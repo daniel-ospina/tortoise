@@ -171,11 +171,14 @@ jobs:
       slow_run: ${{ steps.select.outputs.slow_run }}
       carve_out_run: ${{ steps.select.outputs.carve_out_run }}
       slow_selected: ${{ steps.select.outputs.slow_selected }}
-      matrix_a: ${{ steps.push-matrix.outputs.matrix_a }}
-      matrix_b: ${{ steps.push-matrix.outputs.matrix_b }}
+      # #6135: ONE derived matrix object, not per-half outputs. The `test`
+      # job expands it directly (`fromJSON`), so the shard count and the leg
+      # names are the selector's contract, never a workflow literal. The tier-2
+      # split (PRs) OVERRIDES the push matrix with its own shards; `||` falls
+      # back to the push matrix when `split` did not run (it is skipped on
+      # push and on full-matrix PRs — a skipped step's output is empty).
+      fast_matrix: ${{ steps.split.outputs.fast_matrix || steps.push-matrix.outputs.fast_matrix }}
       carve_out: ${{ steps.push-matrix.outputs.carve_out }}
-      a_files: ${{ steps.split.outputs.a_files }}
-      b_files: ${{ steps.split.outputs.b_files }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -207,7 +210,7 @@ jobs:
           # (full selections + tier-2 + docs-only) so these echoes are safe for
           # push too. slow_selected is space-joined BARE names (the
           # test-slow matrix format — no .py suffix) so a leg can case-match it
-          # against ${{ matrix.files }} in the tier-2 shape.
+          # against the matrix.files expression in the tier-2 shape.
           echo "slow_run=$(echo "$SEL" | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["slow_run"]).lower())')" >> "$GITHUB_OUTPUT"
           echo "carve_out_run=$(echo "$SEL" | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["carve_out_run"]).lower())')" >> "$GITHUB_OUTPUT"
           echo "slow_selected=$(echo "$SEL" | python3 -c 'import json,sys; print(" ".join(x[:-3] if x.endswith(".py") else x for x in json.load(sys.stdin)["slow_selected"]))')" >> "$GITHUB_OUTPUT"
@@ -232,31 +235,42 @@ jobs:
                   print(f"::error::slow_selected format drift: slow_run=true entries={entries!r} not-in-legs={bad}")
                   sys.exit(1)
           EOF
-      - name: Emit push matrix (#1472)
-        # #1472: the push halves are DERIVED from config/ci-surfaces.yml by the
+      - name: Emit push matrix (#1472/#6135)
+        # #1472: the push shards are DERIVED from config/ci-surfaces.yml by the
         # selector — registration in the manifest is sufficient, no manual
         # matrix edit (the old hardcoded files: lists are gone). Runs on every
-        # event (the test job needs the outputs even on tier-2 PRs, where the
-        # matrix rows are still evaluated).
+        # event (the test job needs the matrix even on tier-2 PRs, where the
+        # split step below overrides it).
+        #
+        # #6135: the emitted `fast_matrix` is the COMPLETE GHA matrix object
+        # (`{include: [...]}`) — one entry per shard, each carrying its own
+        # `files` (space-joined), `watchdog_minutes` and `canary_producer`. The
+        # shard COUNT is `config/ci-surfaces.yml::fast_shards`, and the count
+        # of include rows is whatever the selector emits — nothing here counts
+        # shards.
         id: push-matrix
         run: |
           MATRIX=$(python3 tools/ci_selection.py --emit-push-matrix)
-          # #1472 regression fix: emit SPACE-JOINED STRINGS (the old
-          # hardcoded `files: >-` format). fromJSON(...) in the matrix
-          # include yields a JS array, which renders as "Array" in the
-          # shell `for f in ${{ matrix.files }}` loop (template-context
-          # toString) — every full-matrix run collected tests/Array.py.
-          echo "matrix_a=$(echo "$MATRIX" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["half_a"]))')" >> "$GITHUB_OUTPUT"
-          echo "matrix_b=$(echo "$MATRIX" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["half_b"]))')" >> "$GITHUB_OUTPUT"
+          # #1472 regression fix: SPACE-JOINED strings inside the matrix (the
+          # old hardcoded `files: >-` format). fromJSON(...) yields a JS array,
+          # which renders as "Array" in the shell `for f in the matrix.files expression`
+          # loop (template-context toString) — every full-matrix run collected
+          # tests/Array.py. json.dumps keeps the object on one GITHUB_OUTPUT
+          # line (multi-line would need the heredoc form).
+          echo "fast_matrix=$(echo "$MATRIX" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["fast_matrix"]))')" >> "$GITHUB_OUTPUT"
           # Epic #1647 Task 9: the embedded carve-out leg (E2E-4) — excluded
-          # from both docker halves by the selector.
+          # from every docker shard by the selector.
           echo "carve_out=$(echo "$MATRIX" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["carve_out"]))')" >> "$GITHUB_OUTPUT"
       - name: Tier-2 duration split (#1473)
-        # #1473: LPT-pack the tier-2 selected files across halves a/b by
-        # measured duration (config/ci-surfaces.yml durations) instead of the
-        # duration-blind parity split — a heavy matched surface can no longer
-        # dump most of its runtime on one half. Only on PRs with a tier-2
-        # selection (full=false); the full-matrix path uses matrix.files.
+        # #1473/#6135: LPT-pack the tier-2 selected files across the configured
+        # shard count by measured duration (config/ci-surfaces.yml durations)
+        # instead of the duration-blind parity split — a heavy matched surface
+        # can no longer dump most of its runtime on one shard. Only on PRs with
+        # a tier-2 selection (full=false); the full-matrix path uses the push
+        # matrix. The emitted shard COUNT is the configured `fast_shards` for
+        # EVERY selection size — a shard with no files exits early, while a
+        # MISSING shard would make the PR's leg set incomparable to main's for
+        # the merge rail's lane-parity (#6135).
         # NOTE: reads steps.select.outputs.test_files — the split runs INSIDE
         # the changes job, so `needs.changes` (the job's own output) is
         # ALWAYS empty and would crash --split with empty stdin (#1492).
@@ -264,8 +278,7 @@ jobs:
         if: github.event_name == 'pull_request' && steps.select.outputs.full == 'false'
         run: |
           SPLIT=$(echo '${{ steps.select.outputs.test_files }}' | python3 tools/ci_selection.py --split)
-          echo "a_files=$(echo "$SPLIT" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["a"]))')" >> "$GITHUB_OUTPUT"
-          echo "b_files=$(echo "$SPLIT" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["b"]))')" >> "$GITHUB_OUTPUT"
+          echo "fast_matrix=$(echo "$SPLIT" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["fast_matrix"]))')" >> "$GITHUB_OUTPUT"
       # The manifest drift gate used to run HERE. It moved to its own peer job
       # (`manifest-integrity`) — #2656. Living in `changes`, which every other
       # job needs, meant one missing manifest line SKIPPED the entire test
@@ -346,7 +359,10 @@ jobs:
         run: python3 tools/mergify_config_guard.py --static
 
   test:
-    # #880: split into two parallel halves (matrix). The fast suite's pytest
+    # #880: split into parallel shards (matrix). #6135: the COUNT is
+    # `config/ci-surfaces.yml::fast_shards` and the shape is the selector's
+    # `fast_matrix` output — this job carries no literal shard list.
+    # The fast suite's pytest
     # session is ~28 min but the atexit teardown of ~200 leaked embedded
     # redislite servers adds 15+ min on loaded CI runners (each close has
     # 10s timeouts), pushing the single job past every watchdog we set
@@ -361,24 +377,26 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        half: [a, b]
-        include:
-          - half: a
-            files: ${{ needs.changes.outputs.matrix_a }}
-          - half: b
-            files: ${{ needs.changes.outputs.matrix_b }}
+      # #6135: the WHOLE matrix is the selector's output — the shard count
+      # (`config/ci-surfaces.yml::fast_shards`) and the leg names are derived,
+      # and neither is written here. `include` rows carry `half` (the positional
+      # letter label), `files` (space-joined bare names), `watchdog_minutes`
+      # (per-leg budget) and `canary_producer` (the one shard whose artifacts
+      # feed the canary streak). The labels MUST stay a, b, c, … — the merge
+      # rail's lane-parity is a name subtraction, so an S-adding diff has to be
+      # a SUPERSET of main's `test (a)`, `test (b)`.
+      matrix: ${{ fromJSON(needs.changes.outputs.fast_matrix) }}
     name: test (${{ matrix.half }})
     # Outer cap: setup (checkout+install+cache) + manifest collect-only
-    # (epic #1647 Task 6 — half b gains a full-list --collect-only step
-    # BEFORE pytest, off the watchdog) + watchdog (55m) + SIGINT grace
-    # (10s) + tail print. Cap 65m ≈ 55m watchdog + ~5m setup + ~2m
-    # collect-only + margin — the 60m cap (55m + 5m setup) would let a
-    # loaded runner cancel the job mid-summary once the collect-only step
-    # joins the wall (the exact #798 death mode; E2E-5's step-wall
-    # measurement — the flip's purpose — must never be lost to a runner
-    # kill). Divergence note: the plan's "timeout-minutes: 60, the current
-    # spec" predates the collect-only step's wall cost.
+    # (epic #1647 Task 6 — every shard runs a full-list --collect-only step
+    # BEFORE pytest, off the watchdog) + watchdog + SIGINT grace (10s) + tail
+    # print. The cap stays 55m watchdog + ~10m — the worst case at S=2 — so it
+    # remains correct if `fast_shards` is lowered again.
+    # #6135: the OUTER cap is not the watchdog. The per-shard watchdog is the
+    # `timeout -s INT -k 10 the matrix.watchdog_minutes expressionm` in the pytest step,
+    # sized to that shard's own packed estimate — a 6.6-minute shard is killed
+    # at 15m, not 55m, so a hung small shard cannot hold the required aggregate
+    # red for the old budget. This outer cap only bounds SETUP (pre-existing).
     timeout-minutes: 65
     # #1436: provision live FalkorDB so the ~72 live-required tests (test_ep_directional
     # et al.) actually RUN in the fast matrix instead of silently skipping (CI was
@@ -389,10 +407,10 @@ jobs:
     # test_integration_search). Mirrors test-concurrency-falkor's service block.
     # NO job-level TORTOISE_DB_URI: the ~600 embedded tests need the redislite default;
     # the live tests' module probes set/restore their own env. ~2-3 min added runtime
-    # vs the 55m watchdog. The skip-fail guard step below fails closed if they skip.
+    # vs the per-shard watchdog. The skip-fail guard step below fails closed if they skip.
     services:
       falkordb:
-        image: falkordb/falkordb-server:latest
+        image: falkordb/falkordb-server:v4.20.6
         env:
           # #2216: no periodic RDB snapshot in this lane. Redis refuses a second
           # fork while any child is active ("Can't fork for module: File exists"
@@ -416,7 +434,7 @@ jobs:
           --health-timeout 3s
           --health-retries 10
       falkordb-legacy:
-        image: falkordb/falkordb-server:latest
+        image: falkordb/falkordb-server:v4.20.6
         env:
           # #2216: same no-periodic-snapshot rule as the passworded falkordb
           # service above (see there for the mechanism + the reproduced
@@ -560,7 +578,7 @@ jobs:
           echo "SWEEP_TEAM_STRAYS=$SWEEP_TEAM_STRAYS" >> "$GITHUB_ENV"
       - name: Generate coverage manifest (expected nodeids, epic #1647 Task 6/9)
         # Cycle-2 P2-12: the collect-only runs in its OWN step (off the
-        # pytest step's 55m watchdog budget — the collect-only wall can
+        # pytest step's watchdog budget (per shard: matrix.watchdog_minutes) — the collect-only wall can
         # never ride the run). The manifest keys off the SAME space-joined
         # $FILES the run step builds (identical construction below) x the
         # same `-m 'not track_b and not live and not integration'` filter
@@ -573,52 +591,71 @@ jobs:
         # `if: matrix.half == 'b'` gate is gone — both halves are docker).
         run: |
           FILES=""
-          if [ "${{ needs.changes.outputs.full }}" = "true" ]; then
-            for f in ${{ matrix.files }}; do FILES="$FILES tests/$f.py"; done
-          else
-            if [ "${{ matrix.half }}" = "a" ]; then FILES="${{ needs.changes.outputs.a_files }}"; else FILES="${{ needs.changes.outputs.b_files }}"; fi
-          fi
+          # #6135: ONE source — this shard's own `matrix.files`, whatever the
+          # event. The push shards and the tier-2 split are emitted in the same
+          # matrix shape, so the old full/tier-2 branch (and the a/b
+          # conditionals it needed) has nothing left to select on.
+          for f in ${{ matrix.files }}; do FILES="$FILES tests/$f.py"; done
           if [ -z "$FILES" ]; then
-            echo "no selected files for this half — no manifest (guard skips)"
+            echo "no selected files for this shard — no manifest (guard skips)"
             exit 0
           fi
           # Reuse contract: the skip-guard step's empty-file check reads this.
           echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
           python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b and not live and not integration" --output /tmp/expected-nodeids.txt
-      - name: Canary producer (epic #1647 Task 9 Step 6, half b, post-merge)
-        # The D-3=A instrumented streak's producer half: the fast-matrix job
-        # runs PER-LEG, so exactly ONE leg must write the producer marker or
-        # last-writer-wins clobbers (cycle-5 P1-7 option (b)). Gated on
-        # half==b AND the post-merge trigger (push — PR runs never mutate the
-        # canary artifact). The marker rides the artifact upload (below) and
-        # is consumed by the canary-streak job (needs: [test], artifacts-only
-        # — cycle-6 P1-7).
+      - name: Canary producer (epic #1647 Task 9 Step 6, producer shard, post-merge)
+        # The D-3=A instrumented streak's producer: the fast-matrix job runs
+        # PER-LEG, so exactly ONE leg must write the producer marker or
+        # last-writer-wins clobbers (cycle-5 P1-7 option (b)). Gated on the
+        # matrix's `canary_producer` flag (the LAST shard, set by the selector)
+        # AND the post-merge trigger (push — PR runs never mutate the canary
+        # artifact). #6135: the gate is a ROLE, not a name — `half == 'b'`
+        # stopped existing the moment the shard count rose. The marker rides
+        # the artifact upload (below) and is consumed by the canary-streak job
+        # (needs: [test], artifacts-only — cycle-6 P1-7).
         if: github.event_name == 'push'
         run: |
-          if [ "${{ matrix.half }}" = "b" ]; then
-            python3 - <<'EOF'
+          if [ "${{ matrix.canary_producer }}" = "true" ]; then
+            # #6135: the shard's watchdog reaches the marker through the ENV,
+            # never as an unquoted GitHub expression in the embedded python —
+            # that is invalid Python and the column-zero guard reds on it.
+            # NOTE: this comment must not contain template syntax. GitHub
+            # evaluates expressions over the ENTIRE `run` scalar, comments
+            # included, so a literal expression here fails workflow validation
+            # and the job never starts (no check-run is produced at all).
+            SHARD_WATCHDOG_MINUTES=${{ matrix.watchdog_minutes }} python3 - <<'EOF'
           import json, os
           marker = {
               "run_id": int(os.environ.get("GITHUB_RUN_ID", "0") or 0),
-              "half": "b",
+              # `half` is EVIDENCE (which shard produced it); `producer` is the
+              # qualification the classifier reads — the label is not a gate.
+              "half": "${{ matrix.half }}",
+              "producer": True,
+              # #6135: this shard's watchdog budget — the canary's step-wall
+              # gate follows the per-shard budget, not the retired global 55m.
+              "watchdog_minutes": int(os.environ.get(
+                  "SHARD_WATCHDOG_MINUTES", "0") or 0),
               "event": "${{ github.event_name }}",
               "full": "${{ needs.changes.outputs.full }}",
           }
           with open("/tmp/canary-producer.json", "w") as fh:
               json.dump(marker, fh, indent=2)
-          print("canary producer: docker half b qualified (post-merge, full="
+          print("canary producer: docker shard " + marker["half"] + " qualified (post-merge, full="
                 + marker["full"] + ")")
           EOF
           else
-            echo "canary producer: half a — no producer marker (half b only)"
+            echo "canary producer: shard ${{ matrix.half }} — no producer marker (producer shard only)"
           fi
       - name: Run fast test suite (slow files run in the test-slow job)
         id: pytest-run
         # #798: in-step watchdog + guaranteed summary tail. pytest gets
-        # SIGINT at 55m (SIGKILL 10s later if stuck inside a test — pytest
-        # ignores INT mid-test); the step then prints counts + tail + real
-        # exit code. The runner's own timeout-minutes is NOT what bounds
-        # pytest, so a silent runner cancel is impossible.
+        # SIGINT at ITS SHARD'S watchdog (SIGKILL 10s later if stuck inside a
+        # test — pytest ignores INT mid-test); the step then prints counts +
+        # tail + real exit code. The runner's own timeout-minutes is NOT what
+        # bounds pytest, so a silent runner cancel is impossible.
+        # #6135: the budget is PER-SHARD (`matrix.watchdog_minutes`, derived
+        # from the shard's own packed estimate) — the old literal 55m meant a
+        # hung 6.6-minute shard was detected ~8× later than it should be.
         # #964: liveness heartbeat. pytest writes to /tmp/pytest.log (for
         # the guaranteed tail), so the job log shows no output for 25-50
         # min — previously read as "stuck in_progress". The background
@@ -626,19 +663,15 @@ jobs:
         # so GitHub surfaces activity and stall-vs-progress is visible.
         run: |
           set +e
-          # Run only this half's files — collection is halved and each job
-          # leaks ~half the embedded servers.
+          # Run only this shard's files — collection is divided, and each job
+          # leaks only its own share of the embedded servers (#6135).
           FILES=""
-          if [ "${{ needs.changes.outputs.full }}" = "true" ]; then
-            # full matrix: this half's matrix.files (slow files excluded)
-            for f in ${{ matrix.files }}; do FILES="$FILES tests/$f.py"; done
-          else
-            # #1473 tier 2: selected surface files, LPT duration-balanced
-            # across both halves (split computed once in the changes job).
-            if [ "${{ matrix.half }}" = "a" ]; then FILES="${{ needs.changes.outputs.a_files }}"; else FILES="${{ needs.changes.outputs.b_files }}"; fi
-          fi
+          # #6135: this shard's own `matrix.files` — the push shards
+          # (full matrix) and the tier-2 LPT split are the same shape, so one
+          # loop covers both. No `full`/`a`/`b` branching is left to drift.
+          for f in ${{ matrix.files }}; do FILES="$FILES tests/$f.py"; done
           if [ -z "$FILES" ]; then
-            echo "no selected files for this half — skipping"
+            echo "no selected files for this shard — skipping"
             echo 0 > "${RUNNER_TEMP:-/tmp}/pytest-rc"
             # #4740: pytest never runs here, so the conftest session-end sweep
             # never writes its report. Write an explicit, honest one instead of
@@ -663,7 +696,7 @@ jobs:
               echo "HEARTBEAT: pytest still running — $p passed, $f failed so far"
             done ) &
           HB_PID=$!
-          timeout -s INT -k 10 55m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
+          timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
           # #1436: -v truncates skip reasons to terminal width (80 cols when
           # redirected to a file with COLUMNS unset), dropping e.g.
           # test_ep_directional's 81-char nodeid reason entirely — so the guard
@@ -704,13 +737,13 @@ jobs:
             passed=$(grep -c ' PASSED' /tmp/pytest.log)
             failed=$(grep -c ' FAILED' /tmp/pytest.log)
             errored=$(grep -c ' ERROR' /tmp/pytest.log)
-            echo "==================== WATCHDOG: pytest killed after 55m ($passed passed, $failed failed, $errored errored so far) — last test lines above ===================="
+            echo "==================== WATCHDOG: pytest killed after ${{ matrix.watchdog_minutes }}m ($passed passed, $failed failed, $errored errored so far) — last test lines above ===================="
           fi
           echo "==================== pytest exit code: $rc ===================="
           # Epic #1647 Task 6 (cycle-5 P2-5): capture the pytest-step wall
           # ($SECONDS = seconds since THIS step's bash shell started) — the
           # E2E-5 wall-regression signal (job wall alone can hide a step
-          # that silently rides the 55m watchdog). Recorded BOTH as the file
+          # that silently rides the shard's watchdog). Recorded BOTH as the file
           # /tmp/step_wall.txt (the artifact contract the P3 canary
           # classifier consumes — cycle-6 P1-7: artifacts only, never a
           # $GITHUB_OUTPUT across jobs) and as steps.pytest-run.outputs.
@@ -754,10 +787,12 @@ jobs:
         # red the gate (the early-exit path writes no /tmp/pytest.log).
         # Epic #1647 Task 6 (cycle-5 P1-7): ships the FULL artifact set the
         # P3 canary classifier consumes — pytest log + junitxml + expected
-        # nodeids + step wall (the half==b tag in the artifact name is the
-        # dual-lane canary tag). Task 9: the canary-producer marker rides the
-        # same upload (gated to half b + post-merge by the producer step).
-        # Missing files (half a has no producer marker / no manifest on the
+        # nodeids + step wall. #6135: the artifact name is per-SHARD
+        # (`pytest-log-test-<label>`); the classifier no longer reads it — it
+        # reads the fixed-name `pytest-canary-producer` uploaded below by the
+        # producer shard alone. The canary-producer marker rides both uploads
+        # (the producer step is gated by `matrix.canary_producer` + post-merge).
+        # Missing files (non-producer shards have no marker / no manifest on the
         # empty path) are ignored per-path by the uploader.
         if: always()
         continue-on-error: true
@@ -766,6 +801,26 @@ jobs:
           name: pytest-log-${{ github.job }}-${{ matrix.half }}
           path: |
             /tmp/pytest.log
+            /tmp/junit.xml
+            /tmp/expected-nodeids.txt
+            /tmp/step_wall.txt
+            /tmp/canary-producer.json
+          if-no-files-found: ignore
+
+      - name: Upload canary-producer artifacts (producer shard only, #6135)
+        # The canary-streak job consumes ONE shard's junit + expected-nodeids +
+        # step_wall + producer marker, but it cannot know that shard's LABEL and
+        # must not hardcode it — the old literal `pytest-log-test-b` download
+        # broke the instant the shard count rose. This fixed-name copy is
+        # written by the producer shard alone (matrix.canary_producer).
+        # Deliberately NOT named `pytest-log-*`: ci-timing.yml downloads
+        # `pattern: pytest-log-*` and would count these durations twice.
+        if: always() && matrix.canary_producer
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-canary-producer
+          path: |
             /tmp/junit.xml
             /tmp/expected-nodeids.txt
             /tmp/step_wall.txt
@@ -941,7 +996,7 @@ jobs:
     # families: 6379 passworded + 16379 passwordless legacy).
     services:
       falkordb:
-        image: falkordb/falkordb-server:latest
+        image: falkordb/falkordb-server:v4.20.6
         env:
           # #2216: no periodic RDB snapshot in this lane. Redis refuses a second
           # fork while any child is active ("Can't fork for module: File exists"
@@ -965,7 +1020,7 @@ jobs:
           --health-timeout 3s
           --health-retries 10
       falkordb-legacy:
-        image: falkordb/falkordb-server:latest
+        image: falkordb/falkordb-server:v4.20.6
         env:
           # #2216: same no-periodic-snapshot rule as the passworded falkordb
           # service above (see there for the mechanism + the reproduced
@@ -1075,7 +1130,7 @@ jobs:
       - name: Generate coverage manifest (slow legs — expected nodeids, epic #1647 Task 9)
         # Cycle-6 P2-8 (int-10): the manifest runs in its OWN step BEFORE the
         # pytest step (off the 75m watchdog), using each leg's committed
-        # ${{ matrix.files }} x --collect-only
+        # the matrix.files expression x --collect-only
         # -m 'not track_b and not live and not integration' (#4750) (the same
         # construction the run step builds) -> /tmp/expected-nodeids.txt.
         run: |
@@ -1280,7 +1335,7 @@ jobs:
       TORTOISE_DB_URI: "docker://:falkordb@localhost:6379/tortoise"
     services:
       falkordb:
-        image: falkordb/falkordb-server:latest
+        image: falkordb/falkordb-server:v4.20.6
         env:
           # #2216: no periodic RDB snapshot in this lane. Redis refuses a second
           # fork while any child is active ("Can't fork for module: File exists"
@@ -1470,7 +1525,7 @@ jobs:
       TORTOISE_TEST_SWEEP_TEAM_STRAYS: "1"
     services:
       falkordb:
-        image: falkordb/falkordb-server:latest
+        image: falkordb/falkordb-server:v4.20.6
         env:
           # #2216: no periodic RDB snapshot in this lane. Redis refuses a second
           # fork while any child is active ("Can't fork for module: File exists"
@@ -1843,9 +1898,9 @@ jobs:
   canary-streak:
     # Epic #1647 Task 9 Step 6 (D-3=A): the instrumented canary-drop streak.
     # Separate job (needs: [test] — the matrix jobs fan in; a step inside the
-    # matrix job cannot run after both halves — cycle-5 P1-7). POST-MERGE
+    # matrix job cannot run after every shard — cycle-5 P1-7). POST-MERGE
     # ONLY (push — PR runs never mutate the canary artifact).
-    # Downloads the half-b artifact set (junitxml + expected-nodeids +
+    # Downloads the producer shard's artifact set (junitxml + expected-nodeids +
     # step_wall + the canary-producer marker), finds the PREVIOUS streak
     # artifact, runs the deterministic classifier (tools/testdb_canary_classify
     # .py — artifacts only, never a $GITHUB_OUTPUT value; cycle-6 P1-7), and
@@ -1859,7 +1914,7 @@ jobs:
     # never reach the classifier and the streak would freeze instead of
     # resetting (review finding #1: every reset bucket would be dead code).
     # always() + the post-merge gate = the classifier receives red runs too
-    # (the half-b artifact upload is if: always() + continue-on-error, so
+    # (the producer shard's artifact upload is if: always() + continue-on-error, so
     # failed runs still ship their junitxml/manifest/step_wall evidence).
     if: always() && github.event_name == 'push'
     runs-on: ubuntu-latest
@@ -1869,14 +1924,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Download half-b artifacts (the P1-7 canary contract)
-        # The half==b tag is the dual-lane canary tag (Task 6 Step 2 item 7).
-        # Missing artifacts (cancelled half-b leg) are tolerated — the
-        # classifier treats an absent junitxml as an infra-flake reset.
+      - name: Download producer-shard artifacts (the P1-7 canary contract)
+        # #6135: the fixed-name artifact written by the producer shard (the
+        # matrix's `canary_producer`, positionally the last one). It replaced
+        # the literal `pytest-log-test-b`, which stopped naming a real leg the
+        # moment the shard count rose. Missing artifacts (a cancelled producer
+        # leg) are tolerated — the classifier treats an absent junitxml as an
+        # infra-flake reset.
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          name: pytest-log-test-b
+          name: pytest-canary-producer
           path: artifacts
       - name: Download previous streak artifact (chain continuity)
         # The streak chains across post-merge runs via the previous run's
@@ -1926,7 +1984,7 @@ jobs:
         # Deterministic scripted triage: junitxml + expected-nodeids + step_wall
         # + divergence-confirmation log + prev streak -> new streak. Artifacts
         # ONLY (never a steps output). The step-wall file is the MANDATORY
-        # E2E-5 input (cycle-4 P2-4: a run that silently rides the 55m
+        # E2E-5 input (cycle-4 P2-4: a run that silently rides the shard's
         # watchdog breaks the streak like any other failure).
         run: |
           python3 tools/testdb_canary_classify.py \
