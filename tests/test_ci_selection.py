@@ -2571,14 +2571,13 @@ def test_a_matrix_job_never_uploads_a_fixed_name_artifact():
 
 
 def test_workflow_lint_pins_the_actionlint_image_and_its_scope():
-    """The `workflow-lint` leg is only a check while it still RUNS actionlint.
+    """Pin the `workflow-lint` step's body.
 
     The plumbing guards (needs/LEGS) prove the leg is wired in; they cannot
-    see its body. Without this pin, replacing the step with `echo ok`, or
-    unpinning `rhysd/actionlint:1.7.12` to `:latest`, leaves every test green
-    while the leg stops being a check — the same fail-open shape #6253 is
-    about. Mirrors the step-shape pin that `manifest-integrity` carries in
-    `tests/test_mergify_config_guard.py`.
+    see its body. Without this pin the step can be replaced with `echo ok`,
+    the image unpinned to `:latest`, the `*.yaml` glob dropped, or the
+    empty-match refusal deleted, and every test stays green while the leg
+    stops being a check — the same fail-open shape #6253 is about.
     """
     job = _load_python_ci()["jobs"]["workflow-lint"]
     runs = "\n".join(
@@ -2591,18 +2590,26 @@ def test_workflow_lint_pins_the_actionlint_image_and_its_scope():
     tags = re.findall(r"actionlint:(\S+)", runs)
     assert tags, "workflow-lint does not name an actionlint image tag"
     for tag in tags:
-        assert re.fullmatch(r"\d+\.\d+\.\d+", tag), (
+        # A digest pin (`tag@sha256:…`) is STRONGER than a tag pin and is the
+        # supply-chain-correct form, so it must pass this check too.
+        assert re.fullmatch(r"\d+\.\d+\.\d+(?:@sha256:[0-9a-f]{64})?", tag), (
             f"actionlint image must be pinned to major.minor.patch, got {tag!r} "
             "— a floating tag re-opens the unpinned-dependency class (#5440)"
         )
     assert "-shellcheck=" in runs, (
-        "the actionlint invocation must set -shellcheck= explicitly; the "
-        "image's default would add a shell dependency the runners do not "
-        "guarantee"
+        "the actionlint invocation must set -shellcheck= explicitly: the pinned "
+        "image DOES bundle shellcheck, and this tree carries pre-existing "
+        "shellcheck findings, so letting it default on would red the required "
+        "gate on every PR"
     )
     assert "*.yaml" in runs, (
         "workflow-lint globs only *.yml; GitHub loads workflows with either "
         "extension, so a .yaml workflow would be silently unlinted"
+    )
+    assert 'no workflow files matched' in runs and "exit 1" in runs, (
+        "workflow-lint no longer refuses an EMPTY match, so a glob that stops "
+        "matching would lint nothing and exit 0 — a green check over an empty "
+        "surface"
     )
 
 
