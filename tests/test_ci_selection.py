@@ -9,6 +9,7 @@ carve-out so tools/longmem_eval/ etc. select the eval surface).
 from __future__ import annotations
 
 import ast
+import json
 import re
 import shlex
 import shutil
@@ -26,6 +27,7 @@ from tools.ci_selection import (  # noqa: I001
     on_demand_files, leg_coverage_issues, push_legs, fast_pool,
     duration_issues, TESTS_DIR,
 )
+from tools import mergify_config_guard as mcg
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -36,8 +38,20 @@ def _sel(changed, event="pull_request"):
 
 
 def _expand(legs: dict) -> dict:
-    """Compare leg membership without caring about the .py suffix."""
-    return {k: set(v) for k, v in legs.items()}
+    """Compare leg membership without caring about the .py suffix.
+
+    #6135: the fast legs are the N shards under `shards`, so flatten them into
+    one set per shard LABEL — that keeps every per-leg assertion below a
+    per-leg assertion, which is the property that catches "one leg forgot".
+    """
+    out = {}
+    for k, v in legs.items():
+        if k == "shards":
+            for shard in v:
+                out[shard["name"]] = set(shard["files"])
+        else:
+            out[k] = set(v)
+    return out
 
 
 def _tier1() -> set:
@@ -362,6 +376,19 @@ def test_every_conftest_module_level_tests_import_is_shared():
         result = _sel([rel])
         assert result["full"] is True, result
         assert result["test_files"] == "ALL", result
+
+
+def test_the_docker_lane_seam_forces_the_full_matrix():
+    """#6673: `tests/_live_utils.py` carries the docker lane's port/host
+    resolution and is imported by test modules registered on every docker-lane
+    surface (core, ep, sdk, api, eval) — `git grep -l _live_utils -- tests/`
+    lists every file that touches it (importers plus mention-only references). The conftest-derived ratchet cannot cover it (it is not a
+    conftest import), so without the explicit entry a seam-only edit selected
+    `core` and the other surfaces' consumers never ran on the PR that made it.
+    """
+    result = _sel(["tests/_live_utils.py"])
+    assert result["full"] is True, result
+    assert result["test_files"] == "ALL", result
 
 
 def test_every_shared_module_entry_selects_the_full_matrix():
@@ -736,8 +763,10 @@ def test_expensive_eval_integration_is_in_the_on_demand_lane():
     # them, because the exclusion is structural (fast_pool filters the lane).
     lanes = push_legs(m)
     bare = f[:-3]
-    for leg in ("half_a", "half_b", "slow", "carve_out", "env_broken"):
-        assert bare not in lanes[leg], (
+    # #6135: EVERY fast shard is a pre-merge leg, not just a/b.
+    for leg in (*(s["files"] for s in lanes["shards"]),
+                lanes["slow"], lanes["carve_out"], lanes["env_broken"]):
+        assert bare not in leg, (
             f"{f} leaked into {leg!r} — the lane must exclude it from every "
             f"pre-merge leg, not just the fast ones")
     for changed in (["tortoise/graph.py"], ["docs/README.md"],
@@ -1145,7 +1174,7 @@ def test_halves_duplicate_entry_flagged():
     from tools.ci_selection import workflow_halves_issues
     halves = {"a": ["test_api"], "b": ["test_api", "test_crypto"]}
     issues = workflow_halves_issues(_halves_manifest(), halves)
-    assert any("test_api" in i and "BOTH halves" in i for i in issues), issues
+    assert any("test_api" in i and "MORE THAN ONE shard" in i for i in issues), issues
 
 
 def test_halves_imbalance_flagged_beyond_tolerance():
@@ -1188,7 +1217,8 @@ def test_real_workflow_halves_are_consistent():
                                     HALF_DURATION_IMBALANCE_RATIO)
     m = load_manifest()
     legs = push_legs(m)
-    halves = {"a": set(legs["half_a"]), "b": set(legs["half_b"])}
+    # #6135: the derived split is the SHARD set (N of them), not a/b.
+    halves = {s["name"]: set(s["files"]) for s in legs["shards"]}
     issues = workflow_halves_issues(m, halves, TESTS_DIR)
     assert issues == [], f"derived halves drift: {issues}"
     weights = {h: sum(m["durations"].get(f + ".py", 2.0) for f in fs)
@@ -1198,8 +1228,9 @@ def test_real_workflow_halves_are_consistent():
         f"duration tilt beyond {HALF_DURATION_IMBALANCE_RATIO}x: "
         f"{ {h: round(w / 60, 1) for h, w in weights.items()} } min "
         f"(ratio {ratio:.2f}x)")
-    # every fast file rides exactly one half (no coverage hole, no double-run)
-    assert not (halves["a"] & halves["b"]), "leg overlap"
+    # every fast file rides exactly one shard (no coverage hole, no double-run)
+    flat = [f for fs in halves.values() for f in fs]
+    assert len(flat) == len(set(flat)), "leg overlap"
 
 
 def test_push_legs_partitions_every_classified_file():
@@ -1218,10 +1249,17 @@ def test_push_legs_partitions_every_classified_file():
     fast = {f.replace(".py", "") for f in classified if f not in m["slow_files"]}
     fast |= {f.replace(".py", "") for f in m.get("push_extra", [])}
     broken = {f.replace(".py", "") for f in ENV_BROKEN_FILES}
-    assert set(legs["half_a"]) | set(legs["half_b"]) == fast - broken - carve
-    assert not (set(legs["half_a"]) & set(legs["half_b"])), "leg overlap"
+    # #6135: the fast pool is partitioned across N shards, not two halves.
+    shards = [set(s["files"]) for s in legs["shards"]]
+    assert set().union(*shards) == fast - broken - carve
+    assert sum(len(s) for s in shards) == len(set().union(*shards)), "leg overlap"
     # carve-out files never ride the docker legs (fast OR slow)
-    assert not (set(legs["half_a"]) & carve) and not (set(legs["half_b"]) & carve)
+    for shard in shards:
+        assert not (shard & carve), "carve-out file on a fast shard"
+    # The label sequence must be positional letters from `a`: the merge rail's
+    # lane-parity subtracts PR job names from main's, so an S-adding diff is a
+    # SUPERSET only while the first two labels stay `a`/`b` (#6135).
+    assert [s["name"] for s in legs["shards"]] == list("abcdefghijklmnopqrstuvwxyz")[:len(legs["shards"])]
     assert not (set(legs["slow"]) & carve), \
         "slow carve-out files run in the URI-unset carve-out job, never the slow legs"
     assert set(legs["carve_out"]) == carve, "carve_out leg must be exactly the config set"
@@ -1238,7 +1276,8 @@ def test_push_legs_partitions_every_classified_file():
     # `push_extra` is empty, so it would be vacuous — it is pinned on a
     # SYNTHETIC manifest by test_push_legs_distributes_push_extra_across_halves
     # below (#2988/#3243).
-    assert any(f.startswith("bench/") for f in legs["half_a"] + legs["half_b"]), \
+    all_shard_files = [f for s in legs["shards"] for f in s["files"]]
+    assert any(f.startswith("bench/") for f in all_shard_files), \
         "no bench file reached the push legs at all"
 
 
@@ -1258,8 +1297,209 @@ def test_push_legs_distributes_push_extra_across_halves():
     m = dict(load_manifest())
     m["push_extra"] = ["bench/synthetic_a.py", "bench/synthetic_b.py"]
     legs = push_legs(m)
-    assert "bench/synthetic_a" in legs["half_a"], legs["half_a"]
-    assert "bench/synthetic_b" in legs["half_b"], legs["half_b"]
+    # #6135: round-robin over the shards — the first two extras land on the
+    # first two labels (there is no "half" to pin to any more).
+    assert "bench/synthetic_a" in legs["shards"][0]["files"]
+    assert "bench/synthetic_b" in legs["shards"][1]["files"]
+
+
+# ── #6135: the fast pool's shard count ────────────────────────────────────
+# The hand-written 2 was the reason the critical path (`max(shard)`) stayed
+# ~30 min. These pin the three properties the change turns on: a configured S
+# actually shards the pool EXACTLY ONCE (the accounting rule the issue names as
+# the real risk), the labels stay a positional letter sequence so a shard-ADD
+# is a superset of main's names for the merge rail's lane-parity, and the
+# watchdog is PER-LEG rather than the inherited 55m.
+
+
+def _shard_manifest(count: int, heavy: dict[str, float] | None = None,
+                    tiny: int = 60) -> dict:
+    m = _duration_manifest(heavy or {}, tiny)
+    m["fast_shards"] = count
+    return m
+
+
+def test_every_file_rides_exactly_one_shard_at_s_greater_than_two():
+    """#6135 verification: a generated matrix with S>2 covers every selected
+    file EXACTLY once (set-equality against the selector's own pool)."""
+    from tools.ci_selection import fast_pool, push_legs
+    m = _shard_manifest(5)
+    legs = push_legs(m)
+    assert len(legs["shards"]) == 5
+    flat = [f for s in legs["shards"] for f in s["files"]]
+    assert len(flat) == len(set(flat)), "double-run: a file on two shards"
+    bare_pool = {f[:-3] for f in fast_pool(m)} - {
+        f[:-3] for f in m.get("push_extra", [])}
+    assert set(flat) == bare_pool, "coverage hole vs the selector's pool"
+    # the generator fed the workflow is the same partition (no re-derivation)
+    from tools.ci_selection import fast_matrix_include
+    inc = fast_matrix_include(legs["shards"])["include"]
+    assert len(inc) == 5
+    assert len({e["half"] for e in inc}) == 5
+    assert [e["half"] for e in inc] == ["a", "b", "c", "d", "e"]
+    assert sum(len(e["files"].split()) for e in inc) == len(flat)
+
+
+def test_shard_labels_are_a_superset_when_s_changes():
+    """#6135/the merge rail: lane-parity subtracts the PR's job names from
+    main's, so an S-ADDING diff is comparable only while main's `test (a)`
+    and `test (b)` survive. The labels must be a positional letter sequence —
+    a rename would make both of main's names MISSING and refuse every merge.
+    """
+    from tools.ci_selection import shard_labels
+    main_names = {f"test ({lbl})" for lbl in shard_labels(2)}
+    pr_names = {f"test ({lbl})" for lbl in shard_labels(9)}
+    assert main_names == {"test (a)", "test (b)"}
+    assert main_names <= pr_names, "a shard-ADD must be a superset (rail-safe)"
+    # and the REMOVE direction still refuses (the rail's intended polarity)
+    assert not (pr_names <= main_names)
+
+
+def test_watchdog_is_per_shard_and_scales_with_the_shard():
+    """#6135: the watchdog is PER-LEG. Inheriting the old 55m means a hung
+    ~6-minute shard is detected ~8× later than it should be."""
+    from tools.ci_selection import (
+        WATCHDOG_CEILING_MIN,
+        WATCHDOG_FLOOR_MIN,
+        _duration_weight,
+        _durations_map,
+        fast_pool,
+        load_manifest,
+        shard_watchdog_minutes,
+    )
+    small = shard_watchdog_minutes(6.81 * 60)     # a 6.81-min shard at S=9
+    old_two = shard_watchdog_minutes(30.62 * 60)  # a 30.62-min shard at S=2
+    assert small == WATCHDOG_FLOOR_MIN == 15, small
+    assert small < old_two, "the smaller shard must not inherit the old budget"
+    assert old_two == WATCHDOG_CEILING_MIN == 55
+    # the floor must clear the #6133 floor (the largest single fast file) with
+    # headroom, or the watchdog would kill a legally-loaded shard. DERIVED from
+    # the committed manifest — a frozen literal cannot notice a refresh (or a
+    # new file) raising the real floor past the watchdog.
+    manifest = dict(load_manifest())
+    durations = _durations_map(manifest)
+    largest = max(_duration_weight(durations.get(
+        f if f.endswith(".py") else f + ".py")) for f in fast_pool(manifest))
+    assert largest > 0
+    assert small * 60 / largest > 2.5, (
+        f"the watchdog floor ({small} min) has <2.5x headroom over the "
+        f"largest fast file ({largest:.1f}s) — #6133's floor")
+    # a shard big enough to need more than the floor gets its own headroom
+    assert shard_watchdog_minutes(20 * 60) == 40
+    # malformed/absent estimates fall back to the floor, never to zero —
+    # including the non-finite floats that pass float() and then explode
+    # inside math.ceil
+    for bad in (None, "nonsense", float("inf"), float("nan"), float("-inf"), -5):
+        assert shard_watchdog_minutes(bad) == WATCHDOG_FLOOR_MIN, bad
+
+
+def test_fast_shard_config_is_validated_not_silently_defaulted():
+    """#6135: a malformed `fast_shards` is NAMED by the integrity gate — a
+    present-but-unusable declaration must not read as the default 2."""
+    from tools.ci_selection import fast_shard_count, fast_shard_issues
+    assert fast_shard_issues({}) == []              # absent = not adopted
+    assert fast_shard_count({}) == 2
+    # AN EXPLICIT null is NOT absence: it would silently drop the lane to 2
+    # while main runs the configured S, and the rail would then refuse every
+    # merge. Every malformed value is NAMED; the count still degrades safely.
+    for bad in (1, 0, -3, 27, 2.5, "9", True, None):
+        m = {"fast_shards": bad}
+        assert fast_shard_issues(m), f"{bad!r} must be reported"
+        assert fast_shard_count(m) == 2, "a producer path must never crash"
+    assert fast_shard_issues({"fast_shards": 9}) == []
+
+
+def test_shard_count_is_stable_regardless_of_the_selection_size():
+    """#6135: the tier-2 matrix must emit the SAME shard count as the push
+    matrix, even for a tiny selection. The merge rail's lane-parity is a
+    job-NAME subtraction, so a PR that ran `test (a)`…`test (c)` while main runs
+    `a`…`i` would be refused NOT COMPARABLE. An empty shard exits early with an
+    honest report; a shard that does not EXIST cannot be compared at all.
+    """
+    from tools.ci_selection import build_shard_entries, fast_matrix_include
+    three = ["tests/test_a.py", "tests/test_b.py", "tests/test_c.py"]
+    entries = build_shard_entries(
+        three, {f: 5.0 for f in ("test_a.py", "test_b.py", "test_c.py")}, 9)
+    assert len(entries) == 9
+    assert [e["name"] for e in entries] == list("abcdefghi")
+    inc = fast_matrix_include(entries)["include"]
+    assert [e["half"] for e in inc] == list("abcdefghi")
+    # every file still rides exactly one shard; the rest are legitimately empty
+    flat = [f for e in entries for f in e["files"]]
+    assert sorted(flat) == ["test_a", "test_b", "test_c"]
+    assert sum(1 for e in entries if not e["files"]) == 6
+
+
+def test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard():
+    """#6135: the `test` job must expand the selector's matrix (no hand-written
+    shard count), and the pytest watchdog must be the shard's own budget.
+
+    These are the two workflow-level claims the unit tests above cannot see:
+    a literal `half: [a, b]` is exactly the drift the issue exists to end, and
+    a literal `55m` watchdog is the per-leg correctness bug it names.
+    """
+    wf = _load_python_ci()
+    job = wf["jobs"]["test"]
+    matrix = job["strategy"]["matrix"]
+    assert "fromJSON(needs.changes.outputs.fast_matrix)" in str(matrix), matrix
+    assert "include" not in str(matrix), \
+        "the shard set must come from the selector, not a workflow literal"
+    run = next(s for s in job["steps"]
+               if s.get("name", "").startswith("Run fast test suite"))["run"]
+    assert "timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m" in run, \
+        "the pytest watchdog must be the per-shard budget, not a literal"
+    assert "timeout -s INT -k 10 55m" not in run
+    # the canary artifact the separate job downloads must be the fixed
+    # producer name, never a per-shard one (no shard name survives S changes)
+    dl = next(s for s in wf["jobs"]["canary-streak"]["steps"]
+              if s.get("name", "").startswith("Download producer-shard"))
+    assert dl["with"]["name"] == "pytest-canary-producer"
+
+
+def test_no_required_check_names_a_fast_leg():
+    """#6135 acceptance: a shard-ADDING diff must not leave a required check
+    that no longer exists — an unsatisfiable required check is a queue that
+    never admits. Every merge surface must key on the AGGREGATE / the job id,
+    never on a leg name (`test (a)`), so the required set is satisfiable for
+    ANY shard count.
+
+    The live branch-protection set is an API surface (it was read when this
+    change was made: `pricing-artifact, docs, test-isolation, license-surface,
+    legal-e2e, python-ci-gate` — no leg name); these are the in-repo surfaces
+    that must stay consistent with it, and the ones a future edit could break.
+    """
+    wf = _load_python_ci()
+    gate = wf["jobs"]["python-ci-gate"]
+    # the aggregate observes the test MATRIX JOB, whose result rolls up every
+    # leg — so adding a leg cannot orphan anything it requires
+    assert "test" in gate["needs"]
+    assert not [n for n in gate["needs"] if str(n).startswith("test (")], gate["needs"]
+    # the rollup is job-id keyed, not leg-name keyed
+    assert "join(needs.*.result, ' ')" in gate["steps"][0]["run"]
+    # the merge queue's only merge condition is the aggregate. Comments MAY
+    # name a leg as history (several do, deliberately) — the ENFORCED lines
+    # must not.
+    mergify = (REPO / ".mergify.yml").read_text()
+    mergify_code = "\n".join(
+        ln for ln in mergify.splitlines() if not ln.lstrip().startswith("#"))
+    assert "test (" not in mergify_code, \
+        "no enforced mergify line may name a shard leg — the shard set changes with S"
+    assert "      - check-success=python-ci-gate" in mergify_code
+    # The LIVE required set is a GitHub API surface; its in-repo projection is the
+    # guard's record (mcg.RECORD_REL). Read the PROJECTION, never the declaration
+    # home: a test or tool reading the declaration home is what makes it silently
+    # live, and clause viii(b) of the guard refuses exactly that — reading it here
+    # turned this file into a reported divergence.
+    record = json.loads((REPO / mcg.RECORD_REL).read_text())
+    # Anchor the field before testing it, so an emptied or renamed list cannot
+    # satisfy the comprehension below silently. `python-ci-gate` is the
+    # aggregate every merge keys on.
+    assert "python-ci-gate" in record["required_contexts"], (
+        f"{mcg.RECORD_REL} no longer names python-ci-gate — the required-context "
+        "list moved or emptied, so the shard-leg check below would read empty and pass")
+    assert not [c for c in record["required_contexts"] if c.startswith("test (")], (
+        "no required context may be a shard leg — the shard set changes with S, so "
+        "keying the required set on a leg name would make the gate unsatisfiable")
 
 
 def test_carve_out_mirrors_test_no_redirect_stems():
@@ -1399,7 +1639,12 @@ def test_full_matrix_split_is_duration_balanced():
              "test_h2.py": 650.0, "test_h3.py": 600.0}
     m = _duration_manifest(heavy, tiny_count=200)
     legs = push_legs(m)
-    a, b = set(legs["half_a"]), set(legs["half_b"])
+    # the synthetic manifest declares no `fast_shards`, so the default (2)
+    # applies and `a`/`b` are the whole set — the LPT balance assertions below
+    # are the two-shard case of the same rule.
+    by_name = {s["name"]: set(s["files"]) for s in legs["shards"]}
+    assert set(by_name) == {"a", "b"}, by_name.keys()
+    a, b = by_name["a"], by_name["b"]
     assert not (a & b), "leg overlap"
     assert a | b == {f[:-3] for f in m["surfaces"]["core"]}, "coverage hole"
     weights = {h: sum(m["durations"][f + ".py"] for f in fs)
@@ -1528,7 +1773,12 @@ def test_expect_uri_gated_iff_uri():
     assert "matrix.half" not in script, \
         "the URI gate must NOT be half-specific (Task 9 flipped BOTH halves)"
     then_block = script.split("then", 1)[1].split("fi", 1)[0]
-    assert 'URI="docker://:falkordb@localhost:6379/tortoise_test_matrix"' in then_block
+    # #6673: the host port is assigned at runtime by the provision step, so the
+    # URI expands $TORTOISE_TEST_DOCKER_PORT. What this assertion protects is
+    # unchanged: the passworded docker:// shape and the test-prefixed path.
+    assert ('URI="docker://:falkordb@localhost:'
+            '${TORTOISE_TEST_DOCKER_PORT') in then_block
+    assert '/tortoise_test_matrix"' in then_block
     assert 'EXPECT_URI="1"' in then_block
     assert 'echo "URI=$URI" >> "$GITHUB_ENV"' in script
     assert 'echo "EXPECT_URI=$EXPECT_URI" >> "$GITHUB_ENV"' in script
@@ -1544,9 +1794,9 @@ def test_expect_uri_gated_iff_uri():
     env = run["env"]
     assert env["TORTOISE_DB_URI"] == "${{ env.URI }}"
     assert env["TORTOISE_TEST_EXPECT_URI"] == "${{ env.EXPECT_URI }}"
-    # Task 9: the coverage manifest is generated on BOTH halves (no half-b
-    # `if:` gate on the manifest step — the manifest must cover both docker
-    # halves), and the skip-guard step's manifest mode is gated on rc==0 AND
+    # Task 9 / #6135: the coverage manifest is generated on EVERY docker shard
+    # (no half-specific `if:` gate on the manifest step), and the skip-guard
+    # step's manifest mode is gated on rc==0 AND
     # non-empty $FILES (plan-review P1-7 — the "no selected files" path
     # writes rc=0 with no junitxml; with a manifest that would false-red).
     manifest = next(s for s in steps
@@ -1565,8 +1815,10 @@ def test_expect_uri_gated_iff_uri():
                     if s.get("name", "").startswith("Canary producer"))
     assert producer["if"] == "github.event_name == 'push'", \
         "producer must be post-merge only"
-    assert 'if [ "${{ matrix.half }}" = "b" ]; then' in producer["run"], \
-        "the producer must be gated on half b (one writer)"
+    # #6135: the one-writer gate is the matrix's ROLE flag, never a shard name
+    # — `half == 'b'` stopped naming a producer the moment S rose.
+    assert 'if [ "${{ matrix.canary_producer }}" = "true" ]; then' in producer["run"], \
+        "the producer must be gated on the canary_producer role (one writer)"
 
 
 def test_carve_out_env_gated_inverse_of_uri():
@@ -1619,14 +1871,25 @@ def test_pmv_job_carries_uri_manifest_guard():
                / "post-merge-validation.yml")
     wf = _yaml.safe_load(wf_path.read_text())
     job = wf["jobs"]["validate"]
-    assert job["env"]["TORTOISE_DB_URI"] == \
-        "docker://:falkordb@localhost:6379/tortoise_test_matrix", \
-        "pmv must run the docker lane with the test-prefixed URI path"
-    assert job["env"]["TORTOISE_TEST_EXPECT_URI"] == "1"
-    assert "falkordb" in job.get("services", {}) and \
-        "falkordb-legacy" in job.get("services", {}), \
-        "pmv must provision BOTH falkordb services (6379 URI + 16379 probes)"
     steps = job["steps"]
+    # #6673: the URI can no longer be a job-level literal — the host port is
+    # assigned at runtime — so the SAME invariants (docker lane, test-prefixed
+    # path, BOTH probe families provisioned) are now carried by the provision
+    # step. A `services:` block must never come back: its fixed host ports are
+    # the mechanism whose collision produced the false reds.
+    assert "services" not in job, \
+        "pmv must not go back to a `services:` block (fixed host ports, #6673)"
+    assert "TORTOISE_DB_URI" not in job.get("env", {}), \
+        "the pmv URI is exported at runtime by the provision step, not a literal"
+    assert job["env"]["TORTOISE_TEST_EXPECT_URI"] == "1"
+    provision = next(s for s in steps
+                     if str(s.get("uses", "")).endswith("falkordb-provision"))
+    assert provision["with"]["uri_graph"] == "tortoise_test_matrix"
+    assert provision["with"]["image"] == "falkordb/falkordb-server:latest"
+    assert provision.get("if") == "needs.dedup-check.outputs.skip != 'true'"
+    assert any(str(s.get("uses", "")).endswith("falkordb-teardown")
+               and s.get("if") == "always()" for s in steps), \
+        "pmv must tear the services down even when the job fails"
     run = next(s for s in steps
                if s.get("name", "").startswith("Run tests"))
     invocation = run["run"]
@@ -1686,7 +1949,11 @@ def test_live_required_job_runs_only_declared_live_tests():
     # L111-153 + test_event_store L165-185). If a future test adds a
     # path=/URI-default DETACH, the job URI must gain the P1-2 test-prefixed
     # path.
-    assert job["env"]["TORTOISE_DB_URI"] == "docker://:falkordb@localhost:6379/tortoise"
+    assert "TORTOISE_DB_URI" not in job.get("env", {}), \
+        "#6673: the carrier moved to the provision step (runtime host port)"
+    provision = next(s for s in steps
+                     if str(s.get("uses", "")).endswith("falkordb-provision"))
+    assert provision["with"]["uri_graph"] == "tortoise"
 
 
 def test_test_slow_job_carries_junitxml_manifest_guard():
@@ -1850,12 +2117,14 @@ def test_slow_selected_echo_transform_roundtrips_into_legs():
             f"slow_run must imply a non-empty leg intersection ({changed}/{event})"
 
 
-def test_canary_streak_job_consumes_half_b_artifacts_only():
+def test_canary_streak_job_consumes_producer_artifacts_only():
     """Task 9 Step 6 (cycle-5 P1-7/cycle-6 P1-7): the canary-streak job is
     post-merge only (push), needs [test] (matrix fan-in), consumes
-    the HALF-B artifact set + the previous streak artifact via the
-    classifier, and uploads the new streak. It must never read a
-    steps-output value (the classifier's own pin lives in
+    the PRODUCER-SHARD artifact set (#6135: the fixed-name copy the producer
+    shard uploads — never a literal `pytest-log-test-b`, which stopped naming a
+    real leg once the fast pool grew past two) plus the previous streak
+    artifact via the classifier, and uploads the new streak. It must never read
+    a steps-output value (the classifier's own pin lives in
     tests/test_canary_classify.py)."""
     wf = _load_python_ci()
     job = wf["jobs"]["canary-streak"]
@@ -1867,8 +2136,8 @@ def test_canary_streak_job_consumes_half_b_artifacts_only():
         "the streak population is post-merge full-matrix only"
     steps = job["steps"]
     dl = next(s for s in steps
-              if s.get("name", "").startswith("Download half-b artifacts"))
-    assert dl["with"]["name"] == "pytest-log-test-b"
+              if s.get("name", "").startswith("Download producer-shard artifacts"))
+    assert dl["with"]["name"] == "pytest-canary-producer"
     classify = next(s for s in steps
                     if s.get("name", "").startswith("Classify run"))
     crun = classify["run"]
@@ -1975,8 +2244,15 @@ def test_track_b_docker_lane_sets_team_stray_opt_in():
     opt-in must be set there too, or the #1686 journal-blind closure is
     silently inert on that lane."""
     wf = _load_python_ci()
-    env = wf["jobs"]["test-track-b"].get("env", {})
-    assert env.get("TORTOISE_DB_URI", "").endswith("tortoise_test_matrix")
+    job = wf["jobs"]["test-track-b"]
+    # #6673: the URI moved from a job-level literal to the provision step's
+    # `uri_graph` (the host port is Docker-assigned at runtime). The invariant
+    # this pins is unchanged: test-track-b IS a docker lane on the test-prefixed
+    # graph, so the #1886 journal-blind team_* closure must not go inert there.
+    provision = next(s for s in job["steps"]
+                     if str(s.get("uses", "")).endswith("falkordb-provision"))
+    assert provision["with"]["uri_graph"] == "tortoise_test_matrix"
+    env = job.get("env", {})
     assert env.get("TORTOISE_TEST_SWEEP_TEAM_STRAYS") == "1", \
         "test-track-b (dedicated docker lane) must set the team_* stray opt-in"
 
@@ -4306,8 +4582,11 @@ def test_the_on_demand_lane_excludes_its_file_from_every_pre_merge_leg():
     bare = name[:-3] if name.endswith(".py") else name
     assert bare in lanes["on_demand"] or name in lanes["on_demand"], (
         "the lane must own the file, or it is excluded and claimed by nothing")
-    for leg in ("half_a", "half_b", "slow", "carve_out", "env_broken"):
-        assert bare not in lanes[leg] and name not in lanes[leg], (
+    # #6135: every fast shard, plus slow/carve-out/env-broken — not just a/b.
+    for leg, files in lanes.items():
+        if leg == "on_demand":
+            continue
+        assert bare not in files and name not in files, (
             f"{THE_EXPENSIVE_EVAL} must NOT run in {leg!r}: the lane exists to "
             f"keep it off the pre-merge gate")
     assert bare not in {f[:-3] for f in fast_pool(load_manifest())}, (
