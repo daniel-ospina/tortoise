@@ -25,6 +25,29 @@ URI_GRAPH="${FALKORDB_URI_GRAPH:-}"
 # slow pull can raise it, and the hermetic tests lower it.
 HEALTH_TIMEOUT="${FALKORDB_HEALTH_TIMEOUT:-60}"
 
+# The two log helpers are used from the first validation below, so they are
+# defined before it.
+# Logging goes to STDERR: stdout is reserved for GitHub workflow commands (the
+# `::error::` annotation must be the first thing on its line — a `#6673 `
+# prefix would make it plain text). The port does not travel on this stream at
+# all; it goes through $PORT_FILE.
+log() { printf '#6673 %s\n' "$*" >&2; }
+annotate_error() { printf '::error::%s\n' "$*"; }
+
+# Fail closed on a graph name that is not a plain identifier, BEFORE anything
+# is created: it is written verbatim into $GITHUB_ENV, which is
+# line-delimited, so a newline in the value would append ARBITRARY env vars
+# for every later step of the job. All five callers pass a literal today —
+# but this action is reusable, and this is not a property to depend on.
+if [ -n "$URI_GRAPH" ]; then
+  case "$URI_GRAPH" in
+    *[!A-Za-z0-9_-]*)
+      annotate_error "uri_graph must be a plain graph identifier (A-Za-z0-9_-); refusing a value that could inject into GITHUB_ENV"
+      exit 1
+      ;;
+  esac
+fi
+
 # Ownership label: one value per JOB INSTANCE. The teardown step selects on
 # it, so this job can remove exactly its own containers.
 #
@@ -69,15 +92,6 @@ trap cleanup_own EXIT
 # starts the line on the step's stdout stream — so a captured stdout would
 # quietly turn the failure annotation into plain text.
 PORT_FILE="$(mktemp)"
-
-# GitHub annotations must be the first thing on the line — no `#6673 ` prefix.
-annotate_error() { printf '::error::%s\n' "$*"; }
-
-# Logging goes to STDERR: stdout is reserved for GitHub workflow commands
-# (`::error::` below must be the first thing on its line — a `#6673 ` prefix
-# would make it plain text). The port does not travel on this stream at all;
-# it goes through $PORT_FILE.
-log() { printf '#6673 %s\n' "$*" >&2; }
 
 # start <name> <REDIS_ARGS> <health-cli-auth-args>
 # On success writes the ASSIGNED host port to $PORT_FILE and returns 0. All

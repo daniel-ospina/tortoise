@@ -538,8 +538,9 @@ def test_provision_exports_exactly_the_assigned_ports(tmp_path):
     proc, genv, _calls = _run_provision(tmp_path)
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == "", (
-        "provision's stdout must stay EMPTY: the port is captured with $( ), so "
-        f"a log line there becomes part of the exported port. Got {proc.stdout!r}"
+        "provision's stdout must stay EMPTY on success — it is reserved for "
+        "workflow commands, and anything printed there has to be assumed "
+        f"capturable. Got {proc.stdout!r}"
     )
     lines = genv.read_text().splitlines()
     assert "TORTOISE_TEST_DOCKER_PORT=32768" in lines, lines
@@ -655,3 +656,25 @@ def test_provision_emits_a_real_error_annotation_on_failure(tmp_path):
     assert any(ln.startswith("::error::") for ln in proc.stdout.splitlines()), (
         "the failure must be a real annotation on stdout:\n" + proc.stdout
     )
+
+
+def test_provision_refuses_an_uri_graph_that_could_inject_into_GITHUB_ENV(tmp_path):
+    """$GITHUB_ENV is line-delimited, so a newline in `uri_graph` appends
+    arbitrary env vars for every later step of the job. All five callers pass a
+    literal today, so this is latent — but the action is reusable, and the
+    refusal must happen BEFORE anything is created (nothing to clean up).
+    """
+    proc, genv, calls = _run_provision(tmp_path, uri_graph="evil\nINJECTED=1")
+    assert proc.returncode != 0, "a non-identifier graph name must be refused"
+    assert any(ln.startswith("::error::") for ln in proc.stdout.splitlines()), proc.stdout
+    assert not calls.exists() or not calls.read_text().strip(), (
+        "nothing may be started, so there is nothing to clean up"
+    )
+    assert "INJECTED=1" not in genv.read_text()
+    # and the ordinary graph names the five callers use must still be accepted
+    for good in ("tortoise", "tortoise_test_matrix"):
+        # the helper's per-call token-scoped scratch files make a shared
+        # tmp_path safe
+        ok, genv2, _ = _run_provision(tmp_path, uri_graph=good)
+        assert ok.returncode == 0, (good, ok.stderr)
+        assert f"TORTOISE_DB_URI=docker://:falkordb@localhost:32768/{good}" in genv2.read_text()
