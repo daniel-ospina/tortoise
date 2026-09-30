@@ -23,6 +23,23 @@ version: 1
 # trying to enlarge), so it is a wall-clock lever, not a free win.
 fast_shards: 9
 
+# W37: the CARVE-OUT pool. `test-carve-out` was the CI critical path as ONE
+# unsharded job — measured 2026-09-30 over 23 PR runs and 3 successful main
+# runs: work p50 16.9m against a median run wall of 18.6m, i.e. 91% of the wall,
+# while the fast band is already split nine ways. Sharding it is the demand
+# reduction that has to land BEFORE any capacity argument, because the wall was
+# `max(9 fast shards, 1 carve-out)` and the carve-out was the pole in every run
+# examined.
+#
+# Absence means 1 — the unsharded job this repo ran until now — so deleting this
+# key is a complete rollback (unlike `fast_shards`, where absence means 2).
+# 3 is chosen from the measured distribution: the carve-out's 1016 tests run in
+# 881.74s and its slowest single test is only 46.8s (then 39.2, 38.9, 16.7 …),
+# so the work is BROAD and packs evenly — 3 shards put the pole at ~4.9m of test
+# time, level with the fast band, instead of 16.9m above it. Raising this trades
+# wall clock for aggregate runner-minutes, exactly like `fast_shards`.
+carve_shards: 3
+
 surfaces:
   api:
   - test_1162_add_operator_local_svbp.py

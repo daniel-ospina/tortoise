@@ -179,6 +179,13 @@ jobs:
       # push and on full-matrix PRs — a skipped step's output is empty).
       fast_matrix: ${{ steps.split.outputs.fast_matrix || steps.push-matrix.outputs.fast_matrix }}
       carve_out: ${{ steps.push-matrix.outputs.carve_out }}
+      # W37: the carve-out pool's shard matrix. Read by `test-carve-out`
+      # directly (`fromJSON`), so the shard count and the leg names are the
+      # selector's contract, never a workflow literal — the same rule
+      # `fast_matrix` follows. The tier-2 split does NOT override it: the
+      # carve-out set is diff-GATED (`carve_out_run`) but never diff-SIZED, so
+      # every run that enters this job runs exactly its three shards.
+      carve_matrix: ${{ steps.push-matrix.outputs.carve_matrix }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -280,6 +287,11 @@ jobs:
           # Epic #1647 Task 9: the embedded carve-out leg (E2E-4) — excluded
           # from every docker shard by the selector.
           echo "carve_out=$(echo "$MATRIX" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["carve_out"]))')" >> "$GITHUB_OUTPUT"
+          # W37: the carve-out pool's matrix — the same `carve_out` set packed
+          # into `config/ci-surfaces.yml::carve_shards` LPT bins. Emitted the
+          # same way as `fast_matrix` (one JSON GITHUB_OUTPUT line, so the
+          # template-context toString hazard above applies identically).
+          echo "carve_matrix=$(echo "$MATRIX" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["carve_matrix"]))')" >> "$GITHUB_OUTPUT"
       - name: Tier-2 duration split (#1473)
         # #1473/#6135: LPT-pack the tier-2 selected files across the configured
         # shard count by measured duration (config/ci-surfaces.yml durations)
@@ -1724,14 +1736,38 @@ jobs:
     needs: changes
     if: always() && needs.changes.result == 'success' && needs.changes.outputs.carve_out_run == 'true'
     runs-on: ubuntu-latest
-    # #3239: OUTER cap, strictly above the in-step watchdog below (#798: the
-    # in-step kill is the one that prints the counts). Measured 2026-09-30
-    # over the 60 newest completed runs: pytest-step max 16.02m, job max
-    # 18.27m — 45m clears the observed work 2.0x (the worst run in any window
-    # was a 22.2m push job, still 2.0x inside). The inherited 90m cleared it
-    # 4.9x and let a hung cancelled job hold the per-PR concurrency slot for
-    # the whole cap with no way to release it (#3239).
-    timeout-minutes: 45
+    # W37: the carve-out pool. Until now this was ONE unsharded job and it was
+    # the CI critical path — p50 16.9m of a median 18.6m run wall (91%), while
+    # the fast band was already split nine ways, so the wall was
+    # `max(9 fast shards, 1 carve-out)` and the carve-out was the maximand.
+    # The set is packed by the selector into `carve_shards` LPT bins
+    # (`config/ci-surfaces.yml`), exactly as the fast band is.
+    # `fail-fast: false` is load-bearing: with the default, the first red shard
+    # CANCELS the others, so the failure set the admin-merge rail derives from
+    # this job's logs (`scripts/ci-failure-set.sh`) would be partial and the
+    # rail would refuse as unattributable instead of comparing (#4453).
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.carve_matrix) }}
+    # ⛔ The BARE `test-carve-out` is shard 0's name (`suffix == ''`), NOT
+    # `test-carve-out (a)`. The merge rail's lane-parity subtracts main's job
+    # names from the PR's, and an unadopted main holds the bare name — so
+    # suffixing shard 0 would make the PR's shard set a RENAME rather than a
+    # superset and would refuse every merge until it landed. The selector
+    # guarantees the bare-first shape; `test_carve_out_matrix_keeps_the_bare_
+    # name` pins it.
+    name: test-carve-out${{ matrix.suffix }}
+    # #3239/W37: OUTER cap, strictly above the in-step per-shard watchdog
+    # (#798: the in-step kill is the one that prints the counts). It was 45m
+    # when ONE job carried the whole 16.02m step; now each shard carries
+    # `${{ matrix.watchdog_minutes }}`m (15m at 3 shards), so the cap only has
+    # to back THAT — and lowering it 45m -> 30m TIGHTENS the stale-head
+    # exposure #3239 is about rather than loosening it. Both directions are
+    # derived, not chosen: `test_every_bounded_pytest_job_caps_above_its_
+    # watchdog` asserts cap > the LARGEST emitted shard watchdog, and
+    # `test_carve_out_bounds_clear_the_measured_work_without_dwarfing_it`
+    # asserts cap <= 3x that watchdog (and <= 3x the measured step).
+    timeout-minutes: 30
     env:
       TORTOISE_TEST_CARVE_OUT: "1"
     steps:
@@ -1750,7 +1786,7 @@ jobs:
       - name: Generate coverage manifest (carve-out — expected nodeids, epic #1647 Task 9)
         run: |
           FILES=""
-          for f in ${{ needs.changes.outputs.carve_out }}; do FILES="$FILES tests/$f.py"; done
+          for f in ${{ matrix.files }}; do FILES="$FILES tests/$f.py"; done
           if [ -z "$FILES" ]; then
             echo "no carve-out files selected — no manifest (guard skips)"
             exit 0
@@ -1766,7 +1802,7 @@ jobs:
         run: |
           set +e
           FILES=""
-          for f in ${{ needs.changes.outputs.carve_out }}; do FILES="$FILES tests/$f.py"; done
+          for f in ${{ matrix.files }}; do FILES="$FILES tests/$f.py"; done
           if [ -z "$FILES" ]; then
             echo "no carve-out files selected — skipping"
             echo 0 > "${RUNNER_TEMP:-/tmp}/pytest-rc"
@@ -1790,7 +1826,16 @@ jobs:
           # factor #6135 already validated for the fast shards. Was 75m, 4.7x
           # the work, so a hang inside pytest ran the long pole for an hour+
           # on the old budget.
-          timeout -s INT -k 10 35m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
+          # #3239/W37: the watchdog is now the SHARD's own budget
+          # (`${{ matrix.watchdog_minutes }}`m, derived by
+          # `tools/ci_selection.shard_watchdog_minutes` from the shard's packed
+          # LPT estimate), not a literal for the whole set. A per-shard budget
+          # is what lets 3 shards be bounded meaningfully; the inherited literal
+          # bounded all of them by the SUM, which is the wall this change exists
+          # to remove. The outer `timeout-minutes` stays a literal and must
+          # clear this value — `test_every_bounded_pytest_job_caps_above_its_
+          # watchdog` re-derives that from the emitted matrix.
+          timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
           rc=$?
           echo "$rc" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
           kill $HB_PID 2>/dev/null || true
@@ -1818,7 +1863,7 @@ jobs:
             passed=$(grep -c ' PASSED' /tmp/pytest.log)
             failed=$(grep -c ' FAILED' /tmp/pytest.log)
             errored=$(grep -c ' ERROR' /tmp/pytest.log)
-            echo "==================== WATCHDOG: carve-out pytest killed after 35m ($passed passed, $failed failed, $errored errored so far) ===================="
+            echo "==================== WATCHDOG: carve-out shard pytest killed after ${{ matrix.watchdog_minutes }}m ($passed passed, $failed failed, $errored errored so far) ===================="
           fi
           echo "==================== pytest exit code: $rc ===================="
           exit $rc

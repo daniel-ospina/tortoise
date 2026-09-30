@@ -26,6 +26,8 @@ from tools.ci_selection import (  # noqa: I001
     surface_audit, render_surface_audit, duplicate_entries,
     on_demand_files, leg_coverage_issues, push_legs, fast_pool,
     duration_issues, TESTS_DIR, WATCHDOG_HEADROOM, WATCHDOG_CEILING_MIN,
+    carve_matrix_include, carve_shard_issues, carve_shard_count,
+    MAX_CARVE_SHARDS, DEFAULT_CARVE_SHARDS,
 )
 from tools import mergify_config_guard as mcg
 from tools import ci_selection as cs
@@ -47,9 +49,14 @@ def _expand(legs: dict) -> dict:
     """
     out = {}
     for k, v in legs.items():
-        if k == "shards":
+        if k in ("shards", "carve_shards"):
+            # W37: `carve_shards` is the same shape as `shards` (a list of
+            # {name, files, …} dicts), so it must be flattened the same way —
+            # `set(v)` over dicts raises `unhashable type: 'dict'`, which is
+            # how this surface announced itself rather than silently passing.
+            prefix = "" if k == "shards" else "carve_"
             for shard in v:
-                out[shard["name"]] = set(shard["files"])
+                out[prefix + shard["name"]] = set(shard["files"])
         else:
             out[k] = set(v)
     return out
@@ -2316,8 +2323,19 @@ def test_carve_out_job_uri_unset_with_carve_out_flag():
         "EXPECT_URI on the carve-out would trip the E2E-6 tripwire (no URI)"
     run = next(s for s in job["steps"]
                if s.get("name", "").startswith("Run carve-out suite"))
-    assert "needs.changes.outputs.carve_out" in run["run"], \
-        "the carve-out job must consume the selector's carve_out leg"
+    # W37: the file list is still OWNED BY THE SELECTOR — it now arrives as the
+    # per-shard `matrix.files` (each shard's slice of the `carve_out` leg)
+    # rather than whole. The invariant this pin exists for is "the job never
+    # hardcodes its own file list", so assert BOTH halves: the step reads the
+    # selector's matrix, and that matrix is the selector's `carve_matrix`
+    # output rather than a workflow literal. Asserting the old whole-leg
+    # expression would have been a pin on the WIRING, not on the invariant —
+    # and it would forbid exactly the change that removes the pole.
+    assert "${{ matrix.files }}" in run["run"], \
+        "the carve-out job must consume the selector's carve_out leg (its shard)"
+    assert (job["strategy"]["matrix"]
+            == "${{ fromJSON(needs.changes.outputs.carve_matrix) }}"), \
+        "the carve-out matrix must come from the selector's carve_matrix output"
     assert "--junitxml=/tmp/junit.xml" in run["run"]
 
 
@@ -2391,9 +2409,26 @@ def test_every_bounded_pytest_job_caps_above_its_watchdog():
             f"outer cap ({cap}m), or the runner kills the step before it can "
             f"print its pass/fail counts (#798)")
         bounded[name] = (watchdog, cap)
-    assert "test-carve-out" in bounded, (
-        "the carve-out job's bounds are the subject of #3239 — if its pytest "
-        "step no longer carries a literal watchdog, re-derive this pin")
+    # W37: `test-carve-out` is now a SHARDED job, so its pytest step carries no
+    # literal watchdog — it carries `${{ matrix.watchdog_minutes }}m`, derived
+    # per shard by `tools.ci_selection.shard_watchdog_minutes`. The pin is
+    # therefore re-derived rather than deleted (its own message asked for
+    # this): the ORDER invariant is now asserted against the LARGEST watchdog
+    # the selector actually emits, which is the value the literal cap must
+    # clear. A static `in bounded` membership check would have gone vacuous the
+    # moment the job became a matrix — it would assert nothing about the
+    # carve-out at all.
+    idx = _carve_matrix()
+    carve_cap = jobs["test-carve-out"].get("timeout-minutes")
+    assert isinstance(carve_cap, int), (
+        "the carve-out job needs a literal `timeout-minutes` — without one it "
+        "falls back to GitHub's 360m default and a hung shard holds the per-PR "
+        "concurrency slot for six hours (#3239)")
+    worst = max(e["watchdog_minutes"] for e in idx["include"])
+    assert worst < carve_cap, (
+        f"the carve-out's largest per-shard watchdog ({worst}m) must stay "
+        f"BELOW its outer cap ({carve_cap}m), or the runner kills the step "
+        f"before it can print its pass/fail counts (#798)")
     # The fast shards' watchdog is per-shard, clamped by the selector at
     # WATCHDOG_CEILING_MIN — so the cap must clear that ceiling, not a literal.
     fast_cap = jobs["test"].get("timeout-minutes")
@@ -2410,27 +2445,133 @@ def test_carve_out_bounds_clear_the_measured_work_without_dwarfing_it():
     The floor is tapped twice on purpose: the frozen API measurement (what the
     bound was chosen from) and the committed `durations` map for the carve-out
     set (a lower bound that moves with the code — so a carve-out set that grows
-    past the budget reds here instead of surfacing as a 90-minute hang)."""
+    past the budget reds here instead of surfacing as a 90-minute hang).
+
+    W37: with the carve-out SHARDED, both floors are now PER SHARD. The
+    invariant that matters is no longer "the one job's watchdog clears the whole
+    set" (that is the sum, and the sum is precisely the 16.9m wall this change
+    removes) but "EVERY shard's watchdog clears THAT SHARD's committed work by
+    the house headroom" — checked for every shard, because one under-budgeted
+    shard is a guaranteed red and averaging would hide it."""
     job = _load_python_ci()["jobs"]["test-carve-out"]
-    watchdog = _literal_pytest_watchdog(job)
     cap = job["timeout-minutes"]
     measured = _MEASURED_PYTEST_MAX_MIN["test-carve-out"]
-    assert watchdog >= WATCHDOG_HEADROOM * measured, (
-        f"the carve-out watchdog ({watchdog}m) must clear the measured "
-        f"pytest step ({measured}m) by WATCHDOG_HEADROOM "
-        f"({WATCHDOG_HEADROOM}x) or a slow run becomes a guaranteed red")
     manifest = load_manifest()
-    committed = sum(manifest["durations"].get(f, 0.0)
-                    for f in manifest["carve_out"]) / 60.0
-    assert watchdog >= WATCHDOG_HEADROOM * committed, (
-        f"the carve-out watchdog ({watchdog}m) no longer clears the committed "
-        f"carve-out estimate ({committed:.2f}m) by WATCHDOG_HEADROOM "
-        f"({WATCHDOG_HEADROOM}x) — re-derive it from a fresh measurement "
-        f"rather than widening the hang window (#3239)")
+    idx = _carve_matrix()
+    durations = manifest["durations"]
+    for entry in idx["include"]:
+        files = entry["files"].split()
+        assert files, f"carve shard {entry['suffix']!r} is empty — a dropped leg"
+        committed = sum(durations.get(f + ".py", 0.0) for f in files) / 60.0
+        wd = entry["watchdog_minutes"]
+        assert wd >= WATCHDOG_HEADROOM * committed, (
+            f"carve shard {entry['suffix']!r} watchdog ({wd}m) no longer clears "
+            f"its committed estimate ({committed:.2f}m) by WATCHDOG_HEADROOM "
+            f"({WATCHDOG_HEADROOM}x) — re-derive it from a fresh measurement "
+            f"rather than widening the hang window (#3239)")
+        # PROPORTION, per shard: the cap backs a SHARD now, so the bound it must
+        # not dwarf is the shard's own watchdog, not the whole set's work.
+        assert cap <= _CAP_CEILING_FACTOR * wd, (
+            f"the carve-out cap ({cap}m) dwarfs the per-shard watchdog it "
+            f"backstops ({wd}m) by more than {_CAP_CEILING_FACTOR}x — the cap "
+            f"IS the stale-head exposure (#3239)")
+    # And the whole-set measurement stays an upper bound on the cap, so a
+    # future shard count cannot quietly multiply the exposure past the work.
     assert cap <= _CAP_CEILING_FACTOR * measured, (
-        f"the carve-out cap ({cap}m) dwarfs its measured pytest step "
+        f"the carve-out cap ({cap}m) dwarfs the measured pytest step "
         f"({measured}m) — the cap IS the stale-head exposure, and 90m against "
         f"this work is exactly the defect #3239 reports")
+
+
+def _carve_matrix() -> dict:
+    """W37: the carve-out matrix the workflow ACTUALLY expands.
+
+    Derived from `push_legs`, not rebuilt from `carve_out`: the point of every
+    assertion below is to inspect the object `test-carve-out` receives. A
+    helper that re-packed the set independently would happily agree with itself
+    while the emitted matrix was wrong.
+    """
+    return carve_matrix_include(push_legs(load_manifest())["carve_shards"])
+
+
+def test_carve_out_matrix_partitions_the_leg():
+    """W37: sharding must PARTITION the carve-out set — every file in exactly
+    one shard.
+
+    This is the coverage pin, and it is the one that matters most: the whole
+    justification for sharding a 1016-test embedded suite is that a dropped
+    file would be a SILENTLY green, permanently unexecuted gate (the exact
+    failure #4047 was about)."""
+    manifest = load_manifest()
+    # The emitted leg, NOT `manifest["carve_out"]`: `push_legs` STRIPS the `.py`
+    # suffix (the workflow re-adds it), so comparing against the raw manifest
+    # list would compare `test_config` with `test_config.py` and report the whole
+    # set as simultaneously missing AND extra. Compare like with like.
+    del manifest  # kept for the reader: the raw list is deliberately not used
+    expected = set(push_legs(load_manifest())["carve_out"])
+    got: list[str] = []
+    for entry in _carve_matrix()["include"]:
+        got += entry["files"].split()
+    assert len(got) == len(set(got)), (
+        f"a carve-out file is in MORE THAN ONE shard: "
+        f"{sorted(f for f in got if got.count(f) > 1)}")
+    assert set(got) == expected, (
+        f"the carve shards must partition the carve_out leg: "
+        f"missing={sorted(expected - set(got))} extra={sorted(set(got) - expected)}")
+
+
+def test_carve_out_matrix_keeps_the_bare_name():
+    """W37: shard 0's job name must be EXACTLY `test-carve-out`.
+
+    The merge rail's lane-parity subtracts main's job names from the PR's, so
+    an unadopted main holds the bare `test-carve-out`. Naming shard 0
+    `test-carve-out (a)` would make this a RENAME — one of main's names would
+    be missing from the PR and every merge would refuse until this landed.
+    Keeping the bare name makes the shard set a strict SUPERSET, which is the
+    same property `fast_shards` relies on when it keeps `a` and `b`."""
+    entries = _carve_matrix()["include"]
+    assert entries[0]["suffix"] == "", (
+        "shard 0 must carry the bare `test-carve-out` name (empty suffix) — a "
+        "suffixed shard 0 renames main's job and refuses every merge")
+    suffixes = [e["suffix"] for e in entries]
+    assert len(set(suffixes)) == len(suffixes), (
+        f"two carve shards would produce the SAME check name: {suffixes} — "
+        f"GitHub would silently drop one, losing its coverage")
+    for s in suffixes[1:]:
+        assert s.startswith(" (") and s.endswith(")"), (
+            f"a non-first shard suffix must be ` (<label>)`, got {s!r}")
+
+
+def test_carve_shards_declaration_is_fail_closed():
+    """W37: a malformed `carve_shards` is an ERROR, never a silent default.
+
+    Same polarity as `fast_shard_issues`, with one deliberate difference: 1 is
+    LEGAL here. It is the unsharded job this repo ran until now, so removing
+    the key (or setting 1) must be a complete, safe rollback — 0 would delete
+    the lane, and the `a..z` ceiling is the same one the fast band has."""
+    ok = load_manifest()
+    assert carve_shard_issues(ok) == [], carve_shard_issues(ok)
+    assert carve_shard_count(ok) >= 2, (
+        "this repo exists to shard the carve-out; a count of 1 means the key "
+        "was removed and the pin below should be revisited")
+    for bad, why in ((None, "explicit null"), ("3", "a string"),
+                     (True, "a bool"), (3.5, "a float"), (0, "zero"),
+                     (-1, "negative"), (MAX_CARVE_SHARDS + 1, "above the a..z ceiling")):
+        m = dict(ok, carve_shards=bad)
+        assert carve_shard_issues(m), f"{why} ({bad!r}) must be an error"
+        assert carve_shard_count(m) == DEFAULT_CARVE_SHARDS == 1, (
+            f"{why} must fail SAFE to the unsharded shape, not to a number "
+            f"nobody chose")
+    # Absence is NOT an error — it is 'not adopted', and it must give back the
+    # exact unsharded job (one shard, bare name).
+    m = {k: v for k, v in ok.items() if k != "carve_shards"}
+    assert carve_shard_issues(m) == []
+    assert carve_shard_count(m) == 1
+    one = carve_matrix_include(push_legs(m)["carve_shards"])["include"]
+    assert len(one) == 1 and one[0]["suffix"] == "", (
+        "an unadopted manifest must emit ONE shard named exactly "
+        "`test-carve-out` — the shape this repo ran before the split")
+    assert set(one[0]["files"].split()) == set(push_legs(m)["carve_out"])
 
 
 def test_diff_gated_jobs_consume_changes_outputs():
