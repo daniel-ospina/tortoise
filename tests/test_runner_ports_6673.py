@@ -489,8 +489,12 @@ def test_action_inputs_are_declared():
 STUB_DOCKER = """#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$DOCKER_CALLS"
 case "$1" in
-  run)  echo "cid-stub" ;;
-  port) case "$2" in *legacy*) echo "0.0.0.0:32769" ;; *) echo "0.0.0.0:32768" ;; esac ;;
+  run)  if [ "${FAKE_RUN:-ok}" = "fail" ]; then
+          echo "Error response from daemon: pull access denied" >&2; exit 125
+        fi
+        echo "cid-stub" ;;
+  port) if [ -n "${FAKE_PORT:-}" ]; then echo "$FAKE_PORT"; exit 0; fi
+        case "$2" in *legacy*) echo "0.0.0.0:32769" ;; *) echo "0.0.0.0:32768" ;; esac ;;
   exec) if [ "${FAKE_PING:-PONG}" = "PONG" ]; then echo PONG; else exit 1; fi ;;
   logs) echo "stub logs" ;;
   rm)   exit 0 ;;
@@ -501,7 +505,8 @@ exit 0
 
 def _run_provision(tmp_path: Path, *, run_id: str = "42", legacy: str = "true",
                    uri_graph: str = "tortoise_test_matrix",
-                   ping: str = "PONG", health_timeout: str = "1"
+                   ping: str = "PONG", health_timeout: str = "1",
+                   fake_run: str = "ok", fake_port: str = ""
                    ) -> tuple[subprocess.CompletedProcess, Path, Path]:
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
@@ -525,6 +530,8 @@ def _run_provision(tmp_path: Path, *, run_id: str = "42", legacy: str = "true",
         "FALKORDB_LEGACY": legacy,
         "FALKORDB_URI_GRAPH": uri_graph,
         "FAKE_PING": ping,
+        "FAKE_RUN": fake_run,
+        "FAKE_PORT": fake_port,
         "FALKORDB_HEALTH_TIMEOUT": health_timeout,
     }
     proc = subprocess.run(
@@ -678,3 +685,24 @@ def test_provision_refuses_an_uri_graph_that_could_inject_into_GITHUB_ENV(tmp_pa
         ok, genv2, _ = _run_provision(tmp_path, uri_graph=good)
         assert ok.returncode == 0, (good, ok.stderr)
         assert f"TORTOISE_DB_URI=docker://:falkordb@localhost:32768/{good}" in genv2.read_text()
+
+
+def test_provision_annotates_a_docker_run_failure(tmp_path):
+    """`set -e` would abort with docker's stderr as the only trace; the contract
+    is that every failure of this step is a visible annotation."""
+    proc, _genv, calls = _run_provision(tmp_path, fake_run="fail")
+    assert proc.returncode != 0
+    assert any(ln.startswith("::error::") for ln in proc.stdout.splitlines()), (
+        proc.stdout + proc.stderr
+    )
+    # and it cleaned up after itself (the pre-clean of each name, then the trap)
+    assert any(ln.startswith("rm -f ") for ln in calls.read_text().splitlines())
+
+
+def test_provision_refuses_a_non_numeric_port(tmp_path):
+    """The port is exported into $GITHUB_ENV and interpolated into a URI, so a
+    truncated or error-shaped `docker port` line must not be written there."""
+    proc, genv, _calls = _run_provision(tmp_path, fake_port="0.0.0.0:notaport")
+    assert proc.returncode != 0
+    assert any(ln.startswith("::error::") for ln in proc.stdout.splitlines()), proc.stdout
+    assert "TORTOISE_TEST_DOCKER_PORT" not in genv.read_text()

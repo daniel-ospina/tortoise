@@ -23,8 +23,9 @@ inputs:
     default: "true"
   health_timeout:
     description: >-
-      Seconds to wait for the service's PING (per container). Default 60 covers
-      a cold image pull on a fresh runner; raise it on a slow host.
+      Seconds to wait for each container's PING after it is started. This does
+      NOT bound the image pull (that happens inside `docker run`, before the
+      loop) — a cold pull is bounded only by the step/job timeout-minutes.
     required: false
     default: "60"
   uri_graph:

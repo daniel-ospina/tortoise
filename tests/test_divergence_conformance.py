@@ -262,7 +262,8 @@ def test_d4_bulk_wipe_graph_guard(leg, tmp_path):
             proj.close()
         return
     # Server leg — explicit host= construction (never redirects).
-    proj = FalkorProjection(host="localhost", port=_live_utils.docker_port(),
+    proj = FalkorProjection(host=_live_utils.service_host(),
+                        port=_live_utils.docker_port(),
                             password="falkordb",
                             graph_name="divergence_guard_probe")
     try:
@@ -275,7 +276,8 @@ def test_d4_bulk_wipe_graph_guard(leg, tmp_path):
         _drop_own_graph(proj)
         proj.close()
     # A test_-prefixed graph passes the guard.
-    proj2 = FalkorProjection(host="localhost", port=_live_utils.docker_port(),
+    proj2 = FalkorProjection(host=_live_utils.service_host(),
+                        port=_live_utils.docker_port(),
                              password="falkordb",
                              graph_name="test_d4_guard_probe")
     try:
@@ -369,7 +371,8 @@ def test_d7_boolean_index_purge(leg, tmp_path):
     # single-property boolean index and confirm a reopen drops it (a legacy
     # or copy-destination graph must not keep a boolean index: `= false`)
     # would otherwise read 0 forever).
-    proj = FalkorProjection(host="localhost", port=_live_utils.docker_port(),
+    proj = FalkorProjection(host=_live_utils.service_host(),
+                        port=_live_utils.docker_port(),
                             password="falkordb",
                             graph_name="test_d7_sweep")
     try:
@@ -378,7 +381,8 @@ def test_d7_boolean_index_purge(leg, tmp_path):
         proj.g.query("CREATE INDEX FOR (n:Point) ON (n.is_operator)")
         proj.close()
         proj = None  # reopen below
-        proj2 = FalkorProjection(host="localhost", port=_live_utils.docker_port(),
+        proj2 = FalkorProjection(host=_live_utils.service_host(),
+                        port=_live_utils.docker_port(),
                                  password="falkordb",
                                  graph_name="test_d7_sweep")
         try:

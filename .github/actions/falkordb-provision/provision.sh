@@ -20,9 +20,10 @@ set -euo pipefail
 IMAGE="${FALKORDB_IMAGE:?}"
 LEGACY="${FALKORDB_LEGACY:-true}"
 URI_GRAPH="${FALKORDB_URI_GRAPH:-}"
-# Health-gate bound (seconds). Widened from the `services:` blocks' 5s x 10
-# because this also covers the image pull on a cold runner; a caller with a
-# slow pull can raise it, and the hermetic tests lower it.
+# Health-gate bound (seconds) for the PING loop — NOT a bound on the image
+# pull, which happens inside `docker run` before the loop starts (a cold pull
+# is bounded only by the step/job `timeout-minutes`). Widened from the
+# `services:` blocks' 5s x 10 for slow starts on a loaded runner.
 HEALTH_TIMEOUT="${FALKORDB_HEALTH_TIMEOUT:-60}"
 
 # The two log helpers are used from the first validation below, so they are
@@ -108,19 +109,30 @@ start() {
   # --rm  removes the container when it STOPS (a normal exit, a crash, or a
   #       `docker stop`) — it is not a job-death reaper: a hard-killed runner
   #       can leave a RUNNING container, attributable by $LABEL.
-  docker run -d --rm --name "$name" --label "$LABEL" \
-    -e REDIS_ARGS="$redis_args" \
-    -p 0:6379 \
-    "$IMAGE" >/dev/null
+  if ! docker run -d --rm --name "$name" --label "$LABEL" \
+      -e REDIS_ARGS="$redis_args" \
+      -p 0:6379 \
+      "$IMAGE" >/dev/null; then
+    # Annotated explicitly: `set -e` would otherwise abort with docker's stderr
+    # as the only trace, and the contract is that every failure of this step is
+    # a visible annotation.
+    annotate_error "$name failed to start (docker run) — see the docker error above"
+    return 1
+  fi
 
   # `docker port` prints one line per address family ("0.0.0.0:PORT" and
   # "[::]:PORT"); take the first and keep the port.
   port="$(docker port "$name" 6379/tcp | head -n 1 | sed 's/.*://')"
-  if [ -z "$port" ]; then
-    annotate_error "$name got no host port from docker"
-    docker logs "$name" 2>&1 | tail -n 40 >&2 || true
-    return 1
-  fi
+  # Digits only, not merely non-empty: $port is exported into $GITHUB_ENV and
+  # interpolated into a URI, and a truncated/error line from `docker port`
+  # would otherwise be written there verbatim.
+  case "$port" in
+    ""|*[!0-9]*)
+      annotate_error "$name got no usable host port from docker (got '$port')"
+      docker logs "$name" 2>&1 | tail -n 40 >&2 || true
+      return 1
+      ;;
+  esac
 
   # Health gate — the `services:` health-cmd equivalent (5s x 10 retries),
   # widened to 60s because this also covers the image pull on a cold runner.
