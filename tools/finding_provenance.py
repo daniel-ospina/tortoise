@@ -48,6 +48,30 @@ files that were read. ``--validate`` reports the marker but does not refuse —
 a finding about uncommitted state is legitimate; it just cannot be dated to a
 clean commit.
 
+Scope — a finding is also posted as a COMMENT (#4732)
+-----------------------------------------------------
+The gate's original trigger was ``issues: [opened]`` and it read the issue
+BODY only, so a finding posted as a comment — which is how findings are posted
+in practice, after the initial filing — was never seen. ``--is-finding`` is the
+comment gate's classifier: it answers "does this body CLAIM to be a finding?"
+so ordinary discussion passes untouched. A comment is a finding when it
+carries a provenance *claim* (``Measured at:`` in any form — canonical, bolded
+``**Measured at:**``, blockquoted, or malformed) or the explicit
+``<!-- finding -->`` marker.
+
+Both halves matter. A gate keyed on the provenance claim alone would miss the
+case that motivated #4732 — a batch of finding comments that carried NO
+``Measured at:`` line at all; the marker is what lets such a finding be gated
+as UNKNOWN_PROVENANCE. And a gate that fired on every comment would become
+noise and be ignored, which is its own silent failure. The classifier is
+line-anchored with only markdown prefixes allowed, so prose like "the value
+measured at runtime" is discussion, not a claim.
+
+What ``--is-finding`` does NOT do is validate: it only routes. The workflow
+then runs ``--validate`` on the bodies it selects, and annotates on exit 1.
+Re-validation of a body that moves base after it was written (hole 2 in
+#4732 — a CURRENT body going STALE silently) is NOT covered here.
+
 Usage
 -----
     # 1. Record provenance AT MEASUREMENT TIME (paste into the finding body):
@@ -61,6 +85,10 @@ Usage
     python3 tools/finding_provenance.py --validate finding.md --fix 65b26f6c2
     gh issue view 4009 --json body -q .body \\
         | python3 tools/finding_provenance.py --validate -
+
+    # 4. Classify a COMMENT before gating it (#4732) — exit 0 only when the
+    #    body claims to be a finding, so discussion comments are never gated:
+    python3 tools/finding_provenance.py --is-finding comment.md
 
 Provenance line format (ONE line, machine-produced by ``--emit`` — do not
 hand-type the SHA)::
@@ -76,6 +104,11 @@ Exit codes
     0  CURRENT / ok                     (--checkout: current)
     1  STALE / UNKNOWN / PREDATES FIX   (--checkout: behind base)
     2  usage or environment error (not a git repo, unresolvable base, …)
+
+``--is-finding`` is a CLASSIFIER, not a verdict, so its codes are its own
+(never conflated with the gate's): 0 = the body claims to be a finding
+(validate it), 1 = ordinary discussion (leave it untouched), 2 = the body
+could not be read.
 """
 from __future__ import annotations
 
@@ -102,6 +135,44 @@ PROVENANCE_RE = re.compile(
     r"\s+on\s+(?P<date>\d{4}-\d{2}-\d{2})(?P<dirty>\s+\(DIRTY\))?\s*$",
     re.MULTILINE,
 )
+
+# A CLAIM of provenance, in ANY form (#4732). The canonical strict line above
+# is the machine-produced one; a human may also write the bolded
+# `**Measured at:**` form (used in this repo's own scoping docs), prefix it
+# with a quote/list/heading marker, or malform it. Any of those is an
+# unambiguous claim by the body that it is a finding, so the comment gate must
+# select it — and then the STRICT parser is what decides CURRENT vs
+# UNKNOWN_PROVENANCE. A loose claim is not a pass; it is exactly the UNKNOWN
+# case this tool exists to surface.
+#
+# Line-anchored, and only markdown prefixes are tolerated: prose like "the
+# value measured at runtime" must NOT gate a discussion comment. That
+# restriction is what keeps the comment gate from becoming noise.
+PROVENANCE_CLAIM_RE = re.compile(
+    r"^[ \t]*(?:[>#*_`~\-]+[ \t]*)*Measured[ \t]+at\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# The explicit "this is a finding" marker: `<!-- finding -->` (or
+# `<!-- finding-provenance -->`). It exists so a finding whose provenance is
+# MISSING can still be gated as UNKNOWN_PROVENANCE instead of slipping through
+# as discussion — the incident behind #4732 was a batch of finding comments
+# carrying no `Measured at:` line at all, which a claim-only classifier would
+# never have seen. Invisible in rendered output; one token to add.
+FINDING_MARKER_RE = re.compile(
+    r"<!--\s*finding(?:\s*[-:]\s*provenance)?\s*-->", re.IGNORECASE,
+)
+
+
+def claims_finding(body: str) -> bool:
+    """True when a body claims to BE a finding (#4732).
+
+    The comment gate selects only on a positive claim, so ordinary discussion
+    passes untouched and unannotated. Two claims count: a provenance claim of
+    any form, and the explicit ``<!-- finding -->`` marker.
+    """
+    return bool(PROVENANCE_CLAIM_RE.search(body)
+                or FINDING_MARKER_RE.search(body))
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
@@ -332,6 +403,22 @@ def _validate(root: Path, body: str, base_ref: str, fix: str | None,
     return 0
 
 
+def _read_body(spec: str) -> str | None:
+    """Body text for a FILE spec, where ``-`` means stdin. None on read error.
+
+    A missing file is an ENVIRONMENT error (the caller returns exit 2), never
+    an empty body — an empty body must not be silently classified as
+    ``ordinary discussion`` and skipped.
+    """
+    if spec == "-":
+        return sys.stdin.read()
+    path = Path(spec)
+    if not path.is_file():
+        print(f"finding-provenance: no such file: {path}", file=sys.stderr)
+        return None
+    return path.read_text(encoding="utf-8")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__.splitlines()[0],
@@ -344,6 +431,13 @@ def main(argv: list[str] | None = None) -> int:
                       help="answer: is this checkout behind the base, and by how many?")
     mode.add_argument("--validate", nargs="?", const="-", metavar="FILE",
                       help="gate a finding body (FILE or '-' for stdin)")
+    mode.add_argument("--is-finding", nargs="?", const="-", metavar="FILE",
+                      help="classify a body: exit 0 when it CLAIMS to be a "
+                           "finding (a `Measured at:` claim or the "
+                           "`<!-- finding -->` marker), 1 for ordinary "
+                           "discussion, 2 when the body cannot be read. The "
+                           "comment gate's selector (#4732) — it routes, it "
+                           "does not validate.")
     ap.add_argument("--repo", default=None,
                     help="repo path to run git in (default: cwd toplevel)")
     ap.add_argument("--base", default=BASE_DEFAULT,
@@ -353,6 +447,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     args = ap.parse_args(argv)
 
+    if args.is_finding is not None:
+        # A pure TEXT predicate: classification opens no git repo, so it runs
+        # before the repo is resolved (and works where there is none).
+        body = _read_body(args.is_finding)
+        if body is None:
+            return 2
+        return 0 if claims_finding(body) else 1
+
     root = repo_root(Path(args.repo) if args.repo else None)
 
     if args.emit:
@@ -360,14 +462,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.checkout:
         return _checkout(root, args.base)
 
-    if args.validate == "-":
-        body = sys.stdin.read()
-    else:
-        path = Path(args.validate)
-        if not path.is_file():
-            print(f"finding-provenance: no such file: {path}", file=sys.stderr)
-            return 2
-        body = path.read_text(encoding="utf-8")
+    body = _read_body(args.validate)
+    if body is None:
+        return 2
     return _validate(root, body, args.base, args.fix, args.json)
 
 
