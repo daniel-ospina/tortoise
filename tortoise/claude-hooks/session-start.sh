@@ -109,9 +109,15 @@ _record_breadcrumb() {
   crumb_dir="$(_tortoise_state_dir capture-errors)"
   stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
   mkdir -p "$crumb_dir" 2>/dev/null || true
-  printf '{\n  "harness": "%s",\n  "detail": "%s",\n  "recorded_at": "%s",\n  "kind": "install-inert"\n}\n' \
-    "$harness" "$detail" "$stamp" \
-    > "$crumb_dir/$harness.json" 2>/dev/null || true
+  # #5919: redirect the WHOLE write block. Bash opens redirections left to
+  # right and reports a failed open of the STDOUT target BEFORE a trailing
+  # `2>/dev/null` takes effect, so an unwritable target dir leaked the shell's
+  # own error onto the hook's stderr. A block's stderr is established first.
+  {
+    printf '{\n  "harness": "%s",\n  "detail": "%s",\n  "recorded_at": "%s",\n  "kind": "install-inert"\n}\n' \
+      "$harness" "$detail" "$stamp" \
+      > "$crumb_dir/$harness.json"
+  } 2>/dev/null || true
 }
 
 # ── The hook-run observation (#3797) ─────────────────────────────────────
@@ -138,9 +144,13 @@ _record_hook_run() {
   run_dir="$(_tortoise_state_dir hook-runs)"
   stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
   mkdir -p "$run_dir" 2>/dev/null || true
-  printf '{\n  "harness": "%s",\n  "kind": "hook-run",\n  "recorded_at": "%s",\n  "probe_recorded": %s,\n  "probe_rc": %s\n}\n' \
-    "$harness" "$stamp" "$recorded" "$rc" \
-    > "$run_dir/$harness.json" 2>/dev/null || true
+  # #5919: see _record_breadcrumb — a block redirect keeps the failed open of
+  # the stdout target off the hook's stderr.
+  {
+    printf '{\n  "harness": "%s",\n  "kind": "hook-run",\n  "recorded_at": "%s",\n  "probe_recorded": %s,\n  "probe_rc": %s\n}\n' \
+      "$harness" "$stamp" "$recorded" "$rc" \
+      > "$run_dir/$harness.json"
+  } 2>/dev/null || true
 }
 
 # Prefer a local install; fall back to the installer's recorded checkout.

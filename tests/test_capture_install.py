@@ -3294,7 +3294,15 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # its contract is carried by `hook_install.ARTIFACT_CONTRACTS['pi']`.  Before
 # #4680 the Pi seam carried no marker at all, which is why a two-week-old
 # installed copy read as merely UNVERIFIABLE while capturing the old logic.
-_EXPECTED_INSTALL_CONTRACT = {"claude": 7, "codex": 2, "cursor": 2,
+# #5919 moved codex 2→3 and cursor 2→3: each breadcrumb writer's redirection
+# changed (an unwritable target dir no longer leaks the shell's own error onto
+# stderr), so an already-installed copy must read as stale to receive it.
+# claude stays 7: the claude layout shares ONE generation across three scripts
+# and `session-turn.sh` is frozen by a standing hard rule (its stdout contract
+# must not change), so the trio cannot move together.  The claude fix still
+# reaches installed copies via the same-generation byte-diff arm
+# (`modified-script` → `upgrade` restores the shipped bytes).
+_EXPECTED_INSTALL_CONTRACT = {"claude": 7, "codex": 3, "cursor": 3,
                              "pi": 1}
 
 
