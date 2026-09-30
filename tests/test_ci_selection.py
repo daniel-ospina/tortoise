@@ -457,26 +457,39 @@ _SELF_NAMERS = frozenset({"tools/ci_selection.py", "tests/test_ci_selection.py"}
 
 
 def _readers_of(name: str) -> list[str]:
-    """Every non-self file under tests/tools/scripts/.github/tortoise naming `name`."""
+    """Non-self files under tests/tools/scripts/.github/tortoise naming `name`.
+
+    ⛔ `scripts/` carries a TRAILING SLASH deliberately: `scripts` is a tracked
+    SYMLINK, and BSD grep does not descend a symlinked directory named without
+    one — so `grep -rlF <n> tests tools scripts .github tortoise` silently
+    searches NOTHING under scripts/ on macOS (0 hits vs 72 for the same dir with
+    the slash). The census numbers are only reproducible with the slash.
+
+    SCOPE: a LITERAL-NAME grep. It does not see a reader that finds `name` by
+    GLOB or directory walk, nor one outside these five roots.
+    """
     out = subprocess.run(
-        ["grep", "-rlF", name, "tests", "tools", "scripts", ".github", "tortoise"],
+        ["grep", "-rlF", name, "tests", "tools", "scripts/", ".github",
+         "tortoise"],
         cwd=REPO, capture_output=True, text=True).stdout.split("\n")
     return sorted(h for h in (x.strip() for x in out)
                   if h and h not in _SELF_NAMERS and not h.endswith(".pyc"))
 
 
 def test_no_allowlisted_root_file_has_a_reader():
-    """#6784 review cycle 3 P2: the GENERAL invariant, not a name sample.
+    """#6784 review cycle 3 P2: derive the readers, do not list the names.
 
-    The earlier guard was a hard-coded 11-name list, so it only defended the
-    names someone had thought of. Measured counterexamples: adding `.env.example`
-    (16 readers, one of them the cycle-1 P1 guard itself) or `fly.toml`
-    (18 readers, 7 of them non-tier1) left the whole suite GREEN while silently
-    skipping guards — the exact class this allowlist exists to prevent.
+    The earlier guard was a hard-coded 11-name list, so it only defended names
+    someone had thought of. Measured counterexamples: adding `.env.example` or
+    `fly.toml` left the whole suite GREEN while silently skipping guards — the
+    exact class this allowlist exists to prevent.
 
-    This derives the readers for EVERY member, so any future addition of a file
-    something reads fails here instead of in production. REDs if a member gains
-    a reader, or if a file with a reader is added to the allowlist.
+    ⛔ SCOPE — do not read this as "any future member whose file something reads
+    will fail here" (review cycle 4, P2 falsified exactly that phrasing). This
+    catches a LITERAL-NAME reader under `tests tools scripts/ .github tortoise`.
+    A reader that GLOBS for the file (`REPO.glob("*.md")`), or that lives
+    outside those roots (e.g. `docs/`), is NOT caught — both were demonstrated
+    GREEN against this test. Before adding a member, grep the WHOLE tree.
     """
     offenders = {name: _readers_of(name) for name in sorted(cs.ROOT_NON_PYTHON_FILES)
                  if _readers_of(name)}
@@ -502,14 +515,17 @@ def test_root_file_read_by_a_test_is_never_allowlisted():
 
     `tests/test_embedded_durability_claim.py` reads `ROOT/README.md` and asserts
     its durability claim, and it is `core`+carve-out (NOT tier1) — so allowlisting
-    README.md made that guard skip on exactly the PR that edits it. Census:
-    README.md 21 readers, AGENTS.md 35, CONTRIBUTING.md 7, .gitignore 7,
-    LICENSE 4 — spread across `core`, `api` and `tests/bench`, so neither an
-    allowlist NOR a single-surface claim is safe for them.
+    README.md made that guard skip on exactly the PR that edits it. The census is
+    published on issue #6784 (method: `grep -rlF "<name>" tests tools scripts/
+    .github tortoise`, excluding both ci_selection files, which only name or quote
+    the census) rather than duplicated here, because a duplicated number is a
+    claim that re-stales: an earlier revision of this docstring cited
+    `.env.example` as 16 readers when the method yields 15.
 
-    This is the explicit spot-check for the files that matter most; the GENERAL
-    rule is pinned by `test_no_allowlisted_root_file_has_a_reader`. It REDs if the
-    removed blanket `*.md`-at-root clause is reintroduced (it admitted README.md).
+    This is the explicit spot-check for the files that matter most; the rule
+    itself is pinned by `test_no_allowlisted_root_file_has_a_reader`. It REDs if
+    the removed blanket `*.md`-at-root clause is reintroduced (it admitted
+    README.md).
     """
     for name in ("README.md", "AGENTS.md", "CHANGELOG.md", "CONTRIBUTING.md",
                  "LICENSE", "MEMORY.md", "CLAUDE.md", "index.md",

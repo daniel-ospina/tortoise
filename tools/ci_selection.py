@@ -666,35 +666,28 @@ NON_PYTHON_PREFIXES = (
 
 # ROOT-LEVEL files with a VERIFIED ZERO-READER census (#6784).
 #
-# ⛔ THE HEADLINE CASE OF #6784 IS NOT FIXABLE THIS WAY, and this tuple is what
-# is left after measuring that. The issue assumed a root-level prose file is
-# "not python-relevant". In THIS repo it usually is: the root files are
-# deliberately PINNED by tests across several surfaces. Reader census
-# (`grep -rlF "<name>" tests tools scripts .github tortoise`, root files only,
-# EXCLUDING both `tools/ci_selection.py` and `tests/test_ci_selection.py` — the
-# first only quotes this census, the second only names the members):
+# ⛔ THE HEADLINE CASE OF #6784 IS NOT FIXABLE THIS WAY. The issue assumed a
+# root-level prose file is "not python-relevant". In THIS repo it usually is:
+# the root files are deliberately PINNED by tests across several surfaces, so
+# allowlisting one makes its guard skip on exactly the PR that edits it (measured
+# on README.md and `test_embedded_durability_claim.py`, review cycle 1), and a
+# single-surface CORE_ALSO claim is no safer because its readers span `core`,
+# `api` and `tests/bench`.
 #
-#   AGENTS.md 35 · README.md 21 · fly.toml 18 · pyproject.toml 16 · .env.example 15
-#   .mcp.json 10 · entrypoint.sh 9 · .gitignore 7 · CONTRIBUTING.md 7 · LICENSE 4
-#   MANIFEST.in 5 · requirements.txt 5 · docker-compose.yml 4 · index.md 3 · …
+# Membership is ONLY a root file with NO reader. The rule is enforced by
+# `tests/test_ci_selection.py::test_no_allowlisted_root_file_has_a_reader`, which
+# derives the readers per member rather than listing names.
 #
-# So allowlisting README.md made `test_embedded_durability_claim.py` skip on
-# exactly the PR that edits it (review cycle 1, P1), and claiming it as `core`
-# is no safer — its 21 readers are spread over `core`, `api` and `tests/bench`,
-# so a single-surface claim would silently skip the rest. Every root file with a
-# reader therefore KEEPS the fail-closed full matrix:
-#   README.md LICENSE CHANGELOG.md CONTRIBUTING.md AGENTS.md CLAUDE.md MEMORY.md
-#   index.md .gitignore .env.example .mcp.json .mergify.yml fly.toml …
-# (`.gitattributes` is NOT in that list because it does not exist in this tree;
-# `.python-version` IS kept fail-closed although its census is zero, because a
-# toolchain file is exactly what should not be silently exempted.)
+# ⛔ SCOPE OF THAT GUARD, stated rather than overclaimed (review cycle 4, P2):
+# it is a LITERAL-NAME grep over the roots `tests tools scripts/ .github
+# tortoise`. It does NOT see a reader that finds a root file by GLOB or walk
+# (`REPO.glob("*.md")`), nor one outside those roots (e.g. `docs/`). Both were
+# demonstrated GREEN against it. So this tuple is safe against the readers the
+# census searched, NOT against every conceivable reader — before adding a name,
+# grep for it yourself across the WHOLE tracked tree.
 #
-# Membership is ONLY a root file with no reader at all. The rule is
-# MACHINE-ENFORCED, not merely stated here:
-# `tests/test_ci_selection.py::test_no_allowlisted_root_file_has_a_reader`
-# derives the readers for every member and fails if any is read.
-# A name that earns a guard belongs in SOURCE_PATTERNS/CORE_ALSO instead —
-# which is also why `_keep_changed` tests a CLAIM before this tuple.
+# A name that earns a guard belongs in SOURCE_PATTERNS/CORE_ALSO instead — which
+# is also why `_keep_changed` tests a CLAIM before this tuple.
 #
 # These three are stray committed artifacts under a dot-prefix or an obvious
 # scratch name, not project files a reader could be pinned to.
