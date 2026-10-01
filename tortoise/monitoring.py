@@ -252,12 +252,16 @@ PROBE_RETRY_DELAY = 0.1
 #: that reached (and failed at) the query: only the latter's error may replace
 #: the FIRST attempt's real error (#3143 review).
 #:
-#: ⚠️ This is a distinct error STRING, NOT a distinct status. A setup timeout
-#: still returns ``ok=False`` from ``probe_db``, and ``metrics()`` maps
-#: ``db["ok"] is False`` to ``status="degraded"`` + ``graph_size=0`` — #3143's
-#: symptom SHAPE, with only the ``error`` text changed. Do not read the
-#: separate spelling as "no verdict reported": to a caller the report is
-#: indistinguishable from a real unreachability except for that string.
+#: ⚠️ The spelling is a PHASE marker, not the verdict (#3683). A setup timeout
+#: still returns ``ok=False`` from ``probe_db``, but ``probe_db`` ALSO returns
+#: ``observed`` (``_probe_once``'s 4th value) and ``metrics()`` routes on THAT:
+#: a budget-exhausted setup timeout is an unobserved probe and reports the
+#: documented ``status="unknown"`` (+ ``graph_size=0``, the setup error kept),
+#: NOT ``degraded`` — "degraded" is reserved for an OBSERVED failure. So the
+#: separate spelling no longer implies a verdict the caller cannot tell apart
+#: from a real unreachability; the machine-readable discriminator is
+#: ``db["observed"]``. (A callable that RAISED keeps ``observed=True`` even
+#: though its error may be spelled with this same synthesized prefix.)
 _PROBE_SETUP_TIMEOUT_MSG = "probe setup timeout after "
 
 #: A LOOSE outer-alignment bound for :func:`probe_db`'s PLATFORM liveness
@@ -848,9 +852,15 @@ class _SingleSlotWorker:
     calls → +10 live ``ThreadPoolExecutor-N_0`` threads) plus the DB
     connection that abandoned call was holding.
 
-    One long-lived worker bounds the thread count to exactly one per process
-    no matter how many times a probe hangs. Callers keep their own hard
-    timeout through the returned ``Future`` (``future.result(timeout=…)``).
+    What bounds the thread count is the SHAPE, not the number 1 (#3683): ONE
+    process-lifetime pool per name, all ``workers`` threads created EAGERLY and
+    ONCE in ``__init__``, a BOUNDED backlog (``MAX_BACKLOG``), a never-dying
+    loop, and the daemon flag — so the count is exactly ``workers`` no matter
+    how many times a probe hangs. The ``workers=1`` default is therefore an
+    implementation choice, not the leak guard: production already runs this
+    same class at width 8 twice (``CONTROL_PLANE_WORKERS`` and the selfhost
+    readiness probe). Callers keep their own hard timeout through the returned
+    ``Future`` (``future.result(timeout=…)``).
 
     Daemon, NOT ``ThreadPoolExecutor`` (whose workers are non-daemon): a
     wedged probe must never block interpreter/uvicorn shutdown — Fly SIGTERMs
@@ -1386,12 +1396,21 @@ async def run_control_plane_call(fn, *, op: str,
 
 
 def _probe_once(sdk, timeout=None,
-                setup_timeout=None) -> tuple[bool, str | None, bool]:
+                setup_timeout=None) -> tuple[bool, str | None, bool, bool]:
     """Execute ONE bounded probe on the shared probe worker.
 
-    Returns ``(ok, error, transient)`` — ``transient`` is True only when the
-    failure was a connection-level error that a single retry could clear,
-    never a timeout (a hung DB stays hung).
+    Returns ``(ok, error, transient, observed)`` — ``transient`` is True only
+    when the failure was a connection-level error that a single retry could
+    clear, never a timeout (a hung DB stays hung). ``observed`` (#3683) is
+    whether the probe produced a VERDICT about the DB: True whenever a callable
+    RAISED (the projection cold-start or the query failed and said why) or the
+    reachability query actually ran; False only when the probe exhausted a
+    budget (or was refused/abandoned) WITHOUT getting an answer. That is the
+    case ``metrics()`` reports as the documented ``unknown`` instead of
+    claiming an observed failure. It is a PHASE fact, never a restatement of
+    the error text: a callable that raised keeps ``observed=True`` even though
+    the query never ran — including when the raised ``TimeoutError`` carried no
+    message and the error is spelled with the synthesized setup wording.
 
     #3143: the two phases are bounded separately. ``setup_timeout`` bounds the
     projection cold-start (``sdk._get_proj()`` — connect + ``_ensure_indexes()``,
@@ -1454,13 +1473,22 @@ def _probe_once(sdk, timeout=None,
         #       Fall back to the synthesized setup message rather than
         #       returning ``error=""``.
         msg = str(e)[:200] or f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s"
+        if isinstance(e, _WorkerBacklogFull):
+            # (a) the worker REFUSED the submission (saturated #2850 backlog):
+            # ``_setup`` never ran, so the DB was never contacted — not an
+            # observation (mirrors the query-phase refusal branch below).
+            return False, msg, False, False
         if setup.done():
-            return False, msg, _is_transient_connect_error(e)
+            # (b) the CALLABLE raised. A bare ``TimeoutError()`` gets the
+            # synthesized setup spelling, but the cold-start still FAILED and
+            # said so — an observation whatever the message says.
+            return False, msg, _is_transient_connect_error(e), True
         # Not done: the cold-start genuinely overran its allowance (the worker
-        # is abandoned, never cancelled — #2850).
-        return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False
+        # is abandoned, never cancelled — #2850). Budget exhausted with NO
+        # answer ⟹ not an observation.
+        return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False, False
     except Exception as e:  # noqa: BLE001, RUF100
-        return False, str(e)[:200], _is_transient_connect_error(e)
+        return False, str(e)[:200], _is_transient_connect_error(e), True
 
     if combined:
         # Platform-liveness shape (#1384): the query may spend only what the
@@ -1475,7 +1503,7 @@ def _probe_once(sdk, timeout=None,
             # ONE spelling per phase, and ``probe_db``'s retry uses this prefix
             # to keep the first attempt's real error when its own remainder was
             # eaten by the cold-start (#3143 review P2).
-            return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False
+            return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False, False
         slot_wait_budget = None
     else:
         # Explicit-allowance shape (#3143, the MCP health tool): ``timeout``
@@ -1513,21 +1541,22 @@ def _probe_once(sdk, timeout=None,
     if (slot_wait_budget and not query.done()
             and not query_started.wait(slot_wait_budget)):
         # The worker never BEGAN the query inside the leftover allowance, so the
-        # query never ran. That is a distinct error STRING, NOT a distinct
-        # status: ``ok=False`` still flows out to ``metrics()`` as
-        # ``status="degraded"`` + ``graph_size=0`` — #3143's shape with only
-        # the text changed (see ``_PROBE_SETUP_TIMEOUT_MSG``). Same setup
-        # spelling as a cold-start overrun (one spelling per phase). The
+        # query never ran. It is reported with the SETUP spelling — one spelling
+        # per phase — and ``observed=False`` (#3683), which is what sends the
+        # report to the documented ``unknown`` ("could not tell") instead of
+        # falsely claiming an OBSERVED failure ("degraded" means a real
+        # component failing). Same setup spelling as a cold-start overrun. The
         # abandoned submission holds no extra thread (#2850).
-        return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False
+        return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False, False
     try:
         query.result(timeout=query_budget)
-        return True, None, False
+        return True, None, False, True
     except concurrent.futures.TimeoutError as e:
         if query.done() and not query_started.is_set():
             # The worker refused/aborted the submission (saturated backlog) —
-            # its own message, never a synthesized phase timeout.
-            return False, str(e)[:200], _is_transient_connect_error(e)
+            # its own message, never a synthesized phase timeout. The query
+            # was never picked up ⟹ not an observation.
+            return False, str(e)[:200], _is_transient_connect_error(e), False
         if not query_started.is_set():
             # The submission was QUEUED and never RAN (the worker was busy for
             # the whole reachability budget), so the phase at fault is the
@@ -1535,12 +1564,13 @@ def _probe_once(sdk, timeout=None,
             # spelling, the same "one spelling per phase" rule the guard above
             # follows. Only a query that actually STARTED may claim
             # ``probe timeout after …``. Reuses the EXISTING ``query_started``
-            # event; no new machinery.
-            return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False
-        # NOT retried — a slow/hung DB would just hang again.
-        return False, f"probe timeout after {timeout}s", False
+            # event; no new machinery. Never started ⟹ not an observation.
+            return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False, False
+        # NOT retried — a slow/hung DB would just hang again. The query RAN and
+        # overran, so the DB was contacted: an observation.
+        return False, f"probe timeout after {timeout}s", False, True
     except Exception as e:  # noqa: BLE001, RUF100
-        return False, str(e)[:200], _is_transient_connect_error(e)
+        return False, str(e)[:200], _is_transient_connect_error(e), True
 
 
 def probe_db(sdk, setup_timeout=None) -> dict:
@@ -1587,9 +1617,14 @@ def probe_db(sdk, setup_timeout=None) -> dict:
     # degraded within the same sub-second window; a hung black-hole DB is a
     # worker TIMEOUT and is NEVER retried.
 
-    Returns ``{"ok": bool, "latency_ms": float, "error": str|None}`` —
-    NEVER raises, so /health can report ``status: degraded`` instead of
-    crashing the process.
+    Returns ``{"ok": bool, "observed": bool, "latency_ms": float,
+    "error": str|None}`` — NEVER raises, so /health can report
+    ``status: degraded`` instead of crashing the process. ``observed``
+    (#3683) is False when the probe never got a verdict — it exhausted its
+    budget (or was refused/abandoned) without reaching the reachability query —
+    so a caller can tell "never got to ask" from "asked and it failed"
+    WITHOUT parsing the error prose. It is reported by ``_probe_once`` as a
+    phase fact, never re-derived from the error string.
 
     #3143: ``setup_timeout`` is the projection-cold-start allowance (see
     ``_probe_once``). When it is not given, the cold-start and the query SHARE
@@ -1615,28 +1650,30 @@ def probe_db(sdk, setup_timeout=None) -> dict:
     attempt_timeout = PROBE_TIMEOUT
     total_budget = (attempt_timeout if setup_timeout is None
                     else setup_timeout + attempt_timeout)
-    ok, error, transient = _probe_once(sdk, setup_timeout=setup_timeout)
+    ok, error, transient, observed = _probe_once(sdk, setup_timeout=setup_timeout)
     if not ok and transient:
         remaining = total_budget - (time.monotonic() - start) - PROBE_RETRY_DELAY
         if remaining > 0:
             time.sleep(PROBE_RETRY_DELAY)
             # Combined shape on purpose: the retry gets what the deadline has
             # LEFT, split across both phases — not a second allowance.
-            retry_ok, retry_error, _ = _probe_once(
+            retry_ok, retry_error, _, retry_observed = _probe_once(
                 sdk, timeout=remaining, setup_timeout=None)
             if retry_ok:
-                ok, error = True, None
+                ok, error, observed = True, None, True
             elif not (retry_error or "").startswith(_PROBE_SETUP_TIMEOUT_MSG):
                 # The retry reached (and failed at) the query — a genuine
-                # verdict; take it.
-                ok, error = retry_ok, retry_error
+                # verdict; take it (and its observation bit).
+                ok, error, observed = retry_ok, retry_error, retry_observed
             # else: the remainder was too small to REDO the cold-start, so the
             # retry never observed the DB. Keep the FIRST attempt's real error
-            # instead of letting the clock artifact ("probe setup timeout
-            # after 0.01s") mask it — the `remaining > 0` guard alone does not
-            # cover the 0 < remaining < cold-start window (#3143 review).
+            # AND its ``observed`` instead of letting the clock artifact
+            # ("probe setup timeout after 0.01s") mask it — the
+            # `remaining > 0` guard alone does not cover the
+            # 0 < remaining < cold-start window (#3143 review).
     return {
         "ok": ok,
+        "observed": observed,
         "latency_ms": round((time.monotonic() - start) * 1000, 1),
         "error": error,
     }
@@ -3050,6 +3087,20 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
     component failing); an absent registration is an unverified handle, not
     a broken DB, so reporting degraded there is the lie #2202 removes.
 
+    #3683 (health-truthful): the SAME rule covers a probe that never reached
+    the reachability query — its shared probe slot was held for the whole
+    cold-start allowance, so interleaving A (slot taken before setup began)
+    and interleaving B (setup finished, slot taken before reachability was
+    asked) never contacted the DB. ``probe_db`` reports that as
+    ``observed=False`` and it maps to ``unknown`` here (``db.ok=None``, with
+    the setup-timeout ``error`` preserved), so "never got to ask" is
+    distinguishable in the RESULT from an observed failure instead of only in
+    prose a caller must parse. Every OTHER failure that produced a verdict — a
+    raised connect error, a query that RAN and overran — carries
+    ``observed=True`` and keeps ``degraded`` reserved for real component
+    failures. A submission REFUSED by a saturated worker backlog was never
+    asked either, so it is unobserved too (``observed=False``).
+
     ``graph_size`` is counted ONLY on a successful probe (review fix, #2202):
     a dead/hung DB must degrade fast (the bounded RETURN-1 probe — ONE
     ``PROBE_TIMEOUT`` deadline in the default shape, or ``setup_timeout +
@@ -3082,9 +3133,21 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
     """
     target = sdk if sdk is not None else _sdk
     if target is None:
-        db = {"ok": None, "latency_ms": 0.0, "error": "no_sdk_registered"}
+        db = {"ok": None, "observed": False, "latency_ms": 0.0,
+              "error": "no_sdk_registered"}
     else:
         db = probe_db(target, setup_timeout=setup_timeout)
+    # #3683: ``observed`` is the status discriminator. ``probe_db`` reports
+    # ``ok=False`` for TWO different things — a DB that was ASKED and failed,
+    # and a probe that never reached the reachability query — and only the
+    # first is an observed failure. Normalising the unobserved case to
+    # ``ok=None`` keeps the documented ``unknown ⟺ db.ok is None`` shape and
+    # leaves the three-way mapping below untouched. This affects only THIS
+    # report (the MCP tool and the standalone serve_health /health, which
+    # always answers HTTP 200); the platform liveness gates read
+    # ``probe_db``'s own ``ok`` and are deliberately unchanged.
+    if db["ok"] is False and not db.get("observed", True):
+        db = {**db, "ok": None}
     if db["ok"] is True:
         status = "ok"
     elif db["ok"] is False:
