@@ -6251,11 +6251,8 @@ class TortoiseSDK:
             params=params,
         )
         if event_id:
-            proj.g.query(
-                "MATCH (s:Source {url:$url}), (e:Event {eventId:$eid}) "
-                "MERGE (s)-[:references]->(e)",
-                params={"url": url, "eid": event_id},
-            )
+            # Anchored ON CREATE by the shared derivation writer (#5199).
+            proj.link_source_to_event(url, event_id)
 
     # ── Update / Delete consolidation (epic #888 W2, PR #912) ─────────
     # One update()/delete() for Points AND entities. The legacy methods
@@ -20691,9 +20688,13 @@ class TortoiseSDK:
                         self._doc_write(frontmatter, doc_id, title, abs_path, url)
                         repair_work = not base_complete or merge_outcome == "updated"
                     # wire (Source)-[:references]->(Event|Source) — plain edge
-                    # (D10: a document is a :Source, so the doc target is Source)
+                    # (D10: a document is a :Source, so the doc target is keyed by
+                    # url=doc_id). The label stays "Document" for the doc case: it is
+                    # the RELATION's spelling — the writer remaps the identity onto
+                    # `:Source` — and it is what keeps this a derivation link, which is
+                    # what takes the `sourceVersion` anchor (#5199).
                     target = event_id if classifier != "doc" else doc_id
-                    label = "Event" if classifier != "doc" else "Source"
+                    label = "Event" if classifier != "doc" else "Document"
                     proj.link_source_to_entity(url, target, label)
 
             # ── embedding repair (sessions; extract_metadata=True) — runs only
@@ -21679,11 +21680,12 @@ class TortoiseSDK:
         silently no-op on them — the edge must bind the legacy node directly.
         """
         proj = self._get_proj()
-        proj.g.query(
-            "MATCH (s:Source {url:$url}), (e:Event {eventId:$eid}) "
-            "MERGE (s)-[:references]->(e)",
-            params={"url": url, "eid": event_id},
-        )
+        # Anchored ON CREATE, from the version the EVENT records it was read from
+        # (`e.file_hash`) — NOT the Source's current hash. This path runs when the
+        # file was edited since capture (W2): the Source holds the CURRENT hash
+        # while the legacy Event kept its stored `file_hash`, so anchoring the
+        # Source's hash here would report a STALE Event as current.
+        proj.link_source_to_legacy_event(url, event_id)
 
     def index_sessions(self, directory: str, extract_metadata: bool = True,
                        llm_model: str | None = "gpt-5-mini",
@@ -22552,18 +22554,126 @@ class TortoiseSDK:
         as ``entity`` rather than dropping the row. Rows that DO resolve a
         reference are preferred, so a Point extracted from several sources
         keeps returning a referenced entity whenever one exists.
+
+        #5199 — the note is readable for **every** link: one row is returned per
+        ``(source, reference)`` hop, so a source that carries several references
+        reports each one's note rather than one arbitrarily chosen hop. Before
+        this a bare containment link could win and report ``unknown`` for a chain
+        whose note was right there — the ordinary shape, since `hosted_api` gives
+        one Source a document derivation link AND external containment links.
+
+        Row order is a **presentation** choice, pinned for the two distinctions
+        that carry meaning: **resolved** links before the self-terminal fallback,
+        and **annotated** links before unannotated ones. Identity keys follow
+        (node key, note, label, content hash, title) so the shapes the writers
+        produce have a stable order — a fallback row for one source cannot
+        displace another's, a duplicate `:Source` sharing a ``url`` is separated
+        by its hash **when the hashes differ**, and an `:Event` colliding with a
+        `:Source` on its key is separated by its label. Where those keys still
+        agree, the residue paragraph below applies.
+
+        It is **not** a total order, and this docstring will not pretend it is:
+        two rows agreeing on every ordering key (same url/id, note, label, hash,
+        title) come back in engine order, and may still differ in a property the
+        order does not read (``ingestedAt``, say). **Select the link you want by
+        its source/target identity, not by row position.**
+
+        Each row's pair speaks for THAT ``references`` link only, and these rows
+        are **NOT** §4.6's Point-level aggregate: §4.6 aggregates the Point's
+        ``extractedFrom`` links — a DIFFERENT link set, which this method
+        traverses only to enumerate sources and never reads a version off. A
+        caller wanting that verdict has to read those links itself. What these
+        rows answer is the narrower question: *which version was each referenced
+        entity read at, and is that still the source's current version?* Each row
+        carries ``linkRelation`` (the link set it describes — always
+        ``references`` here), ``linkRecordedVersion`` (the version recorded on
+        THAT link, i.e. the edge's own ``sourceVersion`` property),
+        ``sourceCurrentVersion`` (the source's version now) and ``linkCurrency``
+        (the verdict). Every one of those names is scoped to the link on purpose:
+        §4.6's aggregate reads the Point's ``extractedFrom`` link, which records a
+        version of its OWN under the same ``sourceVersion`` property name, so a
+        bare ``sourceVersion``/``currency`` on a Point-addressed call is the
+        conflation the search-hit half was retracted for.
         """
         proj = self._get_proj()
+        from .search_engine import currency_status
+
         r = proj.g.query(
             "MATCH (p:Point {id:$pid})-[:extractedFrom]->(src:Source) "
-            "OPTIONAL MATCH (src)-[:references]->(ref) "
-            "WITH src, ref ORDER BY ref IS NULL LIMIT 1 "
+            "OPTIONAL MATCH (src)-[ref_edge:references]->(ref) "
+            "WITH src, ref_edge, ref "
+            # Order pinned for the two distinctions that carry meaning (resolved
+            # before fallback, annotated before unannotated), then by identity
+            # keys. See the docstring: this is NOT a total order — rows equal on
+            # every key come back in engine order. Deliberately NO `LIMIT`: one
+            # row per link, because a Point extracted from several sources — or a
+            # source referencing several things — must not have its remaining
+            # notes dropped.
+            # (1) a resolved reference beats the self-terminal fallback;
+            # (2) an ANNOTATED reference beats an unannotated one — this decides
+            #     which row LEADS. It is placement, not reachability: there is no
+            #     `LIMIT`, so every link's note comes back either way;
+            # (3) the key terms below. Enumerated in precedence order, most
+            #     significant first — an enumeration, not a claim about which
+            #     term is NEEDED for which shape:
+            #       3a. `coalesce(ref.url, ref.id, ref.eventId, src.url, src.id, '')`
+            #           the target's identity key. `eventId`: a legacy raw-Cypher
+            #           Event carries no `url` and no `id`. `src.url`, then
+            #           `src.id`: the self-terminal fallback row has `ref` NULL, so
+            #           the key falls back to the source's own identity — and a
+            #           url-less `:Source` is producible (a raw producer can wire
+            #           one via `extractedFrom`; `hosted_backup.restore_graph`
+            #           recreates dumped nodes as they were).
+            #       3b. `coalesce(ref_edge.sourceVersion, '')`  the note
+            #       3c. `labels(coalesce(ref, src))`            the target's label
+            #       3d. `coalesce(ref.contentHash, src.contentHash, '')`  hash
+            #       3e. `coalesce(ref.title, src.title, '')`    title
+            #     Every term only breaks ties the earlier ones left, so 3b-3e are
+            #     what separate shapes sharing a key: an `:Event` colliding with a
+            #     `:Source`, two `:Source` nodes sharing a ``url``, or sharing a
+            #     ``url`` AND a hash. (Same-``url`` duplicates need a legacy/raw-Cypher
+            #     write path — #5012's duplication is CANONICAL identity across
+            #     DIFFERENT raw urls (the count itself is unmeasured there) — so
+            #     those terms are defensive.)
+            #     This is NOT a total order — rows equal on every key come back in
+            #     engine order; see the docstring.
+            "ORDER BY ref IS NULL, ref_edge.sourceVersion IS NULL, "
+            "coalesce(ref.url, ref.id, ref.eventId, src.url, src.id, ''), "
+            "coalesce(ref_edge.sourceVersion, ''), "
+            "labels(coalesce(ref, src)), "
+            "coalesce(ref.contentHash, src.contentHash, ''), "
+            "coalesce(ref.title, src.title, '') "
             "RETURN properties(src) as source, "
             "properties(coalesce(ref, src)) as entity, "
-            "labels(coalesce(ref, src)) as labels",
+            "labels(coalesce(ref, src)) as labels, "
+            "ref_edge.sourceVersion as remembered",
             params={"pid": point_id},
         )
-        return [{"source": dict(row[0]), "entity": dict(row[1]), "labels": list(row[2])} for row in r.result_set]
+        out: list[dict] = []
+        for row in r.result_set:
+            source = dict(row[0])
+            remembered = row[3] or ""
+            current = source.get("contentHash") or ""
+            out.append({
+                "source": source,
+                "entity": dict(row[1]),
+                "labels": list(row[2]),
+                # #5199: the version note on THIS hop, and the currency of THIS
+                # link as a READ. `linkRelation` names the link set, so the row is
+                # self-describing: §4.6's aggregate rides a different link.
+                "linkRelation": "references",
+                # It describes the ``source -[references]-> entity`` link — the
+                # version the RETURNED entity was read at — which is deliberately
+                # NOT a claim about the Point: the Point's own `extractedFrom`
+                # version is a different link, and a Point-level verdict has to
+                # aggregate §4.6 across all of them. ``unknown`` whenever the note
+                # or the source's version is absent, so an unnoted link can never
+                # read as current.
+                "linkRecordedVersion": remembered,
+                "sourceCurrentVersion": current,
+                "linkCurrency": currency_status(remembered, current),
+            })
+        return out
 
     def link_source_to_entity(self, source_url: str, entity_id: str, entity_label: str, source_kind: str = "document") -> None:
         """Create Source → Entity references edge (Ontology v3.1 §3.4).
@@ -22577,7 +22687,19 @@ class TortoiseSDK:
             entity_label: the entity label (Source|Event|Object) for the MATCH.
                 The retired ``"Document"`` is accepted as a DEPRECATED ALIAS and
                 resolved to ``Source`` (D10, ONTOLOGY v3.15 §4.4).
+                ⚠️ The alias is NOT equivalent to ``"Source"`` for the caller:
+                it also selects the DERIVATION relation, so the link takes the
+                optional ``sourceVersion`` anchor described below, while
+                ``"Source"`` means referential containment and stays
+                property-free. Pass ``"Document"`` when the link's meaning is
+                "this target was read from that source".
             source_kind: sourceKind to set on auto-created Source (default: "document")
+
+        Anchor (#5199): a DERIVATION link (``Event`` | ``Document``) records the
+        source version its target was read from as an optional ``sourceVersion``,
+        read HERE from the source's own ``contentHash`` so no caller passes it and
+        this signature is unchanged. Written ``ON CREATE`` only. ``Object`` links
+        stay property-free. See ``docs/architecture/STORAGE-ARCHITECTURE.md`` §9.6.
 
         Raises:
             ValueError: if entity_label is not one of Source, Event, Object

@@ -35,6 +35,12 @@ surfaces:
   # #3820: the analytics sink's OUTCOME contract + degraded-sink incident. Load-bearing
   # here: the file it guards most (tortoise/hosted_api.py) selects the `api` surface.
   - test_analytics_fallback_alert.py
+  # #5199: DUAL-REGISTERED with `core` for the same reason as `test_boot_regressions.py`
+  # BELOW in this list. `tortoise/hosted_api.py` is an exact-surface (`api`) match that REPLACES the
+  # `core` fallback, but this file's structural guard pins the session→document call
+  # site in that module — so without this arm a hosted_api.py-only revert of the
+  # `"Document"` spelling (the D10 regression) would run no guard at all.
+  - test_source_version_references_5199.py
   - test_backups_v1_alias.py
   - test_battery_parity_executors.py
   - test_battery_parity_hash.py
@@ -733,6 +739,20 @@ surfaces:
   # never run.
   - test_source_fts.py
   - test_source_identity.py
+  # #5199: the derivation-link version anchor (`sourceVersion` on a derivation
+  # `references` link) — `tortoise/projection/edges.py` + `tortoise/projection/entities.py`
+  # select the `core` surface, so the guard for the anchor runs with the code it
+  # guards. DUAL `core`+`api`: the structural guard also pins
+  # `tortoise/hosted_api.py`'s session→document call site, and an `api` match
+  # REPLACES the `core` fallback — so a hosted_api.py-only change (exactly the
+  # D10 spelling regression this guard exists to catch) would otherwise never run
+  # it. Same reason as `test_boot_regressions.py` above. Hermetic (embedded DB per
+  # test, no URI).
+  - test_source_version_references_5199.py
+  # #5199 read half: the note is actually READABLE — the SDK provenance reader
+  # (`get_provenance_chain`) reports it per link. `tortoise/search_engine.py`
+  # selects this surface too, so the wiring's guard runs with the code it guards.
+  - test_source_version_read_wiring_5199.py
   - test_subject_layer_read_surfaces_4889.py  # #4889: the Subject-layer read surfaces fail loud instead of silently empty
   - test_transport_wait_bound.py  # #3834: transport wait bound + cold-half gate wiring (dual: api)
   # #2877: DB-free guards that a dead backup watcher degrades /health (the file
