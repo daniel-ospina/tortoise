@@ -1927,6 +1927,10 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   .providers { display: flex; gap: .75rem; margin-bottom: .75rem; }
   .btn-provider { background: var(--bg); color: var(--text); }
   .btn-provider:hover { border-color: var(--accent); }
+  .btn-provider:disabled { opacity: .45; cursor: not-allowed; }
+  .warn { display: none; color: var(--gold); border: 1px solid var(--border);
+          border-radius: 6px; padding: .6rem .75rem; margin-bottom: .75rem;
+          font-size: 13px; }
   .spinner { color: var(--text-dim); font-size: 13px; margin-top: 1rem; }
 </style>
 </head>
@@ -1951,6 +1955,7 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   <div id="view-signin" style="display:none">
     <h1>Sign in to Tortoise</h1>
     <p class="muted">Sign in to approve this connection.</p>
+    <p class="warn" id="signin-capability" role="status"></p>
     <div class="providers">
       <button class="btn-provider" id="btn-github">GitHub</button>
       <button class="btn-provider" id="btn-google">Google</button>
@@ -1960,6 +1965,11 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     <button class="btn-auth" id="btn-email">Sign in with email</button>
   </div>
   <div class="error" id="error"></div>
+  <!-- #5734: OUTSIDE both views, as a sibling of #error. Inside #view-signin a
+       `display:block` style would still be invisible whenever the consent view is
+       shown, so the refusal's "Retry" would name a control the user cannot see. -->
+  <button class="btn-provider" id="btn-retry-signin"
+          style="display:none;margin-top:.75rem;width:100%">Try again</button>
   <div class="spinner" id="spinner" style="display:none">Verifying session…</div>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.112.2/dist/umd/supabase.min.js"
@@ -2089,6 +2099,16 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
       try { s.removeItem(key); } catch (e) { /* next store */ }
     }
   };
+  // #5734: set when the write path REFUSES a session it cannot store (the
+  // over-SIZE_CAP branch below). The refusal is reported on the page and must
+  // SURVIVE the two transitions that can erase it: the terminal fallback (a
+  // `?code` load with no session, which is exactly what a refused write looks
+  // like from the library's side) and the messages the consent flow renders for
+  // a session the user did not just sign in as. Both are live — the second is
+  // why `showConsentOnce()` will not enter the consent view at all while a
+  // refusal is pending. See the #3496 scoping doc, Step 7, which recorded this
+  // as #5734's work rather than #3496's.
+  let writeRefused = false;
   const cookieStorage = {
     getItem(key) {
       if (key !== COOKIE_NAME) return readAux(key);
@@ -2139,13 +2159,26 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
           // invisible by construction (#3503/#3496 item 6).
           console.warn('sb-tortoise-auth-token session exceeds the browser cookie cap (' + encoded.length + ' bytes encoded) — refusing the write');
           showSignin();
-          showError("Your sign-in session is too large to store securely here — try again.");
+          // #5734 (option B): the refusal names the CAUSE and the REMEDY, and
+          // stays page-scoped — the limit it hit is THIS page's cookie limit,
+          // not a claim about the browser. Rendered BEFORE `writeRefused` is set:
+          // from that point on the refusal is the page's sticky message.
+          showError("This page can't store the sign-in it just received — the session is "
+            + "larger than this page's cookie limit, so it was not saved. Retry; if it "
+            + "keeps failing, sign in with fewer linked providers.");
+          writeRefused = true;
+          showRetrySignin();
           return;
         }
       }
       const expires = new Date(Date.now() + 7 * 24 * 3600 * 1000).toUTCString();
       document.cookie = key + "=" + encoded + domainAttr() + "; Path=" + COOKIE_PATH +
         "; SameSite=Lax" + secureAttr() + "; Expires=" + expires;
+      // #5734: a write LANDED, so no refusal is pending any more. (The paths that
+      // matter for a user moving on — a retry, the email form, a provider click —
+      // clear the flag themselves when they start; this is the semantic clear, so
+      // the flag never outlives the condition it describes.)
+      writeRefused = false;
     },
     removeItem(key) {
       if (key !== COOKIE_NAME) { removeAux(key); return; }
@@ -2175,10 +2208,41 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   } catch (e) { showError("Auth init failed: " + e.message); }
 
   function showError(msg) {
+    // #5734: while a refused write is pending, THE REFUSAL IS THE MESSAGE.
+    // Every other message this page can render — the consent flow's org
+    // resolution, an expired session, an authorize-request failure, a preview
+    // error from a flow that was ALREADY IN FLIGHT when the refusal landed —
+    // describes an older state, and replacing the refusal with it is exactly the
+    // eraser this issue exists to close. Routing the precedence through ONE
+    // helper is deliberate: it makes "no message replaces a pending refusal" a
+    // property of these two helpers rather than a check every call site has to
+    // remember. `writeRefused` clears when a write lands and at the start of a
+    // new user-initiated attempt, so this is not permanent.
+    //
+    // The retry affordance belongs to the refusal, and it is a sibling of #error
+    // OUTSIDE both views — so once shown it stays visible in whatever view comes
+    // next. Only a message can end its warrant, which makes these two helpers the
+    // owners of it: the refusal re-asserts it below, and every message that is
+    // NOT a refusal drops it (a caller that wants one after its own message calls
+    // `showRetrySignin()` after rendering, never before).
+    if (writeRefused) { showRetrySignin(); return; }
+    hideRetrySignin();
     const el = document.getElementById("error");
     el.textContent = msg; el.classList.add("visible");
   }
-  function hideError() { document.getElementById("error").classList.remove("visible"); }
+  function hideError() {
+    // #5734: the symmetric half of the precedence rule in `showError` — a
+    // transition must not CLEAR the refusal either, nor leave the retry control
+    // behind for a message that does not imply one. In the shipped flow no site
+    // reaches this with a refusal pending (the consent view is not entered while
+    // one is pending, and the only callers outside it — the email and
+    // retry-signin handlers — clear `writeRefused` first), so the guard is
+    // belt-and-braces for a future caller rather than a live guard; it is pinned
+    // DIRECTLY by the over-cap survival test for that reason.
+    if (writeRefused) return;
+    hideRetrySignin();
+    document.getElementById("error").classList.remove("visible");
+  }
   function spinner(on) { document.getElementById("spinner").style.display = on ? "block" : "none"; }
   function redirectBack(params) {
     const sep = PARAMS.redirect_uri.includes("?") ? "&" : "?";
@@ -2214,8 +2278,9 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
 
   // #1701 R1: account-chooser state. orgResource is set ONLY by the picker's
   // change handler — an untouched picker can never authorize (no silent
-  // wrong-org bind). previewInFlight guards concurrent showConsent runs.
-  let previewInFlight = false;
+  // wrong-org bind). previewInFlight holds the RUNNING showConsent flow, so a
+  // concurrent caller is idempotent AND can await what is already running.
+  let previewInFlight = null;
   let orgResource = null;
   let staleRefreshes = 0;   // at most ONE refresh per stale cycle
   const authBtn = () => document.getElementById("btn-auth");
@@ -2234,8 +2299,23 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   async function showConsentOnce() {
     const { data } = await supabaseClient.auth.getSession();
     if (!data.session) { showSignin(); return "nosession"; }
+    // #5734: do NOT present consent for a superseded session. A refused write
+    // means the user's sign-in did not complete, so the only session available is
+    // an older one, and this await is where a refusal that landed DURING the
+    // exchange becomes visible to an already-running flow. Staying on the
+    // sign-in view keeps the refusal and its retry affordance in the view that is
+    // actually shown.
+    if (writeRefused) {
+      // `showSignin()` re-asserts the retry affordance while a refusal is
+      // pending, so this path needs no second call to name the same control.
+      showSignin();
+      return "refused";
+    }
     document.getElementById("view-consent").style.display = "block";
     document.getElementById("view-signin").style.display = "none";
+    // Also drops the retry affordance: this view's messages do not imply one,
+    // and the affordance is a sibling of #error rather than a child of a view, so
+    // it would otherwise show through here (see `showError`/`hideError`).
     hideError();
     document.getElementById("client-line").textContent =
         PARAMS.client_name + " wants to access your Tortoise MCP surface.";
@@ -2293,31 +2373,54 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     }
   }
 
-  async function runConsentFlow() {
-    if (previewInFlight) return;   // concurrent guard (spans the refresh too)
-    previewInFlight = true;
-    orgResource = null;           // never carry a stale selection between runs
-    staleRefreshes = 0;            // one-shot cap per cycle — never sticky across runs
-    disableAuthorize();
-    let result;
-    try {
-      result = await showConsentOnce();
-      if (result === "stale" && staleRefreshes < 1) {
-        // refresh-first recovery (NEVER sign-out): at most ONE refresh per
-        // stale cycle, and the in-flight guard stays held across it so an
-        // onAuthStateChange (INITIAL_SESSION/SIGNED_IN) racing the refresh
-        // cannot double-run and reuse the rotating refresh token.
-        staleRefreshes += 1;
-        const { error } = await supabaseClient.auth.refreshSession();
-        if (!error) result = await showConsentOnce();
+  function runConsentFlow() {
+    // #5734: the concurrent guard hands back the RUNNING flow rather than bare
+    // `undefined`. Its purpose is idempotence for the caller — a second call must
+    // not run a second preview — and resolving early defeats a caller that needs
+    // the flow's RESULT: awaiting the returned promise then resolves before the
+    // flow it did not start has finished, which is a window with no observable in
+    // it. On this page the UI callers fire the flow; the harness is the caller
+    // that awaits it, and returning the in-flight promise makes "await this call"
+    // mean what it says.
+    if (previewInFlight) return previewInFlight;
+    previewInFlight = (async () => {
+      orgResource = null;         // never carry a stale selection between runs
+      staleRefreshes = 0;            // one-shot cap per cycle — never sticky across runs
+      disableAuthorize();
+      let result;
+      try {
+        result = await showConsentOnce();
+        if (result === "stale" && staleRefreshes < 1) {
+          // refresh-first recovery (NEVER sign-out): at most ONE refresh per
+          // stale cycle, and the in-flight guard stays held across it so an
+          // onAuthStateChange (INITIAL_SESSION/SIGNED_IN) racing the refresh
+          // cannot double-run and reuse the rotating refresh token.
+          staleRefreshes += 1;
+          const { error } = await supabaseClient.auth.refreshSession();
+          if (!error) result = await showConsentOnce();
+        }
+      } finally {
+        previewInFlight = null;
       }
-    } finally {
-      previewInFlight = false;
-    }
-    if (result === "stale") showExpiredSignin();
+      if (result === "stale") showExpiredSignin();
+    })();
+    return previewInFlight;
   }
 
   function showSignin() {
+    // #5734: the sign-in view's neutral state. The retry affordance is dropped
+    // here and re-asserted by whoever has a reason to offer one — and, when a
+    // REFUSAL is what is displayed, re-asserted HERE: the refusal's own copy says
+    // "Retry", so any caller that lands on the sign-in view with a refusal
+    // pending (`showExpiredSignin` after a refused refresh write, the no-session
+    // branches of `showConsentOnce` and the authorize handler) must not leave the
+    // user with an instruction and no control. A caller that clears `writeRefused`
+    // before it gets here — the retry handler, the email form, a provider click —
+    // is unaffected, and the email form is unaffected only until the write it
+    // triggers REFUSES: that re-sets the flag, and the no-session branch this
+    // caller then runs has to put the control back.
+    hideRetrySignin();
+    if (writeRefused) showRetrySignin();
     document.getElementById("view-consent").style.display = "none";
     document.getElementById("view-signin").style.display = "block";
   }
@@ -2376,13 +2479,62 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     }
     return "no-store";
   }
+  // #5734: the page-scoped capability copy, keyed by cause. Every sentence names
+  // THIS PAGE as the subject — never the browser — because this auth surface has
+  // repeatedly asserted browser-level absolutes that a live legacy path
+  // falsified (#4678). The remedy lives in this copy; the SECURITY boundary is
+  // the re-check inside signInWithProvider below.
+  const CAPABILITY = {
+    // The cause is stated as what was OBSERVED, and it must cover BOTH conjuncts
+    // the probe tests — the secure-context crypto (`window.crypto.subtle`) absent
+    // (a non-secure origin, the dominant case) AND `TextEncoder` absent. Naming
+    // only WebCrypto asserts a cause the page's own probe contradicts — the #4678
+    // defect class: an absolute a live path falsifies. The remedy carries the
+    // dominant reason (HTTPS); the closing alternative is real, not decorative
+    // (the email path needs no PKCE).
+    //
+    // The subject of every sentence is THIS PAGE. "Open this page over HTTPS" and
+    // "Allow site storage for this page" name the remedy's target without
+    // attributing the limitation to the browser ("leave private browsing" names
+    // the user's own setting, not a browser-level incapacity).
+    "no-webcrypto": "This page can't start a secure sign-in here — the challenge it must "
+      + "build needs secure-context crypto and text encoding, and this page can't use "
+      + "them. Open this page over HTTPS and retry, or sign in with email and password "
+      + "below.",
+    "no-store": "This page can't start a secure sign-in here — it has no usable site "
+      + "storage in which to keep the sign-in verifier. Allow site storage for this page "
+      + "(or leave private browsing) and reload, or sign in with email and password below.",
+  };
+  const PROVIDER_LABEL = { github: "GitHub", google: "Google" };
+  function renderCapability(incap) {
+    const blocked = !!incap;
+    for (const id of ["btn-github", "btn-google"]) {
+      const b = document.getElementById(id);
+      b.disabled = blocked;
+      if (blocked) b.setAttribute("aria-disabled", "true");
+      else b.removeAttribute("aria-disabled");
+    }
+    const notice = document.getElementById("signin-capability");
+    notice.textContent = blocked ? (CAPABILITY[incap] || CAPABILITY["no-store"]) : "";
+    notice.style.display = blocked ? "block" : "none";
+  }
   async function signInWithProvider(provider) {
+    // #5734: a new user-initiated attempt supersedes a pending refusal, so the
+    // capability refusal below can still report itself.
+    writeRefused = false;
     const incap = pkceIncapable();
     if (incap) {
+      // #5734: the load-time probe is an AFFORDANCE only — capability can change
+      // between load and click, so this re-check is the boundary. It also
+      // refreshes the inline affordance to match what is true right now.
       showSignin();
-      showError(incap === "no-webcrypto"
-        ? "This browser cannot complete a secure sign-in here (no WebCrypto). Open this page over HTTPS."
-        : "This browser is blocking site storage, so sign-in cannot be completed securely. Enable storage (or leave private browsing) and retry.");
+      renderCapability(incap);
+      showError("Can't sign in with " + (PROVIDER_LABEL[provider] || provider)
+        + " on this page — see the note above the buttons.");
+      // #5734 (B): an ATTEMPT failed, so offer the retry affordance — its handler
+      // re-probes, which is the only in-page way back after the user grants site
+      // storage (the provider buttons are disabled in this state).
+      showRetrySignin();
       return;
     }
     const { error } = await supabaseClient.auth.signInWithOAuth({
@@ -2395,12 +2547,16 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   document.getElementById("btn-github").onclick = () => signInWithProvider("github");
   document.getElementById("btn-google").onclick = () => signInWithProvider("google");
   document.getElementById("btn-email").onclick = async () => {
+    writeRefused = false;   // a new user-initiated attempt supersedes a refusal
     hideError();
     const email = document.getElementById("email").value.trim();
     const password = document.getElementById("password").value;
     if (!email || !password) { showError("Enter email and password."); return; }
     const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
     if (error) { showError(error.message); return; }
+    // The flow is fired, not awaited: what a caller can observe is the STATE, and
+    // the flow slot (`runConsentFlow` hands back the running flow) is what makes
+    // that state awaitable where it matters.
     runConsentFlow();
   };
 
@@ -2458,6 +2614,16 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     runConsentFlow();
   };
 
+  document.getElementById("btn-retry-signin").onclick = () => {
+    // #5734: a retry re-probes capability — it may have changed since the
+    // attempt that failed (or since load). User-initiated, so it also clears a
+    // pending refusal.
+    writeRefused = false;
+    hideError();
+    renderCapability(pkceIncapable());
+    showSignin();
+  };
+
   document.getElementById("btn-deny").onclick = () =>
       redirectBack({ error: "access_denied", state: PARAMS.state });
 
@@ -2501,14 +2667,75 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     present: TRANSIENT_MARKERS.some((k) => LOAD_QUERY.has(k)),
     error_description: LOAD_QUERY.get("error_description"),
   };
-  function boundedText(s) {
+  const MSG_BUDGET = 300;   // the bound, in chars INCLUDING the appended ellipsis
+  function boundedText(s, limit = MSG_BUDGET) {
     if (!s) return "";
     const t = String(s).replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/g, " ");
-    return t.length > 299 ? t.slice(0, 299) + "\u2026" : t;
+    return t.length > limit ? t.slice(0, Math.max(0, limit - 1)) + "\u2026" : t;
+  }
+  // #5734 (option B): the post-redirect terminal state names its CAUSE and its
+  // REMEDY, per cause, in page-scoped language. A provider-supplied description
+  // is appended inside whatever room the fixed copy leaves, so the rendered
+  // message still satisfies boundedText's bound (one over-long, attacker-
+  // controllable line is why the bound exists).
+  function terminalMessage() {
+    const err = LOAD_QUERY.get("error") || "";
+    const desc = LOAD_TRANSIENT.error_description;
+    let cause, remedy;
+    if (err === "access_denied") {
+      cause = "Sign-in was declined at the provider, so nothing was connected.";
+      remedy = "Retry to pick an account and approve the connection.";
+    } else if (err === "server_error" || err === "temporarily_unavailable") {
+      cause = "The provider reported a temporary failure during sign-in.";
+      remedy = "Retry in a moment.";
+    } else if (err === "login_required" || err === "consent_required"
+               || err === "interaction_required" || err === "account_selection_required") {
+      cause = "The provider needs you to sign in there again.";
+      remedy = "Retry and finish the provider's sign-in.";
+    } else if (err) {
+      cause = "The provider refused this sign-in request (" + boundedText(err, 60) + ").";
+      remedy = "Retry — and start again from your MCP client if it keeps failing.";
+    } else if (LOAD_QUERY.has("code")) {
+      // The library consumed a `?code` and no session landed. Gated on the code
+      // ACTUALLY being present — the branch below is reached for any other
+      // transient, where no code was ever received. The cause states what THIS
+      // CONDITION establishes (a code came back; no session was established) and
+      // not the mechanism: an exchange that completed can still leave no session
+      // when the write is refused, and that case carries its own copy from the
+      // write path (`writeRefused` keeps this branch off it).
+      cause = "This page could not finish the sign-in it had started (a code came back, "
+        + "but no session was established on this page).";
+      remedy = "Retry — and if this page has no writable site storage, allow storage for "
+        + "it and reload.";
+    } else {
+      // Some other transient returned with no provider error and no session — no
+      // code, so nothing was declined and nothing was exchanged.
+      cause = "This page could not finish the sign-in it had started (no session was "
+        + "established).";
+      remedy = "Retry, and start again from your MCP client if it keeps failing.";
+    }
+    let text = cause + " " + remedy;
+    if (text.length > MSG_BUDGET) text = boundedText(text, MSG_BUDGET);
+    if (desc) {
+      const room = MSG_BUDGET - text.length - 3;
+      if (room > 0) text += " (" + boundedText(desc, room) + ")";
+    }
+    return text;
+  }
+  function showRetrySignin() {
+    document.getElementById("btn-retry-signin").style.display = "block";
+  }
+  function hideRetrySignin() {
+    document.getElementById("btn-retry-signin").style.display = "none";
   }
   function showTerminalFallback() {
     showSignin();
-    showError(boundedText(LOAD_TRANSIENT.error_description) || "Sign-in failed — please start again.");
+    // #5734: `showError` itself yields to a pending refusal (see its comment), so
+    // this call is a no-op in that state — the refused-write copy names the REAL
+    // cause, and the generic `?code` branch would replace it with one its own
+    // condition cannot establish.
+    showError(terminalMessage());
+    showRetrySignin();
   }
   function sanitiseUrl() {
     try {
@@ -2542,6 +2769,24 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
       history.replaceState(null, "", u.pathname + (u.search || "") + u.hash);
     } catch (e) { /* leave the URL alone */ }
   }
+
+  // #5734 (option C): probe at LOAD, so an incapable page explains itself and
+  // disables the provider buttons BEFORE the user takes a dead-end action. The
+  // probe is an affordance, never the boundary — signInWithProvider re-checks.
+  //
+  // The probe's documented residual (#3496 R3: "one `__tt_probe-*` entry per
+  // attempt") is a leak whose CARDINALITY this call site changes: `pkceIncapable()`
+  // mints a FRESH randomised sentinel per invocation and, on a store that accepts
+  // the write but cannot remove it, returns "no-store" leaving that sentinel
+  // behind. Probing at load therefore adds one 160-byte non-credential entry per
+  // page load (and one more per click and per retry), not "at most one" — there is
+  // no way to reach a previous probe's key to clean it. It is a sentinel, never a
+  // credential (the key deliberately lacks the `-code-verifier` suffix), it occurs
+  // only on a store that cannot clean itself, and the alternative is worse: a
+  // STABLE key shared across tabs lets one tab's removal make a non-removable
+  // store look removable to another, which is a fail-OPEN on the very check this
+  // probe performs. Recorded as a residual rather than silently bounded away.
+  renderCapability(pkceIncapable());
 
   if (supabaseClient) {
     supabaseClient.auth.onAuthStateChange(async (event) => {

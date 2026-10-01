@@ -122,6 +122,7 @@ from tortoise.sdk import (
     TortoiseSDK,
     _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
     _capture_ep_target_ids,  # W5 Phase D (#2104): EP pass targets (minted + first-time folds)
+    _capture_extraction_window,  # #6246: the shared extraction view (both lanes)
     _capture_minted_ids,  # W5 Phase D (#2104): provenance-stamp gate (minted only)
     _capture_redaction_warning,  # #4911: the shared "a secret was redacted" receipt warning
     _capture_resp_error_split,  # #2335 WI-2: customer error contract (headline/diagnostics)
@@ -10783,6 +10784,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # home in any stored turn (stored-source parity; >5000 turns are accepted
     # and truncated here — the old 422 is removed, D1 contract change).
     windowed = _capture_turn_window(body.conversation)
+    # #6246: the SHARED extraction view, built ONCE and handed to whichever
+    # lane runs below, so a clipped turn with nothing to say contributes no
+    # unit to EITHER the m2 transcript lane or the default v2 lane. The STORED
+    # turns (`windowed`) keep their clipped text — this is the copy only the
+    # extractors see.
+    extraction = _capture_extraction_window(body.conversation)
 
     # P1 #1529 (D3): empty/blank conversation fails closed BEFORE any write —
     # whole-conversation transcript emptiness (of the STORED window, the exact
@@ -11240,7 +11247,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # event loop, and never on the shared default pool either.
             extracted, meta = await _run_capture_bounded(
                 slot, sdk._extract_session_llm,
-                windowed, session_id, now)
+                extraction, session_id, now)
         except ValueError as e:
             # inner provider-gate drift on the M2 lane → a clean fail-closed
             # 503 (mirrors the v2 branch below; belt-and-braces so an
@@ -11315,7 +11322,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # See tests/test_capture_loop_responsiveness.py.
             extracted, meta = await _run_capture_bounded(
                 slot, sdk._extract_session_v2,
-                windowed, session_id, now, master=tenant_master)
+                extraction, session_id, now, master=tenant_master)
         except ValueError as e:
             raise HTTPException(status_code=503, detail=str(e)) from e
 
@@ -13066,6 +13073,45 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     # past. Replays already returned above: quota never gates a duplicate
     # (zero writes).
     _check_org_limit(org, "sessions")
+    # #4051 — the org points gate (the second half of step [4a]). The sessions
+    # gate above is VACUOUS since #4010 (sessions unlimited for every tier).
+    #
+    # ⛔ SCOPE — stated precisely, because overstating a gate is worse than the
+    # gap it leaves: this polices the COUNTED CATEGORY (value Points, plus the
+    # :Object/:Subject nodes entities mint), because `_count_resource("points")`
+    # counts exactly `(n:Point AND (n.is_episodic IS NULL OR n.is_episodic =
+    # false)) OR n:Object OR n:Subject OR (n:Event AND (n.is_episodic IS NULL OR
+    # n.is_episodic = false))` (tortoise/quota.py:734-736).
+    # ⛔ IT GATES THE PRE-STATE, NOT THE PAYLOAD: it refuses when the org's count
+    # is ALREADY at/over `max_points`. It therefore does NOT bound the count this
+    # lane's own commit can leave behind — the lane writes in bulk and carries
+    # no payload estimate, so a commit from just under the cap can finish past
+    # it. (The capture lane's `count + est > max_points` at :10888 IS
+    # estimate-aware; this is the pre-write form every OTHER write endpoint
+    # uses — /v1/points, /v1/objects, /v1/subjects — which is the parity #4051
+    # asked for, NOT a new bound.)
+    # It does NOT bound the lane's total node growth and it CANNOT close the
+    # uncounted loop this issue is about: a `points: []` commit mints :Session
+    # + transcript :Source (D10 — a document is a :Source; :Document is
+    # retired) + :Event, none of which match that predicate, so the count never
+    # moves and this gate can never trip. MEASURED: four fresh-session
+    # `points: []` commits all returned 200, minting 4 Sessions + 4 Sources + 4
+    # Events while the points count stayed 0. Closing that needs `max_points`
+    # widened to include those labels (a meaning change for every existing
+    # tenant, needing a migration) or a new limit (a pricing decision) — both
+    # OWNER decisions, tracked on #4051, deliberately not taken here.
+    #
+    # What it buys: parity with every other write endpoint's points gate
+    # (/v1/points, /v1/objects, /v1/subjects, the demo seed) in place of the
+    # now-vacuous sessions-only gate. Same pre-write site as the sessions gate
+    # (after every replay return above) so an idempotent re-POST is never gated
+    # — a replay writes no nodes and must never 402 (#1727's lesson); the
+    # budget 402 below is unchanged. Same shipped machinery + structured
+    # `quota_refusal_payload` as the /v1/points-class gates (#4614), off the
+    # event loop via the #3773 seam (a full tenant-graph count on a billing hot
+    # path).
+    await _graph_offload(lambda: _check_org_limit(org, "points"),
+                         op="check_org_limit.points")
 
     # [4b] Budget — the authoritative §6.1 semantics live in adjudicate_budget.
     if plan.budget.outcome == "fail":
@@ -23521,7 +23567,7 @@ _ALLOWED_ANALYTICS_PROPS = {
     # the PII filter or the measurement is silently lost.
     "calls", "retries", "prompt_tokens", "completion_tokens",
     "cost_usd", "calls_without_cost", "calls_without_usage",
-    "deadline_aborts", "by_stage",
+    "calls_without_tokens", "deadline_aborts", "by_stage",
     # #3824: provider calls the capture made that NO roll-up accounted for.
     # Without this key in the allowlist the counter is stripped here — the
     # documented #3359 loss mode — and F2 stays invisible even though the
@@ -24754,18 +24800,33 @@ def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
         # F1: zero provider calls. No measurement exists, so no row — a
         # fabricated $0 row here is the phantom the reader must never see.
         return None
+    # #5854: the emitter validates the token fields with the SAME normaliser
+    # the accumulator uses, so a future lane that builds its own ``meta``
+    # (the docstring's F2 concern) cannot reintroduce the fabricate/truncate
+    # defect downstream of the accumulator. Imported lazily: ``extractor_v2``
+    # is a documented cold-start cost and this lane always runs AFTER
+    # extraction, so the module is already loaded.
+    from tortoise.extractor_v2 import _normalise_token_count
     return {
         "session_id": session_id,
         "calls": int(llm.get("calls", 0) or 0),
         "retries": int(llm.get("retries", 0) or 0),
-        "prompt_tokens": int(llm.get("prompt_tokens", 0) or 0),
-        "completion_tokens": int(llm.get("completion_tokens", 0) or 0),
+        "prompt_tokens": _normalise_token_count(llm.get("prompt_tokens")) or 0,
+        "completion_tokens": (
+            _normalise_token_count(llm.get("completion_tokens")) or 0),
         "cost_usd": round(float(llm.get("cost_usd", 0.0) or 0.0), 6),
         "calls_without_cost": int(llm.get("calls_without_cost", 0) or 0),
         # #3359: a call that returned NO usage block at all (no tokens, no
         # charge) is a distinct disclosure from one that returned tokens but
         # no charge — both ride the row, so neither is silently a clean $0.
         "calls_without_usage": int(llm.get("calls_without_usage", 0) or 0),
+        # #5854: calls whose provider TOKEN count was malformed (a bool, a
+        # fractional float, a negative, an absurd magnitude). Rejected, never
+        # shaped into a number — the counter races the row so the absence is
+        # disclosed. (``calls_without_usage`` cannot carry it: a rejected
+        # token can sit beside a valid sibling and a valid charge, so the
+        # call is not usage-less.)
+        "calls_without_tokens": int(llm.get("calls_without_tokens", 0) or 0),
         # #3359: deadline-killed generations are BILLED upstream but produce
         # no tokens, so they are spend this measurement cannot price. Carried
         # on the row so the report can disclose it instead of reading the
