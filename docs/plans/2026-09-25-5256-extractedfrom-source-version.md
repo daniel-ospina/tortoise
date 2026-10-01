@@ -12,8 +12,8 @@
 `ONTOLOGY.md` §4.6 requires: *"Every **Point** derived from a source records **`sourceVersion`** —
 the `contentHash` of the version it was read from — on its `extractedFrom` link."*
 
-`git grep -n sourceVersion -- '*.py'` on `origin/main @ acbe80f85` → **0 matches** (a SHA snapshot;
-`origin/main` has since moved, still 0). On this STACKED base, #5199/PR #5207 **does** write
+`git grep -n sourceVersion -- '*.py'` on `origin/main @ acbe80f85` → **0 matches** (the state the
+problem was confirmed against). #5199 has since landed on `main` as PR #5207 and now **does** write
 `r.sourceVersion` — but on the **`references`** link, through three writers
 (`edges.py::link_source_to_entity`, `::link_source_to_event`, `::link_source_to_legacy_event`,
 all via `_anchor_on_create`). It is a sibling, not a substitute: it reads `s.contentHash` at link
