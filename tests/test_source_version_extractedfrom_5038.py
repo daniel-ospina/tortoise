@@ -1,6 +1,6 @@
 """#5256 (extracted from #5038) — the ``extractedFrom`` READ-VERSION anchor.
 
-A ``Point`` created against a ``:Source`` with a non-empty ``contentHash`` must
+A ``Point`` created against a ``:Source`` with a non-blank ``contentHash`` must
 record **the version it was read from** as ``sourceVersion`` on its
 ``extractedFrom`` link, durably enough to survive a full ``rebuild_all``.
 

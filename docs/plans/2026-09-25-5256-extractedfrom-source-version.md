@@ -424,8 +424,7 @@ three docstrings, but only `test_scalar_ref_records_the_version…` still assert
 resolved-key contract — the other two were the gate-visibility note and the false scope note.)*
 
 **Cycle 9 — code review round 8 (re-review of `13f3f093f`).** No P0/P1/P2; three P3s, all
-mutation-adequacy on the RECOVERY path (the hand-written/foreign-journal class) — i.e. guards nobody's
-producer can reach, which is exactly why each one needed a test. Folded: (1) the
+mutation-adequacy gaps — guards no test could kill, which is exactly why each one needed one. Folded: (1) the
 `isinstance(value, (list, tuple))` clause of `_valid_transit_pairs` was killed by no test — a
 non-iterable carrier (`{"sourceVersionTransit": 5}`) raises `TypeError` inside `rebuild_all` and would
 abort the very recovery path the malformed-carrier test exists to keep total; the existing `bad-scalar`
@@ -438,8 +437,8 @@ rule a `[["   ","h9"]]` carrier is written for a ref that is not a Source — no
 only the raw-ref lookup, a registry keyed by the resolved url leaves the edge bare).
 
 **Cycle 10 — code review round 9 (re-review of `4b5f590b7`).** Round 8's re-review returned
-`NO P0/P1/P2 — P3 residuals only`, naming three more unkilled guards — each on the
-hand-written/foreign-journal path, and each a real robustness gap rather than cosmetics. Folded:
+`NO P0/P1/P2 — P3 residuals only`, naming three more unkilled guards — each a real robustness gap
+rather than cosmetics. Folded:
 (1) `isinstance(pair[1], str)` in `_valid_transit_pairs` was killed by no test (`bad-numeric` is
 `[[1, 2]]` and fails on `pair[0]` first, so it never reaches the hash check): admitting an int let a
 hand-written `[[DOC, 2]]` write `r.sourceVersion = 2` — an INT, against ONTOLOGY §4.6's string scalar —
