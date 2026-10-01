@@ -623,8 +623,10 @@ jobs:
           # while the run step below — which sets the URI — still executed it.
           # skip-guard reconciles in ONE direction (every expected nodeid must
           # appear; extra junit entries are fine), so the omission was silent.
-          # Measured on this leg alone: emit-manifest 8229 (main) -> 8400 (with
-          # the URI), +171; the two fast legs together cover 196 such nodeids.
+          # Measured on one fast leg of the 2-shard layout then in place:
+          # emit-manifest 8229 (main) -> 8400 (with the URI), +171, that leg's
+          # share. Across the fast surface the URI-gated files hold 196 nodeids
+          # in total — a property of the files, not of how they are sharded.
           # Only the DB URI can change collection: EXPECT_URI/CARVE_OUT are read
           # by session-scoped fixtures, which do not run under --collect-only.
           TORTOISE_DB_URI: ${{ env.URI }}
