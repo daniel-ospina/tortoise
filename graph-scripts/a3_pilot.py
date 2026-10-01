@@ -1,6 +1,17 @@
 #!/usr/bin/env python3
 """A3 Conversation Mining Pilot — GAP-15 gate check."""
-import re, sys, json  # noqa: E401, F401, I001
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"graph-scripts/a3_pilot.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python graph-scripts/a3_pilot.py`"
+    )
+
+import re, json  # noqa: E401, F401, I001
 from pathlib import Path
 
 KEYWORDS = re.compile(r'\b(decision|agreed|let.s|plan|decide)\b', re.IGNORECASE)
