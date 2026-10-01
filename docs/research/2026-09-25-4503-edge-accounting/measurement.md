@@ -18,7 +18,8 @@ aboutObjects: tortoise/quota.py, tortoise/metering.py, product/pricing.json cost
 Measured at: fix/4503-edge-accounting@ba4daf580ca6de21d9333b23421471956f1e77db on 2026-10-01
 **Rebase note (2026-10-01).** The figures in §2–§4 were measured on 2026-09-25/26 at `26f6c578`,
 which this branch was later rebased past — that SHA is now an orphan, so naming it here would be
-unverifiable. It is replaced by the current head, and the substitution is provable rather than
+unverifiable. It is replaced by `ba4daf580ca6de21d9333b23421471956f1e77db`, and the substitution is
+provable rather than
 asserted: the instrument itself is byte-identical between the two revisions —
 `git diff 26f6c578 ba4daf580ca6de21d9333b23421471956f1e77db -- tools/edge_census.py` is EMPTY,
 and both revisions resolve that path to the same blob `df0f0338…`.
@@ -74,7 +75,13 @@ main had gained two, then "TWO" when main had gained a third. **Each enumeration
 that carried it**, because `origin/main` moves faster than a prose paragraph re-derives. That is the
 general rule, recorded here so it is not rediscovered: **a claim about process has no artifact to check
 it against, so it can only re-stale — delete it rather than re-narrate it.** The property above is
-different in kind: it names no moving ref, so it is true or false independently of when it is read.
+different in kind, and the difference is worth stating precisely rather than grandly: it is
+**re-runnable**, and it is invalidated only if `origin/main` gains a commit that touches the measured
+path. It names a live ref, so it is NOT time-proof — but unlike a count it needs no maintenance: it
+does not rot in place, and anyone can re-run it and get a current answer. (An earlier revision of this
+sentence claimed it "names no moving ref, so it is true or false independently of when it is read".
+That was FALSE — it names `origin/main` — and it is the same over-claim, one level up, that this whole
+paragraph exists to record. Corrected per the round-5 review.)
 
 (An earlier revision of this sentence summarised the list as "…and assorted tests", which silently
 dropped `tools/ci_selection.py` — a `tools/` module, not a test. Summarise by COUNT and enumerate, or
