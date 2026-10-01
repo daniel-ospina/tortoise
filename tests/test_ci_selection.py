@@ -2588,28 +2588,44 @@ def test_workflow_lint_pins_the_actionlint_image_and_its_scope():
         "nothing while still reporting green (#6253)"
     )
     tags = re.findall(r"actionlint:(\S+)", runs)
-    assert tags, "workflow-lint does not name an actionlint image tag"
+    digest_only = re.search(r"actionlint@sha256:[0-9a-f]{64}\b", runs)
+    assert tags or digest_only, (
+        "workflow-lint does not pin the actionlint image by tag or digest"
+    )
     for tag in tags:
         # A digest pin (`tag@sha256:…`) is STRONGER than a tag pin and is the
-        # supply-chain-correct form, so it must pass this check too.
+        # supply-chain-correct form, so it must pass this check too. A
+        # digest-ONLY reference carries no `tag:` at all and is matched above.
         assert re.fullmatch(r"\d+\.\d+\.\d+(?:@sha256:[0-9a-f]{64})?", tag), (
             f"actionlint image must be pinned to major.minor.patch, got {tag!r} "
             "— a floating tag re-opens the unpinned-dependency class (#5440)"
         )
     assert "-shellcheck=" in runs, (
         "the actionlint invocation must set -shellcheck= explicitly: the pinned "
-        "image DOES bundle shellcheck, and this tree carries pre-existing "
-        "shellcheck findings, so letting it default on would red the required "
-        "gate on every PR"
+        "image bundles shellcheck, so defaulting it on would add this tree's "
+        "shellcheck findings to the required gate"
     )
     assert "*.yaml" in runs, (
         "workflow-lint globs only *.yml; GitHub loads workflows with either "
         "extension, so a .yaml workflow would be silently unlinted"
     )
-    assert 'no workflow files matched' in runs and "exit 1" in runs, (
-        "workflow-lint no longer refuses an EMPTY match, so a glob that stops "
-        "matching would lint nothing and exit 0 — a green check over an empty "
-        "surface"
+    # The empty-match refusal is asserted STRUCTURALLY, not by looking for two
+    # loose substrings: a substring pin is satisfied by commenting the body out.
+    assert re.search(
+        r"if\s+\[\s*\$\{#files\[@\]\}\s*-eq\s+0\s*\]\s*;\s*then\s*\n"
+        r"\s*echo\s+\S.*\n"
+        r"\s*exit\s+1\s*\n"
+        r"\s*fi\b",
+        runs,
+    ), (
+        "workflow-lint no longer refuses an EMPTY match: an unmatched glob "
+        "would lint nothing and report success over an empty surface"
+    )
+    # `$files` unquoted was a real SC2086 this leg introduced into a tree whose
+    # other shellcheck findings are pre-existing. The array form keeps it fixed.
+    assert '"${files[@]}"' in runs, (
+        "workflow-lint must expand the glob array quoted (\"${files[@]}\"); a "
+        "bare `$files` is a new SC2086 in a tree pinned to -shellcheck="
     )
 
 
