@@ -11,13 +11,52 @@
 #            files (status A against the base) are allowed — the author can
 #            fix their own new migration before merge.
 #
-#            EXCEPTION (#1235, duplicate-prefix repair): a PURE PREFIX RENAME
-#            (content identical) of a base-tree migration is allowed when the
-#            old version is PROVABLY UNAPPLIED (not in the remote applied set,
-#            queried via the Supabase Management API) — the canonical fix for
-#            the 0012x2/0015x2 class. Fail-closed: without a token the remote
-#            set cannot be verified, so the strict block stands (fork PRs keep
-#            today's behavior). No-ops (A-only) and edits (M/D) are never exempt.
+#            EXCEPTION (#1235, duplicate-prefix repair; scoped by #2240): a
+#            FORWARD PREFIX RENAME (git status R*) of a base-tree migration is
+#            allowed ONLY when ALL of the following hold:
+#              * BOTH endpoints are PROVABLY UNAPPLIED — absent from the remote
+#                applied set queried via the Supabase Management API;
+#              * the destination is a STRICT renumber (new version != old
+#                version) to a real migration file the CLI can pick up
+#                (basename ^[0-9]+_.*\.sql$);
+#              * the destination sorts strictly AFTER every version present in
+#                the BASE TREE (the repository's own committed history, which
+#                the lagging API cannot move), AND strictly after REMOTE_MAX
+#                (the newest applied version).
+#            This is the canonical fix for the 0012x2/0015x2 class, and the
+#            very remedy the drift gate prescribes for an out-of-order
+#            repo-ahead migration (#4278/#2240). The version's PROD STATE is
+#            the authority, so the content MAY also change in the same rename:
+#            a version with no schema_migrations row has never run anywhere, so
+#            editing it cannot diverge prod. Gating on byte-identity instead
+#            REPRODUCED the contradiction this check exists to avoid — the
+#            gate's own remedy ("re-land its DDL as a FORWARD migration")
+#            corrects the file's self-referencing header, and a byte-identity
+#            requirement rejected exactly that.
+#
+#            ⚠ KNOWN LIMITATION — the lag window is NARROWED, not closed. The
+#            applied-set API documents a multi-day lag (#2240 records a ~4.6-day
+#            window in which a deploy reported success while the
+#            schema_migrations row was still missing). REMOTE_MAX is derived
+#            from that SAME lagging set, so it cannot by itself prove a version
+#            was never applied: a version prod HAS run but the API omits still
+#            sorts after REMOTE_MAX. The BASE-TREE bound above closes the
+#            concrete exploit (renumbering onto a version the repository has
+#            already carried), but it cannot see a migration that exists only
+#            in prod and in no commit of this repo — for that case the bound
+#            remains lag-exposed. The bound is also DESTINATION-ONLY: it
+#            constrains where the renumber LANDS and says nothing about the
+#            renamed-away SOURCE, so when the API omits a version prod HAS run
+#            and that version is the base tree's source, the rename is still
+#            exempt — the same lag, and the same class of harm, on the source
+#            side. That is why the exemption is scoped to PREFIX RENAMES with
+#            both endpoints unapplied: the residual exposure needs all three to
+#            coincide. Fail-closed: without a token the remote set
+#            cannot be verified, so the strict block stands (fork PRs keep
+#            today's behavior). Non-rename statuses — edits (M/T) and deletions
+#            (D) — carry no destination version, so they have no such bound and
+#            are NEVER exempt (#2240 scope (c)+(a), never (b)); neither is a
+#            change to an APPLIED version (#1001).
 #
 # The check logic lives in this SHARED script (not inline YAML) so the
 # hermetic pytest suite exercises the shipped logic, not a Python copy.
@@ -40,6 +79,10 @@
 #   1 — violation found (print the offending file(s))
 #   2 — usage/environment error
 set -euo pipefail
+
+# Byte-deterministic, locale-independent ordering for the version comparison in
+# diff mode — mirrors check-migration-drift (the authority on REMOTE_MAX).
+export LC_ALL=C
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 REPO="${DRIFT_REPO:-$REPO_ROOT}"
@@ -108,6 +151,7 @@ STATUS_OUTPUT="$(
   exit 2
 }
 VIOLATIONS=""
+ADDED=""
 while IFS= read -r line; do
   [ -z "$line" ] && continue
   status="${line%%$'\t'*}"
@@ -116,18 +160,32 @@ while IFS= read -r line; do
       VIOLATIONS="$VIOLATIONS
 $line"
       ;;
+    A)
+      # An ADDED file is normally the whole point of a migration PR, so it is not
+      # a violation in itself — but placing a file at a version prod has ALREADY
+      # applied IS the #1001 divergence: prod skips it, so the repo's content for
+      # that version never ran and the two disagree about what it means. Added
+      # lines are therefore checked against the applied set too, and admitted
+      # only when their version is unapplied.
+      ADDED="$ADDED
+$line"
+      ;;
   esac
 done <<EOF
 $STATUS_OUTPUT
 EOF
 
-if [ -n "$VIOLATIONS" ]; then
-  # ── #1235 exception: pure-prefix rename of a PROVABLY UNAPPLIED migration ──
-  # A rename (R*) whose content is byte-identical and whose old version is NOT
-  # in prod's applied set is the canonical duplicate-prefix repair — the old
-  # version was never applied, so renumbering it cannot diverge prod history.
-  # Fail-closed: the remote set is only reachable with a token; without one
-  # (fork PRs) the strict block below stands.
+if [ -n "$VIOLATIONS" ] || [ -n "$ADDED" ]; then
+  # ── #1235/#2240 exception: a FORWARD renumber of a PROVABLY UNAPPLIED version ─
+  # The test is the migration version's PROD STATE, not the git status: a version
+  # with no `supabase_migrations.schema_migrations` row has never run anywhere,
+  # so a FORWARD renumber of it cannot diverge prod — which is exactly the remedy
+  # `check-migration-drift` prescribes for an out-of-order repo-ahead migration.
+  # An APPLIED version is never exempt (#1001), and an edit or removal of a
+  # merely-unapplied migration is not exempt either: with no destination version
+  # there is no content-independent bound that the lagging applied set cannot
+  # undermine. Fail-closed: the remote set is only reachable with a token;
+  # without one (fork PRs) the strict block below stands.
   EXEMPT_RENAMES=""
   if [ -n "${DRIFT_TOKEN:-}${SUPABASE_ACCESS_TOKEN:-}" ]; then
     API_URL="${DRIFT_API_URL:-https://api.supabase.com}"
@@ -142,42 +200,185 @@ if [ -n "$VIOLATIONS" ]; then
       -d "$QUERY" 2>&1 || true)"
     HTTP_CODE="$(printf '%s' "$API_RESPONSE" | tail -n1)"
     API_BODY="$(printf '%s' "$API_RESPONSE" | sed '$d')"
+    # The applied set is only TRUSTWORTHY when the body is a non-empty JSON array
+    # in which EVERY element carries a version, so its shape is validated FIRST
+    # and REMOTE_OK gates the whole exemption below (fail closed). This matters
+    # more under #2240 than before: the exemption now admits M/D/T as well as
+    # R*, so a malformed 200 (a gateway HTML page, a renamed API field, a missing
+    # jq) would produce an EMPTY set that reads as "nothing is applied" and
+    # exempt EVERY violation — silently disabling the guard for edits to APPLIED
+    # migrations, the #1001 P0 class. An empty reading is not trusted either:
+    # this project's schema_migrations always has rows.
+    REMOTE_OK=0
     if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
-      REMOTE_APPLIED="$(printf '%s' "$API_BODY" | jq -r '.[].version' 2>/dev/null | sort -u || true)"
-      # Evaluate each violation line: format "R<sim>\told\tnew" or "M\tpath" etc.
+      if printf '%s' "$API_BODY" | jq -e '
+            type == "array" and length > 0
+            and all(.[];
+              if type == "object" then
+                has("version") and (.version != null)
+                and ((.version | type) == "string" or (.version | type) == "number")
+              else false end)' >/dev/null 2>&1; then
+        # Normalise PER ELEMENT, never with a stream-wide `tr -d '[:space:]'`:
+        # that deletes the NEWLINE between versions and merges them into one
+        # token, so `grep -qxF` stops matching ANY version and the guard exempts
+        # everything as soon as prod has two or more migrations. A
+        # single-element fixture cannot see that, so the tests pin a
+        # multi-element applied set explicitly.
+        REMOTE_APPLIED="$(printf '%s' "$API_BODY" \
+          | jq -r '.[] | .version | tostring | gsub("\\s";"")' 2>/dev/null \
+          | sort -u)"
+        if [ -n "$REMOTE_APPLIED" ]; then
+          REMOTE_OK=1
+        fi
+      fi
+    fi
+    if [ "$REMOTE_OK" = "1" ]; then
+      # Evaluate each violation line. The version that owns the change is the
+      # BASE-TREE file's version: for "R<sim>\told\tnew" that is the OLD path;
+      # for "M\tpath" / "D\tpath" / "T\tpath" the path itself.
+      #
+      # #2240 — WHAT IS EXEMPT, AND WHY. This guard's authority is prod
+      # divergence (#1001: a change to an APPLIED migration diverged repo from
+      # prod). A version with NO schema_migrations row has never run anywhere, so
+      # re-landing it cannot diverge prod — and the drift gate's prescribed
+      # remedy is exactly a FORWARD re-land ("re-land its DDL as a FORWARD
+      # migration ... so it sorts after $REMOTE_MAX"). The exemption therefore
+      # admits ONLY a git-detected PREFIX RENAME (R*) whose destination is a
+      # STRICT renumber to a real .sql migration sorting strictly AFTER every
+      # version in the BASE TREE and after $REMOTE_MAX, with BOTH endpoints
+      # unapplied:
+      #
+      #   * The BASE-TREE bound is CONTENT-INDEPENDENT: the destination must
+      #     sort strictly after every version the BASE TREE has carried, so a
+      #     renumber can never land on a version the repository already had.
+      #     This is what catches the lag-omitted destination that REMOTE_MAX
+      #     alone admitted: REMOTE_MAX comes from the same lagging applied set,
+      #     so a version prod HAS applied but the API omits passes it.
+      #   * The REMOTE_MAX bound is applied TOO, but it can only NARROW the lag
+      #     window, never close it (see the header's KNOWN LIMITATION): neither
+      #     bound can see a version present in prod and in no commit here.
+      #   * M/T/D carry NO destination version, hence no such bound, so they are
+      #     never exempt — an edit or deletion of a merely-unapplied migration is
+      #     reported as a violation, not silently allowed (#2240 scope (c)+(a),
+      #     never (b)). The destination must also be a STRICT renumber to a real
+      #     migration file, so a same-version relabel (`X_a.sql` → `X_a.sql.bak`)
+      #     — an effective deletion, the `D` outcome reported above — is not
+      #     exempt either. Byte-identity is NOT required on the rename itself:
+      #     the remedy corrects the file's self-referencing header.
+      # The exempted line is still printed, so every exempted change stays
+      # visible in the job log.
+      REMOTE_MAX="$(printf '%s\n' "$REMOTE_APPLIED" | sort | tail -n1)"
+      # FIX 1 (#6862): a SECOND, content-independent bound. REMOTE_MAX is derived
+      # from the lagging applied set the bound exists to compensate for, so a
+      # version prod HAS applied but the API omits satisfies `new_ver >
+      # REMOTE_MAX` and a renumber could land on a version the repository already
+      # carried. The destination must therefore also sort strictly after EVERY
+      # version present in the BASE TREE. The base tree is this repository's own
+      # committed history, read with a LOCAL `git ls-tree` against the ref
+      # already resolved for `git diff` above — no network call, and not another
+      # view of the same lagging API. An empty reading (a base tree with no
+      # migration) fail-closes: the bound below is skipped and no rename passes.
+      # P2-3 (#6862) — this bound reads a DIFFERENT TREE than the diff it
+      # accompanies. `git diff "$DRIFT_BASE_SHA"...HEAD` above diffs from
+      # `merge-base(DRIFT_BASE_SHA, HEAD)`; the `git ls-tree` below reads
+      # tree(DRIFT_BASE_SHA). When DRIFT_BASE_SHA is not an ancestor of HEAD
+      # those differ, and the bound may OVER-block — reject a rename the printed
+      # diff reads as forward (reproduced: merge-base max 20260813000099, base
+      # max 20260901000000, destination 20260820000000 -> rc=1). It can never
+      # UNDER-block: it is an ADDITIONAL conjunct alongside `new_ver >
+      # REMOTE_MAX`, so it only turns an otherwise-exempt rename into a
+      # violation. The shipped CI path sets DRIFT_BASE_SHA to the base parent of
+      # the pull-request merge commit, where `merge-base(A, HEAD) == A`, so the
+      # two trees are equal and this cannot fire.
+      BASE_VERSION_MAX="$(
+        git -C "$REPO" ls-tree -r --name-only "$DRIFT_BASE_SHA" -- supabase/migrations/ 2>/dev/null \
+          | sed -nE 's#.*/([0-9]+)_.*#\1#p' | sort | tail -n1
+      )"
       KEEP=""
       while IFS= read -r line; do
         [ -z "$line" ] && continue
         status="${line%%$'\t'*}"
         rest="${line#*$'\t'}"
+        old_path="$rest"
+        new_ver=""
+        new_base=""
         case "$status" in
           R*)
             old_path="${rest%%$'\t'*}"
-            new_path="${rest#*$'\t'}"
-            old_ver="$(basename "$old_path" | sed -nE 's#([0-9]+)_.*#\1#p')"
-            # Byte-identical content?
-            if git -C "$REPO" diff --quiet "$DRIFT_BASE_SHA:$old_path" "HEAD:$new_path" 2>/dev/null; then
-              # Old version NOT applied in prod?
-              if ! printf '%s\n' "$REMOTE_APPLIED" | grep -qxF "$old_ver"; then
-                EXEMPT_RENAMES="$EXEMPT_RENAMES
-$line"
-                continue
-              fi
+            new_base="$(basename "${rest#*$'\t'}")"
+            new_ver="$(printf '%s' "$new_base" | sed -nE 's#^([0-9]+)_.*#\1#p')"
+            ;;
+          A)
+            # An ADDED file with no numeric prefix is not a migration the CLI can
+            # apply (its basename does not match ^[0-9]+_), so it can neither be
+            # applied nor diverge prod — diff mode must not invent a violation
+            # for it (prefix mode still reports non-conforming *.sql). Only a
+            # prefix-bearing addition is evaluated below.
+            if ! printf '%s' "$(basename "$rest")" | grep -qE '^[0-9]+_'; then
+              continue
             fi
-            KEEP="$KEEP
-$line"
             ;;
           *)
+            # M / T / D — an edit or a deletion of a base-tree file. No
+            # destination version exists, so there is no content-independent
+            # ordering bound to make it safe, and the applied-set API lags prod.
+            # Only a FORWARD PREFIX RENAME (R*) carries that bound, so every
+            # other status falls through to KEEP and is reported, never dropped.
             KEEP="$KEEP
 $line"
+            continue
             ;;
         esac
+        old_ver="$(basename "$old_path" | sed -nE 's#^([0-9]+)_.*#\1#p')"
+        # Both endpoints must be provably UNapplied: the old version must have no
+        # prod row (its DDL has never run), and on a rename the NEW version must
+        # not have one either — otherwise the repo gains a file at a version prod
+        # already ran with DIFFERENT content, which is the divergence this guard
+        # exists to prevent. Fail closed on a non-conforming filename too: an
+        # empty pattern would match an empty REMOTE_APPLIED line.
+        if [ -n "$old_ver" ] \
+           && ! printf '%s\n' "$REMOTE_APPLIED" | grep -qxF "$old_ver" \
+           && { [ -z "$new_ver" ] || ! printf '%s\n' "$REMOTE_APPLIED" | grep -qxF "$new_ver"; }; then
+          # An added file at an UNAPPLIED version is simply a new migration:
+          # there is no exception to announce, so drop it silently rather than
+          # reporting it as one.
+          case "$status" in A) continue;; esac
+          # FIX 2 (#6862): the destination must be a REAL migration at a
+          # DIFFERENT version. A same-version relabel (`X_a.sql` → `X_a.sql.bak`)
+          # leaves the CLI applying NOTHING at that version — the exact `D`
+          # outcome reported as a violation two branches up — and a destination
+          # the CLI cannot pick up (basename failing ^[0-9]+_.*\.sql$) means the
+          # "renumber" landed nowhere. Neither is a renumber, so neither is
+          # exempt. Only an R* line ever reaches here (A continues above).
+          if [ "$new_ver" = "$old_ver" ] \
+             || ! printf '%s' "$new_base" | grep -qE '^[0-9]+_.*\.sql$'; then
+            KEEP="$KEEP
+$line"
+            continue
+          fi
+          # #2240 (a) + FIX 1 (#6862): the destination must sort strictly AFTER
+          # REMOTE_MAX (newest applied version — the same ordering reference
+          # check-migration-drift uses) AND after EVERY version present in the
+          # BASE TREE, so a renumber can never land on a version the repository
+          # has already carried. A backward or equal prefix is a violation; an
+          # empty BASE_VERSION_MAX fails closed (no rename is exempt).
+          if [ -n "$BASE_VERSION_MAX" ] \
+             && [[ "$new_ver" > "$REMOTE_MAX" ]] \
+             && [[ "$new_ver" > "$BASE_VERSION_MAX" ]]; then
+            EXEMPT_RENAMES="$EXEMPT_RENAMES
+$line"
+            continue
+          fi
+        fi
+        KEEP="$KEEP
+$line"
       done <<EOF
 $VIOLATIONS
+$ADDED
 EOF
       VIOLATIONS="$KEEP"
     else
-      echo "::warning::append-only: Management API returned HTTP $HTTP_CODE — cannot evaluate the #1235 unapplied-rename exception; enforcing the strict block." >&2
+      echo "::warning::append-only: cannot evaluate the #1235/#2240 unapplied-version exception — the Management API returned HTTP $HTTP_CODE and/or a body that is not a NON-EMPTY JSON array of objects carrying a version (this project's schema_migrations always has rows, so an empty reading cannot be trusted). Enforcing the strict block." >&2
     fi
   fi
 
@@ -188,7 +389,7 @@ EOF
     exit 1
   fi
   if [ -n "$EXEMPT_RENAMES" ]; then
-    echo "::notice::Append-only exception (#1235): pure-prefix rename of provably-unapplied migration(s) allowed:"
+    echo "::notice::Append-only exception (#1235/#2240): change to a provably-unapplied migration version allowed (this version has no row in supabase_migrations.schema_migrations):"
     printf '%s\n' "$EXEMPT_RENAMES" | sed '/^$/d' | sed 's/^/  /'
   fi
 fi

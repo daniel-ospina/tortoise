@@ -4,7 +4,7 @@
 
 > **For Pi:** Use `executing-plans` to implement this plan task-by-task.
 
-**Goal:** one command — `python3 tools/embedded_evidence.py run|red` — that runs a named, recorded file
+**Goal:** one command — `uv run python tools/embedded_evidence.py run|red` — that runs a named, recorded file
 selection N times in fresh subprocesses at a pinned CLEAN commit, classifies every run (never counts it),
 demonstrates a RED for the same selection at a named pre-fix ref in the same lane, and **enforces**
 `closes_issue` as an exit code — so the embedded family's exit evidence becomes a receipt a reviewer can
@@ -100,7 +100,7 @@ boundary the implementation crosses has a layer and a named test.
 | 13 | Ledger `${tempfile.gettempdir()}/pi-embedded-evidence/{selection}/{commit12}/{invocation_id}/` | ARTIFACT (out of repo) | filesystem | `test_embedded_evidence.py::test_ledger_path_is_under_tmpdir_and_not_the_repo`, `::test_tmpdir_resolved_in_python_not_shell`, `::test_concurrent_writers_do_not_collide` (**C13**: same-namespace case), `::test_prune_does_not_remove_a_live_run_file` |
 | 14 | Streak `…/embedded-evidence-streak.json` | ARTIFACT (new name) | the docker streak file must never be touched | `::test_streak_name_is_not_the_ci_file` |
 | 15 | `--record-out <path>` | ARTIFACT (caller-chosen, **outside the measured tree** — #4572 option (a); the closing receipt defaults to `$TMPDIR/pi-embedded-evidence/record.json` and is copied/uploaded afterwards) | filesystem | `::test_in_tree_record_out_is_refused` (the out-of-tree boundary — M5/**M45**, superseded by #4572), `::test_tracked_record_out_is_exit_2`, `::test_record_out_directory_is_exit_2`, `::test_unwritable_record_out_parent_is_exit_2` (the failure exits — M46) |
-| 16 | CLI entry `python3 tools/embedded_evidence.py run\|red` | ENTRY | `sys.path` (F27) | `::test_cli_entry_is_direct_python`, `::test_module_imports_sibling_classifier_via_repo_root` |
+| 16 | CLI entry `uv run python tools/embedded_evidence.py run\|red` | ENTRY | `sys.path` (F27) | `::test_cli_entry_is_direct_python`, `::test_module_imports_sibling_classifier_via_repo_root` |
 | 17 | `.husky/pre-commit` — the `ci_selection --register` hook (**M43**) | WRITER (indirect) | `config/ci-surfaces.yml` is mutated + `git add`-ed whenever a staged `tests/**.py` change is unregistered | auto-registration IS the intended mechanism (the #1429 drift trap): task 4's commit auto-registers `tests/test_embedded_evidence.py` into `core`, task 11's registers the tripwire. Task 12 therefore only adds `carve_out:` + `TEST_NO_REDIRECT_STEMS` (+ the pin) and **verifies** the `core:` entries rather than re-adding them (`::test_new_embedded_tests_are_carve_out_and_core`, `::test_integrity_covers_all_test_files`); the manifest write is not a `tests/` path, so AC10's allowlist is affected **only** by the M24 shared read in `tests/test_tripwire.py` (**C11** — the seventh path, `::test_git_diff_allowlist`) |
 | — | `.gitignore`, `.github/**`, `tortoise/**`, `graph-scripts/**`, `pyproject.toml`, `uv.lock` | **NOT TOUCHED** | — | AC10 |
 
@@ -225,7 +225,7 @@ env -u TORTOISE_DB_URI uv run pytest tests/test_canary_classify.py tests/test_ci
 env -u TORTOISE_DB_URI TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_embedded_save_tripwire.py tests/test_embedded_evidence.py -v
 
 # the merge-blocking registration gate
-python3 tools/ci_selection.py --integrity
+uv run python tools/ci_selection.py --integrity
 ```
 
 ---
@@ -844,12 +844,12 @@ reused verbatim because its fixed `.tmp` name is not writer-safe):
                "closes_issue": false, "violations": ["..."], "reasons": ["..."] },
   // M1: `violations` is the field D8's exit_code() branches on; `reasons` is appended per failing
   // conjunct by closes_issue() (never left empty on a false conjunct).
-  "reproduce": "python3 tools/embedded_evidence.py run --selection family --n 3 --ref <pin.commit> --marker \"not track_b and not live\" --ledger-root <resolved root>",
+  "reproduce": "uv run python tools/embedded_evidence.py run --selection family --n 3 --ref <pin.commit> --marker \"not track_b and not live\" --ledger-root <resolved root>",
   // M28: self-contained — carries the pinned commit and the marker, so re-running it later cannot
   // silently resolve a different HEAD; the manifest digest is re-derived and compared.
   // C2 — the CLOSING form (what the GREEN half records; `record_role` says `closing` only when the
   // pairing ref is declared and the paired red is re-run in the same invocation):
-  // "python3 tools/embedded_evidence.py run --selection family --n 10 --ref <fix-commit>
+  // "uv run python tools/embedded_evidence.py run --selection family --n 10 --ref <fix-commit>
   //    --pairing-ref <last-before-first-family-fix> --record-role closing
   //    --surface tortoise_search --surface-assertion <resolving-test-id>"
   // #4572: --record-out must be OUTSIDE the measured tree, so the closing form
@@ -1802,7 +1802,7 @@ def test_family_reproducers_relation_is_asserted():
 **Step 2 — run to verify it fails:** `env -u TORTOISE_DB_URI uv run pytest tests/test_ci_selection.py -v`
 Expected: FAIL — `KeyError: 'embedded_family'`.
 **Step 3 — implement** the YAML block (D5), including `lane_mix` and `declared_sets.relation` (M23).
-**Step 4 — run to verify it passes** + `python3 tools/ci_selection.py --integrity`. Expected: `[]` / rc 0.
+**Step 4 — run to verify it passes** + `uv run python tools/ci_selection.py --integrity`. Expected: `[]` / rc 0.
 **Step 5 — commit.**
 
 ### Task 4: tool skeleton — `BUCKET_MAP`, the closed set, the exit contract
@@ -1812,7 +1812,7 @@ Expected: FAIL — `KeyError: 'embedded_family'`.
 ladder, and each entry's `resets_streak` equals `BUCKET_RESETS_STREAK` (D4/M11); a bucket outside the
 closed set is `unexpected-bucket`; `exit_code()` implements 2→1→3→0 and its branches are persisted-tested
 (M1); `DEFAULT_N = 10` with no hardcoded literal (AC3); the CLI is
-`python3 tools/embedded_evidence.py run|red` (no `[project.scripts]`).
+`uv run python tools/embedded_evidence.py run|red` (no `[project.scripts]`).
 
 **Files:**
 - Create: `tools/embedded_evidence.py`
@@ -2347,7 +2347,7 @@ def test_bucket_reset_semantics_agree_across_modules():
 `TEST_NO_REDIRECT_STEMS` + the `test_markers.py` exact-set pin, `tests/test_tripwire.py`'s shared
 `CHILD_LANE_VARS` read — C11, and `TOOL_CARVEOUTS` **including `tools/lane_contract.py`** — C14); point the
 runner at `lane_contract.CHILD_LANE_VARS` (M24).
-**Step 4 — run to pass** + `python3 tools/ci_selection.py --integrity` (rc 0, `[]`).
+**Step 4 — run to pass** + `uv run python tools/ci_selection.py --integrity` (rc 0, `[]`).
 **Step 5 — commit.**
 
 ### Task 13: the runbook and the docs index row
@@ -2389,7 +2389,7 @@ PR body states the split and that #3827 is **not** closed.
 **Step 1 — the family RED run (recorded, ~2–5 min/run):**
 ```bash
 env -u TORTOISE_DB_URI TORTOISE_TEST_CARVE_OUT=1 \
-  python3 tools/embedded_evidence.py run --selection family --n 3 --ref 37d5ef00c \
+  uv run python tools/embedded_evidence.py run --selection family --n 3 --ref 37d5ef00c \
   --record-out /tmp/3827-red-half.json
 ```
 (`--ref` pins the measured commit so the recorded `reproduce` string is self-contained — M28. No
@@ -2399,7 +2399,7 @@ Expected: `exit_code: 1`; `verdict.status: "RED-AT-PINNED-REF"`; `verdict.closes
 `record_role: "historical-attestation"`; at least one run with a bucket whose `is_red` is true; the
 per-run load band is `L-C` and the red attestation is recorded in the same band.
 **Step 2 — the diagnostic `carve-out` record** (documented as *incapable* of being the family's evidence).
-**Step 3 — the `red` historical attestation:** `python3 tools/embedded_evidence.py red --selection family
+**Step 3 — the `red` historical attestation:** `uv run python tools/embedded_evidence.py red --selection family
 --ref 37d5ef00c --record-out /tmp/3827-red-at-ref.json`; expect `UNPAIRED-GREEN-AT-REF` handling to be
 exercised or a red cause recorded (either outcome is recorded verbatim).
 **Step 4 — assert the receipt shape:** re-run the already-authored
@@ -2459,7 +2459,7 @@ list, and it mandates **no new code** — if executing it requires a tool change
 # #4572: --record-out is OMITTED — it defaults to
 # $TMPDIR/pi-embedded-evidence/record.json, OUTSIDE the measured tree. An in-tree
 # --record-out is a usage error (exit 2, no record written).
-python3 tools/embedded_evidence.py run --selection family --n 10 --ref <fix-commit> \
+uv run python tools/embedded_evidence.py run --selection family --n 10 --ref <fix-commit> \
   --pairing-ref <last-commit-before-first-family-fix> --record-role closing \
   --surface tortoise_search --surface-assertion <resolving-test-id>
 # Then copy the receipt into the fixed commit's PR and commit it there:
