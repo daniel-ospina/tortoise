@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: I001
 
+from tests import _live_utils
 from tortoise.projection import FalkorProjection
 from tortoise.analyze import _bfs_select_operators
 
@@ -110,7 +111,7 @@ def test_proj():
         username, password = parse_uri_userinfo(uri)
         proj = FalkorProjection(
             host=parsed.hostname or "localhost",
-            port=parsed.port or 6379,
+            port=parsed.port or _live_utils.docker_port(),
             username=username,
             password=password,
             graph_name=graph_name,
@@ -428,7 +429,7 @@ class TestSnapshotDryRun:
         )
         result = subprocess.run(
             [sys.executable, script, "--dry-run",
-             "--uri", "docker://:falkordb@localhost:16379/tortoise"],
+             "--uri", _live_utils.legacy_uri("tortoise"),],
             capture_output=True, text=True, timeout=30,
         )
         assert result.returncode == 0, f"Dry-run with URI failed: {result.stderr}"

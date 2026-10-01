@@ -5,7 +5,7 @@ Triggers FalkorDB BGSAVE, verifies the RDB file exists, and prints the
 exact restore procedure so we can recover if the REMOVE migration goes wrong.
 
 Usage:
-  TORTOISE_DB_URI=docker://:@localhost:16379/tortoise \\
+  TORTOISE_DB_URI=docker://:@127.0.0.1:16379/tortoise \\
     python3 graph-scripts/pre_migration_snapshot.py
 
   # Dry-run (no side effects):
@@ -200,7 +200,7 @@ RESTORE_PROCEDURE = """
 ║  OPTION C — Replay from event log (slowest, but most complete):         ║
 ║    1. git checkout the commit BEFORE the REMOVE migration               ║
 ║    2. python3 -c "from tortoise.projection import FalkorProjection;     ║
-║       p = FalkorProjection.from_uri('docker://:@localhost:16379/tortoise');
+║       p = FalkorProjection.from_uri('docker://:@127.0.0.1:16379/tortoise');
 ║       p.replay('events.jsonl')"                                          ║
 ║    3. Verify graph state                                                ║
 ║                                                                          ║
@@ -234,7 +234,7 @@ def main() -> int:
     args = parser.parse_args()
 
     uri = args.uri or os.environ.get(
-        "TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise"
+        "TORTOISE_DB_URI", "docker://:@127.0.0.1:16379/tortoise"
     )
     cfg = _parse_uri(uri)
 
