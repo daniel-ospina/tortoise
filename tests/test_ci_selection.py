@@ -2580,8 +2580,31 @@ def test_workflow_lint_pins_the_actionlint_image_and_its_scope():
     stops being a check — the same fail-open shape #6253 is about.
     """
     job = _load_python_ci()["jobs"]["workflow-lint"]
-    runs = "\n".join(
+    raw = "\n".join(
         str(step.get("run") or "") for step in job.get("steps") or []
+    )
+    # Every assertion below targets EXECUTABLE text. Pinning tokens in the raw
+    # body was satisfiable by a `run:` that only MENTIONS them: a comment
+    # carrying `actionlint:1.7.12 -shellcheck= *.yaml` plus the copied
+    # empty-match block passed the whole test while invoking nothing — the very
+    # fail-open this test exists to prevent. Comments are stripped first, and
+    # the invocation itself is pinned STRUCTURALLY so a body that merely names
+    # the tokens cannot pass.
+    runs = "\n".join(
+        line for line in raw.splitlines() if not line.lstrip().startswith("#")
+    )
+    # Join shell line-continuations so a command split across lines (the
+    # `docker run … \` + `  rhysd/actionlint:…` form) is matched as ONE command.
+    joined = re.sub(r"\\\n\s*", " ", runs)
+    assert re.search(
+        r"(?m)^\s*docker\s+run\b[^\n]*\brhysd/actionlint:"
+        r"(?:\d+\.\d+\.\d+(?:@sha256:[0-9a-f]{64})?|@sha256:[0-9a-f]{64})\b"
+        r"[^\n]*-shellcheck=",
+        joined,
+    ), (
+        "workflow-lint no longer executes `docker run … rhysd/actionlint:<pinned> "
+        "-shellcheck=` on a non-comment line: a body that only MENTIONS those "
+        "tokens would satisfy a presence check while linting nothing (#6253)"
     )
     assert "actionlint" in runs, (
         "workflow-lint no longer invokes actionlint — the leg would certify "

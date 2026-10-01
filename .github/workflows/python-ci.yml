@@ -2310,10 +2310,24 @@ jobs:
     # reads every workflow file it can LOAD, so it catches a malformed
     # expression in any workflow OTHER than this one. If this file
     # (`python-ci.yml`) is itself malformed, GitHub refuses it, this leg never
-    # starts, `python-ci-gate` stays ABSENT, and nothing here changes. Closing
-    # that last case needs the lint to live in its own workflow file AND be a
-    # required status check itself, which is a branch-protection change and
-    # not something this leg can do from inside `python-ci-gate`.
+    # starts, `python-ci-gate` stays ABSENT, and nothing here changes.
+    #
+    # THE UNCOVERED CASE IS #6253'S ACTUAL CASE (#6212 was a malformed
+    # `python-ci.yml`), and the blocker is NOT branch protection — an earlier
+    # revision of this comment claimed that and it was wrong. No new required
+    # check is needed: `ci.yml` is triggered on `pull_request`, so it still
+    # runs when GitHub refuses this file, and its `docs`, `pricing-artifact`,
+    # `test-isolation` and `license-surface` jobs are always-on (no `if:`/
+    # `needs:`) and ALREADY enforced by `.mergify.yml` `queue_conditions` as
+    # `check-success=…`. The same actionlint step placed in any of them would
+    # lint this file and red an already-required check with no branch-
+    # protection change at all.
+    #
+    # The real blocker is only the CHOICE to keep the lint inside
+    # `python-ci.yml`. Closing the #6212 case therefore means relocating (or
+    # duplicating) this step into an always-on required job in `ci.yml`; until
+    # that is done, #6253 must NOT be closed as fixed, because the file it
+    # reports remains uncovered.
     #
     # The expression is evaluated over the ENTIRE `run:` scalar, so a shell
     # comment is NOT exempt — that is how the #6212 instance slipped past
