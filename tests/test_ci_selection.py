@@ -25,9 +25,10 @@ from tools.ci_selection import (  # noqa: I001
     unlisted_tests, register_tests, register, classify_test_file,  # noqa: F401
     surface_audit, render_surface_audit, duplicate_entries,
     on_demand_files, leg_coverage_issues, push_legs, fast_pool,
-    duration_issues, TESTS_DIR,
+    duration_issues, TESTS_DIR, WATCHDOG_HEADROOM, WATCHDOG_CEILING_MIN,
 )
 from tools import mergify_config_guard as mcg
+from tools import ci_selection as cs
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -413,6 +414,187 @@ def test_unknown_path_goes_full():
     assert r["full"] is True
 
 
+def test_root_level_non_python_files_skip_the_matrix():
+    """#6784: an EXPLICIT root-level allowlist skips the matrix.
+
+    Before this, a ROOT path matched no NON_PYTHON_PREFIXES entry, fell to the
+    unknown-path branch, and reserved the FULL matrix (every shard slot) for a
+    prose edit. The names are hard-coded here, NOT read from the module
+    constant: emptying the allowlist must RED this test, which it cannot do if
+    the assertion derives its expectation from the same set it is checking.
+
+    ⛔ This set is the ZERO-READER census only, and it is much smaller than the
+    change's first two revisions: every root file that a test reads KEEPS the
+    fail-closed full matrix (see `test_root_file_read_by_a_test_is_never_allowlisted`).
+    """
+    allowlisted = (".scope-1894.md", ".scope-comment-2578.md", "pr-body.md")
+    for name in allowlisted:
+        r = _sel([name])
+        assert r["full"] is False, f"{name} must skip the matrix, got {r}"
+        assert r["surfaces"] == [], name
+        assert set(r["test_files"]) == _tier1(), name
+
+
+def test_every_allowlisted_root_file_actually_exists():
+    """#6784 review cycle 2, P3: a liveness ratchet on the allowlist.
+
+    `SOURCE_PATTERNS` has an equivalent ratchet (`test_source_patterns_all_name_
+    something_real`). Without one, a name that does not exist in the tree is a
+    dead entry that skips the matrix for nothing — which is exactly how the
+    previous revision passed its own tests while changing NO existing file's
+    behaviour (its four names were all absent on disk, so #6784's headline case
+    was still unfixed and the review had to catch it by hand).
+    """
+    for name in sorted(cs.ROOT_NON_PYTHON_FILES):
+        assert (REPO / name).exists(), (
+            f"{name} is allowlisted but does not exist in the tree — a dead "
+            "entry that skips the matrix for nothing")
+
+
+# Files that only NAME the census/members rather than reading them: the census
+# module quotes it, and this test file hard-codes the members.
+_SELF_NAMERS = frozenset({"tools/ci_selection.py", "tests/test_ci_selection.py"})
+
+
+def _readers_of(name: str) -> list[str]:
+    """Non-self files under tests/tools/scripts/.github/tortoise naming `name`.
+
+    ⛔ `scripts/` carries a TRAILING SLASH deliberately: `scripts` is a tracked
+    SYMLINK, and BSD grep does not descend a symlinked directory named without
+    one — so `grep -rlF <n> tests tools scripts .github tortoise` silently
+    searches NOTHING under scripts/ on macOS (0 hits vs 72 for the same dir with
+    the slash). The census numbers are only reproducible with the slash.
+
+    SCOPE: a LITERAL-NAME grep. It does not see a reader that finds `name` by
+    GLOB or directory walk, nor one outside these five roots.
+    """
+    out = subprocess.run(
+        ["grep", "-rlF", name, "tests", "tools", "scripts/", ".github",
+         "tortoise"],
+        cwd=REPO, capture_output=True, text=True).stdout.split("\n")
+    return sorted(h for h in (x.strip() for x in out)
+                  if h and h not in _SELF_NAMERS and not h.endswith(".pyc"))
+
+
+def test_no_allowlisted_root_file_has_a_reader():
+    """#6784 review cycle 3 P2: derive the readers, do not list the names.
+
+    The earlier guard was a hard-coded 11-name list, so it only defended names
+    someone had thought of. Measured counterexamples: adding `.env.example` or
+    `fly.toml` left the whole suite GREEN while silently skipping guards — the
+    exact class this allowlist exists to prevent.
+
+    ⛔ SCOPE — do not read this as "any future member whose file something reads
+    will fail here" (review cycle 4, P2 falsified exactly that phrasing). This
+    catches a LITERAL-NAME reader under `tests tools scripts/ .github tortoise`.
+    A reader that GLOBS for the file (`REPO.glob("*.md")`), or that lives
+    outside those roots (e.g. `docs/`), is NOT caught — both were demonstrated
+    GREEN against this test. Before adding a member, grep the WHOLE tree.
+    """
+    offenders = {name: _readers_of(name) for name in sorted(cs.ROOT_NON_PYTHON_FILES)
+                 if _readers_of(name)}
+    assert not offenders, (
+        "allowlisted root file(s) are READ by the listed files — allowlisting them "
+        f"makes those guards skip on exactly the PR that edits the file: {offenders}")
+
+
+def test_allowlist_members_are_real_root_level_files():
+    """Companion to the invariant above: every member must be a ROOT-LEVEL
+    tracked file, so the census is about real paths, not invented ones."""
+    roots = subprocess.run(["git", "ls-files"], cwd=REPO,
+                           capture_output=True, text=True).stdout.split("\n")
+    root_set = {f for f in roots if f and "/" not in f}
+    for name in sorted(cs.ROOT_NON_PYTHON_FILES):
+        assert name in root_set, (
+            f"{name} is allowlisted but is not a root-level tracked file in this tree")
+
+
+def test_root_file_read_by_a_test_is_never_allowlisted():
+    """#6784 review cycle 1 P1 + cycle 2 P1: a file a test READS is not "not
+    python-relevant".
+
+    `tests/test_embedded_durability_claim.py` reads `ROOT/README.md` and asserts
+    its durability claim, and it is `core`+carve-out (NOT tier1) — so allowlisting
+    README.md made that guard skip on exactly the PR that edits it. The census is
+    published on issue #6784 (method: `grep -rlF "<name>" tests tools scripts/
+    .github tortoise`, excluding both ci_selection files, which only name or quote
+    the census) rather than duplicated here, because a duplicated number is a
+    claim that re-stales: an earlier revision of this docstring cited
+    `.env.example` as 16 readers when the method yields 15.
+
+    This is the explicit spot-check for the files that matter most; the rule
+    itself is pinned by `test_no_allowlisted_root_file_has_a_reader`. It REDs if
+    the removed blanket `*.md`-at-root clause is reintroduced (it admitted
+    README.md).
+    """
+    for name in ("README.md", "AGENTS.md", "CHANGELOG.md", "CONTRIBUTING.md",
+                 "LICENSE", "MEMORY.md", "CLAUDE.md", "index.md",
+                 ".gitignore", ".env.example", "fly.toml", "pyproject.toml",
+                 ".python-version"):
+        r = _sel([name])
+        assert r["full"] is True, (
+            f"{name} is read by a test — it must keep the fail-closed FULL "
+            f"matrix, got {r}")
+        assert r["test_files"] == "ALL", name
+    # `*.md` at the root is NOT blanket-safe: only explicitly named files are.
+    r_md = _sel(["NOTES.md"])
+    assert r_md["full"] is True, "root *.md must fail closed, not blanket-skip"
+    assert r_md["test_files"] == "ALL"
+
+
+def test_a_claimed_root_file_beats_the_allowlist(monkeypatch):
+    """#6784 review P2: the allowlist is a FALLBACK, never a short-circuit.
+
+    An earlier revision tested `_is_safe_root_file` FIRST, so listing a file in
+    SOURCE_PATTERNS or CORE_ALSO — the repo's own documented remedy for "the
+    guard for file X never runs when X changes" (#6138 review P1) — could no
+    longer rescue it. Here a root-allowlisted name is CLAIMED via CORE_ALSO and
+    must therefore stay selected.
+    """
+    claimed = ".scope-1894.md"
+    assert _sel([claimed])["full"] is False, "precondition: unclaimed → skip"
+    monkeypatch.setattr(cs, "CORE_ALSO", (*cs.CORE_ALSO, claimed))
+    r = _sel([claimed])
+    assert r["full"] is False, f"a claimed path must not become full: {r}"
+    assert r["surfaces"] == ["core"], (
+        f"a claimed root file must be KEPT and select its surface, got {r}")
+
+
+def test_root_build_files_still_select_the_full_matrix():
+    """Fail-closed must be PRESERVED: the root allowlist is NOT "root-level
+    and no extension ⇒ safe" (that would admit Makefile/Dockerfile/build.sh)
+    and NOT "any non-python extension ⇒ safe". Each of these remains
+    code-relevant and must keep the FULL matrix."""
+    for name in ("Makefile", "Dockerfile", "pyproject.toml", "uv.lock",
+                 ".python-version", "requirements.txt", "conftest.py",
+                 "setup.py"):
+        r = _sel([name])
+        assert r["full"] is True, f"{name} must fail closed to full, got {r}"
+        assert r["test_files"] == "ALL", name
+
+
+def test_unknown_root_file_still_selects_the_full_matrix():
+    """An unknown ROOT-level path must still hit the fail-closed default:
+    the allowlist is additive, it does not soften the unknown-path branch.
+    (Reds if that fall-through defaults to skip instead of full.)"""
+    for name in ("build.sh", "some_new_thing.xyz", "mystery.conf"):
+        r = _sel([name])
+        assert r["full"] is True, f"{name} must fail closed to full, got {r}"
+        assert r["test_files"] == "ALL", name
+
+
+def test_subdirectory_markdown_is_unaffected():
+    """The root rule must not become "any *.md anywhere": `docs/x.md` keeps
+    its NON_PYTHON_PREFIXES skip, and `tortoise/NOTES.md` keeps the `tortoise/`
+    core fallback — it must NOT become a matrix skip by accident."""
+    r_docs = _sel(["docs/x.md"])
+    assert r_docs["full"] is False
+    assert r_docs["surfaces"] == []
+    r_tortoise = _sel(["tortoise/NOTES.md"])
+    assert r_tortoise["full"] is False
+    assert r_tortoise["surfaces"] == ["core"]
+
+
 def test_new_engine_module_maps_to_core():
     # a new file under tortoise/ is engine code → core surface (conservative,
     # 108 files — not silent under-selection)
@@ -640,6 +822,36 @@ def test_queue_resweep_tool_change_selects_core_not_tier1():
     assert "core" in r["surfaces"], r
     assert "test_queue_resweep.py" in r["test_files"], r
     assert r["full"] is False, r
+
+
+def test_queue_conflict_census_tool_change_selects_core_not_tier1():
+    # #6138 review P1: tools/queue_conflict_census.py owns
+    # tests/test_queue_conflict_census.py (`core`). Without the CORE_ALSO entry
+    # the flat "tools/" prefix swallowed the path, so a census-only change
+    # selected no surface and fell back to tier-1 smoke — the guard never ran
+    # on the PR that edits the census, which is how a measurement instrument
+    # regresses silently. Same shape as #4069 above.
+    r = _sel(["tools/queue_conflict_census.py"])
+    assert r["full"] is False, r
+    assert "core" in r["surfaces"], r
+    assert "test_queue_conflict_census.py" in r["test_files"], r
+    assert set(r["test_files"]) != _tier1()
+
+
+def test_drift_guard_tool_change_selects_core_not_tier1():
+    # #4174 review P1: tools/drift-guard.py owns tests/test_drift_guard.py. The
+    # flat "tools/" NON_PYTHON_PREFIXES entry swallowed the path, so a
+    # guard-only change selected NO surface and fell back to tier-1 smoke — the
+    # suite pinning the guard never ran on the PR that changed the guard. Same
+    # silent-drop class as #4069 above, and the same defect #4174 describes a
+    # gate having. Mutation check: removing the CORE_ALSO entry filters the path
+    # out (docs-only early return → empty surfaces, tier-1 smoke) and fails
+    # every assert below.
+    r = _sel(["tools/drift-guard.py"])
+    assert r["full"] is False, r
+    assert "core" in r["surfaces"], r
+    assert "test_drift_guard.py" in r["test_files"], r
+    assert set(r["test_files"]) != _tier1()
 
 
 def test_collision_preflight_tool_change_fails_closed_to_full():
@@ -1093,8 +1305,9 @@ def test_register_already_present_in_surface_is_reported_noop(capsys):
 
 def test_duplicate_entries_reports_same_surface_repeats():
     """#2913: a same-surface duplicate is invisible to select() (it unions
-    surfaces) and to integrity() (it only asks "classified?") — the new
-    duplicate_entries() check surfaces it for the --integrity note."""
+    surfaces) and to integrity() (it only asks "classified?") — duplicate_entries()
+    surfaces it, and since #5373 it FAILS `--integrity` (a union-merged registry
+    would otherwise absorb it silently)."""
     from tools.ci_selection import duplicate_entries
     m = {"surfaces": {"core": ["test_a.py", "test_a.py", "test_b.py"],
                       "api": ["test_a.py"]}}
@@ -1108,6 +1321,37 @@ def test_duplicate_entries_reports_same_surface_repeats():
     ) == ["core: test_a.py"]
     # a value that is None (empty surface block) must not raise
     assert duplicate_entries({"surfaces": {"core": None}}) == []
+
+
+def test_integrity_reddens_on_a_duplicate_entry(monkeypatch, capsys):
+    """#5373: a duplicate entry must FAIL `--integrity`, not print a note.
+
+    `config/ci-surfaces.yml` carries `merge=union`, which keeps BOTH sides' lines for
+    a conflicting hunk — so a same-surface duplicate is the exact shape union emits
+    when two lanes register the same test. It used to be a ⚠️ note; a note on a
+    union-merged registry lets the duplicate in silently.
+    """
+    import tools.ci_selection as cs
+
+    manifest = {"surfaces": {"core": ["test_a.py", "test_a.py"]}}
+    monkeypatch.setattr(cs, "load_manifest", lambda: manifest)
+    # All the OTHER integrity legs are neutralised so the duplicate is the only
+    # possible cause of the non-zero exit; each is a pure function of the manifest.
+    for leg in ("integrity", "slow_file_issues", "duration_issues",
+                "leg_coverage_issues", "duration_coverage_issues",
+                "workflow_matrix_issues"):
+        monkeypatch.setattr(cs, leg, lambda *a, **k: [])
+    # #6135: `push_legs` now returns `{"shards": [...]}` (N shards), not the old
+    # `half_a`/`half_b` pair — the stub below matches the CURRENT contract so the
+    # duplicate remains the only possible cause of the non-zero exit.
+    monkeypatch.setattr(cs, "push_legs", lambda *a, **k: {"shards": []})
+    monkeypatch.setattr(cs, "workflow_halves_issues", lambda *a, **k: [])
+    monkeypatch.setattr(cs, "fast_files_absent_from_halves", lambda *a, **k: [])
+    monkeypatch.setattr(sys, "argv", ["ci_selection.py", "--integrity"])
+
+    rc = cs.main()
+    assert rc == 1, "a duplicate same-surface entry must redden --integrity"
+    assert "core: test_a.py" in capsys.readouterr().out
 
 
 # ── #1266: matrix halves ↔ manifest consistency ──────────────────────────
@@ -1198,6 +1442,73 @@ def test_fast_files_absent_from_halves_reports_coverage_hole():
     halves = {"a": ["test_api"], "b": ["test_crypto"]}
     absent = fast_files_absent_from_halves(_halves_manifest(), halves)
     assert absent == ["test_auth.py", "test_dead_entry.py"], absent  # slow excluded
+
+
+def test_fast_files_absent_from_halves_excludes_env_broken_files():
+    # #1266 false positive: an ENV_BROKEN_FILES member is kept out of EVERY half
+    # by the selection filter, so it could never appear in a half and was
+    # reported as a coverage hole on every single run. It is not a hole — the
+    # file needs a live environment the shard jobs do not have, and it is run by
+    # `.github/scripts/verify-cutover` instead. The exclusion must mirror `slow`
+    # and `carve_out`, and a REAL hole must still be reported.
+    from tools.ci_selection import ENV_BROKEN_FILES, fast_files_absent_from_halves
+    m = _halves_manifest()
+    m["surfaces"]["api"].extend(ENV_BROKEN_FILES)
+    halves = {"a": ["test_api"], "b": ["test_crypto"]}
+    absent = fast_files_absent_from_halves(m, halves)
+    assert "test_auth.py" in absent, absent  # a genuine hole still reports
+    assert not (set(absent) & ENV_BROKEN_FILES), absent
+
+
+def test_real_manifest_never_reports_env_broken_as_a_coverage_hole():
+    # The end-to-end form of the same guard, against the REAL manifest and the
+    # REAL derived shards: `--integrity` must never print the
+    # "in NO shard (full-matrix coverage hole)" warning about an env-broken
+    # file, because that warning is permanent, always false, and was read at
+    # face value by two independent readers of a shard-split PR as evidence the
+    # split had dropped a test file.
+    #
+    # Deliberately scoped to ENV_BROKEN_FILES rather than asserting the absent
+    # set is empty: the check is documented as informational, so pinning zero
+    # would silently promote a warning into a fail-closed gate.
+    from tools.ci_selection import (
+        ENV_BROKEN_FILES,
+        fast_files_absent_from_halves,
+        load_manifest,
+        push_legs,
+    )
+    m = load_manifest()
+    legs = push_legs(m)
+    halves = {s["name"]: set(s["files"]) for s in legs["shards"]}
+    absent = set(fast_files_absent_from_halves(m, halves))
+    assert not (absent & ENV_BROKEN_FILES), sorted(absent & ENV_BROKEN_FILES)
+
+
+def test_coverage_hole_report_is_always_a_fast_pool_file():
+    # The durable invariant, and the generalisation of the env-broken false
+    # positive: ONLY a fast-pool file can legitimately be a hole, because the
+    # halves are derived from `fast_pool()`. Anything reported absent that the
+    # pool does not contain is a false positive by construction — which is
+    # exactly what a member of any group `fast_pool` omits would be
+    # (ENV_BROKEN_FILES today; `on_demand` latently, since it is currently in
+    # no surface and so cannot reach this check).
+    #
+    # This subsumes the scoped test above and pins the sync requirement the
+    # function's docstring states: the subtraction there must match
+    # `fast_pool`'s own filter, or this reports a file the pool deliberately
+    # excludes.
+    from tools.ci_selection import (
+        fast_files_absent_from_halves,
+        fast_pool,
+        load_manifest,
+        push_legs,
+    )
+    m = load_manifest()
+    legs = push_legs(m)
+    halves = {s["name"]: set(s["files"]) for s in legs["shards"]}
+    absent = set(fast_files_absent_from_halves(m, halves))
+    pool = set(fast_pool(m))
+    assert absent <= pool, sorted(absent - pool)
 
 
 def test_real_workflow_halves_are_consistent():
@@ -2031,6 +2342,118 @@ def test_carve_out_job_uri_unset_with_carve_out_flag():
     assert "--junitxml=/tmp/junit.xml" in run["run"]
 
 
+# ── #3239: a hung pytest job holds the per-PR concurrency slot ────────────
+# The `concurrency:` group is per-PR with `cancel-in-progress: true`, so a
+# stale-head run that will not die blocks the CURRENT head's run — and
+# `gh run cancel` cannot finish while a job is still executing, so the job's
+# OUTER `timeout-minutes` is the exposure window. Two invariants follow, and
+# all of them had been violated:
+#
+#   * ORDER: the in-step watchdog must stay STRICTLY BELOW the outer cap. The
+#     watchdog is the bound that PRINTS the pass/fail counts (#798: a
+#     runner-level cap that fires first cancels the step and loses the log
+#     tail), so a cap beneath it silently restores #798's death mode — and a
+#     MISSING cap (test-track-b before #3239) leaves GitHub's 360m default:
+#     six hours of held slot instead of the 90m the issue reports.
+#   * PROPORTION: the cap clears the measured work with `WATCHDOG_HEADROOM`
+#     (#6135's validated 2.0x factor, reused rather than invented) and is not
+#     an order of magnitude above it.
+#
+# The work is MEASURED, not asserted: Actions API on the 60 newest completed
+# python-ci.yml runs, `started_at`→`completed_at` on the pytest step
+# (2026-09-30T02:17Z..12:52Z, #3239). `_MEASURED_PYTEST_MAX_MIN` is that tap;
+# the carve-out test also re-derives a floor from the committed `durations`
+# map, so the bound cannot silently rot as the carve-out set grows.
+#
+# Before the change the caps were 90m (carve-out, 4.9x its 16.02m pytest
+# step), 90m (test-slow, 11x its 4.70m) and none at all (test-track-b).
+_CAP_CEILING_FACTOR = 3.0
+_MEASURED_PYTEST_MAX_MIN = {
+    "test-carve-out": 16.02,
+    "test-slow": 4.70,
+    "test-track-b": 0.08,
+}
+_PYTEST_WATCHDOG_RE = re.compile(r"timeout -s INT -k \d+ (\d+)m")
+
+
+def _literal_pytest_watchdog(job: dict) -> int | None:
+    """The job's in-step watchdog in minutes, or None when it is not a
+    literal. The fast shards pass `${{ matrix.watchdog_minutes }}m`, which is
+    derived by `tools.ci_selection.shard_watchdog_minutes` — it has no literal
+    here, so it is covered by the ceiling assertion instead."""
+    for step in job.get("steps", []):
+        hit = _PYTEST_WATCHDOG_RE.search(step.get("run", ""))
+        if hit:
+            return int(hit.group(1))
+    return None
+
+
+def test_every_bounded_pytest_job_caps_above_its_watchdog():
+    """#3239: a pytest job whose in-step watchdog kills it must ALSO carry an
+    outer `timeout-minutes` strictly above that watchdog.
+
+    Both halves are load-bearing and both had been broken: test-track-b ran
+    pytest under a 20m watchdog with NO job cap (GitHub's 360m default), and
+    the fast shards' derived watchdog can reach `WATCHDOG_CEILING_MIN`."""
+    wf = _load_python_ci()
+    jobs = wf["jobs"]
+    bounded = {}
+    for name, job in jobs.items():
+        watchdog = _literal_pytest_watchdog(job)
+        if watchdog is None:
+            continue
+        cap = job.get("timeout-minutes")
+        assert isinstance(cap, int), (
+            f"{name}: runs pytest under a {watchdog}m in-step watchdog but has "
+            f"no `timeout-minutes` cap — GitHub's 360m default then holds the "
+            f"per-PR concurrency slot for a hung job (#3239)")
+        assert watchdog < cap, (
+            f"{name}: the in-step watchdog ({watchdog}m) must stay BELOW the "
+            f"outer cap ({cap}m), or the runner kills the step before it can "
+            f"print its pass/fail counts (#798)")
+        bounded[name] = (watchdog, cap)
+    assert "test-carve-out" in bounded, (
+        "the carve-out job's bounds are the subject of #3239 — if its pytest "
+        "step no longer carries a literal watchdog, re-derive this pin")
+    # The fast shards' watchdog is per-shard, clamped by the selector at
+    # WATCHDOG_CEILING_MIN — so the cap must clear that ceiling, not a literal.
+    fast_cap = jobs["test"].get("timeout-minutes")
+    assert isinstance(fast_cap, int) and fast_cap > WATCHDOG_CEILING_MIN, (
+        f"the fast job's cap ({fast_cap}) must clear the selector's "
+        f"WATCHDOG_CEILING_MIN ({WATCHDOG_CEILING_MIN}) — a per-shard "
+        f"watchdog may legitimately reach it (#6135/#3239)")
+
+
+def test_carve_out_bounds_clear_the_measured_work_without_dwarfing_it():
+    """#3239: the carve-out's watchdog must clear its MEASURED work with the
+    house headroom, and its cap must not dwarf that work.
+
+    The floor is tapped twice on purpose: the frozen API measurement (what the
+    bound was chosen from) and the committed `durations` map for the carve-out
+    set (a lower bound that moves with the code — so a carve-out set that grows
+    past the budget reds here instead of surfacing as a 90-minute hang)."""
+    job = _load_python_ci()["jobs"]["test-carve-out"]
+    watchdog = _literal_pytest_watchdog(job)
+    cap = job["timeout-minutes"]
+    measured = _MEASURED_PYTEST_MAX_MIN["test-carve-out"]
+    assert watchdog >= WATCHDOG_HEADROOM * measured, (
+        f"the carve-out watchdog ({watchdog}m) must clear the measured "
+        f"pytest step ({measured}m) by WATCHDOG_HEADROOM "
+        f"({WATCHDOG_HEADROOM}x) or a slow run becomes a guaranteed red")
+    manifest = load_manifest()
+    committed = sum(manifest["durations"].get(f, 0.0)
+                    for f in manifest["carve_out"]) / 60.0
+    assert watchdog >= WATCHDOG_HEADROOM * committed, (
+        f"the carve-out watchdog ({watchdog}m) no longer clears the committed "
+        f"carve-out estimate ({committed:.2f}m) by WATCHDOG_HEADROOM "
+        f"({WATCHDOG_HEADROOM}x) — re-derive it from a fresh measurement "
+        f"rather than widening the hang window (#3239)")
+    assert cap <= _CAP_CEILING_FACTOR * measured, (
+        f"the carve-out cap ({cap}m) dwarfs its measured pytest step "
+        f"({measured}m) — the cap IS the stale-head exposure, and 90m against "
+        f"this work is exactly the defect #3239 reports")
+
+
 def test_diff_gated_jobs_consume_changes_outputs():
     """#2147/#2148 (2026-09-02-ci-audit F1/F2): the workflow wiring pins.
     test-slow + test-carve-out gate their runs on the changes job's
@@ -2154,6 +2577,157 @@ def test_canary_streak_job_consumes_producer_artifacts_only():
               if s.get("name", "").startswith("Upload canary streak"))
     assert up["with"]["name"] == "testdb-canary-streak"
     assert up["with"]["path"] == "config/testdb-canary-streak.json"
+
+
+def test_a_matrix_job_never_uploads_a_fixed_name_artifact():
+    """#6263: in a job with a matrix dimension, an artifact name that does not
+    carry the leg makes the legs collide.
+
+    `github.job` is the BASE job id for every matrix leg, so a name built from
+    it alone is uploaded once PER LEG under ONE name.
+    `ci-timing.yml` downloads by pattern with `merge-multiple` unset (false),
+    which places same-named artifacts in ONE directory — so one leg's
+    `pytest.log` overwrites the other's, and the durations map measures one
+    leg while reporting the whole job. Its guard cannot see this: it compares
+    a file count against a positive artifact count only at zero, so a partial
+    fetch is indistinguishable from a complete one and the loss is silent.
+
+    observed in this repo: the #3467 plan's defect (i) is the same instance
+    this change closes (see the plan's own defect list), and `#6135` is the
+    other mechanism — a CONSUMER hardcoding a shard name rather than a
+    producer reusing one.
+
+    A name is accepted when it interpolates a matrix key the job actually
+    declares, or when the step (or its job) carries an `if:` that mentions the
+    matrix — that is why `pytest-canary-producer` is safe, its `if:` requires
+    `matrix.canary_producer`. The matrix is resolved from the workflow, not
+    kept as a hand-maintained allowlist that the next edit silently outgrows.
+    """
+    offenders = []
+    for job_name, job in _load_python_ci()["jobs"].items():
+        matrix = (job.get("strategy") or {}).get("matrix")
+        if not matrix:
+            continue
+        # A `matrix:` built by `fromJSON(...)` is a string here and cannot be
+        # resolved statically; only a literal mapping can be checked for the
+        # key an interpolated name refers to.
+        declared: set[str] = set()
+        resolvable = isinstance(matrix, dict)
+        if resolvable:
+            declared.update(k for k in matrix if k != "include")
+            for row in matrix.get("include") or []:
+                if isinstance(row, dict):
+                    declared.update(row)
+        for step in job.get("steps") or []:
+            if not str(step.get("uses") or "").startswith("actions/upload-artifact"):
+                continue
+            name = str((step.get("with") or {}).get("name") or "")
+            if "matrix." in str(step.get("if") or "") or "matrix." in str(job.get("if") or ""):
+                continue
+            if "matrix." in name:
+                # GitHub renders an UNDEFINED matrix property as the empty
+                # string, so a typo'd key yields the SAME name for every leg
+                # and the collision returns with the guard green.
+                keys = set(re.findall(r"matrix\.(\w+)", name))
+                if not resolvable or keys <= declared:
+                    continue
+            offenders.append(f"{job_name} uploads {name!r}")
+    assert not offenders, (
+        "a matrix job uploads a fixed-name artifact, so its legs collide and "
+        "one leg's files are overwritten by the other's without any check "
+        "failing (#6263; same root as the #3467 plan's defect (i)): "
+        + "; ".join(offenders))
+
+
+def test_workflow_lint_pins_the_actionlint_image_and_its_scope():
+    """Pin the `workflow-lint` step's body.
+
+    The plumbing guards (needs/LEGS) prove the leg is wired in; they cannot
+    see its body. Without this pin the step can be replaced with `echo ok`,
+    the image unpinned to `:latest`, the `*.yaml` glob dropped, or the
+    empty-match refusal deleted, and every test stays green while the leg
+    stops being a check — the same fail-open shape #6253 is about.
+    """
+    job = _load_python_ci()["jobs"]["workflow-lint"]
+    raw = "\n".join(
+        str(step.get("run") or "") for step in job.get("steps") or []
+    )
+    # Every assertion below targets EXECUTABLE-looking text: `#`-comment lines
+    # are stripped, shell line-continuations are joined, and the invocation is
+    # pinned STRUCTURALLY, which closes the specific no-op the earlier revision
+    # let through (a commented-out body carrying `actionlint:1.7.12
+    # -shellcheck= *.yaml` plus the copied empty-match block).
+    #
+    # WHAT THIS DOES NOT GUARANTEE, stated because the limit is real: a static
+    # regex over a `run:` scalar can prove the command is WRITTEN, never that it
+    # EXECUTES. A body that prints the script from a quoted heredoc, or that
+    # exits 0 before reaching it, still satisfies every assertion below. This is
+    # therefore a TRIPWIRE against the realistic no-op replacements (deleting
+    # the step's work, commenting it out, unpinning the image, dropping the
+    # `*.yaml` glob or the empty-match refusal) — not proof of execution. Real
+    # proof needs a runtime positive control in the step itself (lint a
+    # deliberately malformed temp workflow and assert actionlint exits
+    # non-zero), which is a change to the leg, not to this test.
+    runs = "\n".join(
+        line for line in raw.splitlines() if not line.lstrip().startswith("#")
+    )
+    # Join shell line-continuations so a command split across lines (the
+    # `docker run … \` + `  rhysd/actionlint:…` form) is matched as ONE command.
+    joined = re.sub(r"\\\n\s*", " ", runs)
+    assert re.search(
+        r"(?m)^\s*docker\s+run\b[^\n]*\brhysd/actionlint"
+        r"(?::\d+\.\d+\.\d+(?:@sha256:[0-9a-f]{64})?|@sha256:[0-9a-f]{64})\b"
+        r"[^\n]*-shellcheck=",
+        joined,
+    ), (
+        "workflow-lint no longer executes `docker run … rhysd/actionlint:<pinned> "
+        "-shellcheck=` on a non-comment line: a body that only MENTIONS those "
+        "tokens would satisfy a presence check while linting nothing (#6253)"
+    )
+    assert "actionlint" in runs, (
+        "workflow-lint no longer invokes actionlint — the leg would certify "
+        "nothing while still reporting green (#6253)"
+    )
+    tags = re.findall(r"actionlint:(\S+)", runs)
+    digest_only = re.search(r"actionlint@sha256:[0-9a-f]{64}\b", runs)
+    assert tags or digest_only, (
+        "workflow-lint does not pin the actionlint image by tag or digest"
+    )
+    for tag in tags:
+        # A digest pin (`tag@sha256:…`) is STRONGER than a tag pin and is the
+        # supply-chain-correct form, so it must pass this check too. A
+        # digest-ONLY reference carries no `tag:` at all and is matched above.
+        assert re.fullmatch(r"\d+\.\d+\.\d+(?:@sha256:[0-9a-f]{64})?", tag), (
+            f"actionlint image must be pinned to major.minor.patch, got {tag!r} "
+            "— a floating tag re-opens the unpinned-dependency class (#5440)"
+        )
+    assert "-shellcheck=" in runs, (
+        "the actionlint invocation must set -shellcheck= explicitly: the pinned "
+        "image bundles shellcheck, so defaulting it on would add this tree's "
+        "shellcheck findings to the required gate"
+    )
+    assert "*.yaml" in runs, (
+        "workflow-lint globs only *.yml; GitHub loads workflows with either "
+        "extension, so a .yaml workflow would be silently unlinted"
+    )
+    # The empty-match refusal is asserted STRUCTURALLY, not by looking for two
+    # loose substrings: a substring pin is satisfied by commenting the body out.
+    assert re.search(
+        r"if\s+\[\s*\$\{#files\[@\]\}\s*-eq\s+0\s*\]\s*;\s*then\s*\n"
+        r"\s*echo\s+\S.*\n"
+        r"\s*exit\s+1\s*\n"
+        r"\s*fi\b",
+        runs,
+    ), (
+        "workflow-lint no longer refuses an EMPTY match: an unmatched glob "
+        "would lint nothing and report success over an empty surface"
+    )
+    # `$files` unquoted was a real SC2086 this leg introduced into a tree whose
+    # other shellcheck findings are pre-existing. The array form keeps it fixed.
+    assert '"${files[@]}"' in runs, (
+        "workflow-lint must expand the glob array quoted (\"${files[@]}\"); a "
+        "bare `$files` is a new SC2086 in a tree pinned to -shellcheck="
+    )
 
 
 def _extract_pytest_marker(run_script: str) -> str:
@@ -2464,28 +3038,44 @@ def test_drift_gate_cannot_skip_the_test_matrix():
     assert not _defaults_shell(workflow) and not _defaults_shell(drift), (
         "a `defaults.run.shell` can swallow the integrity exit code (#2656)")
 
-    integrity_steps = [s for s in drift.get("steps", [])
-                       if "integrity" in _code(s)]
-    assert integrity_steps, "the drift job must run the integrity check"
-    for step in integrity_steps:
+    # BOTH checks in this job are fail-closed gates and BOTH feed the required
+    # aggregate, so BOTH are held to the same unsilenceability rule. The
+    # `merge=union` registry validator (#5373) is a SEPARATE step from the drift
+    # gate, but a `|| true` / `continue-on-error` / `shell:` override on it is the
+    # SAME defect class this test exists to catch: the validator would report
+    # success while a duplicate-key union merge passed — the fail-open shape the
+    # validator exists to remove, wearing the fix. Matching on "integrity" alone
+    # swept both steps into one token check and false-redded; parameterising by
+    # each step's OWN exact invocation keeps every contract exact.
+    drift_gate_steps = [s for s in drift.get("steps", [])
+                        if "ci_selection" in _code(s)]
+    assert drift_gate_steps, "the drift job must run the integrity check"
+    registry_validator_steps = [s for s in drift.get("steps", [])
+                                if "tools/registry_integrity.py" in _code(s)]
+    assert registry_validator_steps, (
+        "the drift job must also run the union registry validator (#5373): the "
+        "unioned registries are only safe while a validator fails closed on them")
+    # Each step is paired with the EXACT non-comment invocation it must make.
+    checked_gate_steps = [
+        *((s, "python3 tools/ci_selection.py --integrity") for s in drift_gate_steps),
+        *((s, "python3 tools/registry_integrity.py") for s in registry_validator_steps),
+    ]
+    for step, expected in checked_gate_steps:
         run = step["run"].replace("\\\n", " ")
-        tokens = shlex.split(run)
-        assert tokens[:2] == ["python3", "tools/ci_selection.py"] \
-            and "--integrity" in tokens, (
-            "the integrity step must invoke tools/ci_selection.py --integrity "
-            f"directly (#2656); got {step.get('run')!r}")
-        assert not any(op in run for op in ("||", "&&", ";", "`", "$(")), (
-            "no shell operator may follow the integrity check — `|| true` / "
-            "`; exit 0` (this workflow's most-used silencing idiom) makes a "
-            f"real drift report green (#2656); got {step.get('run')!r}")
+        # The exact string, not a `tokens[:2]` prefix and not a membership test:
+        # a trailing `|| true`, a `; exit 0`, or any other shell tail is the
+        # silencing idiom this pins, and it would satisfy a looser check.
+        assert run.strip() == expected, (
+            f"a gate step must invoke EXACTLY `{expected}` — no shell operator "
+            "and no trailing anything, or a real failure reports green "
+            f"(#2656/#5373); got {step.get('run')!r}")
         assert not step.get("continue-on-error") and not step.get("shell"), (
-            "the integrity STEP must neither be continue-on-error nor override "
+            "a gate STEP must neither be continue-on-error nor override "
             "`shell`: either one lets the job report success while the check "
-            "failed (#2656)")
+            "failed (#2656/#5373)")
         assert step.get("if", "always()") in _always, (
-            "the integrity step must be unconditional: `if: always()` is fine, "
-            "any other condition drops drift enforcement on the events it "
-            "excludes")
+            "a gate step must be unconditional: `if: always()` is fine, any "
+            "other condition drops enforcement on the events it excludes")
     _timeout = drift.get("timeout-minutes")
     assert isinstance(_timeout, int) and 0 < _timeout <= 15, (
         f"the drift job needs a tight timeout (got {_timeout!r}) — it installs "
@@ -3453,10 +4043,11 @@ def test_null_or_non_mapping_durations_reports_instead_of_tracebacking(tmp_path,
 
 # ── #4378: changed-set diffs must disable rename detection ──────────────
 #
-# The predicate below is per COMMAND, not per line: `python-ci.yml`'s "Tiered
-# selection" step carries TWO `git diff` invocations on ONE line joined by `||`,
-# so a whole-line substring check is satisfied by the flag on either side —
-# removing it from the second command reintroduces #4378 while the check still
+# The predicate below is per COMMAND, not per line: a workflow step MAY write two
+# `git diff` invocations on ONE line joined by `||` (that was `python-ci.yml`'s
+# "Tiered selection" shape until #3442 collapsed it to one canonical merge-base
+# diff), and a whole-line substring check is satisfied by the flag on either side
+# — removing it from the second command reintroduces #4378 while the check still
 # passes. These helpers are module-level so the parser can be exercised directly
 # on synthetic shell text.
 
@@ -3874,11 +4465,14 @@ def test_every_changed_set_diff_scan_covers_yaml_workflows(tmp_path):
 def test_changed_set_parser_reads_commands_not_lines():
     """#4378 FIX 1: two `git diff`s on one `||` line are TWO commands.
 
-    `python-ci.yml`'s "Tiered selection" step carries
-    `... || git diff --no-renames --name-only ...`.
-    A whole-line substring predicate is satisfied by the flag on EITHER side, so
-    removing it from the second command reintroduced #4378 undetected. The
-    synthetic inputs below freeze that regression.
+    A changed-set computation can put two `git diff`s on one `||` line (the
+    `... || git diff --no-renames --name-only ...` shape). A whole-line
+    substring predicate is satisfied by the flag on EITHER side, so removing it
+    from the second command would reintroduce #4378 undetected. The synthetic
+    inputs below freeze that regression. (#3442 removed this shape from
+    `python-ci.yml`'s "Tiered selection" step — it is one canonical merge-base
+    diff now — but the parser must keep splitting commands, because any workflow
+    may still write it.)
     """
     one_flagged = (
         'CHANGED=$(git diff --no-renames --name-only "$BASE...HEAD" '
@@ -4144,8 +4738,8 @@ def test_changed_set_parser_cross_check_fails_closed_on_colocation():
     """#4378 FIX 1: an unparsed changed-set diff cannot hide beside a parsed one.
 
     `unparsed_changed_set_diff_lines` used to mark a whole line "covered" as soon
-    as ONE parsed command started on it, so this shape — `python-ci.yml:188`'s two
-    changed-set diffs on one line, with the second written in a spelling the
+    as ONE parsed command started on it, so this shape — two changed-set diffs on
+    one line, with the second written in a spelling the
     parser does not recognise (`--name-status`, no flag) — passed the pin clean
     (`offenders=[]`, `unparsed=[]`) while the second command computed a changed set
     with rename detection ON. The cross-check must count the flag spellings, not
@@ -4281,9 +4875,10 @@ def test_every_changed_set_diff_disables_rename_detection():
     * It is per COMMAND, not per line (`iter_shell_commands`): `||`/`&&`/`;`/`|`/`&`
       split a line into commands, a backslash-continued invocation is joined first,
       and comments and ordinary quoted text are dropped. `python-ci.yml`'s "Tiered
-      selection" step carries TWO diffs on one line, so a line-level check would
+      selection" step carried TWO diffs on one line, so a line-level check would
       let the second lose the flag undetected — the regression the parser tests
-      above freeze. The bare `|`/`&` joiners are load-bearing, not decorative: with
+      above freeze. (#3442 collapsed that step to one merge-base diff; the
+      parser tests keep the two-command case frozen synthetically.) The bare `|`/`&` joiners are load-bearing, not decorative: with
       only the doubled forms in the separator set,
       `git diff --no-renames --name-only A | git diff --name-status B` was ONE
       merged command whose token list carried both spellings, so the ownership
@@ -4386,33 +4981,43 @@ def test_every_changed_set_diff_disables_rename_detection():
         the eval-drift gate — are filed as follow-ups, not covered here.
     * The non-vacuity floor (`checked >= 3`) is a FLOOR, not a pin of exactly
       three. It is counted from the PARSED commands above — measured today as
-      FOUR: two on `python-ci.yml`'s "Tiered selection" step, one on `ci.yml`'s
+      THREE: ONE on `python-ci.yml`'s "Tiered selection" step (#3442 collapsed its
+      two `||`-joined diffs into one canonical merge-base diff), one on `ci.yml`'s
       "Compute per-surface path gates (#2149)" step, and one on the dead step
       below. So a comment cannot satisfy it (and a comment mentioning the flag
-      cannot inflate it). Because the other THREE commands satisfy the floor by
-      themselves, deleting the dead step alone leaves `checked == 3` and needs NO
-      floor change; the floor has to come down to 2 only if a SECOND command is
-      removed, once just two remain.
-    * The dead FOURTH command — from the "Get changed markdown files" step in
+      cannot inflate it). The floor now has ZERO headroom: the two LIVE commands
+      fall one short of it, so deleting the dead step alone leaves `checked == 2` and
+      FAILS the floor — the floor must come down to 2 BEFORE that step is removed.
+    * The dead third command — from the "Get changed markdown files" step in
       `ci.yml` (cited by step name, not line number, because line numbers drift)
       — is INERT today. That step builds a lint-target list, and the `docs` job
       checks out at depth 1, so `github.event.pull_request.base.sha` is absent,
       the diff fails, `|| true` leaves `FILES` empty and the consuming
       markdownlint/lychee steps are skipped. The `docs` job's own "Conflict-marker
-      check (#2802)" step comment records this. Do not let the floor drift above
-      the number of live commands.
+      check (#2802)" step comment records this. Do not let the floor drift above the
+      PARSED count — today 3, of which only 2 are live, so this inert step is the
+      only thing holding the floor at 3 rather than 2.
     * The same step's `--no-renames` is still deliberate and the rule applies to
       it uniformly: it IS a changed-set computation, and feeding markdownlint/lychee
       the DELETED source path of a `.md`->`.md` rename is tolerated —
       `npx markdownlint-cli <nonexistent.md>` exits 0, and plain `.md` deletions
       already put nonexistent paths into this list.
     * Do NOT generalise this rule to `.github/scripts/check-migration-append-only`.
-      That script deliberately runs
-      `git diff --find-renames=20% ... --name-status` because its #1235
-      pure-prefix-rename repair exception is keyed on the `R*` status (recorded
-      at `docs/plans/2026-08-13-1095-migration-drift-gate.md:148`); `--no-renames`
-      there would emit `D`+`A` and break the gate. The rule in this pin is scoped
-      to changed-set *selection* diffs; that file is a deliberate exception.
+      That script deliberately runs `git diff --find-renames=20% ... --name-status`
+      (recorded at `docs/plans/2026-08-13-1095-migration-drift-gate.md:148`).
+      Its exempt arm IS keyed on the `R*` status: #2240 scoped the exemption to a
+      git-detected forward prefix rename whose destination version sorts strictly
+      AFTER the newest applied version, with BOTH endpoints absent from
+      `supabase_migrations.schema_migrations`. A bare `M`/`D` path carries no
+      destination version, so it has no content-independent ordering bound and is
+      NEVER admitted — it falls through to KEEP and is reported as a violation.
+      The old justification ("`--no-renames` would break the gate") therefore
+      holds again: `--find-renames=20%` is what lets a HIGH-SIMILARITY forward
+      renumber report as one `R<sim>` line and reach the exempt arm at all; a
+      re-land carrying a real content delta still degrades to `D`+`A` even with
+      the flag set, and that form is now reported rather than exempted.
+      The rule in this pin is scoped to changed-set
+      *selection* diffs; that file is a deliberate exception.
     """
     root = Path(__file__).resolve().parents[1]
     wf_dir = root / ".github" / "workflows"
@@ -4440,6 +5045,141 @@ def test_every_changed_set_diff_disables_rename_detection():
         "changed_set_git_diff_commands the new spelling (#4378):\n  "
         + "\n  ".join(unparsed)
     )
+
+
+# ── #3442: the changed-set derivation must be ONE canonical question ──────
+# The `changes` job is a required, always-runs hub, so its selection must be a
+# deterministic function of the diff it claims to measure. Two ways it could
+# silently stop being one, both frozen below: (1) the old
+# `git diff "$BASE...HEAD" 2>/dev/null || git diff "$BASE" HEAD` chain answered a
+# DIFFERENT question (the two-ref form folds in the base branch's own advances,
+# and an unrelated history with no merge base) whenever the first form failed,
+# and (2) a swallowed failure left `CHANGED` empty, which `select()` maps to the
+# tier-1 smoke set — a stripped suite that still reports green.
+
+
+def _tiered_selection_run_text() -> str:
+    """The `run` script of python-ci.yml's `changes` → `Tiered selection` step."""
+    wf = _load_python_ci()
+    for step in wf["jobs"]["changes"]["steps"]:
+        if step.get("id") == "select":
+            return step["run"]
+    raise AssertionError("python-ci.yml has no `changes` step with id `select`")
+
+
+def test_tiered_selection_asks_one_canonical_merge_base_question():
+    """#3442: the changed set comes from ONE loud merge-base diff.
+
+    The old chain silently answered a different question on failure and rendered
+    the fallback reachable only when it would produce a *different* answer, so
+    "the same diff" could select different tests. The pin is on the workflow
+    text, because the defect is the shell shape, not the selector (whose own
+    determinism is frozen by the hashseed test below).
+    """
+    run_text = _tiered_selection_run_text()
+    commands = changed_set_git_diff_commands(run_text)
+    assert len(commands) == 1, (
+        "the `changes` job must compute the changed set with exactly ONE `git "
+        f"diff` (the merge-base question) — #3442. Found {commands}"
+    )
+    diff_lines = [ln for ln in run_text.splitlines() if "git diff" in ln]
+    assert len(diff_lines) == 1, (
+        f"exactly ONE `git diff` line may compute the changed set — #3442. {diff_lines}"
+    )
+    diff_line = diff_lines[0]
+    assert '"$BASE...HEAD"' in diff_line, (
+        "the single changed-set diff must ask the MERGE-BASE question "
+        f"(`\"$BASE...HEAD\"`) — #3442. Got: {diff_line}"
+    )
+    assert '"$BASE" HEAD' not in diff_line, (
+        "the two-ref `git diff \"$BASE\" HEAD` form is a DIFFERENT question "
+        "(it folds in the base branch's own advances) and must not be reachable "
+        f"— #3442. Got: {diff_line}"
+    )
+    assert "2>/dev/null" not in diff_line, (
+        "a swallowed diff failure is how the empty changed set silently degraded "
+        f"to the tier-1 smoke set — #3442. Got: {diff_line}"
+    )
+    assert "||" not in diff_line, (
+        f"no silent fallback to a different diff question — #3442. Got: {diff_line}"
+    )
+
+
+def test_tiered_selection_fails_loudly_on_a_diff_it_cannot_compute():
+    """#3442: an absent base, or an empty changed set, REDs instead of degrading.
+
+    `select([])` is `full=false, slow_run=false, carve_out_run=false` — the
+    ~31-file tier-1 smoke set. That is a legitimate answer for a genuinely
+    docs-only diff and a catastrophic one for a diff that failed to compute, and
+    nothing downstream can tell them apart. Both guards must `exit 1`.
+    """
+    run_text = _tiered_selection_run_text()
+    assert 'git rev-parse --verify --quiet "$BASE^{commit}"' in run_text, (
+        "the base commit must be proven present before the diff is taken — #3442"
+    )
+    assert '-z "$CHANGED"' in run_text, (
+        "an empty changed set must be rejected, not handed to select() — #3442"
+    )
+    assert run_text.count("exit 1") >= 2, (
+        "both guards (absent base, empty changed set) must fail the job — #3442"
+    )
+    lowered = run_text.lower()
+    assert "::error::" in run_text and "refusing" in lowered, (
+        "each guard must name its refusal as an ::error:: so the red is legible "
+        "— #3442"
+    )
+    # The guessable-but-wrong alternative: substituting origin/main for an
+    # absent base SHA would change WHICH diff is measured while still exiting 0.
+    # `origin/main` must therefore appear ONLY in the documented fallback for an
+    # EMPTY base ref, never inside the absent-commit guard.
+    assert run_text.count("origin/main") == 1, (
+        "an absent base must fail, not be swapped for origin/main (a different "
+        "diff) — #3442"
+    )
+
+
+def _run_selector(args: list[str], stdin: str, hashseed: str, artifact_dir: Path):
+    import os
+    env = dict(os.environ)
+    env["PYTHONHASHSEED"] = hashseed
+    env["CI_SELECTION_ARTIFACT_DIR"] = str(artifact_dir)
+    return subprocess.run(
+        [sys.executable, str(Path(__file__).resolve().parents[1] / "tools" / "ci_selection.py"), *args],
+        input=stdin, capture_output=True, text=True, env=env, cwd=str(artifact_dir),
+        check=True,
+    ).stdout
+
+
+def test_changes_job_selection_is_hashseed_deterministic(tmp_path):
+    """#3442 O/ I/T: the same diff selects the same tests on every run.
+
+    `set` iteration order is randomised per interpreter (PYTHONHASHSEED), so a
+    selection (or a `--split` half) derived from an unsorted set would differ
+    between two runs of the SAME diff. This runs the three commands the `changes`
+    job runs — select, the push matrix, and the tier-2 split — under two hash
+    seeds and requires byte-identical output.
+    """
+    changed = "\n".join([
+        "tortoise/ep/engine.py",
+        "tortoise/connectors/falkor.py",
+    ]) + "\n"
+    for seed in ("1", "4242"):
+        (tmp_path / seed).mkdir()
+    first = _run_selector(["--changed-files", "-", "--event", "pull_request"],
+                          changed, "1", tmp_path / "1")
+    second = _run_selector(["--changed-files", "-", "--event", "pull_request"],
+                           changed, "4242", tmp_path / "4242")
+    assert first == second, "select() output depends on PYTHONHASHSEED — #3442"
+
+    matrix_a = _run_selector(["--emit-push-matrix"], "", "1", tmp_path / "1")
+    matrix_b = _run_selector(["--emit-push-matrix"], "", "4242", tmp_path / "4242")
+    assert matrix_a == matrix_b, "--emit-push-matrix depends on PYTHONHASHSEED — #3442"
+
+    selected = json.loads(first)["test_files"]
+    assert isinstance(selected, list) and selected, selected
+    split_a = _run_selector(["--split"], json.dumps(selected), "1", tmp_path / "1")
+    split_b = _run_selector(["--split"], json.dumps(selected), "4242", tmp_path / "4242")
+    assert split_a == split_b, "--split depends on PYTHONHASHSEED — #3442"
 
 
 # ── #4740 review 4: the orphan-assert steps' fail-closed pgrep probe ───────

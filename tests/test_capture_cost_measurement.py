@@ -1343,6 +1343,7 @@ class DistinctStageCostModel:
                           "calls": 0, "prompt_tokens": 0,
                           "completion_tokens": 0, "cost_usd": 0.0,
                           "calls_without_cost": 0, "calls_without_usage": 0,
+                          "calls_without_tokens": 0,
                           "usage_present": True}))
             bucket["calls"] += 1
             bucket["prompt_tokens"] += pt
@@ -1357,6 +1358,7 @@ class DistinctStageCostModel:
             "cost_usd": round(sum(c[3] for c in self.calls), 6),
             "calls_without_cost": 0,
             "calls_without_usage": 0,
+            "calls_without_tokens": 0,
             "deadline_aborts": 0,
             # #3824: the call-evidence disclosure. Zero here because this
             # stub's calls DO reach a roll-up — the deep-equal below then
@@ -1813,6 +1815,215 @@ def test_rollup_does_not_reintroduce_a_non_finite_total():
     assert math.isfinite(json.loads(json.dumps(llm))["cost_usd"]), llm
 
 
+# ── #5854: the token fields are validated, never shaped ─────────────────────
+
+def _one_token_call(usage: dict):
+    """Drive ONE provider usage block through the REAL M2 lane:
+    ``_session_llm_usage_sink`` -> ``_rollup_llm`` -> ``_capture_cost_props``
+    -> ``cost_per_session_distribution``. Returns
+    ``(llm, props, distribution)`` — the emitted row, not a mock of it."""
+    from tortoise import hosted_api as ha
+    from tortoise.extractor_v2 import _rollup_llm
+    from tortoise.sdk import _session_llm_usage_sink
+
+    stats: dict = {}
+    _session_llm_usage_sink(stats)(
+        provider=_PROVIDER, model_id=_MODEL, usage=usage, usage_present=True)
+    llm: dict = {"calls": 0, "retries": 0, "truncated": 0,
+                 "deadline_aborts": 0, "by_stage": {}}
+    _rollup_llm(llm, stats, "m2")
+    props = ha._capture_cost_props("sess-5854", {"stats": {"llm": llm}})
+    assert props is not None
+    dist = costing.cost_per_session_distribution([{"properties": props}])
+    return llm, props, dist
+
+
+def test_token_normaliser_positive_control_records_a_well_formed_usage():
+    """CONTROL — the guard must not narrow the VALID path. A well-formed
+    usage block still records its tokens and charge and discloses nothing.
+    Without this, a guard that rejected everything would look like a fix."""
+    _llm, props, dist = _one_token_call(
+        {"prompt_tokens": 100, "completion_tokens": 10, "cost": 0.001})
+
+    assert props["prompt_tokens"] == 100
+    assert props["completion_tokens"] == 10
+    assert props["cost_usd"] == pytest.approx(0.001, abs=1e-9)
+    assert props["calls_without_tokens"] == 0
+    assert dist["total_usd"] == pytest.approx(0.001, abs=1e-9)
+    assert dist["fully_priced"] is True
+
+
+def test_token_normaliser_rejects_a_bool_instead_of_fabricating_one():
+    """#5854 row 1: ``{"prompt_tokens": true}`` used to emit
+    ``prompt_tokens: 1`` — a token FABRICATED from a boolean (``True`` IS
+    ``1`` in Python). It must be rejected and DISCLOSED, while the valid
+    sibling token and the charge survive untouched.
+
+    REDs on: the pre-fix ``int(prompt_tokens or 0)`` (emits 1, no counter)."""
+    _llm, props, _dist = _one_token_call(
+        {"prompt_tokens": True, "completion_tokens": 10, "cost": 0.001})
+
+    assert props["prompt_tokens"] == 0          # not the fabricated 1
+    assert props["completion_tokens"] == 10     # the valid sibling is kept
+    assert props["cost_usd"] == pytest.approx(0.001, abs=1e-9)
+    assert props["calls_without_tokens"] == 1
+
+
+def test_token_normaliser_rejects_a_float_rather_than_truncating():
+    """#5854 row 2 and the issue's OPEN DECISION: a JSON float is REJECTED +
+    DISCLOSED, not floored. Flooring is the same silent-shaping defect class
+    the issue is about, so it cannot be the fix.
+
+    REDs on: the pre-fix ``int(100.9)`` (emits 100/10, no counter)."""
+    _llm, props, _dist = _one_token_call(
+        {"prompt_tokens": 100.9, "completion_tokens": 10.9, "cost": 0.001})
+
+    assert props["prompt_tokens"] == 0          # not the truncated 100
+    assert props["completion_tokens"] == 0      # not the truncated 10
+    assert props["calls_without_tokens"] == 1
+
+
+def test_token_normaliser_rejects_negatives_and_cannot_price_a_negative():
+    """#5854 row 3, the sharpest: a negative token count used to reach the
+    dollar total through ``_price_lane._tok`` and return a NEGATIVE session
+    cost that the row still declared ``fully_priced``. Rejected at the
+    accumulator, and the reader refuses it from already-stored data too.
+
+    REDs on: the pre-fix ``int(-1000)`` (total -0.000168, fully_priced
+    True)."""
+    _llm, props, dist = _one_token_call(
+        {"prompt_tokens": -1000, "completion_tokens": -100})
+
+    assert props["prompt_tokens"] == 0
+    assert props["completion_tokens"] == 0
+    assert props["cost_usd"] == 0.0
+    assert props["calls_without_tokens"] == 1
+    # no usable measurement -> EXCLUDED, never a negative and never fully priced
+    assert dist["total_usd"] >= 0.0
+    assert dist["n"] == 0
+    assert dist["excluded_unmeasured"] == 1
+    assert dist["fully_priced"] is False
+
+
+def test_token_normaliser_rejects_an_absurd_magnitude():
+    """A magnitude no real generation can reach is rejected, mirroring the
+    reader's own ``abs > 1e300`` bound — otherwise it prices a session at
+    astronomically more than was ever spent.
+
+    REDs on: the pre-fix ``int(10 ** 400)`` (a shaped, enormous token)."""
+    _llm, props, _dist = _one_token_call({"prompt_tokens": 10 ** 400})
+
+    assert props["prompt_tokens"] == 0
+    assert props["calls_without_tokens"] == 1
+
+
+def test_token_normaliser_keeps_the_non_finite_raise():
+    """The #5822 atomic contract is preserved for a value ``int()`` cannot
+    represent at all: ``inf``/``nan`` (and a non-numeric string) still RAISE
+    out of the accumulator, so the caller's residual discloses the call
+    (``test_m2_a_raising_usage_sink_must_not_erase_the_call``) rather than a
+    counter turning it into a $0-token row. The SHAPING values — bool,
+    fractional, negative, absurd — are the ones #5854 counters."""
+    from tortoise.extractor_v2 import _accumulate_call_cost
+
+    for bad in (float("inf"), float("-inf"), float("nan"), "abc"):
+        stats: dict = {}
+        with pytest.raises((ValueError, OverflowError, TypeError)):
+            _accumulate_call_cost(
+                stats, prompt_tokens=bad, completion_tokens=1,
+                cost_usd=0.001, provider="p", model="m")
+        assert "prompt_tokens" not in stats.get("cost", {}), stats
+
+
+def test_token_normaliser_unit_rejects_the_shapeable_and_keeps_a_valid_zero():
+    """The normaliser's contract, directly. A valid ``0`` is NOT a rejection
+    (so the counter cannot fire on an honest zero), and a number-LIKE
+    non-number (a numeric string, a ``Decimal``) is rejected rather than
+    parsed — ``int()`` would shape a count out of it."""
+    from decimal import Decimal
+
+    from tortoise.extractor_v2 import _normalise_token_count
+
+    # rejected: the silently-shaping class
+    assert _normalise_token_count(True) is None
+    assert _normalise_token_count(False) is None
+    assert _normalise_token_count(100.9) is None
+    assert _normalise_token_count(-1000) is None
+    assert _normalise_token_count(10 ** 400) is None
+    assert _normalise_token_count("100") is None
+    assert _normalise_token_count(Decimal("100.9")) is None
+
+    # absent is None, but an honest zero is a VALID count
+    assert _normalise_token_count(None) is None
+    assert _normalise_token_count(0) == 0
+    assert _normalise_token_count(0.0) == 0
+    assert _normalise_token_count(100) == 100
+    assert _normalise_token_count(100.0) == 100
+
+
+def test_token_rejection_rides_the_emitted_row_and_the_allowlist():
+    """The disclosure must SURVIVE the PII filter — an unregistered key is
+    stripped at the writer, the documented #3359 silent-loss mode — and it
+    must roll to the session level beside the sibling counters."""
+    from tortoise import hosted_api as ha
+
+    _llm, props, _dist = _one_token_call(
+        {"prompt_tokens": True, "completion_tokens": 10})
+
+    assert props["calls_without_tokens"] == 1
+    assert set(props) <= ha._ALLOWED_ANALYTICS_PROPS
+    assert "calls_without_tokens" in ha._ALLOWED_ANALYTICS_PROPS
+
+
+def test_reader_refuses_a_stored_negative_token_instead_of_a_silent_zero():
+    """#5854 reader path. Rows written BEFORE this fix are already in
+    ``analytics_events``, so the accumulator fix alone cannot reach them.
+    ``_price_lane`` must reject the negative AND mark the lane UNPRICED — a
+    silent $0 would defeat the same premise the negative did."""
+    stored = {"properties": {
+        "session_id": "sess-stored-neg", "calls": 1,
+        "prompt_tokens": -1000, "completion_tokens": -100,
+        "cost_usd": 0.0, "calls_without_cost": 1,
+        "calls_without_usage": 0, "calls_without_tokens": 0,
+        "deadline_aborts": 0, "unattributed": 0,
+        "by_stage": {"m2": {_PROVIDER: {_MODEL: {
+            "calls": 1, "prompt_tokens": -1000,
+            "completion_tokens": -100, "cost_usd": 0.0,
+            "calls_without_cost": 1, "calls_without_usage": 0,
+            "calls_without_tokens": 0, "usage_present": True}}}}}}
+
+    dist = costing.cost_per_session_distribution([stored])
+    assert dist["total_usd"] >= 0.0            # never sign-flipped
+    assert dist["p50"] >= 0.0
+    assert dist["unpriced_sessions"] == 1      # DISCLOSED, not a silent $0
+    assert dist["fully_priced"] is False
+
+
+def test_v2_lane_cannot_shape_a_bool_token_either():
+    """The accumulator fix alone is not enough on the DEFAULT v2 lane:
+    ``_call_once`` used to ``int()`` the counts BEFORE the accumulator saw
+    them, so a bool was already a fabricated ``1``. This drives the REAL
+    ``extract_session_v2`` path with a model reporting a bool.
+
+    REDs on: restoring ``int(getattr(model, "last_prompt_tokens", None) or
+    0)`` in ``_call_once`` (3 fabricated tokens, no counter)."""
+    from tortoise import hosted_api as ha
+
+    model = CostReportingModel(prompt_tokens=True, completion_tokens=10)
+    out = v2.extract_session_v2(model, _conv())
+    llm = out["stats"]["llm"]
+
+    assert llm["calls"] == 3                    # three real calls happened
+    assert llm["prompt_tokens"] == 0            # not 3 fabricated tokens
+    assert llm["completion_tokens"] == 30
+    assert llm["calls_without_tokens"] == 3
+
+    props = ha._capture_cost_props("sess-v2-5854", out)
+    assert props is not None
+    assert props["prompt_tokens"] == 0
+    assert props["calls_without_tokens"] == 3
+
+
 def test_m2_missing_usage_block_is_disclosed_never_fabricated(
         tmp_path, monkeypatch):
     """A provider response with NO usage block must not be turned into a
@@ -1965,6 +2176,7 @@ def test_m2_capture_makes_calls_so_it_is_counted_not_absent(
         "calls": 0, "retries": 0,
         "prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0,
         "calls_without_cost": 0, "calls_without_usage": 0,
+        "calls_without_tokens": 0,
         "deadline_aborts": 0, "by_stage": {},
         "unattributed": props["unattributed"],
     }
@@ -2235,22 +2447,26 @@ def test_capture_cost_props_carries_the_retry_counter():
 
 def test_emission_write_is_handed_off_the_event_loop(
         monkeypatch, _b7_capture_client):
-    """The emit must run OFF the event loop (``asyncio.to_thread``):
-    ``_track_analytics_event`` POSTs synchronously and the API runs a single
-    uvicorn worker, so an inline call stalls every concurrent request for the
-    duration of the Supabase round-trip (the #2988/#3498 class). Asserted
-    BEHAVIOURALLY — the loop thread and the writer thread must differ —
-    because inlining the call leaves every other emission test green (with
-    Supabase unset the write is a fast local append).
+    """The emit must run OFF the event loop, on the dedicated ``telemetry``
+    pool: ``_track_analytics_event`` POSTs synchronously and the API runs a
+    single uvicorn worker, so an inline call stalls every concurrent request
+    for the duration of the Supabase round-trip (the #2988/#3498 class).
+    Asserted BEHAVIOURALLY — the loop thread and the writer thread must differ,
+    and the writer thread must be the shared off-loop entry point's telemetry
+    pool (#4468), NOT the loop's SHARED default executor that the abuse hooks
+    and the selfhost readiness probe compete on — because inlining the call
+    leaves every other emission test green (with Supabase unset the write is a
+    fast local append).
 
     The loop thread is sampled INDEPENDENTLY of the props build (via the
     awaited ``_async_audit`` seam), so a future refactor that moves the whole
-    emission — props build AND write — into one ``to_thread`` closure still
-    passes: the guarded property is "the write is off the loop", not "the
-    write is on a different thread from the props build"."""
+    emission — props build AND write — into one worker closure still passes:
+    the guarded property is "the write is off the loop", not "the write is on
+    a different thread from the props build"."""
     import threading
 
     from tortoise import hosted_api as ha
+    from tortoise import monitoring
     from tortoise import sdk as sdk_mod
 
     monkeypatch.setattr(sdk_mod, "_V2SessionMock",
@@ -2268,6 +2484,7 @@ def test_emission_write_is_handed_off_the_event_loop(
 
     def _record_emit(*args, **kwargs):
         seen["emit_thread"] = threading.get_ident()
+        seen["emit_thread_name"] = threading.current_thread().name
 
     monkeypatch.setattr(ha, "_async_audit", _record_audit)
     monkeypatch.setattr(ha, "_capture_cost_props", _record_props)
@@ -2282,4 +2499,97 @@ def test_emission_write_is_handed_off_the_event_loop(
     assert "emit_thread" in seen, "the emit never reached the writer"
     assert seen["emit_thread"] != seen["loop_thread"], (
         "the analytics write ran ON the event-loop thread — it must be "
-        "handed off via asyncio.to_thread")
+        "handed off via the shared off-loop entry point (#4015 / #4468)")
+    assert seen["emit_thread_name"].startswith(
+        monitoring.CONTROL_PLANE_TELEMETRY_WORKER_NAME), (
+        f"the capture-lane analytics emit ran on {seen['emit_thread_name']!r} "
+        f"— it must use the dedicated telemetry pool "
+        f"({monitoring.CONTROL_PLANE_TELEMETRY_WORKER_NAME!r}), never the "
+        "loop's shared default executor the abuse hooks compete on (#4468)")
+
+
+def test_capture_lane_analytics_emit_rides_the_telemetry_pool(monkeypatch):
+    """#4468: the capture lane's analytics emit is routed through the shared
+    off-loop entry point (``_emit_analytics_off_loop`` → ``_cp_offload`` on the
+    dedicated ``telemetry`` pool), not ``asyncio.to_thread`` on the loop's
+    SHARED default executor that the abuse hooks also use.
+
+    REDs on unpatched main: the emit is
+    ``asyncio.to_thread(_track_analytics_event, …)``, which never reaches
+    ``_cp_offload``, so the recorded route is empty and the assertion fails.
+    """
+    import asyncio
+
+    from tortoise import hosted_api as ha
+
+    seen: dict = {}
+    emitted: list = []
+
+    async def _record_offload(fn, *, op, best_effort=False, **kwargs):
+        # Record the seam the entry point delegates to instead of running the
+        # blocking POST; the callable is exercised separately below.
+        seen.setdefault("offloads", []).append((op, best_effort))
+        seen["fn"] = fn
+        return None
+
+    monkeypatch.setattr(ha, "_cp_offload", _record_offload)
+    monkeypatch.setattr(
+        ha, "_capture_cost_props",
+        lambda session_id, meta: {"session_id": session_id, "cost_usd": 0.001})
+    # The ledger write (the other, unchanged ``asyncio.to_thread`` call) needs
+    # no real registry here; it must not short-circuit before the emit.
+    monkeypatch.setattr("tortoise.metering.record_capture_usage",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(
+        ha, "_track_analytics_event",
+        lambda org_id, event_name, properties=None:
+            emitted.append((org_id, event_name, properties)))
+
+    asyncio.run(ha._emit_capture_ledger("org-4468", "sess-4468", {}))
+
+    assert seen.get("offloads") == [("analytics_event", True)], (
+        "the capture-lane analytics emit did not ride the shared off-loop "
+        f"entry point on the telemetry pool (#4468): {seen.get('offloads')!r}")
+    # The callable the seam was handed IS the capture_cost emit.
+    seen["fn"]()
+    assert emitted == [("org-4468", "capture_cost",
+                        {"session_id": "sess-4468", "cost_usd": 0.001})], (
+        f"the routed emit did not produce the capture_cost row: {emitted!r}")
+
+
+def test_capture_lane_swallows_the_strict_mode_registration_raise(
+        monkeypatch, caplog):
+    """#4468: the capture lane deliberately KEEPS its own ``except Exception``
+    around the emit, so the #3821 strict-mode ``UnregisteredTelemetryKey``
+    that ``_emit_analytics_off_loop`` lets escape is caught HERE — a committed
+    capture is never failed by bookkeeping. ``_track_onboarding_event``
+    depends on that same raise, so both the escape and this swallow are
+    contracts; weakening either is the defect.
+
+    The assertion is bound to the RAISE actually reaching the handler (via
+    the logged ``exc_info``), so the test cannot pass vacuously by the guard
+    never firing.
+    """
+    import asyncio
+    import logging as _logging
+
+    from tortoise import hosted_api as ha
+
+    monkeypatch.setenv(ha._TELEMETRY_STRICT_ENV, "1")
+    monkeypatch.setattr(
+        ha, "_capture_cost_props",
+        lambda session_id, meta: {"cost_usd": 0.001,
+                                  "unregistered_probe_key": 1})
+    monkeypatch.setattr("tortoise.metering.record_capture_usage",
+                        lambda *a, **k: None)
+
+    with caplog.at_level(_logging.ERROR, logger="tortoise.api"):
+        # Must NOT raise, though the strict-mode guard fires inside the emit.
+        asyncio.run(ha._emit_capture_ledger("org-4468", "sess-4468", {}))
+
+    assert any(
+        record.exc_info
+        and isinstance(record.exc_info[1], ha.UnregisteredTelemetryKey)
+        for record in caplog.records), (
+        "the strict-mode raise never reached the capture lane's handler — "
+        "either the test is vacuous or the escape was weakened (#4468)")
