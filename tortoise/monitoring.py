@@ -1199,8 +1199,52 @@ def graph_offload_timeout_s() -> float:
 #: per-request deadline.
 CONTROL_PLANE_OFFLOAD_TIMEOUT_S = 10.0
 
-#: Bounded per-call ``(op, duration_s)`` record for the offload seam.
-_CP_OFFLOAD_RECORDS: deque[tuple[str, float]] = deque(maxlen=512)
+#: #5840: the CLOSED terminal-state vocabulary of an offload. The single writer
+#: (``record_control_plane_offload``) is the only producer, so the metric's
+#: child set is bounded by this tuple — the #501/#3677 house shape (one writer
+#: owns the label vocabulary; no caller touches a metric object directly).
+CONTROL_PLANE_OFFLOAD_OUTCOMES = (
+    "completed",           # the callable returned
+    "bound_miss_refused",  # the bound fired and the callable will never run
+    "bound_miss_running",  # the bound abandoned the AWAIT; the callable still runs
+    "domain_error",        # fn raised its own failure — not a saturation event
+    "cancelled",           # the AWAITING task was cancelled
+)
+
+#: Bounded per-call ``(op, duration_s, outcome, pool)`` record for the offload
+#: seam. #5840: the outcome and the pool are part of the record because a
+#: SUCCESS-ONLY record made a bound miss — a genuine telemetry DROP — and a
+#: saturated pool indistinguishable from "nothing happened": the #3677 loss
+#: class reachable through the observability channel.
+_CP_OFFLOAD_RECORDS: deque[tuple[str, float, str, str]] = deque(maxlen=512)
+
+# ── #5840: offload saturation becomes MEASURABLE ──────────────────────────
+#
+# #4462 could not be decided because its precondition — "the pool's real
+# saturation rate, and the 10s bound's contribution to request latency under
+# load" — had no data source: ``control_plane_offload_records()`` was read
+# nowhere outside tests, and it recorded only SUCCESSES, so the events in
+# question (backlog refusals, missed wait bounds) left no trace at all.
+#
+# THE TWO QUESTIONS NEED DIFFERENT SHAPES. The COUNTER answers "is the pool
+# saturated" (rate by pool+outcome). The HISTOGRAM answers "how much latency
+# does the bound contribute" (duration by pool+outcome), with the bound itself
+# as a bucket edge so a bound miss is a visible pile-up at the last edge.
+#
+# DEFINED HERE rather than with the counters above because the bucket set needs
+# ``CONTROL_PLANE_OFFLOAD_TIMEOUT_S``, defined just above.
+CONTROL_PLANE_OFFLOAD_COUNT = Counter(
+    "tortoise_control_plane_offload_total",
+    "Control-plane offloads by pool and terminal outcome (#5840)",
+    ["pool", "outcome"],
+)
+CONTROL_PLANE_OFFLOAD_LATENCY = Histogram(
+    "tortoise_control_plane_offload_seconds",
+    "Control-plane offload duration by pool and outcome (#5840)",
+    ["pool", "outcome"],
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
+             CONTROL_PLANE_OFFLOAD_TIMEOUT_S, 30.0),
+)
 #: Bounded per-call ``(duration_s, thread_name)`` record for the CONTROL-PLANE
 #: CLIENT itself (#3498 item 2 — the falsifier). Recorded at the httpx choke
 #: point in ``supabase_control.SupabaseControlPlane``, so a call that ran on
@@ -1270,14 +1314,36 @@ def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
     raise ValueError(f"unknown control-plane pool {pool!r}")
 
 
-def record_control_plane_offload(op: str, duration_s: float) -> None:
-    """Record ONE offloaded control-plane resolution ``(op, duration)``."""
+def record_control_plane_offload(
+    op: str, duration_s: float, *, outcome: str, pool: str
+) -> None:
+    """Record ONE offload's TERMINAL state — the single writer (#5840).
+
+    Called on EVERY terminal path, not only success. ``bound_miss_refused``
+    and ``bound_miss_running`` ARE the saturation events, and recording only
+    ``completed`` is precisely what made them unobservable.
+
+    ``outcome`` is clamped to ``CONTROL_PLANE_OFFLOAD_OUTCOMES`` so a future
+    caller cannot grow the metric's child set without bound (the doctrine at
+    the metric definitions above).
+    """
+    if outcome not in CONTROL_PLANE_OFFLOAD_OUTCOMES:
+        outcome = "unknown"
     with _CP_RECORDS_LOCK:
-        _CP_OFFLOAD_RECORDS.append((op, duration_s))
+        _CP_OFFLOAD_RECORDS.append((op, duration_s, outcome, pool))
+    CONTROL_PLANE_OFFLOAD_COUNT.labels(pool=pool, outcome=outcome).inc()
+    CONTROL_PLANE_OFFLOAD_LATENCY.labels(pool=pool, outcome=outcome).observe(
+        duration_s
+    )
 
 
-def control_plane_offload_records() -> list[tuple[str, float]]:
-    """Snapshot of the bounded offload records (oldest first)."""
+def control_plane_offload_records() -> list[tuple[str, float, str, str]]:
+    """Snapshot of the bounded offload records (oldest first).
+
+    Each entry is ``(op, duration_s, outcome, pool)``;
+    ``CONTROL_PLANE_OFFLOAD_OUTCOMES`` names every terminal state, so a
+    caller can tell a completed call from a saturated one.
+    """
     with _CP_RECORDS_LOCK:
         return list(_CP_OFFLOAD_RECORDS)
 
@@ -1363,36 +1429,52 @@ async def run_control_plane_call(fn, *, op: str,
     bound = CONTROL_PLANE_OFFLOAD_TIMEOUT_S if timeout is None else timeout
     future = control_plane_worker(pool).submit(fn)
     started = time.monotonic()
+    # #5840: exactly ONE record per terminal state, on EVERY path. ``outcome``
+    # is assigned before each exit and read by the ``finally``, so a future
+    # early return or raise cannot silently reopen the success-only hole this
+    # closes. The initial value is the catch-all for an unexpected failure.
+    outcome = "domain_error"
     try:
-        result = await _await_future(future, timeout=bound,
-                                     cancel_on_timeout=cancel_on_timeout)
-    except TimeoutError as exc:
-        # Distinguish the three sources of TimeoutError that meet here:
-        #   1. `fn` raised it              -> a domain error, propagate
-        #   2. the pool refused the submit -> `_WorkerBacklogFull`, fail closed
-        #   3. `wait_for`'s bound expired  -> fail closed
-        future_exc = (future.exception()
-                      if future.done() and not future.cancelled() else None)
-        if future_exc is not None and not isinstance(future_exc, _WorkerBacklogFull):
-            raise
-        reason = ("pool backlog full" if isinstance(future_exc, _WorkerBacklogFull)
-                  else f"exceeded its {bound}s bound")
-        if not future.done():
-            # The callable is still QUEUED or RUNNING: the bound abandoned the
-            # AWAIT, not the work. Attribute whatever it eventually does at the
-            # op level instead of leaving it to a bare asyncio warning (#4456).
-            future.add_done_callback(_log_abandoned_outcome(op))
-        # ``refused`` is the DELIVERY discriminator (#4456): True when the
-        # callable did not and will not run (backlog-full refusal, or a queued
-        # submission cancelled by the bound); False when a bound miss left it
-        # running (or, on a non-cancellable lane, still queued).
-        raise ControlPlaneOffloadError(
-            f"control-plane call {op!r} {reason}",
-            refused=(isinstance(future_exc, _WorkerBacklogFull)
-                     or future.cancelled()),
-        ) from exc
-    record_control_plane_offload(op, time.monotonic() - started)
-    return result
+        try:
+            result = await _await_future(future, timeout=bound,
+                                         cancel_on_timeout=cancel_on_timeout)
+        except TimeoutError as exc:
+            # Distinguish the three sources of TimeoutError that meet here:
+            #   1. `fn` raised it              -> a domain error, propagate
+            #   2. the pool refused the submit -> `_WorkerBacklogFull`, fail closed
+            #   3. `wait_for`'s bound expired  -> fail closed
+            future_exc = (future.exception()
+                          if future.done() and not future.cancelled() else None)
+            if future_exc is not None and not isinstance(future_exc, _WorkerBacklogFull):
+                raise
+            reason = ("pool backlog full" if isinstance(future_exc, _WorkerBacklogFull)
+                      else f"exceeded its {bound}s bound")
+            if not future.done():
+                # The callable is still QUEUED or RUNNING: the bound abandoned the
+                # AWAIT, not the work. Attribute whatever it eventually does at the
+                # op level instead of leaving it to a bare asyncio warning (#4456).
+                future.add_done_callback(_log_abandoned_outcome(op))
+            # ``refused`` is the DELIVERY discriminator (#4456): True when the
+            # callable did not and will not run (backlog-full refusal, or a queued
+            # submission cancelled by the bound); False when a bound miss left it
+            # running (or, on a non-cancellable lane, still queued).
+            refused = (isinstance(future_exc, _WorkerBacklogFull)
+                       or future.cancelled())
+            outcome = "bound_miss_refused" if refused else "bound_miss_running"
+            raise ControlPlaneOffloadError(
+                f"control-plane call {op!r} {reason}",
+                refused=refused,
+            ) from exc
+        outcome = "completed"
+        return result
+    except asyncio.CancelledError:
+        # The AWAITING task was cancelled — neither success nor a pool failure.
+        outcome = "cancelled"
+        raise
+    finally:
+        record_control_plane_offload(
+            op, time.monotonic() - started, outcome=outcome, pool=pool
+        )
 
 
 def _probe_once(sdk, timeout=None,

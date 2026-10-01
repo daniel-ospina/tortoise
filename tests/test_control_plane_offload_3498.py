@@ -141,6 +141,210 @@ def test_offload_records_op_and_duration():
     records = monitoring.control_plane_offload_records()
     assert records and records[-1][0] == "unit"
     assert records[-1][1] >= 0.0
+    # #5840: the record carries the TERMINAL STATE and the pool, not just the
+    # op and duration. A success-only record is what made a bound miss
+    # indistinguishable from "nothing happened".
+    assert records[-1][2] == "completed", records[-1]
+    assert records[-1][3] == "auth", records[-1]
+
+
+def test_a_missed_wait_bound_is_recorded(monkeypatch):
+    """#5840: the saturation event itself is recorded, not only success.
+
+    Before this, ``record_control_plane_offload`` sat AFTER the ``except
+    TimeoutError`` block, so a bound miss — a genuine telemetry DROP — left
+    NO record. A dropped call and an idle pool were then indistinguishable in
+    production telemetry, which is exactly the state #4462 could not measure.
+    """
+    monkeypatch.setattr(monitoring, "CONTROL_PLANE_OFFLOAD_TIMEOUT_S", 0.05)
+    gate = threading.Event()
+    mark = len(monitoring.control_plane_offload_records())
+
+    async def _run():
+        with pytest.raises(monitoring.ControlPlaneOffloadError):
+            await monitoring.run_control_plane_call(
+                gate.wait, op="bound-miss", pool="telemetry", timeout=0.05)
+
+    try:
+        asyncio.run(_run())
+    finally:
+        gate.set()
+
+    records = monitoring.control_plane_offload_records()[mark:]
+    assert [r[0] for r in records] == ["bound-miss"], records
+    # EXACT: this callable was RUNNING (holding the slot) when the bound fired,
+    # so the work survived the abandoned await. A refusal means the opposite —
+    # the callable never runs — and the two need different remediation (raise
+    # the bound vs grow the pool). Collapsing them is undetected by an `in (...)`.
+    assert records[-1][2] == "bound_miss_running", (
+        f"a missed bound recorded {records[-1][2]!r} — a bound miss that left "
+        "the work RUNNING must not be conflated with a refusal"
+    )
+    assert records[-1][3] == "telemetry", records[-1]
+    # ...and the exported metric moved for THAT outcome, so Prometheus sees it.
+    counter = monitoring.CONTROL_PLANE_OFFLOAD_COUNT.labels(
+        pool="telemetry", outcome=records[-1][2])
+    assert counter._value.get() >= 1, "the bound-miss counter child did not move"
+
+
+def test_a_saturated_backlog_is_recorded_as_refused(monkeypatch):
+    """#5840: a pool REFUSAL is recorded with its own outcome.
+
+    ``refused`` is the DELIVERY discriminator (#4456) — the callable never
+    ran — so it must be a distinct outcome from a bound miss that left the
+    work running: they need different remediation (grow the pool vs raise the
+    bound).
+    """
+    tiny = monitoring._SingleSlotWorker("test-cp-5840-refused", workers=1,
+                                        max_backlog=1)
+    monkeypatch.setattr(monitoring, "control_plane_worker",
+                        lambda pool="auth": tiny)
+    first_started = threading.Event()
+    gate = threading.Event()
+
+    def _hold():
+        first_started.set()
+        gate.wait()
+
+    mark = len(monitoring.control_plane_offload_records())
+
+    async def _run():
+        first = asyncio.ensure_future(
+            monitoring.run_control_plane_call(_hold, op="hold-1"))
+        await asyncio.get_running_loop().run_in_executor(None, first_started.wait)
+        second = asyncio.ensure_future(
+            monitoring.run_control_plane_call(gate.wait, op="hold-2"))
+        await asyncio.sleep(0)
+        with pytest.raises(monitoring.ControlPlaneOffloadError):
+            await monitoring.run_control_plane_call(gate.wait, op="refused-3")
+        gate.set()
+        with contextlib.suppress(Exception):
+            await asyncio.gather(first, second, return_exceptions=True)
+
+    asyncio.run(_run())
+    outcomes = {r[0]: r[2] for r in monitoring.control_plane_offload_records()[mark:]}
+    assert outcomes.get("refused-3") == "bound_miss_refused", outcomes
+    assert outcomes.get("hold-1") == "completed", outcomes
+
+
+def test_a_domain_error_is_recorded_but_not_as_saturation(monkeypatch):
+    """#5840: ``fn``'s OWN failure is recorded, and NOT conflated with a drop.
+
+    A domain error is not a pool event; counting it as one would make the
+    saturation rate a function of application bugs.
+    """
+    async def _run():
+        with pytest.raises(ZeroDivisionError):
+            await monitoring.run_control_plane_call(lambda: 1 / 0, op="boom")
+
+    asyncio.run(_run())
+    last = monitoring.control_plane_offload_records()[-1]
+    assert last[0] == "boom" and last[2] == "domain_error", last
+
+
+def test_a_callable_raised_timeout_error_is_a_domain_error():
+    """#5840: ``fn``'s OWN ``TimeoutError`` is not a pool saturation event.
+
+    Three different ``TimeoutError``s meet in ``run_control_plane_call``; only
+    two are pool events. Mislabelling a callable's own timeout as a drop would
+    make the saturation rate a function of application bugs — and the ORIGINAL
+    exception must still propagate, unchanged, not be wrapped.
+    """
+    def _boom():
+        raise TimeoutError("original domain timeout")
+
+    async def _run():
+        # The bare TimeoutError, NOT ControlPlaneOffloadError: the re-raise of
+        # a non-pool failure is what this pins.
+        with pytest.raises(TimeoutError, match="original domain timeout"):
+            await monitoring.run_control_plane_call(_boom, op="domain-timeout")
+
+    asyncio.run(_run())
+    last = monitoring.control_plane_offload_records()[-1]
+    assert last[0] == "domain-timeout", last
+    assert last[2] == "domain_error", (
+        f"a callable's own TimeoutError recorded {last[2]!r} — it is not a "
+        "pool saturation event"
+    )
+
+
+def test_a_cancelled_await_is_recorded_as_cancelled():
+    """#5840: cancellation is a terminal state and is recorded as its own.
+
+    Without the ``except asyncio.CancelledError`` branch the ``finally`` falls
+    back to the initial ``domain_error``, silently mislabelling a cancellation
+    as an application failure.
+    """
+    gate = threading.Event()
+    mark = len(monitoring.control_plane_offload_records())
+
+    async def _run():
+        task = asyncio.ensure_future(
+            monitoring.run_control_plane_call(gate.wait, op="cancel-me"))
+        await asyncio.sleep(0)  # let the submission reach the worker
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    try:
+        asyncio.run(_run())
+    finally:
+        gate.set()
+
+    records = monitoring.control_plane_offload_records()[mark:]
+    assert [r[0] for r in records] == ["cancel-me"], records
+    assert records[-1][2] == "cancelled", (
+        f"a cancelled await recorded {records[-1][2]!r}"
+    )
+
+
+def test_an_out_of_vocabulary_outcome_is_clamped():
+    """#5840: the writer CLAMPS an unknown outcome, bounding label cardinality.
+
+    The metric's child set is bounded only if the writer cannot be handed a
+    new label value; the clamp is that bound, so it is pinned directly rather
+    than only through the callers (which happen to use literals today).
+    """
+    monitoring.record_control_plane_offload(
+        "clamp-probe", 0.01, outcome="not-a-real-outcome", pool="auth")
+    last = monitoring.control_plane_offload_records()[-1]
+    assert last[2] == "unknown", last
+    assert "unknown" not in monitoring.CONTROL_PLANE_OFFLOAD_OUTCOMES
+    # The clamped child is the one that moved — the raw value never became a
+    # Prometheus label.
+    child = monitoring.CONTROL_PLANE_OFFLOAD_COUNT.labels(
+        pool="auth", outcome="unknown")
+    assert child._value.get() >= 1
+
+
+def test_the_offload_metrics_reach_the_metrics_endpoint():
+    """#5840 hole 2: the pool has a Prometheus collector on ``/metrics``.
+
+    ``/metrics`` serves ``generate_latest()`` over the default registry, so a
+    module-level ``Counter``/``Histogram`` is exported only if it is DEFINED
+    at import. Before this, the control-plane pools had NO collector and
+    ``control_plane_offload_records()`` was read nowhere outside tests, so the
+    saturation rate was not scrapeable at all.
+    """
+    from prometheus_client import generate_latest
+
+    async def _run():
+        await monitoring.run_control_plane_call(lambda: "ok", op="exported",
+                                                pool="telemetry")
+
+    asyncio.run(_run())
+    text = generate_latest().decode()
+    assert "tortoise_control_plane_offload_total" in text, (
+        "the offload counter is not exported on /metrics"
+    )
+    assert "tortoise_control_plane_offload_seconds" in text, (
+        "the offload duration histogram is not exported on /metrics"
+    )
+    # The child carries BOTH labels — a pool-attributed, outcome-attributed
+    # series is what makes "is the TELEMETRY pool saturated" answerable.
+    assert 'pool="telemetry"' in text and 'outcome="completed"' in text, (
+        "the exported series is not pool/outcome attributed"
+    )
 
 
 def test_run_on_daemon_worker_honours_an_explicit_bound():
@@ -843,7 +1047,7 @@ def test_invite_info_submits_one_offload_regardless_of_token(monkeypatch):
     reads are therefore one unit, and an unknown token never issues the org read.
     """
     def _ops_since(mark: int) -> list[str]:
-        return [op for op, _dur in monitoring.control_plane_offload_records()[mark:]]
+        return [rec[0] for rec in monitoring.control_plane_offload_records()[mark:]]
 
     _stub_control_plane(monkeypatch, [{
         "id": "inv-3718", "org_id": "org-1", "role": "member",
