@@ -32,7 +32,6 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import sys
 import time
 
 import pytest
@@ -701,15 +700,6 @@ def _parse_sse(text: str):
     return json.loads(text)
 
 
-#: How long the registered ``_bound_slow`` tool sleeps. Read at CALL time rather
-#: than defaulted into the closure, so a test can raise it together with the
-#: bound it is measured against — a tool that outlives the seam's REMAINING
-#: deadline is what makes the breach observable, and a test whose bound exceeds
-#: this sleep would see the tool COMPLETE and misread it as "the seam was not
-#: spent".
-_BOUND_SLOW_SLEEP_S = 0.3
-
-
 @pytest.fixture
 def mcp_slow_tool():
     """Register a slow test tool on the shared mcp instance; remove after.
@@ -724,7 +714,7 @@ def mcp_slow_tool():
     finished: list = []
 
     async def _bound_slow() -> dict:
-        await asyncio.sleep(_BOUND_SLOW_SLEEP_S)
+        await asyncio.sleep(0.3)
         finished.append(True)
         return {"ok": True}
 
@@ -809,8 +799,7 @@ def test_mcp_http_sse_path_delivers_the_refusal(
     assert err["data"]["retry_after"] == ma._TRANSPORT_WAIT_RETRY_AFTER_S
 
 
-def test_mcp_seam_spends_the_transport_deadline_not_a_fresh_one(
-        mcp_slow_tool, monkeypatch):
+def test_mcp_seam_spends_the_transport_deadline_not_a_fresh_one(monkeypatch):
     """#3834 F1: ONE deadline, not two.
 
     The middleware's deadline is abandoned the moment ``http.response.start``
@@ -823,29 +812,13 @@ def test_mcp_seam_spends_the_transport_deadline_not_a_fresh_one(
     legible refusal — the exact failure this unit exists to eliminate.
 
     This mounts the REAL parent app (``WaitBoundMiddleware`` included) over the
-    MCP sub-app and injects a pre-SSE cost, then asserts the caller only waits
-    the bound (+ε). The sibling SSE test mounts the MCP app with NO parent
-    middleware, which is precisely why it could not see this.
-
-    ⛔ WHY THE TIMINGS ARE LARGE (#3834 CI flake). The middleware's deadline is
-    ``bound``, and it stands aside only once ``http.response.start`` is on the
-    wire. The SSE therefore starts at ``pre_Sse`` PLUS the whole FastMCP
-    Streamable-HTTP handshake cost, and the margin available to that handshake
-    is exactly ``bound - pre_Sse``. At the original ``(0.2, 0.3)`` that margin
-    was 100 ms — on a cold GitHub-hosted runner the first-request handshake
-    alone can exceed it, the middleware's own deadline then trips, and the
-    caller gets the PRE-SSE 504 refusal instead of the in-SSE one:
-    ``assert 504 == 200``. That is not a code defect (the refusal is correct
-    for that ordering) and it is not "the bound fell to 0" — ``%.0f`` renders
-    the healthy 0.3 s bound as ``(0s)`` in the log line, which is what made the
-    failure read as a misconfiguration.
-
-    The same difference is ALSO the discriminator (a seam that opened a FRESH
-    bound would over-wait by ``pre_Sse``), so making the margin safe and keeping
-    the discrimination are the same act: SCALE BOTH. ``(2.0, 3.0)`` gives a
-    1.0 s handshake margin (10x the old) and a 2.0 s discrimination (a fresh
-    bound lands at 5.0 s against a 3.15 s ceiling). Every assertion below is
-    unchanged — no skip, no tolerant status set, no relaxed equality.
+    MCP sub-app and injects a pre-SSE cost, then asserts the refusal's IDENTITY
+    (``isError`` + the wait-bound marker + ``ERR_TIMEOUT``) — which can only be
+    produced if the seam spent the transport's REMAINING deadline, so the
+    caller-visible wait is ``bound`` rather than ``bound`` + the pre-SSE cost.
+    The elapsed time is measured for the failure message only and deliberately
+    NOT asserted on (#5049). The sibling SSE test mounts the MCP app with NO
+    parent middleware, which is precisely why it could not see this.
     """
     from contextlib import asynccontextmanager
 
@@ -855,10 +828,30 @@ def test_mcp_seam_spends_the_transport_deadline_not_a_fresh_one(
 
     from tortoise import mcp_server as ms
 
-    bound = 3.0
-    # The tool must outlive the seam's REMAINING deadline (bound - pre_Sse =
-    # 1.0 s) or it completes and this reads as "the seam was not spent".
-    monkeypatch.setattr(sys.modules[__name__], "_BOUND_SLOW_SLEEP_S", 3.0)
+    # The seam spends `remaining = max(0.0, bound - (monotonic() - arrival))`
+    # (``tortoise/mcp_server.py``, #3834 F1). The two derived numbers are chosen
+    # so the VERDICT is an outcome, not a stopwatch (#5049: a fixed wall-clock
+    # budget must not be what decides pass/fail).
+    #
+    #   pre_sse + startup_overhead < bound       — this only buys margin, and
+    #       it is still a fixed wall-clock budget: if ``http.response.start``
+    #       takes longer than ``bound - pre_sse`` (3.0 s here) the middleware
+    #       answers 504 first and the ``status_code`` assertion below fails.
+    #       Disclosed as residue, not claimed as #5049 compliance.
+    #   bound - pre_sse < tool_sleep < bound     — this is what makes the
+    #       verdict load-independent. The two candidates then separate by
+    #       OUTCOME: the seam counts from the TRANSPORT's arrival, which is
+    #       stamped before ``_PreSseCost`` runs, so a correct implementation
+    #       always has ``remaining <= bound - pre_sse`` and ALWAYS leaves the
+    #       tool running; the pre-#3834 regression instead uses a FRESH
+    #       ``bound``, which is longer than the tool, so the tool completes and
+    #       the call succeeds. No tolerance has to be tuned: a stalled host can
+    #       only push ``remaining`` further DOWN on the correct path, so the
+    #       refusal assertions below cannot be load-falsified. The window above
+    #       is the one clock this test still answers to.
+    pre_sse = 2.0
+    bound = 5.0
+    tool_sleep = 4.0  # in (bound - pre_sse, bound) = (3.0, 5.0)
     monkeypatch.setattr(ma, "_TRANSPORT_WAIT_BOUND_S", bound)
     monkeypatch.setattr(ha, "_track_analytics_event", lambda *a, **k: None)
 
@@ -877,7 +870,7 @@ def test_mcp_seam_spends_the_transport_deadline_not_a_fresh_one(
 
         async def __call__(self, scope, receive, send):
             if scope["type"] == "http":
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(pre_sse)
             await self.app(scope, receive, send)
 
     parent = Starlette(lifespan=_lifespan, routes=[Mount("/mcp", app=mcp_app)])
@@ -885,7 +878,23 @@ def test_mcp_seam_spends_the_transport_deadline_not_a_fresh_one(
     # Registered LAST → OUTERMOST, so it wraps _PreSseCost (add_middleware
     # inserts at index 0).
     parent.add_middleware(ha.WaitBoundMiddleware)
+
+    # Its own tool, for the same reason as the sibling test below and one more:
+    # ``tool_sleep`` sits in ``(bound - pre_sse, bound)`` so the outcome, not the
+    # clock, tells the two candidates apart. The shared fixture's 0.3 s sleep
+    # would put it below that window and make the outcome the same for both.
+    from fastmcp.tools import FunctionTool
+
+    async def _flake_slow() -> dict:
+        await asyncio.sleep(tool_sleep)
+        return {"ok": True}
+
     try:
+        # Inside the ``try`` so the ``finally`` that clears the pending map also
+        # removes the tool from the shared ``ms.mcp`` registry on any failure.
+        ms.mcp.add_tool(FunctionTool.from_function(
+            _flake_slow, name="_bound_slow_flake",
+            description="wait-bound test: flake-hardened slow tool"))
         with TestClient(parent) as client:
             t0 = time.perf_counter()
             # `/mcp/` (trailing slash) on purpose: posting `/mcp` makes Starlette
@@ -893,24 +902,43 @@ def test_mcp_seam_spends_the_transport_deadline_not_a_fresh_one(
             # pre-SSE cost TWICE — measuring the redirect, not the deadline.
             r = client.post("/mcp/", headers=_MCP_HEADERS, json={
                 "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                "params": {"name": "_bound_slow", "arguments": {}}})
+                "params": {"name": "_bound_slow_flake", "arguments": {}}})
             elapsed = time.perf_counter() - t0
     finally:
         ms._pending_mcp_wait_bound.clear()
+        try:  # noqa: SIM105
+            ms.mcp.local_provider.remove_tool("_bound_slow_flake")
+        except Exception:
+            pass
 
     assert r.status_code == 200, r.text
     body = _parse_sse(r.text)
     assert body is not None, r.text
-    assert body["result"]["isError"] is True, (
-        "the tool returned success — the seam did not spend the transport's "
-        "remaining deadline (or the pre-SSE middleware did not run)")
-    assert elapsed <= bound + 0.15, (
-        f"caller-visible wait {elapsed:.3f}s exceeded the {bound}s bound+ε — "
-        "pre-SSE cost is being added to a FRESH MCP deadline (two deadlines)")
+    result = body["result"]
+    # The discriminator: with a FRESH deadline the tool (4.0 s) finishes before
+    # the bound (5.0 s) and this is a success, so this assertion IS the #3834 F1
+    # pin. ``elapsed`` is reported for diagnosis only — it is deliberately NOT
+    # asserted on, so a loaded host can never fail a correct run (#5049).
+    assert result["isError"] is True, (
+        f"the tool COMPLETED after {elapsed:.3f}s — the seam spent a fresh "
+        f"{bound}s deadline instead of the transport's remaining "
+        f"{bound - pre_sse:.1f}s one, so the {tool_sleep}s tool finished first"
+    )
+    # Identify the REFUSAL, not merely an error: FastMCP answers an unregistered
+    # tool name with ``isError: true`` too (the seam IS entered — ``call_tool``
+    # routes every ``tools/call`` through it — but the dispatch fails fast and
+    # never times out), so the check above would pass with the wait-bound
+    # refusal never produced. Only the timeout branch sets the marker and
+    # ``ERR_TIMEOUT``. ``.get``/``or {}`` rather than raw indexing: on that path
+    # ``_meta`` is absent entirely, and ``result["_meta"][...]`` would raise
+    # KeyError instead of showing ``r.text``.
+    meta = result.get("_meta") or {}
+    assert meta.get(ms._WAIT_BOUND_META_KEY) is True, r.text
+    err = (result.get("structuredContent") or {}).get("error") or {}
+    assert err.get("code") == ERR_TIMEOUT, r.text
 
 
-def test_mcp_breach_reports_the_caller_visible_interval(
-        mcp_slow_tool, monkeypatch):
+def test_mcp_breach_reports_the_caller_visible_interval(monkeypatch):
     """#3834 F-1: the MCP arm's breach event must report the SAME interval the
     REST arm reports — the CALLER-VISIBLE wait — not this seam's own entry.
 
@@ -920,14 +948,6 @@ def test_mcp_breach_reports_the_caller_visible_interval(
     bound 0.3 s and pre-SSE 0.2 s: the caller waited ~0.3 s while the event said
     ~0.09 s. A consumer thresholding ``latency_ms >= 10000`` counted ZERO MCP
     breaches on the very surface the bound was justified by.
-
-    ⛔ Same fragile margin as the F1 test above, fixed the same way: ``bound``
-    and the pre-SSE cost are scaled to ``(3.0, 2.0)`` so the FastMCP handshake
-    has 1.0 s to reach ``http.response.start`` instead of 100 ms. The two
-    assertions below are PROPORTIONAL or measure two quantities on one
-    timeline, so they hold unchanged: ``0.75 * bound`` scales itself, and the
-    seam-local interval (~bound - pre_Sse = 1.0 s) still lands far under that
-    floor, which is what catches a regression back to the seam's own ``t0``.
     """
     from contextlib import asynccontextmanager
 
@@ -937,8 +957,12 @@ def test_mcp_breach_reports_the_caller_visible_interval(
 
     from tortoise import mcp_server as ms
 
-    bound = 3.0
-    monkeypatch.setattr(sys.modules[__name__], "_BOUND_SLOW_SLEEP_S", 3.0)
+    # Identical window to the sibling test above, which derives it — see the
+    # comment there. ``pre_sse`` is the signal in this test too: the seam-local
+    # report is ``bound - pre_sse``, the caller-visible one is ``bound``.
+    pre_sse = 2.0
+    bound = 5.0
+    tool_sleep = 4.0  # in (bound - pre_sse, bound) = (3.0, 5.0)
     monkeypatch.setattr(ma, "_TRANSPORT_WAIT_BOUND_S", bound)
     seen: list = []
     monkeypatch.setattr(ha, "_track_analytics_event",
@@ -959,40 +983,71 @@ def test_mcp_breach_reports_the_caller_visible_interval(
 
         async def __call__(self, scope, receive, send):
             if scope["type"] == "http":
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(pre_sse)
             await self.app(scope, receive, send)
 
     parent = Starlette(lifespan=_lifespan, routes=[Mount("/mcp", app=mcp_app)])
     parent.add_middleware(_PreSseCost)
     parent.add_middleware(ha.WaitBoundMiddleware)
+
+    # Its own tool, for the same reason as the sibling test above: ``tool_sleep``
+    # must sit in ``(bound - pre_sse, bound)`` so a correct run leaves it running
+    # (the seam then emits the breach) while a fresh-deadline regression lets it
+    # finish and emits nothing.
+    from fastmcp.tools import FunctionTool
+
+    async def _flake_slow() -> dict:
+        await asyncio.sleep(tool_sleep)
+        return {"ok": True}
+
     try:
+        ms.mcp.add_tool(FunctionTool.from_function(
+            _flake_slow, name="_bound_slow_flake",
+            description="wait-bound test: flake-hardened slow tool"))
         with TestClient(parent) as client:
             t0 = time.perf_counter()
             r = client.post("/mcp/", headers=_MCP_HEADERS, json={
                 "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                "params": {"name": "_bound_slow", "arguments": {}}})
+                "params": {"name": "_bound_slow_flake", "arguments": {}}})
             elapsed = time.perf_counter() - t0
+        # Poll for the BREACH specifically, not for "any event": this request
+        # also emits ``mcp_tool_call`` through the same monkeypatched sink, and
+        # that one takes a shorter path to the executor, so breaking on the
+        # first event made this assertion load-falsifiable.
         for _ in range(250):
-            if seen:
+            if any(e == ha._TRANSPORT_WAIT_BOUND_EVENT for e, _ in seen):
                 break
             time.sleep(0.02)
     finally:
         ms._pending_mcp_wait_bound.clear()
+        try:  # noqa: SIM105
+            ms.mcp.local_provider.remove_tool("_bound_slow_flake")
+        except Exception:
+            pass
 
     assert r.status_code == 200, r.text
     breach = [p for e, p in seen if e == ha._TRANSPORT_WAIT_BOUND_EVENT]
     assert len(breach) == 1, breach
     emitted = breach[0]["latency_ms"]
-    # The seam-local interval is ~remaining == bound - pre-SSE (~0.1 s); the
-    # caller-visible one is ~bound. A regression back to the seam's ``t0``
-    # lands well under the 0.75 * bound floor.
+    # ``emitted >= 0.75 * bound`` guards the reported-interval half of the
+    # defect: the deadline is right but the event reports the seam-local
+    # ``remaining`` (~``bound - pre_sse``) instead of the caller-visible
+    # interval. The pre-#3834 regression is caught one line ABOVE instead, by
+    # ``len(breach) == 1`` — a fresh deadline outlives the tool, so no breach is
+    # emitted at all. Both checks are one-sided and load-safe: a stalled loop can
+    # only push the reported interval UP, and can only delay the breach, which
+    # the poll above waits for by name. The old
+    # ``abs(emitted - elapsed) < 150`` compared a server-side interval against a
+    # CLIENT-side stopwatch that a stalled event loop inflates on its own (it
+    # false-failed a correct run 3/5 under 4 GIL-spinning threads), so it is
+    # gone rather than re-tuned (#5049). What that gives up: the two-sided check
+    # also caught an OVER-reported interval, and no load-safe ceiling can
+    # replace it — a correct reported interval already reaches above ``bound``
+    # under contention.
     assert emitted >= 0.75 * bound * 1000, (
         f"the MCP breach reported {emitted} ms for a caller-visible wait of "
         f"{elapsed * 1000:.0f} ms — that is the seam-local interval, not the "
         "interval the bound governs")
-    assert abs(emitted - elapsed * 1000) < 150, (
-        f"emitted {emitted} ms vs caller-visible {elapsed * 1000:.0f} ms — the "
-        "two arms are measuring different intervals")
 
 
 def test_mcp_breach_is_recorded_exactly_once_on_the_composed_path(
