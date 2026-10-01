@@ -20,9 +20,19 @@ Usage:
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/experiments/extractor-v2/run_parity_v2.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/experiments/extractor-v2/run_parity_v2.py`"
+    )
+
 import json
 import re
-import sys
 import time
 from pathlib import Path
 
