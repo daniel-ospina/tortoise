@@ -35,7 +35,7 @@ Usage:
         [--uri URI] [--all-tenants] [--limit N] [--batch-size N]
         [--force-re-embed] [--repair-embeddings]
 
-Defaults to TORTOISE_DB_URI env var (or docker://:falkordb@localhost:16379/tortoise).
+Defaults to TORTOISE_DB_URI env var (or docker://:falkordb@127.0.0.1:16379/tortoise).
 
 Requires the embeddings extra: pip install 'tortoise-graph[embeddings]'
 (or sentence-transformers + scikit-learn). --dry-run only reports counts and
@@ -48,7 +48,7 @@ import json
 import os
 import sys
 
-DEFAULT_URI = "docker://:falkordb@localhost:16379/tortoise"
+DEFAULT_URI = "docker://:falkordb@127.0.0.1:16379/tortoise"
 DEFAULT_BATCH = 500
 
 # Entity types to embed + their text property (what gets vectorized) and
