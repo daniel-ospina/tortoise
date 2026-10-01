@@ -279,15 +279,14 @@ _DERIVATION_REFERENCES_LABELS = frozenset({"Event", "Document"})
 # auto-created-Source placeholder (and the "no recorded hash" value on an Event), and
 # `'' = ''` compares equal to the source's current hash — a FALSE current.
 #
-# `version_expr` names the version the edge was READ at, and it has three CALLERS:
-# ``s.contentHash`` on the live `references` writers (the Source was just written from the
-# content the target describes), ``e.file_hash`` on the repair path — see
+# `version_expr` names the version the edge was READ at. Three expressions are passed:
+# ``s.contentHash`` on the `references` writers (which re-read the Source, including on the
+# rebuild path — ``_upsert_document`` and ``_materialize_connector_source`` in pass 1b),
+# ``e.file_hash`` on the repair path — see
 # :meth:`_EdgeHandlers.link_source_to_legacy_event` — and the caller-bound ``$v`` on the
-# `extractedFrom` writer (:meth:`_EdgeHandlers._link_source`). The ``$v`` caller is the
-# only one whose version is JOURNALED rather than re-read at replay: LIVE fills it from
-# :func:`resolve_source_versions`, REPLAY passes the value carried in the Point's own
-# snapshot. (The ``s.contentHash`` callers ALSO run during a rebuild — ``_upsert_document``
-# and ``_materialize_connector_source`` in pass 1b — and DO re-read the Source there.)
+# `extractedFrom` writer (:meth:`_EdgeHandlers._link_source`), which LIVE fills from
+# :func:`resolve_source_versions` and REPLAY passes from the Point's own journaled snapshot
+# (``sourceVersionTransit``), so that anchor needs no graph read at replay.
 #
 # ⚠️ KNOWN LIMITATION — the anchor does not advance when the TARGET is rewritten in place
 # (#5199, under owner review). ``ON CREATE`` means a target rebuilt from a NEWER version
