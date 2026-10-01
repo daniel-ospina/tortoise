@@ -2606,8 +2606,8 @@ def test_workflow_lint_pins_the_actionlint_image_and_its_scope():
     # `docker run … \` + `  rhysd/actionlint:…` form) is matched as ONE command.
     joined = re.sub(r"\\\n\s*", " ", runs)
     assert re.search(
-        r"(?m)^\s*docker\s+run\b[^\n]*\brhysd/actionlint:"
-        r"(?:\d+\.\d+\.\d+(?:@sha256:[0-9a-f]{64})?|@sha256:[0-9a-f]{64})\b"
+        r"(?m)^\s*docker\s+run\b[^\n]*\brhysd/actionlint"
+        r"(?::\d+\.\d+\.\d+(?:@sha256:[0-9a-f]{64})?|@sha256:[0-9a-f]{64})\b"
         r"[^\n]*-shellcheck=",
         joined,
     ), (
