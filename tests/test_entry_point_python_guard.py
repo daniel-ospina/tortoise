@@ -89,6 +89,12 @@ Declared bounds — what this file does NOT verify
   RUNS it under `/usr/bin/python3` and asserts the contract's exit `2` (a guard
   exits `1`), and `…_for_triage` imports the module under the same interpreter.
   `test_the_runtime_39_exclusion_is_accurate` re-derives both 3.9-runnable claims.
+* **`tools/queue_conflict_census.py`** is also deliberately 3.9-RUNNABLE
+  (`RUNTIME_39`): it is stdlib-only and 3.9-clean, and its own `USAGE` block
+  documents the bare-`python3` form (`python3 tools/queue_conflict_census.py`,
+  the ambient 3.9.6) for the daily census series. Guarding it would convert a
+  working documented command into a refusal with no diagnostic benefit.
+  `test_the_runtime_39_exclusion_is_accurate` re-derives the 3.9-runnable claim.
 * **`tools/**/__init__.py`** are package markers, not entry points.
 """
 
@@ -152,13 +158,20 @@ RUNTIME_39: dict[str, str] = {
         "docs/ci/merge-throughput-measurements.md — the guard would remove a "
         "working documented command rather than name a crash"
     ),
+    "tools/queue_conflict_census.py": (
+        "deliberately 3.9-RUNNABLE: stdlib-only and 3.9-clean, and its own "
+        "`USAGE` block documents `python3 tools/queue_conflict_census.py` (the "
+        "ambient 3.9 interpreter) for the daily census series — the guard would "
+        "turn a working documented command into a refusal with no diagnostic "
+        "benefit"
+    ),
 }
 
 #: A small floor: the corpus is the measured tracked `tools/**/*.py` +
 #: `graph-scripts/*.py` set. A glob that silently stopped matching must fail,
-#: never pass vacuously. (145 at the #5136 rebased head: 152 tracked `.py` in the
+#: never pass vacuously. (147 at the #5136 rebased head: 155 tracked `.py` in the
 #: corpus dirs, minus 3 `__init__.py` package markers, minus `UNGUARDABLE`, minus
-#: the 3 `RUNTIME_39` entries.)
+#: the 4 `RUNTIME_39` entries.)
 MIN_CORPUS = 140
 
 
