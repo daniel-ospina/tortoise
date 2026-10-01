@@ -706,6 +706,7 @@ surfaces:
   - test_6131_operator_mutation_vocabulary.py
   - test_comove_dispatch_3627.py
   - test_heavy_import_guard.py
+  - test_hook_stderr_5919.py
   # #4971: the `(op_type, src, dst)` idempotency guard hoisted into
   # `commit_ops.apply_payload_operators` — the helper is core engine code, and
   # the re-key regression drives the real embedded capture commit, so this is
