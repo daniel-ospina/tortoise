@@ -39,13 +39,23 @@ Also:
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/ci_selection.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/ci_selection.py`"
+    )
+
 import argparse
 import ast
 import json
 import math
 import os
 import re
-import sys
 from pathlib import Path
 
 # 1.4.0 (#6135): the fast pool is split into N shards (config `fast_shards`)
@@ -178,6 +188,13 @@ SHARED_MODULES = (
     # `tests/test_ci_selection.py::test_every_conftest_module_level_tests_import_is_shared`.
     "tests/_tmpdir_hygiene.py",
     "tests/_embedded.py",
+    # #5049: the verdict contract (`tests/_verdict.py`) is imported at conftest
+    # MODULE level and hands the suite-wide per-test process-global reset to
+    # every surface's tests. It is not a `test_*.py` file, so the manifest never
+    # classifies it; without this entry a change to the contract would select
+    # `core` only and a break it induced in an api/eval/ep test would never run
+    # on the PR that made it (the #1349/#3332/#3910 under-selection class).
+    "tests/_verdict.py",
     "pyproject.toml",
     "requirements.txt",
     ".github/workflows/python-ci.yml",
