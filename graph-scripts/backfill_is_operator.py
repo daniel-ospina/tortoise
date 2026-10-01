@@ -25,7 +25,7 @@ Idempotent: only touches Points where is_operator IS NULL; index drop is
 best-effort. Safe to re-run.
 
 Usage:
-    TORTOISE_DB_URI=docker://:@localhost:16379/tortoise \
+    TORTOISE_DB_URI=docker://:@127.0.0.1:16379/tortoise \
         python3 graph-scripts/backfill_is_operator.py [--dry-run] [--yes]
 
 Test safety: always verify graph name before running. For tests, use

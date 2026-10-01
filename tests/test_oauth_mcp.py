@@ -545,9 +545,11 @@ class TestAuthorizePage:
         html = self._consent_html(api_client)
         assert 'id="btn-retry-preview"' in html
         # in-flight guard spans the async preview + options are rebuilt from
-        # scratch (no duplicate rows on sequential re-runs)
-        assert "let previewInFlight = false" in html
-        assert "if (previewInFlight) return;" in html
+        # scratch (no duplicate rows on sequential re-runs). Since #5734 the guard
+        # hands back the RUNNING flow rather than bare `undefined`, so a caller
+        # that awaits it observes the flow it would otherwise race.
+        assert "let previewInFlight = null" in html
+        assert "if (previewInFlight) return previewInFlight;" in html
         assert "while (orgSelect.firstChild) orgSelect.removeChild" in html
         assert "onAuthStateChange" in html
         assert 'event === "INITIAL_SESSION"' in html

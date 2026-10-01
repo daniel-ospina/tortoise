@@ -240,7 +240,9 @@ DISCRIMINATORS = {
 
 VALID_DEST = set(TARGET_MCP) | {"REMOVED"}
 
-# Destinations the SIBLING SDK rename table (`docs/product/sdk-rename-table.md` §C3b, and
+# Destinations the SIBLING SDK rename table (`docs/product/sdk-rename-table.md`, GENERATED
+# ON DEMAND — not committed, #5373; render with `uv run python tools/sdk_rename_table.py`;
+# `§C3b`, and
 # its C6 fold record) records as WRONG. `tools/sdk_rename_table.py` reconciles the two
 # artifacts and determined that beta's row — and the owner-approved MCP list it rests on —
 # puts these two on `update_knowledge`, not `refresh_confidence`.
@@ -762,7 +764,7 @@ def render(rows: list[dict], sdk_defs: dict[str, int], cites: dict[str, dict]) -
         + ", ".join(f"`{n}`" for n in retired_names),
         "",
         "**A `⚠️` after a destination means the sibling SDK rename table**",
-        "**(`docs/product/sdk-rename-table.md` §C3b, and its C6 fold record) records that**",
+        "**(`docs/product/sdk-rename-table.md` (generated on demand) §C3b, and its C6 fold record) records that**",
         "**destination as WRONG.** The map is owner-approved, so it is NOT edited here; §D2c states",
         "the documented reading and the authority for it.",
         "",
@@ -906,7 +908,7 @@ def render(rows: list[dict], sdk_defs: dict[str, int], cites: dict[str, dict]) -
         "",
         "#### D2c — destinations the sibling SDK rename table records as WRONG",
         "",
-        "`docs/product/sdk-rename-table.md` reconciles the same surface this file maps, and its",
+        "`docs/product/sdk-rename-table.md` (generated on demand) reconciles the same surface this file maps, and its",
         "§C3b finding plus its C6 fold record name a different destination for the rows below.",
         "**The destination map here is owner-approved, so it is reported, not edited** — the same",
         "rule D2 states. Each row's documented reading and the authority for it are shown, so the",

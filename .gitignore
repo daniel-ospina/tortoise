@@ -92,3 +92,20 @@ data/kind_index/*
 .tortoise-prewipe-snapshot.json
 .tortoise-prewipe-*.tmp
 .venv
+
+# #5373: the SDK rename table is GENERATED from `sdk.py` (AST line numbers) and two
+# docs, and it is a function of a file every lane edits. Committing it made any two
+# concurrent `sdk.py` PRs unmergeable: measured 2026-09-26, it was the sole conflict
+# in 8 of the 44 unclean PRs, and normalising `sdk.py:\d+` made the two sides
+# byte-identical — git conflicted on two files that differed only by a number nobody
+# reads. It is NOT unioned (a union of two regenerations duplicates rows and matches
+# neither side); it is generated ON DEMAND instead:
+#
+#   uv run python tools/sdk_rename_table.py            # write it
+#   uv run python tools/sdk_rename_table.py --check    # verify a local copy
+#
+# `tests/test_sdk_rename_table.py` renders it to a temp file and asserts it against
+# independent AST/doc oracles, so the mapping is still checked on every run — only
+# the committed copy (and its conflicts) is gone. The MCP half
+# (`docs/product/mcp-rename-table.md`) is a separate, still-committed artifact.
+docs/product/sdk-rename-table.md
