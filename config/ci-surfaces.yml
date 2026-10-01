@@ -460,6 +460,11 @@ surfaces:
   # `hooks status` wiring in `tortoise/__main__.py`, which selects `api`.
   # Same dual registration as test_4314_inert_hooks.py.
   - test_hook_run_observation.py
+  # #4041: the capture breadcrumb must be READ BACK to the agent — the
+  # shipped `session-start.sh` renders it to stdout. Same dual
+  # registration as its two siblings above (mechanism = core; the
+  # `tortoise/__main__.py` render path = api).
+  - test_4041_breadcrumb_reader.py
   # #4675: the post-commit confirmation — a client-side refusal whose effect
   # LANDED. Its source is tortoise/session_confirm.py (an ENGINE path matching
   # no SOURCE_PATTERNS entry, so `core` via the `tortoise/` fallback) plus the
@@ -574,6 +579,7 @@ surfaces:
   - test_battery_validation_real.py
   - test_battery_write_channel.py
   core:
+  - test_4041_breadcrumb_reader.py
   # #3982: a date-only temporal value anchors to UTC midnight rather than the
   # reading machine's local midnight (ECMA-262 §21.4.3.2). DB-free — it only
   # exercises the shared sort-key primitive under a forced TZ, so the fast
@@ -593,6 +599,7 @@ surfaces:
   # guards, dry-run is non-destructive, delete verifies 0 remain) and the suite's
   # write/read marker split. No DB, no network — default `core` surface is correct.
   - test_4220_blog_residue_cleanup.py
+  - test_4542_retract_fold_decay.py
   - test_4716_capture_operator_ref_remap.py
   - test_6131_operator_mutation_vocabulary.py
   # #4971: the `(op_type, src, dst)` idempotency guard hoisted into
