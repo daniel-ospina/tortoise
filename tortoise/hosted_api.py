@@ -12623,9 +12623,10 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         # TRUE for any stored non-empty hash, so an anchorless re-commit of the
         # same url WIPED the stored anchor, bumped `version` and rewrote
         # updatedAt/title — and against a corpus-indexed url it also wiped the
-        # hash the INDEX path owns. (It does NOT null `_searchText`: that SET is
-        # `coalesce($st, s._searchText)` and the commit path passes no
-        # `_searchText`, so stored text survives — verified, not assumed.)
+        # hash the INDEX path owns. It does NOT null `_searchText`: `$st` is
+        # `ev.get("_searchText") or ev.get("title")` and this call carries
+        # NEITHER, so the `coalesce($st, s._searchText)` SET preserves the
+        # stored text.
         # `or None` (not a bare pass-through) is deliberate: the field admits
         # "" (no min_length), and an empty anchor is an absent one — the same
         # normalization the session-Source write applies via its
