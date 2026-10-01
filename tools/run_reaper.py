@@ -85,12 +85,22 @@ Usage
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/run_reaper.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/run_reaper.py`"
+    )
+
 import argparse
 import json
 import os
 import re
 import subprocess
-import sys
 from datetime import UTC, datetime
 from urllib.parse import urlparse
 
@@ -622,10 +632,16 @@ def _render_human(slug: str, apply: bool, decisions: list[dict]) -> None:
                 if d["action"] == ACTION_CANCEL and d.get("cancel_result") is None)
     cancelled = sum(1 for d in decisions if d.get("cancel_result") == "cancelled")
     refused = sum(1 for d in decisions if d.get("cancel_result") == "refused")
+    # A cancel POST whose outcome is UNREADABLE may have landed, so it is
+    # neither "would" nor "cancelled" — it gets its own bucket, or the counts
+    # would not sum to `candidates` and a reader would see cancelled=0 over a
+    # cancel that may have landed.
+    unknown = sum(1 for d in decisions if d.get("cancel_result") == "unknown")
     skipped = sum(1 for d in decisions if d["action"] == ACTION_SKIP)
     mode = "APPLY" if apply else "DRY-RUN"
     print(f"run_reaper: {mode} repo={slug} candidates={len(decisions)} "
-          f"would_cancel={would} cancelled={cancelled} refused={refused} skipped={skipped}")
+          f"would_cancel={would} cancelled={cancelled} refused={refused} "
+          f"outcome_unknown={unknown} skipped={skipped}")
     for d in decisions:
         label = d.get("branch") or "?"
         if d["action"] == ACTION_CANCEL:
@@ -634,6 +650,8 @@ def _render_human(slug: str, apply: bool, decisions: list[dict]) -> None:
                            f"{d.get('post_cancel_status')!r})")
             elif d.get("cancel_result") == "refused":
                 verdict = "CANCEL REFUSED"
+            elif d.get("cancel_result") == "unknown":
+                verdict = "CANCEL ISSUED — OUTCOME UNKNOWN"
             else:
                 verdict = "WOULD CANCEL"
         else:

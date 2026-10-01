@@ -460,8 +460,12 @@ class RunReaperTestCase(unittest.TestCase):
         covers the shard that might be the wedge, so the run is skipped.
         """
         self.make_run("555", elapsed_s=99999, workflow_id=7)
-        self.make_jobs("555", [job("test (a)", None, status="in_progress"),
-                               job("test (g)", None, status="in_progress")])
+        # BOTH shards need a clock, or derive_bound() returns at the UNSTARTED
+        # guard and never reaches the missing-green-coverage guard this test is
+        # named for — the claim would be unexercised (and a neutralised coverage
+        # guard would leave this test green).
+        self.make_jobs("555", [job("test (a)", None, status="in_progress", started_s=99999),
+                               job("test (g)", None, status="in_progress", started_s=99999)])
         self.green_population(7, maxes={"test (a)": 500})   # no "test (g)" sample
         row = self.rows(["--run", "555"])["555"]
         self.assertEqual(row["action"], "skip")
