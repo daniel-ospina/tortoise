@@ -4984,19 +4984,18 @@ def test_every_changed_set_diff_disables_rename_detection():
     * Do NOT generalise this rule to `.github/scripts/check-migration-append-only`.
       That script deliberately runs `git diff --find-renames=20% ... --name-status`
       (recorded at `docs/plans/2026-08-13-1095-migration-drift-gate.md:148`).
-      Its exempt arm is NO LONGER keyed on the `R*` status: #2240 moved the test
-      to the migration version's PROD STATE — a version absent from
-      `supabase_migrations.schema_migrations` has never run anywhere, so it may be
-      renumbered, re-landed or removed without diverging prod — precisely because
-      `--find-renames=20%` reports the re-land the drift gate prescribes, when it
-      carries a real content delta, as `D`+`A` rather than `R<sim>`. So the old
-      justification ("`--no-renames` would break the gate") no longer holds: the
-      exempt arm reads the BASE-TREE version from the `R<sim>` OLD path or from a
-      bare `M`/`D` path, and both are admitted on the same prod-state test.
-      `--find-renames` is kept so that a HIGH-SIMILARITY renumber still reports as
-      one `R` line; a re-land carrying a real content delta degrades to `D`+`A`
-      even with the flag set, and that form is admitted by the `D`-line branch of
-      the BOTH-ENDPOINTS check. The rule in this pin is scoped to changed-set
+      Its exempt arm IS keyed on the `R*` status: #2240 scoped the exemption to a
+      git-detected forward prefix rename whose destination version sorts strictly
+      AFTER the newest applied version, with BOTH endpoints absent from
+      `supabase_migrations.schema_migrations`. A bare `M`/`D` path carries no
+      destination version, so it has no content-independent ordering bound and is
+      NEVER admitted — it falls through to KEEP and is reported as a violation.
+      The old justification ("`--no-renames` would break the gate") therefore
+      holds again: `--find-renames=20%` is what lets a HIGH-SIMILARITY forward
+      renumber report as one `R<sim>` line and reach the exempt arm at all; a
+      re-land carrying a real content delta still degrades to `D`+`A` even with
+      the flag set, and that form is now reported rather than exempted.
+      The rule in this pin is scoped to changed-set
       *selection* diffs; that file is a deliberate exception.
     """
     root = Path(__file__).resolve().parents[1]
