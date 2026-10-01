@@ -30,7 +30,7 @@ def _parse_uri(uri: str) -> dict:
     }
 
 
-_uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise")
+_uri = os.environ.get("TORTOISE_DB_URI", "docker://:@127.0.0.1:16379/tortoise")
 _cfg = _parse_uri(_uri)
 
 # Importing this module must NOT open a socket. The URI parse above is
