@@ -1,5 +1,13 @@
--- Migration 20260926000001: the CAPTURE lane's extraction TOKEN WORKLOAD on
+-- Migration 20261001000001: the CAPTURE lane's extraction TOKEN WORKLOAD on
 -- the metering ledger (#5045, lane c7-instrumentation).
+--
+-- RENUMBERED FORWARD from 20260926000001 (#2240). That version was authored
+-- with a prefix OLDER than one prod had already applied (20260927000001), so
+-- it sorted before prod's newest applied version and `supabase db push
+-- --include-all` would have landed it ON TOP of its own successor. It was
+-- NEVER APPLIED anywhere (the drift gate listed it as repo-ahead, which a
+-- version with a schema_migrations row cannot be), so renumbering it forward
+-- cannot diverge prod. The DDL below is unchanged and idempotent.
 --
 -- WHY THIS EXISTS. The owner ruling (2026-09-26, on #4495; carried forward in
 -- #5331/#5045) sells extraction overage:
