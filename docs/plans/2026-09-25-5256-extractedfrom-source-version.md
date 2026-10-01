@@ -62,7 +62,7 @@ node property** with its own explicit `SET` clause"*.
 
 | seam | verdict |
 |---|---|
-| **(A) declared node property, own `SET` clause** ← **chosen** | Symmetric (live CREATE-map + replayed `_upsert_point_props` clause), replayable from `ev["point"]`, **durable across re-emits** (the #5004 `embedding_verbatim` lesson: a payload-only marker was *"LOST there … so it must live on the NODE"*, `entities.py`), and the #5011 gate can **see and compare** it. |
+| **(A) declared node property, own `SET` clause** ← **chosen** | Symmetric (live CREATE-map + replayed `_upsert_point_props` clause), replayable from `ev["point"]`, **durable across re-emits** (the #5004 `embedding_verbatim` lesson: a payload-only marker was *"LOST there"* — `sdk.py` — *"… so it must live on the NODE"*, `entities.py`), and the #5011 gate can **see and compare** it. |
 | (B) a key in the `_emit_event` **payload dict** | Rejected by X3 — the consumer reads only `ev["point"]`. |
 | (C) journal-only key in `ev["point"]` | Rejected: to keep the #5011 gate green it must be **excluded from the compared content view** (via `_NEVER_A_NODE_PROP`/`_EXCLUSION_REASONS` or `_uncarried`), so a dropped or forged transit cannot be *compared* — and it does not follow the issue's mandated node-prop precedent. *(Not claimed: that the value becomes wholly unreported — an undeclared list is surfaced in `uncarried_journal_fields`; nor that (C) loses the **edge** on a re-emit — pass-2 iterates every PointAdded and `ON CREATE` re-stamps from the original snapshot.)* |
 
