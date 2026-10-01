@@ -32,9 +32,19 @@ self-heals on the next request).
 Everything here is best-effort on the request path: recording/evaluation
 failures are logged and swallowed — abuse telemetry must never break the
 write path. Kill-switch: ``TORTOISE_ABUSE_DISABLED=1``.
+
+The failure handling is NOT uniform (#4872): the six swallow sites on the
+enforcement DECISION/ACTION path (``window_sum``, ``clean_window_episode_end``,
+``latest_flag_at``, ``rule_event_between``, ``suspend_org``, ``flag_org``) report
+to the OPERATOR — an ERROR record plus a platform-scoped operator incident,
+because a failed evaluation or a failed suspension is otherwise
+indistinguishable from "the engine decided not to enforce". The remaining
+telemetry / notification / durability swallows stay debug-only;
+``DECISION_FAULT_LANES`` declares the boundary and why.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import threading
@@ -67,6 +77,100 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+#: #5493 review P2-3: window misconfigurations already warned about, keyed
+#: ``(name, raw_env_value)``. These readers sit on request hot paths — the
+#: unauthenticated signup limiter re-reads its window 2-3x per request — so an
+#: unlatched warning lets a misconfig be driven to arbitrary log volume by
+#: traffic. The operator needs the FIRST occurrence of each distinct
+#: misconfiguration, not one line per read (mirrors ``_WIDTH_MISMATCH_WARNED``
+#: in ``embeddings.py`` and ``_DEV_PEPPER_WARNED`` in ``auth.py``).
+_WINDOW_WARNED: set[tuple[str, str | None]] = set()
+_WINDOW_WARN_LOCK = threading.Lock()
+
+
+def _negative_env(raw: str | None) -> bool:
+    """True when ``raw`` parses as a negative int.
+
+    ``_int_env`` gates on ``isdigit()``, which rejects ``"-1"`` — it therefore
+    returns the knob's DEFAULT, and before #5493's review it did so SILENTLY,
+    leaving the operator-facing promise (a non-positive window is reported)
+    false for the negative half. This is the test that makes it true. A value
+    that does not parse at all is not negative and keeps its existing
+    (unreported) default.
+    """
+    if raw is None:
+        return False
+    try:
+        return int(raw) < 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _window_env(name: str, default: int) -> int:
+    """Env-tunable rate-limit WINDOW, floored so a non-positive value can
+    never fail OPEN (#5493).
+
+    A window is the one limiter knob whose non-positive value *disables*
+    protection instead of tightening it — and it does so in one of two
+    shapes, depending on where the window is applied:
+
+    * **Hosted bucket limiter** (``_check_ip_bucket_rate_limit``): the bucket
+      is pruned (``now - t < window_s``) and THEN compared to the limit. A
+      non-positive window empties it on every request, ``len(bucket) >=
+      limit`` is never reached, and every request is allowed, FOREVER — the
+      fail-open this floor exists to remove.
+    * **In-process velocity trackers** (``ReadVelocityTracker``,
+      ``SignupVelocityTracker``, ``RecoveryVelocityTracker``): the prune runs
+      BEFORE the append and the comparison runs AFTER it, so a non-positive
+      window never prunes and the bucket collapses to this request's sample.
+      ``len(bucket)`` is then ``1``, which clears neither
+      ``ReadVelocityTracker``'s strict ``> threshold`` nor the signup/recovery
+      ``>= threshold`` against the configured thresholds (>1): the breach
+      signal NEVER FIRES — silently disabled — and the notify-dedup test
+      ``now - last < window_s`` is never true, so the once-per-window dedup is
+      defeated too. (Not an allow-everything fail-open here; a lose-the-signal
+      one.)
+
+    Either way ``0`` is a second, undocumented off-switch — the intended one
+    is ``RATE_LIMIT_DISABLED=1`` — so a non-positive window falls back to the
+    knob's DEFAULT (always at least one second). The precedent for an
+    out-of-range env value degrading to its default is the ``max(1,
+    _int_env(...))`` guard on the capture/dream/scorecard executors
+    (``hosted_api.py:210``, and the same pattern at 223/1589/1599). A warning
+    names the variable, the raw value, and the value actually used, and is
+    emitted ONCE per distinct misconfiguration (see ``_WINDOW_WARNED``) —
+    never once per read.
+
+    Do NOT "simplify" this back to ``_int_env``. ``_int_env`` is shared with
+    the THRESHOLD/limit knobs, where a non-positive value is a legitimate
+    fail-CLOSED deny-all (``len(bucket) >= 0`` is always true) — the floor
+    belongs to the window knobs alone, so it lives here and not in
+    ``_int_env``.
+
+    ``_int_env`` treats a NEGATIVE value as unset (its ``isdigit()`` gate) and
+    yields ``default`` — so a negative never arrives as a negative. The RAW
+    value is therefore inspected too: ``"0"`` (and ``"00"``) reaches the
+    warning path as a non-positive ``value``, while a negative is detected by
+    ``_negative_env``. BOTH warn through the same latch, and neither changes
+    the value returned — a non-positive window always yields the knob's
+    default.
+    """
+    raw = os.environ.get(name)
+    value = _int_env(name, default)
+    if value > 0 and not _negative_env(raw):
+        return value
+    fallback = default if default > 0 else 1
+    with _WINDOW_WARN_LOCK:
+        first = (name, raw) not in _WINDOW_WARNED
+        _WINDOW_WARNED.add((name, raw))
+    if first:
+        logger.warning(
+            "%s=%r is not a valid rate-limit window (must be a positive number "
+            "of seconds); using %d so the limiter cannot fail open (#5493)",
+            name, raw, fallback)
+    return fallback
+
+
 def abuse_disabled() -> bool:
     return os.environ.get("TORTOISE_ABUSE_DISABLED") == "1"
 
@@ -83,6 +187,121 @@ def suspended_message() -> str:
         "This organization has been suspended due to unusual activity. "
         f"Appeal: {appeal_url()}"
     )
+
+
+# ── #4872: the enforcement decision path's failure lanes ────────────────────
+#
+#: The DECLARED inventory of failure lanes on the abuse enforcement decision
+#: path (#4872): swallow site -> ``(incident kind, fallback)``. ``fallback`` is
+#: what the handler DID when the store call failed, i.e. the enforcement
+#: CONSEQUENCE — and it is NOT recoverable from the lane name, which is why the
+#: incident carries it. TWO lanes fail TOWARD a suspension and the rest away
+#: from one: ``rule_event_between`` (``continuity_true``) and
+#: ``clean_window_episode_end`` — the latter because a failed guard read OR
+#: clear write leaves the flag episode ARMED, so the stale anchor survives and a
+#: later over-threshold evaluation can still reach ``suspend_org``. The
+#: away-from-suspension lanes are ``window_sum``, ``latest_flag_at`` (``reflag``)
+#: and the two enforcement ACTION lanes. This map is the single source of truth
+#: for both values, so the token and the code cannot drift as a pair, and it is
+#: pinned against the source by ``tests/test_abuse.py``: every ``except`` handler
+#: inside ``_evaluate``/``_flag`` must call ``report_abuse_decision_fault`` (an
+#: ADDED uninstrumented swallow is RED), and the emitted tokens must equal this
+#: map's keys exactly once each (a renamed token is RED).
+#:
+#: ``clean_window_episode_end`` names the clean-window episode-END LEG (its
+#: guard read OR its clear write), NOT the ``latest_flag_at`` method: H2 and H3
+#: both involve ``latest_flag_at`` and take opposite enforcement directions, so
+#: the lane is the leg.
+#:
+#: DELIBERATELY EXCLUDED (declared so the boundary is not re-discovered next
+#: incident): ``record_event`` in :meth:`AbuseEngine.record_point_create` (a
+#: recording-leg drop — folding it into ``UNMETERED_INCREMENT`` would break
+#: ``tests/test_metering_window_admission.py::test_mcp_abuse_failure_is_not_
+#: reported_as_a_dropped_increment``), ``_notify`` (the notification leg, and
+#: the sweep-gated sibling of #4778), ``MemoryAbuseStore._durable``, and the
+#: R3/R8/geo trackers — all different defect classes from "the enforcement
+#: decision could not complete".
+DECISION_FAULT_LANES: dict[str, tuple[str, str]] = {
+    "window_sum": ("ABUSE_DECISION_FAULT", "return_none"),
+    "clean_window_episode_end": ("ABUSE_DECISION_FAULT", "return_none"),
+    "latest_flag_at": ("ABUSE_DECISION_FAULT", "reflag"),
+    "rule_event_between": ("ABUSE_DECISION_FAULT", "continuity_true"),
+    "suspend_org": ("ABUSE_ENFORCEMENT_FAULT", "return_breach"),
+    "flag_org": ("ABUSE_ENFORCEMENT_FAULT", "return_flag"),
+}
+
+#: Defensive default only: every lane is declared above, so this is unreachable
+#: in practice and the source-scan fence REDs if an undeclared lane is emitted.
+#: It is NOT a third real kind — an undeclared lane must not silently disappear,
+#: so it reports as the decision kind with ``fallback="unknown"``.
+_UNKNOWN_LANE_KIND = "ABUSE_DECISION_FAULT"
+
+#: Traceback-suppression window (seconds) for the fault ERROR record. The
+#: COMPACT record still fires on EVERY occurrence — it is the residual for a
+#: deployment with no alert channel — but the ``exc_info`` stack is emitted at
+#: most once per lane per window. The fault cause is shared substrate, so a
+#: substrate outage makes every decision-path store call raise, and
+#: ``record_point_create`` evaluates TWICE per write (R1 + R2): without this the
+#: debug-to-ERROR elevation would emit two multi-KB stacks per write request for
+#: the whole outage, i.e. a log-amplification path on the request path.
+_FAULT_TRACEBACK_WINDOW_S = 60.0
+_fault_traceback_at: dict[str, float] = {}
+_fault_traceback_lock = threading.Lock()
+
+
+def _fault_traceback_due(lane: str, now: float | None = None) -> bool:
+    """True at most once per ``lane`` per ``_FAULT_TRACEBACK_WINDOW_S``."""
+    now = time.monotonic() if now is None else now
+    with _fault_traceback_lock:
+        last = _fault_traceback_at.get(lane)
+        if last is not None and now - last < _FAULT_TRACEBACK_WINDOW_S:
+            return False
+        _fault_traceback_at[lane] = now
+        return True
+
+
+def report_abuse_decision_fault(lane: str, org_id: str,
+                                rule: str | None = None,
+                                error: BaseException | None = None) -> None:
+    """Operator alert: a store call on the abuse DECISION path FAILED (#4872).
+
+    Mirrors ``metering.report_unmetered_increment``: the failure is absorbed by
+    us (the request is served and the decision path keeps its documented
+    fallback) and announced to the OPERATOR — never silently, and never to the
+    user. Without this, a broken enforcement path is indistinguishable from
+    "the engine decided not to enforce": ``_evaluate`` returns ``"breach"`` on
+    a failed suspend, exactly as it does while still inside the staging window,
+    and the exception that would name the cause (``supabase_control.rpc``
+    carries the PostgREST ``message``) is what the old ``logger.debug`` threw
+    away.
+
+    The alert is PLATFORM-SCOPED (one shared substrate cause, one incident) and
+    the local ERROR record is the durable diagnosis, carrying the resolved
+    ``kind`` and the PostgREST message. For a deployment with no alert channel
+    configured the ERROR record is the residual (the ``UNMETERED_INCREMENT``
+    contract), and it fires on EVERY occurrence; only the ``exc_info`` stack is
+    bounded to one per lane per ``_FAULT_TRACEBACK_WINDOW_S`` (see
+    ``_fault_traceback_due``).
+
+    Never raises: the alert must not become a new failure path on an enforcement
+    path (a signal that can raise is a bypass by another name). The retained
+    state is NOT repaired by this call — this makes the fault VISIBLE; arming
+    or repairing the suspend is a separate, owner-held decision.
+    """
+    with contextlib.suppress(Exception):  # the alert must never raise
+        kind, fallback = DECISION_FAULT_LANES.get(lane, (_UNKNOWN_LANE_KIND, "unknown"))
+        logger.error(
+            "ABUSE FAULT (#4872): kind=%s lane=%s org=%s rule=%s "
+            "error=%s: %s — the abuse enforcement decision could not complete; "
+            "the retained state is the handler's fallback (%s), which may point "
+            "TOWARD or AWAY from a suspension",
+            kind, lane, org_id or "<none>", rule or "<none>",
+            type(error).__name__, error, fallback,
+            exc_info=error if _fault_traceback_due(lane) else None,
+        )
+        from tortoise.operator_alert import alert_abuse_fault
+
+        alert_abuse_fault(kind, lane, org_id, error, rule=rule, fallback=fallback)
 
 
 # ── Suspended signal set (delta 14) ─────────────────────────────────────────
@@ -341,7 +560,7 @@ class SupabaseAbuseStore:
             filters=[("org_id", "eq", org_id),
                      ("event_type", "eq", EVENT_FLAG),
                      ("rule", "eq", rule)],
-            order="-created_at", limit=1,
+            order="created_at.desc", limit=1,
         )
         if not rows:
             return None
@@ -351,7 +570,7 @@ class SupabaseAbuseStore:
             filters=[("org_id", "eq", org_id),
                      ("event_type", "eq", EVENT_FLAG_CLEAR),
                      ("rule", "eq", rule)],
-            order="-created_at", limit=1,
+            order="created_at.desc", limit=1,
         )
         if clears:
             newest_clear = _parse_ts(clears[0].get("created_at"))
@@ -442,7 +661,7 @@ class SupabaseAbuseStore:
             select=["event_type", "created_at", "country", "key_id",
                     "details"],
             filters=[("org_id", "eq", org_id)],
-            order="-created_at", limit=100,
+            order="created_at.desc", limit=100,
         )
         out = [_alert_dict(r) for r in rows
                if r.get("event_type") in ALERT_TYPES]
@@ -479,13 +698,13 @@ class AbuseEngine:
         return _int_env("TORTOISE_ABUSE_POINT_THRESHOLD", 500)
 
     def point_window_s(self) -> int:
-        return _int_env("TORTOISE_ABUSE_POINT_WINDOW_S", 3600)
+        return _window_env("TORTOISE_ABUSE_POINT_WINDOW_S", 3600)
 
     def key_threshold(self) -> int:
         return _int_env("TORTOISE_ABUSE_KEY_THRESHOLD", 10)
 
     def key_window_s(self) -> int:
-        return _int_env("TORTOISE_ABUSE_KEY_WINDOW_S", 86400)
+        return _window_env("TORTOISE_ABUSE_KEY_WINDOW_S", 86400)
 
     def record_point_create(self, org_id: str, n: int = 1,
                             now: datetime | None = None) -> str | None:
@@ -519,8 +738,8 @@ class AbuseEngine:
                   window_s: int, now: datetime) -> str | None:
         try:
             total = self.store.window_sum(org_id, rule, window_s, now)
-        except Exception:
-            logger.debug("abuse window_sum failed for %s/%s", org_id, rule)
+        except Exception as e:
+            report_abuse_decision_fault("window_sum", org_id, rule, e)
             return None
         if total <= threshold:
             # Clean window → end any active flag episode for this rule, so a
@@ -528,14 +747,16 @@ class AbuseEngine:
             try:
                 if self.store.latest_flag_at(org_id, rule) is not None:
                     self.store.flag_clear(org_id, rule, now=now)
-            except Exception:
-                logger.debug("abuse flag_clear failed for %s/%s", org_id, rule)
+            except Exception as e:
+                report_abuse_decision_fault(
+                    "clean_window_episode_end", org_id, rule, e)
             return None
         details = {"rule": rule, "count": total,
                    "threshold": threshold, "window_s": window_s}
         try:
             flagged_at = self.store.latest_flag_at(org_id, rule)
-        except Exception:
+        except Exception as e:
+            report_abuse_decision_fault("latest_flag_at", org_id, rule, e)
             flagged_at = None
         if flagged_at is None:
             return self._flag(org_id, rule, details, now)
@@ -551,14 +772,16 @@ class AbuseEngine:
             continuity = self.store.rule_event_between(
                 org_id, rule, flagged_at,
                 now - timedelta(seconds=window_s))
-        except Exception:
+        except Exception as e:
+            report_abuse_decision_fault(
+                "rule_event_between", org_id, rule, e)
             continuity = True  # fail-safe toward the conservative path
         if not continuity:
             return self._flag(org_id, rule, details, now)
         try:
             self.store.suspend_org(org_id, details, now=now)
-        except Exception:
-            logger.debug("abuse suspend_team failed for %s", org_id)
+        except Exception as e:
+            report_abuse_decision_fault("suspend_org", org_id, rule, e)
             return "breach"
         mark_suspended(org_id)
         self._notify("abuse_suspended", org_id, details)
@@ -568,8 +791,8 @@ class AbuseEngine:
               now: datetime) -> str:
         try:
             self.store.flag_org(org_id, rule, details, now=now)
-        except Exception:
-            logger.debug("abuse flag_team failed for %s", org_id)
+        except Exception as e:
+            report_abuse_decision_fault("flag_org", org_id, rule, e)
         self._notify("abuse_flag", org_id, details)
         return "flag"
 
@@ -599,7 +822,7 @@ class ReadVelocityTracker:
     def __init__(self, threshold: int | None = None, window_s: int | None = None):
         self.threshold = threshold if threshold is not None else _int_env(
             "TORTOISE_ABUSE_READ_THRESHOLD", 100)
-        self.window_s = window_s if window_s is not None else _int_env(
+        self.window_s = window_s if window_s is not None else _window_env(
             "TORTOISE_ABUSE_READ_WINDOW_S", 300)
         self._by_key: dict[str, list[float]] = defaultdict(list)
         self._by_org: dict[str, list[float]] = defaultdict(list)
@@ -709,7 +932,7 @@ class SignupVelocityTracker:
         self.threshold = threshold if threshold is not None else _int_env(
             "TORTOISE_ABUSE_SIGNUP_THRESHOLD",
             _int_env("TORTOISE_SIGNUP_IP_LIMIT", 2))  # P3-5: defaults follow allowance
-        self.window_s = window_s if window_s is not None else _int_env(
+        self.window_s = window_s if window_s is not None else _window_env(
             "TORTOISE_ABUSE_SIGNUP_WINDOW_S", 86400)
         self._by_ip: dict[str, list[float]] = defaultdict(list)
         self._notified: dict[str, float] = {}  # bare ip -> last notify ts
@@ -838,7 +1061,7 @@ class RecoveryVelocityTracker:
         self.threshold = threshold if threshold is not None else _int_env(
             "TORTOISE_ABUSE_RECOVER_THRESHOLD",
             _int_env("TORTOISE_RECOVER_IP_LIMIT", 5))
-        self.window_s = window_s if window_s is not None else _int_env(
+        self.window_s = window_s if window_s is not None else _window_env(
             "TORTOISE_ABUSE_RECOVER_WINDOW_S", 86400)
         self._by_ip: dict[str, list[float]] = defaultdict(list)
         self._notified: dict[str, float] = {}  # bare ip -> last notify ts

@@ -1987,6 +1987,84 @@ def test_extract_session_v2_supersession_meta_warnings(sdk, monkeypatch):
         (f"fold must never fire for a dangling successor: {rows!r}")
 
 
+def test_extract_session_v2_over_cap_supersession_batch_warns_bounded(
+        sdk, monkeypatch):
+    """#5654: CAPTURE applies the raw extractor batch with NO Layer-1 gate
+    (#2243 proposes a Layer-1 cap on the commit API's ``supersessions`` list —
+    PR #5648, still open at this base — which would not cover the capture
+    path anyway), so an over-cap batch reaches
+    ``commit_ops.apply_supersessions``, whose fail-open loop emitted ONE warn
+    PER RECORD. The per-record emission is
+    now bounded (the first N, then ONE summary carrying the total) — an
+    emission bound only: the batch below places records that MUST still be
+    folded AFTER the warn budget is exhausted, so the loop is proven not to
+    have become a write bound."""
+    import tortoise.extractor_v2 as ev2
+
+    # Hard-coded, deliberately NOT imported from commit_ops: an expected
+    # value taken from the thing under test asserts nothing (#5654 brief).
+    BOUND = 20
+    OVER_CAP = 25
+
+    # 25 records whose successor resolves nowhere — each warns exactly once
+    # (the entity lane's dangling-successor skip) and is skipped fail-open.
+    malformed = [
+        {"superseded": f"ghost-ref-{i}",
+         "supersedes_by": f"ghost-successor-{i}",
+         "evidence": "malformed batch record"}
+        for i in range(OVER_CAP)
+    ]
+    # 3 records that MUST still fold. The fold-order pre-pass keeps payload
+    # order here (no chain edges among them), so these sort AFTER the
+    # malformed block — they are only reached once the warn budget is spent.
+    applied_pairs = []
+    for k in range(3):
+        target, successor = f"bulk-target-{k}", f"bulk-successor-{k}"
+        sdk.create_entity("object", target, objectKind="core:strategy")
+        sdk.create_entity("object", successor, objectKind="core:strategy")
+        applied_pairs.append((target, successor))
+
+    supersessions = malformed + [
+        {"superseded": t, "supersedes_by": s, "evidence": "must still fold"}
+        for t, s in applied_pairs
+    ]
+    payload = {"session_id": "sess_5654", "story_arc": "",
+               "entities": [], "points": [], "operators": [], "events": [],
+               "supersessions": supersessions,
+               "client_commit_id": "ccid5654"}
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        lambda *a, **kw: _v2_out(payload=payload))
+    _extracted, meta = sdk._extract_session_v2(
+        CONV, "sess_5654", "2026-08-20T00:00:00+00:00")
+
+    assert meta["errors"] == [], meta
+    # (1) BOUNDED emission: one warn per malformed record would be 25; the
+    # bound emits BOUND of them and adds exactly ONE summary warn.
+    sup_warns = [w for w in meta["warnings"] if "supersession" in w]
+    assert len(sup_warns) == BOUND + 1, (
+        f"expected {BOUND} per-record warns + 1 summary, got "
+        f"{len(sup_warns)}: {sup_warns!r}")
+    assert len(sup_warns) < OVER_CAP, (
+        "emission must stay below one-warn-per-record")
+    # (2) the summary carries the batch size and the true warning total, so
+    # the amplification is still observable even when it is not emitted.
+    summary = sup_warns[-1]
+    assert "supersession batch of" in summary, summary
+    assert f"{len(supersessions)} record(s)" in summary, summary
+    assert f"{OVER_CAP} per-record warning(s) raised" in summary, summary
+
+    # (3) NO DATA LOSS: every foldable record still landed. These three are
+    # the last records in fold order, i.e. processed after suppression — a
+    # write bound would have dropped them.
+    proj = sdk._get_proj()
+    for target, successor in applied_pairs:
+        rows = proj.g.query(
+            "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
+            params={"n": target}).result_set
+        assert rows and rows[0][0] == "superseded", (target, rows)
+        assert rows[0][1] == successor, (target, rows)
+
+
 # ── #2164 Task 4: pt_ capture routing + terminal guard + unresolved-ref
 #    meta warnings (indicators 3 + 4) — end-to-end through
 #    _extract_session_v2 (each test fails if the helper's pt_ branch were
@@ -3839,6 +3917,107 @@ def test_capture_turn_window_idempotent_when_pre_truncated(sdk):
     assert out[0]["content"] == "y" * 5000
 
 
+def test_shared_extraction_window_blanks_a_clipped_turn_with_nothing_to_say():
+    """#6246: the #4897 marker-only invariant is enforced at ONE SHARED point.
+
+    The invariant — "a turn with no extractable content of its own yields no
+    claims" — used to live only inside ``_session_llm_transcript`` (the m2
+    lane). The DEFAULT lane is ``_extract_session_v2`` ->
+    ``extractor_v2._edus_from_conversation``, which keeps any turn with truthy
+    content, so a clipped turn whose readable body was a lone ``X`` was
+    submitted as a v2 EDU while the m2 lane dropped it: the SAME conversation
+    was clean on one lane and not on the other.
+
+    Pinned at the INPUT UNIT both lanes share — no DB, no provider, no LLM.
+    Mutation: drop the ``_extractable_sentences`` check in
+    ``_capture_extraction_window`` and the two blank turns reappear as EDUs
+    while the m2 lane still drops them.
+    """
+    from tortoise.extractor_v2 import _edus_from_conversation
+    from tortoise.sdk import (
+        _capture_extraction_window,
+        _capture_turn_window,
+        _redact_turn_contents,
+        _session_llm_transcript,
+    )
+
+    mixed = [
+        {"role": "user",
+         "content": "I think the auth dead-end is the top issue."},
+        # 10,000 chars flattening to lone dots — no >=3-char sentence
+        {"role": "user", "content": "  .  " * 2000},
+        # 6,001 chars whose readable body is the single char "X"
+        {"role": "user", "content": "X" + " " * 6000},
+    ]
+
+    # The STORED view (what the turn Points hold) is clipped, NOT blanked —
+    # only the extraction input is blanked.
+    stored = _capture_turn_window(mixed)
+    assert stored[1]["content"].strip() and stored[2]["content"].strip()
+
+    extract = _capture_extraction_window(mixed)
+    assert len(extract) == len(mixed), "the turn list must not be renumbered"
+    assert [t["content"] for t in extract] == [mixed[0]["content"], "", ""]
+
+    # LANE 1 — the m2 transcript and the Source summary.
+    transcript, _est = _session_llm_transcript(extract)
+    assert transcript == "User: I think the auth dead-end is the top issue."
+
+    # LANE 2 — the default v2 EDU list. Same input, same verdict.
+    edus = _edus_from_conversation(_redact_turn_contents(extract)[0])
+    assert [e["index"] for e in edus] == [0], (
+        f"a clipped turn with nothing to say produced a v2 EDU: {edus}")
+    assert all(e["text"].strip() for e in edus)
+
+    # NARROW BY CONSTRUCTION: an ordinary unmarked short turn is untouched —
+    # this must not become "drop every sentence-less turn from v2".
+    short = _capture_extraction_window([{"role": "user", "content": "ok"}])
+    assert short[0]["content"] == "ok"
+    # A clipped turn that DOES have a sentence keeps its content verbatim.
+    kept = _capture_extraction_window(
+        [{"role": "user", "content": "a real sentence here. " + " pad" * 1500}])
+    assert kept[0]["content"].startswith("a real sentence here. ")
+
+
+def test_capture_session_hands_both_lanes_the_shared_extraction_window(
+        sdk, monkeypatch):
+    """#6246 — the WIRING, not just the helper.
+
+    The helper test above would still pass if nobody called
+    ``_capture_extraction_window``. This drives the DEFAULT lane's real entry
+    point and captures the conversation ``_extract_session_v2`` actually
+    receives, so deleting the one call site reds this test (and the STORED
+    turn keeps its clipped text).
+    """
+    from tortoise import sdk as sdk_mod
+    seen: list = []
+
+    def spy(self, conversation, session_id, now, master=None):
+        seen.append([t["content"] for t in conversation])
+        return [], {"provider": None, "route": None, "failover_used": False,
+                    "errors": [], "warnings": [], "mode": "llm", "stats": {}}
+
+    monkeypatch.setattr(sdk_mod.TortoiseSDK, "_extract_session_v2", spy)
+    mixed = [
+        {"role": "user",
+         "content": "I think the auth dead-end is the top issue."},
+        {"role": "user", "content": "X" + " " * 6000},
+    ]
+    sdk.capture_session(mixed, session_id="sess-6246-wiring")
+
+    assert seen, "the v2 lane was never reached"
+    assert len(seen[0]) == 2, "the turn list was renumbered, not blanked"
+    assert seen[0][0] == "I think the auth dead-end is the top issue."
+    assert seen[0][1] == "", (
+        f"a clipped turn with nothing to say reached the v2 lane: {seen[0][1]!r}")
+
+    # Stored turns are unaffected: turn 1 keeps its clipped 5,000 chars.
+    rows = sdk._get_proj().g.query(
+        "MATCH (t:Point {pointKind:'event'}) RETURN t.content ORDER BY t.id",
+    ).result_set
+    assert rows[1][0] == "[user] " + ("X" + " " * 6000)[:5000]
+
+
 def test_normalize_turn_role_matches_sdk_loop(sdk):
     from tortoise.sdk import _normalize_turn_role
     assert _normalize_turn_role("user") == "user"
@@ -4600,6 +4779,47 @@ def test_session_capture_tool_off_switch_409(tmp_path, monkeypatch):
     assert st.get("session_capture_last_error_pi"), \
         "off-switch MCP attempt must record the per-harness last error"
     assert st.get("session_capture_receipt_pi") is None
+
+
+def test_mcp_failed_recapture_names_the_stored_harness(tmp_path, monkeypatch):
+    """#4898: the MCP capture's failure path must attribute
+    ``session_capture_last_error_<harness>`` to the SESSION's stored harness,
+    never to the tool's raw ``harness`` argument — the same stored-or-claimed
+    resolution (``_observed_capture_harness``) the REST capture applies to both
+    per-harness keys (#3681 / #3700).
+
+    The forged replay below is the #3681 shape, one key down: a ``claude``
+    session re-captured with ``harness='cursor'`` and a FAILING payload. Before
+    the fix the error is written under the CALLER's declaration
+    (``session_capture_last_error_cursor``), so the dashboard paints the
+    failure on the cursor row — a harness the server's own Session record
+    contradicts.
+
+    RED mutation: restore ``_record_capture_last_error(org_id, harness, ...)``
+    (the raw tool argument) → the key becomes ``..._cursor`` → the stored-
+    harness assertion fails. GREEN: the key names the stored ``claude`` and no
+    cursor key is written.
+    """
+    from tortoise.mcp_server import tortoise_session_capture
+    with _mcp_team_context(tmp_path, monkeypatch):
+        # 1) a successful capture stamps the Session's stored harness = claude
+        first = tortoise_session_capture(
+            conversation=_CONV, harness="claude", session_id="s-4898")
+        assert not first.get("error"), first
+        # 2) forged replay: SAME session_id, a DIFFERENT caller harness, and a
+        # payload that FAILS at the empty-transcript 422 gate (the error path)
+        failed = tortoise_session_capture(
+            conversation=[], harness="cursor", session_id="s-4898")
+        st = _ha._get_onboarding_state("team-1727-mcp")
+    assert failed.get("status") == 422, failed
+    # the registered key set is always present (None-valued when unset), so
+    # read the SET keys — exactly one: the Session's stored harness.
+    error_keys = {k for k, v in st.items()
+                  if k.startswith("session_capture_last_error_") and v}
+    assert error_keys == {"session_capture_last_error_claude"}, (
+        f"a forged caller harness named the last-error key: {sorted(error_keys)}")
+    assert st.get("session_capture_last_error_cursor") is None, (
+        "the caller's declared harness claimed the last-error key")
 
 
 def test_mcp_capture_missing_max_sessions_fails_closed(tmp_path, monkeypatch):

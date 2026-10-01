@@ -77,12 +77,14 @@ def test_resolve_defaults_are_the_measured_window():
     caps = resolve_ask_retrieval_caps()
     # A LITERAL pin of the shipped window. Comparing only against the
     # ``DEFAULT_*`` constants cannot detect a changed literal (both sides
-    # would move together), so the measured 200/200/200/16000/128000 window
-    # is asserted here verbatim — a typo in ``DEFAULT_ASK_RETRIEVAL_LIMIT``
-    # must fail this test.
+    # would move together), so the measured window is asserted here verbatim
+    # — a typo in a ``DEFAULT_*`` must fail this test. The pool is 400 (not
+    # the 200 ``DEFAULT_ASK_POOL_SIZE`` env-knob default): #4235 applies the
+    # SDK's own ``limit*2`` candidate floor, because the lane passes an
+    # explicit ``pool_size`` the SDK treats as an exact override.
     assert caps == {
         "limit": 200,
-        "pool_size": 200,
+        "pool_size": 400,
         "context_item_cap": 200,
         "context_token_cap": 16000,
         "context_byte_cap": 128000,
@@ -90,7 +92,8 @@ def test_resolve_defaults_are_the_measured_window():
     assert caps["limit"] == DEFAULT_ASK_RETRIEVAL_LIMIT
     assert caps["context_item_cap"] == DEFAULT_ASK_CONTEXT_ITEM_CAP
     assert caps["context_token_cap"] == DEFAULT_ASK_CONTEXT_TOKEN_CAP
-    assert caps["pool_size"] == DEFAULT_ASK_POOL_SIZE
+    assert caps["pool_size"] == max(DEFAULT_ASK_POOL_SIZE,
+                                    DEFAULT_ASK_RETRIEVAL_LIMIT * 2)
     # The byte ceiling is DERIVED from the token cap when unset — never a
     # literal that a token raise cannot move.
     assert caps["context_byte_cap"] == max(
@@ -114,6 +117,62 @@ def test_pool_never_narrower_than_the_window(monkeypatch):
     caps = resolve_ask_retrieval_caps()
     assert caps["limit"] == 900
     assert caps["pool_size"] >= 900
+
+
+def test_pool_applies_the_sdk_limit_2_candidate_floor(monkeypatch):
+    """#4235: the lane hands ``tortoise_fts_query`` an EXPLICIT
+    ``pool_size``, which the SDK's ``resolve_pool_size(exact=True)`` contract
+    treats as an exact override — so the SDK's own ``limit*2`` candidate floor
+    never runs on this path. The lane applies it itself, clamped to the
+    engine bound (10000).
+
+    Two guarantees, asserted at their boundary: ``pool_size >= limit`` ALWAYS
+    (``limit`` is clamped to 10000, so the clamp can never undercut it), and
+    ``pool_size >= limit * 2`` exactly while ``limit * 2 <= 10000``. Above the
+    bound the engine clamps the pool — so a limit of 5001 resolves to 10000,
+    not 10002 — and THAT is what this test pins, so a floor that is silently
+    broken in the reachable range FAILS here instead of passing on the clamp.
+    """
+    from tortoise.retrieval import DEFAULT_POOL_SIZE, resolve_pool_size
+    caps = resolve_ask_retrieval_caps()
+    assert caps["limit"] == 200
+    # 200/200 defaults: the SDK would resolve max(120, 200*2) = 400, and so
+    # does the lane — the floor is live at the shipped window.
+    assert caps["pool_size"] == 400
+    sdk_would_resolve = resolve_pool_size(
+        caps["limit"] * 2, pool_size=None, env_name="TORTOISE_POOL_FLOOR",
+        default=DEFAULT_POOL_SIZE, exact=True)
+    assert caps["pool_size"] >= caps["limit"] * 2
+    assert caps["pool_size"] >= sdk_would_resolve
+    # the env knob only RAISES the floor; it can never lower the pool below it
+    monkeypatch.setenv(ASK_POOL_SIZE_ENV, str(caps["limit"] * 3))
+    assert resolve_ask_retrieval_caps()["pool_size"] == caps["limit"] * 3
+    monkeypatch.setenv(ASK_POOL_SIZE_ENV, "1")
+    assert resolve_ask_retrieval_caps()["pool_size"] == caps["limit"] * 2
+    # The reachable-range boundary. `limit` is env-settable up to 10000, so
+    # these rows are the case the fix must NOT silently break: while
+    # limit*2 <= 10000 the pool IS the floor; past it the pool is the ENGINE
+    # BOUND (10000), and the always-true floor is pool_size >= limit.
+    monkeypatch.setenv(ASK_POOL_SIZE_ENV, "1")
+    for limit, floor, expected in (
+            (4999, 9998, 9998),
+            (5000, 10000, 10000),
+            (5001, 10002, 10000),
+            (6000, 12000, 10000),
+            (10000, 20000, 10000)):
+        monkeypatch.setenv(ASK_RETRIEVAL_LIMIT_ENV, str(limit))
+        monkeypatch.setenv(ASK_CONTEXT_ITEM_CAP_ENV, str(limit))
+        row = resolve_ask_retrieval_caps()
+        assert row["limit"] == limit, limit
+        assert row["pool_size"] == expected, (limit, row["pool_size"])
+        assert row["pool_size"] >= row["limit"], limit
+        if floor <= 10000:
+            # the SDK floor must be MET in the range the fix guarantees
+            assert row["pool_size"] >= floor, (limit, row["pool_size"])
+        else:
+            # past the engine bound it cannot be met — pin the bound exactly
+            assert row["pool_size"] == 10000, limit
+            assert floor > 10000, limit
 
 
 def test_token_raise_raises_the_derived_byte_ceiling(monkeypatch):
@@ -175,7 +234,12 @@ def test_out_of_range_window_env_falls_back_to_default(
     """
     monkeypatch.setenv(env, value)
     caps = resolve_ask_retrieval_caps()
-    assert caps[key] == default, (env, value, caps[key])
+    expected = default
+    if key == "pool_size":
+        # #4235: the pool carries the SDK's ``limit*2`` candidate floor, so
+        # the fallback VALUE is the floor, never the bare default.
+        expected = max(default, caps["limit"] * 2)
+    assert caps[key] == expected, (env, value, caps[key])
     assert caps["limit"] <= 10000
     assert caps["pool_size"] <= 10000
 
@@ -505,7 +569,10 @@ def test_ask_lane_threads_the_resolved_caps_into_retrieval(monkeypatch):
     sdk = _FakeSDK()
     _run(sdk, monkeypatch)
     assert sdk.query_kwargs["limit"] == DEFAULT_ASK_RETRIEVAL_LIMIT
-    assert sdk.query_kwargs["pool_size"] == DEFAULT_ASK_POOL_SIZE
+    # #4235: the pool is the SDK's ``limit*2`` candidate floor, not the
+    # env-knob default — the lane passes it explicitly, so it must apply it.
+    assert sdk.query_kwargs["pool_size"] == max(
+        DEFAULT_ASK_POOL_SIZE, DEFAULT_ASK_RETRIEVAL_LIMIT * 2)
 
 
 def test_ask_lane_passes_the_resolved_byte_cap_to_assembly(monkeypatch):
@@ -541,3 +608,77 @@ def test_ask_lane_does_not_warn_when_bytes_do_not_bind(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger=ask_lane.__name__):
         _run(sdk, monkeypatch)
     assert not any("byte cap" in r.message for r in caplog.records)
+
+
+# ── #4235: ask_recall_bench's raised arm derives its byte ceiling ─────────
+
+_BENCH_WORDS = (
+    "alpha bravo charlie delta echo foxtrot golf hotel india juliet "
+    "kilo lima mike november oscar papa quebec romeo sierra tango ")
+
+
+class _BenchFakeSDK:
+    """The SDK surface ``ask_recall_bench._retrieve_pipeline`` uses."""
+
+    def __init__(self, n_hits: int = 400):
+        self.n_hits = n_hits
+
+    def tortoise_fts_query(self, query, **kwargs):
+        content = (_BENCH_WORDS * 4)[:590]
+        return [{"id": f"h{i}", "content": content, "session_id": f"s{i}"}
+                for i in range(self.n_hits)]
+
+    def annotate_ask_hits(self, hits, **kwargs):
+        return [dict(h) for h in hits]
+
+
+def _run_bench_arm(limit, item_cap, byte_cap):
+    from tools import ask_recall_bench as bench
+    stats: dict = {}
+    hits = bench._retrieve_pipeline(
+        _BenchFakeSDK(), "zephyr", limit=limit, item_cap=item_cap,
+        keep_numeric=False, search_keys_prf=False,
+        fusion_weights=None, fusion_k=60, evidence_boost=False,
+        byte_cap=byte_cap, stats=stats, question_date="2024-01-01")
+    return hits, stats
+
+
+def test_bench_raised_arm_derives_its_byte_ceiling_from_its_token_cap():
+    """#4235 second defect: the A6-raised arm assembled under the frozen
+    pre-#4105 ``BYTE_CAP`` literal, so raising the item/limit could not admit
+    a hit the token budget had room for. The arm's ceiling is now DERIVED
+    from its own token cap, so the token budget — not the literal — binds."""
+    from tools import ask_recall_bench as bench
+    derived = bench._raised_byte_cap()
+    assert derived == max(bench.BYTE_CAP,
+                          bench.CONTEXT_TOKEN_CAP * BYTES_PER_TOKEN_FLOOR)
+    assert derived > bench.BYTE_CAP
+    raised, raised_stats = _run_bench_arm(120, 120, derived)
+    frozen, frozen_stats = _run_bench_arm(120, 120, bench.BYTE_CAP)
+    # the derived ceiling is in effect and is NOT the binding bound
+    assert raised_stats["byte_cap"] == derived
+    assert raised_stats["dropped_by_byte_cap"] == 0
+    assert raised_stats["stopped_by"] != "byte_cap"
+    # the frozen literal is what refused the hits the token budget admitted
+    assert frozen_stats["byte_cap"] == bench.BYTE_CAP
+    assert frozen_stats["dropped_by_byte_cap"] > 0
+    assert frozen_stats["stopped_by"] == "byte_cap"
+    assert len(raised) > len(frozen)
+
+
+def test_bench_measure_question_records_the_binding_bound():
+    """``_measure_question`` records WHICH bound cut the raised arm (and the
+    derived ceiling it used), so the arm's non-binding byte cap is visible in
+    the per-row result rather than inferred."""
+    from tools import ask_recall_bench as bench
+    question = {"question_id": "q1", "question": "zephyr",
+                "question_date": "2024-01-01", "haystack_sessions": []}
+    row = bench._measure_question(
+        _BenchFakeSDK(), question, keep_numeric=False, search_keys_prf=False,
+        fusion_weights=None, fusion_k=60, cap_limit=120, cap_item=120,
+        evidence_boost=False)
+    assert row["cap_byte_cap"] == bench._raised_byte_cap()
+    assert row["cap_dropped_by_byte_cap"] == 0
+    assert row["cap_stopped_by"] != "byte_cap"
+    # the raised window admits more than the frozen 40-item baseline
+    assert row["n_ctx_cap"] > row["n_ctx40"]

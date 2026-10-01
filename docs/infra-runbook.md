@@ -490,7 +490,7 @@ The flap only became an outage because of three independent defects:
 
 | # | Defect | Status |
 |---|---|---|
-| 1 | `path = "/health"` was coupled to a downstream — process liveness inherited every DB/probe stall | **mitigated in the app** — `hosted_api.health` (`@app.get("/health")`) returns 200 unconditionally with `status` = `ok`/`degraded`; DB truth lives in `/health/ready` (`hosted_api.health_ready`). `status` is `ok` only when `db.ok` **and** `backup_watcher.ok` are true; read `backup_watcher.state` for which: `running` and `disabled` are `ok` (`disabled` = no sweep config, or `BACKUP_WATCHER_DISABLED=1`), while `stopped` (started, thread gone), `failed` (wanted, the start raised — `backup_watcher.error` carries it) and `unknown` (metadata unreadable) are not. Before this, a watcher that never started was invisible on `/health` while the process served normally (#2851/#2922: ~31 days) |
+| 1 | `path = "/health"` was coupled to a downstream — process liveness inherited every DB/probe stall | **mitigated in the app** — `hosted_api.health` (`@app.get("/health")`) returns 200 unconditionally with `status` = `ok`/`degraded`; DB truth lives in `/health/ready` (`hosted_api.health_ready`). `status` is `ok` only when `db.ok` **and** `backup_watcher.ok` are true; read `backup_watcher.state` for which: `running` and `disabled` are `ok` (`disabled` = no sweep config, or `BACKUP_WATCHER_DISABLED=1`), while `stopped` (started, thread gone), `failed` (wanted, the start raised — `backup_watcher.error` carries it) and `unknown` (metadata unreadable) are not. Before this, a watcher that never started was invisible on `/health` while the process served normally (#2851/#2922: ~31 days). `backup_watcher.expected` rides every state and is what disambiguates `disabled`: `true` = this boot intended to run the watcher (it is a host where backups were supposed to be on — the hosted-boot marker), `false` = the non-hosted/TestClient default. It is a reader's disambiguation and does **not** affect `status`/`ok` |
 | 2 | Routing was decided by an **HTTP** service check, so any application-level latency (probe latency, event-loop queueing) could de-register the only machine | **fixed in config** — `[[services.tcp_checks]]` is kernel-served, so it is not starved by event-loop/thread-pool scheduling and a slow/starved app no longer de-registers the machine (§6.4); the application-level liveness signal is the now-**live** non-routing `[checks.loop_liveness]` check (§6.0/§6.4), which cannot affect routing |
 | 3 | One machine + an implicit, undeclared lifecycle policy | policy now explicit (§6.2); machine redundancy **blocked** (§6.3) |
 
@@ -991,6 +991,9 @@ on a `*/5 * * * *` cron **intent** (measured delivery is ~15 min; see §7.5a).
 - **Workflow:** `.github/workflows/availability-watchdog.yml` (schedule `*/5 * * * *` + `workflow_dispatch`)
 - **Logic + limits:** `.github/scripts/availability-watchdog.sh`
 - **Harness (runs in CI job `availability-watchdog`):** `bash .github/scripts/availability-watchdog.test.sh`
+- **Independent liveness check (#4573):** `.github/workflows/availability-liveness.yml` (its OWN schedule,
+  `*/30`) + `.github/scripts/availability-liveness.sh`, harness `bash .github/scripts/availability-liveness.test.sh`
+  (same CI job). It is a separate workflow on purpose — see §7.8a.
 
 **Two production targets (#3628).** The watchdog now drives TWO surfaces, as two
 steps of the same job: the Fly API probe (§7.1a) and the Cloudflare Pages auth
@@ -1274,17 +1277,16 @@ incident cannot authorise a restart before `SUSTAINED_DOWN_MINUTES` of observed
 failure. The **run leg** is what stops the new anchor from paging a long-lived
 incident on its *first* observed failing tick: both legs stay required.
 
-**Two deliberate non-adoptions**, both stated so a later reader does not
-tidy them away:
+**One deliberate non-adoption**, stated so a later reader does not tidy it away:
 
 - **OVERRIDES: PagerDuty's “acknowledgment pauses further notifications.”**
   Not adopted: the incident body is on a **public** repo and this watchdog's own
   threat model treats it as human-editable, so an ack field would be a
   fail-**open** mute on the pager. A bounded reminder interval is used instead.
-- **No acknowledgment field, and no independent heartbeat yet.** A heartbeat /
-  dead-man's-switch for the pager's own liveness (the canonical fail-closed
-  construction) is a different failure surface and is tracked separately in
-  tortoise **#4573**.
+
+A second, related gap — the pager's OWN liveness — was never a deliberate
+omission, and it is no longer a gap: a heartbeat / dead-man's-switch now exists
+in §7.8a (#4573), on a channel independent of this leg's Telegram page.
 
 ### 7.6 When restarts do not help
 
@@ -1381,6 +1383,104 @@ rows are currently not garbage-collected — tracked in #3647). A drill therefor
 exercises the API drill path while still alerting on a genuinely-down auth
 surface.
 
+### 7.8a The pager's own liveness — the heartbeat + independent check (#4573)
+
+**Why it exists.** Everything above is fail-closed for a broken **channel**
+(#3887): a sustained incident reaches a human, and an undelivered page is
+durable (`escalate_state=failed`) and red. None of it can see a dead **monitor**.
+Disable the workflow (`gh workflow disable availability-watchdog`), have GitHub
+drop the schedule, or crash before the down path, and there is **no run at all**
+— no escalation fires and the log is silent. “The pager is dead” then reads
+exactly like “all clear”: the same fail-open class, one level up.
+
+**Two halves, on different channels.** The canonical construction (a watchdog
+heartbeat checked by something external to the monitored path) has two parts
+here, and the load-bearing property is that the second does not travel the
+channel the first verifies:
+
+1. **The heartbeat** — `availability-watchdog.sh::emit_heartbeat()` writes a
+   rolling record into **its own GitHub issue** (title
+   `[OPS] availability-watchdog heartbeat (rolling)`, body marker
+   `<!-- availability-watchdog-heartbeat -->`, fields `heartbeat_at=` /
+   `heartbeat_epoch=` / `verdict=` / `host=` / `run=`). It is written on every
+   **scheduled** run that reaches a verdict — **a `DOWN`/`DEGRADED` run
+   included**, because a pager that is working during an incident is ALIVE
+   (emitting only on green runs would page about the pager during every real
+   outage). A `workflow_dispatch` run (a drill, a manual re-probe) does **not**
+   stamp it: it proves the script works, not that the schedule delivers. The
+   write is **best-effort and non-fatal** by design — the check is fail-closed on
+   the read side, so a heartbeat that stops arriving IS the alarm; making the
+   write fatal would only redden a green monitor.
+2. **The check** — `.github/scripts/availability-liveness.sh`, run by its **own
+   workflow on its own schedule**, reads that body and — when the record is
+   older than the threshold, or absent on an established monitor — **files/updates
+   a GitHub alert issue and fails the run**. That is a GitHub issue plus
+   GitHub's own failure notification: it **never calls Telegram** and does not
+   read the incident issue the Telegram leg is keyed on, so a dead Telegram bot
+   cannot silence the check on Telegram. On recovery it closes the alert.
+
+**Measured cadence, not cron intent.** The 5-minute cron delivers ~96 runs/day.
+Re-measured for #4573 over the whole live population (the watchdog workflow was
+created 2026-09-12T22:15 CDT, 2026-09-13T03:15Z) through 2026-09-27T08:55:32Z — 14.22 days, n=1377 scheduled runs:
+
+| Statistic | Value |
+|---|---|
+| runs/day | **96.8** |
+| mean inter-arrival | **14.88 min** (≈ the “~15 min” in §7.5a) |
+| median · p90 · p95 · p99 | 11.9 · 23.9 · **28.6** · 53.8 min |
+| **max gap** | **63.5 min** |
+| gaps > 45 min | **15** |
+
+⛔ **The mean is not the threshold basis.** `3 × 15 = 45 min` would have
+**false-fired 15 times** in that 14.2-day window — GitHub drops and delays
+scheduled runs under load, and a pager that cries wolf is the defect restated.
+The default threshold is **`HEARTBEAT_MAX_AGE_MIN=90`** = 3 × the measured
+**p95** (3 × 28.6 = 85.8, rounded up), which clears the observed max with ~40 %
+headroom.
+
+The knob is the repository variable `HEARTBEAT_MAX_AGE_MIN` (wired step-level in
+`availability-liveness.yml`). It must be a **plain integer**: anything else
+(`2h`, `-1`, `0.5`) is rejected with a warning and falls back to the measured
+default. (This matters — those values all contain digits, so a naive
+digit-stripping validator would turn `2h` into a 2-minute, always-alerting
+bound.) A valid integer **below the measured p95 (~29 min)** is honoured but
+warned, because it sits inside GitHub's own jitter; re-measure before lowering
+it.
+
+**Operator controls.** Two knobs, both wired step-level in the workflow from a
+repository variable of the same name (so neither needs a workflow edit):
+
+| Knob | Default | Meaning |
+|---|---|---|
+| `HEARTBEAT_ENABLED` | `1` | `0` (byte-exact only) is a **kill switch**: no heartbeat is recorded, which makes the liveness check alert **by design** — a silence is never an all-clear. Any other value (`true`, `yes`, `00`) is treated as `1` and warns, so a malformed value cannot choose the silent direction |
+| `HEARTBEAT_MAX_AGE_MIN` | `90` | The staleness bound above. Validated strictly: only a plain integer of at most 6 digits inside `1..100000` is honoured — anything else (a unit like `2h`, a negative, a fraction, or a value beyond bash's integer range) warns and falls back to the measured default. The digit bound matters: an int-overflowing value makes bash's `[ -gt ]` error, which a condition reads as *false*, and the checker would then never alert |
+| `HEARTBEAT_EMIT` | `1` | **Internal, not an operator knob.** A scheduled job runs the script once per probe step (API + auth); exactly ONE step emits (`availability-watchdog.yml` sets `HEARTBEAT_EMIT=0` on the auth step), so one job writes exactly one rolling record and cannot race the search index into a duplicate issue |
+
+**Reading the alert.** The alert title is
+`[OPS] availability-watchdog LIVENESS — no heartbeat`; its body carries
+`reason=` (`heartbeat-too-old` / `no-heartbeat-record` /
+`heartbeat-record-unreadable` / `heartbeat-record-unparseable`),
+the observed age, and the threshold. Check, in order: (1) `gh workflow list --all`
+— is `availability-watchdog` `active`? (2) `gh run list --workflow
+availability-watchdog.yml --limit 20` — are scheduled runs arriving?
+(3) the rolling heartbeat issue — does `heartbeat_at=` move? (4) if runs arrive
+but the heartbeat does not, read the last run's `heartbeat:` log lines.
+
+**Bootstrap, and the residual.** Before the monitor has ever run there is no
+record; the checker reads the **liveness workflow's own `created_at`** — the age
+of *this feature*, not of the watchdog workflow (created 2026-09-12T22:15 CDT,
+2026-09-13T03:15Z, so keying on it would alarm from the moment this checker first ships
+until the first heartbeat lands, a false page produced by the rollout meant to
+prevent false pages). It does not alarm while the feature is younger than the
+threshold (a fresh rollout has nothing to verify). An **unreadable** feature age
+is treated as stale (fail closed), and so are an unreadable or unparseable
+heartbeat. The residual this does **not** close:
+an outage of GitHub Actions itself takes both halves out (the emitter and the
+checker both run on Actions) — closing that needs an endpoint external to GitHub
+(Dead Man's Snitch / OneUptime / promlabs' end-to-end watchdog pattern), which is
+an external account and an owner decision, deliberately out of this scope and
+tracked as **#5798**.
+
 ### 7.8 Known limits
 
 - **Two probes, still narrow.** The API probe checks ONE route
@@ -1408,21 +1508,66 @@ surface.
   paths already end in a loud `fail` (and, on a first occurrence, a body
   explaining the refusal), and the corrupt-ledger message now says explicitly
   that **no escalation page was sent and why**, so the gap is named rather than
-  silent. Independent liveness for the pager itself is tortoise **#4573**.
-- **A sustained incident observed through a FLAP gets no escalation page.**
-  When a probe answers UP but the recovery-confirmation probe fails while an
-  incident is already open, the run leaves the incident open and exits GREEN
-  *before* the escalation leg, so no state advances and nothing is paged. That
-  early exit is deliberate (the open incident is the standing alert, and
-  changing when a flap counts as still-failing is a behavioural change with its
-  own design), so the run **names the gap** instead: it logs a warning saying
-  the escalation leg is not reached and **no escalation page is sent this
-  run**, so “no page” is never read as “nothing to page about”.
+  silent. Independent liveness for the pager itself now exists — §7.8a, #4573.
+- **A sustained incident observed through a FLAP gets no escalation page and
+  advances no state — a recorded DECISION, not an open gap (#5021).** When a
+  probe's verdict is UP but the recovery-confirmation probe fails while an
+  incident is already open, the run leaves the incident open, advances **no**
+  state, does **not** reach the escalation leg, and (since #5021) exits **RED**.
+  Two separate reasons, stated separately because they are not the same:
+  * **Why the state is not advanced — the restart gate.**
+    `decide_escalation`'s RUN leg reads `STATE_DOWN_RUNS`, the same counter
+    `decide_restart`'s run leg reads, and `normalize_escalation_knobs` enforces
+    `ESCALATE_MIN_RUNS >= SUSTAINED_MIN_RUNS`. So any flap that **advanced**
+    that counter to satisfy the pager's run leg would simultaneously satisfy the
+    restart leg's run window, and the flap is a run whose first probe verdict
+    was UP (`probe()` returns on the FIRST UP attempt, so at least one attempt
+    answered — not necessarily all `PROBE_ATTEMPTS`). A self-heal restart of a
+    service that was answering UP moments ago is what the restart gate exists to
+    bound, so the flap advances nothing. The wall-clock leg is not moved here
+    either: it is anchored on the incident's server-side `created_at`.
+  * **Why `last_down_ts` is not advanced either — the same hazard, wall-clock
+    axis.** `last_down_ts` is the staleness input that decides whether
+    `STATE_FIRST_FAILURE_TS` (the restart window's START) is reset to `now`: the
+    reset fires only once the gap since the last recorded failing run exceeds
+    `STALE_RESET_MINUTES`. Stamping `last_down_ts` from a flap would hold the
+    restart window open across a run in which the service answered UP — arming
+    (or keeping armed) a restart in the wall-clock dimension, exactly what the
+    shared-counter argument forbids in the run-count dimension. So a flap
+    advances neither.
+  * **Why a page is not sent — scope, not impossibility.** Because
+    `decide_escalation` is a pure function of **persisted** state, a page IS
+    reachable from here without moving anything: when an incident has already
+    accumulated `ESCALATE_MIN_RUNS` observed failing runs and is past its
+    anchor, the leg can be run against the state the incident already holds and
+    a page sent while persisting **only** `escalate_state`/`escalate_ts`/
+    `page_ok_ts` — `decide_restart` reads none of those, so nothing is armed.
+    That is a change to the **escalation state machine**, and the owner recorded
+    on #5021 that it is consolidated under the one-incident-substrate refactor
+    (tortoise **#5047**) and is *not an independent patch*; the mechanism and
+    its proof are written up there. Residual that #5047 owns: a service that
+    flaps from creation and never records a genuine DOWN run keeps `down_runs`
+    below `ESCALATE_MIN_RUNS`, so its run leg is never satisfied and it does not
+    page at all.
+  * **What #5021 changed:** the run is no longer **GREEN**. The confirmation
+    probe FAILED (a `DOWN` verdict exhausts all `PROBE_ATTEMPTS` attempts, while
+    an `UNEXPECTED` verdict returns on its first attempt), and a run that
+    observed a failure must not read as an all-clear — the same “green while
+    down” rule the no-open-incident sibling already enforces. The message names
+    the refusal and its reason, so “no page” is never read as “nothing to page
+    about”.
+  The convergent practice this refusal is argued against (`keep_firing_for`-style
+  hysteresis: keep a flapping alert *firing* and throttle notifications rather
+  than let it read as resolved) supports the state-preserving page — it says
+  nothing about advancing a restart window — and is cited on #5047. A
+  **cross-kind flap** is unchanged: `any_open` treats either kind as the standing
+  alert, so this path files no new incident either, and the incident's kind can
+  understate the observed failure until the next genuine DOWN/DEGRADED run.
 - **This leg covers the PAGER, not the MONITOR.** If the workflow is disabled,
   the schedule is dropped, or the job never reaches the failing path, no
   escalation can fire and there is no run log to read — “the pager is dead” then
-  looks exactly like “all clear”. That is the dead-man's-switch surface, not
-  this one: tortoise **#4573**.
+  looks exactly like “all clear”. That is the dead-man's-switch surface, and it
+  is now covered by the heartbeat + independent check in §7.8a (#4573).
 - **The dedupe search is a loose `in:title` term match**, not an exact phrase,
   **and an adopted item must clear three checks**: the search is constrained to
   `author:app/github-actions`; the returned item's `user.login` must be the
@@ -1466,12 +1611,18 @@ surface.
   issue is a new outage.
 - **Flapping** (UP→DOWN→UP within minutes) keeps an open incident open
   (recovery needs a confirmation probe) but does churn comments. That
-  unconfirmed-recovery run exits **GREEN** — the open incident, not the run
-  colour, is the standing alert, so do not read a green run as all-clear while
-  an incident is open. The sustained
-  clock is **preserved** while the incident stays open (it is only reset when
-  the gap since the last failing run exceeds `STALE_RESET_MINUTES`), so a flap
-  does not delay self-healing; a flap that recovers long enough to close the
+  unconfirmed-recovery run exits **RED**, not green (#5021): the confirmation
+  probe failed a full `PROBE_ATTEMPTS` cycle, and a run that observed a full
+  failure must not read as an all-clear. The open incident is still the standing
+  alert, and **no escalation page** is sent for it on this path — see the flap
+  entry in §7.8 for why that refusal is deliberate (it is the restart gate).
+  A flap advances **no** failing-run state, so it moves neither clock. The
+  restart window itself runs from `STATE_FIRST_FAILURE_TS`; `last_down_ts` is
+  only the staleness input that decides when that start is reset to `now`. Because
+  a flap does not stamp `last_down_ts`, the gap since the last recorded failing
+  run keeps growing through a flap, so once it exceeds `STALE_RESET_MINUTES` the
+  stale-clock reset fires and restarts the window (fail closed, toward *not*
+  restarting) rather than being held open. A flap that recovers long enough to close the
   incident starts a fresh sustained clock, but the restart budget is **shared
   across incidents** and does not reset (next bullet). If a flap is seen with
   NO incident open, the watchdog files one for the observed failure rather than
@@ -1514,8 +1665,10 @@ surface.
 pack-catalog smoke (#1929), and post-release DB health (#1719 — since #4538 it
 runs in its own `post-deploy-verify` job and does not colour the deploy job; its
 phase contract — the weaker predicate informs, the strongest decides — is §8.5).
-Some can be bypassed for an incident-fix deploy — and **a bypass is an
-incident-window state, not a setting.** **Not every gate is bypassable:** the
+Some can be bypassed for an incident-fix deploy, and `SKIP_FLY_SECRET_PROVENANCE`
+also carries a `fly-toml-env` route-(b) transition (§8.4 step 4) — and **a
+*persistent* bypass is an incident-window state, not a setting.** **Not every
+gate is bypassable:** the
 migration-drift gate has no `if:` guard and no `SKIP_` lane by design (the #1001
 P0 recurred while a migration was missing from prod, so a missing token or an
 error must fail the deploy).
@@ -1550,11 +1703,33 @@ The source tokens are:
 |---|---|
 | `gh-secret:<GH_NAME>` | propagated by the workflow from the GitHub Actions secret `<GH_NAME>` (not always the same name — e.g. `GITHUB_CLIENT_ID` ← `GH_CLIENT_ID`) |
 | `workflow` | set by the workflow from non-secret context (`${GITHUB_SHA}`, a composed feature flag) |
-| `fly-toml-env` | applied from `fly.toml` `[env]` — versioned, and the deploy applies it |
+| `fly-toml-env` | applied from `fly.toml` `[env]` — versioned, and the deploy applies it. The gate **fails while a Fly secret of the same name still exists** (a Fly secret SHADOWS `[env]`, so the versioned value is not what the app reads): that is the route-(b) transition, not drift — §8.4 step 4 is the order that completes it |
 | `fly-only:<issue-ref>` | a **deliberately** out-of-band secret; the named issue carries the recorded decision (§8.3) |
 
 A bare `unmanaged` entry — present on Fly with no declared source — **FAILS the
 gate**. It names the #4126 defect precisely, not debt to be recorded.
+
+**The machine side (the second half of #4568).** The gate above checks the
+*manifest* against the Fly **secret list** and `fly.toml` `[env]` — build-time
+surfaces. That is not the same question as *"does the machine that is actually
+running carry the declared value?"*, and for a while nothing asked it: a declared
+`fly-toml-env` value the machine did not have passed every gate there was. It cost
+~5 h of `TORTOISE_MANUAL_LINKING_ENABLED` being absent — `is_truthy(None)` →
+`_linking_available()` False, a product flag off — with no way for the operator to
+learn that the value they applied was not the value the machine ran.
+
+`.github/scripts/check-fly-machine-env.py` now asserts it, **post-release**, in
+`post-deploy-verify`: for every `fly-toml-env` name, each **active** machine's
+`config.env` must carry that name with the value `fly.toml` `[env]` declares. An
+absent or divergent name **exits 1 and names both the variable and the machine**;
+a could-not-determine (API error, malformed shape, missing token, **zero active
+machines**, **no `fly-toml-env` names declared**) **exits 2 and is never
+bypassable** — "nothing was compared" is not a pass in either direction. A
+failure here means *the release is live and its env is wrong*, never "the
+deploy failed" (there is no rollback) — the same posture as the DB health step
+(§8.5). The two gates are complementary and neither replaces the other: a perfect
+manifest can coexist with a machine running something else. Tests:
+`tests/test_fly_machine_env.py`.
 
 **Fail-closed, and the two exit classes.** Exit 1 = undeclared or stale
 declarations (the actionable incident-time class). Exit 2 = the gate *could not
@@ -1620,6 +1795,14 @@ Rules that hold for every one of them:
   step/job-level `if:` — `SKIP_PACK_SMOKE` skips the whole packaging-smoke job,
   and `SKIP_DB_HEALTH_GATE` skips the whole health step — so nothing in it
   runs, and the bypass is not exit-class-limited.
+- **One bypass has a second, NON-incident use.** `SKIP_FLY_SECRET_PROVENANCE`
+  also carries the single transition deploy of a `fly-toml-env` route (b)
+  (§8.4 step 4, #4568): the declaration is "stale" only until the shadowing Fly
+  secret is unset, and the `[env]`-before-`unset` order needs that deploy. Use
+  the **per-run dispatch input** there, so nothing is left set and no `_SET_AT`
+  window exists. The exit-1 lane releases *every* exit-1 violation in the run, so
+  read the violation list and confirm the only entry is the name being moved —
+  the run summary names the gate, not the violations.
 
 **A bypass is never the committed default.** Every `skip-*` dispatch input
 defaults to the non-bypass value, so clearing the repo variable re-arms the gate
@@ -1687,13 +1870,64 @@ stays out-of-band: `tools/rotate-backup-keys.py --role registry_stream`.
    fly secrets list -a tortoise-y4mjjq
    ```
 4. Resolve it by **declaring the real source**: add the propagation line to the
-   workflow plus the matching probe line (§8.1), or record the value in
-   `fly.toml [env]` and unset the Fly secret — **deploy the `[env]` entry first**,
-   because a Fly secret SHADOWS `[env]`.
-5. Only if that is impossible **during an incident** (e.g. an operator must
-   hand-set a secret mid-incident) may you set
-   `SKIP_FLY_SECRET_PROVENANCE=true` for the window — clear it afterwards, and
-   declare the secret anyway.
+   workflow plus the matching probe line (§8.1), or — for a **non-secret config
+   value** — record it in `fly.toml [env]`. That second route is a transition, and
+   **the `[env]` value must be on the machine before the secret is unset**
+   (#4568; #4471's caution for whoever executes it):
+
+   - **read the current value, then land it** — while the secret shadows `[env]`,
+     `flyctl ssh console -a tortoise-y4mjjq -C "printenv <NAME>"` shows the value
+     production actually runs. Put **that** in the `[env]` entry — never
+     `.env.example`'s default, which becomes effective at the unset below — and
+     merge the entry with the `fly-toml-env` declaration;
+   - **deploy it, from the merged commit** — apply `[env]` with a `deploy-hosted`
+     dispatch carrying `skip-fly-secret-provenance: true` **for that run only**
+     (the shadowed declaration is exit-1 class, so that input releases it, and the
+     bypass is stated in the run summary; use the dispatch input, never the repo
+     variable — nothing is left set). **Confirm this name's shadow is the ONLY
+     violation in that run**: the input releases every exit-1 violation, and the
+     summary names the gate, not the violations (they are in the step log). The
+     secret still shadows `[env]`, so the value the app reads does not change. (A
+     config-only operator deploy of the current image — how #4523 did it — also
+     applies `[env]`, but runs none of the deploy gates and leaves no run summary
+     or audit line; the dispatch is the route.)
+   - **wait for the deploy job, not the run, then unset** — a `deploy-hosted`
+     **run** can end RED with `[env]` already applied: since #4538 the separate,
+     fail-closed `post-deploy-verify` job can leave the run red *after*
+     `flyctl deploy` succeeded and `[env]` was applied (§8.5), and
+     `concurrency: cancel-in-progress` can cancel a run after that step too.
+     Require the `deploy-api` job's Deploy step to succeed — unsetting against a
+     deploy that did **not** apply `[env]` drops the value. Only then run
+     `flyctl secrets unset <NAME> --app tortoise-y4mjjq`;
+   - **verify BOTH halves** — `flyctl secrets list -a tortoise-y4mjjq` must no
+     longer list `<NAME>` (the shadow is gone; that list is the gate's own input),
+     **and** `printenv <NAME>` on the machine must still return the value you read
+     at the top (the move is behaviour-preserving). Neither alone is enough:
+     `secrets list` says nothing about the value, and `printenv` alone cannot say
+     *which* source supplied it.
+
+   ⛔ **The `[env]` deploy must be from the MERGED commit.** From a
+   **pre-merge** commit it is the out-of-band application #4568 records: the
+   next `deploy-hosted` run re-applied `main`'s `fly.toml` (which lacked the
+   entries), removed them, and the value was absent until a later deploy put
+   `[env]` back — ~5 h for `TORTOISE_MANUAL_LINKING_ENABLED`. Unset-first
+   reaches that same state directly: `fly.toml` is the value's **only durable
+   home** (the deploy re-materialises the machine's env from it), so with no
+   `[env]` on the machine the unset leaves the variable absent until a later
+   deploy. The route relies on Fly applying `[env]` at deploy and preserving
+   the machine config across a `secrets unset`; nothing asserts the running env
+   (that is #4568's other half), so the two checks above are the only checks on
+   the outcome. Until the unset, **every push-triggered `deploy-hosted` run
+   fails this gate** (the transitional state is red by design), so finish this
+   step as soon as the transition deploy's `Deploy` step succeeds — and do
+   **not** clear that freeze with `vars.SKIP_FLY_SECRET_PROVENANCE`, which
+   leaves the incident-class lane armed.
+5. The provenance bypass's sanctioned uses are route (b)'s transition deploy
+   (step 4 — per-run input, nothing left set) and an incident-fix deploy that must
+   hand-set a secret, where on a push-triggered run the repo variable is the only
+   lane — set it for the window, clear it afterwards, and declare the secret
+   anyway. The workflow's own `skip-fly-secret-provenance` input description
+   names both uses.
 
 **Rotation:** for a `gh-secret:` name, rotating the GitHub secret is the only
 step — the next deploy propagates it.

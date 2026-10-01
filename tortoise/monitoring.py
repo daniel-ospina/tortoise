@@ -252,12 +252,16 @@ PROBE_RETRY_DELAY = 0.1
 #: that reached (and failed at) the query: only the latter's error may replace
 #: the FIRST attempt's real error (#3143 review).
 #:
-#: ⚠️ This is a distinct error STRING, NOT a distinct status. A setup timeout
-#: still returns ``ok=False`` from ``probe_db``, and ``metrics()`` maps
-#: ``db["ok"] is False`` to ``status="degraded"`` + ``graph_size=0`` — #3143's
-#: symptom SHAPE, with only the ``error`` text changed. Do not read the
-#: separate spelling as "no verdict reported": to a caller the report is
-#: indistinguishable from a real unreachability except for that string.
+#: ⚠️ The spelling is a PHASE marker, not the verdict (#3683). A setup timeout
+#: still returns ``ok=False`` from ``probe_db``, but ``probe_db`` ALSO returns
+#: ``observed`` (``_probe_once``'s 4th value) and ``metrics()`` routes on THAT:
+#: a budget-exhausted setup timeout is an unobserved probe and reports the
+#: documented ``status="unknown"`` (+ ``graph_size=0``, the setup error kept),
+#: NOT ``degraded`` — "degraded" is reserved for an OBSERVED failure. So the
+#: separate spelling no longer implies a verdict the caller cannot tell apart
+#: from a real unreachability; the machine-readable discriminator is
+#: ``db["observed"]``. (A callable that RAISED keeps ``observed=True`` even
+#: though its error may be spelled with this same synthesized prefix.)
 _PROBE_SETUP_TIMEOUT_MSG = "probe setup timeout after "
 
 #: A LOOSE outer-alignment bound for :func:`probe_db`'s PLATFORM liveness
@@ -488,6 +492,274 @@ LOOP_LAG = Histogram(
 )
 
 
+# ── #4491: EGRESS (response bytes) per org — the network cost dimension ───
+#
+# #4491: inbound bytes were the ONLY byte accounting in the hosted API, and
+# only as a DoS cap (the `content-length` guard on the manifest route) — a
+# safety bound, not a cost metric. NOTHING counted outbound bytes, so the
+# network cost of serving a read-heavy org (retrieval/ask result sets, graph
+# read, export) had no signal at all while reads are free by decision
+# (`product/pricing.json` -> `billing.reads_free: true`).
+#
+# SHAPE — constrained by the #5045 consolidation comment on #4491, which asks
+# for egress to become a DECLARED dimension of one metering substrate "rather
+# than a sixth separate counter": ONE writer (``record_egress``) owns the unit
+# (bytes), the attribution key (org) and the route class, so a dimension
+# registry can enumerate it later without a call-site sweep, and no caller
+# touches a metric object directly (the #501/#3677 house shape). No endpoint,
+# no quota, no cap, no price — this measures; it does not price.
+#
+# BOUNDED CARDINALITY: both labels are capped and everything past the cap folds
+# into ONE shared child — the ``_TELEMETRY_DROP_COUNTS`` doctrine in
+# ``hosted_api``. Without the cap, unknown traffic (or a fleet of orgs) grows
+# the Prometheus child set without bound, which is a scrape-cost bug, not a
+# measurement.
+#
+# ROUTE LABELS SIT ON TWO AXES: the ROUTE axis is CODE LITERAL (a FastAPI route
+# template ``/v1/points/{pid}`` or a declared mount prefix — see
+# ``hosted_api._EGRESS_DECLARED_PREFIXES``), which traffic can never add a child
+# to; the DERIVED axis is REQUEST-derived and therefore UNTRUSTED (a path that
+# matched no route). ``EGRESS_MAX_PATHS`` / ``EGRESS_MAX_DERIVED_PATHS`` bound
+# them separately, and each has one shared overflow child.
+#
+# WHY NOT ONE REGISTRY (measured): the live app already carried 121 templates, so
+# a single 128-slot registry left ~7 slots for unknown traffic — an
+# unauthenticated client could fill them with distinct paths and fold REAL routes
+# (and the size histogram) into ``__other__`` for the whole process.
+#
+# TWO MEASURED HOLES IN THAT SPLIT ALONE, both closed here:
+#   * one label STRING could be emitted from either axis, so a request-derived
+#     label could be written into a template's series — and the histogram
+#     carries no org label, which made that contamination cross-tenant. The
+#     ``origin`` label below makes the same string two distinct children.
+#   * ``/mcp`` and the docs endpoints sat on the derived axis, where 8 cheap
+#     404s on unrelated paths starved them for the process lifetime. Both are
+#     code literals of the app (a ``Mount`` prefix, a plain ``Route`` path), so
+#     they are declared and admitted on the ROUTE axis: unrelated junk cannot
+#     displace them, and no per-sub-route precision is claimed for a sub-app
+#     whose inner routes this layer does not enumerate.
+# What remains on the derived axis is ONLY untrusted traffic, where losing
+# precision is the accepted price of boundedness (the ``_TELEMETRY_DROP_COUNTS``
+# doctrine in ``hosted_api``): no legitimate surface is starved to advantage an
+# attacker.
+#
+# DECLARED LIMIT (scale, not attack): admission is first-come and permanent, so
+# past ``EGRESS_MAX_ORGS`` the LATER orgs fold into ``EGRESS_OVERFLOW`` for the
+# process lifetime — with one shared ``""`` child consuming a slot, a fleet of
+# more than ~511 orgs would see its per-org figure degrade to one bucket. An
+# admitted label is never evicted, because eviction either drops accumulated
+# cost (removing the child) or grows the child set without bound (keeping it).
+# Choosing between those is the metering substrate's decision (#5045), not this
+# counter's.
+EGRESS_MAX_ORGS = 512
+#: The route axis — code literals, ~121 templates today (measured on the live
+#: app) plus the declared mount prefixes, so 512 is headroom for new routes
+#: rather than a tight fit.
+EGRESS_MAX_PATHS = 512
+#: The request-derived axis (paths matching no route). Small on purpose: NOTHING
+#: legitimate lives here — every code-known surface is on the route axis — so
+#: this is the granularity worth paying for traffic that names its own label.
+EGRESS_MAX_DERIVED_PATHS = 8
+EGRESS_OVERFLOW = "__other__"
+#: Where excess REQUEST-DERIVED path labels fold. DELIBERATELY not a path: the
+#: fallback always emits a leading ``/``, so a value a client can request can
+#: never collide with this child — otherwise a client could pre-occupy the
+#: overflow bucket (``GET /__unrouted__``) and make routine folding
+#: indistinguishable from a real path.
+EGRESS_UNROUTED = "__unrouted__"
+# PAIR SPACE: the caps multiply — the worst case is EGRESS_MAX_ORGS x 2 origins x
+# (EGRESS_MAX_PATHS + EGRESS_MAX_DERIVED_PATHS + 2) children. The ORG axis is
+# deliberately generous because org attribution IS the measurement #4491 asks
+# for, and it is not traffic-reachable: every unauthenticated request shares the
+# ``""`` child, and a new org label costs a real org id. The path axis is the
+# bounded one, per the two-axis split above.
+
+#: Response body bytes by (org, route class, origin). The Counter answers "how
+#: many bytes did this org's traffic cost us"; the Histogram below answers "how
+#: big ARE the responses", which is the shape a fair-use boundary needs.
+#: ``origin`` is ``route`` (code literal) or ``derived`` (request-derived) — the
+#: provenance axis that keeps the two apart in the emitted series.
+EGRESS_BYTES = Counter(
+    "tortoise_egress_bytes_total",
+    "Response body bytes written to clients, by org and route class (#4491)",
+    ["org", "path", "origin"],
+)
+#: #4491 indicator 1's "or, at minimum, a distribution of response sizes per
+#: org/path" arm. Labelled by route class ONLY: org x bucket would multiply the
+#: cardinality for a question ("is this route returning 10 MB?") that the org
+#: does not change. It carries ``origin`` for the reason above — a derived label
+#: must never add observations to a template's distribution.
+EGRESS_RESPONSE_BYTES = Histogram(
+    "tortoise_egress_response_bytes",
+    "Response body size distribution by route class (#4491)",
+    ["path", "origin"],
+    buckets=(256, 1024, 4096, 16384, 65536, 262144, 1048576, 8388608),
+)
+
+#: Labels admitted so far, per dimension. Membership IS the cap registry, so a
+#: warm label costs one set lookup with NO lock (the hot path: one response per
+#: admitted org/path pair); the lock is taken only while ADMITTING a new label.
+_EGRESS_ORGS: set[str] = set()
+_EGRESS_PATHS: set[str] = set()
+_EGRESS_DERIVED_PATHS: set[str] = set()
+_EGRESS_LOCK = threading.Lock()
+
+
+#: Characters replaced in a request-derived label: C0, DEL and the C1 range
+#: (U+0085 NEL and U+009B CSI are line-break / escape introducers to
+#: Unicode-aware readers), plus U+2028/U+2029 — the SAME CLASS
+#: ``mcp_auth._sanitize_for_log`` covers. That one escapes for a LOG sink; this
+#: one replaces with ``?``, because a label is a series KEY and the value's
+#: readability matters less than it not splitting a line.
+_EGRESS_LABEL_TRANSLATE = str.maketrans({
+    **{c: "?" for c in (*range(0x20), 0x7F, *range(0x80, 0xA0))},
+    0x2028: "?",
+    0x2029: "?",
+})
+
+
+def _utf8_safe(label: str) -> str:
+    """Make a request-derived label safe to EMIT.
+
+    Control characters are replaced: the path is percent-decoded and
+    unauthenticated, and a reader that splits on line breaks — or one
+    validating control bytes — would drop or garble the series (measured: a NEL
+    in a label adds physical lines to a ``splitlines()`` reader, and the
+    ``*_bucket`` lines carry the same label).
+
+    A label that cannot be UTF-8 encoded is repaired. ``generate_latest()``
+    encodes label values, so ONE lone surrogate would make the whole
+    ``/metrics`` endpoint raise for the process lifetime, blinding every alert
+    rather than this one dimension. Not reachable from the HTTP path today
+    (uvicorn replaces invalid bytes; org ids are charset-validated — measured),
+    and this single writer is the only place that can enforce it.
+    """
+    label = label.translate(_EGRESS_LABEL_TRANSLATE)
+    try:
+        label.encode("utf-8")
+    except UnicodeEncodeError:
+        return label.encode("utf-8", "replace").decode("utf-8")
+    return label
+
+
+def _admit_egress_label(label: str, seen: set[str], cap: int,
+                        overflow: str = EGRESS_OVERFLOW) -> str:
+    """Admit ``label`` as a metric child, folding past ``cap`` into overflow.
+
+    Additive by construction: an already-admitted label never locks (and never
+    changes); a new label past the cap becomes ``overflow`` so the metric stays
+    bounded rather than raising or dropping the whole record.
+    """
+    if label in seen:
+        return label
+    with _EGRESS_LOCK:
+        if label in seen:
+            return label
+        if len(seen) >= cap:
+            seen.add(overflow)
+            return overflow
+        seen.add(label)
+        return label
+
+
+def record_egress(org: str | None, path: str, nbytes: int, *,
+                  derived: bool = False) -> None:
+    """Record response body bytes written for ``org`` on route class ``path``.
+
+    THE single writer for the egress dimension (#4491): the caller
+    (``hosted_api.EgressBytesMiddleware``) supplies what it measured — org,
+    route class, byte count — and never touches a metric object, so the unit
+    and the attribution key stay in one place.
+
+    ``derived`` names WHICH route-label axis ``path`` belongs to: ``False``
+    (default) for a code-literal label (a matched route template, or a declared
+    mount prefix), ``True`` for a label the caller derived from the request path
+    because no route matched. They are separate budgets so request-derived
+    labels can never consume the route budget, and the axis is emitted as the
+    ``origin`` label so the same string can never mix two provenances' series —
+    see the two-axis note above.
+
+    ``org`` may be ``None``/empty: a request that never resolved an org (an
+    unauthenticated 401, a health probe, an MCP call whose org lives in the
+    MCP ContextVar this ASGI layer cannot see) is attributed to the empty
+    label — an honest "unattributed" child rather than an invented org id.
+
+    ``nbytes`` is clamped at 0: a negative count is impossible data, and a
+    negative increment would corrupt a monotonic counter.
+
+    Labels are repaired to be UTF-8 encodable here, at the single writer,
+    because ``generate_latest()`` encodes label values: ONE unencodable value (a
+    lone surrogate) would make the whole ``/metrics`` endpoint raise for the
+    process lifetime, blinding every alert rather than this one dimension. Not
+    reachable from the HTTP path today (uvicorn replaces invalid bytes and org
+    ids are charset-validated — measured), but this is the only place that can
+    enforce it.
+    """
+    amount = max(0, int(nbytes))
+    origin = "derived" if derived else "route"
+    org_label = _utf8_safe(org or "")
+    org_label = _admit_egress_label(org_label, _EGRESS_ORGS, EGRESS_MAX_ORGS)
+    path = _utf8_safe(path or "")
+    if derived:
+        path_label = _admit_egress_label(
+            path, _EGRESS_DERIVED_PATHS, EGRESS_MAX_DERIVED_PATHS,
+            overflow=EGRESS_UNROUTED)
+    else:
+        path_label = _admit_egress_label(path, _EGRESS_PATHS, EGRESS_MAX_PATHS)
+    EGRESS_BYTES.labels(org=org_label, path=path_label, origin=origin).inc(amount)
+    EGRESS_RESPONSE_BYTES.labels(path=path_label, origin=origin).observe(amount)
+
+
+def egress_bytes_by_org() -> dict[str, int]:
+    """In-process snapshot of ``EGRESS_BYTES`` keyed by org (#4491 indicator 3).
+
+    The readable form of the metric, for a person or a test — no dashboard, no
+    UI, no new endpoint. ``/metrics`` carries the same figure as Prometheus
+    text (``sum by (org) (tortoise_egress_bytes_total)``); this is the direct
+    read, mirroring ``analytics_outcome_counts()``. Derived from ``collect()``
+    rather than a second tally, so the snapshot cannot drift from the metric.
+
+    The ``""`` key is the unattributed share and ``EGRESS_OVERFLOW`` the folded
+    tail of the org/path caps; both are INCLUDED, so the snapshot always
+    reconciles to the whole measurement. (``EGRESS_UNROUTED`` needs no mention
+    here: it is a PATH label, so it appears under whichever org incurred the
+    unrouted traffic, never as a key of this org-keyed dict.)
+    """
+    totals: dict[str, int] = {}
+    for family in EGRESS_BYTES.collect():
+        for sample in family.samples:
+            # Read ONLY the byte counter. The created series of the client the
+            # lock resolves is ``<name>_created``, so the second operand is not
+            # reachable there — it is kept so that a client naming it
+            # ``_created_total`` could not have its creation TIMESTAMP summed
+            # as byte counts.
+            if (not sample.name.endswith("_total")
+                    or sample.name.endswith("_created_total")):
+                continue
+            org = sample.labels.get("org")
+            if org is None:
+                # A family that lost the org label is skipped, never recorded as
+                # an org literally named ``None``.
+                continue
+            totals[org] = totals.get(org, 0) + int(sample.value)
+    return totals
+
+
+def _reset_egress() -> None:
+    """Test seam: forget every admitted label and this process's series.
+
+    Clears the cap registries as well as the children — leaving them behind
+    would make a following test see labels "already admitted" that no longer
+    exist in the metric, which is exactly the drift the cap must not have.
+    """
+    with _EGRESS_LOCK:
+        _EGRESS_ORGS.clear()
+        _EGRESS_PATHS.clear()
+        _EGRESS_DERIVED_PATHS.clear()
+    EGRESS_BYTES.clear()
+    EGRESS_RESPONSE_BYTES.clear()
+
+
 def register(sdk) -> None:
     """Wire SDK so /health can check FalkorDB connectivity + graph size."""
     global _sdk
@@ -580,9 +852,15 @@ class _SingleSlotWorker:
     calls → +10 live ``ThreadPoolExecutor-N_0`` threads) plus the DB
     connection that abandoned call was holding.
 
-    One long-lived worker bounds the thread count to exactly one per process
-    no matter how many times a probe hangs. Callers keep their own hard
-    timeout through the returned ``Future`` (``future.result(timeout=…)``).
+    What bounds the thread count is the SHAPE, not the number 1 (#3683): ONE
+    process-lifetime pool per name, all ``workers`` threads created EAGERLY and
+    ONCE in ``__init__``, a BOUNDED backlog (``MAX_BACKLOG``), a never-dying
+    loop, and the daemon flag — so the count is exactly ``workers`` no matter
+    how many times a probe hangs. The ``workers=1`` default is therefore an
+    implementation choice, not the leak guard: production already runs this
+    same class at width 8 twice (``CONTROL_PLANE_WORKERS`` and the selfhost
+    readiness probe). Callers keep their own hard timeout through the returned
+    ``Future`` (``future.result(timeout=…)``).
 
     Daemon, NOT ``ThreadPoolExecutor`` (whose workers are non-daemon): a
     wedged probe must never block interpreter/uvicorn shutdown — Fly SIGTERMs
@@ -727,16 +1005,55 @@ def daemon_worker(name: str, *, workers: int = 1,
         return worker
 
 
-async def _await_future(future, *, timeout: float | None):
+def _consume_future_exception(future) -> None:
+    """Retrieve a finished future's exception so an abandoned failure is not
+    reported only as an unattributed asyncio warning. NEVER raises.
+
+    Registered by ``_await_future`` on the wrap_future awaitable of the
+    non-cancellable lane. Calling ``exception()`` is what marks the exception
+    RETRIEVED (clears ``Future._log_traceback``); without it, a failure that
+    lands AFTER the await bound was abandoned surfaces ONLY as asyncio's
+    "Future exception was never retrieved" when the future is collected.
+    """
+    with contextlib.suppress(Exception):
+        if not future.cancelled():
+            future.exception()
+
+
+async def _await_future(future, *, timeout: float | None,
+                        cancel_on_timeout: bool = True):
     """Await a concurrent Future, optionally bounded.
 
     Shared by ``run_on_daemon_worker`` and ``run_control_plane_call`` so the
     wrap/cancel/bound semantics have ONE implementation (#3498 review — the
     two offload await paths must not drift).
+
+    ``cancel_on_timeout=False`` (#4456) is for work whose DELIVERY matters.
+    ``asyncio.wait_for`` cancels the awaitable it is handed, and
+    ``asyncio.wrap_future`` propagates that cancellation to the underlying
+    ``concurrent.futures.Future``. For a submission still QUEUED (never
+    dequeued) that ``cancel()`` SUCCEEDS; when a worker later dequeues it,
+    ``set_running_or_notify_cancel()`` returns False and
+    ``_SingleSlotWorker._loop`` SKIPS the callable — the work is silently
+    DROPPED, not merely abandoned. ``asyncio.shield`` keeps the
+    ``wrap_future`` awaitable alive, so the bound abandons only the AWAIT and
+    a QUEUED submission still runs. Callers for which fail-closed
+    abandonment is correct keep the default ``True``.
+
+    On the non-cancellable lane the abandoned awaitable has NO retriever, and
+    ``shield`` does NOT supply one: in CPython 3.12 ``_outer_done_callback``
+    runs on outer-cancel and, because the inner is not yet done (exactly the
+    bound-miss case), REMOVES ``_inner_done_callback`` — whose only job was
+    ``inner.exception()``. The wrapped future's outcome is therefore consumed
+    HERE (#4456), and ``run_control_plane_call`` attributes a later failure at
+    the op level.
     """
     awaitable = asyncio.wrap_future(future)
     if timeout is None:
         return await awaitable
+    if not cancel_on_timeout:
+        awaitable.add_done_callback(_consume_future_exception)
+        awaitable = asyncio.shield(awaitable)
     return await asyncio.wait_for(awaitable, timeout)
 
 
@@ -899,7 +1216,18 @@ class ControlPlaneOffloadError(RuntimeError):
     worker is abandoned) or its backlog is full. The hosted seam maps this to
     the repo-standard 503 ``control_plane_unavailable`` — never a hang and
     never a silent pass-through.
+
+    ``refused`` (#4456) is the public discriminator between the two outcomes:
+    ``True`` when the pool REFUSED the submission (its backlog was full) or
+    the submission was CANCELLED before any worker ran it — the callable did
+    NOT and WILL NOT run; ``False`` for a plain bound miss, where a RUNNING
+    worker still completes the callable (the seam abandons only the await)
+    and a non-cancellable lane keeps a QUEUED submission alive.
     """
+
+    def __init__(self, message: str, *, refused: bool = False) -> None:
+        super().__init__(message)
+        self.refused = refused
 
 
 def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
@@ -978,9 +1306,31 @@ def reset_control_plane_records() -> None:
         _CP_CLIENT_RECORDS.clear()
 
 
+def _log_abandoned_outcome(op: str):
+    """Done-callback factory: attribute an ABANDONED callable's later failure.
+
+    A bound miss on the ``cancel_on_timeout=False`` lane abandons ONLY the
+    await — the worker still runs the callable — so a failure that lands after
+    the bound has nowhere to be reported. ``_await_future`` consumes it (so it
+    is not just an unattributed asyncio warning); this names the op (#4456).
+    Never raises: it runs on the completing thread's done-callback path.
+    """
+    def _cb(future) -> None:
+        with contextlib.suppress(Exception):
+            if future.cancelled():
+                return
+            exc = future.exception()
+            if exc is not None:
+                logger.error(
+                    "control-plane call %r abandoned at the wait bound then "
+                    "FAILED: %r", op, exc)
+    return _cb
+
+
 async def run_control_plane_call(fn, *, op: str,
                                  timeout: float | None = None,
-                                 pool: str = "auth"):
+                                 pool: str = "auth",
+                                 cancel_on_timeout: bool = True):
     """Offload ONE blocking control-plane helper to a bounded pool.
 
     The unit of offload is the RESOLUTION, not an individual HTTP call:
@@ -1001,12 +1351,21 @@ async def run_control_plane_call(fn, *, op: str,
     :class:`ControlPlaneOffloadError`. A builtin ``TimeoutError`` raised by
     ``fn`` ITSELF is a DOMAIN error and propagates unchanged — the three cases
     are disambiguated by inspecting the future, not conflated (#3498 review).
+
+    ``cancel_on_timeout`` (#4456) selects the bound-miss semantics. ``True``
+    (default) is fail-closed: the bound cancels the submission, so a QUEUED
+    callable is dropped. ``False`` is DELIVERY-preserving: the bound abandons
+    only the await (``asyncio.shield``) and a QUEUED callable still runs —
+    used by the Stripe billing notify, whose event is already claimed and can
+    never be re-fired. The raised error's public ``refused`` attribute still
+    tells the two apart.
     """
     bound = CONTROL_PLANE_OFFLOAD_TIMEOUT_S if timeout is None else timeout
     future = control_plane_worker(pool).submit(fn)
     started = time.monotonic()
     try:
-        result = await _await_future(future, timeout=bound)
+        result = await _await_future(future, timeout=bound,
+                                     cancel_on_timeout=cancel_on_timeout)
     except TimeoutError as exc:
         # Distinguish the three sources of TimeoutError that meet here:
         #   1. `fn` raised it              -> a domain error, propagate
@@ -1018,19 +1377,40 @@ async def run_control_plane_call(fn, *, op: str,
             raise
         reason = ("pool backlog full" if isinstance(future_exc, _WorkerBacklogFull)
                   else f"exceeded its {bound}s bound")
+        if not future.done():
+            # The callable is still QUEUED or RUNNING: the bound abandoned the
+            # AWAIT, not the work. Attribute whatever it eventually does at the
+            # op level instead of leaving it to a bare asyncio warning (#4456).
+            future.add_done_callback(_log_abandoned_outcome(op))
+        # ``refused`` is the DELIVERY discriminator (#4456): True when the
+        # callable did not and will not run (backlog-full refusal, or a queued
+        # submission cancelled by the bound); False when a bound miss left it
+        # running (or, on a non-cancellable lane, still queued).
         raise ControlPlaneOffloadError(
-            f"control-plane call {op!r} {reason}") from exc
+            f"control-plane call {op!r} {reason}",
+            refused=(isinstance(future_exc, _WorkerBacklogFull)
+                     or future.cancelled()),
+        ) from exc
     record_control_plane_offload(op, time.monotonic() - started)
     return result
 
 
 def _probe_once(sdk, timeout=None,
-                setup_timeout=None) -> tuple[bool, str | None, bool]:
+                setup_timeout=None) -> tuple[bool, str | None, bool, bool]:
     """Execute ONE bounded probe on the shared probe worker.
 
-    Returns ``(ok, error, transient)`` — ``transient`` is True only when the
-    failure was a connection-level error that a single retry could clear,
-    never a timeout (a hung DB stays hung).
+    Returns ``(ok, error, transient, observed)`` — ``transient`` is True only
+    when the failure was a connection-level error that a single retry could
+    clear, never a timeout (a hung DB stays hung). ``observed`` (#3683) is
+    whether the probe produced a VERDICT about the DB: True whenever a callable
+    RAISED (the projection cold-start or the query failed and said why) or the
+    reachability query actually ran; False only when the probe exhausted a
+    budget (or was refused/abandoned) WITHOUT getting an answer. That is the
+    case ``metrics()`` reports as the documented ``unknown`` instead of
+    claiming an observed failure. It is a PHASE fact, never a restatement of
+    the error text: a callable that raised keeps ``observed=True`` even though
+    the query never ran — including when the raised ``TimeoutError`` carried no
+    message and the error is spelled with the synthesized setup wording.
 
     #3143: the two phases are bounded separately. ``setup_timeout`` bounds the
     projection cold-start (``sdk._get_proj()`` — connect + ``_ensure_indexes()``,
@@ -1093,13 +1473,22 @@ def _probe_once(sdk, timeout=None,
         #       Fall back to the synthesized setup message rather than
         #       returning ``error=""``.
         msg = str(e)[:200] or f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s"
+        if isinstance(e, _WorkerBacklogFull):
+            # (a) the worker REFUSED the submission (saturated #2850 backlog):
+            # ``_setup`` never ran, so the DB was never contacted — not an
+            # observation (mirrors the query-phase refusal branch below).
+            return False, msg, False, False
         if setup.done():
-            return False, msg, _is_transient_connect_error(e)
+            # (b) the CALLABLE raised. A bare ``TimeoutError()`` gets the
+            # synthesized setup spelling, but the cold-start still FAILED and
+            # said so — an observation whatever the message says.
+            return False, msg, _is_transient_connect_error(e), True
         # Not done: the cold-start genuinely overran its allowance (the worker
-        # is abandoned, never cancelled — #2850).
-        return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False
+        # is abandoned, never cancelled — #2850). Budget exhausted with NO
+        # answer ⟹ not an observation.
+        return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False, False
     except Exception as e:  # noqa: BLE001, RUF100
-        return False, str(e)[:200], _is_transient_connect_error(e)
+        return False, str(e)[:200], _is_transient_connect_error(e), True
 
     if combined:
         # Platform-liveness shape (#1384): the query may spend only what the
@@ -1114,7 +1503,7 @@ def _probe_once(sdk, timeout=None,
             # ONE spelling per phase, and ``probe_db``'s retry uses this prefix
             # to keep the first attempt's real error when its own remainder was
             # eaten by the cold-start (#3143 review P2).
-            return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False
+            return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False, False
         slot_wait_budget = None
     else:
         # Explicit-allowance shape (#3143, the MCP health tool): ``timeout``
@@ -1152,21 +1541,22 @@ def _probe_once(sdk, timeout=None,
     if (slot_wait_budget and not query.done()
             and not query_started.wait(slot_wait_budget)):
         # The worker never BEGAN the query inside the leftover allowance, so the
-        # query never ran. That is a distinct error STRING, NOT a distinct
-        # status: ``ok=False`` still flows out to ``metrics()`` as
-        # ``status="degraded"`` + ``graph_size=0`` — #3143's shape with only
-        # the text changed (see ``_PROBE_SETUP_TIMEOUT_MSG``). Same setup
-        # spelling as a cold-start overrun (one spelling per phase). The
+        # query never ran. It is reported with the SETUP spelling — one spelling
+        # per phase — and ``observed=False`` (#3683), which is what sends the
+        # report to the documented ``unknown`` ("could not tell") instead of
+        # falsely claiming an OBSERVED failure ("degraded" means a real
+        # component failing). Same setup spelling as a cold-start overrun. The
         # abandoned submission holds no extra thread (#2850).
-        return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False
+        return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False, False
     try:
         query.result(timeout=query_budget)
-        return True, None, False
+        return True, None, False, True
     except concurrent.futures.TimeoutError as e:
         if query.done() and not query_started.is_set():
             # The worker refused/aborted the submission (saturated backlog) —
-            # its own message, never a synthesized phase timeout.
-            return False, str(e)[:200], _is_transient_connect_error(e)
+            # its own message, never a synthesized phase timeout. The query
+            # was never picked up ⟹ not an observation.
+            return False, str(e)[:200], _is_transient_connect_error(e), False
         if not query_started.is_set():
             # The submission was QUEUED and never RAN (the worker was busy for
             # the whole reachability budget), so the phase at fault is the
@@ -1174,12 +1564,13 @@ def _probe_once(sdk, timeout=None,
             # spelling, the same "one spelling per phase" rule the guard above
             # follows. Only a query that actually STARTED may claim
             # ``probe timeout after …``. Reuses the EXISTING ``query_started``
-            # event; no new machinery.
-            return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False
-        # NOT retried — a slow/hung DB would just hang again.
-        return False, f"probe timeout after {timeout}s", False
+            # event; no new machinery. Never started ⟹ not an observation.
+            return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False, False
+        # NOT retried — a slow/hung DB would just hang again. The query RAN and
+        # overran, so the DB was contacted: an observation.
+        return False, f"probe timeout after {timeout}s", False, True
     except Exception as e:  # noqa: BLE001, RUF100
-        return False, str(e)[:200], _is_transient_connect_error(e)
+        return False, str(e)[:200], _is_transient_connect_error(e), True
 
 
 def probe_db(sdk, setup_timeout=None) -> dict:
@@ -1226,9 +1617,14 @@ def probe_db(sdk, setup_timeout=None) -> dict:
     # degraded within the same sub-second window; a hung black-hole DB is a
     # worker TIMEOUT and is NEVER retried.
 
-    Returns ``{"ok": bool, "latency_ms": float, "error": str|None}`` —
-    NEVER raises, so /health can report ``status: degraded`` instead of
-    crashing the process.
+    Returns ``{"ok": bool, "observed": bool, "latency_ms": float,
+    "error": str|None}`` — NEVER raises, so /health can report
+    ``status: degraded`` instead of crashing the process. ``observed``
+    (#3683) is False when the probe never got a verdict — it exhausted its
+    budget (or was refused/abandoned) without reaching the reachability query —
+    so a caller can tell "never got to ask" from "asked and it failed"
+    WITHOUT parsing the error prose. It is reported by ``_probe_once`` as a
+    phase fact, never re-derived from the error string.
 
     #3143: ``setup_timeout`` is the projection-cold-start allowance (see
     ``_probe_once``). When it is not given, the cold-start and the query SHARE
@@ -1254,28 +1650,30 @@ def probe_db(sdk, setup_timeout=None) -> dict:
     attempt_timeout = PROBE_TIMEOUT
     total_budget = (attempt_timeout if setup_timeout is None
                     else setup_timeout + attempt_timeout)
-    ok, error, transient = _probe_once(sdk, setup_timeout=setup_timeout)
+    ok, error, transient, observed = _probe_once(sdk, setup_timeout=setup_timeout)
     if not ok and transient:
         remaining = total_budget - (time.monotonic() - start) - PROBE_RETRY_DELAY
         if remaining > 0:
             time.sleep(PROBE_RETRY_DELAY)
             # Combined shape on purpose: the retry gets what the deadline has
             # LEFT, split across both phases — not a second allowance.
-            retry_ok, retry_error, _ = _probe_once(
+            retry_ok, retry_error, _, retry_observed = _probe_once(
                 sdk, timeout=remaining, setup_timeout=None)
             if retry_ok:
-                ok, error = True, None
+                ok, error, observed = True, None, True
             elif not (retry_error or "").startswith(_PROBE_SETUP_TIMEOUT_MSG):
                 # The retry reached (and failed at) the query — a genuine
-                # verdict; take it.
-                ok, error = retry_ok, retry_error
+                # verdict; take it (and its observation bit).
+                ok, error, observed = retry_ok, retry_error, retry_observed
             # else: the remainder was too small to REDO the cold-start, so the
             # retry never observed the DB. Keep the FIRST attempt's real error
-            # instead of letting the clock artifact ("probe setup timeout
-            # after 0.01s") mask it — the `remaining > 0` guard alone does not
-            # cover the 0 < remaining < cold-start window (#3143 review).
+            # AND its ``observed`` instead of letting the clock artifact
+            # ("probe setup timeout after 0.01s") mask it — the
+            # `remaining > 0` guard alone does not cover the
+            # 0 < remaining < cold-start window (#3143 review).
     return {
         "ok": ok,
+        "observed": observed,
         "latency_ms": round((time.monotonic() - start) * 1000, 1),
         "error": error,
     }
@@ -2588,8 +2986,86 @@ def _counter_val(counter) -> int:
     return 0
 
 
+#: #3253: the budget for the ``graph_size`` taxonomy round-trip that
+#: ``metrics()`` runs after a successful probe. Five label ``COUNT`` queries on
+#: the WARM projection ``probe_db`` just built are normally sub-millisecond;
+#: this is a wide margin for a large/loaded graph, and a stall now yields a
+#: per-call ``graph_size_error`` instead of pinning the health call for as long
+#: as the server stalls. Derived from (not restated beside) ``PROBE_TIMEOUT`` so
+#: the health surfaces keep ONE latency knob.
+#:
+#: ⚠️ It is a SEPARATE phase, not a widening of the reachability gate: it
+#: bounds the COUNT, so the caller's total grows by this much (see the shape
+#: totals in ``metrics()``) but the probe's own fast-degrade budget is
+#: untouched. It is captured at IMPORT time, so monkeypatching
+#: ``PROBE_TIMEOUT`` (as the probe-budget tests do) does NOT move it.
+GRAPH_SIZE_TIMEOUT = PROBE_TIMEOUT
+
+#: Name of the DEDICATED process-lifetime daemon worker the ``graph_size``
+#: count runs on. Deliberately NOT ``_probe_worker()``: a stalled label count
+#: on the SINGLE probe slot would hold it and block the NEXT health probe's
+#: ``RETURN 1``, turning a graph_size problem into a false ``degraded`` — the
+#: #3143 symptom class. A separate pool isolates the two failure domains.
+#: Its backlog is BOUNDED but fills slowly: a wedge makes each queued call pay
+#: the full ``GRAPH_SIZE_TIMEOUT`` — still bounded, so a health call is never
+#: pinned by the stall — until the backlog reaches
+#: ``_SingleSlotWorker.MAX_BACKLOG`` (32), after which submissions fail fast
+#: with ``_WorkerBacklogFull``. The recovery seam is
+#: ``_reset_graph_size_worker()``, not the backlog.
+GRAPH_SIZE_WORKER_NAME = "tortoise-graph-size-worker"
+
+#: Prefix of the per-call ``graph_size_error`` marker's structural cases; a
+#: count that RAISES supplies its own message after the colon. Defined once so
+#: callers/tests can match a symbol instead of re-typing the literal.
+_GRAPH_SIZE_UNAVAILABLE = "graph_size not measured"
+
+
+def _bounded_graph_size(target, timeout: float) -> int:
+    """``sum(target.taxonomy().values())`` bounded by ``timeout`` (#3253).
+
+    Runs the count on the DEDICATED ``GRAPH_SIZE_WORKER_NAME`` daemon worker
+    and refuses to wait past ``timeout`` (see ``GRAPH_SIZE_TIMEOUT``). RAISES
+    on failure — the taxonomy error, or a ``TimeoutError`` naming the budget
+    when the count overruns it — so ``metrics()`` can record a per-call
+    ``graph_size_error`` instead of leaving ``graph_size: 0`` to be misread as
+    an empty graph. The worker thread is abandoned, never cancelled (CPython
+    #87185), and is a daemon, so a stalled count cannot block interpreter
+    exit. A worker wedged on a permanently stalled count is dropped with
+    ``_reset_graph_size_worker()`` (mirrors ``_reset_probe_worker()``), so
+    ``graph_size`` is measurable again without a process restart.
+    """
+    future = daemon_worker(GRAPH_SIZE_WORKER_NAME).submit(target.taxonomy)
+    try:
+        counts = future.result(timeout=timeout)
+    except concurrent.futures.TimeoutError as exc:
+        # ``concurrent.futures.TimeoutError`` IS ``builtins.TimeoutError`` on
+        # py3.12, so a ``TimeoutError`` raised INSIDE ``taxonomy()`` (e.g. a
+        # redis socket read timeout) is caught here too. ``future.done()``
+        # separates the two: a callable that already finished raised its OWN
+        # error and must keep it, not be relabelled as a budget overrun.
+        if future.done():
+            raise
+        raise TimeoutError(
+            f"graph_size count exceeded its {timeout}s budget") from exc
+    return sum(counts.values())
+
+
+def _reset_graph_size_worker() -> None:
+    """Drop the graph-size worker so the next count lazily starts a fresh one.
+
+    Mirrors ``_reset_probe_worker()``: the escape hatch for tests and for ops
+    recovery when a count is presumed wedged past any realistic budget. The
+    old (possibly wedged) thread is a daemon — it is abandoned, never joined,
+    so a permanently stalled ``taxonomy()`` cannot pin the one slot for the
+    life of the process and force a restart (#3253 review P2).
+    """
+    with _DAEMON_WORKERS_LOCK:
+        _DAEMON_WORKERS.pop(GRAPH_SIZE_WORKER_NAME, None)
+
+
 def metrics(sdk=None, setup_timeout=None) -> dict:
-    """Return {status, db, falkordb, graph_size, last_ingest, errors, uptime}.
+    """Return {status, db, falkordb, graph_size, graph_size_error, last_ingest,
+    errors, uptime}.
 
     ``db`` is the deep-check result ({ok, latency_ms, error}) added by
     #1384; ``falkordb`` keeps the legacy message form for backward compat.
@@ -2611,22 +3087,39 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
     component failing); an absent registration is an unverified handle, not
     a broken DB, so reporting degraded there is the lie #2202 removes.
 
+    #3683 (health-truthful): the SAME rule covers a probe that never reached
+    the reachability query — its shared probe slot was held for the whole
+    cold-start allowance, so interleaving A (slot taken before setup began)
+    and interleaving B (setup finished, slot taken before reachability was
+    asked) never contacted the DB. ``probe_db`` reports that as
+    ``observed=False`` and it maps to ``unknown`` here (``db.ok=None``, with
+    the setup-timeout ``error`` preserved), so "never got to ask" is
+    distinguishable in the RESULT from an observed failure instead of only in
+    prose a caller must parse. Every OTHER failure that produced a verdict — a
+    raised connect error, a query that RAN and overran — carries
+    ``observed=True`` and keeps ``degraded`` reserved for real component
+    failures. A submission REFUSED by a saturated worker backlog was never
+    asked either, so it is unobserved too (``observed=False``).
+
     ``graph_size`` is counted ONLY on a successful probe (review fix, #2202):
     a dead/hung DB must degrade fast (the bounded RETURN-1 probe — ONE
     ``PROBE_TIMEOUT`` deadline in the default shape, or ``setup_timeout +
     PROBE_TIMEOUT`` when an explicit allowance is passed) and never drag an
     extra unbounded taxonomy round-trip onto the health call, and its failure
     must not inflate the very ``errors`` field this response reports. A
-    degraded report carries graph_size 0 with the probe error. The count
-    itself (``taxonomy()``) carries NO budget of its own — it is safe only
-    because it runs after a successful ``RETURN 1`` (a reachable server is
-    expected to answer label counts promptly; that is an assumption, not a
-    measurement), so the MCP tool's total latency is ``setup_timeout +
-    PROBE_TIMEOUT`` PLUS that round-trip. If the probe SUCCEEDS but the count
-    raises, the report is ``status="ok"`` with ``graph_size 0`` and an
-    incremented ``errors`` counter — the failure is recorded, never raised, so
-    ``ok`` + 0 is deliberately indistinguishable from a genuinely empty graph
-    and callers needing certainty must read ``errors``.
+    degraded report carries graph_size 0 with the probe error.
+
+    #3253: the count itself is now BOUNDED by ``GRAPH_SIZE_TIMEOUT`` on a
+    DEDICATED daemon worker (never the shared probe slot), so the MCP tool's
+    total latency is ``setup_timeout + PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT``
+    for the explicit-allowance shape and ``PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT``
+    for the platform shape — a BOUNDED tail, never "as long as the server
+    stalls". Whether ``graph_size`` was MEASURED is reported per call through
+    ``graph_size_error``: ``None`` means it was (so a 0 is a genuinely empty
+    graph), a string means it was not (a raised count OR a budget overrun),
+    which makes the two distinguishable WITHOUT diffing the cumulative
+    ``errors`` counter. A failed count still increments ``errors`` and is
+    never raised; ``graph_size`` stays 0 for backward compatibility.
 
     #3143: ``setup_timeout`` (named to match ``probe_db``'s keyword — the
     previous ``probe_setup_timeout`` SHADOWED the module function of the same
@@ -2640,26 +3133,50 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
     """
     target = sdk if sdk is not None else _sdk
     if target is None:
-        db = {"ok": None, "latency_ms": 0.0, "error": "no_sdk_registered"}
+        db = {"ok": None, "observed": False, "latency_ms": 0.0,
+              "error": "no_sdk_registered"}
     else:
         db = probe_db(target, setup_timeout=setup_timeout)
+    # #3683: ``observed`` is the status discriminator. ``probe_db`` reports
+    # ``ok=False`` for TWO different things — a DB that was ASKED and failed,
+    # and a probe that never reached the reachability query — and only the
+    # first is an observed failure. Normalising the unobserved case to
+    # ``ok=None`` keeps the documented ``unknown ⟺ db.ok is None`` shape and
+    # leaves the three-way mapping below untouched. This affects only THIS
+    # report (the MCP tool and the standalone serve_health /health, which
+    # always answers HTTP 200); the platform liveness gates read
+    # ``probe_db``'s own ``ok`` and are deliberately unchanged.
+    if db["ok"] is False and not db.get("observed", True):
+        db = {**db, "ok": None}
     if db["ok"] is True:
         status = "ok"
     elif db["ok"] is False:
         status = "degraded"
     else:
         status = "unknown"
+    # #3253: ``graph_size_error is None`` ⟺ ``graph_size`` was MEASURED, so a
+    # caller can tell a failed count from a genuinely empty graph on the SAME
+    # call — no second call to diff the cumulative ``errors`` counter.
     graph_size = 0
-    try:
-        if target is not None and db["ok"] is True:
-            graph_size = sum(target.taxonomy().values())
-    except Exception:
-        record_error()
+    graph_size_error: str | None = None
+    if target is None:
+        graph_size_error = f"{_GRAPH_SIZE_UNAVAILABLE}: no probe target"
+    elif db["ok"] is not True:
+        graph_size_error = f"{_GRAPH_SIZE_UNAVAILABLE}: db probe failed"
+    else:
+        try:
+            graph_size = _bounded_graph_size(target, GRAPH_SIZE_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001, RUF100
+            graph_size_error = (
+                f"{_GRAPH_SIZE_UNAVAILABLE}: {str(exc)[:160] or type(exc).__name__}"
+            )
+            record_error()
     return {
         "status": status,
         "db": db,
         "falkordb": "connected" if db["ok"] is True else db["error"] or "unreachable",
         "graph_size": graph_size,
+        "graph_size_error": graph_size_error,
         "last_ingest": _last_ingest,
         "errors": _counter_val(ERROR_COUNT),
         "uptime": round(time.monotonic() - _start, 2),

@@ -66,7 +66,12 @@
 #       dropped only when the entry carries a hunk, kept verbatim otherwise —
 #       hunk-header rewrite with the absent-count default of 1, mode-width
 #       boundary, and final-newline preservation)
-#   plus the static invariants: the required job must never gain
+#   (r) synthetic merge-queue batch (#5426): a `mergify[bot]`-authored PR on
+#       `mergify/merge-queue/<sha>` passes even with no evidence (it is not a
+#       review target and not a merge condition), while a NON-mergify author
+#       with the same branch name, and a `mergify[bot]` PR on an ordinary
+#       branch, both still FAIL — the guard cannot be bypassed by naming alone
+#   plus the static invariants: the gate job must never gain
 #   `if:`/`needs:`/`continue-on-error:` (any indentation or quoting), the
 #   trigger must be EXACTLY `pull_request_target` (asserted over `pull_request*`
 #   TOKENS, so `pull_request: {}`, a space before the colon, a quoted key, a
@@ -247,9 +252,9 @@ for _blk in job on perm; do
     fi
 done
 
-# (1) The required job must never become conditional or non-blocking. A
+# (1) The gate job must never become conditional or non-blocking. A
 #     SKIPPED check reports Success; `continue-on-error` swallows a failure.
-#     Either one silently passes the required check without evaluating any
+#     Either one silently passes the check without evaluating any
 #     evidence. The pattern matches the key as a TOKEN after an optional `?`
 #     (YAML explicit key: `? if` / `: false` — valid Actions YAML that GitHub's
 #     own parser accepts) or quote, and accepts a line that ENDS at the key,
@@ -259,14 +264,14 @@ done
 #     Plain, quoted (`    "if":`), space-padded (`    if :`) and explicit-key
 #     (`    ? if`) forms are all matched.
 if grep -qE '(^|[[:space:]{,?])["'\'']?(if|needs|continue-on-error)["'\'']?[[:space:]]*(:|$)' "$T/job-block.yml"; then
-    bad "gate job gained if:/needs:/continue-on-error: — a skipped or swallowed required check reports Success"
+    bad "gate job gained if:/needs:/continue-on-error: — a skipped or swallowed check reports Success"
 else
     ok "gate job carries no if:/needs:/continue-on-error: (must always run)"
 fi
 
 # (2) The trigger must be EXACTLY `pull_request_target`. Under `pull_request`, a
 #     same-repo PR executes ITS OWN copy of this workflow (it can `exit 0` and
-#     self-certify the required check), and fork PRs stop receiving
+#     self-certify the check), and fork PRs stop receiving
 #     AI_REVIEW_GATE_KEY. Assert the SET of `pull_request*` TOKENS in the `on:`
 #     block, not a spelled-out key: a key-spelling matcher misses `pull_request
 #     : {}` (space before colon), `{pull_request: {...}}` (flow mapping), a
@@ -274,21 +279,39 @@ fi
 #     banned trigger under a different, VALID spelling (review finding, cycle
 #     2). Token-matching is spelling-agnostic; comments are stripped first so
 #     prose cannot confuse it.
-on_tokens="$(sed 's/#.*//' "$T/on-block.yml" | grep -oE 'pull_request[A-Za-z_-]*' | sort -u | sed '/^$/d')"
+on_tokens="$(sed 's/#.*//' "$T/on-block.yml" | grep -oE 'pull_request[A-Za-z_-]*' | sort -u | sed '/^$/d' || true)"
 if [ "$on_tokens" = "pull_request_target" ]; then
     ok "trigger is pull_request_target only (PR code can never run the gate)"
 else
     bad "trigger is not exactly pull_request_target (pull_request* tokens found: $(printf '%s' "$on_tokens" | tr '\n' ',') ) — a same-repo PR could run its own gate definition"
 fi
 
-# (3) No path filter may gate the workflow. A required check whose workflow is
-#     skipped by path filtering stays PENDING forever, so the PR can never
-#     merge (a self-inflicted deadlock rather than a silent bypass — an earlier
-#     version of this message claimed it reports Success; corrected in the
-#     cycle-3 review). Matched as a token, so a flow mapping on the trigger
-#     line and an explicit key (`? paths`) are both caught.
+# (2b) The `edited` ACTIVITY TYPE must be present. Since #5433 this check is a
+#      REQUIRED context and a queue ENTRY condition, and `record-review.sh` posts
+#      the evidence marker by PATCHing the PR body — an `edited` event. That event
+#      is the only thing that re-runs the gate after a review is recorded, so
+#      dropping `edited` would leave every legitimately-reviewed PR red on its last
+#      pre-record run, with nothing to re-trigger it. Token-matched (dependency-free
+#      — this harness runs on a bare runner, no PyYAML) so `- edited`,
+#      `[opened, edited]` and a nested list all read the same. Deliberately NOT an
+#      assignment + `[ -n ]`: under `set -euo pipefail` a `grep` that finds nothing
+#      makes the ASSIGNMENT exit non-zero, so `set -e` aborts the script and the
+#      `bad` diagnostic below is dead in exactly the case it exists for (the abort
+#      also skips the rest of the suite — 101 assertions ran silently skipped).
+if sed 's/#.*//' "$T/on-block.yml" | grep -qE '\bedited\b'; then
+    ok "trigger includes the 'edited' activity type (body edits re-run the gate)"
+else
+    bad "the pull_request_target trigger does not list 'edited' — record-review.sh posts the marker by editing the PR body, so without it a recorded review never re-runs the gate and every reviewed PR stays red on its pre-record run"
+fi
+
+# (3) No path filter may gate the workflow. A path-filtered workflow simply
+#     does not RUN on a non-matching PR, so the gate silently stops reporting
+#     — and a check that reports nothing is read as a pass (the local rail
+#     refuses only on a RED). That is a silent bypass, not a deadlock.
+#     Matched as a token, so a flow mapping on the trigger line and an
+#     explicit key (`? paths`) are both caught.
 if grep -qE '(^|[[:space:]{,?])["'\'']?(paths|paths-ignore)["'\'']?[[:space:]]*(:|$)' "$T/on-block.yml"; then
-    bad "trigger gained a paths:/paths-ignore: filter — a path-filtered required check stays Pending, so the PR can never merge"
+    bad "trigger gained a paths:/paths-ignore: filter — a path-filtered gate never runs, so it silently stops reporting (a skipped check reads as a pass to the rail)"
 else
     ok "trigger carries no paths:/paths-ignore: filter"
 fi
@@ -425,6 +448,10 @@ run_gate() { # <env-body-file> [<rest-body-file>]
         export PR_BODY
         PR_BODY="$(cat "$envfile")"
         export HEAD_SHA="$HEAD" PR_NUMBER REPO_NAME
+        # (#5426) Synthetic-queue-batch guard inputs. Defaults describe an
+        # ordinary author PR; the (r) cases override them.
+        export PR_AUTHOR="${PR_AUTHOR_OVERRIDE:-daniel-ospina}"
+        export HEAD_REF="${HEAD_REF_OVERRIDE:-feat/author-branch}"
         export GATE_SECRET="${GATE_SECRET_OVERRIDE:-$KEY}"
         export STUB_BODY_FILE="$restfile" STUB_LOG="$T/gh.log"
         export STUB_UNRECOGNISED="$T/gh-unrecognised"
@@ -678,11 +705,11 @@ assert_rc 0 "(l) a whitespace-padded key is normalised"
 echo "── (m) a whitespace-ONLY key fails closed ─────────────────────"
 # A whitespace-only secret passes the raw `-z` guard and then normalizes to the
 # EMPTY string, which is a PUBLIC HMAC key: any PR author could mint a
-# stale-sha marker carrying the live `diff=` and turn the required check green
+# stale-sha marker carrying the live `diff=` and turn the check green
 # on an unreviewed diff. The gate must re-validate AFTER normalization.
 # Sign the marker with the EMPTY key — the key every attacker knows once the
 # secret normalizes to "". If the gate skips validation of the NORMALIZED key,
-# this marker verifies and the required check passes on an unreviewed diff.
+# this marker verifies and the check passes on an unreviewed diff.
 empty_key_marker() {
     local m="review recorded: reviews/${PR_NUMBER}.json verdict=clean @ ${HEAD} diff=${DH} (${REPO_NAME})"
     printf '%s sig=%s\n' "$m" "$(printf '%s' "$m" | openssl dgst -sha256 -hmac "" | awk '{print $NF}')"
@@ -698,7 +725,7 @@ echo "── (n) a malformed trailing line cannot hijack the repo diagnostic ─
 # A well-formed but STALE own-repo marker followed by a line that carries a
 # trailing ` (other/repo) sig=<hex>` but no well-formed 40-hex sha must still
 # report the real cause (stale). Naming `other/repo` suppresses the accurate
-# stale/diff diagnostic on a REQUIRED check.
+# stale/diff diagnostic on a red check.
 {
     diff_marker "$STALE" "$DH2"
     printf 'review recorded: reviews/%s.json verdict=clean @ not-a-sha (some-other/place) sig=%s\n' \
@@ -706,7 +733,14 @@ echo "── (n) a malformed trailing line cannot hijack the repo diagnostic ─
 } > "$T/body-n"
 STUB_DIFF_FILE="$DIFF_FILE" run_gate "$T/body-n"
 assert_rc 1 "(n) gate fails"
-assert_contains "(n) reports the real cause" "latest recorded ${STALE} — expected ${HEAD}"
+# The stale verdict must name the condition it actually established (#4776): no marker in
+# the body is bound to the head, and the marker that IS there is listed as a candidate. The
+# previous assertion pinned `latest recorded ${STALE} — expected ${HEAD}`, a label that
+# overclaimed (it is the LAST sha-bearing line, not the newest record) and that a reader
+# could not re-check once the PR moved on.
+assert_contains "(n) reports the real cause" "NO marker in this PR's body is bound to ${HEAD}"
+assert_contains "(n) lists the candidate marker it did see" "bound to: ${STALE:0:12}"
+assert_contains "(n) keeps the head in the verdict" "head expected: ${HEAD}"
 assert_not_contains "(n) does not misattribute the repo" "was found for some-other/place"
 
 echo "── (o) normalized diff digest (#1362) ─────────────────────────"
@@ -720,7 +754,7 @@ assert_contains "(o1) names the diff-match path" "passed via diff match"
 assert_contains "(o1) reports the normalized digest matched" "matched the normalized digest"
 # o2 — backward compatibility. The legacy RAW digest is STILL accepted for the
 # same diff. Without this arm every marker already recorded breaks and the
-# required check reddens fleet-wide. This is the case that pins the consumer-
+# check reddens fleet-wide. This is the case that pins the consumer-
 # first land order.
 diff_marker "$STALE" "$DH_RAW" > "$T/body-o2"
 STUB_DIFF_FILE="$DIFF_NORM_FILE" run_gate "$T/body-o2"
@@ -778,7 +812,7 @@ echo "── (q) #1362 binary carve-out: entry-scoped index retention ───�
 # exactly when the hunk content already carries the change. A binary entry has
 # no hunks and `Binary files … differ` carries no content, so an unconditional
 # drop made two DISTINCT binary revisions normalize identically — review v1,
-# sign, swap in v2, and the required gate ACCEPTED the unreviewed binary.
+# sign, swap in v2, and the gate ACCEPTED the unreviewed binary.
 
 # (a) The fail-open is CLOSED. Two different binaries at the same path must
 #     produce DIFFERENT normalized digests. This is the mutation-pinned case:
@@ -921,6 +955,30 @@ diff_marker "$STALE" "$DH_TB1_RAW" > "$T/body-raw-normfail"
 STUB_DIFF_FILE="$TEXT_B1" run_gate "$T/body-raw-normfail"
 assert_rc 1 "(g2) a failing normalizer clears the RAW arm too (no silent fallback)"
 rm -f "$T/bin/python3"
+
+# (r) Synthetic merge-queue batch guard (#5426). Mergify's queue PR is authored
+#     by `mergify[bot]` on `mergify/merge-queue/<sha>` and can never carry an
+#     attestation, so the gate must pass it explicitly instead of reddening
+#     every batch. The guard needs BOTH signals: naming alone must not bypass
+#     the author-PR gate.
+printf 'merge queue: checking #1 + #2 together\n' > "$T/body-r-queue"
+PR_AUTHOR_OVERRIDE="mergify[bot]" HEAD_REF_OVERRIDE="mergify/merge-queue/19ba552894" \
+    STUB_DIFF_FILE="$DIFF_FILE" run_gate "$T/body-r-queue"
+assert_rc 0 "(r1) a mergify[bot] queue batch passes with no evidence"
+assert_contains "(r1) explains why (not a review target)" "Synthetic merge-queue batch"
+# (r2) Bypass control: a contributor branch named mergify/merge-queue/... is NOT
+#      authored by the bot and must still fail closed.
+printf 'no marker\n' > "$T/body-r-bypass"
+PR_AUTHOR_OVERRIDE="daniel-ospina" HEAD_REF_OVERRIDE="mergify/merge-queue/19ba552894" \
+    STUB_DIFF_FILE="$DIFF_FILE" run_gate "$T/body-r-bypass"
+assert_rc 1 "(r2) a non-mergify author with a queue-shaped branch still fails closed"
+assert_contains "(r2) reports no evidence" "No AI review evidence found"
+# (r3) The other signal alone must not bypass either: a mergify[bot] PR on an
+#      ordinary branch is an author PR and is evaluated normally.
+printf 'no marker\n' > "$T/body-r-botbranch"
+PR_AUTHOR_OVERRIDE="mergify[bot]" HEAD_REF_OVERRIDE="feat/author-branch" \
+    STUB_DIFF_FILE="$DIFF_FILE" run_gate "$T/body-r-botbranch"
+assert_rc 1 "(r3) mergify[bot] on an ordinary branch is still evaluated (fails with no evidence)"
 
 echo ""
 echo "── Summary ───────────────────────────────────────────────────────"

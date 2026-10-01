@@ -44,7 +44,7 @@ from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
-from .embedded_lifecycle import atexit_fast_close  # #1371: registers the batch flush
+from .embedded_lifecycle import atexit_fast_close  # #1371: the fast-close seam
 from .retrieval import (DEFAULT_POOL_SIZE, _safe_session_tag,
                         resolve_pool_size)
 from . import monitoring
@@ -262,10 +262,13 @@ def _session_llm_mock_enabled() -> bool:
 class _SessionLLMCallCounter:
     """#3824: a transparent pass-through that counts model completions.
 
-    The M2 session lane discards its usage block wholesale, so by the time
-    its capture reaches the cost emitter there is no in-hand evidence that a
-    provider call happened — "made billed calls" and "made none" are the
-    same shape (an empty ``stats``). The emitter cannot recover that fact
+    Calls the M2 session lane issues that produced no surviving USAGE
+    (a failed request, or a model with no #2185 seam) leave no evidence at
+    the cost emitter that a provider call happened — "made billed calls" and
+    "made none" are the same shape (an empty ``stats``). #3747 gives the
+    lane a real cost roll-up for the calls that DO report usage; this
+    counter remains the disclosure for the ones that do not. The emitter
+    cannot recover that fact
     from the roll-up, because the roll-up is exactly what is missing; it has
     to come from the CALL site. This wrapper is that call site:
     ``complete()`` is invoked once per provider request by ``_PointStage`` /
@@ -309,21 +312,96 @@ class _SessionLLMCallCounter:
         return self._model.complete(*args, **kwargs)
 
 
-def _session_llm_extractor(point_model, relation_model):
-    """Build the M2 ``LLMExtractor`` with #3824 call-evidence counters.
+def _session_llm_usage_sink(stats: dict):
+    """#3747: the #2185 usage sink for the M2 session lane.
+
+    The lane's real provider calls go through ``OpenAICompatModel.complete``,
+    which fires ``usage_sink`` with the response-local usage block
+    (``models._emit_usage_sink``) — but nothing ever bound a sink on this
+    path, so the tokens/charge were dropped and the #3359 ``capture_cost``
+    row could only DISCLOSE the calls (#3824 ``unattributed``), never price
+    them. This sink accumulates each call into the SAME stage-shaped cost
+    accumulator the v2 lane's ``_accumulate_call_cost`` / ``_rollup_llm``
+    consume, so the emitted row is priced by the existing report path with
+    no new cost concept and no change to ``hosted_api``.
+
+    ``attempts`` rides alongside ``cost`` because ``_rollup_llm`` reads the
+    call COUNT from ``stage_stats["attempts"]`` (the cost accumulator's own
+    ``calls`` key stays in ``by_stage``); a sink fire IS a completed provider
+    call, so the two increment together. ``usage`` may be ``None``/``{}``
+    when the provider sent none — ``_accumulate_call_cost`` then discloses
+    ``calls_without_usage`` instead of inventing tokens.
+
+    ⚠️ ORDER IS LOAD-BEARING (#5822 review P2): the count is bumped AFTER
+    ``_accumulate_call_cost``, never before. ``_emit_usage_sink`` swallows an
+    accumulator raise by design ("a metering observer must NEVER flip a call
+    outcome"), so a malformed provider payload — ``{"prompt_tokens":
+    "abc"}``, or ``1e309`` which parses to ``inf`` and overflows ``int()`` —
+    raises INSIDE the accumulator. Bumping the counter first would leave
+    ``calls == calls_made``, so ``unattributed = max(0, calls_made - calls)
+    == 0``, the roll-up stays empty, and ``_capture_cost_props`` returns
+    ``None``: the call is ERASED from the report, which is strictly worse
+    than the #3824 ``unattributed`` disclosure this lane had before. Counting
+    after keeps the residual honest — an unaccounted-for call is disclosed on
+    a row, never erased.
+    """
+    from tortoise.extractor_v2 import _accumulate_call_cost
+
+    def _sink(*, provider, model_id, usage, usage_present):
+        u = usage if isinstance(usage, dict) else {}
+        # Count AFTER accumulating (see the ORDER note above): a raise here
+        # must leave ``attempts`` untouched so the caller's residual still
+        # discloses the call.
+        _accumulate_call_cost(
+            stats,
+            prompt_tokens=u.get("prompt_tokens"),
+            completion_tokens=u.get("completion_tokens"),
+            cost_usd=u.get("cost"),
+            provider=provider, model=model_id)
+        stats["attempts"] = int(stats.get("attempts", 0)) + 1
+
+    return _sink
+
+
+def _session_llm_extractor(point_model, relation_model, *, provider=None):
+    """Build the M2 ``LLMExtractor`` with #3824 call-evidence counters and
+    the #3747 usage sink.
 
     The counters ride on the extractor (``_call_counters``) because that is
     the object ``_extract_session_llm`` holds; a fresh pair is built per
     call to this helper, so a capture's count can never leak into the next
     one (the extractor is built inside ``_extract_session_llm``, once per
-    capture).
+    capture). The SAME lifetime rule gives the cost accumulator
+    (``_cost_stats``): one per capture, never shared across captures.
+
+    The sink is assigned through the counters, whose ``__setattr__``
+    forwards public writes to the wrapped model (that forwarding exists
+    precisely for this seam). A model with no ``usage_sink`` attribute
+    (``MockModel`` — the offline seam) simply never fires it, so the lane
+    degrades to the #3824 call-count disclosure rather than a fake roll-up.
+
+    ``provider`` is the configured provider id, stamped on both models: the
+    ``(provider, model)`` route is what ``_capture_cost_props``' ``by_stage``
+    envelope is repriced from at report time (#3359), and
+    ``OpenAICompatModel`` does not carry one of its own (the eval harness
+    binds it at registration — no such step exists on this lane), so without
+    it a cost-SILENT provider (deepseek-direct reports no ``usage.cost``)
+    would land under ``unknown`` and never reprice from the versioned map.
     """
     from tortoise.extractor import LLMExtractor
 
+    if provider is not None:
+        point_model.provider = provider
+        relation_model.provider = provider
     counters = [_SessionLLMCallCounter(point_model),
                 _SessionLLMCallCounter(relation_model)]
     extractor = LLMExtractor(counters[0], counters[1])
     extractor._call_counters = counters
+    cost_stats: dict = {}
+    sink = _session_llm_usage_sink(cost_stats)
+    counters[0].usage_sink = sink
+    counters[1].usage_sink = sink
+    extractor._cost_stats = cost_stats
     return extractor
 
 
@@ -371,6 +449,7 @@ def _build_session_llm_extractor():
     return _session_llm_extractor(
         OpenAICompatModel(id=model_id, base_url=base_url, api_key_env=key_env),
         OpenAICompatModel(id=model_id, base_url=base_url, api_key_env=key_env),
+        provider=provider,
     )
 
 
@@ -503,8 +582,6 @@ def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
     extractor clamps operators ≤ points (LLMExtractor.run dedupe+cap, #1194) —
     a permissive relation model can no longer write more operator nodes than
     points, which would have bypassed this estimate and the 402 gate it feeds."""
-    from tortoise.extractor import _SENT
-
     lines: list[str] = []
     n_sentences = 0
     for turn in conversation:
@@ -518,10 +595,12 @@ def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
             speaker = "Speaker"
         raw = turn.get("content")
         content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
-        body = " ".join(content[:_CAPTURE_TURN_CAP].split())
-        sents = [s.group(0).strip() for s in _SENT.finditer(body)]
-        sents = [s for s in sents if len(s) >= 3]
-        capped = sents[:MAX_EXTRACTIONS_PER_TURN]
+        # #6246: the "does this turn have anything to say" predicate has ONE
+        # home (_extractable_sentences) — the same one the shared extraction
+        # view blanks on, so the m2 lane and the default v2 lane cannot
+        # disagree about which turns contribute a unit.
+        capped = _extractable_sentences(
+            content[:_CAPTURE_TURN_CAP])[:MAX_EXTRACTIONS_PER_TURN]
         n_sentences += len(capped)
         if capped:
             lines.append(f"{speaker}: {' '.join(capped)}")
@@ -561,6 +640,60 @@ def _capture_turn_window(
         content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
         t["content"] = content[:cap]
         out.append(t)
+    return out
+
+
+def _extractable_sentences(content: str) -> list[str]:
+    """The >=3-char sentences *content* contributes, from its flattened body.
+
+    The ONE home of "does this turn have anything to say" (#6246). It is the
+    exact predicate ``_session_llm_transcript`` has always applied inline (and
+    the transcript is the lane that already REFUSED a turn it yields nothing
+    for). Extracting it here lets the shared extraction view apply the SAME
+    test before the default v2 lane sees the turns, so the two lanes cannot
+    drift apart about emptiness.
+    """
+    from tortoise.extractor import _SENT
+
+    body = " ".join(content.split())
+    return [s.group(0).strip() for s in _SENT.finditer(body)
+            if len(s.group(0).strip()) >= 3]
+
+
+def _capture_extraction_window(
+    conversation: list[dict], cap: int = _CAPTURE_TURN_CAP) -> list[dict]:
+    """The SHARED extraction view of a capture conversation (#6246).
+
+    ``_capture_turn_window`` is the STORED view: it clips silently and the
+    clipped text is what the turn Points hold. Both extraction lanes consume
+    THIS view instead, and it blanks a turn that was CLIPPED and still has no
+    extractable sentence of its own — so a cut whose readable body has nothing
+    to say contributes no unit to EITHER lane.
+
+    The invariant ("a turn with no extractable content of its own yields no
+    claims", #4897) previously lived only inside ``_session_llm_transcript``,
+    which is why the m2 lane enforced it and the default v2 lane
+    (``_edus_from_conversation``, which keeps any turn with truthy content)
+    did not. It is built ONCE per capture loop — selfhost ``capture_session``
+    and hosted ``_capture_session_impl`` — and each loop hands the SAME list
+    to whichever lane runs, so no lane re-decides emptiness for itself.
+
+    NARROW BY CONSTRUCTION: only a turn that was CLIPPED (``len > cap``) is
+    eligible, so an ordinary short turn (``"ok"``) is untouched — this is not
+    "drop every sentence-less turn from v2". The list LENGTH is preserved (the
+    turn is blanked, never removed): ``extractor_v2._edus_from_conversation``
+    derives each edu's turn index from its POSITION and ``_resolve_source_turn``
+    anchors quotes to those indices, so shortening the list would renumber
+    every later turn.
+    """
+    windowed = _capture_turn_window(conversation, cap)
+    out: list[dict] = []
+    for turn, win in zip(conversation, windowed, strict=True):
+        raw = turn.get("content")
+        content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
+        if len(content) > cap and not _extractable_sentences(win["content"]):
+            win = {**win, "content": ""}
+        out.append(win)
     return out
 
 
@@ -781,6 +914,32 @@ def _capture_turn_role_text(stored: str) -> tuple[str, str]:
     if match is None:
         return "unknown", stored
     return match.group(1), stored[match.end():]
+
+
+#: The durable-session read projection (#3557): the field list the hosted
+#: read surfaces (`GET /v1/sessions` and `GET /v1/sessions/{id}`) both serve,
+#: and the subset `TortoiseSDK.get_session` returns for a captured `:Session`.
+#: The hosted handlers spell these column names inline — the shared surface is
+#: the declared NAMES, not a shared import — so this tuple is the SDK-side
+#: declaration and the parity test BINDS the two in BOTH directions: it
+#: iterates this tuple (a field dropped from or renamed on the SDK read
+#: reddens it) AND pins the detail response's key SET to this tuple plus the
+#: detail endpoint's known extras — `actor_display`, `turn_points`,
+#: `extracted_points`, `source` — so a column ADDED to the hosted detail
+#: handler reddens it too, the direction the inline columns would otherwise
+#: let drift silently. The `GET /v1/sessions` LIST key set is pinned the same
+#: way (this tuple plus `actor_display`); its `extracted` COUNT is not,
+#: because the list still uses the legacy typed filter and diverges for
+#: untyped extractions (#3555). Ordered as the hosted handlers append their
+#: columns: existing positions are stable and new columns go at the END, so
+#: a consumer reading positionally never shifts.
+#: (`GET /v1/sessions` additionally serves `actor_display`; the by-id endpoint
+#: additionally serves `actor_display`, the point lists and `source`; those
+#: are derived per-request and are deliberately not part of this shared list.)
+SESSION_READ_FIELDS: tuple[str, ...] = (
+    "id", "created_at", "turns", "extracted",
+    "actor_user_id", "harness", "machine_id", "model",
+)
 
 
 def _capture_turn_embeddings(
@@ -1214,6 +1373,30 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     return summary, topics
 
 
+#: #3518: the ONE searchable-text field on a :Source — the field the Source
+#: FTS index is declared on (``projection/__init__.py``) and the one
+#: ``search_engine.run_fts_query(entity_type='source')`` resolves against.
+SOURCE_SEARCH_TEXT_FIELD = "_searchText"
+
+
+def _source_search_text(*, title: str | None = None,
+                        summary: str | None = None) -> str | None:
+    """#3518: the ONE rule for a Source's searchable text — the title when
+    present, else the summary (``None`` when neither carries text).
+
+    Both Source writers resolve their ``_searchText`` through here so the two
+    cannot drift into different vocabularies: the indexer
+    (``_index_source_merge`` → ``create_source(..., _searchText=...)``) passes
+    its frontmatter ``title``; the capture path
+    (``_materialize_session_source``) has no title and passes its derived
+    ``summary``. Before this, the indexer set the field but the capture path
+    never did, and no ``Source`` FTS index existed at all — a captured session
+    was unfindable through ``tortoise_fts_query(entity_type='source')``.
+    """
+    text = title or summary
+    return text or None
+
+
 def _session_extraction_estimate(conversation: list[dict], *,
                                  extractor: str | None = None) -> int:
     """Pre-write fail-closed estimate of NEW non-episodic nodes a capture
@@ -1567,6 +1750,25 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
         raise ValueError(
             "'outdated' is a server-managed lifecycle flag — use "
             "invalidate_point() or supersede_point() to terminalize a claim."
+        )
+    # #5256: the `extractedFrom` READ-VERSION anchor is server-derived (it is
+    # read from the :Source node by `resolve_source_versions` on the LIVE path
+    # and carried in the Point's journaled snapshot), so a tenant must never be
+    # able to set it. Accepting it would let a caller forge provenance — claim
+    # a Point was read from a different version than the one recorded — and,
+    # because the value persists live while the replay re-derives it, it is
+    # also a live/replay parity break. Rejected on EVERY spelling
+    # (`sourceVersion`, `sourceVersions`, `sourceVersionTransit`): the plural
+    # spelling is the natural caller guess (mirrors `extractedFrom`'s own
+    # accepts-list/str shape) and must not slip through as an unknown prop.
+    _source_version_keys = [k for k in
+                            ("sourceVersion", "sourceVersions",
+                             "sourceVersionTransit")
+                            if k in props]
+    if _source_version_keys:
+        raise ValueError(
+            f"{_source_version_keys} are server-managed provenance fields and "
+            "cannot be set via props."
         )
     if reject_id and "id" in props:
         raise ValueError("'id' is server-managed and cannot be set via props.")
@@ -2289,12 +2491,6 @@ def _stream_to_payload(summary: dict, session_id: str, stream: dict) -> dict:
     }
 
 
-def _now_iso() -> str:
-    """UTC now in ISO format (module-level — shared by write paths)."""
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()  # noqa: UP017
-
-
 def _source_merge_lock_for(url: str) -> threading.Lock:
     with _source_merge_lock_guard:
         lock = _source_merge_locks.get(url)
@@ -2588,6 +2784,185 @@ HOLDS_ROLE_UNAVAILABLE = (
     "create_edge/create_entity caller — so 'roles' is structurally empty "
     "rather than a finding about this Subject."
 )
+
+
+def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
+                          stored_vf, successor_created_at, now):
+    """Resolve the predecessor's window END and refuse an inverted window (#4021).
+
+    #4021 — the supersession stamped ``old.validTo`` from the SUCCESSOR's
+    window start and never read the predecessor's own ``validFrom``, so a
+    successor dated earlier than its predecessor persisted
+    ``validTo < validFrom``.  ``restore_point_at``'s ``_covers``
+    (``sdk.py``) then rejects an inverted window for EVERY query instant, so
+    the predecessor became unreachable from every read surface with no error
+    anywhere — a silent, permanent loss of the old fact.
+
+    Resolution order is unchanged and is the ONE home for it::
+
+        str(valid_from) [a STRING must name an instant; a numeric is exempt]
+                        → stored_vf (TRUTHY and ORDERABLE)
+                        → successor_created_at (ORDERABLE) → now
+
+    ``stored_vf`` is taken only when it is ORDERABLE (#5360), not merely
+    truthy: a present-but-unparseable stored start carries no instant, and
+    persisting it as the end leaves the window unbounded — see the branch
+    comment below.
+
+    Returns the value AS PERSISTED.  The ``stored_vf`` branch stays RAW (no
+    ``str()``): a numeric stored value must keep keying as ``(0, float)``
+    (``_created_sort_key`` documents numeric epochs as supported and seeded
+    corpora carry them) — passing it through ``str()`` makes it unparseable
+    ``(1, text)`` and REINTRODUCES the unbounded predecessor window the
+    ``valid_from``-agreement guard exists to prevent.
+
+    Refuses when ANY of the predecessor's own starts is present and the
+    successor's resolved start sorts STRICTLY BEFORE it — the same measure and
+    the same ``is not None`` presence predicate ``_covers`` uses, so the
+    guard's boundary IS the read path's.  Strictly-before only: equality (a
+    zero-length predecessor window) is well-formed and accepted.  ``old_vfs``
+    is a SEQUENCE, not a scalar: a point id is not unique (the duplicate
+    fan-out is a tested shape), and the stamp block below MATCHes and stamps
+    EVERY node carrying the id, so reading only the first row would pass the
+    guard and still leave an inverted window on a sibling node — and the
+    verdict would then depend on server row order.  ``_assert_window_start_
+    not_inverted`` (the #5358 sibling) documents and loops over the same
+    fan-out; this mirrors it.
+
+    The refusal fires only when BOTH instants are orderable.  A predecessor
+    start that is present-but-unparseable (``""``, ``"TBD"``, ``"2026-6-1"``)
+    is SKIPPED, not refused — matching ``_assert_window_start_not_inverted``,
+    the #5358 sibling, which documents the same choice: such a window already
+    covers no PARSEABLE instant, so the write cannot newly hide it from any
+    parseable query instant, whereas refusing would refuse on an
+    ordering-fallback artefact rather than a comparison.  It also matters
+    practically: ``create_point`` accepts any caller ``validFrom``, so a
+    legacy or imported point carrying a non-ISO start is reachable, and
+    refusing here would make such a point impossible to supersede until its
+    window was repaired — foreclosing the very write a caller would use to
+    move past it.  (An unparseable resolved END was #5360's residual; it is
+    closed below on every route reachable under the declared ``str | None``
+    type plus the numeric-epoch extension — the numeric kwarg being the
+    deliberate exemption: the no-kwarg STORED-start branch requires
+    orderability, a STRING ``valid_from`` kwarg that names no instant falls
+    through, and the ``createdAt`` fallback likewise requires an orderable
+    value and otherwise lands on ``now``. So a value naming no instant becomes
+    an orderable instant rather than an end no query can order — see the branch
+    comments below.)
+
+    Raises ``ValueError`` BEFORE any mutation at either call site, so no
+    event is journaled and no half-write survives a refusal.
+
+    Scope: this refuses the **inverted** direction.  The resolution of an
+    **unparseable** end is handled in the resolution block below (#5360): the
+    no-kwarg STORED-start branch requires orderability, and a STRING
+    ``valid_from`` kwarg that names no instant falls through to
+    ``successor_created_at`` rather than being persisted. A NUMERIC kwarg is
+    deliberately exempt there.
+
+    The ``valid_from``-vs-successor agreement guard is NOT here: it is
+    reachable only when a kwarg is passed, and it stays inline at its
+    reviewed call site.
+    """
+    from .search_engine import _created_sort_key  # lazy — import cycle
+    if valid_from is not None and not (
+        # #5360 — a STRING kwarg that names no instant must not be persisted as
+        # the end either. A NUMERIC kwarg is deliberately EXEMPT from this and
+        # is passed through to ``str(valid_from)`` as before: that string keys
+        # ``(1, text)`` (no ``-``/``T``), and
+        # ``test_window_end_numeric_kwarg_resolved_before_measure`` (B3) pins
+        # that the guard measures that RESOLVED value, so the numeric case is
+        # NOT an inversion. Gating on ``isinstance(valid_from, str)`` keeps B3's
+        # decision intact — a blanket orderability test here, applied to
+        # numbers too, replaces the numeric kwarg's end and reddens B3.
+        isinstance(valid_from, str)
+        and _created_sort_key(valid_from)[0] != 0
+    ):
+        succ_vf = str(valid_from)
+    elif stored_vf and _created_sort_key(stored_vf)[0] == 0:
+        # #5360 — ORDERABLE, not merely truthy. A stored start that is present
+        # but unorderable ("not-a-date", "TBD") names no instant, and this
+        # branch used to persist it RAW as the predecessor's window END. The
+        # resulting window has no orderable boundary:
+        # ``_created_sort_key("not-a-date")`` is ``(1, text)``, so the #4021
+        # inversion guard's ``end >= start`` conjunct is trivially satisfied
+        # (that guard skips an unorderable successor — see below), while
+        # ``_covers`` cannot exclude the window either, because
+        # ``(1, x) < (0, y)`` is False. The predecessor then appears to cover
+        # EVERY later instant — the exact overlap class #3980 exists to
+        # prevent, on the one path #3980 does not guard.
+        #
+        # Falling through to ``successor_created_at`` is the SAME treatment a
+        # FALSEY stored start already gets (#3985), and normalising rather
+        # than refusing is this function's own documented policy for the
+        # identical shape on the predecessor side, where a present-but-
+        # unparseable start is "SKIPPED, not refused" — because
+        # ``create_point`` accepts any caller ``validFrom``, so refusing would
+        # make a legacy/imported point impossible to supersede until its
+        # window was repaired, foreclosing the very write a caller would use
+        # to move past it. The successor side is the same shape: refuse there
+        # and such a point could never be superseded at all.
+        #
+        # The test for ORDERABILITY lives HERE and NOT as a normalisation of
+        # the resolved value below, because such a normalisation would reverse
+        # a deliberate, pinned decision: a numeric ``valid_from`` kwarg is
+        # persisted as ``str(valid_from)``, which keys ``(1, text)`` (no
+        # ``-``/``T``), and
+        # ``test_window_end_numeric_kwarg_resolved_before_measure`` (B3) pins
+        # that the guard measures that RESOLVED value — so the numeric case is
+        # NOT an inversion.
+        succ_vf = stored_vf
+    elif successor_created_at and _created_sort_key(successor_created_at)[0] == 0:
+        # #5360, the THIRD route (found in the third review cycle): ``createdAt``
+        # is a normal CALLER prop — ``create_point``'s own comment records that
+        # api.py, ingest.py and the source-inheritance path all pass one, and
+        # ``_create_map`` lets a caller override the ``"$now"`` default — so an
+        # unparseable ``createdAt`` is reachable through the public API, and
+        # this fallback used to persist it RAW as the predecessor's END. Same
+        # unbounded window as the other two routes. Requiring orderability here
+        # sends it to ``now`` instead, which is always ISO.
+        succ_vf = successor_created_at
+    else:
+        succ_vf = now  # monotone fallback — never a gap
+    if old_vfs:
+        k_succ = _created_sort_key(succ_vf)
+        # A NUMERIC KWARG can still resolve unparseable here and is
+        # DELIBERATELY left that way (see above and B3): the guard measures the
+        # value the writer persists, and an unparseable resolved value is
+        # skipped rather than compared, so it is not an inversion. Every other
+        # route yields an orderable ``succ_vf`` — #5360 closed the no-kwarg
+        # STORED-start route, the string-kwarg route, and the ``createdAt``
+        # fallback.
+        if k_succ[0] == 0:
+            for old_vf in old_vfs:
+                if old_vf is None:
+                    continue
+                k_old = _created_sort_key(old_vf)
+                if k_old[0] != 0:
+                    # Present but unorderable — skipped, NOT refused, and
+                    # with no message: it buckets LAST as ``(1, text)``, so
+                    # comparing it would fire for ANY successor on an
+                    # ordering-fallback artefact. The #5358 sibling proceeds
+                    # on this identical shape; two guards in one file must
+                    # not return opposite verdicts for one input.
+                    continue
+                if k_succ[1] < k_old[1]:
+                    # Wording is pinned by two tests: the literal substring
+                    # "inverted window", and scrub-stability under
+                    # mcp_server._scrub_error, whose `(host=|at |to )[\w.-]+`
+                    # rule rewrites any word ending in at/to followed by a
+                    # space — a scrubbed hint reaches the caller as `***`.
+                    raise ValueError(
+                        f"supersede_point: refusing supersede {old_id!r} - "
+                        f"{new_id!r} - the successor's window start "
+                        f"{succ_vf!r} precedes the predecessor's validFrom "
+                        f"{old_vf!r}; persisting it would leave an inverted "
+                        f"window (validTo < validFrom), which no query "
+                        f"instant resolves. Give the successor a validFrom "
+                        f"on-or-after {old_vf!r}, or use `retract_point()` "
+                        f"(window-agnostic) for withdrawal of the predecessor"
+                    )
+    return succ_vf
 
 
 class TortoiseSDK:
@@ -3652,6 +4027,23 @@ class TortoiseSDK:
         # the pre-#2952 code applied props in a post-CREATE `SET n += $props`
         # (so props won), and `createdAt` is a normal caller prop — api.py,
         # ingest.py and the source-inheritance path all pass one.
+        #
+        # #5256: the extractedFrom read-version is resolved from the :Source
+        # HERE, on the LIVE path only, and carried in the CREATE map — i.e. in
+        # the Point's OWN journaled snapshot (`get_point` rides it into the
+        # PointAdded payload below). The replay must never re-read the Source:
+        # `_upsert_source`'s in-place contentHash bump is unjournalled (#5024),
+        # so a Source read at rebuild time may hold a NEWER hash than the one
+        # this Point was actually read from. A Source that does not exist yet
+        # (or has an empty hash) contributes nothing — honest-absent, and the
+        # stub `_link_source` mints below has no hash either way.
+        _source_versions: dict[str, str] = {}
+        _source_version_sv = None
+        if props.get("extractedFrom"):
+            from .projection.edges import _source_version_transit, resolve_source_versions
+            _source_versions = resolve_source_versions(
+                proj.g, props["extractedFrom"])
+            _source_version_sv = _source_version_transit(_source_versions)
         _create_map: dict[str, str] = {
             "id": "$id", "content": "$c", "pointKind": "$k",
             "is_operator": "false", "status": "$st",
@@ -3660,6 +4052,9 @@ class TortoiseSDK:
         if not _born_terminal:
             _create_map["ep_dirty"] = "true"
             _create_map["ep_dirty_at"] = "$_epv"
+        if _source_version_sv is not None:
+            _create_map["sourceVersionTransit"] = "$sv"
+            _create_params["sv"] = _source_version_sv
         if _create_baseline is not None:
             _create_params.update(_baseline_create_params(_create_baseline))
             _create_map.update(_baseline_create_fields())
@@ -3740,7 +4135,8 @@ class TortoiseSDK:
             self._sync_tags(proj, pid, tags)
         # P1-1: Ontology v2.1 — link Point → Source via extractedFrom
         if props.get("extractedFrom"):
-            proj._link_source(pid, props["extractedFrom"])
+            proj._link_source(pid, props["extractedFrom"],
+                              source_versions=_source_versions)
             # Inheritance gate dirty-mark: a freshly-sourced point is always
             # inherit-eligible on the next EP run (no interval wait, #398).
             # #2952: a born point carries no `inherited_at` stamp, so the
@@ -4078,12 +4474,12 @@ class TortoiseSDK:
         Supersession records are REAL-BACKEND-ONLY, by construction: the v2
         extractor forms conversation-driven supersessions only when its S3
         search resolves against the real graph — extractor_v2 skips the search
-        entirely when the active backend is not "real" (the ``mode != "real"``
-        degraded branch: embedded/FalkorDBLite — the real graph, FalkorDB via
-        docker/redis URI or hosted API, is required), so capture over
-        embedded/FalkorDBLite produces ZERO supersession records (structurally
-        — the supersedes refs never resolve). Not a bug; do not debug it as
-        one.
+        when the CLIENT's actual backend is the embedded store
+        (``_is_searchable_backend``: FalkorDBLite is not searched; the real
+        graph, FalkorDB via docker/redis URI or hosted API, is), so capture
+        over embedded/FalkorDBLite produces ZERO supersession records
+        (structurally — the supersedes refs never resolve). Not a bug; do not
+        debug it as one.
 
         ``conversation`` is a list of {"role", "content"} dicts. Returns
         {"session_id", "turns", "extracted", "points": [...],
@@ -4372,6 +4768,12 @@ class TortoiseSDK:
         # structured contract — the M2 branch's meta now carries
         # errors/warnings/mode (no fabricated empty meta) so the assembly is
         # branch-independent and fails closed on either extractor.
+        # #6246: the SHARED extraction view — built ONCE and handed to
+        # whichever lane runs below, so a clipped turn with nothing to say
+        # contributes no unit to EITHER the m2 transcript lane or the default
+        # v2 lane. The STORED turns above keep their clipped text (this is a
+        # copy); only the extraction input is blanked.
+        extraction = _capture_extraction_window(conversation)
         # W5 Phase F (#2104): the #1727 replay skip — a re-capture of an
         # existing session_id is a NO-OP replay (extraction_mode "replayed",
         # 0 new non-episodic nodes), byte-parity with hosted_api's replay
@@ -4428,10 +4830,10 @@ class TortoiseSDK:
             }
         elif os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2":
             extracted, meta = self._extract_session_llm(
-                windowed, session_id, now)
+                extraction, session_id, now)
         else:
             extracted, meta = self._extract_session_v2(
-                windowed, session_id, now)
+                extraction, session_id, now)
 
         # P1 #1529: the fail-closed assembly consumes the shared contract.
         extraction_errors = list(meta.get("errors") or [])
@@ -4554,6 +4956,42 @@ class TortoiseSDK:
                             "    o.source_harness=$harness, "
                             "    o.ingested_at=$ing",
                             params={"ids": minted_ids,
+                                    "eid": event_id, "sid": session_id,
+                                    "harness": source_harness, "ing": now},
+                        )
+                    # #4936: the minted-point join above CANNOT reach an
+                    # operator whose endpoint RE-KEYED to a pre-existing
+                    # graph node (#4716 Part 1): the payload point resolved
+                    # to the existing node, so it is NOT in ``minted_ids``
+                    # (and a folded-only capture mints nothing at all, leaving
+                    # ``minted_ids`` empty and the join above unreached). The
+                    # operator node was created and wired correctly but stayed
+                    # unstamped — invisible to the eventId-keyed retrievable
+                    # layer (the #2552 ``operator_counts == {}`` signature).
+                    # Stamp exactly the operator ids THIS capture created
+                    # (meta["operator_ids"], the apply_payload_operators
+                    # return) — the topology's own provenance handle, whereas
+                    # the minted join has none. ``eventId IS NULL`` is the
+                    # no-clobber guard. The minted join's ``draft`` guard is
+                    # deliberately NOT repeated: these ids are Points created
+                    # by THIS call (fresh ULIDs, draft at creation), so
+                    # re-checking status only adds a race — a concurrent
+                    # capture's ``_apply_capture_ingest_ep`` promotion can
+                    # flip one to 'live' before this stamp runs, and the stamp
+                    # must still land. The join is KEPT because it is the only
+                    # surface covering operators created outside
+                    # apply_payload_operators (the M2 projection path —
+                    # test_capture_session_stamps_operator_event_ids).
+                    operator_ids = list(meta.get("operator_ids") or [])
+                    if operator_ids:
+                        proj.g.query(
+                            "MATCH (o:Point {is_operator:true}) "
+                            "WHERE o.id IN $ids "
+                            "AND o.eventId IS NULL "
+                            "SET o.eventId=$eid, o.source_session=$sid, "
+                            "    o.source_harness=$harness, "
+                            "    o.ingested_at=$ing",
+                            params={"ids": operator_ids,
                                     "eid": event_id, "sid": session_id,
                                     "harness": source_harness, "ing": now},
                         )
@@ -4956,10 +5394,14 @@ class TortoiseSDK:
             # P1 #1529 (D2): the internal defense-in-depth empty guard must be
             # self-consistent — mode="empty" WITH an error entry, so a caller
             # mapping empty→ok=False can never compute ok=True on this path.
+            # #2335 WI-1a: ``stats`` is part of the shared meta contract and
+            # is ALWAYS present — no extraction ran, so it is the empty gate's
+            # legitimate {} (the same shape the response assembly would
+            # normalize it to).
             return [], {
                 "provider": None, "route": None, "failover_used": False,
                 "errors": ["no extractable content — empty or blank conversation"],
-                "warnings": [], "mode": "empty",
+                "warnings": [], "mode": "empty", "stats": {},
             }
 
         from tortoise.api import EventAPI
@@ -5069,25 +5511,53 @@ class TortoiseSDK:
             # warning (nothing extractable ≠ failure), never a silent 0.
             warnings.append("LLM extraction produced no points")
         # #3824: the call-level evidence — how many model completions this
-        # capture actually issued. Carried OUTSIDE the (empty on this lane)
-        # roll-up so the cost emitter can tell "billed calls, no roll-up"
-        # (F2) from "no calls at all" (F1) instead of collapsing both to
-        # None. Counted at the model boundary above, so it holds even when
-        # ``extractor.run`` raised after the first request.
+        # capture actually issued. Carried OUTSIDE the roll-up so the cost
+        # emitter can tell "billed calls, no roll-up" (F2) from "no calls at
+        # all" (F1) instead of collapsing both to None — #3747 gives this
+        # lane a real roll-up for priced calls, and the residual (calls the
+        # sink did not account for) still needs a home outside it. Counted at
+        # the model boundary above, so it holds even when ``extractor.run``
+        # raised after the first request.
         calls_made = sum(
             int(getattr(c, "count", 0) or 0)
             for c in getattr(extractor, "_call_counters", ()) or ())
+        # #3747: roll the #2185 usage sink's per-call accumulation into the
+        # session's llm telemetry, so a REAL M2 capture's tokens/charge reach
+        # ``_capture_cost_props`` instead of being dropped — the #3359 blind
+        # spot #3824 could only DISCLOSE. The accumulator is read AFTER the
+        # try/except above, so a run() that raised after a successful request
+        # still reports the spend it actually incurred.
+        llm_stats: dict = {
+            "calls": 0, "retries": 0, "truncated": 0, "deadline_aborts": 0,
+            "by_stage": {},
+        }
+        cost_stats = getattr(extractor, "_cost_stats", None) or {}
+        if cost_stats:
+            from tortoise.extractor_v2 import _rollup_llm
+
+            _rollup_llm(llm_stats, cost_stats, "m2")
+        # #3824: calls the sink did NOT account for — a request that failed
+        # before its response parsed, or a model with no #2185 seam (the
+        # offline ``MockModel``). Kept OUT of ``llm`` so it survives exactly
+        # the case the roll-up does not; the residual (never the raw count)
+        # keeps the report's attempt total — ``calls + unattributed`` — from
+        # double-counting a call the roll-up already priced.
+        unattributed = max(0, calls_made - int(llm_stats["calls"] or 0))
+        stats: dict = {}
+        if llm_stats["by_stage"]:
+            stats["llm"] = llm_stats
+        if unattributed:
+            stats["unattributed"] = unattributed
         meta = {
             "provider": None, "route": None, "failover_used": False,
             "errors": errors, "warnings": warnings,
             "mode": "error" if errors else "llm",
-            # #2335 WI-1a: the M2 pipeline has no extractor_v2 stats — the
-            # key is ALWAYS present, but its value is not always empty.
-            # #3824: the ONE extractor fact this lane can state without a
-            # roll-up is that it reached the provider, so ``stats`` is
-            # {"unattributed": N} when N completions were issued and {} when
-            # none were — a genuine zero-call path stays a clean no-row.
-            "stats": ({"unattributed": calls_made} if calls_made else {}),
+            # #2335 WI-1a: ``stats`` is ALWAYS present, but its value is not
+            # always empty — a priced roll-up (``llm``) when the sink saw
+            # usage, and/or the #3824 call-evidence disclosure
+            # (``unattributed``) when calls went unaccounted. A genuine
+            # zero-call path stays a clean no-row ({}).
+            "stats": stats,
         }
         return extracted, meta
 
@@ -5226,15 +5696,40 @@ class TortoiseSDK:
         # topical entities (the pinned Session-link contract: the Session's
         # aboutObject set is the resolved reference targets, nothing else).
         from .session_link import link_entity
+        from .subject_binding import bind_point_subjects, is_subject_kind
+        # #1370 / #4934: kind→label routing at the WRITE seam. The extractor's
+        # declared §5 Subject kinds must become `:Subject` nodes — otherwise
+        # the Subject layer is unreachable (no aboutSubject target exists) and
+        # the Subject vocabulary leaks into `Object.objectKind`. The binder is
+        # the ONLY confidence-gated aboutSubject producer, so the legacy
+        # `about_entities` topic channel below SKIPS subject-kind names (it
+        # must not emit an un-gated aboutSubject, and it must not mint an
+        # id-less Object stub for one).
+        # F6: EXACT names, derived only from payload entities whose KIND is a
+        # subject kind — the same population the resolver checks against. A
+        # `.lower()` fold here would skip a legitimately-cased Object whose
+        # name only case-insensitively matches a subject name, while the
+        # `MATCH (o:Object {name:$n})` resolution below is case-SENSITIVE.
+        subject_entity_names: set[str] = set()
         for e in payload.get("entities", []) or []:
             name = str(e.get("name", "")).strip()
             if not name:
                 continue
+            _ekind = str(e.get("kind", "core:other"))
+            _is_subject = is_subject_kind(_ekind)
+            if _is_subject:
+                subject_entity_names.add(name)
             try:
-                self.create_entity(
-                    "object", name,
-                    objectKind=str(e.get("kind", "core:other")),
-                    is_episodic=False)
+                if _is_subject:
+                    self.create_entity(
+                        "subject", name,
+                        subjectKind=_ekind,
+                        is_episodic=False)
+                else:
+                    self.create_entity(
+                        "object", name,
+                        objectKind=_ekind,
+                        is_episodic=False)
             except Exception as exc:  # noqa: BLE001, RUF100 — #2164: the
                 # old `except: pass` was indicator-4 hygiene — a swallowed
                 # create_entity failure silently stranding an Object a
@@ -5400,6 +5895,13 @@ class TortoiseSDK:
                             # arbitrary node; (b) a NULL/absent `id` yielded
                             # `[None]` and no edge at all.
                             _n = name.strip()
+                            if _n in subject_entity_names:
+                                # #1370: the binder owns the gated
+                                # aboutSubject edge; the topic channel must
+                                # not produce an un-gated one, nor an
+                                # id-less Object stub for a subject-kind
+                                # name (the #4934 label leak).
+                                continue
                             _oid_rows = proj.g.query(
                                 "MATCH (o:Object {name:$n}) "
                                 "RETURN o.id",
@@ -5430,6 +5932,20 @@ class TortoiseSDK:
                     "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
                     "MERGE (s)-[:CONTAINS]->(p)",
                     params={"sid": session_id, "pid": pid})
+                # #1370: write-time, confidence-gated, fail-closed subject
+                # binding. Only on a genuine create — a dedup hit resolved to
+                # a canonical whose binding was set when IT was created
+                # (first-writer; re-journaling would duplicate records).
+                if created_here and pt.get("slots"):
+                    try:
+                        bind_point_subjects(proj, self, point_id=pid,
+                                            slots=pt.get("slots"))
+                    except Exception as _sb_exc:  # noqa: BLE001, RUF100
+                        # Binding is best-effort — it must never sink the
+                        # commit (the point content is already durable).
+                        warnings.append(
+                            f"subject binding failed for {pid}: "
+                            f"{type(_sb_exc).__name__}: {_sb_exc}")
                 if not created_here:
                     # #2949 (review P2): a dedup hit wrote NONE of these props
                     # in this call (the session CONTAINS edge above is still
@@ -5616,11 +6132,18 @@ class TortoiseSDK:
         #    bridge-attack record routed to mitigate_operator — #4937; shared
         #    commit semantics, #1532 D3 — apply_payload_operators) ──
         ops = payload.get("operators", []) or []
+        # #4936: the ids of the operator Points this capture CREATED — the
+        # provenance stamp's own handle on the operator topology. Surfaced on
+        # ``meta`` for the capture assembly (below), which mints the
+        # sessionCaptured eventId AFTER extraction returns. Empty when the
+        # payload carried no operators.
+        operator_ids: list[str] = []
         if ops:
             from tortoise.commit_ops import (
                 _payload_point_content_by_id,
                 apply_payload_operators,
                 remap_operator_endpoint_refs,
+                reverse_point_id_map,
             )
             # #4716 Part 1: rewrite payload endpoint refs to the ids the commit
             # resolved the points to BEFORE the operator write. A payload id
@@ -5637,9 +6160,8 @@ class TortoiseSDK:
             # pre-remap ref named (first payload id wins when several folded
             # into one graph id — deterministic, and the fold guarantees equal
             # normalized content anyway).
-            _capture_reverse_id_map: dict[str, str] = {}
-            for _payload_id, _resolved_id in capture_point_id_map.items():
-                _capture_reverse_id_map.setdefault(_resolved_id, _payload_id)
+            _capture_reverse_id_map = reverse_point_id_map(
+                capture_point_id_map)
             # A FOLDED (NOOP) endpoint's ref is the PRIOR's graph id and has no
             # payload point at all — the extractor's noop record carries the
             # canonical content precisely so the reason still resolves here
@@ -5651,7 +6173,7 @@ class TortoiseSDK:
                 for _n in noops
                 if _n.get("point_id") and _n.get("content")}
             ops = remap_operator_endpoint_refs(ops, capture_point_id_map)
-            apply_payload_operators(
+            operator_ids = apply_payload_operators(
                 proj, self, ops,
                 point_content_by_id=lambda pid: (
                     _payload_point_content_by_id(
@@ -5702,6 +6224,14 @@ class TortoiseSDK:
             "errors": errors,
             "warnings": warnings,
             "mode": "error" if errors else "v2",
+            # #4936: ids of the IMPL/NAND operator Points this capture CREATED
+            # (``apply_payload_operators`` return) — the capture's provenance
+            # stamp MUST use these, not a join on the minted point set: an
+            # operator whose endpoint re-keyed to a pre-existing graph node
+            # (#4716 Part 1) is absent from the minted set, and a folded-only
+            # capture has no minted id at all, so the join left the operator
+            # unstamped and invisible to the eventId-keyed memory layer.
+            "operator_ids": operator_ids,
             # #2335 WI-1a: surface the extractor_v2 telemetry (recovery
             # per-seam tokens / llm / chunks) on the product-lane meta —
             # eval lane already surfaces it via ingest_v2; the product
@@ -5744,6 +6274,13 @@ class TortoiseSDK:
         review). ``contentHash`` is taken over the redacted transcript too, so
         the hash describes what is stored.
 
+        #3518: it also populates ``_searchText`` — the field the Source FTS
+        index is declared on — via the shared ``_source_search_text`` rule
+        (title-else-summary; the capture path has no title). Without it the
+        captured session was created but NOT findable through
+        ``tortoise_fts_query(entity_type='source')``. The SET is a
+        ``coalesce``, so a re-capture of an empty transcript cannot erase the
+        text a previous capture (or the indexer path) established.
         Additive and idempotent: never touches ``_link_source`` or
         ``_session_event_write``; re-capturing a session re-MERGEs the same
         url. The references edge is skipped when ``event_id`` is None (Event
@@ -5770,6 +6307,14 @@ class TortoiseSDK:
             hashlib.sha256(transcript.encode("utf-8")).hexdigest()
             if transcript.strip() else ""
         )
+        # #3518: the Source FTS index is declared on `_searchText`, so the
+        # capture path MUST populate it or the captured session stays
+        # unfindable. The capture path has no title (the indexer path is the
+        # one that carries frontmatter), so the shared rule resolves to the
+        # derived summary. `coalesce` keeps an existing value when a
+        # re-capture of an empty transcript yields no text, mirroring the
+        # merge semantics `_upsert_source` applies on the indexer side.
+        search_text = _source_search_text(summary=summary)
         params = {
             "url": url,
             "sk": "agentSession",
@@ -5778,6 +6323,7 @@ class TortoiseSDK:
             "ch": content_hash,
             "sum": summary,
             "topics": topics,
+            "st": search_text,
             "now": now,
         }
         set_clauses = [
@@ -5787,6 +6333,7 @@ class TortoiseSDK:
             "s.contentHash=$ch",
             "s.summary=$sum",
             "s.topics=$topics",
+            f"s.{SOURCE_SEARCH_TEXT_FIELD}=coalesce($st, s.{SOURCE_SEARCH_TEXT_FIELD})",
             "s.ingestedAt=coalesce(s.ingestedAt, $now)",
         ]
         if event_id:
@@ -5798,11 +6345,8 @@ class TortoiseSDK:
             params=params,
         )
         if event_id:
-            proj.g.query(
-                "MATCH (s:Source {url:$url}), (e:Event {eventId:$eid}) "
-                "MERGE (s)-[:references]->(e)",
-                params={"url": url, "eid": event_id},
-            )
+            # Anchored ON CREATE by the shared derivation writer (#5199).
+            proj.link_source_to_event(url, event_id)
 
     # ── Update / Delete consolidation (epic #888 W2, PR #912) ─────────
     # One update()/delete() for Points AND entities. The legacy methods
@@ -5813,6 +6357,18 @@ class TortoiseSDK:
 
     def update(self, id: str, **props) -> dict:
         """One update for a Point OR an entity (epic #888 W2).
+
+        A graph operator IS a Point (``is_operator=true``), so it takes the
+        Point arm below: ``update(<operator_id>, label=...)`` edits an existing
+        operator edge in place. So ``update`` belongs to the operator-mutation
+        vocabulary even though ``operator_action`` exposes only mitigate/annotate
+        (#6131).
+
+        Note what this path does NOT do: unlike ``create_operator``, which returns
+        a structured ``undeclared_relation`` warning when no installed pack
+        declares the predicate, ``update(<operator_id>, label=...)`` performs no
+        declaredness check and installs the label silently. Take valid predicates
+        from ``list_relations()``.
 
         Detects the node type by label:
           - Point → point-lifecycle semantics (delegates to update_point):
@@ -5833,6 +6389,12 @@ class TortoiseSDK:
 
     def delete(self, id: str) -> bool:
         """One delete for a Point OR an entity (epic #888 W2).
+
+        An operator IS a Point (``is_operator=true``), so
+        ``delete(<operator_id>)`` removes an operator edge — operators are not
+        delete-less, and a mislabelled or superseded edge is not permanent
+        (#6131). The verb is deliberately generic, so its name says Point/entity
+        rather than naming operators.
 
         Destructive. Detects the node type by label:
           - Point → delete_point (tag GC + `PointRetracted` :GraphEvent)
@@ -6354,8 +6916,22 @@ class TortoiseSDK:
         window START is its own ``validFrom`` (the create path, D3), or the
         optional ``valid_from`` kwarg when the caller knows it (else read
         the successor's ``validFrom``, fall back to its ``createdAt``, fall
-        back to now — monotone, never a gap). Additive-only: no behavior
-        change for callers that don't pass the kwarg.
+        back to now — monotone, never a gap). Additive-only for callers that
+        stay inside the predecessor's window: a successor whose resolved start
+        sorts strictly BEFORE the predecessor's own ``validFrom`` is refused
+        (``ValueError``, before any mutation — an inverted window is satisfiable
+        by no query instant, so the old fact would be silently unreachable from
+        every read surface; #4021). Equality (a zero-length predecessor window)
+        is legal. The comparison needs an INSTANT on both sides: a resolved
+        start that is itself unparseable is not compared (it names no instant,
+        so a refusal would rest on a lexicographic accident rather than a
+        comparison) — the orderability residual is closed on the WRITE path
+        (#5360) for every route EXCEPT the deliberately-exempt numeric-epoch
+        ``valid_from`` kwarg: an unorderable resolved start or end is otherwise
+        normalised to an orderable instant rather than persisted. That kwarg is
+        still ``str()``-ed and left unorderable (see ``_supersede_window_end``
+        and ``docs/ONTOLOGY.md`` §4.7), so that ONE route can still write a
+        bound ``_covers`` cannot order.
 
         The kwarg is a CLAIM about the successor's window start, so when the
         successor carries a stored ``validFrom`` the two must be parseable
@@ -6364,9 +6940,13 @@ class TortoiseSDK:
         uses). A disagreement raises ``ValueError`` BEFORE any mutation: a
         predecessor ``validTo`` that disagrees either leaves a GAP (a query
         instant covered by neither window) or an OVERLAP (two covering
-        candidates ⇒ ``ambiguous``). The kwarg remains the SOLE source when
-        the successor carries no stored ``validFrom`` (an undated successor),
-        unchanged. See docs/ONTOLOGY.md §4.7 (``validTo``).
+        candidates ⇒ ``ambiguous``). The kwarg is the SOLE source when the
+        successor carries no stored ``validFrom`` (an undated successor)
+        **unless it names no instant**: an unparseable STRING kwarg falls
+        through to the successor's ``createdAt``, and that fallback itself
+        requires an orderable value and otherwise lands on ``now`` (#5360). A
+        numeric-epoch kwarg is deliberately exempt — see
+        ``_supersede_window_end``. See docs/ONTOLOGY.md §4.7 (``validTo``).
 
         Transfers all edges from the old point to the new point:
           - Operator edges (IMPL, NAND, hasPart) with idx
@@ -6453,12 +7033,18 @@ class TortoiseSDK:
         # guard's agreement boundary IS the read path's contiguity boundary.
         # It normalizes a purely cosmetic encoding difference
         # ("…T00:00:00Z" vs "…T00:00:00+00:00") and that is therefore
-        # accepted. It parses a DATE-ONLY value as LOCAL midnight (issue
-        # #3982), so a date-only-vs-offset-aware pair is a real instant
-        # difference off UTC — refused there, accepted on a UTC host. That is
-        # deliberate: `_covers` has the same host-dependence, so a
-        # host-independent verdict here would disagree with the read path.
-        # #3982 owns the decision on date-only semantics.
+        # accepted. Since #3982 it ANCHORS a DATE-ONLY value to UTC midnight
+        # (ECMA-262 §21.4.3.2: with no offset, date-only forms are UTC). So a
+        # date-only value and the SAME day stated as midnight UTC
+        # ("…T00:00:00Z") compare EQUAL, and that pair is ACCEPTED on every
+        # host — the equality does not depend on the reader's zone.
+        # The equality is specific to the midnight-UTC ENCODING, not to the
+        # calendar day: the same date at any other time of day names a
+        # different instant and is still refused, as is any pair on different
+        # days. Those verdicts are now host-INDEPENDENT rather than
+        # host-dependent. The read path consumes the same primitive
+        # (`_covers`), so the guard and the read path continue to agree. A
+        # zone-less date-TIME is unaffected and still reads locally.
         #
         # The guard's PRESENCE predicate is the read path's, not the
         # resolution branch's. `_covers` gates on `vf is not None`, so a
@@ -6470,8 +7056,12 @@ class TortoiseSDK:
         # `(1, <text>)` and IS covered by it, so `""` only hides the successor
         # from parseable queries, which land in the predecessor's window end
         # instead. The resolution
-        # branch below gates on TRUTHINESS instead (`elif stored_vf:`), so for
-        # those two values it falls through to `createdAt`. The guard follows
+        # branch below takes a stored start only when it is TRUTHY **and**
+        # ORDERABLE (#5360), so `0` falls through because it is falsey (it IS
+        # orderable, keying `(0, 0.0)`, which is why truthiness cannot be
+        # dropped from the description) and `""` falls through because it is
+        # falsey too. The guard
+        # follows
         # `_covers`: with a kwarg present it refuses rather than allow an
         # unchecked window end against a start the read path treats as real
         # (a `validFrom=0` successor's `[epoch0, ∞)` window overlaps any
@@ -6498,14 +7088,25 @@ class TortoiseSDK:
                     f"validTo gaps or overlaps the chain (read paths use "
                     f"the stored window start)"
                 )
-        if valid_from is not None:
-            succ_vf = str(valid_from)
-        elif stored_vf:
-            succ_vf = stored_vf
-        elif vf_rows and vf_rows[0][1]:
-            succ_vf = vf_rows[0][1]
-        else:
-            succ_vf = now  # monotone fallback — never a gap
+        # #4021: the resolution above plus the INVERTED-window refusal live in
+        # ONE home, shared with the MCP dry-run preview (parity by construction).
+        # This read of the predecessor's own start is the one the defect was
+        # missing: the stamp below used the successor's start without ever
+        # comparing it to the window it was truncating.
+        old_vf_rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.validFrom",
+            params={"id": old_id},
+        ).result_set
+        # EVERY node carrying the id, not just the first: the stamp below
+        # MATCHes and stamps them all, and row order is server-dependent
+        # (the #5358 sibling loops over the same fan-out for this reason).
+        old_vfs = [r[0] for r in old_vf_rows]
+        succ_vf = _supersede_window_end(
+            old_id=old_id, new_id=new_id, old_vfs=old_vfs,
+            valid_from=valid_from, stored_vf=stored_vf,
+            successor_created_at=(vf_rows[0][1] if vf_rows else None),
+            now=now,
+        )
         # #2423 (rebuild-parity fix): kwargs-style emission (id + extra keys)
         # so the FULL payload rides the JSONL line — the previous dict-style
         # emission only reached the :GraphEvent store (payload) while the
@@ -7059,6 +7660,9 @@ class TortoiseSDK:
         # target can never produce a live point with no event (#1080 review).
         temporal_wired = False
         superseded = False
+        # #5365: unapplied supersessions during this promotion — see the
+        # temporal_replacement loop below.
+        supersede_skipped: list[dict] = []
         temporal_targets = point.get("temporal_target_ids") or []
         if point.get("temporal_target_id") and point.get("temporal_target_id") not in temporal_targets:
             temporal_targets.append(point["temporal_target_id"])
@@ -7096,6 +7700,12 @@ class TortoiseSDK:
                     self.supersede_point(tgt, point_id)
                     superseded = True
                 except ValueError as exc:
+                    # #5365: the same fail-open skip as commit_ops — the
+                    # promotion PROCEEDS without superseding, so the caller
+                    # must be able to SEE that, not just find a log line.
+                    # Reported in the result below.
+                    supersede_skipped.append({"target": tgt,
+                                              "reason": str(exc)})
                     _logger.warning(
                         "promote_point: supersede of %s failed for %s: %s",
                         tgt, point_id, exc)
@@ -7147,6 +7757,14 @@ class TortoiseSDK:
             result["temporal_wired"] = True
         if superseded:
             result["superseded"] = True
+        if supersede_skipped:
+            # #5365: a promotion that could not supersede its temporal target
+            # is a PARTIAL promotion. Surfaced as a counted, listed field so a
+            # caller sees the skip without parsing logs (mirrors the
+            # `race_detected` precedent above: a lost race is reported, not
+            # hidden).
+            result["supersede_skipped"] = supersede_skipped
+            result["supersede_skipped_count"] = len(supersede_skipped)
         if race_detected:
             result["race_detected"] = True
             result["race_warning"] = (
@@ -7312,10 +7930,22 @@ class TortoiseSDK:
 
         For each new non-operator Point whose pointKind is 'decision':
         Tier 1 — content-hash vs existing decision Points; Tier 2 — embedding
-        cosine vs existing decision Points. On a hit:
-          - existing prior is DRAFT → wire the "already decided" IMPL now
-            (draft-to-draft, create_operator(promote_source=False)) and flag
-            the candidate (DedupeRecorded event).
+        cosine vs existing decision Points. A hit is always FLAGGED for the
+        review queue; whether it is also WIRED is decided by the D12/O4
+        never-across boundary (#5316). Tier 2 matches on embedding similarity
+        alone, and a connective swap (`and`/`or`, `then`/`else`, `than`/`as`,
+        `to`/`from`) sits well inside the 0.94 band, so a rival pair can land
+        here. A pair is therefore wired only when
+        `fold_allowed(prior_content, content)` holds — the same predicate the
+        four other near-duplicate consumers consult.
+          - existing prior is DRAFT and the boundary allows → wire the
+            "already decided" IMPL now (draft-to-draft,
+            create_operator(promote_source=False)) and flag the candidate
+            (DedupeRecorded event).
+          - existing prior is DRAFT and the boundary refuses → flag, do NOT
+            wire (counted in `boundary_blocked`): the pair differs in a
+            distinguishing dimension, so the IMPL would assert that two rival
+            claims are one decision.
           - existing prior is LIVE → flag the candidate WITHOUT wiring
             (W-2 live-prior rule: a draft must never wire an operator to a
             live Point) — the link is scheduled for D2's promotion time
@@ -7323,9 +7953,11 @@ class TortoiseSDK:
         Idempotent: points already carrying dedup_candidate=true are skipped
         (re-run → no duplicate IMPL, no new DedupeRecorded — DE2E-3).
 
-        Returns {"hits": n, "wired_draft_to_draft": n, "deferred_live_prior": n}.
+        Returns {"hits": n, "wired_draft_to_draft": n, "deferred_live_prior": n,
+                 "boundary_blocked": n}.
         """
         threshold = self.DEDUP_REVIEW_THRESHOLD if threshold is None else threshold
+        from tortoise.extractor_v2 import fold_allowed
         proj = self._get_proj()
         rows = proj.g.query(
             "MATCH (n:Point) WHERE n.id IN $ids "
@@ -7334,7 +7966,7 @@ class TortoiseSDK:
             "       coalesce(n.dedup_candidate, false)",
             params={"ids": list(point_ids)},
         ).result_set
-        hits = wired = deferred = 0
+        hits = wired = deferred = boundary_blocked = 0
         for pid, content, kind, status, already in rows:
             if already or status != "draft" or kind != "decision":
                 continue
@@ -7347,6 +7979,9 @@ class TortoiseSDK:
                                          exclude_id=pid)
             method = "hash"
             similarity = 1.0
+            # Tier 1 is a content hash, so a hit there IS the same text — the
+            # boundary is trivially satisfied and only tier 2 needs it.
+            prior_content = content
             if prior is None:
                 # Tier 2: embedding similarity vs existing decisions,
                 # excluding the candidate itself (self-cosine 1.0 would
@@ -7362,12 +7997,21 @@ class TortoiseSDK:
                 if not pairs:
                     continue
                 prior = pairs[0]["existing"]
+                prior_content = pairs[0].get("existing_content")
                 method = "embedding"
                 similarity = pairs[0]["similarity"]
             if prior == pid:
                 # Belt-and-braces: never self-target.
                 _logger.warning("dedup: candidate %s matched itself — skipped", pid)
                 continue
+            # D12/O4 never-across boundary (#5316). The flag below is
+            # review-queue state, so a boundary refusal must not silence it —
+            # what it must stop is the IMPL wire, which asserts the two claims
+            # are ONE decision. Fail-closed toward KEEP: `fold_allowed`
+            # refuses an unreadable pair, so an unknown prior body refuses the
+            # wire rather than assuming the claims match.
+            boundary_ok = (prior_content is not None
+                           and fold_allowed(prior_content, content))
             # Mark the candidate (review-queue state on the Point).
             proj.g.query(
                 "MATCH (n:Point {id:$id}) SET n.dedup_candidate = true, "
@@ -7383,8 +8027,13 @@ class TortoiseSDK:
             ).result_set
             prior_status = (prow[0][0] if prow else None) or "live"
             if prior_status == "draft":
-                # Variant A: draft-to-draft "already decided" IMPL.
-                if sdk_for_wiring is not None:
+                if not boundary_ok:
+                    # #5316: a distinguishing difference makes these rival
+                    # claims, not one decision. The flag above stays (a human
+                    # should still see the pair); the wire does not happen.
+                    boundary_blocked += 1
+                elif sdk_for_wiring is not None:
+                    # Variant A: draft-to-draft "already decided" IMPL.
                     sdk_for_wiring.create_operator(
                         "IMPL", pid, [prior], label="alreadyDecided",
                         direction="unidirectional", promote_source=False)
@@ -7394,7 +8043,8 @@ class TortoiseSDK:
                 deferred += 1
             self._emit_event("DedupeRecorded", point=self.get_point(pid))
         return {"hits": hits, "wired_draft_to_draft": wired,
-                "deferred_live_prior": deferred}
+                "deferred_live_prior": deferred,
+                "boundary_blocked": boundary_blocked}
 
     def list_dedup_candidates(self, candidate_type: str = "content",
                               limit: int = 50) -> list[dict]:
@@ -7797,6 +8447,13 @@ class TortoiseSDK:
         action='annotate' → annotate_operator(id=..., bias=..., precision=...,
             consistency=..., directness=...) — structured epistemic dims.
 
+        This is NOT the whole operator-mutation vocabulary. Operators are also
+        edited and removed by the GENERIC verbs — ``update(<operator_id>, ...)``
+        and ``delete(<operator_id>)`` — because an operator IS a Point and so
+        takes their Point arm (#6131). This action set exists for the two
+        operations that need a reason or epistemic dimensions; their absence
+        here is not evidence that operators cannot be changed.
+
         Unknown action raises ValueError.
         """
         if action == "mitigate":
@@ -7809,7 +8466,9 @@ class TortoiseSDK:
                 kwargs["consistency"], kwargs["directness"])
         raise ValueError(
             f"operator_action: unknown action {action!r} — must be "
-            f"'mitigate' or 'annotate'")
+            f"'mitigate' or 'annotate'. This is not the whole operator "
+            f"vocabulary: operators are also edited and removed by the generic "
+            f"verbs update(id, ...) and delete(id) (#6131).")
 
     def annotate_operator(self, id: str, bias: float, precision: float,
                           consistency: float, directness: float) -> dict:
@@ -7975,8 +8634,12 @@ class TortoiseSDK:
         # #548: emit events for rebuild parity
         self._emit_event("PointAdded", point=self.get_point(mid))
         # Emit OperatorAdded so the IMPL edge (mitigation → operator) is
-        # recreated on replay. mitigated_by edges are ancillary and
-        # reconstructed separately via the operator's edge replay.
+        # recreated on replay. The reverse mitigated_by edge is NOT: nothing in
+        # tortoise/projection/ mentions mitigation, so the operator's edge
+        # replay drops it and rebuild_all silently reverts w_eff to the
+        # undecayed base (measured 1 → 0 edges, 0.5 → 1.0) while the mitigation
+        # Point survives. Do not read this pair as replay parity — that missing
+        # substrate fold is the defect owned by #5048.
         mit_point = self.get_point(mid)
         mit_point["operator"] = {"op_type": "IMPL", "inputs": [id]}
         self._emit_event("OperatorAdded", point=mit_point)
@@ -8485,6 +9148,23 @@ class TortoiseSDK:
                 "message": f"ingest: {section}[{index}] _server_id is "
                            f"server-managed and cannot be set on bundle items",
             })
+        # #5256: the `extractedFrom` READ-VERSION anchor is server-derived (it
+        # is read from the :Source by `resolve_source_versions` and carried in
+        # the Point's journaled snapshot). NOTE, unlike `_server_id` above: these
+        # keys are NOT declared parameters of `create_point`, so they would land
+        # in `**props` where `_sanitize_props` DOES reject them — the sanitizer is
+        # the backstop, not the gap. This shape-time check is what makes the
+        # refusal a Phase-1 abort (zero mutation, evaluated before any write)
+        # rather than a mid-write one, and it covers EVERY section, including the
+        # ones that never reach `_sanitize_props` at all. Rejected on every
+        # spelling.
+        for _svk in ("sourceVersion", "sourceVersions", "sourceVersionTransit"):
+            if _svk in item:
+                violations.append({
+                    "section": section, "index": index,
+                    "message": f"ingest: {section}[{index}] {_svk} is "
+                               f"server-managed and cannot be set on bundle items",
+                })
         if section == "points":
             # kind is OPTIONAL (CYCLE-25: kind-absent defaults to
             # 'statement'); content is required.
@@ -10597,8 +11277,8 @@ class TortoiseSDK:
         return _get_kind_expander().list_relations()
 
     def _atexit_close(self) -> None:
-        """#1371: atexit seam — collect ephemeral test servers for the
-        batch flush first.
+        """#1371: atexit seam — collect ephemeral test servers so interpreter
+        exit takes the fast close.
 
         Falls through to the normal _t_close when the fast path does not
         apply.
@@ -14502,7 +15182,8 @@ class TortoiseSDK:
         taking the ``:Session`` ``CONTAINS`` edge id as a ``session_id`` — the
         eval ingest writes those with INTERNAL ``lme:{qid}:s{si}`` ids)
         re-buckets the pool and changes which hits fit the resolved ask-lane
-        reader window (200/200/16000/derived since #4105; 8k/32KiB before it).
+        reader window (200/400/200/16000/128000 since #4105/#4235; 8k/32KiB
+        before it).
         #4106 adds ONE source, the session's own recorded
         ``created_at``, and it is read for ``session_date`` ONLY — the
         attached ``session_id`` set is byte-identical with and without it
@@ -15245,22 +15926,52 @@ class TortoiseSDK:
                 # identity so ``SearchResult.session_id`` / the wire
                 # ``sessionId`` is populated for points (it was hardcoded ""
                 # — the capture-metadata columns were only read for
-                # entity_type="document"). Two ordered graph-derived sources,
-                # never a guess: the Point's own camel ``sessionId`` prop,
-                # else the ``:Session`` ``CONTAINS`` edge the capture loop
-                # writes for every turn Point (whose ``:Session`` id IS the
-                # session identity for a captured session); a Point contained
-                # by several ``:Session`` nodes resolves to the deterministic
+                # entity_type="document"). Three ordered graph-derived
+                # sources, never a guess: the Point's own camel ``sessionId``
+                # prop, ELSE the Point's own snake ``session_id`` prop, ELSE
+                # the ``:Session`` ``CONTAINS`` edge the capture loop writes
+                # for every turn Point (whose ``:Session`` id IS the session
+                # identity for a captured session); a Point contained by
+                # several ``:Session`` nodes resolves to the deterministic
                 # minimum of them.
                 #
-                # ⛔ Deliberately NOT read: the snake ``n.session_id`` prop.
-                # It is the identity ``create_point(session_id=…`` writes, but
-                # reading it changes the rendered evidence of the R17
-                # assembly goldens (``tests/test_assembly_sdk.py``, whose
-                # ``_FROZEN_CHUNKS`` content record is contractually never
-                # re-captured) — a separate, policy-governed change. Tracked
-                # as #3804; this PR stays identity-only for the captured-turn
-                # surface the defect measured.
+                # #3804: the snake ``n.session_id`` prop IS read here. It is
+                # the Point-level identity ``create_point(session_id=…`` and
+                # the LongMemEval ingest write (``tools/longmem_eval/
+                # ingest.py`` / ``ingest_v2.py`` — snake on POINTS; their camel
+                # ``sessionId`` goes on Document/Event nodes), and before this
+                # it was read by NO search/ask path — so a Point created
+                # through the SDK's own documented path came back
+                # ``"sessionId": ""`` and rendered ``[session ?]``. Both
+                # spellings are EXPLICIT Point-level identity and either
+                # outranks the derived ``CONTAINS`` edge; between the two the
+                # camel ``sessionId`` wins because it is the WIRE spelling —
+                # ``SearchResult.to_dict()`` emits ``sessionId`` and the
+                # hosted/API contract is expressed in it — so a Point that
+                # carries it explicitly is speaking the wire's own vocabulary.
+                # The WRITE side is deliberately NOT unified into one spelling:
+                # the snake prop is already persisted on existing rows (and
+                # written by the eval ingest), so a read path must accept both
+                # regardless — teaching the read side both spellings is the
+                # narrower change than a prop migration.
+                #
+                # ⛔ KNOWN LIMITATION — this read is the PROJECT-search point
+                # path only. The two degraded fallback tiers
+                # (``fallback_snapshot.search_snapshot`` / ``fallback_tfidf``)
+                # build their ``SearchResult``s and RETURN before this fetch
+                # runs, and the snapshot keeps a deliberately LEAN projection
+                # (``fallback_snapshot._SNAPSHOT_QUERY`` — no session column),
+                # so a degraded hit still carries ``sessionId == ""`` and
+                # renders ``[session ?]``. Widening that cached corpus is the
+                # same separate, policy-governed change
+                # ``search_provenance_enabled`` already declares for
+                # provenance — a declared boundary, not an oversight of #3804.
+                #
+                # R17 (``tests/test_assembly_sdk.py``): naming these rows is a
+                # DELIBERATE content change, so the assembly goldens were
+                # re-captured and ``_FROZEN_CHUNKS`` updated under that
+                # module's own "documented, reviewed content change" clause —
+                # #3804 is that record.
                 _prov = search_provenance_enabled()
                 _prov_cols = ", n.extractedFrom, n.createdAt" if _prov else ""
                 rows = graph.query(
@@ -15268,7 +15979,7 @@ class TortoiseSDK:
                     "OPTIONAL MATCH (sess:Session)-[:CONTAINS]->(n) "
                     "RETURN n.id, n.content, n.pointKind, "
                     "       coalesce(n.has_answer, false), n.sessionId, "
-                    "       sess.id" + _prov_cols,
+                    "       n.session_id, sess.id" + _prov_cols,
                     params={"ids": result_ids},
                 ).result_set
                 # A Point contained by MORE THAN ONE :Session yields one row
@@ -15289,33 +16000,46 @@ class TortoiseSDK:
                         # so the lane's evidence boost has material.
                         "has_answer": bool(row[3]),
                         "sessionId": (row[4] or "") if len(row) > 4 else "",
+                        # #3804: the snake spelling ``create_point(
+                        # session_id=…)`` writes — read here as the second
+                        # explicit identity source, never emitted raw (the
+                        # wire key stays camel ``sessionId``).
+                        "session_id": (row[5] or "") if len(row) > 5 else "",
                     }
                     if _prov:
                         # Provenance (#3837): the Source/document ref and the
                         # capture time — additive, read ONLY when the flag is
                         # set so the default query is unchanged.
                         entity_data[pid]["source_ref"] = (
-                            row[6] if len(row) > 6 else None
+                            row[7] if len(row) > 7 else None
                         )
                         entity_data[pid]["captured_at"] = (
-                            (row[7] or "") if len(row) > 7 else ""
+                            (row[8] or "") if len(row) > 8 else ""
                         )
-                    edge_sid = (row[5] or "") if len(row) > 5 else ""
+                    edge_sid = (row[6] or "") if len(row) > 6 else ""
                     if edge_sid:
                         edge_sids.setdefault(pid, []).append(edge_sid)
                 for pid, entry in entity_data.items():
                     # D3: no fabrication, and an EXPLICIT identity wins: the
-                    # Point's own ``sessionId`` prop is taken when it is
-                    # renderable, else the deterministic minimum of the
-                    # :Session CONTAINS edge ids (sanitized BEFORE the pick —
-                    # a lexicographic minimum over raw ids could select an
-                    # unrenderable one and blank a value that had a perfectly
-                    # good sibling). The wire is filtered through the SAME
+                    # Point's own ``sessionId`` (camel) prop, else its own
+                    # ``session_id`` (snake) prop — #3804 — else the
+                    # deterministic minimum of the :Session CONTAINS edge ids
+                    # (sanitized BEFORE the pick — a lexicographic minimum
+                    # over raw ids could select an unrenderable one and blank
+                    # a value that had a perfectly good sibling). CAMEL FIRST:
+                    # it is the WIRE spelling (``to_dict()`` emits
+                    # ``sessionId``), so it is the one a Point carrying both
+                    # spellings intends. The wire is filtered through the SAME
                     # sanitizer the reader tag uses: ``/v1/search`` output is
                     # agent-consumed and may be re-embedded into a
                     # line-oriented prompt, so it must not hand back a
                     # structure-breaking id.
-                    own = _safe_session_tag(entry["sessionId"])
+                    own = (_safe_session_tag(entry["sessionId"])
+                           or _safe_session_tag(entry["session_id"]))
+                    # the raw snake spelling is an INTERNAL read; only the
+                    # camel wire key survives on the entry (it feeds
+                    # ``SearchResult.session_id`` → ``to_dict()["sessionId"]``)
+                    entry.pop("session_id", None)
                     if own:
                         entry["sessionId"] = own
                     else:
@@ -18492,6 +19216,19 @@ class TortoiseSDK:
     def _update_entity(self, id_val: str, **props) -> dict:
         # #329: id + sourcePath/source_path are server-managed — reject
         props = _sanitize_props(props, reject_id=True)
+        # #5482: `search_keys` must reach the graph FLAT, exactly as it does on
+        # `create_point` and `update_point` — both flatten immediately after
+        # `_sanitize_props`, and this surface did not. It wrote caller props
+        # straight through `SET n += $props`, so a list-valued `search_keys`
+        # landed as an ARRAY; FalkorDB's fulltext index does not index
+        # array-valued properties, so the Point became permanently unfindable
+        # by `queryNodes` while the write reported success. Flattening once,
+        # before the per-label loop, covers every write site below: each
+        # derives its props from this dict on a later line.
+        # NOTE: on the Point branch this write is live-only — `PointRevised`
+        # carries the annotator dims, not `search_keys` — so a replay does not
+        # restore it. That is pre-existing (#4094) and unchanged here.
+        _flatten_search_keys_prop(props)
         # E4 (#5007, re-review P2): the span invariant has to hold HERE too.
         # This is the generic tenant surface (`tortoise_update_entity`) and
         # its Point branch below writes caller props straight through
@@ -19229,7 +19966,25 @@ class TortoiseSDK:
         ).result_set]
 
     def get_session(self, session_id: str) -> dict | None:
-        """Get a single session Event by session_id (matches snake or camel case)."""
+        """Get a single agent session by session_id.
+
+        TWO lanes share this read, and they write DIFFERENT node kinds:
+
+        * an indexed agent-session ``Event`` (``eventKind='AgentSession'`` —
+          the ``index_sessions`` / session-commit lane), returned as its raw
+          properties (the historical contract, positionally unchanged);
+        * a captured durable ``:Session`` record (``capture_session``, and the
+          hosted ``POST /v1/sessions``), returned in the SAME projection the
+          hosted ``GET /v1/sessions/{id}`` serves.
+
+        #3557: the second arm did not exist. The capture lane writes a
+        ``:Session`` node plus a ``sessionCaptured`` Event — never an
+        ``AgentSession`` Event — so ``get_session`` returned ``None`` for
+        EVERY session the SDK itself had just captured, and a self-hosted
+        consumer (including the MCP ``tortoise_get_session`` tool, which
+        delegates here) could not read back its own captures at all. The
+        durable arm below is the read half of the capture lane.
+        """
         if not session_id:
             return None
         proj = self._get_proj()
@@ -19238,7 +19993,92 @@ class TortoiseSDK:
             "WHERE e.session_id = $sid OR e.sessionId = $sid RETURN properties(e)",
             params={"sid": session_id}
         ).result_set
-        return rows[0][0] if rows else None
+        if rows:
+            return rows[0][0]
+        return self._read_captured_session(proj, session_id)
+
+    def _read_captured_session(self, proj, session_id: str) -> dict | None:
+        """The durable ``:Session`` projection — the SDK mirror of the hosted
+        ``GET /v1/sessions/{id}`` read (#3557).
+
+        Field-for-field the same keys the hosted detail endpoint builds, so a
+        self-hosted SDK consumer and a hosted one see one session vocabulary:
+        ``SESSION_READ_FIELDS`` plus ``actor_display`` (the raw id here — this
+        lane has no control plane to resolve a member email, the hosted
+        endpoint's own fail-soft fallback) and the ``turn_points`` /
+        ``extracted_points`` lists.
+
+        Both counts use the DETAIL endpoint's non-turn predicate
+        (``pointKind IS NULL OR pointKind <> 'event'``) — LLM-extracted claims
+        are untyped, so the legacy ``IN ['decision','statement']`` filter the
+        LIST endpoint still uses would report 0 for them (#3555).
+
+        Returns ``None`` when no ``:Session`` carries the id.
+        """
+        rows = proj.g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.id, s.created_at, "
+            "s.turn_count, s.actor_user_id, s.harness, "
+            "s.machine_id, s.model",
+            params={"sid": session_id},
+        ).result_set
+        if not rows:
+            return None
+        sess = rows[0]
+        extracted_count = proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+            "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "
+            "RETURN count(p)",
+            params={"sid": session_id},
+        ).result_set[0][0]
+        turn_rows = proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
+            "RETURN t.id, t.content, t.createdAt ORDER BY t.id",
+            params={"sid": session_id},
+        ).result_set
+        turn_points = []
+        for tr in turn_rows:
+            role, body = _capture_turn_role_text(tr[1] or "")
+            turn_points.append({
+                "id": tr[0], "role": role, "content": body,
+                "created_at": tr[2],
+            })
+        ext_rows = proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+            "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "
+            "RETURN p.id, p.content, p.pointKind, p.createdAt "
+            "ORDER BY p.createdAt",
+            params={"sid": session_id},
+        ).result_set
+        extracted_points = [{
+            "id": er[0], "content": er[1] or "",
+            "kind": er[2] or "statement", "created_at": er[3],
+        } for er in ext_rows]
+        source = None
+        source_rows = proj.g.query(
+            "MATCH (src:Source {url:$url}) "
+            "RETURN src.url, src.sourceKind, src.eventId",
+            params={"url": f"session:{session_id}"},
+        ).result_set
+        if source_rows:
+            source = {
+                "url": source_rows[0][0],
+                "sourceKind": source_rows[0][1],
+                "eventId": source_rows[0][2],
+            }
+        return {
+            "id": sess[0],
+            "created_at": sess[1],
+            "turns": sess[2],
+            "actor_user_id": sess[3],
+            "actor_display": sess[3],
+            "harness": sess[4],
+            "machine_id": sess[5],
+            "model": sess[6],
+            "extracted": extracted_count,
+            "turn_points": turn_points,
+            "extracted_points": extracted_points,
+            "source": source,
+        }
 
     def index_file(self, path: str,
                    file_type: str | None = None,   # "agent_session"|"meeting"|"doc"|None(auto)
@@ -20054,9 +20894,13 @@ class TortoiseSDK:
                         self._doc_write(frontmatter, doc_id, title, abs_path, url)
                         repair_work = not base_complete or merge_outcome == "updated"
                     # wire (Source)-[:references]->(Event|Source) — plain edge
-                    # (D10: a document is a :Source, so the doc target is Source)
+                    # (D10: a document is a :Source, so the doc target is keyed by
+                    # url=doc_id). The label stays "Document" for the doc case: it is
+                    # the RELATION's spelling — the writer remaps the identity onto
+                    # `:Source` — and it is what keeps this a derivation link, which is
+                    # what takes the `sourceVersion` anchor (#5199).
                     target = event_id if classifier != "doc" else doc_id
-                    label = "Event" if classifier != "doc" else "Source"
+                    label = "Event" if classifier != "doc" else "Document"
                     proj.link_source_to_entity(url, target, label)
 
             # ── embedding repair (sessions; extract_metadata=True) — runs only
@@ -20202,7 +21046,8 @@ class TortoiseSDK:
             # other index writers (threads leg). bolt:// stats stay honest.
             self.create_source(
                 url, kind, sourceDate=source_date, source_path=abs_path,
-                contentHash=content_hash, title=title, _searchText=title,
+                contentHash=content_hash, title=title,
+                _searchText=_source_search_text(title=title),
                 format="markdown", _merge_run_id=rid)
             proj = self._get_proj()
             rows = proj.g.query(
@@ -21041,11 +21886,12 @@ class TortoiseSDK:
         silently no-op on them — the edge must bind the legacy node directly.
         """
         proj = self._get_proj()
-        proj.g.query(
-            "MATCH (s:Source {url:$url}), (e:Event {eventId:$eid}) "
-            "MERGE (s)-[:references]->(e)",
-            params={"url": url, "eid": event_id},
-        )
+        # Anchored ON CREATE, from the version the EVENT records it was read from
+        # (`e.file_hash`) — NOT the Source's current hash. This path runs when the
+        # file was edited since capture (W2): the Source holds the CURRENT hash
+        # while the legacy Event kept its stored `file_hash`, so anchoring the
+        # Source's hash here would report a STALE Event as current.
+        proj.link_source_to_legacy_event(url, event_id)
 
     def index_sessions(self, directory: str, extract_metadata: bool = True,
                        llm_model: str | None = "gpt-5-mini",
@@ -21086,7 +21932,7 @@ class TortoiseSDK:
         from pathlib import Path  # noqa: I001
         from .file_indexer import compute_file_hash
         from .session_indexer import (
-            extract_session_id, session_corpus_dir,
+            corpus_files, extract_session_id, session_corpus_dir,
         )
 
         dir_path = Path(directory or session_corpus_dir())
@@ -21103,7 +21949,7 @@ class TortoiseSDK:
         ).result_set
         by_event = {r[0]: r[1] for r in rows}
 
-        files = sorted(dir_path.rglob("*.md"))
+        files = corpus_files(dir_path)
         # Group by session id: two files may share a sessionId (rglob picking
         # up copies, or duplicated frontmatter). Classify only the PRIMARY
         # file (first in sorted order) so the delta drives the sweep to
@@ -21212,10 +22058,29 @@ class TortoiseSDK:
                     # would create duplicate Objects on every run).
                     oid = f"{key.rstrip('s')}_{hashlib.sha256(name.encode()).hexdigest()[:8]}"
                 okind = "pr" if key == "prs" else "issue"
+                # #3574: store the name VERBATIM — never `name[:200]`.
+                #
+                # `name` IS the Object's identity: `_upsert_object` MERGEs on
+                # it, `_fold_object_superseded` MATCHes it, and the canonical
+                # id (`_entity_name_id` → `obj-<sha26(name)>`) is derived from
+                # the FULL name. This was the only writer applying a 200-char
+                # cap, so a GitHub title > 200 chars (the session-indexing
+                # lane's stock input — titles run to 256) landed under a name
+                # no other name-keyed writer or reader could match:
+                # `create_object(same_title)` minted a second carrier and the
+                # supersession fold could never find this one — one logical
+                # issue, two divergent names by door. The cap is load-bearing
+                # nowhere (no index or uniqueness constraint wants it; it only
+                # breaks identity agreement), so it is REMOVED rather than
+                # mirrored: mirroring would make two distinct >200-char names
+                # collapse into ONE Object — the silent-merge harm the identity
+                # rule exists to prevent. Pin:
+                # tests/test_sdk_group3.py::TestConnectIssueObjectsAboutObject
+                # ::test_long_object_name_stored_verbatim_by_both_writers.
                 proj.g.query(
                     "MERGE (o:Object {id:$oid}) SET o.name=$name, o.objectKind=$okind, "
                     "o.repo=$repo, o.issue_number=$issue_number, o.url=$url",
-                    params={"oid": oid, "name": name[:200], "okind": okind,
+                    params={"oid": oid, "name": name, "okind": okind,
                             "repo": repo, "issue_number": issue_number, "url": url},
                 )
                 if proj.create_about_edge(event_id, oid, "aboutObject"):
@@ -21326,6 +22191,20 @@ class TortoiseSDK:
                     f"{_k!r} is a server-managed field and cannot be set via "
                     f"props — use the sanctioned create_source({sanctioned}=) "
                     f"keyword (epic #900 §4.1)."
+                )
+        # #5256: the `extractedFrom` read-version anchor and its node carrier
+        # are server-derived. `create_source` is the one writer that BYPASSES
+        # `_sanitize_props` (`_create_entity(..., _skip_sanitize=True)`), so it
+        # needs this reject itself — otherwise a caller-supplied `sourceVersion`
+        # would persist on the Source node (unjournalled-value mismatch: the
+        # value means nothing there, but it is a forged-looking provenance
+        # field the tenant never owned). Same key family as the Point reject.
+        for _svk in ("sourceVersion", "sourceVersions",
+                     "sourceVersionTransit"):
+            if _svk in props:
+                raise ValueError(
+                    f"{_svk!r} is a server-managed provenance field and cannot "
+                    f"be set via props."
                 )
         ev = {
             "url": url,
@@ -21895,18 +22774,126 @@ class TortoiseSDK:
         as ``entity`` rather than dropping the row. Rows that DO resolve a
         reference are preferred, so a Point extracted from several sources
         keeps returning a referenced entity whenever one exists.
+
+        #5199 — the note is readable for **every** link: one row is returned per
+        ``(source, reference)`` hop, so a source that carries several references
+        reports each one's note rather than one arbitrarily chosen hop. Before
+        this a bare containment link could win and report ``unknown`` for a chain
+        whose note was right there — the ordinary shape, since `hosted_api` gives
+        one Source a document derivation link AND external containment links.
+
+        Row order is a **presentation** choice, pinned for the two distinctions
+        that carry meaning: **resolved** links before the self-terminal fallback,
+        and **annotated** links before unannotated ones. Identity keys follow
+        (node key, note, label, content hash, title) so the shapes the writers
+        produce have a stable order — a fallback row for one source cannot
+        displace another's, a duplicate `:Source` sharing a ``url`` is separated
+        by its hash **when the hashes differ**, and an `:Event` colliding with a
+        `:Source` on its key is separated by its label. Where those keys still
+        agree, the residue paragraph below applies.
+
+        It is **not** a total order, and this docstring will not pretend it is:
+        two rows agreeing on every ordering key (same url/id, note, label, hash,
+        title) come back in engine order, and may still differ in a property the
+        order does not read (``ingestedAt``, say). **Select the link you want by
+        its source/target identity, not by row position.**
+
+        Each row's pair speaks for THAT ``references`` link only, and these rows
+        are **NOT** §4.6's Point-level aggregate: §4.6 aggregates the Point's
+        ``extractedFrom`` links — a DIFFERENT link set, which this method
+        traverses only to enumerate sources and never reads a version off. A
+        caller wanting that verdict has to read those links itself. What these
+        rows answer is the narrower question: *which version was each referenced
+        entity read at, and is that still the source's current version?* Each row
+        carries ``linkRelation`` (the link set it describes — always
+        ``references`` here), ``linkRecordedVersion`` (the version recorded on
+        THAT link, i.e. the edge's own ``sourceVersion`` property),
+        ``sourceCurrentVersion`` (the source's version now) and ``linkCurrency``
+        (the verdict). Every one of those names is scoped to the link on purpose:
+        §4.6's aggregate reads the Point's ``extractedFrom`` link, which records a
+        version of its OWN under the same ``sourceVersion`` property name, so a
+        bare ``sourceVersion``/``currency`` on a Point-addressed call is the
+        conflation the search-hit half was retracted for.
         """
         proj = self._get_proj()
+        from .search_engine import currency_status
+
         r = proj.g.query(
             "MATCH (p:Point {id:$pid})-[:extractedFrom]->(src:Source) "
-            "OPTIONAL MATCH (src)-[:references]->(ref) "
-            "WITH src, ref ORDER BY ref IS NULL LIMIT 1 "
+            "OPTIONAL MATCH (src)-[ref_edge:references]->(ref) "
+            "WITH src, ref_edge, ref "
+            # Order pinned for the two distinctions that carry meaning (resolved
+            # before fallback, annotated before unannotated), then by identity
+            # keys. See the docstring: this is NOT a total order — rows equal on
+            # every key come back in engine order. Deliberately NO `LIMIT`: one
+            # row per link, because a Point extracted from several sources — or a
+            # source referencing several things — must not have its remaining
+            # notes dropped.
+            # (1) a resolved reference beats the self-terminal fallback;
+            # (2) an ANNOTATED reference beats an unannotated one — this decides
+            #     which row LEADS. It is placement, not reachability: there is no
+            #     `LIMIT`, so every link's note comes back either way;
+            # (3) the key terms below. Enumerated in precedence order, most
+            #     significant first — an enumeration, not a claim about which
+            #     term is NEEDED for which shape:
+            #       3a. `coalesce(ref.url, ref.id, ref.eventId, src.url, src.id, '')`
+            #           the target's identity key. `eventId`: a legacy raw-Cypher
+            #           Event carries no `url` and no `id`. `src.url`, then
+            #           `src.id`: the self-terminal fallback row has `ref` NULL, so
+            #           the key falls back to the source's own identity — and a
+            #           url-less `:Source` is producible (a raw producer can wire
+            #           one via `extractedFrom`; `hosted_backup.restore_graph`
+            #           recreates dumped nodes as they were).
+            #       3b. `coalesce(ref_edge.sourceVersion, '')`  the note
+            #       3c. `labels(coalesce(ref, src))`            the target's label
+            #       3d. `coalesce(ref.contentHash, src.contentHash, '')`  hash
+            #       3e. `coalesce(ref.title, src.title, '')`    title
+            #     Every term only breaks ties the earlier ones left, so 3b-3e are
+            #     what separate shapes sharing a key: an `:Event` colliding with a
+            #     `:Source`, two `:Source` nodes sharing a ``url``, or sharing a
+            #     ``url`` AND a hash. (Same-``url`` duplicates need a legacy/raw-Cypher
+            #     write path — #5012's duplication is CANONICAL identity across
+            #     DIFFERENT raw urls (the count itself is unmeasured there) — so
+            #     those terms are defensive.)
+            #     This is NOT a total order — rows equal on every key come back in
+            #     engine order; see the docstring.
+            "ORDER BY ref IS NULL, ref_edge.sourceVersion IS NULL, "
+            "coalesce(ref.url, ref.id, ref.eventId, src.url, src.id, ''), "
+            "coalesce(ref_edge.sourceVersion, ''), "
+            "labels(coalesce(ref, src)), "
+            "coalesce(ref.contentHash, src.contentHash, ''), "
+            "coalesce(ref.title, src.title, '') "
             "RETURN properties(src) as source, "
             "properties(coalesce(ref, src)) as entity, "
-            "labels(coalesce(ref, src)) as labels",
+            "labels(coalesce(ref, src)) as labels, "
+            "ref_edge.sourceVersion as remembered",
             params={"pid": point_id},
         )
-        return [{"source": dict(row[0]), "entity": dict(row[1]), "labels": list(row[2])} for row in r.result_set]
+        out: list[dict] = []
+        for row in r.result_set:
+            source = dict(row[0])
+            remembered = row[3] or ""
+            current = source.get("contentHash") or ""
+            out.append({
+                "source": source,
+                "entity": dict(row[1]),
+                "labels": list(row[2]),
+                # #5199: the version note on THIS hop, and the currency of THIS
+                # link as a READ. `linkRelation` names the link set, so the row is
+                # self-describing: §4.6's aggregate rides a different link.
+                "linkRelation": "references",
+                # It describes the ``source -[references]-> entity`` link — the
+                # version the RETURNED entity was read at — which is deliberately
+                # NOT a claim about the Point: the Point's own `extractedFrom`
+                # version is a different link, and a Point-level verdict has to
+                # aggregate §4.6 across all of them. ``unknown`` whenever the note
+                # or the source's version is absent, so an unnoted link can never
+                # read as current.
+                "linkRecordedVersion": remembered,
+                "sourceCurrentVersion": current,
+                "linkCurrency": currency_status(remembered, current),
+            })
+        return out
 
     def link_source_to_entity(self, source_url: str, entity_id: str, entity_label: str, source_kind: str = "document") -> None:
         """Create Source → Entity references edge (Ontology v3.1 §3.4).
@@ -21920,7 +22907,19 @@ class TortoiseSDK:
             entity_label: the entity label (Source|Event|Object) for the MATCH.
                 The retired ``"Document"`` is accepted as a DEPRECATED ALIAS and
                 resolved to ``Source`` (D10, ONTOLOGY v3.15 §4.4).
+                ⚠️ The alias is NOT equivalent to ``"Source"`` for the caller:
+                it also selects the DERIVATION relation, so the link takes the
+                optional ``sourceVersion`` anchor described below, while
+                ``"Source"`` means referential containment and stays
+                property-free. Pass ``"Document"`` when the link's meaning is
+                "this target was read from that source".
             source_kind: sourceKind to set on auto-created Source (default: "document")
+
+        Anchor (#5199): a DERIVATION link (``Event`` | ``Document``) records the
+        source version its target was read from as an optional ``sourceVersion``,
+        read HERE from the source's own ``contentHash`` so no caller passes it and
+        this signature is unchanged. Written ``ON CREATE`` only. ``Object`` links
+        stay property-free. See ``docs/architecture/STORAGE-ARCHITECTURE.md`` §9.6.
 
         Raises:
             ValueError: if entity_label is not one of Source, Event, Object
@@ -22146,14 +23145,11 @@ class TortoiseSDK:
     # operator surface is the CLI (see `tortoise/__main__.py`). Both delegate to
     # the module-level helpers so the reader/writer contract has ONE driver.
     #
-    # The imports are FUNCTION-LOCAL, and that is load-bearing: the generated
-    # rename table (`docs/product/sdk-rename-table.md`) cites `sdk.py` LINE
-    # NUMBERS, so a two-line import at the top of this file re-stales every
-    # citation below it (`tests/test_sdk_rename_table.py::test_part_a_*`,
-    # `::test_check_mode_is_clean`) — a documentation-drift failure with no
-    # relation to this fix. These methods sit AFTER the last cited line, so
-    # importing here shifts nothing. (Same reason `_config_classes()` imports
-    # `PACK_INSTALL_LABEL` locally in `projection/__init__.py`.)
+    # NOTE (#5373): the imports below are FUNCTION-LOCAL. The generated
+    # `docs/product/sdk-rename-table.md` is produced ON DEMAND from this module and
+    # is NOT committed (gitignored), so its `sdk.py:N` citations are re-rendered
+    # from the current file on every run and no committed copy pins this file's
+    # line numbers.
     def _config_reset_state(self) -> dict | None:
         """The sticky `config_reset` marker's properties, or None if never set.
 
@@ -22319,6 +23315,13 @@ def _summary_to_payload(summary: dict, session_id: str,
 
 
 def _now_iso() -> str:
+    """UTC now in ISO format.
+
+    One of this module's timestamp helpers, not a single shared clock: some call sites
+    here use it, while others inline ``datetime.now(timezone.utc).isoformat()``
+    directly (e.g. ``update_point``, ``invalidate_point``, ``supersede_point``) and
+    several other modules define their own ``_now_iso``.
+    """
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 

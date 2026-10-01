@@ -1,0 +1,35 @@
+# Repository-wide merge behaviour (#5373).
+#
+# Measured 2026-09-26: of 130 open PRs, 44 did not merge cleanly, and 33 of those
+# conflicted on just three artifacts — 25 on `config/ci-surfaces.yml`, 8 on
+# `docs/product/sdk-rename-table.md`, 4 on `config/surface-manifest.yml`. The two
+# registries are APPEND-ONLY: two lanes registering a new entry land on the same
+# anchor, and git reports a conflict on lines that do not disagree.
+#
+# `merge=union` is a git BUILT-IN — it needs NO `git config` in any clone, so this
+# file alone is the whole setup. It keeps BOTH sides' lines for the conflicting
+# hunk. That is right for an append-only registry, and WRONG for anything a YAML
+# loader reads: union can emit a duplicate mapping key or a duplicate entry, and
+# `yaml.safe_load` silently keeps the last one.
+#
+# So each unioned file is paired with a fail-closed validator that reddens the
+# required `manifest-integrity` job (see `python-ci-gate`'s `needs`):
+#   config/ci-surfaces.yml      -> tools/registry_integrity.py
+#   config/surface-manifest.yml -> tools/registry_integrity.py
+# Adding a unioned file here without adding a validator is a red test
+# (tests/test_registry_integrity.py::test_validated_set_equals_unioned_set).
+config/ci-surfaces.yml       merge=union
+config/surface-manifest.yml  merge=union
+
+# NOT unioned, deliberately — generated artifacts.
+#
+# `docs/product/sdk-rename-table.md` is a function of `sdk.py` line numbers. Both
+# sides of a merge regenerate it against a different tree, so a line-level union
+# duplicates rows and produces a table matching NEITHER side. Its conflict class is
+# removed by not committing it (see `.gitignore`, #5373) and generating it on
+# demand with `tools/sdk_rename_table.py` — not by unioning it, and not by a custom
+# merge driver (a driver would have to regenerate from the MERGED `sdk.py`, which
+# does not exist while a per-file driver runs, so it would be wrong by construction).
+#
+# Real source (`tortoise/sdk.py`, `tortoise/hosted_api.py`) is likewise NOT unioned:
+# those are genuine semantic conflicts, and per-PR resolution is correct for them.

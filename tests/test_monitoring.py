@@ -98,6 +98,19 @@ def _fresh_probe_worker():
     monitoring._reset_probe_worker()
 
 
+@pytest.fixture(autouse=True)
+def _fresh_graph_size_worker():
+    """#3253 review P2: the DEDICATED graph-size worker is process-lifetime
+    too. A test that wedges it (the stalled-taxonomy tests below) would leave
+    the ONE slot held, so every later ``graph_size`` count in the file pays
+    the full budget and ``graph_size`` stops being measurable — leaking a
+    wedged worker into the next test. Drop it per test, the same recovery
+    seam ops uses to fix a wedged count without a process restart."""
+    monitoring._reset_graph_size_worker()
+    yield
+    monitoring._reset_graph_size_worker()
+
+
 class TestProbeDb:
     """probe_db() deep-check (#1384) — never raises, hard-bounded."""
 
@@ -357,10 +370,15 @@ class TestProbeDb:
         bare = monitoring.probe_db(BareTimeoutSDK())
         assert bare["ok"] is False
         assert bare["error"] == "probe setup timeout after 0.5s", bare
+        # #3683: the CALLABLE raised, so the probe has an observation — the
+        # synthesized spelling must NOT also decide the status (a message-less
+        # raised timeout and a messaged one are the same phase fact).
+        assert bare["observed"] is True, bare
         # A timeout WITH its own message keeps it (more informative).
         messaged = monitoring.probe_db(MessagedTimeoutSDK())
         assert messaged["ok"] is False
         assert "timed out" in messaged["error"], messaged
+        assert messaged["observed"] is True, messaged
         # A TimeoutError is never retried (a hung DB stays hung).
         assert calls["n"] == 1, calls
 
@@ -427,7 +445,7 @@ class TestProbeDb:
             seen.append((timeout, setup_timeout))
             if len(seen) == 1:
                 clock.t += 2.5  # the attempt consumed its deadline
-            return False, "transient", True
+            return False, "transient", True, True
 
         monkeypatch.setattr(monitoring, "_probe_once", fake_probe_once)
         result = monitoring.probe_db(object(), setup_timeout=2.0)
@@ -459,7 +477,7 @@ class TestProbeDb:
         def fake_probe_once(sdk, timeout=None, setup_timeout=None):
             seen.append((timeout, setup_timeout))
             clock.t += overrun  # 1.0 = exactly the deadline, 1.2 = overrun
-            return False, "connection refused", True
+            return False, "connection refused", True, True
 
         monkeypatch.setattr(monitoring, "_probe_once", fake_probe_once)
         result = monitoring.probe_db(object(), setup_timeout=0.0)
@@ -485,9 +503,9 @@ class TestProbeDb:
             seen.append((timeout, setup_timeout))
             if len(seen) == 1:
                 clock.t += 1.39  # transient failure LATE in the shared budget
-                return False, "NXDOMAIN / connection refused", True
+                return False, "NXDOMAIN / connection refused", True, True
             # The remainder (~0.01s) is far below the cold-start it must redo.
-            return False, f"probe setup timeout after {timeout}s", False
+            return False, f"probe setup timeout after {timeout}s", False, False
 
         monkeypatch.setattr(monitoring, "_probe_once", fake_probe_once)
         result = monitoring.probe_db(object())
@@ -612,7 +630,7 @@ class TestMetricsFunction:
         result = monitoring.metrics()
         assert result["status"] == "unknown"
         assert result["falkordb"] == "no_sdk_registered"
-        assert result["db"] == {"ok": None, "latency_ms": 0.0,
+        assert result["db"] == {"ok": None, "observed": False, "latency_ms": 0.0,
                                 "error": "no_sdk_registered"}
         assert result["graph_size"] == 0
 
@@ -635,6 +653,7 @@ class TestMetricsFunction:
         assert result["status"] == "degraded"
         assert "connection refused" in result["falkordb"]
         assert result["db"]["ok"] is False
+        assert result["db"]["observed"] is True
         assert "connection refused" in result["db"]["error"]
 
     def test_includes_uptime(self):
@@ -701,6 +720,278 @@ class TestMetricsExplicitSdkArg:
         assert result["status"] == "degraded"
         assert calls["taxonomy"] == 0
         assert result["graph_size"] == 0
+        # #3253: a skipped count is NOT a measured 0 — say so per call.
+        assert result["graph_size_error"] is not None
+
+
+class TestGraphSizeMeasurementIsBoundedAndReported:
+    """#3253: the ``graph_size`` taxonomy round-trip in ``metrics()``.
+
+    Two defects, one shape. (1) The count ran on the CALLER thread with no
+    budget of its own, so a server that answered ``RETURN 1`` promptly but
+    stalled on the five label ``COUNT``s pinned the health call for as long as
+    the server stalled — the MCP ``tortoise_health`` tool and ``serve_health``
+    both. (2) A count that RAISED was swallowed (``record_error()``) and the
+    report stayed ``status="ok"`` / ``graph_size: 0``, identical to a genuinely
+    empty graph on the same call; only the process-lifetime ``errors`` counter
+    moved, so telling them apart took a second call.
+
+    The fix bounds the count (``GRAPH_SIZE_TIMEOUT``, on a DEDICATED daemon
+    worker so it can never occupy the probe slot) and reports per-call
+    whether the value was MEASURED via ``graph_size_error`` (``None`` ==
+    measured, so a 0 is a real empty graph; a string == not measured).
+    """
+
+    class EmptySDK(FakeSDK):
+        """A reachable graph with no nodes — a REAL measured zero."""
+
+        def taxonomy(self):
+            return {"Point": 0, "Event": 0}
+
+    class BoomSDK(FakeSDK):
+        def taxonomy(self):
+            raise RuntimeError("count failed")
+
+    def test_success_reports_a_measured_value(self):
+        monitoring._sdk = None
+        result = monitoring.metrics(sdk=FakeSDK(db_ok=True, graph_size=42))
+        assert result["graph_size"] == 42
+        # None is the "measured" signal, so 42 needs no caveat.
+        assert result["graph_size_error"] is None
+
+    def test_empty_graph_is_a_measured_zero(self):
+        monitoring._sdk = None
+        result = monitoring.metrics(sdk=self.EmptySDK(db_ok=True))
+        assert result["graph_size"] == 0
+        assert result["graph_size_error"] is None, (
+            "a genuinely empty graph must read as measured, not unavailable")
+
+    def test_count_failure_is_distinguishable_from_empty_without_diffing_errors(
+            self):
+        """THE #3253 DISCRIMINATOR. Assert the DISTINCTION, not just a
+        number: on the SAME per-call report, an empty graph and a failed count
+        share ``status`` + ``graph_size`` (so the old reader could not tell
+        them apart) but differ on ``graph_size_error`` — no second call, no
+        cumulative-counter diff."""
+        monitoring._sdk = None
+        empty = monitoring.metrics(sdk=self.EmptySDK(db_ok=True))
+        failed = monitoring.metrics(sdk=self.BoomSDK(db_ok=True))
+
+        # The pre-#3253 observable really is identical — this is the defect.
+        assert (empty["status"], empty["graph_size"]) == (
+            failed["status"], failed["graph_size"])
+
+        # The per-call marker is what separates them.
+        assert empty["graph_size_error"] is None
+        assert failed["graph_size_error"] is not None
+        assert "count failed" in failed["graph_size_error"]
+        # The failure is still recorded (never raised) for the Prometheus
+        # counter consumer — the marker is additive, not a replacement.
+        assert failed["errors"] > empty["errors"]
+
+    def test_stalled_count_is_bounded_and_reported(self, monkeypatch):
+        """A reachable server that stalls on the label counts must not pin
+        the health call: ``metrics()`` returns inside the count budget with an
+        explicit unavailability marker instead of hanging."""
+        import threading
+
+        monkeypatch.setattr(monitoring, "GRAPH_SIZE_TIMEOUT", 0.05)
+        release = threading.Event()
+
+        class StallSDK(FakeSDK):
+            def taxonomy(self):
+                # Parked on the DEDICATED graph-size worker, not the caller.
+                release.wait(5.0)
+                return {"Point": 1}
+
+        try:
+            started = time.monotonic()
+            result = monitoring.metrics(sdk=StallSDK(db_ok=True))
+            elapsed = time.monotonic() - started
+        finally:
+            release.set()
+
+        assert result["status"] == "ok"
+        assert result["graph_size"] == 0
+        assert result["graph_size_error"] is not None, result
+        assert "budget" in result["graph_size_error"]
+        assert elapsed < 1.0, f"metrics() did not honour the count budget: {elapsed:.2f}s"
+
+    def test_stalled_count_never_occupies_the_probe_slot(self, monkeypatch):
+        """Isolation: the count runs on its OWN worker, so a stalled count
+        cannot hold the single probe slot and turn a graph_size problem into a
+        false ``degraded`` on the next probe (#3143's symptom class)."""
+        import threading
+
+        monkeypatch.setattr(monitoring, "GRAPH_SIZE_TIMEOUT", 0.05)
+        release = threading.Event()
+
+        class StallSDK(FakeSDK):
+            def taxonomy(self):
+                release.wait(5.0)
+                return {"Point": 1}
+
+        try:
+            stalled = monitoring.metrics(sdk=StallSDK(db_ok=True))
+            assert stalled["graph_size_error"] is not None
+            # The count thread is STILL parked on the graph-size worker here;
+            # the probe lane must be unaffected.
+            started = time.monotonic()
+            probe = monitoring.probe_db(FakeSDK(db_ok=True))
+            elapsed = time.monotonic() - started
+        finally:
+            release.set()
+        assert probe["ok"] is True, probe
+        assert elapsed < 1.0, f"the probe lane queued behind the count: {elapsed:.2f}s"
+
+    def test_wedged_count_is_bounded_and_reset_restores_measurement(
+            self, monkeypatch):
+        """#3253 review P2 — the post-stall behaviour no test covered.
+
+        ONE permanently stalled ``taxonomy()`` count wedges the single
+        graph-size slot for the life of the process, because the worker is a
+        singleton and the stalled ``taxonomy()`` is abandoned, not cancelled.
+        Two properties
+        must hold and neither was pinned: (a) every LATER ``metrics()`` call
+        is still bounded — it queues behind the wedged slot and pays the
+        budget (failing fast only once the backlog of 32 is FULL), never
+        unbounded; and (b) ``_reset_graph_size_worker()`` drops the wedged
+        worker so ``graph_size`` is measurable again with no restart. Pre-fix
+        there was no reset seam at all, so (b) could not pass.
+        """
+        import threading
+
+        budget = 0.05
+        monkeypatch.setattr(monitoring, "GRAPH_SIZE_TIMEOUT", budget)
+        release = threading.Event()
+
+        class StallSDK(FakeSDK):
+            def taxonomy(self):
+                # Parked on the graph-size worker until the test ends — never
+                # returns during the loop, so the slot stays wedged.
+                release.wait(30.0)
+                return {"Point": 1}
+
+        try:
+            # The first call is abandoned at the budget; the worker is left
+            # wedged on the stalled count.
+            first = monitoring.metrics(sdk=StallSDK(db_ok=True))
+            assert first["graph_size_error"] is not None, first
+
+            # (a) Later calls queue behind the wedged slot and each pay the
+            # budget — but none may be UNBOUNDED. A generous absolute bound
+            # (matching this file's 1.0s tolerance for a 0.05s budget):
+            # pre-fix an unbounded call would ride the stalled count instead.
+            for i in range(3):
+                started = time.monotonic()
+                result = monitoring.metrics(sdk=StallSDK(db_ok=True))
+                elapsed = time.monotonic() - started
+                assert result["graph_size_error"] is not None, (i, result)
+                assert result["graph_size"] == 0, (i, result)
+                assert elapsed < 1.0, (
+                    f"post-stall metrics() call {i} was not bounded: "
+                    f"{elapsed:.4f}s (budget {budget}s)")
+
+            # (b) The recovery seam: drop the wedged worker and the very next
+            # count is measurable again. Without it, graph_size stayed
+            # unmeasured for the process lifetime.
+            monitoring._reset_graph_size_worker()
+            recovered = monitoring.metrics(
+                sdk=FakeSDK(db_ok=True, graph_size=7))
+            assert recovered["graph_size"] == 7, recovered
+            assert recovered["graph_size_error"] is None, recovered
+        finally:
+            release.set()
+            monitoring._reset_graph_size_worker()
+
+    def test_probe_failure_marks_graph_size_unavailable(self):
+        """A degraded report must not leave ``graph_size_error`` as None —
+        that would present its ``graph_size: 0`` as a measured empty graph."""
+        monitoring._sdk = None
+        result = monitoring.metrics(sdk=FakeSDK(db_ok=False))
+        assert result["status"] == "degraded"
+        assert result["graph_size_error"] is not None
+
+    def test_missing_probe_target_marks_graph_size_unavailable(self):
+        monitoring._sdk = None
+        result = monitoring.metrics()
+        assert result["status"] == "unknown"
+        assert result["graph_size"] == 0
+        assert result["graph_size_error"] is not None
+
+
+class TestProbeNeverAskedStatus:
+    """#3683: a probe that never reached the reachability query is reported
+    ``unknown`` ("could not tell"), never ``degraded`` — ``degraded`` means an
+    OBSERVED failure, and the ``metrics()`` docstring already reserved the
+    state. The defect was that ``db["ok"] is False`` mapped EVERY probe
+    failure to degraded, so interleavings A and B (the shared probe slot held
+    for the whole allowance) were only distinguishable in error prose.
+
+    The held-slot reproductions of BOTH interleavings live in
+    ``TestProbeQueueIsolation`` and ``TestProbeSetupBudget`` at the
+    ``_probe_once`` layer; these pin
+    the mapping the issue asks for at the ``metrics()`` layer, plus the
+    observed-failure control that must NOT move.
+    """
+
+    def test_never_asked_probe_reports_unknown_not_degraded(self, monkeypatch):
+        """Interleaving A's shape through ``metrics()``: the explicit
+        allowance is consumed by the cold-start, so the reachability question
+        was never asked. The report must be the documented non-verdict."""
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
+        sdk = SlowColdStartSDK(delay=0.2)
+        result = monitoring.metrics(sdk=sdk, setup_timeout=0.05)
+        assert result["status"] == "unknown", result
+        assert result["db"]["ok"] is None
+        assert result["db"]["observed"] is False
+        assert result["db"]["error"].startswith(
+            monitoring._PROBE_SETUP_TIMEOUT_MSG), result["db"]["error"]
+        assert result["graph_size"] == 0
+        assert result["graph_size_error"] is not None
+        # ran_query == 0 is the PROOF the DB was never contacted.
+        assert sdk.query_calls == 0
+
+    def test_observed_failure_still_degrades(self):
+        """CONTROL for the routing: a real raised failure (the DB was
+        contacted and refused) keeps ``degraded`` — the fix must not blunt
+        the signal for a genuinely broken DB."""
+        result = monitoring.metrics(sdk=FakeSDK(db_ok=False))
+        assert result["status"] == "degraded"
+        assert result["db"]["observed"] is True
+        assert "connection refused" in result["db"]["error"]
+
+    def test_saturated_backlog_refusal_is_not_an_observation(self, monkeypatch):
+        """#3683 review: a submission REFUSED by a saturated worker backlog
+        never ran ``_setup``, so the DB was never contacted — that is an
+        UNOBSERVED probe, not a degraded one (mirrors the query-phase
+        refusal branch). Pinned because the setup-phase refusal shares the
+        ``concurrent.futures.TimeoutError`` base with a callable that raised."""
+        import threading
+        import time
+
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
+        release = threading.Event()
+        worker = monitoring._SingleSlotWorker(
+            "test-saturated-backlog", workers=1, max_backlog=1)
+        monkeypatch.setattr(monitoring, "_PROBE_WORKER", worker)
+        try:
+            worker.submit(lambda: release.wait(10))  # occupy the single slot
+            time.sleep(0.05)
+            worker.submit(lambda: None)  # fill the 1-deep backlog
+
+            class Stub:
+                def _get_proj(self):
+                    return None
+
+            ok, error, transient, observed = monitoring._probe_once(
+                Stub(), timeout=0.05)
+            assert ok is False
+            assert observed is False, (ok, error, observed)
+            assert transient is False, transient
+            assert "backlog full" in error, error
+        finally:
+            release.set()
 
 
 class TestProbeSetupBudget:
@@ -728,6 +1019,7 @@ class TestProbeSetupBudget:
         sdk = SlowColdStartSDK(delay=0.2)
         result = monitoring.probe_db(sdk)
         assert result["ok"] is False
+        assert result["observed"] is False  # #3683: never reached the query
         assert "setup timeout" in result["error"], result["error"]
         assert sdk.query_calls == 0
 
@@ -744,7 +1036,11 @@ class TestProbeSetupBudget:
         refactor that had ``metrics()`` resolve the allowance itself (the
         natural 'make all callers benefit' change) would give this surface a
         multi-second cold-start; this pins the explicit ``setup_timeout=None``
-        it forwards AND the resulting degraded status."""
+        it forwards AND the resulting status. #3683 CORRECTION: that status is
+        now ``unknown``, not ``degraded`` — the cold-start overran so the
+        reachability query never ran, which is NOT an observed failure (the
+        bound and the HTTP surface are unchanged; only the label moved to the
+        documented "could not tell" state)."""
         monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
         forwarded = {}
         real_probe_db = monitoring.probe_db
@@ -756,7 +1052,9 @@ class TestProbeSetupBudget:
         monkeypatch.setattr(monitoring, "probe_db", spy_probe_db)
         result = monitoring.metrics(sdk=SlowColdStartSDK(delay=0.2))
         assert forwarded["setup_timeout"] is None, forwarded
-        assert result["status"] == "degraded"
+        assert result["status"] == "unknown"
+        assert result["db"]["ok"] is None
+        assert result["db"]["observed"] is False
         assert "setup timeout" in result["db"]["error"]
         assert result["graph_size"] == 0  # no taxonomy round-trip on a failed probe
 
@@ -881,8 +1179,11 @@ class TestProbeSetupBudget:
         """#3143 review: post-fix, ``graph_size`` is newly reachable on large
         graphs. A reachable DB whose label COUNT raises must not surface as a
         crash — the report stays ok/0 and the failure is recorded in
-        ``errors`` (never raised), which is the only signal distinguishing it
-        from a genuinely empty graph."""
+        ``errors``, never raised.
+
+        #3253: the per-call ``graph_size_error`` marker is the signal that now
+        distinguishes this from a genuinely empty graph (the ``errors``
+        counter is process-lifetime and needs a second call to diff)."""
         class TaxonomyBoomSDK(FakeSDK):
             def __init__(self):
                 super().__init__(db_ok=True)
@@ -897,6 +1198,8 @@ class TestProbeSetupBudget:
         assert result["db"]["ok"] is True
         assert result["graph_size"] == 0
         assert result["errors"] == baseline["errors"] + 1
+        assert baseline["graph_size_error"] is None
+        assert result["graph_size_error"] is not None
 
     def test_deep_setup_budget_reports_a_reachable_large_graph_ok(
             self, monkeypatch):
@@ -1136,7 +1439,7 @@ class TestProbeQueueIsolation:
                 return proj
 
         try:
-            ok, error, transient = monitoring._probe_once(
+            ok, error, transient, observed = monitoring._probe_once(
                 OccupiedSlotSDK(), timeout=query_budget,
                 setup_timeout=ALLOWANCE)
 
@@ -1149,6 +1452,9 @@ class TestProbeQueueIsolation:
             assert error == "probe setup timeout after 3.0s", error
             assert "probe timeout after" not in error, error
             assert transient is False, transient
+            # #3683: and the probe never OBSERVED anything, so the report is
+            # the documented `unknown`, never a false `degraded`.
+            assert observed is False, observed
             assert ran["query"] == 0, (
                 "the queued query RAN — the blocker did not hold the slot")
         finally:
@@ -1280,9 +1586,50 @@ class TestProbeWorkerNoLeak:
         after = sum(1 for t in threading.enumerate() if t.is_alive())
         # Old shape: +8 (one ThreadPoolExecutor worker per call). New shape:
         # at most the single shared daemon probe worker.
+        # #3683: this is a COUNT of threads, which is only a PROXY for the real
+        # property (one pool, created once, eagerly, with a FIXED width and a
+        # bounded backlog, so hung calls queue instead of spawning). At
+        # ``workers > 1`` the constant below would have to be the width, or a
+        # correct change would fail here with a "threads leaked" message. The
+        # real property is pinned separately by
+        # ``test_same_worker_recovers_after_a_released_hang``.
         assert after - before <= 1, (
             f"{after - before} threads leaked for 8 hung probes — "
             "per-call ThreadPoolExecutor regressed")
+
+    def test_same_worker_recovers_after_a_released_hang(self, monkeypatch):
+        """#3683: the property behind the count above — ONE pool, created
+        once, serves the next call after a hang is released, with NO
+        ``_reset_probe_worker()``. This is what must hold at any width; a
+        count assertion alone cannot tell a fixed-width pool from a leak."""
+        import threading
+        import time
+
+        release = threading.Event()
+
+        class ReleaseSDK:
+            def _get_proj(self):
+                release.wait(5.0)
+                proj = MagicMock()
+                proj.g.query.return_value = MagicMock(result_set=[[1]])
+                return proj
+
+            def taxonomy(self):
+                return {"Point": 3}
+
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
+        monitoring._reset_probe_worker()
+        assert monitoring.probe_db(ReleaseSDK())["ok"] is False  # times out
+        release.set()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if monitoring.probe_db(ReleaseSDK())["ok"] is True:
+                break
+            time.sleep(0.02)
+        else:
+            raise AssertionError(
+                "the shared probe worker never recovered — a reset was needed, "
+                "so the pool is not the process-lifetime worker it claims")
 
 
 class TestHealthProbe:

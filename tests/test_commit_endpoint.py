@@ -28,6 +28,7 @@ DE2E suite legs owned by this slice:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 
@@ -686,6 +687,112 @@ class TestExternalSources:
         ).result_set[0][0]
         assert n >= 1
 
+    def test_anchorless_recommit_preserves_stored_external_anchor(self, client):
+        """#4146: an anchorless re-commit of an external ``sources[]`` url must
+        NOT wipe its stored ``contentHash`` or bump ``version``.
+
+        This is the exact defect #4005 fixed for the SESSION Source (see
+        ``TestSessionSourceIndexIdentity``), still live in the external loop
+        immediately beside it: ``contentHash=src.contentHash or ""`` turned the
+        back-compat NULL into ``""``, so ``_upsert_source``'s ON MATCH took the
+        OVERWRITE branch — the preserve branch fires only WHEN ``$hash IS
+        NULL``, and ``s.contentHash <> $hash`` is TRUE for any stored non-empty
+        hash. Red before the fix: the anchor is wiped and the version bumped.
+        """
+        url = "https://example.com/pricing"
+        anchor = hash_text("pricing v1")
+        raw = _raw_payload(1, summary="first capture", sources=[
+            {"sourceKind": "document", "url": url,
+             "credibilityTier": "T1", "contentHash": anchor},
+        ])
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        meta = _session_source_meta(url)
+        assert meta is not None, "the external Source was never created"
+        assert meta[0] == anchor, meta
+        version = meta[1]
+
+        # back-compat client: same url, no contentHash at all, different
+        # summary so this is a real write (not an L1 replay)
+        raw = _raw_payload(1, summary="second capture", sources=[
+            {"sourceKind": "document", "url": url, "credibilityTier": "T1"},
+        ])
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        assert r.json().get("duplicate") is not True, (
+            "the second commit was deduped as an L1 replay — not a real write"
+        )
+        meta = _session_source_meta(url)
+        assert meta[0] == anchor, (
+            f"an anchorless re-commit wiped the stored external contentHash: {meta[0]!r}"
+        )
+        assert meta[1] == version, (
+            f"an anchorless re-commit bumped the version: {meta[1]} != {version}"
+        )
+
+    def test_empty_string_anchor_is_treated_as_absent(self, client):
+        """#4146: an EMPTY-STRING anchor is an absent anchor, not a hash.
+
+        The field admits ``""`` (``contentHash: str | None`` with no
+        ``min_length``), so a client can send ``contentHash: ""`` and mean
+        "I have no anchor". A bare pass-through would let that wipe the stored
+        hash exactly like the bug; this pins the ``or None`` normalization.
+        """
+        url = "https://example.com/empty-anchor"
+        anchor = hash_text("v1")
+        raw = _raw_payload(1, summary="first capture", sources=[
+            {"sourceKind": "document", "url": url, "contentHash": anchor},
+        ])
+        assert _commit(client, raw).status_code == 200
+        version = _session_source_meta(url)[1]
+
+        raw = _raw_payload(1, summary="second capture", sources=[
+            {"sourceKind": "document", "url": url, "contentHash": ""},
+        ])
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        assert r.json().get("duplicate") is not True, (
+            "the second commit was deduped as an L1 replay — not a real write"
+        )
+        meta = _session_source_meta(url)
+        assert meta[0] == anchor, (
+            f"an EMPTY-STRING anchor wiped the stored contentHash: {meta[0]!r}"
+        )
+        assert meta[1] == version, (
+            f"an EMPTY-STRING anchor bumped the version: {meta[1]} != {version}"
+        )
+
+    def test_anchored_recommit_still_updates_external_anchor(self, client):
+        """#4146: a re-commit carrying a NEW anchor must still update the stored
+        hash and bump the version.
+
+        The fix makes an ABSENT anchor preserve; it must never make a PRESENT
+        one inert. Measured: mutating the fix to an unconditional
+        ``contentHash=None`` turns this test, both preservation tests and
+        ``test_sources_external_chain`` red.
+        """
+        url = "https://example.com/pricing"
+        a1, a2 = hash_text("pricing v1"), hash_text("pricing v2")
+        raw = _raw_payload(1, summary="first capture", sources=[
+            {"sourceKind": "document", "url": url, "contentHash": a1},
+        ])
+        assert _commit(client, raw).status_code == 200
+        assert _session_source_meta(url)[0] == a1
+        v1 = _session_source_meta(url)[1]
+
+        raw = _raw_payload(1, summary="second capture", sources=[
+            {"sourceKind": "document", "url": url, "contentHash": a2},
+        ])
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        meta = _session_source_meta(url)
+        assert meta[0] == a2, (
+            f"a NEW anchor did not update the stored hash: {meta[0]!r}"
+        )
+        assert meta[1] == v1 + 1, (
+            f"a NEW anchor did not bump the version: {meta[1]} != {v1 + 1}"
+        )
+
 
 # ── #4005 — the hosted session Source is a real index entry ───────────────
 
@@ -1063,6 +1170,375 @@ class TestMitigates:
         r = _commit(client, _raw_payload(3, operators=ops))
         assert r.status_code == 422  # target ∉ emitted operator keys
         assert any("target" in k for k in r.json()["detail"]), r.json()["detail"]
+
+
+# ── #4970 — the resolved-id map on the hosted commit lane ─────────────────
+
+class TestRekeyedPointResolvedIds:
+    """#4970 — the hosted commit lane reproduced the #4716 two-id-space hole.
+
+    A payload point whose CONTENT already exists in the graph under a
+    DIFFERENT id re-keys inside ``create_point(..., dedup=True)`` (whose
+    return value the §5 loop IGNORED), while every downstream reference kept
+    the payload's ``pt_<sha>`` id. ``_load_commit_graph_state`` only loads
+    ``p.id IN <payload ids>``, so the prior node is invisible to
+    ``reconcile_payload`` and the point is marked ``action == "new"``; the
+    ``pt_<sha>`` node is then never created.
+
+    Six consumers read that payload id and every one dropped or mis-wrote
+    its edge. This is the residual the #4716 fix left behind — its Part 1
+    remap WAS scoped to the v2 CAPTURE commit; #4970 closed it by wiring the
+    same shared helper on the hosted lane:
+
+      1. §5's Session ``CONTAINS`` MERGE (the adjacent defect),
+      2. §5's ``supersede_point(prior, pid)`` — the successor id was never
+         minted, so the lifecycle guard raises and the commit fails closed,
+      3. §6's ``aboutObject`` MERGE (no match ⇒ no edge, no error),
+      4. §7's operator endpoints — ``create_operator`` raises and
+         ``apply_payload_operators`` swallows it as
+         ``operator write skipped (inputs missing?)``,
+      5. §7's MITIGATES reason, resolved from the SAME ref after the remap
+         (a graph id) while ``payload.points`` is keyed by payload id —
+         hence the map-aware reverse resolver,
+      6. §6b's ``supersedes_by`` successor ref (a ``pt_`` id BY
+         construction).
+
+    The fix is the general shape #4936/PR #5478 used: the writer RETURNS the
+    id it actually used and downstream stamping keys on the RESOLVED graph
+    id. Here §5 builds ``payload id -> resolved graph id`` and threads it
+    through the SAME shared ``commit_ops.remap_*`` helpers the capture path
+    uses (#4716) — no rival mechanism.
+
+    Before/after (this fixture, pre-seeded legacy node holding "point 0"):
+
+        before: IMPL edges [] · CONTAINS {pt_1...} · aboutObject {pt_1...}
+                · warning "operator write skipped (inputs missing?)"
+        after:  IMPL edges [(legacy, pt_1...)] · CONTAINS {legacy, pt_1...}
+                · aboutObject {legacy, pt_1...} · no warning
+    """
+
+    def test_rekey_keeps_operator_contains_and_about_object(self, client, caplog):
+        # The graph pre-exists holding the payload point's CONTENT under a
+        # legacy (auto-minted ULID) id — the re-key source.
+        legacy_id = _team_sdk().create_point("decision", "point 0")["id"]
+        assert legacy_id and not legacy_id.startswith("pt_"), legacy_id
+
+        p0 = f"pt_{'0' * 64}"   # payload id — re-keys onto legacy_id
+        p1 = f"pt_{'1' * 64}"   # genuinely new
+        raw = _raw_payload(2, points=[
+            _point(0, id=p0, content="point 0", about_entities=["Alpha"]),
+            _point(1, id=p1, content="point 1", about_entities=["Alpha"]),
+        ], operators=[
+            {"src": p0, "dst": p1, "op_type": "IMPL",
+             "direction": "unidirectional"},
+        ])
+        with caplog.at_level(logging.WARNING, logger="tortoise.commit_ops"):
+            r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        # (3) the operator edge was NOT silently dropped
+        assert "operator write skipped" not in caplog.text, caplog.text
+        g = _team_sdk()._get_proj().g
+        rows = g.query(
+            "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
+            "MATCH (o)-[:IMPL {idx:0}]->(s) "
+            "MATCH (o)-[:IMPL {idx:1}]->(d) "
+            "RETURN s.id, d.id",
+        ).result_set
+        assert [tuple(r) for r in rows] == [(legacy_id, p1)], rows
+        # (1) Session CONTAINS reaches BOTH points, the re-keyed one included
+        contained = {row[0] for row in g.query(
+            "MATCH (:Session {id:'s1'})-[:CONTAINS]->(p:Point) RETURN p.id",
+        ).result_set}
+        assert {legacy_id, p1} <= contained, contained
+        # (2) §6 aboutObject keys on the resolved id too
+        about = {row[0] for row in g.query(
+            "MATCH (p:Point)-[:aboutObject]->(:Object {name:'Alpha'}) "
+            "RETURN p.id",
+        ).result_set}
+        assert {legacy_id, p1} <= about, about
+        # the payload id names NO node — no phantom was minted (the re-key is
+        # real; the fix must not create a second point)
+        assert g.query("MATCH (p:Point {id:$id}) RETURN count(p)",
+                       params={"id": p0}).result_set[0][0] == 0
+
+    def test_rekey_keeps_the_supersession_successor_ref(self, client):
+        """§6b — ``supersedes_by`` is a payload ``pt_<sha>`` id BY
+        construction, so it shares the two-id-space hole: the successor point
+        re-keyed onto a pre-existing node under another id and
+        ``sdk.supersede(prior, '<payload id>')`` targeted a node that does not
+        exist — it RAISED and ``apply_supersessions`` swallowed it as
+        ``point supersede '<prior>' → '<payload id>' failed`` (not the
+        ``… ref '<payload id>' not found`` skip, which fires only when the
+        already-graph-id ``superseded`` side is absent) — so the CORRECTS fold
+        was lost. The §6b call now remaps
+        through the same map the operators use (capture-path parity), while
+        ``superseded`` — already a real graph id, and the record's lane
+        discriminator — is untouched."""
+        old_id = f"pt_{content_hash('gym at 6pm')}"
+        assert _commit(client, _raw_payload(1, points=[
+            {"id": old_id, "content": "gym at 6pm", "pointKind": "decision",
+             "reason": "NEW", "confidence": 0.9, "c_cal": 0.8,
+             "about_entities": ["Alpha"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+        ])).status_code == 200
+
+        # the successor CONTENT pre-exists under a legacy id → the new
+        # ``pt_<sha>`` payload id re-keys onto it in §5
+        new_id = point_content_id("gym at 5pm")
+        legacy_id = _team_sdk().create_point("decision", "gym at 5pm")["id"]
+        assert not legacy_id.startswith("pt_"), legacy_id
+
+        r = _commit(client, _raw_payload(1, session_id="s2", points=[
+            {"id": new_id, "content": "gym at 5pm", "pointKind": "decision",
+             "reason": "REVISES", "confidence": 0.9, "c_cal": 0.8,
+             "about_entities": ["Alpha"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+        ], supersessions=[
+            {"superseded": old_id, "supersedes_by": new_id,
+             "evidence": "fact-value contradiction (later session value "
+                         "change)"},
+        ]))
+        assert r.status_code == 200, r.text
+        g = _team_sdk()._get_proj().g
+        n = g.query(
+            "MATCH (new:Point {id:$new})-[:CORRECTS]->(old:Point {id:$old}) "
+            "RETURN count(old)",
+            params={"new": legacy_id, "old": old_id}).result_set[0][0]
+        assert n == 1, f"CORRECTS fold lost on the re-keyed successor ({n})"
+
+    def test_rekey_resolves_the_mitigation_reason_content(self, client):
+        """§7's MITIGATES reason is resolved from the SAME ref the remap
+        rewrites: after ``remap_operator_endpoint_refs`` that ref is a GRAPH
+        id, while ``payload.points`` is keyed by PAYLOAD id — so a re-keyed
+        dampener's reason degraded to its bare graph id (the #4716 review P1
+        on the capture path, reproduced here). §7 hands the helper a
+        map-aware resolver (the reverse map) so the payload content still
+        resolves."""
+        legacy_id = _team_sdk().create_point("decision", "point 0")["id"]
+        assert not legacy_id.startswith("pt_"), legacy_id
+        p0 = f"pt_{'0' * 64}"   # payload id — re-keys onto legacy_id
+        p1 = f"pt_{'1' * 64}"   # genuinely new
+        raw = _raw_payload(2, points=[
+            _point(0, id=p0, content="point 0"),
+            _point(1, id=p1, content="point 1"),
+        ], operators=[
+            {"src": p0, "dst": p1, "op_type": "IMPL",
+             "direction": "unidirectional"},
+            # the dampener IS the re-keyed point
+            {"src": p0, "dst": p1, "op_type": "MITIGATES",
+             "target": {"src": p0, "dst": p1, "op_type": "IMPL"},
+             "strength": 0.4},
+        ])
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        g = _team_sdk()._get_proj().g
+        rows = g.query(
+            "MATCH (op:Point {is_operator:true, op_type:'IMPL'}) "
+            "MATCH (op)-[:IMPL {idx:0}]->(:Point {id:$legacy}) "
+            "MATCH (op)-[:IMPL {idx:1}]->(:Point {id:$p1}) "
+            "MATCH (op)-[:mitigated_by]->(m:Point) "
+            "RETURN m.content",
+            params={"legacy": legacy_id, "p1": p1},
+        ).result_set
+        assert rows, "mitigation artifact missing on the re-keyed dampener"
+        content = rows[0][0]
+        # the reason is the PAYLOAD point's content (wrapped by
+        # mitigate_operator's display prefix) — never the bare resolved id
+        assert "point 0" in content, content
+        assert legacy_id not in content, content
+
+    def test_rekey_supersede_uses_the_resolved_successor_id(self, client):
+        """§5's supersede branch passed the never-minted ``supersede_id`` to
+        ``supersede_point`` when ``create_point`` re-keyed the successor onto
+        a pre-existing node — the lifecycle guard then raised and the whole
+        commit failed closed. The branch now supersedes the PRIOR with the
+        RESOLVED successor id."""
+        old_id = point_content_id("gym at 6pm")
+        assert _commit(client, _raw_payload(1, points=[
+            {"id": old_id, "content": "gym at 6pm", "pointKind": "decision",
+             "reason": "NEW", "confidence": 0.9, "c_cal": 0.8,
+             "about_entities": ["Alpha"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+        ])).status_code == 200
+        # the successor CONTENT pre-exists under a legacy id → the recomputed
+        # ``supersede_id`` re-keys onto it in §5
+        legacy_id = _team_sdk().create_point("decision", "gym at 5pm")["id"]
+        assert not legacy_id.startswith("pt_"), legacy_id
+        r = _commit(client, _raw_payload(1, session_id="s2", points=[
+            {"id": old_id, "content": "gym at 5pm", "pointKind": "decision",
+             "reason": "REVISES", "confidence": 0.9, "c_cal": 0.8,
+             "about_entities": ["Alpha"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+        ]))
+        assert r.status_code == 200, r.text
+        g = _team_sdk()._get_proj().g
+        n = g.query(
+            "MATCH (new:Point {id:$new})-[:CORRECTS]->(old:Point {id:$old}) "
+            "RETURN count(old)",
+            params={"new": legacy_id, "old": old_id}).result_set[0][0]
+        assert n == 1, f"CORRECTS fold lost on the re-keyed successor ({n})"
+        # the recomputed successor id names NO node — no phantom was minted
+        assert g.query("MATCH (p:Point {id:$id}) RETURN count(p)",
+                       params={"id": point_content_id("gym at 5pm")}
+                       ).result_set[0][0] == 0
+
+    def test_supersede_operator_ref_follows_the_successor(self, client):
+        """On the ``supersede`` reconcile action the payload point id IS the
+        PRIOR node's graph id, and §5 keys it to the RESOLVED successor — so a
+        payload operator ref naming that point lands on the SUCCESSOR. That is
+        deliberate and consistent with ``supersede_point``'s own edge transfer
+        (an operator edge on a superseded point belongs to its successor);
+        pinned here so the semantics are not incidental. This holds on the
+        ordinary (non-re-keyed) supersede path too, which is why it needs its
+        own test."""
+        prior_id = point_content_id("gym at 6pm")
+        assert _commit(client, _raw_payload(1, points=[
+            {"id": prior_id, "content": "gym at 6pm", "pointKind": "decision",
+             "reason": "NEW", "confidence": 0.9, "c_cal": 0.8,
+             "about_entities": ["Alpha"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+        ])).status_code == 200
+        successor_id = point_content_id("gym at 5pm")
+        p1 = f"pt_{'1' * 64}"
+        r = _commit(client, _raw_payload(2, session_id="s2", points=[
+            {"id": prior_id, "content": "gym at 5pm", "pointKind": "decision",
+             "reason": "REVISES", "confidence": 0.9, "c_cal": 0.8,
+             "about_entities": ["Alpha"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+            _point(1, id=p1, content="point 1"),
+        ], operators=[
+            {"src": prior_id, "dst": p1, "op_type": "IMPL",
+             "direction": "unidirectional"},
+        ]))
+        assert r.status_code == 200, r.text
+        g = _team_sdk()._get_proj().g
+        rows = g.query(
+            "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
+            "MATCH (o)-[:IMPL {idx:0}]->(s) "
+            "MATCH (o)-[:IMPL {idx:1}]->(d) "
+            "RETURN s.id, d.id",
+        ).result_set
+        assert [tuple(r) for r in rows] == [(successor_id, p1)], rows
+        # the prior is terminal and carries no operator endpoint
+        assert g.query("MATCH (p:Point {id:$id}) RETURN p.status",
+                       params={"id": prior_id}).result_set[0][0] == "superseded"
+
+    def test_supersede_mitigation_reason_is_the_payload_content(self, client):
+        """§5 keys the map by PAYLOAD point id ONLY (one id space), so the
+        reverse-map winner is a real ``payload.points`` entry and the MITIGATES
+        reason resolves to the payload CONTENT rather than degrading to the
+        bare graph id (#4716 review P1). On the supersede path §5's map value
+        for ``pr.point.id`` IS the resolved successor, and the reverse lookup
+        returns the payload id — never ``supersede_id``, which has no
+        ``payload.points`` entry."""
+        prior_id = point_content_id("gym at 6pm")
+        assert _commit(client, _raw_payload(1, points=[
+            {"id": prior_id, "content": "gym at 6pm", "pointKind": "decision",
+             "reason": "NEW", "confidence": 0.9, "c_cal": 0.8,
+             "about_entities": ["Alpha"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+        ])).status_code == 200
+        successor_id = point_content_id("gym at 5pm")
+        p1 = f"pt_{'1' * 64}"
+        r = _commit(client, _raw_payload(2, session_id="s2", points=[
+            {"id": prior_id, "content": "gym at 5pm", "pointKind": "decision",
+             "reason": "REVISES", "confidence": 0.9, "c_cal": 0.8,
+             "about_entities": ["Alpha"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+            _point(1, id=p1, content="point 1"),
+        ], operators=[
+            {"src": prior_id, "dst": p1, "op_type": "IMPL",
+             "direction": "unidirectional"},
+            {"src": prior_id, "dst": p1, "op_type": "MITIGATES",
+             "target": {"src": prior_id, "dst": p1, "op_type": "IMPL"},
+             "strength": 0.4},
+        ]))
+        assert r.status_code == 200, r.text
+        g = _team_sdk()._get_proj().g
+        rows = g.query(
+            "MATCH (op:Point {is_operator:true, op_type:'IMPL'}) "
+            "MATCH (op)-[:IMPL {idx:0}]->(:Point {id:$succ}) "
+            "MATCH (op)-[:IMPL {idx:1}]->(:Point {id:$p1}) "
+            "MATCH (op)-[:mitigated_by]->(m:Point) "
+            "RETURN m.content",
+            params={"succ": successor_id, "p1": p1},
+        ).result_set
+        assert rows, "mitigation artifact missing on the superseded dampener"
+        content = rows[0][0]
+        assert "gym at 5pm" in content, content
+        # never the bare graph id (neither the prior nor the successor)
+        assert successor_id not in content and prior_id not in content, content
+
+    def test_payload_id_and_supersede_id_do_not_share_one_key_space(
+            self, client):
+        """#4970 review P2 — the §5 map is keyed by PAYLOAD point id ONLY.
+
+        ``point_content_id`` hashes CONTENT ONLY, while dedup matches
+        content+kind (#784), so two records in ONE payload can collide across
+        id spaces: a ``new`` point whose payload id is
+        ``pt_<hash("shared text")>`` and a ``supersede`` record whose NEW
+        content is that same text share the latter's server-recomputed
+        ``supersede_id``. Keying the map by ``supersede_id`` as well let the
+        second record OVERWRITE the first record's payload-id entry (last
+        writer wins), silently re-pointing the first record's aboutObject
+        edge at the SECOND record's successor. Here the first point dedup-hits
+        a pre-existing legacy node while the second's successor is minted at
+        the shared content-addressed id, so the two resolutions DIFFER and the
+        mis-route is observable rather than self-cancelling."""
+        shared = "shared text"
+        shared_id = point_content_id(shared)
+        # Pre-existing OBSERVATION holding the shared content under a legacy
+        # id: record A's write dedup-hits it, so A resolves to the legacy node
+        # (never to ``shared_id``).
+        legacy_observation = _team_sdk().create_point(
+            "observation", shared)["id"]
+        assert not legacy_observation.startswith("pt_"), legacy_observation
+        # Pre-existing DECISION to supersede, seeded at its own
+        # content-addressed id: the payload point below reuses that id with
+        # changed content, so reconcile takes the supersede path.
+        prior_old_id = point_content_id("old claim")
+        prior_decision = _team_sdk().create_point(
+            "decision", "old claim", id=prior_old_id)["id"]
+        assert prior_decision == prior_old_id
+
+        r = _commit(client, _raw_payload(
+            2, session_id="s1",
+            entities=[
+                {"name": "Alpha", "kind": "Project",
+                 "passes_frequency_gate": True},
+                {"name": "Beta", "kind": "Project",
+                 "passes_frequency_gate": True},
+            ],
+            points=[
+            {"id": shared_id, "content": shared, "pointKind": "observation",
+             "reason": "NEW", "confidence": 0.9, "c_cal": 0.8,
+             "about_entities": ["Alpha"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+            {"id": prior_old_id, "content": shared, "pointKind": "decision",
+             "reason": "REVISES", "confidence": 0.9, "c_cal": 0.8,
+             "about_entities": ["Beta"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+        ]))
+        assert r.status_code == 200, r.text
+
+        g = _team_sdk()._get_proj().g
+        # A's aboutObject edge belongs on the legacy observation it RESOLVED
+        # to — the pre-fix map had ``shared_id`` overwritten by B and would
+        # route it onto B's successor node.
+        rows = g.query(
+            "MATCH (p:Point {id:$pid})-[:aboutObject]->(o:Object) "
+            "RETURN collect(o.name)",
+            params={"pid": legacy_observation},
+        ).result_set
+        assert rows and sorted(rows[0][0]) == ["Alpha"], rows
+        # B's successor — minted at the shared content-addressed id — carries
+        # B's own edge, and NOT A's.
+        rows = g.query(
+            "MATCH (p:Point {id:$pid})-[:aboutObject]->(o:Object) "
+            "RETURN collect(o.name)",
+            params={"pid": shared_id},
+        ).result_set
+        assert rows and sorted(rows[0][0]) == ["Beta"], rows
 
 
 # ── DE2E-7 — idempotency + budget + quota + Layer-1 ───────────────────────
@@ -1602,6 +2078,158 @@ class TestBudgetDE2E7:
         body = r.json()
         assert body["nodes_created"] == 0 and body["held"] == []
         assert _session_counter("s1", "commit_count") == 1
+
+
+class TestCommitPointsGate:
+    """#4051 — the commit lane's pre-write org `max_points` gate.
+
+    Until #4010 the flat `max_sessions` bounded this lane's TOTAL node growth;
+    sessions are now unlimited for every tier, and `_count_resource("points")`
+    excludes the chain this lane mints (:Session, :Event, transcript :Source).
+    A free-tier key could therefore loop POST /v1/sessions/commit with a fresh
+    session_id — even `points: []` — and mint nodes no quota counted.
+    """
+
+    @staticmethod
+    def _set_max_points(limit: int) -> None:
+        app.dependency_overrides[get_current_org] = lambda: {
+            **TEST_TEAM, "max_points": limit}
+
+    @staticmethod
+    def _seed_points(n: int) -> None:
+        for i in range(n):
+            _team_sdk()._get_proj().g.query(
+                "MERGE (p:Point {id:$pid}) "
+                "SET p.content='seed', p.is_episodic=false",
+                params={"pid": f"pt_seed_{i}"},
+            )
+
+    @staticmethod
+    def _point_count() -> int:
+        rows = _team_sdk()._get_proj().g.query(
+            "MATCH (p:Point) RETURN count(p)").result_set
+        return int(rows[0][0])
+
+    @staticmethod
+    def _chain_counts(session_id: str) -> tuple[int, int, int]:
+        """(:Session, :Event, transcript :Source) minted for a session.
+
+        Counts by `sessionId` for Event/Source — the transcript :Source MERGE
+        is keyed by `url`, but stamps `s.sessionId` (D10: a document is a
+        :Source; the :Document label is retired).
+        """
+        g = _team_sdk()._get_proj().g
+        sess = g.query("MATCH (s:Session {id:$sid}) RETURN count(s)",
+                       params={"sid": session_id}).result_set[0][0]
+        ev = g.query("MATCH (e:Event {sessionId:$sid}) RETURN count(e)",
+                     params={"sid": session_id}).result_set[0][0]
+        src = g.query("MATCH (s:Source {sessionId:$sid}) RETURN count(s)",
+                      params={"sid": session_id}).result_set[0][0]
+        return int(sess), int(ev), int(src)
+
+    def test_at_max_points_refused_and_mints_nothing(self, client):
+        """#4051: with the org AT max_points, a `points: []` commit — the
+        cheapest possible loop iteration — 402s and mints no
+        Session/Event/transcript-Source/Point node."""
+        self._set_max_points(1)
+        self._seed_points(1)  # count == limit → the boundary is inclusive
+        before = self._point_count()
+        r = _commit(client, _raw_payload(0, session_id="sGateAt", points=[],
+                                         entities=[], provenance_refs=[]))
+        assert r.status_code == 402, r.text
+        detail = r.json()["detail"]
+        # Same structured refusal the capture/points lanes raise (#4614).
+        assert detail["code"] == "quota_exceeded"
+        assert detail["resource"] == "points"
+        assert detail["limit"] == 1
+        assert detail["used"] == 1
+        assert self._chain_counts("sGateAt") == (0, 0, 0), (
+            "a refused commit must mint no Session/Event/Source — NOT 'nothing': "
+            "a :CommitRecord with status='partial' IS merged before the gate "
+            "(`store.acquire(..., status='partial')`, hosted_api.py:13006, which "
+            "runs ahead of the gate at :13061); replay-safe, and invisible to "
+            "_chain_counts by design")
+        assert self._point_count() == before  # no partial Point either
+
+    def test_over_max_points_refused_and_mints_nothing(self, client):
+        """#4051: one over the limit (count > max_points) refuses too."""
+        self._set_max_points(1)
+        self._seed_points(3)
+        r = _commit(client, _raw_payload(0, session_id="sGateOver", points=[],
+                                         entities=[], provenance_refs=[]))
+        assert r.status_code == 402, r.text
+        assert r.json()["detail"]["resource"] == "points"
+        assert self._chain_counts("sGateOver") == (0, 0, 0)
+
+    def test_count_error_fails_closed(self, client, monkeypatch):
+        """#4051: a COUNTING FAILURE must never be a silent pass.
+
+        `_check_org_limit` documents "counting errors raise HTTP 500
+        (QuotaCheckError) — never a silent pass", and that is the property the
+        new gate site must inherit.
+
+        ⛔ IT MUST DISCRIMINATE THE POINTS SITE FROM THE SESSIONS SITE. The lane
+        calls `_check_org_limit(org, "sessions")` (:13023) BEFORE the #4051
+        points gate (:13061), and BOTH call the same `enforce_org_limit` — so a
+        patch that fails EVERY resource makes the SESSIONS gate raise the 500
+        first and the request never reaches the new site. That was the first cut
+        of this test, and it pinned nothing: with only the points gate made to
+        swallow its 500 it stayed GREEN (verified by mutation). The patch below
+        raises for `resource == "points"` only, so the sessions gate passes and
+        the 500 can come from the new site alone.
+        """
+        import tortoise.quota as quota_mod
+        from tortoise.quota import QuotaCheckError
+
+        # Patch the seam the gate CALLS, not the gate itself: `_check_org_limit`
+        # imports `enforce_org_limit` locally and catches QuotaCheckError around
+        # it to raise HTTP 500. Patching `_check_org_limit` instead would bypass
+        # that handler and the exception would escape the TestClient (which
+        # re-raises server exceptions) — proving nothing.
+        def _boom(org, resource, *, slot_credit=0, **kwargs):
+            if resource != "points":
+                return  # the sessions gate must PASS — see the docstring
+            raise QuotaCheckError("count unavailable")
+
+        monkeypatch.setattr(quota_mod, "enforce_org_limit", _boom)
+        r = _commit(client, _raw_payload(1, session_id="sGateErr", points=[],
+                                         entities=[], provenance_refs=[]))
+        assert r.status_code == 500, r.text
+
+    def test_one_under_max_points_still_commits(self, client):
+        """#4051 boundary: at max_points - 1 the same payload lands — a normal
+        commit is untouched by the gate (regression)."""
+        self._set_max_points(1)
+        # count == 0 == limit - 1 → admitted
+        r = _commit(client, _raw_payload(0, session_id="sGateUnder", points=[],
+                                         entities=[], provenance_refs=[]))
+        assert r.status_code == 200, r.text
+        assert r.json()["nodes_created"] == 0
+        sess, ev, src = self._chain_counts("sGateUnder")
+        assert (sess, ev, src) == (1, 1, 1)
+
+    def test_replayed_commit_not_re_gated(self, client):
+        """#4051 replay interaction: a fully_written re-POST returns 200
+        duplicate even when the org is AT max_points. The gate sits after
+        every replay return, so a replay (zero writes) is never 402'd —
+        #1727's lesson.
+
+        The first commit is an empty payload so the test does NOT load the
+        embedding model (which can exceed the 10s transport bound in a
+        targeted run). The cap is then reached by a direct Point seed.
+        """
+        self._set_max_points(1)
+        raw = _raw_payload(0, session_id="sGateReplay", points=[],
+                           entities=[], provenance_refs=[])
+        r1 = _commit(client, raw)
+        assert r1.status_code == 200, r1.text
+        # push the org AT max_points AFTER the first commit landed
+        self._seed_points(1)
+        r2 = _commit(client, dict(raw))
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["duplicate"] is True
+        # the replay minted nothing beyond the first commit's chain
+        assert self._chain_counts("sGateReplay") == (1, 1, 1)
 
 
 class TestLayer1:

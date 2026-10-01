@@ -16,9 +16,12 @@ Covers (plan Task 2/4/9 + scoping deltas 8/9/11/13/14):
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
+import logging
 import os
+import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -35,7 +38,9 @@ from tortoise.abuse import (AbuseEngine, MemoryAbuseStore, ReadVelocityTracker,
                             SignupVelocityTracker, check_new_country,
                             clear_suspended, is_suspended_signal,
                             mark_suspended, resolve_country, reset_geo_cache)
+from tortoise.alert_store import OpenOutcome
 from tests.fake_control_plane import FakeControlPlane
+import tortoise.operator_alert as oa
 
 
 T0 = datetime(2026, 8, 11, 12, 0, 0, tzinfo=timezone.utc)  # noqa: UP017
@@ -43,10 +48,12 @@ T0 = datetime(2026, 8, 11, 12, 0, 0, tzinfo=timezone.utc)  # noqa: UP017
 
 @pytest.fixture(autouse=True)
 def _clean_state(monkeypatch):
-    """Fresh signal set + geo cache + engine per test; no kill-switch."""
+    """Fresh signal set + geo cache + engine + warn latch per test; no
+    kill-switch."""
     monkeypatch.delenv("TORTOISE_ABUSE_DISABLED", raising=False)
     with abuse._SIGNAL_LOCK:
         abuse._SUSPENDED_SIGNAL.clear()
+    abuse._WINDOW_WARNED.clear()
     reset_geo_cache()
     abuse.set_engine(None)
     yield
@@ -544,6 +551,65 @@ class TestFakeTrigger:
         assert alerts and alerts[0]["type"] in ("suspend", "flag")
 
 
+# ── PostgREST order dialect at the store's call sites (#4037) ──────────────
+
+class TestAbuseOrderParam:
+    """#4037: ``SupabaseAbuseStore`` transmitted ``order="-created_at"``, which
+    PostgREST rejects (``PGRST100`` / HTTP 400). Every consumer of these reads
+    is fail-soft, so the 400 was swallowed — Stage-2 suspension never ran and
+    ``/v1/team/alerts`` was permanently empty. The only coverage was over
+    ``FakeControlPlane``, which implemented the SAME invalid ``-col`` dialect:
+    the double was the mask, not the guard."""
+
+    class _CapturingCP:
+        def __init__(self):
+            self.orders: list[str | None] = []
+
+        def query(self, table, **kw):
+            self.orders.append(kw.get("order"))
+            # A row so `latest_flag_at` proceeds to its SECOND (newest-clear)
+            # read — the early `if not rows: return None` would otherwise skip
+            # that site, leaving it unpinned.
+            return [{"created_at": "2026-01-01T00:00:00+00:00"}]
+
+    def test_abuse_store_sends_the_postgrest_order_dialect(self):
+        """Pin the transmitted ``order`` at the store's three descending
+        sites. REDs per site when any is reverted to ``-created_at`` — the
+        wire-param assertion a fake-based test could never make."""
+        from tortoise.abuse import SupabaseAbuseStore
+        cp = self._CapturingCP()
+        store = SupabaseAbuseStore(cp)
+        store.latest_flag_at("t1", "point_create")  # newest flag + newest clear
+        store.recent_alerts("t1")
+        assert cp.orders == ["created_at.desc"] * 3, cp.orders
+        assert not any(o and o.startswith("-") for o in cp.orders)
+
+    def test_captured_abuse_order_is_accepted_by_the_fake(self):
+        """Oracle cross-check (#4037): feed the CAPTURED wire string into the
+        real ``FakeControlPlane`` and require (a) no raise and (b)
+        newest-first. This is what ties the double's semantics to the
+        client's wire form; a lane that changes production to a spelling the
+        double rejects reds here."""
+        from tests.fake_control_plane import FakeControlPlane
+        from tortoise.abuse import SupabaseAbuseStore
+        cp = self._CapturingCP()
+        store = SupabaseAbuseStore(cp)
+        store.latest_flag_at("t1", "point_create")
+        store.recent_alerts("t1")
+
+        fake = FakeControlPlane(tables={"abuse_events": [
+            {"org_id": "t1", "event_type": "flag", "rule": "point_create",
+             "created_at": "2026-01-01T00:00:00+00:00"},
+            {"org_id": "t1", "event_type": "flag", "rule": "point_create",
+             "created_at": "2026-03-01T00:00:00+00:00"},
+        ]})
+        for order in cp.orders:
+            rows = fake.query("abuse_events", select=["created_at"],
+                              order=order)
+            assert rows, order
+            assert rows[0]["created_at"] == "2026-03-01T00:00:00+00:00", order
+
+
 # ── notify_abuse (Task 4) ───────────────────────────────────────────────────
 
 class TestNotifyAbuse:
@@ -679,3 +745,727 @@ class TestTurnstile:
 
         monkeypatch.setattr("httpx.post", boom)
         assert asyncio.run(ha._verify_turnstile("tok", None)) is False
+
+
+# ── #4872: the enforcement decision path's failures are observable ──────────
+
+class _FaultStore:
+    """A ``MemoryAbuseStore`` with a method forced to raise (#4872).
+
+    ``tests/fake_control_plane.FakeControlPlane`` has no ``rpc()`` fault
+    injector (``fail_query`` covers ``query()`` only, and nothing in this file
+    guards against an unfired fault), so a store call must be faulted at the
+    store method to reach the engine's handlers.
+
+    ``times=None`` (the default) faults the method PERMANENTLY. ``times=1``
+    faults it ONCE and then delegates to the real store — which is what lets a
+    test observe what a failed call LEFT BEHIND (both "toward suspension" lanes
+    are about retained state, not about the one return value) and still
+    evaluate the same rule again. A permanent fault would still be firing on
+    that follow-up, so the follow-up would fail for a reason unrelated to the
+    retained state the test pins — a false RED, not a vacuous pass.
+    """
+
+    class _Boom(Exception):
+        pass
+
+    def __init__(self, method: str, message: str = "postgrest: PGRST202",
+                 times: int | None = None):
+        self._inner = MemoryAbuseStore()
+        self._method = method
+        self._exc = self._Boom(message)
+        self._times = times
+        self._fired = 0
+
+    def __getattr__(self, name):
+        if name == self._method:
+            def boom(*_a, **_k):
+                if self._times is not None and self._fired >= self._times:
+                    return getattr(self._inner, name)(*_a, **_k)
+                self._fired += 1
+                raise self._exc
+            return boom
+        return getattr(self._inner, name)
+
+
+class _RecordingOperatorStore:
+    """Records ``(kind, subject, detail)`` from the operator-alert seam."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, str, dict]] = []
+
+    def open_incident_state(self, kind, org_id="", detail=None):
+        self.calls.append((kind, org_id, dict(detail or {})))
+        return OpenOutcome.FILED
+
+
+@pytest.fixture
+def operator_store(monkeypatch):
+    """Install a recording store on ``operator_alert.alert_store``.
+
+    The autouse ``tests/conftest.py::_operator_alert_isolation`` sets this seam
+    to ``lambda: None``, so a dispatch test that does NOT patch it in-body
+    passes VACUOUSLY. Every test below that asserts on a dispatch uses this.
+    """
+    store = _RecordingOperatorStore()
+    monkeypatch.setattr(oa, "alert_store", lambda: store)
+    return store
+
+
+def _armed_org(store, org_id):
+    """Seed one stage-2-eligible org: an old flag + continuity + a fresh breach.
+
+    Flag 2h ago (> the 1h window), a continuity event inside the band, and a
+    501-weight event in the current window. ``window_sum`` = 501 over the T0
+    window (the T0-1h event sits exactly on the cutoff and is excluded).
+    """
+    store.record_event(org_id, abuse.EVENT_FLAG, rule=abuse.EVENT_POINT_CREATE,
+                       created_at=T0 - timedelta(hours=2))
+    store.record_event(org_id, abuse.EVENT_POINT_CREATE, weight=501,
+                       created_at=T0)
+    store.record_event(org_id, abuse.EVENT_POINT_CREATE, weight=1,
+                       created_at=T0 - timedelta(hours=1))
+
+
+class TestDecisionPathObservability:
+    """#4872: every swallow on ``_evaluate``/``_flag`` reports to the operator.
+
+    The mutation detector is ``_detail``: reverting a ``report_abuse_decision_
+    fault(...)`` call leaves ``store.calls == []`` and REDs the lane's test.
+    """
+
+    def _engine(self, method: str,
+                times: int | None = None) -> tuple[_FaultStore, AbuseEngine]:
+        fs = _FaultStore(method, times=times)
+        return fs, AbuseEngine(fs)
+
+    def _detail(self, store: _RecordingOperatorStore) -> tuple[str, str, dict]:
+        assert oa.join_operator_alerts() == 0
+        assert len(store.calls) == 1, store.calls
+        return store.calls[0]
+
+    def test_window_sum_failure_reports_and_returns_none(self, operator_store):
+        _fs, eng = self._engine("window_sum")
+        assert eng._evaluate("org-1", abuse.EVENT_POINT_CREATE,
+                             500, 3600, T0) is None
+        kind, subject, detail = self._detail(operator_store)
+        assert kind == oa.ABUSE_DECISION_FAULT_KIND
+        assert subject == ""
+        assert detail == {"lane": "window_sum", "error_type": "_Boom",
+                          "rule": abuse.EVENT_POINT_CREATE,
+                          "subject_org": "org-1", "fallback": "return_none"}
+
+    def test_clean_window_episode_failure_reports(self, operator_store):
+        _fs, eng = self._engine("latest_flag_at")
+        # total 0 <= 500 → clean branch → the episode-end guard read raises
+        assert eng._evaluate("org-2", abuse.EVENT_POINT_CREATE,
+                             500, 3600, T0) is None
+        _kind, _subject, detail = self._detail(operator_store)
+        assert detail["lane"] == "clean_window_episode_end"
+        assert detail["fallback"] == "return_none"
+
+    def test_clean_window_guard_read_fault_leaves_the_episode_armed(
+            self, operator_store):
+        """The guard-read half of ``clean_window_episode_end``'s TOWARD lane.
+
+        A failure here must NOT end the episode, and the fact asserted is the
+        RETAINED STATE — the stale anchor survives and a later over-threshold
+        evaluation on the SAME rule still suspends — not the lane token alone
+        (which ``DECISION_FAULT_LANES`` restates back at itself). The fault is
+        ONE-SHOT for exactly that reason: the follow-up evaluation must be able
+        to read the anchor the failed call left behind.
+        """
+        fs, eng = self._engine("latest_flag_at", times=1)
+        fs._inner.flag_org("org-12", abuse.EVENT_POINT_CREATE,
+                           now=T0 - timedelta(hours=2))
+        # Clean window (no point_create event) → the episode-end GUARD READ raises
+        assert eng._evaluate("org-12", abuse.EVENT_POINT_CREATE,
+                             500, 3600, T0) is None
+        _kind, _subject, detail = self._detail(operator_store)
+        assert detail["lane"] == "clean_window_episode_end"
+        assert fs._inner.latest_flag_at(
+            "org-12", abuse.EVENT_POINT_CREATE) is not None  # anchor SURVIVED
+        # Independent fact: the surviving anchor is load-bearing — a LATER
+        # over-threshold evaluation on the same rule still reaches suspend.
+        fs._inner.record_event("org-12", abuse.EVENT_POINT_CREATE, weight=501,
+                               created_at=T0)
+        fs._inner.record_event("org-12", abuse.EVENT_POINT_CREATE, weight=1,
+                               created_at=T0 - timedelta(hours=1))
+        assert eng._evaluate("org-12", abuse.EVENT_POINT_CREATE,
+                             500, 3600, T0) == "suspend"
+        assert fs._inner.org_suspended("org-12") is True
+
+    def test_clean_window_clear_write_fault_leaves_the_episode_armed(
+            self, operator_store):
+        """The clear-WRITE half of the lane — the sub-case no test exercised.
+
+        The pre-existing ``test_clean_window_episode_failure_reports`` faults
+        the guard READ with NO flag seeded, so the clear write is unreachable.
+        Here a flag IS seeded, so the clean branch reaches the write, the write
+        raises, and the episode must stay ARMED: the return is ``None``, the
+        anchor survives, and a later over-threshold evaluation still suspends.
+        """
+        fs, eng = self._engine("flag_clear")
+        fs._inner.flag_org("org-13", abuse.EVENT_POINT_CREATE,
+                           now=T0 - timedelta(hours=2))
+        assert fs._inner.latest_flag_at(
+            "org-13", abuse.EVENT_POINT_CREATE) is not None
+        # Clean window → guard read succeeds → the CLEAR WRITE raises
+        assert eng._evaluate("org-13", abuse.EVENT_POINT_CREATE,
+                             500, 3600, T0) is None
+        _kind, _subject, detail = self._detail(operator_store)
+        assert detail["lane"] == "clean_window_episode_end"
+        assert fs._inner.latest_flag_at(
+            "org-13", abuse.EVENT_POINT_CREATE) is not None  # anchor SURVIVED
+        fs._inner.record_event("org-13", abuse.EVENT_POINT_CREATE, weight=501,
+                               created_at=T0)
+        fs._inner.record_event("org-13", abuse.EVENT_POINT_CREATE, weight=1,
+                               created_at=T0 - timedelta(hours=1))
+        assert eng._evaluate("org-13", abuse.EVENT_POINT_CREATE,
+                             500, 3600, T0) == "suspend"
+        assert fs._inner.org_suspended("org-13") is True
+
+    def test_anchor_read_failure_reflags_and_reports(self, operator_store):
+        fs, eng = self._engine("latest_flag_at")
+        fs._inner.record_event("org-3", abuse.EVENT_POINT_CREATE, weight=501,
+                               created_at=T0)
+        assert eng._evaluate("org-3", abuse.EVENT_POINT_CREATE,
+                             500, 3600, T0) == "flag"
+        _kind, _subject, detail = self._detail(operator_store)
+        assert detail["lane"] == "latest_flag_at"
+        assert detail["fallback"] == "reflag"
+        assert fs._inner.org_flagged_at("org-3") is not None  # re-flag landed
+
+    def test_continuity_read_failure_still_proceeds_toward_suspend(
+            self, operator_store):
+        """The one lane that fails TOWARD the irreversible action."""
+        fs, eng = self._engine("rule_event_between")
+        _armed_org(fs._inner, "org-4")
+        assert eng._evaluate("org-4", abuse.EVENT_POINT_CREATE,
+                             500, 3600, T0) == "suspend"
+        _kind, _subject, detail = self._detail(operator_store)
+        assert detail["lane"] == "rule_event_between"
+        assert detail["fallback"] == "continuity_true"
+        assert fs._inner.org_suspended("org-4") is True
+
+    def test_suspend_rpc_failure_reports_breach_and_does_not_arm(
+            self, operator_store):
+        fs, eng = self._engine("suspend_org")
+        _armed_org(fs._inner, "org-5")
+        assert eng._evaluate("org-5", abuse.EVENT_POINT_CREATE,
+                             500, 3600, T0) == "breach"
+        kind, _subject, detail = self._detail(operator_store)
+        assert kind == oa.ABUSE_ENFORCEMENT_FAULT_KIND
+        assert detail["lane"] == "suspend_org"
+        assert detail["fallback"] == "return_breach"
+        # ⛔ NO ARMING: the suspend did not land and the signal was not marked
+        assert fs._inner.org_suspended("org-5") is False
+        assert is_suspended_signal("org-5") is False
+        assert [r for r in fs._inner.rows
+                if r["event_type"] == abuse.EVENT_SUSPEND] == []
+
+    def test_flag_write_failure_reports(self, operator_store):
+        fs, eng = self._engine("flag_org")
+        fs._inner.record_event("org-6", abuse.EVENT_POINT_CREATE, weight=501,
+                               created_at=T0)
+        assert eng._evaluate("org-6", abuse.EVENT_POINT_CREATE,
+                             500, 3600, T0) == "flag"
+        kind, _subject, detail = self._detail(operator_store)
+        assert kind == oa.ABUSE_ENFORCEMENT_FAULT_KIND
+        assert detail["lane"] == "flag_org"
+        assert detail["fallback"] == "return_flag"
+
+    def test_one_incident_for_a_shared_substrate_fault(self, operator_store):
+        """Two orgs, one cause → ONE platform incident, not N per-org."""
+        fs = _FaultStore("window_sum")
+        eng = AbuseEngine(fs)
+        eng._evaluate("org-a", abuse.EVENT_POINT_CREATE, 500, 3600, T0)
+        eng._evaluate("org-b", abuse.EVENT_POINT_CREATE, 500, 3600, T0)
+        assert oa.join_operator_alerts() == 0
+        assert len(operator_store.calls) == 1
+        kind, subject, detail = operator_store.calls[0]
+        assert kind == oa.ABUSE_DECISION_FAULT_KIND
+        assert subject == ""                      # platform sentinel
+        assert detail["subject_org"] == "org-a"   # first org: evidence, not scope
+
+    def test_report_never_raises_when_the_alert_plane_raises(
+            self, monkeypatch):
+        fs, eng = self._engine("suspend_org")
+        _armed_org(fs._inner, "org-7")
+
+        def raising_operator(*_a, **_k):
+            raise RuntimeError("alert plane down")
+
+        monkeypatch.setattr(oa, "alert_operator", raising_operator)
+        assert eng._evaluate("org-7", abuse.EVENT_POINT_CREATE,
+                             500, 3600, T0) == "breach"
+        assert fs._inner.org_suspended("org-7") is False
+
+    def test_report_never_raises_when_store_resolution_fails(
+            self, monkeypatch):
+        fs, eng = self._engine("suspend_org")
+        _armed_org(fs._inner, "org-8")
+
+        def raising_store():
+            raise RuntimeError("no alert channel")
+
+        monkeypatch.setattr(oa, "alert_store", raising_store)
+        assert eng._evaluate("org-8", abuse.EVENT_POINT_CREATE,
+                             500, 3600, T0) == "breach"
+
+    def test_detail_never_carries_the_exception_message(self, operator_store):
+        leak = "SENTINEL-LEAK-TOKEN"
+        fs = _FaultStore("window_sum", leak)
+        eng = AbuseEngine(fs)
+        eng._evaluate("org-9", abuse.EVENT_POINT_CREATE, 500, 3600, T0)
+        assert oa.join_operator_alerts() == 0
+        assert len(operator_store.calls) == 1
+        detail = operator_store.calls[0][2]
+        assert leak not in json.dumps(detail)
+        assert detail["error_type"] == "_Boom"
+
+    def test_error_record_is_the_residual_without_an_alert_channel(
+            self, caplog, monkeypatch):
+        monkeypatch.setattr(oa, "alert_store", lambda: None)
+        fs, eng = self._engine("suspend_org")
+        _armed_org(fs._inner, "org-10")
+        with caplog.at_level(logging.ERROR, logger="tortoise.abuse"):
+            assert eng._evaluate("org-10", abuse.EVENT_POINT_CREATE,
+                                 500, 3600, T0) == "breach"
+        errors = [r.getMessage() for r in caplog.records
+                  if r.levelno == logging.ERROR]
+        assert any("suspend_org" in m and "#4872" in m for m in errors)
+        # the record names the RESOLVED kind, not a generic "DECISION FAULT"
+        assert any("kind=ABUSE_ENFORCEMENT_FAULT" in m for m in errors)
+
+    def test_traceback_is_bounded_but_the_record_keeps_firing(
+            self, caplog, monkeypatch):
+        """#4872 amplification guard: the stack is bounded, the residual is not."""
+        monkeypatch.setattr(oa, "alert_store", lambda: None)
+        abuse._fault_traceback_at.clear()
+        try:
+            _fs, eng = self._engine("window_sum")
+            with caplog.at_level(logging.ERROR, logger="tortoise.abuse"):
+                for _ in range(3):
+                    eng._evaluate("org-11", abuse.EVENT_POINT_CREATE,
+                                  500, 3600, T0)
+            errors = [r for r in caplog.records
+                      if r.levelno == logging.ERROR]
+            assert len(errors) == 3          # every occurrence is still recorded
+            assert sum(1 for r in errors if r.exc_info) == 1  # stack once
+            assert all("kind=ABUSE_DECISION_FAULT" in r.getMessage()
+                       for r in errors)
+        finally:
+            abuse._fault_traceback_at.clear()
+
+    def test_traceback_window_boundary(self):
+        """The gate's window and its per-lane keying, at the exact boundary.
+
+        Exercises the ``now`` seam directly, so the 60s constant is pinned by
+        value instead of by "the dict was cleared".
+        """
+        abuse._fault_traceback_at.clear()
+        try:
+            assert abuse._fault_traceback_due("window_sum", now=100.0) is True
+            assert abuse._fault_traceback_due("window_sum",
+                                              now=159.99) is False
+            assert abuse._fault_traceback_due("window_sum", now=160.0) is True
+            # keyed PER LANE: another lane is not suppressed by this one
+            assert abuse._fault_traceback_due("suspend_org", now=100.5) is True
+        finally:
+            abuse._fault_traceback_at.clear()
+
+    def test_lane_inventory_matches_the_declared_kinds(self):
+        kinds = {kind for kind, _fb in abuse.DECISION_FAULT_LANES.values()}
+        assert kinds == {oa.ABUSE_DECISION_FAULT_KIND,
+                         oa.ABUSE_ENFORCEMENT_FAULT_KIND}
+        assert abuse._UNKNOWN_LANE_KIND in kinds
+
+    @staticmethod
+    def _method(tree, name):
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                return node
+        raise AssertionError(name)
+
+    def test_declared_lanes_match_the_source_call_sites(self):
+        """Completeness fence: no swallow on the decision path is unwired.
+
+        Two independent assertions: (1) EVERY ``except`` handler inside
+        ``AbuseEngine._evaluate``/``_flag`` calls ``report_abuse_decision_fault``
+        — so an ADDED uninstrumented swallow REDs, which is the defect #4872 is
+        about; (2) the emitted lane tokens equal ``DECISION_FAULT_LANES``
+        exactly once each — so a renamed token REDs.
+        """
+        src = Path(abuse.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        emitted: list[str] = []
+        unwired: list[str] = []
+        for fn in ("_evaluate", "_flag"):
+            for node in ast.walk(self._method(tree, fn)):
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id == "report_abuse_decision_fault"
+                        and node.args
+                        and isinstance(node.args[0], ast.Constant)):
+                    emitted.append(node.args[0].value)
+                if isinstance(node, ast.ExceptHandler) and not any(
+                        isinstance(c, ast.Call)
+                        and isinstance(c.func, ast.Name)
+                        and c.func.id == "report_abuse_decision_fault"
+                        for c in ast.walk(node)):
+                    unwired.append(f"{fn}:{node.lineno}")
+                # `with contextlib.suppress(Exception):` is the evasion FORM
+                # of the same swallow, and `contextlib` is used in this very
+                # module — so a try/except-only fence would leave the
+                # "every swallow is wired" claim false.
+                if isinstance(node, ast.With) and any(
+                        isinstance(item.context_expr, ast.Call)
+                        and ((isinstance(item.context_expr.func, ast.Attribute)
+                              and item.context_expr.func.attr == "suppress")
+                             or (isinstance(item.context_expr.func, ast.Name)
+                                 and item.context_expr.func.id == "suppress"))
+                        for item in node.items):
+                    unwired.append(f"{fn}:{node.lineno} (contextlib.suppress)")
+        assert unwired == [], (
+            "uninstrumented swallow on the abuse decision path: "
+            + ", ".join(unwired))
+        assert sorted(emitted) == sorted(abuse.DECISION_FAULT_LANES)
+        assert len(emitted) == len(set(emitted))  # each lane wired exactly once
+        # the four superseded debug swallows are gone from the source
+        for dead in ("abuse window_sum failed", "abuse flag_clear failed",
+                     "abuse suspend_team failed", "abuse flag_team failed"):
+            assert dead not in src, dead
+
+
+# ── #5493: rate-limit WINDOW knobs must never fail OPEN ────────────────────
+#
+# `_int_env` returns the parsed int for a digit string, so `TORTOISE_*_WINDOW_S=0`
+# reaches a limiter as ``window_s=0``. The sliding-window test is
+# ``now - t < window_s``: with 0 (or a negative) it is NEVER true, and the two
+# limiter families then lose protection in two different shapes:
+#   * hosted bucket limiter — prune THEN compare: the bucket is emptied on
+#     every request, ``len(bucket) >= limit`` is never reached, and every
+#     request is allowed, forever;
+#   * in-process velocity trackers — prune, append, THEN compare: the bucket
+#     collapses to this request's sample, so for the configured thresholds (>1)
+#     the breach signal never fires, silently disabled.
+# The window knobs therefore read through ``_window_env`` (default-fallback + a
+# once-per-misconfig warning naming the variable). The THRESHOLD/limit knobs
+# keep ``_int_env`` on purpose — a non-positive threshold is a legitimate
+# fail-CLOSED deny-all (``len(bucket) >= 0`` is always true), so the floor
+# belongs to the windows alone.
+
+_ROOT = Path(__file__).resolve().parent.parent
+
+# EVERY env-tunable rate-limit window knob in the product, with its default.
+# A new window knob must be added here — test_every_window_site_is_covered
+# fails until it is, so a site cannot be added unfloored (or floored-but-untested).
+_WINDOW_KNOBS = [
+    ("TORTOISE_ABUSE_POINT_WINDOW_S", 3600),
+    ("TORTOISE_ABUSE_KEY_WINDOW_S", 86400),
+    ("TORTOISE_ABUSE_READ_WINDOW_S", 300),
+    ("TORTOISE_ABUSE_SIGNUP_WINDOW_S", 86400),
+    ("TORTOISE_ABUSE_RECOVER_WINDOW_S", 86400),
+    ("TORTOISE_SIGNUP_IP_WINDOW_S", 86400),
+    ("TORTOISE_RECOVER_IP_WINDOW_S", 86400),
+    ("TORTOISE_RECOVER_TOKEN_WINDOW_S", 3600),
+    ("TORTOISE_INVITE_ACCEPT_TOKEN_WINDOW_S", 900),
+    ("TORTOISE_INVITE_ACCEPT_IP_WINDOW_S", 3600),
+    ("TORTOISE_INVITE_ACCEPT_GLOBAL_WINDOW_S", 3600),
+    ("TORTOISE_INVITE_OTP_TOKEN_WINDOW_S", 900),
+    ("TORTOISE_INVITE_OTP_IP_WINDOW_S", 3600),
+    ("TORTOISE_INVITE_OTP_GLOBAL_WINDOW_S", 3600),
+    ("TORTOISE_INVITE_RESEND_WINDOW_S", 86400),
+    ("TORTOISE_CLAIM_WINDOW_S", 86400),
+]
+
+_WINDOW_FILES = ("tortoise/abuse.py", "tortoise/hosted_api.py")
+
+# Product-wide scan (P2-1): the guard must NOT be a hardcoded file pair, or a
+# window knob added in a new module ships unfloored. Reproduce the RED with a
+# GENUINELY NEW module — `tortoise/window_probe_mut.py` holding `from
+# tortoise.abuse import _int_env` + `_int_env("TORTOISE_MUT3_WINDOW_S", 900)`:
+# `test_no_window_is_read_with_int_env` fails. Do NOT cite a LIVE module, as
+# this comment used to (`tortoise/operator_alert.py`): it is tracked and
+# imported at module scope by THIS test file, so a probe there raises at import
+# and ERRORs the whole guard module instead of producing that RED.
+# `_WINDOW_ENV_CALL` finds the floored accessor; `_INT_ENV_CALL` finds the raw
+# one. `_WINDOWISH_NAME` is the naming heuristic: a var is window-shaped if it
+# says WINDOW, or follows the `_S` seconds-suffix the window knobs use — so a
+# knob "named without WINDOW" (`..._INTERVAL_S`, the other measured blind spot)
+# is caught too.
+_WINDOW_ENV_CALL = re.compile(r'_window_env\(\s*"([A-Z][A-Z0-9_]*)"')
+_INT_ENV_CALL = re.compile(r'_int_env\(\s*"([A-Z][A-Z0-9_]*)"')
+_WINDOWISH_NAME = re.compile(r"WINDOW|_S$")
+
+
+def _tortoise_sources() -> list[Path]:
+    """Every Python module in the product — the guard's true scope."""
+    return sorted((_ROOT / "tortoise").rglob("*.py"))
+
+
+class _FakeReq:
+    """Minimal Starlette-Request stand-in: the limiters read only
+    ``request.state.client_ip`` and ``request.client.host``."""
+
+    class _Client:
+        def __init__(self, host):
+            self.host = host
+
+    class _State:
+        client_ip = None
+
+    def __init__(self, host="1.2.3.4"):
+        self.client = self._Client(host)
+        self.state = self._State()
+
+
+class _BucketRecorder:
+    """Stands in for ``_check_ip_bucket_rate_limit`` and records the
+    ``window_s`` each limiter family actually passes it."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def __call__(self, request, **kwargs):
+        self.calls.append(kwargs)
+
+
+class TestWindowFloor:
+    """The accessor itself (#5493)."""
+
+    @pytest.mark.parametrize("name,default", _WINDOW_KNOBS)
+    def test_zero_window_falls_back_to_default_and_warns(
+            self, name, default, monkeypatch, caplog):
+        monkeypatch.setenv(name, "0")
+        with caplog.at_level(logging.WARNING, logger="tortoise.abuse"):
+            got = abuse._window_env(name, default)
+        assert got == default and got > 0
+        assert name in caplog.text  # the operator is told which knob was ignored
+
+    def test_misconfig_warns_once_per_setting_not_per_read(
+            self, monkeypatch, caplog):
+        """#5493 review P2-3: the warning is per distinct MISCONFIG, not per
+        READ. `TORTOISE_ABUSE_READ_WINDOW_S=0` read 1000x must emit ONE record
+        — these accessors are request hot paths (the unauthenticated signup
+        limiter re-reads its window 2-3x/request), so an unlatched warning lets
+        traffic drive arbitrary log volume while the misconfig stands."""
+        monkeypatch.setenv("TORTOISE_ABUSE_READ_WINDOW_S", "0")
+        with caplog.at_level(logging.WARNING, logger="tortoise.abuse"):
+            for _ in range(1000):
+                assert abuse._window_env(
+                    "TORTOISE_ABUSE_READ_WINDOW_S", 300) == 300
+        records = [r for r in caplog.records if "is not a valid rate-limit"
+                   in r.getMessage()]
+        assert len(records) == 1, (
+            f"expected 1 warning for 1000 reads, got {len(records)}")
+
+    def test_warn_latch_is_keyed_on_the_distinct_value(self, monkeypatch,
+                                                       caplog):
+        """A second DISTINCT misconfiguration is still surfaced — the latch is
+        keyed on (name, raw value), not the name alone."""
+        monkeypatch.setenv("TORTOISE_ABUSE_READ_WINDOW_S", "0")
+        with caplog.at_level(logging.WARNING, logger="tortoise.abuse"):
+            abuse._window_env("TORTOISE_ABUSE_READ_WINDOW_S", 300)
+            abuse._window_env("TORTOISE_ABUSE_READ_WINDOW_S", 300)
+            monkeypatch.setenv("TORTOISE_ABUSE_READ_WINDOW_S", "00")
+            abuse._window_env("TORTOISE_ABUSE_READ_WINDOW_S", 300)
+        records = [r for r in caplog.records if "is not a valid rate-limit"
+                   in r.getMessage()]
+        assert len(records) == 2, [r.getMessage() for r in records]
+
+    @pytest.mark.parametrize("name,default", _WINDOW_KNOBS)
+    def test_negative_window_falls_back_to_default_and_warns(
+            self, name, default, monkeypatch, caplog):
+        # `_int_env`'s isdigit() gate already treats a negative as unset; this
+        # pins that the floor never turns "-1" into a positive-looking clamp —
+        # and (#5493 review P2-1) that the operator is TOLD, rather than left
+        # with the silent fallback the `.env.example` promise had claimed was
+        # gone.
+        monkeypatch.setenv(name, "-1")
+        with caplog.at_level(logging.WARNING, logger="tortoise.abuse"):
+            got = abuse._window_env(name, default)
+        assert got == default and got > 0
+        assert name in caplog.text
+
+    def test_negative_window_warns_once_per_distinct_value(
+            self, monkeypatch, caplog):
+        """P2-1: a NEGATIVE window must warn (it used to fall back silently)
+        and must share the SAME `(name, raw)` latch as the zero case — 1
+        record for N reads, while a second distinct negative still warns."""
+        monkeypatch.setenv("TORTOISE_ABUSE_READ_WINDOW_S", "-7")
+        with caplog.at_level(logging.WARNING, logger="tortoise.abuse"):
+            for _ in range(50):
+                assert abuse._window_env(
+                    "TORTOISE_ABUSE_READ_WINDOW_S", 300) == 300
+            monkeypatch.setenv("TORTOISE_ABUSE_READ_WINDOW_S", "-8")
+            assert abuse._window_env(
+                "TORTOISE_ABUSE_READ_WINDOW_S", 300) == 300
+        records = [r for r in caplog.records if "is not a valid rate-limit"
+                   in r.getMessage()]
+        assert len(records) == 2, [r.getMessage() for r in records]
+
+    @pytest.mark.parametrize("name,default", _WINDOW_KNOBS)
+    def test_positive_window_is_honoured(self, name, default, monkeypatch):
+        monkeypatch.setenv(name, "17")
+        assert abuse._window_env(name, default) == 17
+
+    def test_unset_window_uses_default(self, monkeypatch):
+        monkeypatch.delenv("TORTOISE_ABUSE_READ_WINDOW_S", raising=False)
+        assert abuse._window_env("TORTOISE_ABUSE_READ_WINDOW_S", 300) == 300
+
+    def test_non_positive_default_cannot_reintroduce_zero(self, monkeypatch):
+        # Defence in depth: even a caller who passes a non-positive default
+        # cannot get a zero window back out of the accessor.
+        monkeypatch.setenv("TORTOISE_X_WINDOW_S", "0")
+        assert abuse._window_env("TORTOISE_X_WINDOW_S", 0) == 1
+
+    def test_no_window_is_read_with_int_env(self):
+        """No window-shaped env knob may be read with the UNFLOORED
+        `_int_env`, anywhere in the product. Scans `tortoise/**/*.py` (not a
+        hardcoded pair) using the WINDOW + `_S`-suffix heuristic, so it
+        catches BOTH measured blind spots: a knob named without WINDOW
+        (`..._INTERVAL_S`) and a knob added in a new module."""
+        bad = []
+        for path in _tortoise_sources():
+            rel = str(path.relative_to(_ROOT))
+            src = path.read_text(encoding="utf-8")
+            for name in _INT_ENV_CALL.findall(src):
+                if _WINDOWISH_NAME.search(name):
+                    bad.append(f"{rel}: {name}")
+        assert bad == [], (
+            "window-shaped env read via the UNFLOORED _int_env: "
+            + ", ".join(bad))
+
+    def test_every_window_site_is_covered(self):
+        """Every `_window_env` site in the PRODUCT must be listed in
+        `_WINDOW_KNOBS`, and every module that reads a window through it must
+        be a registered `_WINDOW_FILES` entry — so a new window knob (or a new
+        module holding one) fails this test until it is floored AND listed."""
+        found: set[str] = set()
+        modules: set[str] = set()
+        for path in _tortoise_sources():
+            rel = str(path.relative_to(_ROOT))
+            src = path.read_text(encoding="utf-8")
+            found |= set(_WINDOW_ENV_CALL.findall(src))
+            if "_window_env(" in src:
+                modules.add(rel)
+        assert found == {n for n, _ in _WINDOW_KNOBS}, (
+            f"window knobs in source not in _WINDOW_KNOBS: "
+            f"{found.symmetric_difference({n for n, _ in _WINDOW_KNOBS})}")
+        assert modules == set(_WINDOW_FILES), (
+            f"modules reading _window_env not in _WINDOW_FILES: "
+            f"{modules.symmetric_difference(set(_WINDOW_FILES))}")
+
+
+class TestWindowFloorBehaviour:
+    """The floor must be load-bearing at every reader (abuse.py)."""
+
+    def test_abuse_engine_windows_floor_zero(self, monkeypatch):
+        monkeypatch.setenv("TORTOISE_ABUSE_POINT_WINDOW_S", "0")
+        monkeypatch.setenv("TORTOISE_ABUSE_KEY_WINDOW_S", "0")
+        eng = AbuseEngine(MemoryAbuseStore())
+        assert eng.point_window_s() == 3600
+        assert eng.key_window_s() == 86400
+
+    def test_read_velocity_window_floors_zero(self, monkeypatch):
+        monkeypatch.setenv("TORTOISE_ABUSE_READ_WINDOW_S", "0")
+        assert ReadVelocityTracker().window_s == 300
+
+    def test_signup_velocity_zero_window_still_breaches(self, monkeypatch,
+                                                        notified):
+        # THE FAIL-OPEN, behaviourally: with window_s=0 the count bucket is
+        # emptied on every record, so the 2nd mint never breaches. Floored, the
+        # second mint still breaches (the farming signal is not silently lost).
+        monkeypatch.setenv("TORTOISE_ABUSE_SIGNUP_WINDOW_S", "0")
+        tr = SignupVelocityTracker(threshold=2)
+        # Pin the SOURCE default: the param tests pass the list's default in,
+        # so without this a call-site default change (86400 -> 1000) is green.
+        assert tr.window_s == 86400
+        assert tr.record_signup("1.2.3.4", org_id="t1", now=1000.0) is None
+        assert tr.record_signup("1.2.3.4", org_id="t2", now=1001.0) == (
+            "ip", "1.2.3.4")
+
+    def test_recovery_velocity_zero_window_still_breaches(self, monkeypatch,
+                                                          notified):
+        monkeypatch.setenv("TORTOISE_ABUSE_RECOVER_WINDOW_S", "0")
+        tr = abuse.RecoveryVelocityTracker(threshold=2)
+        assert tr.window_s == 86400
+        assert tr.record("1.2.3.4", org_id="t1", now=1000.0) is None
+        assert tr.record("1.2.3.4", org_id="t2", now=1001.0) == (
+            "ip", "1.2.3.4")
+
+
+class TestHostedWindowFloor:
+    """Every hosted limiter family must read its window through the floor:
+    a zero env window must never reach `_check_ip_bucket_rate_limit` as 0."""
+
+    def _recorder(self, monkeypatch):
+        import tortoise.hosted_api as ha
+        rec = _BucketRecorder()
+        monkeypatch.setattr(ha, "_check_ip_bucket_rate_limit", rec)
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        return ha, rec
+
+    def test_signup_window_floors_zero(self, monkeypatch):
+        ha, rec = self._recorder(monkeypatch)
+        monkeypatch.setenv("TORTOISE_SIGNUP_IP_WINDOW_S", "0")
+        asyncio.run(ha._check_signup_ip_rate_limit(_FakeReq()))
+        assert [c["window_s"] for c in rec.calls] == [86400]
+
+    def test_recover_windows_floor_zero(self, monkeypatch):
+        ha, rec = self._recorder(monkeypatch)
+        monkeypatch.setenv("TORTOISE_RECOVER_IP_WINDOW_S", "0")
+        monkeypatch.setenv("TORTOISE_RECOVER_TOKEN_WINDOW_S", "0")
+        asyncio.run(ha._check_recovery_rate_limit(_FakeReq(), token_hash="abc"))
+        assert [c["window_s"] for c in rec.calls] == [86400, 3600]
+
+    def test_invite_accept_windows_floor_zero(self, monkeypatch):
+        ha, rec = self._recorder(monkeypatch)
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_TOKEN_WINDOW_S", "0")
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_IP_WINDOW_S", "0")
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_GLOBAL_WINDOW_S", "0")
+        asyncio.run(ha._check_invite_accept_rate_limit(_FakeReq(), "tok"))
+        assert [c["window_s"] for c in rec.calls] == [900, 3600, 3600]
+
+    def test_invite_otp_windows_floor_zero(self, monkeypatch):
+        ha, rec = self._recorder(monkeypatch)
+        monkeypatch.setenv("TORTOISE_INVITE_OTP_TOKEN_WINDOW_S", "0")
+        monkeypatch.setenv("TORTOISE_INVITE_OTP_IP_WINDOW_S", "0")
+        monkeypatch.setenv("TORTOISE_INVITE_OTP_GLOBAL_WINDOW_S", "0")
+        asyncio.run(ha._check_invite_otp_rate_limit(_FakeReq(), "tok"))
+        assert [c["window_s"] for c in rec.calls] == [900, 3600, 3600]
+
+    def test_invite_resend_window_floors_zero(self, monkeypatch):
+        ha, rec = self._recorder(monkeypatch)
+        monkeypatch.setenv("TORTOISE_INVITE_RESEND_WINDOW_S", "0")
+        asyncio.run(ha._check_invite_resend_rate_limit(_FakeReq(), "inv1"))
+        assert [c["window_s"] for c in rec.calls] == [86400]
+
+
+class TestThresholdAsymmetry:
+    """The floor is window-only. A non-positive THRESHOLD is a legitimate
+    fail-CLOSED deny-all and must keep its current semantics (#5493)."""
+
+    def test_int_env_leaves_a_zero_threshold_at_zero(self, monkeypatch):
+        monkeypatch.setenv("TORTOISE_ABUSE_READ_THRESHOLD", "0")
+        assert abuse._int_env("TORTOISE_ABUSE_READ_THRESHOLD", 100) == 0
+
+    def test_zero_threshold_still_denies(self, monkeypatch, notified):
+        # len(bucket) >= threshold is true from the first event -> deny.
+        monkeypatch.setenv("TORTOISE_ABUSE_READ_THRESHOLD", "0")
+        tr = ReadVelocityTracker()
+        assert tr.threshold == 0
+        assert tr.record_read("k1", "t1", now=1000.0) == ("key", "k1")
+
+    def test_negative_threshold_is_treated_as_unset(self, monkeypatch):
+        """Stated decision (#5493): a NEGATIVE threshold is unset (the
+        pre-existing `_int_env` isdigit() gate) and yields the default. Left
+        UNCHANGED: turning it into a deny would alter threshold semantics beyond
+        the window floor, and no caller can express deny-all with a negative
+        today (use 0).
+        """
+        monkeypatch.setenv("TORTOISE_ABUSE_READ_THRESHOLD", "-1")
+        assert abuse._int_env("TORTOISE_ABUSE_READ_THRESHOLD", 100) == 100
+

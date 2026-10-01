@@ -40,6 +40,7 @@ from __future__ import annotations
 import contextlib
 import enum
 import errno
+import logging
 import os
 import socket
 import threading
@@ -52,6 +53,8 @@ import requests
 # free of model_adapters — this one-way import cannot cycle).
 from tortoise.env_truthy import is_truthy  # #4097: the declared truthy contract
 from tortoise.models import _emit_usage_sink
+
+_logger = logging.getLogger("tortoise.model_adapters")
 
 
 class OpenRouterModel:
@@ -464,6 +467,29 @@ def is_fatal(exc: BaseException) -> bool:
     return classify_llm_error(exc) in (LlmErrorClass.FATAL, LlmErrorClass.FATAL_CONFIG)
 
 
+def is_key_limit_403(exc: BaseException) -> bool:
+    """True → an HTTP 403 whose body carries a provider key-limit signature.
+
+    The NARROW half of ``is_billing_exhausted`` — it deliberately EXCLUDES
+    HTTP 402. It is a named predicate because ``RoutingModel`` and
+    ``RotatingModel`` must use DIFFERENT classes on purpose: the key-limit
+    403 carve-out is the #4960 fix, while a bare 402 on ``RoutingModel``
+    stays fatal per the recorded #1987/#1509 reader-lane failover decision
+    (docs/plans/2026-08-29-1987-ask-reader.md; E2E-8 in #1509). Do NOT
+    "restore symmetry" by pointing ``RoutingModel`` at ``is_billing_exhausted``
+    — see the comment on ``RoutingModel.complete``'s gate.
+
+    The BODY, not the status, is the discriminator (``_KEY_LIMIT_SIGNATURES``):
+    OpenRouter reports an exhausted key budget as 403
+    ``{"error":{"message":"Key limit exceeded (monthly limit)."}}``, NOT
+    402. A 403 whose body carries no limit signature stays FATAL (owner
+    constraint: never blanket-treat 403)."""
+    if _http_status(exc) != 403:
+        return False
+    body = _http_response_body(exc)
+    return any(sig in body for sig in _KEY_LIMIT_SIGNATURES)
+
+
 def is_billing_exhausted(exc: BaseException) -> bool:
     """True → the provider's OWN budget/limit for THIS key is spent.
 
@@ -471,29 +497,69 @@ def is_billing_exhausted(exc: BaseException) -> bool:
     mid-run), not config-inherent: a wrong credential (401, or a signature-
     less 403), and a config 4xx, mean the bug is the same on every leg —
     rotation would retry it and mask the real cause. Two statuses are
-    provider-specific and rotation-eligible:
+    provider-specific on the FULL class:
 
       * **HTTP 402** (Payment Required) — credits ran out (#1951).
       * **HTTP 403 carrying a key-limit body signature** (#4860) —
-        OpenRouter reports an exhausted key budget as 403
-        ``{"error":{"message":"Key limit exceeded (monthly limit)."}}``,
-        NOT 402. The BODY, not the status, is the discriminator
-        (``_KEY_LIMIT_SIGNATURES``); a 403 whose body carries no limit
-        signature stays FATAL (owner constraint: never blanket-treat 403).
+        ``is_key_limit_403``; the BODY, not the status, is the discriminator.
 
-    ``RotatingModel`` cooldowns the lane and rotates to an alternative so
-    the run continues; with no alternative lane it raises loud
-    (``RotatingModel`` n==1 guard). Deliberately NOT part of the M2/M3
-    taxonomy export contract — ``is_fatal``/``classify_llm_error`` semantics
-    are unchanged for the retry/abort consumers (run.py M3, extractor_v2);
-    only the rotation pool consults this hook."""
-    status = _http_status(exc)
-    if status == 402:
+    CONSULTED BY THREE CALLERS, WITH A DELIBERATE FULL/NARROW SCOPE SPLIT:
+    ``RotatingModel`` uses the FULL class (402 and the key-limit 403 both
+    rotate to an alternative), while ``RoutingModel`` uses only the NARROW
+    ``is_key_limit_403`` — a bare 402 stays fatal there by the recorded
+    #1987/#1509 decision, and must not be "tidied" into symmetry. The
+    predicate itself is unchanged and remains the rotation contract.
+    The extractor's census classifier (``extractor_v2._classify_error``,
+    #4959) consults the SAME seam to map a key-limit 403 to the census's
+    billing class, so the extraction-killer gate fires on a key-limited
+    run — one seam, so the two consumers make the same key-limit/billing
+    discrimination on every requests-shaped error this lane produces. They
+    disagree in OTHER ways, all tracked on #5525: the census classifier
+    reads the status from ``e.response.status_code``, so a
+    ``urllib.error.HTTPError`` (status on ``.code``, no ``.response``) never
+    reaches this discrimination; and 408/425 map to ``fatal_4xx`` there while
+    the retry taxonomy calls them transient. The extractor's ``ImportError``
+    fallback is a third, defensive divergence — see ``_is_key_limit_error``.
+
+    With no alternative lane ``RotatingModel`` raises loud (its n==1
+    guard). Deliberately NOT part of the M2/M3 taxonomy export contract —
+    ``is_fatal``/``classify_llm_error`` semantics are unchanged for the
+    retry/abort consumers (run.py M3, extractor_v2)."""
+    if _http_status(exc) == 402:
         return True
-    if status == 403:
-        body = _http_response_body(exc)
-        return any(sig in body for sig in _KEY_LIMIT_SIGNATURES)
-    return False
+    return is_key_limit_403(exc)
+
+
+def _alert_provider_billing_exhausted(adapter, exc: BaseException,
+                                      pool_size: int) -> None:
+    """Best-effort #3873 operator alert for an observed billing exhaustion.
+
+    The provider's own refusal (402 / key-limit 403) is the trigger — an
+    OBSERVED event, not a threshold — so this adds no spend-policy number. It
+    exists because ``RotatingModel`` consumed the classification silently: it
+    cooled the lane, rotated, and (with no alternative lane) raised, while no
+    operator was told that the aggregate bound — the provider credit balance —
+    had been reached.
+
+    Never raises and never changes the request's outcome: the whole dispatch —
+    including the import — is inside the ``try``, so a missing/broken alert
+    plane cannot turn a rotation into a 500. ``has_alternative`` records whether
+    ANOTHER lane was configured (``False`` = the refusal is about to be raised);
+    it says nothing about whether a later lane also refuses.
+    """
+    try:
+        from tortoise.operator_alert import alert_provider_billing_exhausted
+
+        alert_provider_billing_exhausted(
+            getattr(adapter, "provider", "") or "",
+            exc,
+            status=_http_status(exc),
+            has_alternative=pool_size > 1,
+        )
+    except Exception:
+        _logger.warning(
+            "provider billing-exhaustion alert not dispatched (provider=%s)",
+            getattr(adapter, "provider", "?"), exc_info=True)
 
 
 # ── Provider routing (D2) ──────────────────────────────────────────────────
@@ -763,10 +829,15 @@ def _reset_failover_cooldown() -> None:
 class RoutingModel:
     """Primary adapter + optional fallback with failover (D4/D5 #1530).
 
-    ``complete()`` tries the primary; the exception class decides (D4):
-    FATAL (401/402/403) and FATAL_CONFIG (400/404/unknown 4xx) re-raise
-    immediately — no retry, NO failover; TRANSIENT/UNKNOWN fails over to the
-    fallback when configured. Stickiness (D5): once an in-complete call
+    ``complete()`` tries the primary; the exception class decides (D4).
+    Auth (401/403) and FATAL_CONFIG (400/404/unknown 4xx) re-raise
+    immediately — no retry, NO failover. **Failover rule (one line): a 403
+    carrying the provider's key-limit body (#4860) fails over; a bare HTTP
+    402 stays FATAL and does NOT fail over (#1987/#1509 pinned decision),
+    unlike ``RotatingModel`` which rotates on both (#1951).** With no
+    fallback configured it still raises (fail loud, mirrors the rotation
+    pool's n==1 guard); TRANSIENT/UNKNOWN fails over to the fallback when
+    configured. Stickiness (D5): once an in-complete call
     fails over, ``last_route``/``route`` flip to the fallback and STAY there
     for the rest of this extraction (forward-only, never back
     mid-extraction). The DEADLINE-abort path (``note_stall``) is separate:
@@ -844,7 +915,26 @@ class RoutingModel:
                               max_tokens=max_tokens)
         except BaseException as e:  # noqa: BLE001, RUF100 — classify first
             self.errors.append(f"{type(e).__name__}: {e}")
-            if is_fatal(e) or self.fallback is None:
+            # #4960, in one line: RoutingModel fails over ONLY on the 403
+            # key-limit class; a bare HTTP 402 stays FATAL here.
+            #
+            # ⛔ DELIBERATELY ASYMMETRIC with RotatingModel's gate (which uses
+            # the FULL is_billing_exhausted and therefore rotates on 402 too,
+            # #1951). This is NOT an oversight and must NOT be "restored to
+            # symmetry": the ask/reader lane's failover policy is a RECORDED
+            # decision authored AFTER #1951 — #1987 Task 3 pins "RoutingModel
+            # re-raises 401/402/403 as fatal … no failover → 502
+            # reader_unavailable" (docs/plans/2026-08-29-1987-ask-reader.md,
+            # Steps (f)/(c)) and #1509 owns it as E2E-8's negative "fatal 4xx
+            # (401/402/403) → must NOT trigger failover". Adopting the broad
+            # predicate here would silently reverse that decision; reversing a
+            # recorded decision is a REOPEN in its own home, not a fix. The
+            # #4960 defect is the key-limit 403 (#4860), so the carve-out is
+            # scoped to exactly that.
+            if (is_fatal(e) and not is_key_limit_403(e)) or self.fallback is None:
+                # auth (401/403) + config 4xx — never fail over; the no-fallback
+                # case raises regardless. A 402 is fatal by the #1987/#1509
+                # decision (RotatingModel still rotates on it, #1951).
                 raise
             _note_failure(self.primary.provider, self.cooldown_s)
             self._failed_over = True
@@ -1010,6 +1100,13 @@ def _build_single(provider: str, model_id: str, *, max_tokens, temperature,
                            temperature=temperature, json_mode=json_mode)
 
 
+# #4992: eligibility reason kinds returned by
+# ``RotatingModel._lane_ineligible_reason``. Named constants so the
+# exhaustion-message branch cannot drift from the reason text it classifies on.
+_COOLDOWN_REASON = "in cooldown"
+_DOWNED_SKIP_REASON = "session-downed (a healthy lane is preferred)"
+
+
 class RotatingModel:
     """3-provider pool with round-robin rotation + per-provider cooldown
     (pilot #1549 — the DeepSeek direct API degrades to 15-90s/call under
@@ -1084,29 +1181,22 @@ class RotatingModel:
         return self.route or (self.providers[0].provider if self.providers else "none")
 
     def complete(self, *, system: str, user: str,
-                 max_tokens: int | None = None) -> str:
+                 max_tokens: int | None = None) -> str | None:
         import time
         now = time.time()
         n = len(self.providers)
         if n == 0:
             raise RuntimeError("RotatingModel with no providers")
         last_err: Exception | None = None
-        for _ in range(n * 3):  # bounded attempts: each provider at most ~3x per call
-            idx = self._pick()
-            p = self.providers[idx]
-            if self._cooldowns.get(p.provider, 0.0) > now:
-                continue
-            if p.provider in self._downed:
-                # #2384 option A half-open probe: a twice-stalled lane is out
-                # of rotation for the session UNLESS no healthy lane remains
-                # (its own cooldown lapsed) — then a single probe re-admits it
-                # and a probe success (below) restores it. Never burn probes
-                # against a downed lane while a healthy one is usable.
-                if any(q.provider not in self._downed
-                       and self._cooldowns.get(q.provider, 0.0) <= now
-                       for q in self.providers):
-                    continue
-                self._downed.discard(p.provider)
+
+        def _attempt(p) -> tuple[bool, str | None]:
+            """Call one admitted lane. Returns ``(True, output)`` when the lane
+            answered — ``output`` may legitimately be None (a provider can
+            return a null/empty completion) — or ``(False, None)`` after a
+            rotation-eligible failure, having recorded the lane's cooldown and
+            ``last_err``. Auth/config-4xx faults re-raise here, before any
+            cooldown write (#1951)."""
+            nonlocal last_err
             try:
                 self._in_flight = p
                 out = p.complete(system=system, user=user, max_tokens=max_tokens)
@@ -1123,19 +1213,127 @@ class RotatingModel:
                 self.last_completion_tokens = getattr(p, "last_completion_tokens", 0)
                 self.last_cost_usd = getattr(p, "last_cost_usd", None)
                 self.model = getattr(p, "id", self.model)
-                return out
+                return True, out
             except Exception as e:
                 last_err = e
                 self._in_flight = None  # no longer mid-call on this adapter
                 billing = is_billing_exhausted(e)
+                if billing:
+                    # #3873: the refusal that makes us rotate is ALSO the
+                    # operator's only signal that the provider budget is
+                    # spent — record it before the raise paths below, so the
+                    # no-alternative case (n == 1) alerts too. Best-effort:
+                    # this can never affect the outcome.
+                    _alert_provider_billing_exhausted(p, e, n)
                 if is_fatal(e) and not billing:
                     raise  # auth (401/403) + config 4xx — never rotate (#1951)
                 if billing and n == 1:
                     raise  # no alternative provider — fail loud, no infinite loop
                 self._cooldowns[p.provider] = now + self.cooldown_s
                 self.errors.append(f"{p.provider}: {type(e).__name__}: {e}")
+                return False, None
+
+        # Phase 1 — weighted rotation within the bounded budget. The bound is a
+        # BUDGET, not a coverage guarantee: a draw that lands on a skipped lane
+        # spends an attempt without advancing the rotation to another lane.
+        for _ in range(n * 3):  # bounded draws: each provider ~3x per call
+            p = self.providers[self._pick()]
+            if not self._admit(p, now):
+                continue
+            ok, out = _attempt(p)
+            if ok:
+                return out
+
+        # Phase 2 — deterministic reachability pass (#4992). The random budget
+        # above has NO progress property, so it can spend every draw on a
+        # skipped lane and never reach one the eligibility test admits; the
+        # half-open-probe lane was exactly that case (measured: 6/500 seeds
+        # raised "all 2 providers in cooldown" about a lane that was NOT
+        # cooled). Walk the pool in declaration order AND re-scan after every
+        # failed attempt: eligibility is state-dependent — a lane skipped as
+        # "downed while a healthy lane exists" becomes admissible the moment
+        # that healthy lane is cooldowned — so a single forward pass can still
+        # miss it (measured 1.5% on the issue's 2-lane shape before the
+        # re-scan). ``attempted`` bounds the pass: it grows by >=1 lane per
+        # round and is capped by the pool size, so Phase 2 makes at most n real
+        # calls (Phase 1 + Phase 2 <= 4n) and never re-tries a lane WITHIN the
+        # pass. (With cooldown_s <= 0 a lane Phase 1 failed is never actually
+        # cooled, so the pass may try it once more — the 4n ceiling still holds.)
+        attempted: set[str] = set()
+        while True:
+            progressed = False
+            for p in self.providers:
+                if p.provider in attempted:
+                    continue
+                if not self._admit(p, now):
+                    continue
+                attempted.add(p.provider)
+                progressed = True
+                ok, out = _attempt(p)
+                if ok:
+                    return out
+            if not progressed:
+                break
+
+        # Nothing was served. last_err set => every eligible lane was tried and
+        # failed (re-raise that lane-specific error). last_err is None => no
+        # lane was eligible at all; the message is DERIVED from the eligibility
+        # evaluation, never asserted (#4992).
         raise last_err if last_err is not None else RuntimeError(
-            f"all {n} providers in cooldown")
+            self._no_eligible_message(now))
+
+    def _lane_ineligible_reason(self, p, now: float) -> str | None:
+        """Why ``p`` cannot serve this call, or None when it can (#4992).
+
+        The single source of truth for eligibility — shared by the weighted
+        rotation loop, the deterministic reachability pass, and the exhaustion
+        message — so the message can only state a reason this test actually
+        established. It mirrors the two skip branches: a cooled lane, and a
+        session-downed lane while a healthy alternative exists. A downed lane
+        with NO healthy alternative is eligible (the #2384 half-open probe)."""
+        if self._cooldowns.get(p.provider, 0.0) > now:
+            return _COOLDOWN_REASON
+        if p.provider in self._downed and any(
+                q.provider not in self._downed
+                and self._cooldowns.get(q.provider, 0.0) <= now
+                for q in self.providers):
+            return _DOWNED_SKIP_REASON
+        return None
+
+    def _admit(self, p, now: float) -> bool:
+        """Eligibility gate for ``complete``: False for a lane that must be
+        skipped; True for a lane to attempt — re-admitting a probe-eligible
+        downed lane (the #2384 half-open probe) as a side effect."""
+        if self._lane_ineligible_reason(p, now) is not None:
+            return False
+        if p.provider in self._downed:
+            self._downed.discard(p.provider)
+        return True
+
+    def _no_eligible_message(self, now: float) -> str:
+        """The exhaustion message (#4992), derived from the eligibility test.
+
+        "all N providers in cooldown" is claimed ONLY when every lane is
+        genuinely cooled; any lane excluded for a different reason is named as
+        such, because "wait out the cooldown" and "restore/probe the downed
+        lane" are different remedies. The pre-fix code ASSERTED cooldown in the
+        half-open-probe case, where the uncooled lane was merely one the random
+        budget never drew.
+
+        Reached from ``complete`` only when ``last_err is None`` — and the
+        reachability pass makes that exactly "every lane cooled", since any
+        uncooled lane is admissible (directly, or as the #2384 half-open probe).
+        The per-lane form below is therefore a direct-call defense: the message
+        must be able to name a non-cooldown exclusion without inventing one, and
+        it must never label a lane with a reason the eligibility test did not
+        return."""
+        reasons = [(p.provider, self._lane_ineligible_reason(p, now))
+                   for p in self.providers]
+        if all(reason == _COOLDOWN_REASON for _name, reason in reasons):
+            return f"all {len(self.providers)} providers {_COOLDOWN_REASON}"
+        detail = "; ".join(f"{name}: {reason}"
+                           for name, reason in reasons if reason is not None)
+        return f"no eligible provider to serve this call: {detail}"
 
     def _pick(self) -> int:
         """Weighted round-robin: pick the next provider by cumulative weight

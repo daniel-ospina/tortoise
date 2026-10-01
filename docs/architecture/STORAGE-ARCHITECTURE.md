@@ -19,6 +19,97 @@ aboutObjects: STORAGE-ARCHITECTURE.md, records ledger, vector index, raw storage
 
 ---
 
+## ⛔ THE STORAGE UNIT IS BYTES — decision, owner, 2026-09-26 (`#4495`)
+
+**Read this before the rest of the document.** The body below is written in the **node** unit (`~25,000 quota
+nodes`, `140 MB`, `$73/GB`, per-node byte constants). The owner ruling of 2026-09-26 keeps the *bytes* and retires
+the **node as the customer-facing unit**:
+
+- **Storage is billed in MB/GB**, as both our cost input **and** the customer-facing unit — *"migrate away from
+  counting nodes and start counting in mb/gb for storage (both as a cost input for us and customer facing bill them
+  per mb/gb as they understand that) **[typos in the source silently normalised: `coutnign`, `inout`]**"*.
+- **Exceeding the storage allowance is PURCHASED OVERAGE, not refusal** — consistent with the 22 September ruling
+  that tiers price *features*, never refusal.
+- **Overage is bought with PREPAID CREDITS**, not a postpaid "max spend" approval — the owner's stated reason is
+  cashflow.
+- The tier carries a **starter amount** of storage and usage; the subscription itself is priced on **features**.
+- **Prices are NOT set by this document or by this ruling.** The owner *"calibrat[es] after the beta launch"*, from
+  measured consumption.
+
+**⚠️ Why the node unit is not merely deprecated but replaced — and what actually removes the P0.** The stored data
+*"does not shrink back on its own"* (**the wording is this issue's QUESTION comment, not the ruling's** — the
+ruling's own synthesis renders the same fact as *"stock never resets while flow does"*. The qualifier carries the
+argument, so it is kept: a node count does fall when nodes are deleted
+or purged — but **not** when one is superseded, which **does not delete the old point**: it marks it outdated and
+adds a `CORRECTS` edge. The node is still there, and the quota predicate carries no status filter, so a superseded
+point is still counted), so a customer who filled the stock cap stayed full **without doing anything further** — the
+P0 in `#4495` was **24,978 of 25,000, i.e. 22 points of headroom**, and a later capture in the same window was
+refused outright at **24,984 of 25,000 (16 points)** with no partial acceptance.
+
+⇒ **What removes the permanent-refusal state is the PURCHASE PATH, not the unit.** A byte allowance with no overage
+— or a customer who declines to buy — refuses exactly as the node cap did. The ruling therefore does **not** extend
+the never-refusal ruling to the node cap; it **removes the unit the question was about**, and pairs the new unit with
+a way to buy more. Keeping those two halves distinct matters: the guarantee comes from the overage path.
+
+**Measured basis (2026-09-25, live graph).** These are the numbers the allowance must be denominated in, and **each
+per-node figure states its base and its denominator**, because that pair is where this document has already erred
+twice:
+
+| quantity | measured | note |
+|---|---|---|
+| resident nodes | **89,701** | `MATCH (n)` |
+| nodes the quota predicate counts | **24,978** | **3.59× divergence** from the resident count — the denominator trap |
+| `GRAPH.MEMORY USAGE` | **143 MB** (indices 46 MB) | sampling estimate, `SAMPLES`=100 |
+
+**Per-node figures must not be quoted without a base.** Taking the ruling's headline reading (143 MiB):
+
+- **6,003 B per *capped* node** (143 MiB ÷ 24,978)
+- **1,672 B per *resident* node** (143 MiB ÷ 89,701)
+
+⚠️ **The ruling records `1,594 B` per resident node, and that figure is on a DIFFERENT base** — it is
+143 **decimal** MB ÷ 89,701. So the ruling's two per-node numbers (`6,003` and `1,594`) differ by **3.77×**, not by
+the **3.59×** the denominators alone imply, precisely because MiB and decimal MB were mixed. **On one base the pair
+is either `6,003 / 1,672` (MiB) or `5,725 / 1,594` (decimal)** — at most two of `{143 MB, 6,003 B, 1,594 B}` can be
+true at once. The *decision* is untouched by this (bytes remain the unit); the *derivation* is corrected here so the
+error is not propagated into the allowance.
+
+⚠️ **This block SUPERSEDES the body's older figures.** §2 and §12 read **141 MB** and **45 MB** of indices where this
+block reads **143 MB / 46 MB**, and §13's issue-map row concludes *"~3 KB per node (140 MB ÷ ~45k total nodes)"* —
+a **third** denominator (~45k, and a different residency set). The **`~3 KB` estimate is superseded by this block's
+`1,672 B` per resident node**; the figures are not interchangeable and the `~45k` node count is not re-measured here.
+§13's row carries the earlier denominator correction (the retracted 5.6 KB claim); **this block, not §1, is the
+precedent for the denominator error class** — §1 corrects a *growth-horizon* error, a different mistake.
+
+**⛔ Status of the implementation — read this as FORWARD-LOOKING, not shipped.** Nothing in the byte path is on
+`main` today:
+
+- `tortoise/graph_storage.py` is **not on `main`** (nor on this document's own revision pin `c79ba1cf2`). It exists
+  only on the **unmerged** branch `feat/5331-graph-byte-meter` (PR #5696). *"Built"* is true of an open PR only.
+- **There is no byte gate on `main`.** The gate — and with it the `max_storage_bytes` allowance key — is the
+  **separate**, also-unmerged branch `feat/5331-node-to-byte-cap`. The key is therefore **absent on `main`** (and
+  absent from the meter branch), but it is **not absent from the repository**: it is written in `tortoise/` on that
+  cap branch.
+- **The meter is measurement-only and FAIL-SOFT** — its own docstring is explicit: *"NOT A DIAL. Nothing here
+  prices, caps, tiers, refuses or throttles. It is the instrument, not the setting (#5331 is measurement only)"*,
+  and *"FAIL-SOFT … never raise"*. Do not describe the **meter** as fail-closed; the fail-closed behaviour belongs to
+  the **gate**.
+
+⇒ **The gate itself IS written — on the cap branch, not on `main`.** `_enforce_storage_allowance`
+(`tortoise/quota.py` on `feat/5331-node-to-byte-cap`) raises `QuotaCheckError` when no reading is supplied, and that
+branch's `pricing.py` describes the design as *"FAIL-CLOSED when no reading is supplied"*. The gate is therefore not
+missing. **What is missing is the WIRING**: no production caller supplies a `storage_reading`, so the gate is inert,
+and configuring an allowance today would 500 every points-gated write.
+
+⇒ **A requirement on the not-yet-done wiring, not a shipped default:** the meter must be wired into the gate **before**
+any allowance is configured. That ordering is a constraint on the work, not a statement of what exists.
+
+> **OVERRIDES:** the node-count storage cap (`max_graph_nodes`, per-node byte constants such as 1,024 B/node) as the
+> customer-facing storage unit — replaced by measured MB/GB storage with purchased overage, because per-node
+> accounting (a) declares 1,024 B/node against a measured 6,003 B/node on the capped set, (b) makes the cap permanent
+> while the number it counts never shrinks **on its own**, and (c) is a unit customers cannot reason about.
+
+---
+
 ## 1. The problem
 
 One user's graph reached **25,000 quota nodes in 3–4 active days** - **140 MB of resident memory at $73/GB/month ≈ $9.98/month for a single user, and every further GB costs another $73/month in perpetuity.** The product's constraint is a **$19 price with <$9 total cost per user**, and the graph keeps growing with tenure.
@@ -301,7 +392,7 @@ The extraction document states no target and no aggregate reduction; the number 
 
 **⇒ Two consequences the storage plan depends on:**
 - **The mechanical half is ~2×, not 10×.** The headline depends entirely on the salience gate.
-- **⚠️ Volume with no recall floor is gameable** — you can always hit a node target by writing nothing. **Any reduction target must be paired with a retention floor** (a measured share of durable claims kept), or the metric is meaningless. ⚠️ **No retention-floor measurement exists yet (§15 lists none).**
+- **⚠️ Volume with no retention measurement is gameable** — you can always hit a node target by writing nothing. **A volume objective must be paired with the measurement of how many durable claims we kept**, or the metric is meaningless. ✅ **The measurement is now listed (§15 M6): the owner re-affirmed on 2026-09-30 that it is wanted (§14.1 O2, AMENDED) — only the GOAL is deferred.** ⚠️ **Its denominator is a measurement-design question and is not yet specified:** a sample drawn only from the *rejects* estimates how often the rule wrongly drops something, **not** how much was kept, so M6 states the denominator requirement rather than asserting a floor.
 
 ---
 
@@ -443,10 +534,12 @@ Two link types look like near-duplicates:
 
 **Merging them is the obvious tidy-up, and it is refused.** The two are **not** interchangeable in the rebuild machinery:
 
-| | in the snapshot-derivable set? | what `rebuild_all` pass-2b does |
-|---|---|---|
-| `aboutDocument` | ✅ **yes** (`DERIVABLE_STRUCTURAL_RELS`, `#2489`) | **re-creates it at the OLD point** from its immutable snapshot |
-| `aboutSource` | ❌ **deliberately excluded** | **never resurrects at old** — so it gets no replay descriptor at all |
+| | in the snapshot-derivable set? | moved by the live `supersede_point` transfer? | what `rebuild_all` pass-2b does |
+|---|---|---|---|
+| `aboutDocument` | ✅ **yes** (`DERIVABLE_STRUCTURAL_RELS`, `#2489`) | ✅ **yes** (`SUPERSEDE_STRUCTURAL_RELS`) | **re-creates it at the OLD point** from its immutable snapshot |
+| `aboutSource` | ❌ **deliberately excluded** | ❌ **also excluded** | **never resurrects at old** — so it gets no replay descriptor at all |
+
+**⚠️ The two omissions are independent, and `aboutSource` is the only `about*` rel absent from BOTH.** `aboutAction` and `wasDerivedFrom` are excluded from the snapshot-derivable set too, but `supersede_point` **does** transfer them live; `aboutSource` is moved by neither leg — a supersede leaves it on the old point, and pass-2b never re-creates it. So the exclusion is stronger than the transfer set's other members: a reader comparing the two sets must not read `aboutSource` as "excluded from replay, transferred live" like the other two.
 
 **⇒ Collapsing `aboutDocument` into `aboutSource` moves the edge class OUT of the replayable set. That is a durability regression**, and it would be invisible until a rebuild was actually needed. **The contradiction test caught this and disqualified the recommendation that proposed it** — which is the rule working, not the analysis failing.
 
@@ -538,6 +631,37 @@ The owner raised the gap the D10 pass left open: *"shouldn't we have some form o
 
 **Both are reads; only one has an anchor.** That is the whole gap — and it is why the fix is a field on an edge, not a new subsystem.
 
+#### ⭐ Scope of the anchor — a **Point-level** guarantee, extended to derivation links (decided 2026-09-25)
+
+`sourceVersion` rides on `extractedFrom`, which is declared **`Point → Source`** (`ONTOLOGY.md` §3.3) — so **a class whose provenance does not pass through an `extractedFrom` link carries no recorded version read at all.** `:Object` and `:Event` are reached from a source through the `references` edge (`ONTOLOGY.md` §3.4), not through `extractedFrom`, so **neither was version-scoped before the decision below** (§4.6) — the derivation half is addressed there; the identity half deliberately is not.
+
+**This is not a storage omission, and for the derivation half it is now decided** (below). §12.1's cost question is *where* bytes live; this is *whether the anchor exists*. Two facts follow for sizing, recorded here so they are not discovered later:
+
+- **`references` carries more than one meaning, so the gap is not uniform.** Its declared target set is `Event | Object | Source` (§3.4), and the in-repo writers do not all mean the same thing by it:
+  - **identity / mention** — a connector `Object` materialized at the projection choke point (`projection/entities.py::_materialize_connector_source`; `connectors/github.py:305` mirrors it idempotently). The Source's `url` **is** the artifact. The Source still has versions, but the target is **not read from** them, so a recorded version here would be a non-answer rather than a stale mark.
+  - **derivation** — an `Event` (or `Document`) built from a source's content: the connector path materializes the link at the projection choke point (`projection/entities.py::_materialize_connector_source` → `link_source_to_event`), and the meeting path writes the same edge at `mining.py:621` (the choke point's gate excludes mining events — `ONTOLOGY.md` §3.4). Here the target **is** read from the content, and there was no recorded version to compare against — **this was the live half of the gap, addressed by the decision below**. ⚠️ **Addressed is not the same as closed on this path:** no connector writes `contentHash` and the choke point creates its Source with `contentHash = ''` (the Source MERGE in `projection/entities.py::_materialize_connector_source`), so the anchor is **absent** for connector-derived Events — honest (no version is known), but *"are these entities about the content we currently hold?"* stays unanswerable there until a connector records a content hash (tracked in `#5214`). The anchor does land on the capture path (`sha256(transcript)`) and on the repair path (`e.file_hash`).
+  - **referential containment** — `Source → Source` (the session→external `MERGE (a)-[:references]->(b)` in `hosted_api.py::_execute_commit_writes`). A provenance chain, not a derivation of either target's content.
+
+  ⇒ **The version question is a property of what the link means, not of the target's label.** That is why a blanket `sourceVersion` on every `references` edge is the wrong shape: it would stamp a non-answer on the identity and containment forms.
+
+- **So the cost of closing it falls on the derivation links only** — one hash each, since a version is three timestamps + a hash and never a content copy (D30). ⚠️ **No total is derivable without a census**: the derivation-link count is its own quantity (the connector paths mint per-`Event` links for events that may yield no Point), so it is **not** bounded by the `extractedFrom` count. **Not measured** — the shared instance refused reads when this was written.
+
+**DECIDED — option A (owner-approved 2026-09-25, `#5199`).** The anchor extends to the **derivation** `references` link only — targets `Event` or `Document` (`Document` retires with D10): an *optional* `sourceVersion`, set **at link time** from the version the link's own writer observes (the Source's current `contentHash`; see the repair-path caveat below) — so the **public SDK signature does not change** — and written **`ON CREATE` only**, because a re-link must not advance the recorded version or staleness would silently read as current. **Identity/mention** (`Object`) and **referential-containment** (`Source → Source`) links stay **property-free**, and a source with no content (`contentHash = ''`) anchors nothing. Currency stays a **read** (`r.sourceVersion` vs `s.contentHash`), never a stored status.
+
+⚠️ **The mechanism discriminates on the target's LABEL, which is a proxy for "derived"** — the only signal available without changing the SDK signature. It is applied by every **provenance** writer of a derivation edge: `link_source_to_entity` (the `id`-keyed paths), `link_source_to_event` (the `eventId`-keyed connector choke point and capture path) and `link_source_to_legacy_event` (the crash-repair backfill).
+
+⚠️ **Post-D10 the proxy is carried by the RETIRED label's alias, so it lives at the CALL SITE.** The `:Document` node label is gone (a document is a `:Source`), so the three document-derivation writers — `_upsert_document`, the session→document link in `_execute_commit_writes`, and the doc classifier of the ingest path — pass the retained deprecated alias `"Document"` as the *relation's* spelling, and `link_source_to_entity` reads it for this decision **before** remapping the identity onto `:Source`. The two facts are independent: the stored edge is `(Source)-[:references]->(Source)` either way, so switching a call site to `"Source"` keeps the edge, creates no conflict marker, and silently drops the anchor — which is exactly what the D10 merge did. These call sites are pinned by `tests/test_source_version_references_5199.py` (`test_document_derivation_through_the_production_path_anchors`, `test_index_path_document_link_records_the_version_read`, and the structural `test_document_call_sites_express_derivation_not_containment`); a definitional `grep` for the alias among them is the cheap check before any refactor of these writers.
+
+⚠️ **This is a pipeline guarantee, NOT a graph invariant** — do not read it as "every `references` edge is anchored". Two writers bypass it by design and neither is auto-anchored: the generic escape hatch `create_edge` (public SDK, exposed as the MCP tool `tortoise_create_edge`) takes any allowlisted predicate including `references`, and `graph-scripts/backfill_references.py` is a standalone ops script. A caller minting a derivation edge through either leaves the anchor **absent** unless it supplies the property itself. Tracked in `#5213`.
+
+⚠️ **On the repair path the anchor comes from the TARGET, not the Source.** `backfill_sources` sets the Source to the file's **current** hash while the legacy Event keeps the `file_hash` it was captured with (W2, "file edited since capture") — so anchoring `s.contentHash` there would report a **stale Event as current**, the precise failure this anchor exists to expose. `link_source_to_legacy_event` therefore anchors `e.file_hash` (equal to `s.contentHash` whenever the file has not changed), and anchors nothing when the Event records no hash.
+
+⚠️ **KNOWN LIMITATION — the anchor does not advance when the TARGET is rebuilt in place; the read is then STALE for a current entity.** `ON CREATE` is a property of the *edge* MERGE, so a derivation target rebuilt from a **newer** version through the **same node id** keeps its **original** `sourceVersion`. One real path: `index_directory` → `_index_directory_locked` → `_index_process_unit` (`sdk.py`), where `_index_source_merge` bumps the Source's `contentHash`, `_session_event_write` rewrites the existing Event **in place** under the same `eventId` (`event_id = f"session_{session_id}"` — content-independent), and then `link_source_to_entity` MERGEs an **already existing** edge, so `ON CREATE` does not fire. (`ingest_corpus` is **not** such a path — it rewrites Events but never writes a Source, so it never mints this edge.) The currency read then reports STALE although the target is current: the **converse** of the false-current guarded above, and the **conservative** direction the model prefers (`stale != wrong`, §4.6 — the entity is `stale`-flagged, never hidden or deleted). It is deliberate that this is not "fixed" by removing `ON CREATE`: that would re-open the false-current on a **source-only** re-poll (a connector re-poll that bumps the Source with no target rebuild), and the ON CREATE/ON MATCH pair cannot distinguish the two cases on its own. Recorded for the owner on `#5199`.
+
+⚠️ **No backfill, deliberately.** An edge written before this change carries no recorded version and is **not** retro-stamped: the version it was read from is **unknown**, and writing today's hash would fabricate a `current` read. Its honest state is **absent** — which is precisely why the anchor is a derived comparison and never a stored `status`.
+
+⚠️ **The model statement lives in `ONTOLOGY.md` §3.4 / §4.6** — this section records only what the anchor costs. The ontology wording is in owner review (`#5199`); until it lands, the code and this section are the operative record.
+
 #### ⭐ The policy — **B: mark stale now, supersede on re-inference** (owner)
 
 When a re-fetched source's content differs, the old version's entities are **marked stale immediately** and **superseded when re-inference produces their successors**.
@@ -561,6 +685,16 @@ The convergence is on **two layers with different jobs**: the **source** carries
 **⇒ This is why the version goes on the extraction link and not only on the source** — and it is why the storage cost lands on the edge, not on a document store.
 
 **Research:** `docs/research/2026-09-24-source-versioning/research-brief.md`. **Adoption gate: ADOPT** — no recorded decision contradicted; D7 governs it; the ontology's `§4.7` already declares the Source window; D30 bounds the cost. **Tracked:** `#5038` (the model) · `#5024` (the in-place mutation that blocks it) · `#5025` · `#5026`.
+
+#### ⭐ Where this stands (2026-09-25) — a status pointer, not a new rule
+
+- **The anchor shipped.** The read version rides on the `extractedFrom` link as `sourceVersion` (`#5256`, PR `#5288`), with the honest-absent rule (**`''`/blank/non-string hash ⇒ no property at all**), live == replay, and **no SDK/MCP surface change**.
+- **The currency CHECK is a read** (this section's model): it compares the recorded `sourceVersion` against the source's current `contentHash`, with **no stored `status`** field — so it belongs on the **existing** read surfaces and needs **no new tool and no new SDK method**.
+- **What a stale fact does — Policy B, REFINED by the owner on 2026-09-26** (`#5038` comment `5845802608`): *"We should not return an out-of-date fact when we have a newer one"* — so when a newer fact exists, the out-of-date fact is **withheld as an answer** and **disclosed as an FYI carrying its source** (*"let the user know that (newer fact but no source, and older fact from source X) … so I can disambiguate"*). This **refines rather than reverses** Policy B: Policy B's prohibition was on the fact being *"silently"* withdrawn, and the required disclosure is exactly what keeps this non-silent. **OVERRIDES:** the field's practice of returning a stale fact **alongside** its replacement with a flag (Zep/Graphiti's temporal fields; the RAG `is_latest` norm) — the withheld-as-answer + disclosed-as-FYI form is deliberate, because a visible flag is measurably not acted on (`arXiv 2609.08258`; `2605.06527`: 77.5% visible vs 3.3% adjudicated). The **write-time** notice the owner also asked for (*"ideally at write time it would have told me"*) is **`lane:c1-capture`'s** surface, not this one. **⚠️ Open alongside it:** how mechanical validity reconciles with **EP confidence** (owner, same comment — *"not sure how we reconcile the two here"*), tracked as **O9** in `docs/plans/2026-09-25-5038-source-version-anchor.md`; research first, and no second truth signal is added beside EP in the meantime.
+- **A non-re-read successor records no version** (owner, O1) and reads `unknown` until it is itself read from a source; `ONTOLOGY.md` §4.6 is unmodified and the §4.6 reopen was not taken.
+- **The re-inference step has no owner** — filed as **#5422**, because acceptance A2 of `#5038` cannot complete without it. **`#5024` is its precondition** (a re-fetched `:Source` currently mutates in place, unjournalled: if the old version is overwritten there is nothing to mark stale).
+
+*This pointer records status only. `ONTOLOGY.md` §4.6 is owner-gated and is NOT edited by this work.*
 
 ---
 
@@ -1120,7 +1254,7 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 | # | the question | ✅ ANSWER (owner, 2026-09-24) | what changed |
 |---|---|---|---|
 | **O1** | Is the journal allowed to be the authority? | ⭐ **Neither side was ever decided — and the conflict was mine.** `#2826` **A2** (the actual decision row, owner-required) **recommended the journal be authoritative**; `#2881` §7 recommended reversing it; `durability-posture.md` recorded the reversal as *"the rule"* and flagged *"the row is the owner's to answer."* **The two questions are different and both hold: DURABILITY = the store's backup (`#2881`, unchanged); REBUILDABILITY = the journal.** | **No reopen.** The wording is scoped, not overridden: *"the journal is the derived layer's rebuild source; it is not a durability mechanism."* **⚠️ The real work this exposes: `rebuild_all` performs an unconditional wipe + journal-only replay — i.e. the CODE already treats an incomplete log as the authority.** That is a defect, and it gets its own issue. **Embedding in the journal: yes — a re-embed is a re-run, not a replay** (§3). |
-| **O2** | Per-item or per-batch target; what recall floor? | ⛔ **THE QUESTION IS WITHDRAWN — the owner rejected its framing.** *"we're not optimising stupidly for a number… this is not a corporate OKR setting exercise. We need to balance multiple things at each step of the pipeline and on each architecture decision."* | **Removed from this document.** The objective is **great recall and reasoning at an affordable cost**; the method is **manual step-by-step review** until a calibration set exists. **No volume target, no recall floor, no node count.** |
+| **O2** | Per-item or per-batch target; what recall floor? | ⛔ **THE QUESTION IS WITHDRAWN — the owner rejected its framing.** *"we're not optimising stupidly for a number… this is not a corporate OKR setting exercise. We need to balance multiple things at each step of the pipeline and on each architecture decision."* | **Removed from this document.** The objective is **great recall and reasoning at an affordable cost**; the method is **manual step-by-step review** until a calibration set exists. **No volume target, no recall floor, no node count.** ⭐ **AMENDED 2026-09-30 — the owner narrowed WHAT this withdrew: a TARGET, not a MEASUREMENT.** *"Tracking how many facts are useful is good data to have… having that measurement is good"*, with the goals explicitly deferred: *"we can decide what goals we optimise for later."* **⇒ What O2 withdrew is a number to optimise *toward*; measuring how many durable claims we kept is not such a number and survives it.** §6.1 and §15 are corrected to match. ⚠️ **No target, floor value or node count is set by this amendment** — only the measurement is re-affirmed. |
 | **O3** | Which outcome word does the gate emit? | ✅ **ADOPTED — use the declared word (`DISCARD`), matching the engine's existing classifier.** | `#4899`'s text is corrected to the declared vocabulary. |
 | **O4** | Can near-duplicates be merged? | ✅ **YES — the owner authorised it, with Jev as arbiter over the claim plus narrative/raw data.** *"yes we can merge near duplicate claims. maybe we can have jev with the claim and the narrative/raw data/both arbiter that"* | ⛔ **This SUPERSEDES the `OVERRIDES:` ruling on `#4899`** (*"never merging two claims into one"*). **The new ruling is recorded on `#4899`, replacing the old — the owner overriding their own earlier ruling, which is the only valid way to reverse one.** ⚠️ **Shaped by evidence (§16.3): a HIGH merge bar, and merge only when nothing distinguishing is lost — never across differing numbers, names, negations or conditions (the list has since grown; `EXTRACTOR-V4-ARCHITECTURE.md` §16.4 carries the current classes).** Practical thresholds cluster at ~0.95. |
 | **O5** | Sample first, or make it deterministic? | ✅ **Neither as an either/or — draft and iterate.** *"we draft something (a prompt, a step of the extraction workflow, etc) and run it and see the result then refine and run again, until good."* | **The method is: draft → run → look → refine → repeat.** Recorded as the working method for every step. |
@@ -1146,7 +1280,7 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 ---
 
 ## 15. The measurement plan — what is actually worth measuring
-**⚠️ CUT HARD 2026-09-24.** An earlier version listed seven measurements, several invented to defend numbers this document has since withdrawn. **A measurement is only worth listing if a decision turns on it.**
+**⚠️ CUT HARD 2026-09-24.** An earlier version listed seven measurements, several invented to defend numbers this document has since withdrawn. **A measurement is only worth listing if a decision turns on it.** ⭐ **M6 was added 2026-09-30 under that rule: the owner re-affirmed that the retention measurement is wanted (a decision turns on it — §14.1 O2, AMENDED), while the goal it would be compared against stays deferred.**
 
 | id | question | why it matters | status |
 |---|---|---|---|
@@ -1155,6 +1289,7 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 | **M3** | **How much of the 140 MB is junk?** — re-measure after the extractor work lands | tells us whether the engine decision needs revisiting at all | after extractor work |
 | **M4** | **Does self-hosting beat Cloud at our footprint?** — price a VM holding N tenants at ≤75% RAM | the named revisit lever (§14.2) | when there are users |
 | **M5** | ⭐ **Where should the vector index live?** — our query latency with the index resident, against a real `GRAPH.MEMORY USAGE` read | **decides V1 (§12.1c) — the month-6 answer** | **M1 done (§12.1d); `GRAPH.MEMORY USAGE` read (§12.1b). V1 is now a decision, not a measurement gap.** |
+| **M6** | ⭐ **How many durable claims did we keep?** — the share of the candidate facts the pipeline saw that survived as claims | **The guard §6.1 requires: without it, a volume objective can be satisfied by writing nothing.** The owner re-affirmed **2026-09-30** that this measurement is wanted (§14.1 **O2**, AMENDED) — **only the goal is deferred.** | **needed — the denominator must be stated first** |
 
 **WITHDRAWN (recorded so they are not re-invented):** the cold-index p95/p99 study (**premise was vendor marketing**), the quantization-recall study (**no engine to apply it to**), the 1,000-partition planning study (**§12.1a already answers it — it fails**), and the narrative-vs-raw A/B (**`#3011` is already pre-registered; do not duplicate it**).
 

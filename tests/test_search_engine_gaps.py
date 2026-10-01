@@ -18,6 +18,7 @@ import unittest.mock as mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: I001
+from tests import _live_utils
 from tortoise.search_engine import (
     fallback_tfidf,
     degradation_chain,
@@ -93,8 +94,8 @@ def _probe_falkordb(candidates: list[str | None]) -> tuple[bool, str | None]:
 
 _uri_candidates = [
     os.environ.get("TORTOISE_DB_URI"),
-    "docker://:falkordb@localhost:6379/tortoise_test_fts125",
-    "docker://:@localhost:16379/tortoise_test_fts125",
+    _live_utils.docker_uri("tortoise_test_fts125"),
+    _live_utils.legacy_uri("tortoise_test_fts125"),
 ]
 FALKORDB_AVAILABLE, _WORKING_URI = _probe_falkordb(_uri_candidates)
 
@@ -107,7 +108,8 @@ def _current_uri() -> str:
     per-test isolation. Falls back to the module-probe _WORKING_URI only if
     the env var is unset.
     """
-    return os.environ.get("TORTOISE_DB_URI") or (_WORKING_URI or "docker://localhost:6379/tortoise_test_fts125")
+    return os.environ.get("TORTOISE_DB_URI") or (_WORKING_URI or _live_utils.docker_uri(
+        "tortoise_test_fts125", password=None))
 
 
 # ── Mock helpers ────────────────────────────────────────────────────────────
@@ -213,8 +215,8 @@ class TestProbeFalkordb:
         try:
             candidates = [
                 os.environ.get("TORTOISE_DB_URI"),
-                "docker://:falkordb@localhost:6379/tortoise_test_fts125",
-                "docker://:@localhost:16379/tortoise_test_fts125",
+                _live_utils.docker_uri("tortoise_test_fts125"),
+                _live_utils.legacy_uri("tortoise_test_fts125"),
             ]
             available, working_uri = _probe_falkordb(candidates)
             assert available is True
@@ -231,8 +233,8 @@ class TestProbeFalkordb:
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         candidates = [
             None,  # os.environ.get returns None
-            "docker://:falkordb@localhost:6379/tortoise_test_fts125",
-            "docker://:@localhost:16379/tortoise_test_fts125",
+            _live_utils.docker_uri("tortoise_test_fts125"),
+            _live_utils.legacy_uri("tortoise_test_fts125"),
         ]
         available, working_uri = _probe_falkordb(candidates)
         # Either available (if a localhost FalkorDB is running) or not —
@@ -268,8 +270,8 @@ class TestProbeFalkordb:
         try:
             candidates = [
                 os.environ.get("TORTOISE_DB_URI"),
-                "docker://:falkordb@localhost:6379/tortoise_test_fts125",
-                "docker://:@localhost:16379/tortoise_test_fts125",
+                _live_utils.docker_uri("tortoise_test_fts125"),
+                _live_utils.legacy_uri("tortoise_test_fts125"),
             ]
             available, working_uri = _probe_falkordb(candidates)
             assert available is False
@@ -599,12 +601,15 @@ class TestRunVectorQuery:
         graph = MultiCallGraph([
             (None, Exception(
                 "Invalid arguments for procedure 'db.idx.vector.queryNodes'")),
-            ([("a", 0.95), ("b", 0.8)], None),
+            # Sig B's rows carry the engine's DISTANCE (#5583), so these are
+            # distances: 0.05 is a near row, 0.8 a far one.
+            ([("a", 0.05), ("b", 0.8)], None),
         ])
 
         result = run_vector_query(graph, self.QUERY_VEC, limit=10, is_embedded=False)
 
-        assert result == [("a", 0.95), ("b", 0.8)]
+        assert [pid for pid, _ in result] == ["a", "b"]
+        assert [s for _, s in result] == pytest.approx([0.95, 0.2])
         assert len(graph.query_calls) == 2
         sig_b = graph.query_calls[1][0]
         assert "YIELD node, score" in sig_b
@@ -612,16 +617,25 @@ class TestRunVectorQuery:
         assert "vec.euclideanDistance" not in sig_b
 
     def test_docker_mode_signature_b_scores_clamped_to_non_negative(self):
-        """#1359: engine-native cosine scores outside [0, 1] are clamped
-        so RRF/single-strategy ordering stays sane."""
+        """#1359 / #5583: sig B's engine value is a DISTANCE, and the
+        similarity derived from it is clamped to [0, 1] so RRF and
+        single-strategy ordering stay sane.
+
+        A cosine distance lives in [0, 2]: 0.0 is a perfect match
+        (similarity 1.0), and 1.0 or beyond is unrelated or opposed
+        (similarity 0.0). The clamp therefore bites at the FAR end. The
+        pre-#5583 fixture used ``-0.2``, which is not a distance at all — it
+        was written against the (unmeasured) belief that the engine returns a
+        similarity.
+        """
         graph = MultiCallGraph([
             (None, Exception("Type mismatch: expected Integer, Float, or Null but was List")),
-            ([("a", 1.4), ("b", -0.2)], None),
+            ([("a", 2.4), ("b", 0.0)], None),
         ])
 
         result = run_vector_query(graph, self.QUERY_VEC, limit=10, is_embedded=False)
 
-        assert result == [("a", 1.0), ("b", 0.0)]
+        assert result == [("a", 0.0), ("b", 1.0)]
 
     def test_docker_mode_both_signatures_fail_falls_back_to_brute_force(self):
         """#1359: sig A 'not registered' AND sig B fails → brute-force is
@@ -645,13 +659,14 @@ class TestRunVectorQuery:
         graph = MultiCallGraph([
             (None, Exception(
                 "Procedure `db.idx.vector.queryNodes` is not registered")),
-            ([("evt-1", 0.9)], None),
+            ([("evt-1", 0.9)], None),      # a DISTANCE (#5583)
         ])
 
         result = run_vector_query(
             graph, self.QUERY_VEC, entity_type="event", is_embedded=False)
 
-        assert result == [("evt-1", 0.9)]
+        assert [pid for pid, _ in result] == ["evt-1"]
+        assert [s for _, s in result] == pytest.approx([0.1])
         assert len(graph.query_calls) == 2
         assert "queryNodes('Event'," in graph.query_calls[0][0]
         assert "queryNodes('Event'," in graph.query_calls[1][0]
@@ -662,13 +677,14 @@ class TestRunVectorQuery:
         """vector_index_api='cypher' → sig B attempted directly; sig A is
         NOT attempted (index creation recorded the Cypher-native API — the
         failed sig-A round trip is skipped)."""
-        graph = SimpleMockGraph(result_set=[("a", 0.95), ("b", 0.8)])
+        graph = SimpleMockGraph(result_set=[("a", 0.05), ("b", 0.8)])  # distances (#5583)
 
         result = run_vector_query(
             graph, self.QUERY_VEC, limit=10, is_embedded=False,
             vector_index_api="cypher")
 
-        assert result == [("a", 0.95), ("b", 0.8)]
+        assert [pid for pid, _ in result] == ["a", "b"]
+        assert [s for _, s in result] == pytest.approx([0.95, 0.2])
         assert len(graph.query_calls) == 1  # no failed sig-A attempt
         only = graph.query_calls[0][0]
         assert "YIELD node, score" in only
@@ -708,18 +724,21 @@ class TestRunVectorQuery:
 
     def test_none_api_keeps_probe_behavior(self):
         """vector_index_api=None → sig A first, retry sig B on signature
-        failure (historical probe behavior)."""
+        failure (historical probe behavior).
+
+        Sig B's rows are DISTANCES and come back as similarities (#5583).
+        """
         graph = MultiCallGraph([
             (None, Exception(
                 "Type mismatch: expected Integer, Float, or Null but was List")),
-            ([("a", 1.4), ("b", -0.2)], None),
+            ([("a", 2.4), ("b", 0.0)], None),
         ])
 
         result = run_vector_query(
             graph, self.QUERY_VEC, limit=10, is_embedded=False,
             vector_index_api=None)
 
-        assert result == [("a", 1.0), ("b", 0.0)]
+        assert result == [("a", 0.0), ("b", 1.0)]
         assert len(graph.query_calls) == 2
 
     def test_docker_mode_generic_error_falls_back_to_brute_force(self):

@@ -7,6 +7,7 @@ from __future__ import annotations  # noqa: I001
 
 import logging
 import os
+import re
 import threading
 import time
 from collections import Counter
@@ -333,6 +334,38 @@ def search_provenance_enabled() -> bool:
     non-degraded POINT query path only.
     """
     return is_truthy(os.environ.get(SEARCH_PROVENANCE_FLAG_ENV))
+
+
+def currency_status(remembered: str, current: str) -> str:
+    """#5199 — the currency of a ``sourceVersion`` note, as a **READ**.
+
+    ``current``  the note names the version the source holds NOW
+    ``stale``    it names a DIFFERENT version — the thing built from it may be
+                 out of date
+    ``unknown``  nothing was noted, or the source has no version. This is the
+                 HONEST answer and is deliberately NOT a synonym for ``current``:
+                 an absent note must never read as fresh, because "no recorded
+                 version" silently rendering as "up to date" is the precise
+                 false-current the note exists to expose.
+
+    A pure function of two strings, never a stored status field: the #5199
+    ruling keeps currency a read, so a source edit needs no backfill and no two
+    readers can disagree about the same **pair** (a later source edit moves the
+    pair, so the same link can legitimately read differently across time). The
+    comparison is exact string
+    equality — the versions are content hashes, so there is no ordering to get
+    wrong and no "newer" to infer.
+
+    ⚠ IT COMPARES **ONE LINK'S** PAIR. A Point's own currency is an AGGREGATE
+    across its links (ONTOLOGY §4.6: stale if ANY link is behind, current only
+    when EVERY link is), so a Point-level verdict is NOT derivable from a single
+    pair — a caller that collapses several links into one call here can report
+    ``current`` for a Point another link makes stale. Aggregate per §4.6 at the
+    call site; never assume this helper speaks for the Point.
+    """
+    if not remembered or not current:
+        return "unknown"
+    return "current" if remembered == current else "stale"
 
 
 @dataclass
@@ -1030,19 +1063,39 @@ def run_vector_query(
                 logger.warning("Vector query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
             _breaker_record("vector", True)
             if sig == "B":
-                # Engine-native scores: cosine similarity in (-1, 1] on
-                # similarityFunction:'cosine' indexes — clamp to [0, 1]
-                # and pass through in index rank order.
+                # #5583: the engine's value here is a DISTANCE (lower is
+                # better), NOT a similarity. `db.idx.vector.queryNodes`
+                # returns `1 - cosine` for a
+                # `similarityFunction: 'cosine'` index: a PERFECT match comes
+                # back as 0.0 and an orthogonal one as 1.0. Passing that
+                # through as a similarity inverted this leg exactly — the
+                # WORST row scored highest, and every `min_similarity` floor
+                # discarded the rows it exists to keep. Measured on the
+                # docker lane (falkordb-server, module ver 42004): a query
+                # identical to the stored vector scored 0.0, an orthogonal
+                # one scored 1.0.
+                #
+                # The conversion mirrors this function's own scan fallback
+                # below (`1.0 / (1.0 + distance)`): both branches derive a
+                # similarity from a distance, so they agree on polarity.
+                # Cosine distance lies in [0, 2], so `1 - d` lies in [-1, 1]
+                # and the [0, 1] clamp still maps a perfect match to 1.0.
+                # The engine's row order is ALREADY best-first, so only the
+                # value changes here; the order is passed through untouched.
                 out = []
                 for row in rows:
                     try:
-                        score = float(row[1])
+                        distance = float(row[1])
                     except (IndexError, TypeError, ValueError):
-                        score = 0.0
+                        distance = None
+                    # An unreadable score carries no evidence of similarity —
+                    # send it to the floor (0.0), never to the ceiling.
+                    score = 0.0 if distance is None else 1.0 - distance
                     out.append((row[0], max(0.0, min(1.0, score))))
                 if min_similarity is not None and out:
-                    # Score IS cosine here — filter directly. Only claim the
-                    # FLOOR when there was something to filter: a zero-row
+                    # Score is a true cosine similarity now — filter directly.
+                    # Only claim the FLOOR when there was something to filter: a
+                    # zero-row
                     # index result is `empty_results`, not a relevance verdict
                     # (claiming the floor there would suppress the caller's
                     # legitimate degraded fallback, #4028 review P1).
@@ -1661,6 +1714,42 @@ CONTESTED_VARIANCE_THRESHOLD = 0.04
 _DECORATION_TIMEOUT_MS = 200
 
 
+#: A value that is a CALENDAR DATE with NO time-of-day component, optionally
+#: followed by a timezone offset — the shape ``_created_sort_key`` must ANCHOR
+#: rather than let ``fromisoformat`` resolve in the reader's zone (#3982).
+#:
+#: The offset belongs INSIDE the anchored pattern. The pattern must match the
+#: WHOLE string (``\Z``, not ``$``), because an unanchored date alternative is
+#: free to match only its own extent: against ``"2026-W24-05:00"`` the
+#: week-with-day alternative matches ``"2026-W24-0"``, which would leave
+#: ``"5:00"`` — not an offset — and the value would go unanchored. ``\Z`` and
+#: not ``$``: ``$`` also matches immediately BEFORE a trailing newline, so
+#: ``"2026-06-10\n"`` would be accepted as a date-only value and anchored,
+#: laundering a malformed stored value into a valid instant where it used to
+#: fall through to the unparseable bucket.
+#:
+#: Reachability: the caller's gate is ``s[0].isdigit() and len(s) >= 10 and
+#: ("-" in s or "T" in s)``, so every DASHED date of 10+ characters arrives
+#: (bare or with any offset, either sign), a COMPACT form arrives when it bears
+#: a negative offset or a ``T``, and a bare compact date never arrives.
+#:
+#: ``YYYY-DDD`` (ordinal) is absent deliberately: the stdlib cannot parse it
+#: (``date.fromisoformat("2026-161")`` raises), so such values are unparseable
+#: either way and an alternative for them would be dead.
+_DATE_ONLY_RE = re.compile(
+    r"^(?P<date>"
+    r"\d{4}-W\d{2}-\d"       # ISO week date, dashed, with day
+    r"|\d{4}-W\d{2}"         # ISO week date, dashed, week only
+    r"|\d{4}W\d{2}\d"        # ISO week date, compact, with day
+    r"|\d{4}W\d{2}"          # ISO week date, compact, week only
+    r"|\d{4}-\d{2}-\d{2}"    # calendar date
+    r"|\d{8}"                # calendar date, compact
+    r")"
+    r"(?P<off>[+-][0-9]{2}(?::?[0-9]{2})?(?::?[0-9]{2})?)?"
+    r"\Z"
+)
+
+
 def _created_sort_key(value):
     """Sortable key for createdAt values — safe across mixed formats.
 
@@ -1675,8 +1764,53 @@ def _created_sort_key(value):
     s = str(value or "")
     if s and s[0].isdigit() and len(s) >= 10 and ("-" in s or "T" in s):
         try:
-            from datetime import datetime
-            return (0, datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp())
+            from datetime import date, datetime
+            iso = s.replace("Z", "+00:00")
+            # #3982: a DATE-ONLY value carries no offset, and
+            # ``datetime.fromisoformat`` returns a NAIVE datetime whose
+            # ``.timestamp()`` reads it in the READER'S LOCAL ZONE — so the
+            # instant a stored fact occupies, and therefore whether a query
+            # finds it, depended on the machine doing the asking. Anchoring is
+            # not a preference; it is settled normatively. ECMA-262 §21.4.3.2
+            # (the ECMAScript standard, ``Date.parse``): "When the UTC offset
+            # representation is absent, date-only forms are interpreted as a
+            # UTC time and date-time forms are interpreted as a local time."
+            # So a date-only value is pinned to UTC midnight below, while a
+            # date-TIME with no offset keeps the LOCAL reading the same clause
+            # prescribes. W3C XML Schema 1.1 corroborates from the other side:
+            # a zone-less value is not one moment (a calendar day spans up to
+            # 52 hours), so it must be anchored, not resolved against the
+            # reader.
+            #
+            # Scope: this aligns DATE-ONLY with the repo's #153 rule ("no zone
+            # given means UTC") and deliberately does NOT extend it to a
+            # zone-less date-TIME, which stays local. The two therefore DISAGREE
+            # for the same nominal string: this primitive reads
+            # "2024-01-01T00:00:00" locally, while
+            # ``source_credibility._parse_timestamp`` reads it as UTC (pinned by
+            # tests/test_event_provenance.py::test_recency_timezone_naive_ingested_at).
+            # That divergence is OPEN, recorded here so it is visible at the
+            # primitive rather than rediscovered from a surprising ordering.
+            #
+            # An offset suffix needs an explicit time component. Python 3.11+
+            # accepts ANY character as the date/time separator, so
+            # ``fromisoformat("2026-06-10+05:00")`` reads the offset's digits
+            # as a TIME-OF-DAY and returns ``2026-06-10 05:00:00`` with
+            # ``tzinfo=None`` — never applying the offset. A date-only value is
+            # therefore normalised to an explicit midnight (the stated offset
+            # if it has one, UTC if not) before parsing.
+            if _m := _DATE_ONLY_RE.match(iso):
+                # Rebuild through ``date`` so every alternative (dashed,
+                # compact, week) is anchored the same way: a stated offset
+                # wins, a bare date means UTC midnight. Going through ``date``
+                # rather than string surgery is what lets a WEEK date be
+                # handled at all — a time cannot simply be appended to it.
+                iso = (
+                    date.fromisoformat(_m.group("date")).isoformat()
+                    + "T00:00:00"
+                    + (_m.group("off") or "+00:00")
+                )
+            return (0, datetime.fromisoformat(iso).timestamp())
         except ValueError:
             pass
     return (1, s)
@@ -2285,15 +2419,19 @@ def get_relationships_bounded(
 #: read-only 2026-09-23: the whole edge inventory of the dogfood graph
 #: (37,535 Points) holds **0** ``aboutSubject`` edges and **1** ``:Subject``
 #: node, because the capture entity spine stores SUBJECT-kind entities as
-#: ``:Object`` (issue #4934) and the only document-path Subject writer is
-#: behind the opt-in ``--semantic-extract`` flag (issue #4938).
-#: Tracked producers: #1370, #1509. The marker self-clears as soon as any
-#: ``aboutSubject`` edge exists on the graph.
+#: ``:Object`` (issue #4934) and the document-path Subject writer is ON by
+#: default since #4938 — but it writes ``(document :Source)-[:aboutSubject]->
+#: (:Subject)`` edges, which this probe deliberately does NOT count because
+#: they cannot resolve a Point's ``subject`` field. Tracked producers for the
+#: Point/Event-sourced shapes: #1370, #1509. The marker self-clears as soon as
+#: any Point/Event-sourced ``aboutSubject`` edge exists.
 SUBJECT_BINDING_UNAVAILABLE = (
     "aboutSubject has no reachable producer for Points or Events on this "
     "graph, so 'subject' is structurally empty rather than unknown: the "
     "capture entity spine writes SUBJECT-kind entities as :Object (#4934), "
-    "and the document extractor's Subject writer is opt-in (#4938). "
+    "and the document extractor's Subject writer — on by default since "
+    "#4938 — writes document-Source-sourced edges only, which cannot "
+    "resolve a Point's subject. "
     "Tracked producers: #1370, #1509."
 )
 

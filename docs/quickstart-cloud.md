@@ -36,23 +36,31 @@ tortoise signup
 
 ## 2. Connect your agent (MCP, streamable-http)
 
-The hosted endpoint is `https://api.premiselabs.co/mcp/`, and it only speaks **streamable-http** — that's the only correct hosted pattern. Auth is a Bearer header with your API key.
+The hosted endpoint is `https://api.premiselabs.co/mcp/`, and it only speaks **streamable-http** — that's the only correct hosted pattern. Auth is a Bearer header with your API key. In client JSON the transport value is `"http"` — Claude Code accepts `"streamable-http"` as an alias, but Cursor's CLI can drop the whole config file and Pi ignores `type`, so `"http"` is the only universally safe value.
 
-Add this to your client's `.mcp.json` (Claude Code, Cursor, and most MCP clients read this file):
+Export the key first. For one machine, prefer the one-liner — it writes **local** scope to `~/.claude.json` (private, never committed): `claude mcp add --transport http tortoise https://api.premiselabs.co/mcp/ --header "Authorization: Bearer $TORTOISE_API_KEY"`. To share the config through the repo, add this to your client's `.mcp.json` (Claude Code and Pi read this file; Cursor reads `.cursor/mcp.json` and expands only the `${env:…}` form) — the file is **committable**, so it carries the env reference, never the key:
+
+```bash
+export TORTOISE_API_KEY=tt_YOUR_KEY   # in this shell; use a non-committed include in your profile if it is version-controlled
+```
 
 ```json
 {
   "mcpServers": {
     "tortoise": {
-      "type": "streamable-http",
+      "type": "http",
       "url": "https://api.premiselabs.co/mcp/",
       "headers": {
-        "Authorization": "Bearer tt_YOUR_KEY"
+        "Authorization": "Bearer ${TORTOISE_API_KEY}"
       }
     }
   }
 }
 ```
+
+A project-scope `.mcp.json` stays **⏸ Pending approval** in Claude Code until you
+approve it once — start `claude` in the project and allow the prompt, or run
+`/mcp` (`claude mcp reset-project-choices` resets the choice).
 
 **Codex** instead:
 
@@ -92,10 +100,20 @@ tortoise context                                    # memory digest for session-
 
 ### Session capture requires explicit consent
 
-Filing a transcript to Tortoise Cloud is **off by default** and is never
-inferred from the presence of an API key — exporting `TORTOISE_API_KEY` for the
-MCP `Authorization` header (section 2) only authenticates the connection. To
-let the Claude Code `session-end.sh` hook (or `tortoise session capture` /
+Filing a transcript to Tortoise Cloud is **off by default**, and what gates it
+is **per-surface**, not uniform (#3615):
+
+- **The in-repo paths** fail closed on the explicit `TORTOISE_CAPTURE=1` opt-in
+  (`tortoise/capture_consent.py`), which is credential-independent — exporting
+  `TORTOISE_API_KEY` for the MCP `Authorization` header (section 2) does **not**
+  enable capture there; it only authenticates the connection.
+- **The Pi agent-harness `reflect-hook` is not gated that way.** It lives in
+  `agent-infra` and starts hosted capture on **credential presence**, never
+  reading `TORTOISE_CAPTURE` — so on a Pi host, exporting `TORTOISE_API_KEY` is
+  a **data-sharing opt-in**, not a credential-only change. Open dependency:
+  **agent-infra#1117**.
+
+To let the Claude Code `session-end.sh` hook (or `tortoise session capture` /
 `tortoise sessions import`) file sessions:
 
 ```bash
@@ -174,11 +192,11 @@ Running Tortoise yourself and moving to hosted? The primary path is **`tortoise 
 
    Encrypted by default (AES-256-GCM). Set `TORTOISE_BACKUP_KEY` (base64 32-byte) to use a key you control, or keep the `key_b64` the CLI prints once on its stdout JSON line — you need it to import.
 2. **Register a hosted account** — [tortoise.premiselabs.co/signup](https://tortoise.premiselabs.co/signup), or from the CLI: `tortoise signup` (mints a free hosted team + key, no email).
-3. **Connect a working directory**: run `tortoise init --api-key tt_<your-key>` from the directory you'll use.
+3. **Connect a working directory**: run `tortoise init --api-key 'tt_<your-key>'` from the directory you'll use.
 4. **Import the artifact** into the team graph (owner session auth):
 
    ```bash
-   curl -X POST https://api.premiselabs.co/v1/organizations/<org_id>/import \
+   curl -X POST "https://api.premiselabs.co/v1/organizations/<org_id>/import" \
      -H "Authorization: Bearer <owner-session-jwt>" \
      -H "Content-Type: application/vnd.tortoise.export.v1" \
      -H "X-Tortoise-Import-Key: <key_b64>" \

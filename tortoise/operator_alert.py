@@ -52,6 +52,58 @@ _logger = logging.getLogger("tortoise.operator_alert")
 #: ``tests/test_operator_alert.py::test_kind_constants_match_the_runbook``.
 UNMETERED_INCREMENT_KIND = "UNMETERED_INCREMENT"
 
+#: The incident KINDS for a fault on the abuse ENFORCEMENT path (#4872). Declared
+#: HERE beside ``UNMETERED_INCREMENT_KIND`` so every operator-alert kind has one
+#: definition and one home for the runbook pin
+#: (``tests/test_operator_alert.py::test_kind_constants_match_the_runbook``).
+#:
+#: TWO kinds, not one, because the incident BODY is written create-once: a DEDUP
+#: hit never rewrites ``detail`` (``alert_store.AlertStore.open_incident_state``),
+#: so a single kind would let the first lane to fault own the incident for its
+#: whole life. ``ABUSE_DECISION_FAULT`` is the evaluation path (``window_sum``,
+#: ``clean_window_episode_end``, ``latest_flag_at``, ``rule_event_between``);
+#: ``ABUSE_ENFORCEMENT_FAULT`` is the enforcement ACTION (``suspend_org``,
+#: ``flag_org``). Keeping them apart means a transient evaluation-read blip can
+#: never mask a failed suspension — the defect #4872 is about.
+#:
+#: Deliberately not superstrings of ``UNMETERED_INCREMENT`` / ``COHORT_*``: a
+#: dropped metering increment, an unenforceable spend cap, and an abuse
+#: decision fault are different conditions with different runbook actions, and
+#: the R2-unreachable adoption path resolves an incident by GitHub search on the
+#: subject suffix.
+ABUSE_DECISION_FAULT_KIND = "ABUSE_DECISION_FAULT"
+ABUSE_ENFORCEMENT_FAULT_KIND = "ABUSE_ENFORCEMENT_FAULT"
+
+#: The incident KIND for a Stripe billing notification the #3498 offload seam
+#: REFUSED (#4456). The event is already CLAIMED when the notify is submitted
+#: (the ``WebhookEvent`` marker commits BEFORE it), so a Stripe retry sees
+#: ``is_first=False`` and the notification is **lost permanently** — the org
+#: is never told its plan changed. The seam's public ``refused``
+#: discriminator distinguishes this real drop from a plain bound miss (where
+#: the worker still completes the send), and this is the escalation path.
+BILLING_NOTIFY_REFUSED_KIND = "BILLING_NOTIFY_REFUSED"
+
+#: The incident KIND for a PROVIDER BILLING EXHAUSTION observed on a serving
+#: lane (#3873). The trigger is the provider's OWN refusal — an HTTP 402, or an
+#: OpenRouter 403 carrying a key-limit body signature
+#: (``model_adapters.is_billing_exhausted``) — so this kind carries NO
+#: threshold: it records an OBSERVED event, never a policy line. Before this
+#: existed, ``RotatingModel`` absorbed the refusal, cooled the lane, rotated,
+#: and told no operator: the beta's aggregate spend bound is the provider
+#: credit balance, so the exhaustion arrived as an outage (all lanes down)
+#: rather than as a warning, and the repo could not see it at all.
+#:
+#: Subject is the SERVING LEG's provider slug (``deepseek-direct`` /
+#: ``openrouter`` / ``venice``), NOT the platform sentinel and NOT an org: the
+#: alert must name the leg that ACTUALLY refused (a hop can reach a leg whose
+#: provider was not the configured primary), and per-leg dedup means a second
+#: lane exhausting is its own incident rather than being swallowed by the
+#: first's still-open one. Detail is a bounded, message-free vocabulary —
+#: ``provider``, ``error_type``, ``status``, ``has_alternative`` — because the
+#: incident body is durable and an exception MESSAGE is attacker-influenceable
+#: text.
+PROVIDER_BILLING_EXHAUSTED_KIND = "PROVIDER_BILLING_EXHAUSTED"
+
 #: Repeat-suppression windows (seconds). A recorded incident holds the long
 #: window; an attempt that recorded NOTHING re-arms on the short one, so a
 #: transient channel outage delays the first alert by at most a minute. The
@@ -173,6 +225,98 @@ def alert_unmetered_increment(lane: str, org_id: str | None,
     with contextlib.suppress(Exception):  # the alert must never raise
         alert_operator(UNMETERED_INCREMENT_KIND, org_id,
                        {"lane": lane, "error_type": type(error).__name__})
+
+
+def alert_abuse_fault(kind: str, lane: str, subject_org: str,
+                      error: BaseException, rule: str | None = None,
+                      fallback: str | None = None) -> None:
+    """Dispatch an abuse enforcement-path fault incident (#4872). Never raises.
+
+    PLATFORM-SCOPED BY CONSTRUCTION: the dispatch subject is hard-coded ``""``
+    (the store's canonical platform sentinel, ``ops/alerts/{kind}/_.json``), so a
+    fault on the SHARED substrate — one PostgREST RPC, one schema cache, one
+    ACL, one transport — is ONE incident rather than N per-org incidents. The
+    org whose evaluation failed is carried in the ``detail`` as ``subject_org``;
+    note it is EVIDENCE, NOT SCOPE: the body is written create-once, so only the
+    first org to fault is ever recorded and a triager must not read it as the
+    blast radius. The signature deliberately takes no subject argument: platform
+    scope is not a call-site choice, so no caller can reintroduce per-org
+    fan-out.
+
+    A platform subject also collapses the throttle key to one, so a store fault
+    affecting many orgs at once is one throttled dispatch rather than an
+    alert-plane storm.
+
+    The detail vocabulary is bounded and message-free (``lane``/``error_type``/
+    ``rule``/``subject_org``/``fallback``): the incident BODY is durable and an
+    exception MESSAGE is attacker-influenceable text that must never reach the
+    operator channel. The exception class name is the correct amount of detail.
+    """
+    with contextlib.suppress(Exception):  # the alert must never raise
+        alert_operator(kind, "",
+                       {"lane": lane,
+                        "error_type": type(error).__name__,
+                        "rule": rule,
+                        "subject_org": subject_org,
+                        "fallback": fallback})
+
+
+def alert_billing_notify_refused(org_id: str | None,
+                                 event_type: str | None = None) -> None:
+    """Dispatch the ``BILLING_NOTIFY_REFUSED`` incident. Never raises.
+
+    Fired by the Stripe webhook when the #3498 offload seam REFUSED the
+    billing notification (#4456): the event is already claimed, so this real
+    drop is unrecoverable and must not be silent. Detail is a fixed,
+    message-free vocabulary (the incident body is durable) — ``op`` names the
+    seam site, ``event_type`` the Stripe event type, ``org_id`` the affected
+    org; no free text.
+
+    The incident SUBJECT is PLATFORM-SCOPED (``""``) by the #4456 plan: ONE
+    Resend account serves every team, so a per-org key would file N issues for
+    ONE outage (the same reason ``notify.py`` passes ``""`` for a failed
+    billing send). Dedup is ``(kind, subject)``; the affected org still
+    travels in the detail. The shared telemetry pool makes such a refusal
+    CROSS-TENANT — one saturation refuses a notify per billing webhook for
+    every tenant — so per-org keying would amplify the outage it reports.
+    """
+    with contextlib.suppress(Exception):  # the alert must never raise
+        alert_operator(BILLING_NOTIFY_REFUSED_KIND, "",
+                       {"op": "billing_notify", "event_type": event_type,
+                        "org_id": org_id or "?"})
+
+
+def alert_provider_billing_exhausted(provider: str, error: BaseException, *,
+                                     status: int | None = None,
+                                     has_alternative: bool = False) -> None:
+    """Dispatch the ``PROVIDER_BILLING_EXHAUSTED`` incident. Never raises.
+
+    The post-hoc operator record for #3873: the provider refused on its OWN
+    budget/limit (402, or a key-limit 403 — ``is_billing_exhausted``), so the
+    lane that was in use can no longer serve. This is the EVENT record, not a
+    threshold watch: nothing here decides at what spend to warn, and a trip is
+    advisory only (it must never refuse a request — the refusal already
+    happened, and a second refusal path would be a spend-policy change).
+
+    Best-effort BY CONSTRUCTION, in two layers, because it is called from the
+    LLM rotation path (`RotatingModel.complete`): ``alert_operator`` is already
+    fire-and-forget, and the ``suppress`` below means an alert-plane failure
+    can never change the request's outcome or turn a rotation into a 500.
+
+    The SUBJECT is the serving leg's provider slug, so one incident is filed
+    per exhausted leg (see ``PROVIDER_BILLING_EXHAUSTED_KIND``).
+    ``has_alternative`` records whether ANOTHER lane was configured: ``False``
+    means this refusal was raised (no alternative — this call's cliff), ``True``
+    means the call continued on the rotation path. ``True`` does NOT mean the
+    call ultimately succeeded — a later lane can refuse too.
+    """
+    with contextlib.suppress(Exception):  # the alert must never raise
+        leg = provider or "unknown"
+        alert_operator(PROVIDER_BILLING_EXHAUSTED_KIND, leg,
+                       {"provider": leg,
+                        "error_type": type(error).__name__,
+                        "status": status,
+                        "has_alternative": bool(has_alternative)})
 
 
 def file_operator_incident(store, kind: str, org_id: str | None, detail: dict) -> bool:
