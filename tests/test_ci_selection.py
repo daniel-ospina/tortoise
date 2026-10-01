@@ -1193,6 +1193,73 @@ def test_fast_files_absent_from_halves_reports_coverage_hole():
     assert absent == ["test_auth.py", "test_dead_entry.py"], absent  # slow excluded
 
 
+def test_fast_files_absent_from_halves_excludes_env_broken_files():
+    # #1266 false positive: an ENV_BROKEN_FILES member is kept out of EVERY half
+    # by the selection filter, so it could never appear in a half and was
+    # reported as a coverage hole on every single run. It is not a hole — the
+    # file needs a live environment the shard jobs do not have, and it is run by
+    # `.github/scripts/verify-cutover` instead. The exclusion must mirror `slow`
+    # and `carve_out`, and a REAL hole must still be reported.
+    from tools.ci_selection import ENV_BROKEN_FILES, fast_files_absent_from_halves
+    m = _halves_manifest()
+    m["surfaces"]["api"].extend(ENV_BROKEN_FILES)
+    halves = {"a": ["test_api"], "b": ["test_crypto"]}
+    absent = fast_files_absent_from_halves(m, halves)
+    assert "test_auth.py" in absent, absent  # a genuine hole still reports
+    assert not (set(absent) & ENV_BROKEN_FILES), absent
+
+
+def test_real_manifest_never_reports_env_broken_as_a_coverage_hole():
+    # The end-to-end form of the same guard, against the REAL manifest and the
+    # REAL derived shards: `--integrity` must never print the
+    # "in NO shard (full-matrix coverage hole)" warning about an env-broken
+    # file, because that warning is permanent, always false, and was read at
+    # face value by two independent readers of a shard-split PR as evidence the
+    # split had dropped a test file.
+    #
+    # Deliberately scoped to ENV_BROKEN_FILES rather than asserting the absent
+    # set is empty: the check is documented as informational, so pinning zero
+    # would silently promote a warning into a fail-closed gate.
+    from tools.ci_selection import (
+        ENV_BROKEN_FILES,
+        fast_files_absent_from_halves,
+        load_manifest,
+        push_legs,
+    )
+    m = load_manifest()
+    legs = push_legs(m)
+    halves = {s["name"]: set(s["files"]) for s in legs["shards"]}
+    absent = set(fast_files_absent_from_halves(m, halves))
+    assert not (absent & ENV_BROKEN_FILES), sorted(absent & ENV_BROKEN_FILES)
+
+
+def test_coverage_hole_report_is_always_a_fast_pool_file():
+    # The durable invariant, and the generalisation of the env-broken false
+    # positive: ONLY a fast-pool file can legitimately be a hole, because the
+    # halves are derived from `fast_pool()`. Anything reported absent that the
+    # pool does not contain is a false positive by construction — which is
+    # exactly what a member of any group `fast_pool` omits would be
+    # (ENV_BROKEN_FILES today; `on_demand` latently, since it is currently in
+    # no surface and so cannot reach this check).
+    #
+    # This subsumes the scoped test above and pins the sync requirement the
+    # function's docstring states: the subtraction there must match
+    # `fast_pool`'s own filter, or this reports a file the pool deliberately
+    # excludes.
+    from tools.ci_selection import (
+        fast_files_absent_from_halves,
+        fast_pool,
+        load_manifest,
+        push_legs,
+    )
+    m = load_manifest()
+    legs = push_legs(m)
+    halves = {s["name"]: set(s["files"]) for s in legs["shards"]}
+    absent = set(fast_files_absent_from_halves(m, halves))
+    pool = set(fast_pool(m))
+    assert absent <= pool, sorted(absent - pool)
+
+
 def test_real_workflow_halves_are_consistent():
     # #1472: the matrix halves are now DERIVED from the manifest
     # (space-joined matrix_* outputs) —

@@ -1668,10 +1668,45 @@ def workflow_halves_issues(manifest: dict, halves: dict[str, list[str]],
 
 def fast_files_absent_from_halves(manifest: dict, halves: dict[str, list[str]]) -> list[str]:
     """#1266 (informational): manifest fast files that are in NO half — the
-    full-matrix coverage hole. Slow files, bench/*, and the epic #1647
-    carve-out set (their leg is `carve_out`) are excluded. Kept as
-    a warning (not fail-closed): closing it would push 100+ files into the
-    fast gate and blow the watchdog budget (see the scoping doc).
+    full-matrix coverage hole. Slow files, bench/*, the epic #1647
+    carve-out set (their leg is `carve_out`), and ENV_BROKEN_FILES are
+    excluded. Kept as a warning (not fail-closed): closing it would push
+    100+ files into the fast gate and blow the watchdog budget (see the
+    scoping doc).
+
+    ENV_BROKEN_FILES is excluded for the SAME reason as `slow` and
+    `carve_out`: `fast_pool()` drops those groups from the push/full-matrix
+    fast pool, and the halves this function is called with are derived from
+    that pool (`push_legs`). A group the pool omits can therefore never appear
+    in `halfset`, so leaving ENV_BROKEN_FILES out of this subtraction reported
+    its members as a coverage hole on EVERY run — structurally, not because of
+    the data. Empirically the set intersected with the surfaces is exactly one
+    file, which is why the warning was always the same one. It is not a hole:
+    the file needs a live environment the shard jobs do not have, and it is
+    executed by `.github/scripts/verify-cutover` instead.
+
+    Two boundaries, stated because the obvious generalisations of the sentence
+    above are each FALSE:
+      * This is the PUSH pool's exclusion, not every lane's. `select()`'s
+        tier-2 path does not subtract ENV_BROKEN_FILES, so a PR touching a
+        kept file can still place a member of the set in a tier-2 fast shard.
+        That is a separate question and is NOT changed here.
+      * `fast_pool()` also omits `on_demand`, which this function does not
+        subtract. That is LATENT rather than live only because no on_demand
+        file is currently a member of any surface, and the universe this check
+        walks is the surfaces — so such a file cannot reach it today. Add one
+        to a surface and it becomes this same false positive.
+
+    The durable rule: this subtraction must stay in sync with `fast_pool`'s own
+    filter, since the two are complements of the same pool.
+
+    The cost of leaving it in was not cosmetic: `--integrity` printed
+    `1 manifest fast files are in NO shard (full-matrix coverage hole, #1266)`
+    on every run, and two independent readings of a shard-split PR took that
+    warning at face value and reported that the split had dropped a test file
+    from the matrix. A permanent warning that is always false trains its
+    readers to discount the warning that is sometimes true — which is the
+    whole #1266 check.
     """
     slow = set(manifest.get("slow_files", []))
     carve_out = carve_out_files(manifest)
@@ -1680,6 +1715,7 @@ def fast_files_absent_from_halves(manifest: dict, halves: dict[str, list[str]]) 
         fast.update(fs)
     fast -= slow
     fast -= carve_out
+    fast -= ENV_BROKEN_FILES
     halfset = {f for fs in halves.values() for f in fs}
     return sorted(f for f in fast if f[:-3] not in halfset)
 
