@@ -271,7 +271,7 @@ _VALID_EDGE_PREDICATES = frozenset({
 # is the merge regression pinned by `test_document_derivation_through_the_production_path_anchors`.
 _DERIVATION_REFERENCES_LABELS = frozenset({"Event", "Document"})
 
-# CQL suffix stamping the derivation anchor on a `references` MERGE, `ON CREATE` only.
+# CQL suffix stamping a version anchor on a link MERGE, `ON CREATE` only.
 #
 # `ON CREATE` is load-bearing: connectors re-poll and the `link_source_to_*` writers are
 # idempotent MERGEs, so advancing a recorded version on a re-link would erase exactly the
@@ -279,9 +279,14 @@ _DERIVATION_REFERENCES_LABELS = frozenset({"Event", "Document"})
 # auto-created-Source placeholder (and the "no recorded hash" value on an Event), and
 # `'' = ''` compares equal to the source's current hash — a FALSE current.
 #
-# `version_expr` names the version the edge was READ at. That is ``s.contentHash`` on the
-# live writers (the Source was just written from the content the target describes), but
-# ``e.file_hash`` on the repair path — see :meth:`_EdgeHandlers.link_source_to_legacy_event`.
+# `version_expr` names the version the edge was READ at, and it has three CALLERS:
+# ``s.contentHash`` on the live `references` writers (the Source was just written from the
+# content the target describes), ``e.file_hash`` on the repair path — see
+# :meth:`_EdgeHandlers.link_source_to_legacy_event` — and the caller-bound ``$v`` on the
+# `extractedFrom` writer (:meth:`_EdgeHandlers._link_source`). The ``$v`` caller is the
+# first to run on the REPLAY path as well: LIVE fills it from
+# :func:`resolve_source_versions`, REPLAY passes the value carried in the Point's own
+# journaled snapshot, so a replay never re-reads the Source.
 #
 # ⚠️ KNOWN LIMITATION — the anchor does not advance when the TARGET is rewritten in place
 # (#5199, under owner review). ``ON CREATE`` means a target rebuilt from a NEWER version
