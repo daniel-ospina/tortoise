@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import sys
 import time
 
 import pytest
@@ -700,6 +701,15 @@ def _parse_sse(text: str):
     return json.loads(text)
 
 
+#: How long the registered ``_bound_slow`` tool sleeps. Read at CALL time rather
+#: than defaulted into the closure, so a test can raise it together with the
+#: bound it is measured against — a tool that outlives the seam's REMAINING
+#: deadline is what makes the breach observable, and a test whose bound exceeds
+#: this sleep would see the tool COMPLETE and misread it as "the seam was not
+#: spent".
+_BOUND_SLOW_SLEEP_S = 0.3
+
+
 @pytest.fixture
 def mcp_slow_tool():
     """Register a slow test tool on the shared mcp instance; remove after.
@@ -714,7 +724,7 @@ def mcp_slow_tool():
     finished: list = []
 
     async def _bound_slow() -> dict:
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(_BOUND_SLOW_SLEEP_S)
         finished.append(True)
         return {"ok": True}
 
@@ -813,9 +823,29 @@ def test_mcp_seam_spends_the_transport_deadline_not_a_fresh_one(
     legible refusal — the exact failure this unit exists to eliminate.
 
     This mounts the REAL parent app (``WaitBoundMiddleware`` included) over the
-    MCP sub-app and injects a 0.2 s pre-SSE cost, then asserts the caller only
-    waits the bound (+ε). The sibling SSE test mounts the MCP app with NO parent
+    MCP sub-app and injects a pre-SSE cost, then asserts the caller only waits
+    the bound (+ε). The sibling SSE test mounts the MCP app with NO parent
     middleware, which is precisely why it could not see this.
+
+    ⛔ WHY THE TIMINGS ARE LARGE (#3834 CI flake). The middleware's deadline is
+    ``bound``, and it stands aside only once ``http.response.start`` is on the
+    wire. The SSE therefore starts at ``pre_Sse`` PLUS the whole FastMCP
+    Streamable-HTTP handshake cost, and the margin available to that handshake
+    is exactly ``bound - pre_Sse``. At the original ``(0.2, 0.3)`` that margin
+    was 100 ms — on a cold GitHub-hosted runner the first-request handshake
+    alone can exceed it, the middleware's own deadline then trips, and the
+    caller gets the PRE-SSE 504 refusal instead of the in-SSE one:
+    ``assert 504 == 200``. That is not a code defect (the refusal is correct
+    for that ordering) and it is not "the bound fell to 0" — ``%.0f`` renders
+    the healthy 0.3 s bound as ``(0s)`` in the log line, which is what made the
+    failure read as a misconfiguration.
+
+    The same difference is ALSO the discriminator (a seam that opened a FRESH
+    bound would over-wait by ``pre_Sse``), so making the margin safe and keeping
+    the discrimination are the same act: SCALE BOTH. ``(2.0, 3.0)`` gives a
+    1.0 s handshake margin (10x the old) and a 2.0 s discrimination (a fresh
+    bound lands at 5.0 s against a 3.15 s ceiling). Every assertion below is
+    unchanged — no skip, no tolerant status set, no relaxed equality.
     """
     from contextlib import asynccontextmanager
 
@@ -825,7 +855,10 @@ def test_mcp_seam_spends_the_transport_deadline_not_a_fresh_one(
 
     from tortoise import mcp_server as ms
 
-    bound = 0.3
+    bound = 3.0
+    # The tool must outlive the seam's REMAINING deadline (bound - pre_Sse =
+    # 1.0 s) or it completes and this reads as "the seam was not spent".
+    monkeypatch.setattr(sys.modules[__name__], "_BOUND_SLOW_SLEEP_S", 3.0)
     monkeypatch.setattr(ma, "_TRANSPORT_WAIT_BOUND_S", bound)
     monkeypatch.setattr(ha, "_track_analytics_event", lambda *a, **k: None)
 
@@ -844,7 +877,7 @@ def test_mcp_seam_spends_the_transport_deadline_not_a_fresh_one(
 
         async def __call__(self, scope, receive, send):
             if scope["type"] == "http":
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(2.0)
             await self.app(scope, receive, send)
 
     parent = Starlette(lifespan=_lifespan, routes=[Mount("/mcp", app=mcp_app)])
@@ -887,6 +920,14 @@ def test_mcp_breach_reports_the_caller_visible_interval(
     bound 0.3 s and pre-SSE 0.2 s: the caller waited ~0.3 s while the event said
     ~0.09 s. A consumer thresholding ``latency_ms >= 10000`` counted ZERO MCP
     breaches on the very surface the bound was justified by.
+
+    ⛔ Same fragile margin as the F1 test above, fixed the same way: ``bound``
+    and the pre-SSE cost are scaled to ``(3.0, 2.0)`` so the FastMCP handshake
+    has 1.0 s to reach ``http.response.start`` instead of 100 ms. The two
+    assertions below are PROPORTIONAL or measure two quantities on one
+    timeline, so they hold unchanged: ``0.75 * bound`` scales itself, and the
+    seam-local interval (~bound - pre_Sse = 1.0 s) still lands far under that
+    floor, which is what catches a regression back to the seam's own ``t0``.
     """
     from contextlib import asynccontextmanager
 
@@ -896,7 +937,8 @@ def test_mcp_breach_reports_the_caller_visible_interval(
 
     from tortoise import mcp_server as ms
 
-    bound = 0.3
+    bound = 3.0
+    monkeypatch.setattr(sys.modules[__name__], "_BOUND_SLOW_SLEEP_S", 3.0)
     monkeypatch.setattr(ma, "_TRANSPORT_WAIT_BOUND_S", bound)
     seen: list = []
     monkeypatch.setattr(ha, "_track_analytics_event",
@@ -917,7 +959,7 @@ def test_mcp_breach_reports_the_caller_visible_interval(
 
         async def __call__(self, scope, receive, send):
             if scope["type"] == "http":
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(2.0)
             await self.app(scope, receive, send)
 
     parent = Starlette(lifespan=_lifespan, routes=[Mount("/mcp", app=mcp_app)])

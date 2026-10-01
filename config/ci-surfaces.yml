@@ -35,6 +35,12 @@ surfaces:
   # #3820: the analytics sink's OUTCOME contract + degraded-sink incident. Load-bearing
   # here: the file it guards most (tortoise/hosted_api.py) selects the `api` surface.
   - test_analytics_fallback_alert.py
+  # #5199: DUAL-REGISTERED with `core` for the same reason as `test_boot_regressions.py`
+  # BELOW in this list. `tortoise/hosted_api.py` is an exact-surface (`api`) match that REPLACES the
+  # `core` fallback, but this file's structural guard pins the session→document call
+  # site in that module — so without this arm a hosted_api.py-only revert of the
+  # `"Document"` spelling (the D10 regression) would run no guard at all.
+  - test_source_version_references_5199.py
   - test_backups_v1_alias.py
   - test_battery_parity_executors.py
   - test_battery_parity_hash.py
@@ -597,6 +603,7 @@ surfaces:
   # counts. Editing any of those selected NO surface, so the drift gate never ran
   # on precisely the PRs that can break it. `core` is the docs/default surface.
   - test_bridge_table.py
+  - test_ci_verdict.py
   - test_env_isolation.py
   - test_graph_name_ownership.py
   # #3634: guards the graph-name ownership vocabulary (the prefix sets that
@@ -612,6 +619,13 @@ surfaces:
   # gap is #4454's job, not this registration's; do not read this entry as
   # covering a hand-edited document.
   - test_mcp_rename_table.py
+  # #6138: the queue-conflict census. Hermetic (no DB, no network — every live
+  # read is injected through a fixture), so `core` can run it on engine-wide
+  # changes; it pins tools/queue_conflict_census.py, the instrument that makes
+  # the conflicting share of the open queue a reproducible number instead of a
+  # hand count. Same surface as its siblings test_merge_throughput.py /
+  # test_queue_window_observe.py.
+  - test_queue_conflict_census.py
   - test_rotate_key.py
   # #3981: dual-registered with `api` (the arm that fires on a tortoise/hosted_api.py-only
   # change); this `core` entry is the fallback arm, since core is only added when nothing
@@ -653,6 +667,12 @@ surfaces:
   - test_subject_binding_1370.py
   - test_ci_expected_manifests.py
   - test_ci_guard_invocation.py
+  # #3470: the pytest-attribution reporter (`.github/scripts/pytest-attribution.sh`,
+  # called from python-ci.yml). It reads the workflow, the reporter script and the
+  # rail's parser (`scripts/ci_exemption.py`) and needs no DB, so `core` — the
+  # default surface — is where it runs when nothing else matched. Registered here
+  # because `integrity()` requires every `tests/**/test_*.py` to be classified.
+  - test_pytest_attribution.py
   - test_client_cli_probe.py
   # #3677: dual-registered with `api` for the same reason as test_boot_regressions.py
   # above. `api` is the arm that actually fires on a tortoise/hosted_api.py-only change;
@@ -727,6 +747,20 @@ surfaces:
   # never run.
   - test_source_fts.py
   - test_source_identity.py
+  # #5199: the derivation-link version anchor (`sourceVersion` on a derivation
+  # `references` link) — `tortoise/projection/edges.py` + `tortoise/projection/entities.py`
+  # select the `core` surface, so the guard for the anchor runs with the code it
+  # guards. DUAL `core`+`api`: the structural guard also pins
+  # `tortoise/hosted_api.py`'s session→document call site, and an `api` match
+  # REPLACES the `core` fallback — so a hosted_api.py-only change (exactly the
+  # D10 spelling regression this guard exists to catch) would otherwise never run
+  # it. Same reason as `test_boot_regressions.py` above. Hermetic (embedded DB per
+  # test, no URI).
+  - test_source_version_references_5199.py
+  # #5199 read half: the note is actually READABLE — the SDK provenance reader
+  # (`get_provenance_chain`) reports it per link. `tortoise/search_engine.py`
+  # selects this surface too, so the wiring's guard runs with the code it guards.
+  - test_source_version_read_wiring_5199.py
   - test_subject_layer_read_surfaces_4889.py  # #4889: the Subject-layer read surfaces fail loud instead of silently empty
   - test_transport_wait_bound.py  # #3834: transport wait bound + cold-half gate wiring (dual: api)
   # #2877: DB-free guards that a dead backup watcher degrades /health (the file
@@ -1218,6 +1252,13 @@ surfaces:
   - test_unjournaled_mutation_class.py
   - test_uri_env_mutations_declared.py
   - test_validity_windows.py
+  # #5365: a fail-open supersession skip must be VISIBLE — the refusal from
+  # #4021 lands in an OPTIONAL `skipped` result channel on
+  # commit_ops.apply_supersessions and in promote_point's response, instead of
+  # being only a callback warning. `tortoise/commit_ops.py` and
+  # `tortoise/sdk.py` are SHARED_MODULEs -> full matrix; `core` is the default
+  # home, the same surface as the E6 window suite above.
+  - test_5365_fail_open_visible.py
   # #5358: fail-closed refusal for an INVERTED predecessor window in
   # invalidate_point (a future-dated validFrom would be stamped validTo=now).
   # `tortoise/sdk.py` is a SHARED_MODULE -> full matrix, so no single surface
@@ -2159,6 +2200,7 @@ durations:
   test_subjectadded_journal.py: 1.9
   test_turnstile_signup.py: 0.9
   test_validity_windows.py: 4.4
+  test_5365_fail_open_visible.py: 21.2  # unmeasured — local single run (5 tests); refresh from CI junit
   bench/test_degradation_chain.py: 1.3
   longmem_eval/test_measure_temporal.py: 2.2
   test_assembly_fixtures.py: 2.2
