@@ -2857,6 +2857,7 @@ def main() -> int:
         # raise at all.)
         problems = missing + slow_file_issues(manifest) \
             + fast_shard_issues(manifest) \
+            + carve_shard_issues(manifest) \
             + duration_issues(manifest) + leg_coverage_issues(manifest) \
             + duration_coverage_issues(manifest) + duplicate_entries(manifest)
         # #1472: the matrix must come from the selector derivation — when it
