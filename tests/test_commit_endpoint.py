@@ -687,6 +687,109 @@ class TestExternalSources:
         ).result_set[0][0]
         assert n >= 1
 
+    def test_anchorless_recommit_preserves_stored_external_anchor(self, client):
+        """#4146: an anchorless re-commit of an external ``sources[]`` url must
+        NOT wipe its stored ``contentHash`` or bump ``version``.
+
+        This is the exact defect #4005 fixed for the SESSION Source (see
+        ``TestSessionSourceIndexIdentity``), still live in the external loop
+        immediately beside it: ``contentHash=src.contentHash or ""`` turned the
+        back-compat NULL into ``""``, so ``_upsert_source``'s ON MATCH took the
+        OVERWRITE branch — the preserve branch fires only WHEN ``$hash IS
+        NULL``, and ``s.contentHash <> $hash`` is TRUE for any stored non-empty
+        hash. Red before the fix: the anchor is wiped and the version bumped.
+        """
+        url = "https://example.com/pricing"
+        anchor = hash_text("pricing v1")
+        raw = _raw_payload(1, summary="first capture", sources=[
+            {"sourceKind": "document", "url": url,
+             "credibilityTier": "T1", "contentHash": anchor},
+        ])
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        meta = _session_source_meta(url)
+        assert meta is not None, "the external Source was never created"
+        assert meta[0] == anchor, meta
+        version = meta[1]
+
+        # back-compat client: same url, no contentHash at all, different
+        # summary so this is a real write (not an L1 replay)
+        raw = _raw_payload(1, summary="second capture", sources=[
+            {"sourceKind": "document", "url": url, "credibilityTier": "T1"},
+        ])
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        assert r.json().get("duplicate") is not True, (
+            "the second commit was deduped as an L1 replay — not a real write"
+        )
+        meta = _session_source_meta(url)
+        assert meta[0] == anchor, (
+            f"an anchorless re-commit wiped the stored external contentHash: {meta[0]!r}"
+        )
+        assert meta[1] == version, (
+            f"an anchorless re-commit bumped the version: {meta[1]} != {version}"
+        )
+
+    def test_empty_string_anchor_is_treated_as_absent(self, client):
+        """#4146: an EMPTY-STRING anchor is an absent anchor, not a hash.
+
+        The field admits ``""`` (``contentHash: str | None`` with no
+        ``min_length``), so a client can send ``contentHash: ""`` and mean
+        "I have no anchor". A bare pass-through would let that wipe the stored
+        hash exactly like the bug; this pins the ``or None`` normalization.
+        """
+        url = "https://example.com/empty-anchor"
+        anchor = hash_text("v1")
+        raw = _raw_payload(1, summary="first capture", sources=[
+            {"sourceKind": "document", "url": url, "contentHash": anchor},
+        ])
+        assert _commit(client, raw).status_code == 200
+        version = _session_source_meta(url)[1]
+
+        raw = _raw_payload(1, summary="second capture", sources=[
+            {"sourceKind": "document", "url": url, "contentHash": ""},
+        ])
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        meta = _session_source_meta(url)
+        assert meta[0] == anchor, (
+            f"an EMPTY-STRING anchor wiped the stored contentHash: {meta[0]!r}"
+        )
+        assert meta[1] == version, (
+            f"an EMPTY-STRING anchor bumped the version: {meta[1]} != {version}"
+        )
+
+    def test_anchored_recommit_still_updates_external_anchor(self, client):
+        """#4146 fail-safe — the OTHER direction.
+
+        A re-commit that DOES carry a new anchor must still update the hash and
+        bump the version. The fix makes an ABSENT anchor preserve; it must
+        never make a PRESENT one inert. Without this test a "fix" that simply
+        stopped writing contentHash on the external path would pass the
+        preservation tests while silently breaking hash-diff versioning.
+        """
+        url = "https://example.com/pricing"
+        a1, a2 = hash_text("pricing v1"), hash_text("pricing v2")
+        raw = _raw_payload(1, summary="first capture", sources=[
+            {"sourceKind": "document", "url": url, "contentHash": a1},
+        ])
+        assert _commit(client, raw).status_code == 200
+        assert _session_source_meta(url)[0] == a1
+        v1 = _session_source_meta(url)[1]
+
+        raw = _raw_payload(1, summary="second capture", sources=[
+            {"sourceKind": "document", "url": url, "contentHash": a2},
+        ])
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        meta = _session_source_meta(url)
+        assert meta[0] == a2, (
+            f"a NEW anchor did not update the stored hash: {meta[0]!r}"
+        )
+        assert meta[1] == v1 + 1, (
+            f"a NEW anchor did not bump the version: {meta[1]} != {v1 + 1}"
+        )
+
 
 # ── #4005 — the hosted session Source is a real index entry ───────────────
 
