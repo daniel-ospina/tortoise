@@ -652,15 +652,21 @@ def test_relationship_census_refuses_a_slot_exceeding_ep_bearing():
 def test_relationship_census_refuses_all_four_exceeding_a_slot():
     """The ALL-slots count cannot exceed any single slot's count.
 
-    Every all-four edge necessarily carries each individual slot, so `all_four_slots`
-    is a lower bound on every `by_slot[s]`. Round-2 review probed this too — the
-    extremes-only check let an all-four census larger than its own subset print.
+    ⛔ This fixture must keep `ep_bearing == all_four_slots == 5`, i.e. it must NOT
+    violate the PRE-EXISTING ordering arm. An earlier revision of this test used
+    `ep_bearing=6, all_four_slots=8`, which the ordering arm already rejects, so the
+    test passed with the new arm DELETED — it proved nothing about the arm it names
+    (round-3 review, which caught it by mutation). The shape below is the one the
+    review probed: every all-four edge carries a slot, so `all_four_slots` may equal
+    `ep_bearing`, but it can never exceed any single `by_slot`. The count-1 slot is named
+    against `EP_EDGE_SLOTS` order — an earlier revision of this comment called it `msg_beta`
+    when the fake graph's FIRST `by_slot` result feeds `msg_alpha` (round-3 re-review).
     """
     graph = _FakeGraph([
         [["IMPL", 10]],                # total = 10
-        [[6]], [[6]], [[6]], [[6]],    # by_slot: all 6
-        [[6]],                         # ep_bearing
-        [[8]],                         # all_four_slots = 8 > every slot, impossible
+        [[1]], [[5]], [[5]], [[5]],    # by_slot in EP_EDGE_SLOTS order: msg_alpha = 1, rest 5
+        [[5]],                         # ep_bearing = 5   (ordering arm: 10 >= 5 >= 5 OK)
+        [[5]],                         # all_four_slots = 5 > by_slot[msg_alpha] = 1 ONLY
     ])
 
     with pytest.raises(CensusError, match="exceeds by_slot"):
