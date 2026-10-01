@@ -13,6 +13,13 @@ Coverage (the issue's own mutations, plus the guard that matters):
     the API is called and the run is cancelled
   * the SAME run under dry-run (the default) -> reported, NOT cancelled
   * a run NOT over its bound -> skip: in-budget, never cancelled
+  * a run EXACTLY AT its bound -> not cancelled (pins the strict `>`, so `>=`
+    turns it RED)
+  * a run OBJECT whose id is not the id asked for -> skip: run-unreadable, never
+    cancelled (pins the read_run id-match guard; dropping it turns it RED)
+  * a run whose run_started_at is absent -> skip: start-time-unreadable, never
+    judged from created_at (pins the no-fallback clock; restoring the fallback
+    turns it RED)
   * **a STALE listing** (the listing says in_progress, the individual run OBJECT
     says completed) -> skip: stale-listing, never cancelled. This is the case the
     hand-intervention got wrong; the mutation (drop the object-status guard)
@@ -142,12 +149,16 @@ class RunReaperTestCase(unittest.TestCase):
     # ── fixtures ────────────────────────────────────────────────────────────
 
     def make_run(self, run_id, *, status="in_progress", elapsed_s=0, workflow_id=7,
-                 branch="feat/x", conclusion=None) -> None:
+                 branch="feat/x", conclusion=None, object_id=None,
+                 omit_run_started_at=False) -> None:
         started = iso(NOW - elapsed_s)
-        payload = {"id": int(run_id), "status": status, "conclusion": conclusion,
+        payload = {"id": int(run_id if object_id is None else object_id),
+                   "status": status, "conclusion": conclusion,
                    "head_branch": branch, "workflow_id": workflow_id,
-                   "run_started_at": started, "created_at": started,
+                   "created_at": started,
                    "html_url": f"https://example.invalid/runs/{run_id}"}
+        if not omit_run_started_at:
+            payload["run_started_at"] = started
         (self.gh_dir / f"run_{run_id}.json").write_text(json.dumps(payload))
 
     def make_jobs(self, run_id, jobs) -> None:
@@ -242,6 +253,26 @@ class RunReaperTestCase(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
         self.assertEqual(self.cancelled(), [])
 
+    def test_elapsed_exactly_at_the_bound_is_not_cancelled(self):
+        """The overrun test is STRICT (`>`): elapsed == bound is still in budget.
+
+        Pins the off-by-one control — `>=` would cancel a run that is exactly
+        at its own derived bound.
+        """
+        self.make_run("111", elapsed_s=2144, workflow_id=7)
+        self.make_jobs("111", [job("test (a)", 600),
+                               job("test (g)", None, status="in_progress")])
+        self.green_population(7, maxes={"test (a)": 500, "test (g)": 1072})
+
+        row = self.rows(["--run", "111"])["111"]
+        self.assertEqual(row["bound_s"], 2144)
+        self.assertEqual(row["elapsed_s"], 2144)
+        self.assertEqual(row["action"], "skip")
+        self.assertEqual(row["reason"], "in-budget")
+        res = self.run_tool(["--run", "111", "--apply"])
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertEqual(self.cancelled(), [])
+
     def test_stale_listing_is_not_cancelled(self):
         """THE TEST THE HAND-INTERVENTION FAILED.
 
@@ -306,6 +337,48 @@ class RunReaperTestCase(unittest.TestCase):
         self.assertEqual(row["action"], "skip")
         self.assertEqual(row["reason"], "run-unreadable")
         res = self.run_tool(["--run", "777", "--apply"])
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertEqual(self.cancelled(), [])
+
+    def test_run_object_with_a_different_id_is_skipped_not_cancelled(self):
+        """The run OBJECT must BE the run asked for.
+
+        A response carrying a different `id` — a stale, proxied or redirected
+        read — is never decided on: it is skipped as run-unreadable and
+        --apply cancels nothing. Without the id-match guard the tool judges,
+        and cancels, a run it was not asked about.
+        """
+        self.make_run("111", elapsed_s=25740, workflow_id=7, object_id=999)
+        self.make_jobs("111", [job("test (a)", 600),
+                               job("test (g)", None, status="in_progress")])
+        self.green_population(7, maxes={"test (g)": 1072})
+
+        row = self.rows(["--run", "111"])["111"]
+        self.assertEqual(row["action"], "skip")
+        self.assertEqual(row["reason"], "run-unreadable")
+        self.assertIn("expected", row["detail"])
+        res = self.run_tool(["--run", "111", "--apply"])
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertEqual(self.cancelled(), [])
+
+    def test_missing_run_started_at_is_skipped_not_judged_from_created_at(self):
+        """An absent start clock SKIPS — created_at is NOT a substitute.
+
+        created_at is always <= run_started_at, so falling back to it inflates
+        elapsed by the whole queue wait. This run was queued 2h behind a starved
+        fleet but its start clock is unknown; judging it from created_at would
+        call it a 2h overrun and cancel a healthy run.
+        """
+        self.make_run("111", elapsed_s=7200, workflow_id=7, omit_run_started_at=True)
+        self.make_jobs("111", [job("test (a)", 600),
+                               job("test (g)", None, status="in_progress")])
+        self.green_population(7, maxes={"test (g)": 1072})
+
+        row = self.rows(["--run", "111"])["111"]
+        self.assertEqual(row["action"], "skip")
+        self.assertEqual(row["reason"], "start-time-unreadable")
+        self.assertIn("created_at", row["detail"])
+        res = self.run_tool(["--run", "111", "--apply"])
         self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
         self.assertEqual(self.cancelled(), [])
 

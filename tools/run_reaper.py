@@ -52,7 +52,10 @@ WAIT, so an underivable bound falls back to a fail-safe (3900s). This tool
 CANCELS, so it must never invent a bound: if a pending shard has no green
 sample, or the green history is unreadable, or the run object cannot be read,
 or the start time cannot be parsed, the run is SKIPPED. There is deliberately
-no fail-safe and no global constant here.
+no fail-safe and no global constant here. The start clock is ``run_started_at``
+**alone**: ``created_at`` is NOT a fallback, because it is always <=
+``run_started_at`` and would inflate elapsed by the whole queue wait — biasing a
+cancel tool toward cancelling a healthy run that only just started.
 
 Exit codes
 ----------
@@ -85,6 +88,7 @@ import re
 import subprocess
 import sys
 from datetime import UTC, datetime
+from urllib.parse import urlparse
 
 EXIT_OK = 0
 EXIT_INCOMPLETE = 2
@@ -173,36 +177,77 @@ def _valid_slug(slug: str) -> bool:
     return bool(owner) and bool(name) and all(c in ok for c in owner + name)
 
 
+#: Only these hosts ARE GitHub. A substring test (``"github.com" in url``)
+#: also accepted an internal mirror such as ``https://mygithub.com/acme/foo`` and
+#: resolved it to ``acme/foo`` ON github.com — with ``--apply`` that reads and
+#: cancels runs in a DIFFERENT repository.
+_GITHUB_HOSTS = frozenset({"github.com", "www.github.com"})
+
+
 def _slug_from_remote(repo_dir: str) -> str | None:
+    """``owner/name`` of ``origin`` — host-checked AND slug-validated.
+
+    Returns ``None`` (fail closed) unless the remote's host is EXACTLY GitHub
+    and the derived slug is a well-formed ``owner/name``. The DERIVED slug is
+    validated for the same reason the ``--repo`` form is: it is interpolated
+    into API paths, so an unvalidated one could name a different repository.
+    """
     res = _run(["git", "-C", repo_dir, "remote", "get-url", "origin"])
     if res.returncode != 0:
         return None
     url = res.stdout.strip()
-    if url.endswith(".git"):
-        url = url[:-4]
-    if "github.com" in url:
-        tail = url.split("github.com", 1)[1]
-        if tail.startswith(":") and tail[1:2].isdigit() and "/" in tail:
+    if not url:
+        return None
+    # scp-like syntax (``git@github.com:owner/name``) carries no scheme, so
+    # urlparse cannot see a host; normalise it to an ssh:// URL first. A
+    # scp-like port (``host:22/owner/name``) is stripped so it cannot leak
+    # into the slug.
+    if "://" not in url:
+        head, sep, tail = url.partition(":")
+        if not sep:
+            return None
+        if tail[:1].isdigit() and "/" in tail:
             tail = tail.split("/", 1)[1]
-        parts = [p for p in tail.lstrip(":/").split("/") if p]
-        if len(parts) >= 2:
-            return f"{parts[0]}/{parts[1]}"
-    return None
+        url = f"ssh://{head}/{tail}"
+    parsed = urlparse(url)
+    host = parsed.hostname
+    if host is None or host.lower() not in _GITHUB_HOSTS:
+        return None
+    path = parsed.path
+    if path.endswith(".git"):
+        path = path[:-4]
+    parts = [p for p in path.split("/") if p]
+    if len(parts) < 2:
+        return None
+    slug = f"{parts[0]}/{parts[1]}"
+    return slug if _valid_slug(slug) else None
 
 
 def resolve_slug(repo: str | None) -> str:
+    """The ``owner/name`` to act on. Every derived slug is validated.
+
+    The ``--repo owner/name`` form is validated by ``_valid_slug``, and so is
+    every slug DERIVED from a remote: a derived slug is interpolated into API
+    paths exactly like an explicit one, so a host that merely contains
+    ``github.com`` must not yield a slug on github.com.
+    """
     if repo:
         if _valid_slug(repo):
             return repo
         if os.path.isdir(repo):
             slug = _slug_from_remote(repo)
-            if slug:
+            if slug and _valid_slug(slug):
                 return slug
+            raise ValueError(
+                f"--repo {repo!r} is a directory whose origin does not resolve to a "
+                f"valid 'owner/name' on github.com")
         raise ValueError(f"--repo {repo!r} is not a directory or 'owner/name'")
     slug = _slug_from_remote(os.getcwd())
-    if slug:
+    if slug and _valid_slug(slug):
         return slug
-    raise ValueError("no --repo given and the current directory has no github.com origin")
+    raise ValueError(
+        "no --repo given and the current directory's origin does not resolve to a "
+        "valid 'owner/name' on github.com")
 
 
 # ── GitHub reads ────────────────────────────────────────────────────────────
@@ -415,11 +460,19 @@ def decide(run: dict, target_jobs: list[dict], green_job_lists: list[list[dict]]
             + " — a listing saying otherwise is stale; never cancel from a list")
         return row
 
-    # (2) ELAPSED, fail-closed on an unparseable clock.
-    started = _parse_ts(run.get("run_started_at")) or _parse_ts(run.get("created_at"))
+    # (2) ELAPSED — from run_started_at ALONE, fail-closed on an unknown start.
+    # `created_at` is deliberately NOT a fallback: it is always <= run_started_at,
+    # so using it would inflate elapsed by the entire queue wait and bias the
+    # decision TOWARD cancelling — a run queued 2h behind a starved fleet and
+    # started 5 minutes ago would be judged at ~2h against a ~40m bound and
+    # cancelled while healthy. This tool CANCELS, so an unknown start clock
+    # skips the run.
+    started = _parse_ts(run.get("run_started_at"))
     if started is None:
         row["reason"] = REASON_NO_START
-        row["detail"] = "neither run_started_at nor created_at is parseable — fail closed"
+        row["detail"] = ("run_started_at is absent or unparseable — the start clock is "
+                         "unknown, and created_at is NOT a substitute (it would inflate "
+                         "elapsed by the queue wait) — fail closed")
         return row
     elapsed = int(now - started.timestamp())
     row["elapsed_s"] = elapsed
