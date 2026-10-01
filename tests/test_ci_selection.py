@@ -817,6 +817,22 @@ def test_queue_conflict_census_tool_change_selects_core_not_tier1():
     assert set(r["test_files"]) != _tier1()
 
 
+def test_drift_guard_tool_change_selects_core_not_tier1():
+    # #4174 review P1: tools/drift-guard.py owns tests/test_drift_guard.py. The
+    # flat "tools/" NON_PYTHON_PREFIXES entry swallowed the path, so a
+    # guard-only change selected NO surface and fell back to tier-1 smoke — the
+    # suite pinning the guard never ran on the PR that changed the guard. Same
+    # silent-drop class as #4069 above, and the same defect #4174 describes a
+    # gate having. Mutation check: removing the CORE_ALSO entry filters the path
+    # out (docs-only early return → empty surfaces, tier-1 smoke) and fails
+    # every assert below.
+    r = _sel(["tools/drift-guard.py"])
+    assert r["full"] is False, r
+    assert "core" in r["surfaces"], r
+    assert "test_drift_guard.py" in r["test_files"], r
+    assert set(r["test_files"]) != _tier1()
+
+
 def test_collision_preflight_tool_change_fails_closed_to_full():
     # #3261: tools/collision_preflight.py owns tests/test_collision_preflight.py.
     # Before its TOOL_CARVEOUTS entry the flat "tools/" prefix swallowed the
@@ -1268,8 +1284,9 @@ def test_register_already_present_in_surface_is_reported_noop(capsys):
 
 def test_duplicate_entries_reports_same_surface_repeats():
     """#2913: a same-surface duplicate is invisible to select() (it unions
-    surfaces) and to integrity() (it only asks "classified?") — the new
-    duplicate_entries() check surfaces it for the --integrity note."""
+    surfaces) and to integrity() (it only asks "classified?") — duplicate_entries()
+    surfaces it, and since #5373 it FAILS `--integrity` (a union-merged registry
+    would otherwise absorb it silently)."""
     from tools.ci_selection import duplicate_entries
     m = {"surfaces": {"core": ["test_a.py", "test_a.py", "test_b.py"],
                       "api": ["test_a.py"]}}
@@ -1283,6 +1300,37 @@ def test_duplicate_entries_reports_same_surface_repeats():
     ) == ["core: test_a.py"]
     # a value that is None (empty surface block) must not raise
     assert duplicate_entries({"surfaces": {"core": None}}) == []
+
+
+def test_integrity_reddens_on_a_duplicate_entry(monkeypatch, capsys):
+    """#5373: a duplicate entry must FAIL `--integrity`, not print a note.
+
+    `config/ci-surfaces.yml` carries `merge=union`, which keeps BOTH sides' lines for
+    a conflicting hunk — so a same-surface duplicate is the exact shape union emits
+    when two lanes register the same test. It used to be a ⚠️ note; a note on a
+    union-merged registry lets the duplicate in silently.
+    """
+    import tools.ci_selection as cs
+
+    manifest = {"surfaces": {"core": ["test_a.py", "test_a.py"]}}
+    monkeypatch.setattr(cs, "load_manifest", lambda: manifest)
+    # All the OTHER integrity legs are neutralised so the duplicate is the only
+    # possible cause of the non-zero exit; each is a pure function of the manifest.
+    for leg in ("integrity", "slow_file_issues", "duration_issues",
+                "leg_coverage_issues", "duration_coverage_issues",
+                "workflow_matrix_issues"):
+        monkeypatch.setattr(cs, leg, lambda *a, **k: [])
+    # #6135: `push_legs` now returns `{"shards": [...]}` (N shards), not the old
+    # `half_a`/`half_b` pair — the stub below matches the CURRENT contract so the
+    # duplicate remains the only possible cause of the non-zero exit.
+    monkeypatch.setattr(cs, "push_legs", lambda *a, **k: {"shards": []})
+    monkeypatch.setattr(cs, "workflow_halves_issues", lambda *a, **k: [])
+    monkeypatch.setattr(cs, "fast_files_absent_from_halves", lambda *a, **k: [])
+    monkeypatch.setattr(sys, "argv", ["ci_selection.py", "--integrity"])
+
+    rc = cs.main()
+    assert rc == 1, "a duplicate same-surface entry must redden --integrity"
+    assert "core: test_a.py" in capsys.readouterr().out
 
 
 # ── #1266: matrix halves ↔ manifest consistency ──────────────────────────
@@ -2570,6 +2618,97 @@ def test_a_matrix_job_never_uploads_a_fixed_name_artifact():
         + "; ".join(offenders))
 
 
+def test_workflow_lint_pins_the_actionlint_image_and_its_scope():
+    """Pin the `workflow-lint` step's body.
+
+    The plumbing guards (needs/LEGS) prove the leg is wired in; they cannot
+    see its body. Without this pin the step can be replaced with `echo ok`,
+    the image unpinned to `:latest`, the `*.yaml` glob dropped, or the
+    empty-match refusal deleted, and every test stays green while the leg
+    stops being a check — the same fail-open shape #6253 is about.
+    """
+    job = _load_python_ci()["jobs"]["workflow-lint"]
+    raw = "\n".join(
+        str(step.get("run") or "") for step in job.get("steps") or []
+    )
+    # Every assertion below targets EXECUTABLE-looking text: `#`-comment lines
+    # are stripped, shell line-continuations are joined, and the invocation is
+    # pinned STRUCTURALLY, which closes the specific no-op the earlier revision
+    # let through (a commented-out body carrying `actionlint:1.7.12
+    # -shellcheck= *.yaml` plus the copied empty-match block).
+    #
+    # WHAT THIS DOES NOT GUARANTEE, stated because the limit is real: a static
+    # regex over a `run:` scalar can prove the command is WRITTEN, never that it
+    # EXECUTES. A body that prints the script from a quoted heredoc, or that
+    # exits 0 before reaching it, still satisfies every assertion below. This is
+    # therefore a TRIPWIRE against the realistic no-op replacements (deleting
+    # the step's work, commenting it out, unpinning the image, dropping the
+    # `*.yaml` glob or the empty-match refusal) — not proof of execution. Real
+    # proof needs a runtime positive control in the step itself (lint a
+    # deliberately malformed temp workflow and assert actionlint exits
+    # non-zero), which is a change to the leg, not to this test.
+    runs = "\n".join(
+        line for line in raw.splitlines() if not line.lstrip().startswith("#")
+    )
+    # Join shell line-continuations so a command split across lines (the
+    # `docker run … \` + `  rhysd/actionlint:…` form) is matched as ONE command.
+    joined = re.sub(r"\\\n\s*", " ", runs)
+    assert re.search(
+        r"(?m)^\s*docker\s+run\b[^\n]*\brhysd/actionlint"
+        r"(?::\d+\.\d+\.\d+(?:@sha256:[0-9a-f]{64})?|@sha256:[0-9a-f]{64})\b"
+        r"[^\n]*-shellcheck=",
+        joined,
+    ), (
+        "workflow-lint no longer executes `docker run … rhysd/actionlint:<pinned> "
+        "-shellcheck=` on a non-comment line: a body that only MENTIONS those "
+        "tokens would satisfy a presence check while linting nothing (#6253)"
+    )
+    assert "actionlint" in runs, (
+        "workflow-lint no longer invokes actionlint — the leg would certify "
+        "nothing while still reporting green (#6253)"
+    )
+    tags = re.findall(r"actionlint:(\S+)", runs)
+    digest_only = re.search(r"actionlint@sha256:[0-9a-f]{64}\b", runs)
+    assert tags or digest_only, (
+        "workflow-lint does not pin the actionlint image by tag or digest"
+    )
+    for tag in tags:
+        # A digest pin (`tag@sha256:…`) is STRONGER than a tag pin and is the
+        # supply-chain-correct form, so it must pass this check too. A
+        # digest-ONLY reference carries no `tag:` at all and is matched above.
+        assert re.fullmatch(r"\d+\.\d+\.\d+(?:@sha256:[0-9a-f]{64})?", tag), (
+            f"actionlint image must be pinned to major.minor.patch, got {tag!r} "
+            "— a floating tag re-opens the unpinned-dependency class (#5440)"
+        )
+    assert "-shellcheck=" in runs, (
+        "the actionlint invocation must set -shellcheck= explicitly: the pinned "
+        "image bundles shellcheck, so defaulting it on would add this tree's "
+        "shellcheck findings to the required gate"
+    )
+    assert "*.yaml" in runs, (
+        "workflow-lint globs only *.yml; GitHub loads workflows with either "
+        "extension, so a .yaml workflow would be silently unlinted"
+    )
+    # The empty-match refusal is asserted STRUCTURALLY, not by looking for two
+    # loose substrings: a substring pin is satisfied by commenting the body out.
+    assert re.search(
+        r"if\s+\[\s*\$\{#files\[@\]\}\s*-eq\s+0\s*\]\s*;\s*then\s*\n"
+        r"\s*echo\s+\S.*\n"
+        r"\s*exit\s+1\s*\n"
+        r"\s*fi\b",
+        runs,
+    ), (
+        "workflow-lint no longer refuses an EMPTY match: an unmatched glob "
+        "would lint nothing and report success over an empty surface"
+    )
+    # `$files` unquoted was a real SC2086 this leg introduced into a tree whose
+    # other shellcheck findings are pre-existing. The array form keeps it fixed.
+    assert '"${files[@]}"' in runs, (
+        "workflow-lint must expand the glob array quoted (\"${files[@]}\"); a "
+        "bare `$files` is a new SC2086 in a tree pinned to -shellcheck="
+    )
+
+
 def _extract_pytest_marker(run_script: str) -> str:
     """Pull the `-m <marker>` filter from a job's pytest run script. The
     docker lanes quote it (`-m 'not track_b and not live'`); the track-b
@@ -2878,28 +3017,44 @@ def test_drift_gate_cannot_skip_the_test_matrix():
     assert not _defaults_shell(workflow) and not _defaults_shell(drift), (
         "a `defaults.run.shell` can swallow the integrity exit code (#2656)")
 
-    integrity_steps = [s for s in drift.get("steps", [])
-                       if "integrity" in _code(s)]
-    assert integrity_steps, "the drift job must run the integrity check"
-    for step in integrity_steps:
+    # BOTH checks in this job are fail-closed gates and BOTH feed the required
+    # aggregate, so BOTH are held to the same unsilenceability rule. The
+    # `merge=union` registry validator (#5373) is a SEPARATE step from the drift
+    # gate, but a `|| true` / `continue-on-error` / `shell:` override on it is the
+    # SAME defect class this test exists to catch: the validator would report
+    # success while a duplicate-key union merge passed — the fail-open shape the
+    # validator exists to remove, wearing the fix. Matching on "integrity" alone
+    # swept both steps into one token check and false-redded; parameterising by
+    # each step's OWN exact invocation keeps every contract exact.
+    drift_gate_steps = [s for s in drift.get("steps", [])
+                        if "ci_selection" in _code(s)]
+    assert drift_gate_steps, "the drift job must run the integrity check"
+    registry_validator_steps = [s for s in drift.get("steps", [])
+                                if "tools/registry_integrity.py" in _code(s)]
+    assert registry_validator_steps, (
+        "the drift job must also run the union registry validator (#5373): the "
+        "unioned registries are only safe while a validator fails closed on them")
+    # Each step is paired with the EXACT non-comment invocation it must make.
+    checked_gate_steps = [
+        *((s, "python3 tools/ci_selection.py --integrity") for s in drift_gate_steps),
+        *((s, "python3 tools/registry_integrity.py") for s in registry_validator_steps),
+    ]
+    for step, expected in checked_gate_steps:
         run = step["run"].replace("\\\n", " ")
-        tokens = shlex.split(run)
-        assert tokens[:2] == ["python3", "tools/ci_selection.py"] \
-            and "--integrity" in tokens, (
-            "the integrity step must invoke tools/ci_selection.py --integrity "
-            f"directly (#2656); got {step.get('run')!r}")
-        assert not any(op in run for op in ("||", "&&", ";", "`", "$(")), (
-            "no shell operator may follow the integrity check — `|| true` / "
-            "`; exit 0` (this workflow's most-used silencing idiom) makes a "
-            f"real drift report green (#2656); got {step.get('run')!r}")
+        # The exact string, not a `tokens[:2]` prefix and not a membership test:
+        # a trailing `|| true`, a `; exit 0`, or any other shell tail is the
+        # silencing idiom this pins, and it would satisfy a looser check.
+        assert run.strip() == expected, (
+            f"a gate step must invoke EXACTLY `{expected}` — no shell operator "
+            "and no trailing anything, or a real failure reports green "
+            f"(#2656/#5373); got {step.get('run')!r}")
         assert not step.get("continue-on-error") and not step.get("shell"), (
-            "the integrity STEP must neither be continue-on-error nor override "
+            "a gate STEP must neither be continue-on-error nor override "
             "`shell`: either one lets the job report success while the check "
-            "failed (#2656)")
+            "failed (#2656/#5373)")
         assert step.get("if", "always()") in _always, (
-            "the integrity step must be unconditional: `if: always()` is fine, "
-            "any other condition drops drift enforcement on the events it "
-            "excludes")
+            "a gate step must be unconditional: `if: always()` is fine, any "
+            "other condition drops enforcement on the events it excludes")
     _timeout = drift.get("timeout-minutes")
     assert isinstance(_timeout, int) and 0 < _timeout <= 15, (
         f"the drift job needs a tight timeout (got {_timeout!r}) — it installs "
