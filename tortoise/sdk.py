@@ -1701,8 +1701,10 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
             "'contains_session' is a server-managed capture field and cannot "
             "be set via props."
         )
-    # #1486 (code-review P1): is_episodic is the points-quota discriminator
-    # (quota.py counts only `is_episodic IS NULL OR = false` points). A tenant
+    # #1486 (code-review P1): is_episodic is the POINT-arm discriminator of the
+    # points quota — quota.py counts `is_episodic IS NULL OR = false` points, and
+    # since #1911 it ALSO counts Object/Subject nodes unconditionally, so the
+    # resource is no longer Points alone (#1975). For Points, a tenant
     # setting it true via props would exclude their points from the quota —
     # unlimited points past the paid-tier cap. Server-managed: internal
     # capture/extractor callers set it via the explicit `is_episodic` kwarg on
