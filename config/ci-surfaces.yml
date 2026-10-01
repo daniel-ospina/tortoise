@@ -569,6 +569,13 @@ surfaces:
   - test_battery_validation_real.py
   - test_battery_write_channel.py
   core:
+  # #3982: a date-only temporal value anchors to UTC midnight rather than the
+  # reading machine's local midnight (ECMA-262 §21.4.3.2). DB-free — it only
+  # exercises the shared sort-key primitive under a forced TZ, so the fast
+  # `core` lane is the correct home. It guards the primitive that backs both
+  # window coverage and `at_date` queries, so a regression here moves which
+  # facts a point-in-time read can see.
+  - test_3982_date_only_utc.py
   # #2500: guards the pre-#2490 terminal-EP backfill script
   # (`graph-scripts/2500_backfill_terminal_ep_vacuity.py`) AND the canonical
   # terminal predicate it imports from `tortoise/live.py` — both match no
@@ -582,6 +589,7 @@ surfaces:
   # write/read marker split. No DB, no network — default `core` surface is correct.
   - test_4220_blog_residue_cleanup.py
   - test_4716_capture_operator_ref_remap.py
+  - test_6131_operator_mutation_vocabulary.py
   # #4971: the `(op_type, src, dst)` idempotency guard hoisted into
   # `commit_ops.apply_payload_operators` — the helper is core engine code, and
   # the re-key regression drives the real embedded capture commit, so this is
@@ -1183,6 +1191,7 @@ surfaces:
   - test_time_aware_run_2520.py  # #2520: the run-layer arm wiring (C6; hermetic + docker legs)
   - test_retrieval.py
   - test_retrieval_determinism_2952.py  # #2952: ranking determinism w.r.t. elapsed wall-clock (hermetic, no DB)
+  - test_3844_annotation_injection.py  # #3844: reader-evidence annotation prefix cannot be forged by a newline in speaker/session_date OR the validity marker (hermetic, no DB)
   - test_review_connections.py
   - test_round_trip_parity.py
   - test_run_protocol.py
@@ -1574,6 +1583,7 @@ surfaces:
   - test_product_rerank.py  # #2976: ask-lane (eval-only) rerank seam — tri-state gate, budget guard, one-impl de-fork guard (hermetic)
   - test_ci_timing.py
   - test_ids.py
+  - test_sdk_now_iso_single_definition.py   # #5375: sdk.py must declare exactly one module-level `_now_iso` (hermetic — ast.parse + the bound global)
   - test_log.py
   - test_longmem_reader_aggregation.py
   - test_longmem_reader_pinning.py
@@ -1601,6 +1611,7 @@ surfaces:
   - test_assembly_pure.py  # #2165 Task 2: pure shape classifier + subject extraction (no-DB unit)
   - test_assembly_sdk.py  # #2165 Task 6: ask_lane.run_ask_lane()/run_ask_assembled() connected-assembly branch + byte goldens (docker-lane)
   - test_retrieval.py
+  - test_3844_annotation_injection.py  # #3844: annotation-prefix newline forging; dual core+sdk because tortoise/retrieval.py is SOURCE_PATTERNS["sdk"] — a core-only entry would never run on a retrieval.py-only change
   - test_sdk.py
   - test_sdk_dedup.py
   - test_search_engine_recency.py

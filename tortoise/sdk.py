@@ -2418,12 +2418,6 @@ def _stream_to_payload(summary: dict, session_id: str, stream: dict) -> dict:
     }
 
 
-def _now_iso() -> str:
-    """UTC now in ISO format (module-level — shared by write paths)."""
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()  # noqa: UP017
-
-
 def _source_merge_lock_for(url: str) -> threading.Lock:
     with _source_merge_lock_guard:
         lock = _source_merge_locks.get(url)
@@ -6264,6 +6258,18 @@ class TortoiseSDK:
     def update(self, id: str, **props) -> dict:
         """One update for a Point OR an entity (epic #888 W2).
 
+        A graph operator IS a Point (``is_operator=true``), so it takes the
+        Point arm below: ``update(<operator_id>, label=...)`` edits an existing
+        operator edge in place. So ``update`` belongs to the operator-mutation
+        vocabulary even though ``operator_action`` exposes only mitigate/annotate
+        (#6131).
+
+        Note what this path does NOT do: unlike ``create_operator``, which returns
+        a structured ``undeclared_relation`` warning when no installed pack
+        declares the predicate, ``update(<operator_id>, label=...)`` performs no
+        declaredness check and installs the label silently. Take valid predicates
+        from ``list_relations()``.
+
         Detects the node type by label:
           - Point → point-lifecycle semantics (delegates to update_point):
             draft→live promote via status (only transition allowed), version
@@ -6283,6 +6289,12 @@ class TortoiseSDK:
 
     def delete(self, id: str) -> bool:
         """One delete for a Point OR an entity (epic #888 W2).
+
+        An operator IS a Point (``is_operator=true``), so
+        ``delete(<operator_id>)`` removes an operator edge — operators are not
+        delete-less, and a mislabelled or superseded edge is not permanent
+        (#6131). The verb is deliberately generic, so its name says Point/entity
+        rather than naming operators.
 
         Destructive. Detects the node type by label:
           - Point → delete_point (tag GC + `PointRetracted` :GraphEvent)
@@ -6921,12 +6933,18 @@ class TortoiseSDK:
         # guard's agreement boundary IS the read path's contiguity boundary.
         # It normalizes a purely cosmetic encoding difference
         # ("…T00:00:00Z" vs "…T00:00:00+00:00") and that is therefore
-        # accepted. It parses a DATE-ONLY value as LOCAL midnight (issue
-        # #3982), so a date-only-vs-offset-aware pair is a real instant
-        # difference off UTC — refused there, accepted on a UTC host. That is
-        # deliberate: `_covers` has the same host-dependence, so a
-        # host-independent verdict here would disagree with the read path.
-        # #3982 owns the decision on date-only semantics.
+        # accepted. Since #3982 it ANCHORS a DATE-ONLY value to UTC midnight
+        # (ECMA-262 §21.4.3.2: with no offset, date-only forms are UTC). So a
+        # date-only value and the SAME day stated as midnight UTC
+        # ("…T00:00:00Z") compare EQUAL, and that pair is ACCEPTED on every
+        # host — the equality does not depend on the reader's zone.
+        # The equality is specific to the midnight-UTC ENCODING, not to the
+        # calendar day: the same date at any other time of day names a
+        # different instant and is still refused, as is any pair on different
+        # days. Those verdicts are now host-INDEPENDENT rather than
+        # host-dependent. The read path consumes the same primitive
+        # (`_covers`), so the guard and the read path continue to agree. A
+        # zone-less date-TIME is unaffected and still reads locally.
         #
         # The guard's PRESENCE predicate is the read path's, not the
         # resolution branch's. `_covers` gates on `vf is not None`, so a
@@ -8297,6 +8315,13 @@ class TortoiseSDK:
         action='annotate' → annotate_operator(id=..., bias=..., precision=...,
             consistency=..., directness=...) — structured epistemic dims.
 
+        This is NOT the whole operator-mutation vocabulary. Operators are also
+        edited and removed by the GENERIC verbs — ``update(<operator_id>, ...)``
+        and ``delete(<operator_id>)`` — because an operator IS a Point and so
+        takes their Point arm (#6131). This action set exists for the two
+        operations that need a reason or epistemic dimensions; their absence
+        here is not evidence that operators cannot be changed.
+
         Unknown action raises ValueError.
         """
         if action == "mitigate":
@@ -8309,7 +8334,9 @@ class TortoiseSDK:
                 kwargs["consistency"], kwargs["directness"])
         raise ValueError(
             f"operator_action: unknown action {action!r} — must be "
-            f"'mitigate' or 'annotate'")
+            f"'mitigate' or 'annotate'. This is not the whole operator "
+            f"vocabulary: operators are also edited and removed by the generic "
+            f"verbs update(id, ...) and delete(id) (#6131).")
 
     def annotate_operator(self, id: str, bias: float, precision: float,
                           consistency: float, directness: float) -> dict:
@@ -23128,6 +23155,13 @@ def _summary_to_payload(summary: dict, session_id: str,
 
 
 def _now_iso() -> str:
+    """UTC now in ISO format.
+
+    One of this module's timestamp helpers, not a single shared clock: some call sites
+    here use it, while others inline ``datetime.now(timezone.utc).isoformat()``
+    directly (e.g. ``update_point``, ``invalidate_point``, ``supersede_point``) and
+    several other modules define their own ``_now_iso``.
+    """
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 

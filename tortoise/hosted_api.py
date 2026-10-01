@@ -12614,9 +12614,26 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         # (keyed on these urls) addresses the SAME node create_source wrote.
         u = sdk._resolve_source_url(src.url)
         external_urls.append(u)
+        # #4146: an ABSENT anchor stays absent — NULL, not "" — exactly as the
+        # session-Source write above does. `_upsert_source`'s ON MATCH preserve
+        # branch fires only WHEN `$hash IS NULL` (entities.py: the JOINT-E2E
+        # #900/#1032 contract: "when the caller carries NO contentHash ... the
+        # ingest must never clobber an index-created Source's contentHash to ''").
+        # Coercing the back-compat NULL to "" made `s.contentHash <> $hash`
+        # TRUE for any stored non-empty hash, so an anchorless re-commit of the
+        # same url WIPED the stored anchor, bumped `version` and rewrote
+        # updatedAt/title — and against a corpus-indexed url it also wiped the
+        # hash the INDEX path owns. It does NOT null `_searchText`: `$st` is
+        # `ev.get("_searchText") or ev.get("title")` and this call carries
+        # NEITHER, so the `coalesce($st, s._searchText)` SET preserves the
+        # stored text.
+        # `or None` (not a bare pass-through) is deliberate: the field admits
+        # "" (no min_length), and an empty anchor is an absent one — the same
+        # normalization the session-Source write applies via its
+        # `next((ref.contentHash for ref in ... if ref.contentHash), None)`.
         sdk.create_source(
             u, src.sourceKind, tier=src.credibilityTier,
-            contentHash=src.contentHash or "", is_episodic=True,
+            contentHash=(src.contentHash or None), is_episodic=True,
         )
     for url in session_urls:
         # "Document" is the RELATION's spelling (D10 retired the node label and the
