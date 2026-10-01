@@ -1208,11 +1208,14 @@ CONTROL_PLANE_OFFLOAD_OUTCOMES = (
     "bound_miss_refused",  # the bound fired and the callable will never run
     "bound_miss_running",  # the bound abandoned the AWAIT; the callable still runs
     "domain_error",        # fn failed, or the seam itself failed (catch-all)
-                           # — not a saturation event. The two are NOT told
-                           # apart: at this seam a non-timeout exception out of
-                           # the await cannot be attributed to fn vs the
-                           # plumbing without a traceback heuristic that would
-                           # mislabel more than it fixes. Named residual.
+                           # — not a saturation event. The two are NOT
+                           # separately labelled: `future.exception() is exc`
+                           # does attribute the common path, but it is not
+                           # RELIABLY separable — on the bare-`raise` path a
+                           # concurrently-completing fn TimeoutError is not
+                           # distinguishable from the bound's — and a
+                           # mostly-right `internal_error` child that mislabels
+                           # is worse than one documented catch-all. Residual.
     "cancelled",           # the AWAITING task was cancelled
 )
 
