@@ -167,6 +167,7 @@ def restore(backup_dir: str, db_path: str,
         from tortoise.projection import (  # noqa: I001
             FalkorProjection,
             journal_hard_delete_seqs,
+            plan_point_restamp_folds,
         )
         from tortoise.log import EventLog
         # RDB-first: open the snapshot directly — it holds the full graph
@@ -204,11 +205,41 @@ def restore(backup_dir: str, db_path: str,
                        else log.read_all())
             hard_delete_seqs = journal_hard_delete_seqs(records)
             deferred_links: list[tuple[int, dict]] = []
+            # #3305: the Point lifecycle terminalizers fold through the SHARED
+            # whole-journal plan (the same selection ``rebuild_all`` uses),
+            # not through ``apply()``'s inline branch — that branch folds every
+            # terminalizer, including the pre-recreation ones ``rebuild_all``
+            # drops and the non-canonical supersedes it collapses.
+            restamp_plan, _ = plan_point_restamp_folds(records)
+            # #3305: their CORRECTS edges name a SUCCESSOR this pass may create
+            # later, so defer the edges and re-apply them after the pass (the
+            # inline MERGE no-ops for a forward reference, while
+            # ``rebuild_all``'s after-creations sweep resolves it).
+            deferred_corrects: list[tuple[int, str, str]] = []
             for seq, ev in enumerate(records):
                 if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
                     deferred_links.append((seq, ev))
                     continue
+                # Keyed on the PLAN, not the raw envelope type — the plan
+                # selects by the NORMALIZED type (``_norm`` splices a nested
+                # payload), so a raw-type guard would let a ``type``-in-``point``
+                # terminalizer fall through to ``apply()``'s inline branch and
+                # its unshared selection (#325/#3722's raw-vs-normalized class).
+                if seq in restamp_plan:
+                    edge = proj.apply_journal_point_restamp(
+                        ev, seq, restamp_plan)
+                    if edge is not None:
+                        deferred_corrects.append(edge)
+                    continue
                 proj.apply(ev)
+            if deferred_corrects:
+                try:
+                    proj.fold_deferred_corrects_edges(
+                        deferred_corrects, hard_delete_seqs)
+                except Exception:
+                    logger.exception(
+                        "restore: deferred CORRECTS fold failed; %d "
+                        "edge(s) not replayed", len(deferred_corrects))
             if deferred_links:
                 try:
                     proj.fold_deferred_entity_links(
