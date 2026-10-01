@@ -275,11 +275,16 @@ def test_the_stored_text_matches_the_servers_own_writer_definition():
 def test_the_role_split_is_the_inverse_of_the_writer_and_the_servers_own():
     """The round trip, and the reason the split is shared: `get_session_detail`
     serves `(role, body)` from the stored `"[role] body"`, so the client must
-    invert the SAME way. Checked against the server's own expression so a
-    change on either side reds here.
-    """
-    import re
+    invert the SAME way — the server routes the stored text through
+    `_capture_turn_role_text` itself, so the pairs below are exactly what it
+    serves for this window.
 
+    The pairs are pinned LITERALLY, not by re-applying the split here. A mirror
+    that ran `_CAPTURE_ROLE_PREFIX` (or a hand-copied twin of it) over the text
+    and compared would be `f(x) == f(x)` and could never fail — the anti-pattern
+    already refuted in `tests/test_capture_redaction_sinks_5445.py`. Pinning the
+    output instead makes drift on either side red here for real.
+    """
     from tortoise.sdk import _capture_turn_role_text, _capture_turn_texts
 
     stored = _capture_turn_texts([
@@ -289,11 +294,17 @@ def test_the_role_split_is_the_inverse_of_the_writer_and_the_servers_own():
         {"role": "", "content": "empty role"},
         {"content": "no role key"},
     ])
-    for text in stored:
-        match = re.match(r"^\[([^\]]+)\]\s*", text)
-        server = ((match.group(1), text[match.end():]) if match
-                  else ("unknown", text))
-        assert _capture_turn_role_text(text) == server, text
+    assert [_capture_turn_role_text(text) for text in stored] == [
+        ("user", "hi"),
+        ("assistant", "padded"),
+        ("user", "[user] nested"),
+        # ⛔ The empty role must recover as ``""``, NOT fold into the whole
+        # string: a ``+`` quantifier mis-splits ``"[] empty role"`` into
+        # ``("unknown", "[] empty role")`` and corrupts the served turn with a
+        # stray ``[] `` prefix (round-12 P0).
+        ("", "empty role"),
+        ("unknown", "no role key"),
+    ], stored
 
 
 def test_session_extracted_is_total_over_odd_values():

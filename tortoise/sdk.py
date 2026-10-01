@@ -884,7 +884,7 @@ def _capture_turn_texts_with_redactions(
         # the #5445 role scrub WRITES one — a role holding a credential becomes
         # ``[REDACTED:github_token]``, and the stored text is
         # ``[[REDACTED:github_token]] please review…``. The reader's inverse
-        # (``_CAPTURE_ROLE_PREFIX``, ``^\[([^\]]+)\]\s*``) then parses the
+        # (``_CAPTURE_ROLE_PREFIX``, ``^\[([^\]]*)\]\s*``) then parses the
         # speaker as ``[REDACTED:github_token`` — dropping the closing bracket —
         # and hands the BODY a stray ``] ``, so ``:Point.speaker`` and the turn
         # the read path serves are both corrupted on the exact path this cluster
