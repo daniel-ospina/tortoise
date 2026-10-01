@@ -484,10 +484,10 @@ def test_track_analytics_event_is_only_called_from_the_off_loop_entry_point():
     second OFF-loop lane; this pin forbids an ON-loop direct call, which is the
     defect #4015 names — it does not forbid a second off-loop route.
 
-    Out of this pin's scope by design: partial-application lanes — the
-    capture-cost ``asyncio.to_thread(_track_analytics_event, …)`` and
-    ``mcp_server``'s retained emitter — which carry their own off-loop
-    guarantees and are pinned by their own tests.
+    Out of this pin's scope by design: the remaining partial-application lane —
+    ``mcp_server``'s retained emitter — which carries its own off-loop
+    guarantee and is pinned by its own test. #4468 moved the capture-cost lane
+    onto the shared entry point above, so it is covered by this pin now.
 
     The ``best_effort=True`` half is co-owned by
     ``tests/test_control_plane_offload_3498.py::test_never_raise_offload_sites_pass_best_effort``
