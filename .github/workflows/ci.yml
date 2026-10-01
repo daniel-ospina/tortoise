@@ -473,10 +473,14 @@ jobs:
   #   migration-append-only    — edits/renames/deletions of already-merged
   #                              migrations are rejected (a change to an applied
   #                              migration must be a NEW timestamp file).
-  #                              #1235: when SUPABASE_ACCESS_TOKEN is available
-  #                              (same-repo PRs), a PURE PREFIX RENAME of a
-  #                              provably-unapplied migration is exempt; fork
-  #                              PRs (no token) keep the strict block (fail-closed).
+  #                              #1235/#2240: when SUPABASE_ACCESS_TOKEN is
+  #                              available (same-repo PRs), any change to a
+  #                              PROVABLY-UNAPPLIED version is exempt — it has no
+  #                              schema_migrations row, so renumbering, re-landing
+  #                              or removing it cannot diverge prod. That is the
+  #                              remedy check-migration-drift prescribes for an
+  #                              out-of-order repo-ahead migration. Fork PRs (no
+  #                              token) keep the strict block (fail-closed).
   # Both drive the shared .github/scripts/check-migration-append-only script so
   # tests exercise the shipped logic. fetch-depth: 0 is required for the base
   # SHA to be available to `git diff` (default checkout is depth 1).

@@ -154,6 +154,9 @@ def _git_sha(repo: Path) -> str:
 
 # ── #1235: pure-prefix rename of a PROVABLY UNAPPLIED migration is allowed ──
 # (token present → Management API stub says old version NOT applied)
+# #2240 widens it: the prod state is the authority, so the rename MAY also edit
+# content — which is what the drift gate's "re-land as a FORWARD migration"
+# remedy does when it corrects the file's self-referencing header.
 
 
 def _stub_curl(versions: list[str], http_code: int = 201) -> Path:
@@ -200,6 +203,41 @@ def test_diff_unapplied_rename_allowed_with_token():
     assert "exception" in r.stdout.lower(), r.stdout
 
 
+def test_diff_unapplied_renumber_with_edited_content_allowed():
+    # #2240: the drift gate's remedy is "re-land its DDL as a FORWARD migration",
+    # which corrects the file's own self-referencing header — i.e. a rename that
+    # ALSO edits content. A version with no schema_migrations row has never run
+    # anywhere, so the edit cannot diverge prod and must not be blocked.
+    d = _make_repo(["20260813000099_a.sql"])
+    base = _git_sha(d)
+    (d / MIG / "20260813000099_a.sql").rename(d / MIG / "20260813100100_a.sql")
+    body = (d / MIG / "20260813100100_a.sql").read_text()
+    (d / MIG / "20260813100100_a.sql").write_text(
+        body + "-- re-landed forward from 20260813000099 (#2240)\n"
+    )
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "renumber unapplied, header corrected")
+    r = _run_script_with_token("diff", d, base, versions=["0001"])
+    assert r.returncode == 0, r.stdout
+    assert "exception" in r.stdout.lower(), r.stdout
+
+
+def test_diff_applied_renumber_with_edited_content_still_blocked():
+    # The safety property the byte-identity gate was reaching for is kept by the
+    # PROD STATE test instead: if the old version IS applied, no rename —
+    # identical or edited — may pass. Both directions are asserted.
+    d = _make_repo(["20260813000099_a.sql"])
+    base = _git_sha(d)
+    (d / MIG / "20260813000099_a.sql").rename(d / MIG / "20260813100100_a.sql")
+    body = (d / MIG / "20260813100100_a.sql").read_text()
+    (d / MIG / "20260813100100_a.sql").write_text(body + "-- edited\n")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "renumber applied, edited")
+    r = _run_script_with_token("diff", d, base, versions=["20260813000099"])
+    assert r.returncode == 1, r.stdout
+    assert "append-only" in r.stdout.lower(), r.stdout
+
+
 def test_diff_applied_rename_still_blocked_with_token():
     # Old version IS applied in prod (stub lists it) → rename must stay blocked.
     d = _make_repo(["20260813000099_a.sql"])
@@ -224,12 +262,29 @@ def test_diff_unapplied_rename_blocked_without_token():
     assert "append-only" in r.stdout.lower(), r.stdout
 
 
-def test_diff_content_edit_never_exempt_with_token():
-    # M (edit) — not a pure rename — must stay blocked even with a token.
+def test_diff_applied_content_edit_never_exempt_with_token():
+    # #1001 protection, PRESERVED under the #2240 rule: an edit to a migration
+    # prod HAS applied must stay blocked — that divergence is the whole reason
+    # this guard exists.
     d = _make_repo(["20260813000099_a.sql"])
     base = _git_sha(d)
     (d / MIG / "20260813000099_a.sql").write_text("-- changed content\n")
     _git(d, "add", "-A")
-    _git(d, "commit", "-q", "-m", "edit")
-    r = _run_script_with_token("diff", d, base, versions=["0001"])
+    _git(d, "commit", "-q", "-m", "edit applied")
+    r = _run_script_with_token("diff", d, base, versions=["20260813000099"])
     assert r.returncode == 1, r.stdout
+    assert "append-only" in r.stdout.lower(), r.stdout
+
+
+def test_diff_unapplied_content_edit_allowed_with_token():
+    # #2240: the guard's authority is prod divergence, and a version with no
+    # schema_migrations row has never run anywhere — so editing it cannot
+    # diverge prod. The exempted line is still printed to the job log.
+    d = _make_repo(["20260813000099_a.sql"])
+    base = _git_sha(d)
+    (d / MIG / "20260813000099_a.sql").write_text("-- changed content\n")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "edit unapplied")
+    r = _run_script_with_token("diff", d, base, versions=["0001"])
+    assert r.returncode == 0, r.stdout
+    assert "exception" in r.stdout.lower(), r.stdout

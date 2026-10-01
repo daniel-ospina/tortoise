@@ -4982,12 +4982,21 @@ def test_every_changed_set_diff_disables_rename_detection():
       `npx markdownlint-cli <nonexistent.md>` exits 0, and plain `.md` deletions
       already put nonexistent paths into this list.
     * Do NOT generalise this rule to `.github/scripts/check-migration-append-only`.
-      That script deliberately runs
-      `git diff --find-renames=20% ... --name-status` because its #1235
-      pure-prefix-rename repair exception is keyed on the `R*` status (recorded
-      at `docs/plans/2026-08-13-1095-migration-drift-gate.md:148`); `--no-renames`
-      there would emit `D`+`A` and break the gate. The rule in this pin is scoped
-      to changed-set *selection* diffs; that file is a deliberate exception.
+      That script deliberately runs `git diff --find-renames=20% ... --name-status`
+      (recorded at `docs/plans/2026-08-13-1095-migration-drift-gate.md:148`).
+      Its exempt arm is NO LONGER keyed on the `R*` status: #2240 moved the test
+      to the migration version's PROD STATE — a version absent from
+      `supabase_migrations.schema_migrations` has never run anywhere, so it may be
+      renumbered, re-landed or removed without diverging prod — precisely because
+      `--find-renames=20%` reports the re-land the drift gate prescribes, when it
+      carries a real content delta, as `D`+`A` rather than `R<sim>`. So the old
+      justification ("`--no-renames` would break the gate") no longer holds: the
+      exempt arm reads the BASE-TREE version from the `R<sim>` OLD path or from a
+      bare `M`/`D` path, and both are admitted on the same prod-state test.
+      `--find-renames` is kept because it is what makes the exempted line REPORT
+      as one migration renumbered rather than as an unexplained delete+add. The
+      rule in this pin is scoped to changed-set *selection* diffs; that file is a
+      deliberate exception.
     """
     root = Path(__file__).resolve().parents[1]
     wf_dir = root / ".github" / "workflows"

@@ -11,13 +11,22 @@
 #            files (status A against the base) are allowed — the author can
 #            fix their own new migration before merge.
 #
-#            EXCEPTION (#1235, duplicate-prefix repair): a PURE PREFIX RENAME
-#            (content identical) of a base-tree migration is allowed when the
-#            old version is PROVABLY UNAPPLIED (not in the remote applied set,
+#            EXCEPTION (#1235, duplicate-prefix repair; widened by #2240): a
+#            PREFIX RENAME of a base-tree migration is allowed when the OLD
+#            VERSION is PROVABLY UNAPPLIED (not in the remote applied set,
 #            queried via the Supabase Management API) — the canonical fix for
-#            the 0012x2/0015x2 class. Fail-closed: without a token the remote
-#            set cannot be verified, so the strict block stands (fork PRs keep
-#            today's behavior). No-ops (A-only) and edits (M/D) are never exempt.
+#            the 0012x2/0015x2 class, and the very remedy the drift gate
+#            prescribes for an out-of-order repo-ahead migration (#4278/#2240).
+#            The version's PROD STATE is the authority, so the content MAY also
+#            change in the same rename: a version with no schema_migrations row
+#            has never run anywhere, so editing it cannot diverge prod. Gating
+#            on byte-identity instead REPRODUCED the contradiction this check
+#            exists to avoid — the gate's own remedy ("re-land its DDL as a
+#            FORWARD migration") corrects the file's self-referencing header,
+#            and a byte-identity requirement rejected exactly that. Fail-closed:
+#            without a token the remote set cannot be verified, so the strict
+#            block stands (fork PRs keep today's behavior). No-ops (A-only) and
+#            edits/deletes of an APPLIED migration (M/D) are never exempt.
 #
 # The check logic lives in this SHARED script (not inline YAML) so the
 # hermetic pytest suite exercises the shipped logic, not a Python copy.
@@ -144,34 +153,41 @@ if [ -n "$VIOLATIONS" ]; then
     API_BODY="$(printf '%s' "$API_RESPONSE" | sed '$d')"
     if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
       REMOTE_APPLIED="$(printf '%s' "$API_BODY" | jq -r '.[].version' 2>/dev/null | sort -u || true)"
-      # Evaluate each violation line: format "R<sim>\told\tnew" or "M\tpath" etc.
+      # Evaluate each violation line. The version that owns the change is the
+      # BASE-TREE file's version: for "R<sim>\told\tnew" that is the OLD path;
+      # for "M\tpath" / "D\tpath" / "T\tpath" the path itself.
+      #
+      # #2240 — WHY PROD STATE, NOT GIT STATUS, IS THE TEST. This guard's
+      # authority is prod divergence (#1001: an edit to an APPLIED migration
+      # diverged repo from prod). A version with NO schema_migrations row has
+      # never run anywhere, so renumbering, re-landing or removing it cannot
+      # diverge prod. Gating on git status instead produced two false blocks
+      # that this fix removes:
+      #   (1) a byte-identity requirement rejected the drift gate's OWN remedy
+      #       ("re-land its DDL as a FORWARD migration"), which corrects the
+      #       file's self-referencing header; and
+      #   (2) that remedy routinely degrades to D+A rather than R<sim>, because
+      #       git pairs files by SIMILARITY (--find-renames=20%) — so the
+      #       exemption was unreachable for exactly the re-land it was for.
+      # The exempted line is still printed, so every unapplied-version change
+      # stays visible in the job log.
       KEEP=""
       while IFS= read -r line; do
         [ -z "$line" ] && continue
         status="${line%%$'\t'*}"
         rest="${line#*$'\t'}"
-        case "$status" in
-          R*)
-            old_path="${rest%%$'\t'*}"
-            new_path="${rest#*$'\t'}"
-            old_ver="$(basename "$old_path" | sed -nE 's#([0-9]+)_.*#\1#p')"
-            # Byte-identical content?
-            if git -C "$REPO" diff --quiet "$DRIFT_BASE_SHA:$old_path" "HEAD:$new_path" 2>/dev/null; then
-              # Old version NOT applied in prod?
-              if ! printf '%s\n' "$REMOTE_APPLIED" | grep -qxF "$old_ver"; then
-                EXEMPT_RENAMES="$EXEMPT_RENAMES
+        old_path="$rest"
+        case "$status" in R*) old_path="${rest%%$'\t'*}";; esac
+        old_ver="$(basename "$old_path" | sed -nE 's#^([0-9]+)_.*#\1#p')"
+        # Fail closed on a non-conforming filename: an empty version would make
+        # `grep -qxF ""` match an empty REMOTE_APPLIED line and exempt it.
+        if [ -n "$old_ver" ] && ! printf '%s\n' "$REMOTE_APPLIED" | grep -qxF "$old_ver"; then
+          EXEMPT_RENAMES="$EXEMPT_RENAMES
 $line"
-                continue
-              fi
-            fi
-            KEEP="$KEEP
+          continue
+        fi
+        KEEP="$KEEP
 $line"
-            ;;
-          *)
-            KEEP="$KEEP
-$line"
-            ;;
-        esac
       done <<EOF
 $VIOLATIONS
 EOF
