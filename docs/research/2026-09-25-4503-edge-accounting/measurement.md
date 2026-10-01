@@ -62,7 +62,7 @@ it. What matters is a PROPERTY, not a snapshot, and it is stated that way delibe
 
 > **No commit `origin/main` gained past the declared base touches the measured path.**
 
-Re-run it at any time — it needs no pinning and cannot go stale:
+Re-run it at any time — it needs no pinning, and it always returns a current answer:
 
 ```sh
 git log --name-only --format= 228f416e9..origin/main \
