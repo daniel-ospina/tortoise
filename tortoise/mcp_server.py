@@ -916,7 +916,7 @@ _QUOTA_GATED: frozenset[str] = frozenset({
 # absent from that frozenset, and the demo-create tool writes Points via
 # _enforce_quota without the wrapper.
 #
-# The `# noqa: E402` is deliberate: the bottom `tool_registry` import exists
+# The E402 noqa is deliberate: the bottom `tool_registry` import exists
 # for the adapter, and importing the derived helpers here keeps this module's
 # import order unchanged (tool_registry does not import mcp_server — no cycle).
 from tortoise.tool_registry import get_tool_by_name, get_write_tool_names  # noqa: E402
@@ -1269,7 +1269,13 @@ _SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a 
     # recorded decision (PR #3018 review P2) that a caller-supplied vector is
     # stored verbatim; the writer marks it `embedding_verbatim` instead.
     "embedding_model", "embedding_revision", "embedding_text_hash",
-    "embedding_verbatim", "embedding_preserved"})
+    "embedding_verbatim", "embedding_preserved",
+    # #5256: the `extractedFrom` READ-VERSION anchor and its Point node carrier
+    # are server-derived (read from the :Source on the live path and carried in
+    # the Point's journaled snapshot). A tenant setting either would forge
+    # provenance and break live/replay parity. Rejected on ALL spellings, at
+    # this boundary AND in `sdk._sanitize_props` (the fail-closed backstop).
+    "sourceVersion", "sourceVersions", "sourceVersionTransit"})
 
 
 # #2600: client-supplied actor claims are STRIP-AND-IGNORE (never a 4xx —

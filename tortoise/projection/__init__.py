@@ -271,7 +271,7 @@ def _is_bulk_wipe(cypher: str) -> bool:
 # re-point discriminator on the very run that needs them. Re-prepending from
 # the sidecar keeps replay order byte-identical to the uninterrupted case.
 _PREWIPE_SNAPSHOT_FILENAME = ".tortoise-prewipe-snapshot.json"
-_PREWIPE_SNAPSHOT_VERSION = 3
+_PREWIPE_SNAPSHOT_VERSION = 4
 # #2814: v2 adds the `config_snapshot` section. Reading v1 is required
 # (backward compatibility): a rescue file written before this change carries
 # no config record, and the union treats that exactly as the loader does —
@@ -282,13 +282,60 @@ _PREWIPE_SNAPSHOT_VERSION = 3
 # bump that build REFUSES the rebuild instead (its `version != 1` check).
 #
 # #3049: v3 adds `graph_identity` — the GRAPH the sidecar describes, not just
-# the directory it sits in. The bump carries the same rollback argument as
-# v2 and it is sharper here: a v2-aware build reading a v3 sidecar REFUSES it
+# the directory it sits in. The bump carries the same rollback argument as v2
+# and it is sharper here: a v2-aware build reading a v3 sidecar REFUSES it
 # (unknown version), so a rollback cannot silently re-enter the unconditional
-# merge that this change removes. Reading v1/v2 stays required — a rescue
-# file written before this change has NO `graph_identity`, which the mismatch
-# test reads as identity-unknown and proceeds on, exactly as that build did.
-_PREWIPE_SNAPSHOT_READABLE_VERSIONS = (1, 2, 3)
+# merge that this change removes. Reading v1/v2 stays required — a rescue file
+# written before this change has NO `graph_identity`, which the mismatch test
+# reads as identity-unknown and proceeds on, exactly as that build did.
+#
+# #4641: `onboarding_snapshot` / `onboarding_step_links` first claimed `3` for
+# this same reason, one increment on — WITHOUT a bump the writer would stamp
+# `2`, and a v2 build would accept that file and ignore the onboarding sections
+# while its wipe landed. A v1/v2 rescue file stays READABLE — it carries no
+# onboarding record (the writing build did not capture the class), and the
+# restore leg reports that as state-UNKNOWN rather than as a clean, empty
+# restore. `3` was later given up for `4`; see the round-8 note below.
+#
+# #4641 review round 8 — v4, NOT v3, because the format gate was made
+# asymmetric by sibling contention. The version is a FORMAT gate, and THREE
+# builds independently picked `3` for three different payloads: this change
+# (the onboarding pair), the open #5327 (`event_meta`) and `graph_identity`
+# (#5241, since LANDED here as #3049 at v3 — which is exactly why `3` is no
+# longer available to this change). A section-set refusal inside ONE of them
+# cannot make that gate symmetric: it stops a foreign-section v3 file from
+# being consumed HERE, but a sibling that carries no such refusal still reads
+# THIS build's file, walks only its own `_SNAPSHOT_SECTIONS`, ignores the
+# onboarding sections it does not know, and lets its unconditional wipe land
+# on the very class this change exists to preserve — the fail-open, in the
+# direction that destroys data. Claiming a DISTINCT number closes it without
+# depending on the siblings: every not-yet-updated build sees version 4 as
+# unsupported and REFUSES the rebuild (fail-closed), instead of accepting the
+# file and wiping over the onboarding class. v3 stays readable because a v3
+# file may be this build's own earlier write OR main's `graph_identity` write;
+# the section-set refusal below still rejects a v3 file carrying a foreign
+# section (#2943, #4641).
+#
+# `_validate_prewipe_snapshot` therefore ALSO refuses a file carrying any
+# section key outside this build's `_SNAPSHOT_SECTIONS`: a build that cannot
+# restore a section must not wipe over it, whatever the version says. The two
+# guards are complementary, and each covers the direction the other cannot:
+# the section refusal rejects a foreign payload that claims a version we
+# read; the distinct version makes a not-yet-updated build refuse OUR payload
+# instead of accepting it and wiping over the sections it cannot see.
+_PREWIPE_SNAPSHOT_READABLE_VERSIONS = (1, 2, 3, 4)
+# Top-level keys that are METADATA, never a preserved class. The
+# unknown-section refusal below subtracts these so it cannot mistake the
+# envelope for a section.
+#
+# `graph_identity` is main's #3049 (#5241) envelope key: the identity mismatch
+# test reads it as a top-level key and it is never a preserved class, so it
+# belongs here. Without it this refusal rejects main's OWN rescue file — the
+# one #3049 exists to make recoverable — because that file carries the key and
+# this build's `_SNAPSHOT_SECTIONS` does not name it.
+_PREWIPE_SNAPSHOT_META_KEYS = frozenset(
+    {"version", "created_at", "completed", "onboarding_unknown",
+     "graph_identity"})
 # #3947 × #3010: `session_snapshot` / `session_point_links` join the durable
 # sidecar for the same reason the #990 `:Batch` marker did — a `:Session`
 # container and its CONTAINS edges are RAW graph writes on the capture path
@@ -299,6 +346,18 @@ _PREWIPE_SNAPSHOT_READABLE_VERSIONS = (1, 2, 3)
 _SNAPSHOT_SECTIONS = ("synthetic_events", "batch_snapshot",
                       "batch_point_links", "session_snapshot",
                       "session_point_links",
+                      # #4641: the onboarding state machine. `:OnboardingState`
+                      # node properties + `:OnboardingStep` / `COMPLETED_STEP`
+                      # edges are RAW writes in `tortoise/onboarding/state.py`
+                      # that ride NO journal record and are not re-derivable, so
+                      # the sidecar is their only durable record once the wipe
+                      # lands (the #2814/#3947 class). Enrolled as a SECTION
+                      # pair rather than a `_config_classes()` row because the
+                      # registry carries nodes with a single-property identity
+                      # and `:OnboardingStep` is composite `(org_id, step_id)`
+                      # with an edge — a node-only row would restore the node
+                      # and silently drop the step edges.
+                      "onboarding_snapshot", "onboarding_step_links",
                       # #2814: authoritative configuration. Enrolled here so it
                       # is validated before the wipe (:447) and so the
                       # retirement payload and `rebuild_all`'s write payload can
@@ -674,6 +733,131 @@ def _capture_config_snapshot(g) -> list[dict]:
     return entries
 
 
+def _capture_onboarding_snapshot(g) -> tuple[list[dict], list[tuple[str, str]]]:
+    """Read the onboarding state machine into sidecar section entries (#4641).
+
+    Returns ``(nodes, links)``:
+
+    * ``nodes`` — one entry per `:OnboardingState`, the property map itself
+      (the ``batch_snapshot`` / ``session_snapshot`` shape), keyed by
+      ``org_id``.
+    * ``links`` — ``(org_id, step_id)`` pairs for every `COMPLETED_STEP` edge.
+
+    The labels / edge type come from the DOMAIN module (never re-typed — a
+    rename must not silently de-enrol the class).
+
+    #4641 review round 4: the step-id set is deliberately NOT filtered. An
+    earlier version restricted ``links`` to the canonical
+    ``ONBOARDING_STEPS``, reasoning that a foreign id carried no gate
+    semantics. That was backwards and unsafe: the gates
+    (``resolve_wire_completion`` / ``recompute_completion``) count an
+    unrecognised id as an AGENT step, so while the edge exists it BLOCKS the
+    grandfathered completion, and DROPPING it can CREATE that completion —
+    the exact forgery this capture exists to prevent. Every `COMPLETED_STEP`
+    edge the live graph holds is therefore captured verbatim — and one whose
+    endpoints are not both strings makes the capture REFUSE rather than drop
+    it, so the guarantee is "carried or refused", never "silently lost".
+
+    The pair is ``(parent state org_id, step_id)`` — the step node's OWN
+    ``org_id`` is not read, and the restore re-keys the step onto its parent.
+    That is faithful to every WRITER (`write_completed_step` MERGEs
+    ``s.org_id`` from the parent in the same statement) and to the
+    edge-traversing readers (`completed_steps`, `decide_completed_edge_exists`
+    — which match through the parent edge), so the re-key is a no-op on any
+    graph a writer produced. It is NOT a no-op for
+    `_prune_orphan_decide_step`, the one reader that keys the step node's own
+    ``org_id`` with no parent constraint (``{org_id, step_id:'decide-completed'}``):
+    a raw/hand-edited graph whose step ``org_id`` DIVERGES from its parent's is
+    re-keyed onto the parent, and that reader would no longer find it under
+    its original org. That divergence is the documented residual in
+    `docs/durability-posture.md` (#4641).
+
+    An orphan `:OnboardingStep` node (no `COMPLETED_STEP` edge) is not
+    captured: it is the ``_prune_orphan_decide_step`` cleanup's residue, it
+    carries no properties beyond its `{org_id, step_id}` key, and nothing
+    reads it — the edge set is the record.
+
+    Any failure propagates: the caller funnels it into the ``capture_failed``
+    gate, so a graph that cannot answer this read NEVER reaches the wipe —
+    the same #2943 discipline the config capture documents.
+    """
+    from tortoise.onboarding.state import (
+        COMPLETED_STEP_EDGE,
+        ONBOARDING_NODE_LABEL,
+        ONBOARDING_STEP_LABEL,
+    )
+
+    node_rows = g.query(
+        f"MATCH (n:{ONBOARDING_NODE_LABEL}) RETURN properties(n)"
+    ).result_set
+    nodes = []
+    for row in node_rows or []:
+        props = row[0]
+        # The capture's output MUST be loader-acceptable: a non-str `org_id`
+        # (or a non-storable property) would be written into the rescue file
+        # and then make it UNLOADABLE on the retry, so the sidecar — the only
+        # durable record of EVERY graph-only class it carries — would be
+        # refused and auto-recovery blocked until an operator deleted it.
+        # Failing closed here (the caller funnels the raise into the
+        # `capture_failed` gate) aborts BEFORE the wipe instead, with the bad
+        # node still in place to be repaired (#2943, #4641).
+        # Bind the value BEFORE formatting: the non-dict arm of the guard
+        # would otherwise make the f-string raise AttributeError instead of
+        # reporting the offending node it exists to name (#4641 review
+        # round 6).
+        _org_value = props.get("org_id") if isinstance(props, dict) else None
+        if not isinstance(props, dict) or not isinstance(_org_value, str):
+            raise RuntimeError(
+                f"an :{ONBOARDING_NODE_LABEL} node cannot survive a rebuild "
+                f"round-trip (org_id={_org_value!r} is not a string) — "
+                f"writing it would make the pre-wipe snapshot unloadable on "
+                f"the retry")
+        for key, value in props.items():
+            if not _is_snapshot_primitive(value):
+                raise RuntimeError(
+                    f"an :{ONBOARDING_NODE_LABEL} node (org_id="
+                    f"{props.get('org_id')!r}) carries property {key!r} = "
+                    f"{value!r}, which is not storable — writing it would "
+                    f"make the pre-wipe snapshot unloadable on the retry")
+        nodes.append(props)
+    link_rows = g.query(
+        f"MATCH (n:{ONBOARDING_NODE_LABEL})"
+        f"-[:{COMPLETED_STEP_EDGE}]->(s:{ONBOARDING_STEP_LABEL}) "
+        "RETURN n.org_id, s.step_id"
+    ).result_set
+    # The step id is NOT filtered to the canonical vocabulary: the earlier
+    # "drop the foreign ones, they are inert" reasoning was WRONG in the
+    # direction that matters. In `tortoise/onboarding/state.py`,
+    # `resolve_wire_completion` and `recompute_completion` compute
+    # `agent_steps = [s for s in done if s not in _NON_AGENT_STEPS]` and
+    # require `not agent_steps`. An unrecognised id is NOT in
+    # `_NON_AGENT_STEPS`, so it counts as an AGENT step: while the edge is
+    # PRESENT it BLOCKS the grandfathered completion, and DROPPING it empties
+    # `agent_steps` and can therefore FORGE that completion
+    # (`resolve_wire_completion('active', True, ['made-up-step'])` is False;
+    # with the edge gone it is True).
+    #
+    # A NON-STR `step_id` FAILS CLOSED instead of being dropped (round 5): a
+    # silent drop is the same forgery — the post-restore check reads through
+    # this same capture, so the loss would be invisible and the run would
+    # report a clean, fully-verified restore. The tripwire mirrors the
+    # `org_id` guard above: abort BEFORE the wipe with the bad edge still in
+    # place to be repaired. The pair must also be loader-acceptable
+    # (`_validate_onboarding_step_link` requires two strings).
+    links = []
+    for row in link_rows or []:
+        oid, sid = row[0], row[1]
+        if not isinstance(oid, str) or not isinstance(sid, str):
+            raise RuntimeError(
+                f"a {COMPLETED_STEP_EDGE} edge cannot survive a rebuild "
+                f"round-trip (org_id={oid!r}, step_id={sid!r} — both must "
+                f"be strings) — carrying it would make the pre-wipe "
+                f"snapshot unloadable on the retry, and DROPPING it could "
+                f"forge a grandfathered onboarding completion (#4641)")
+        links.append((oid, sid))
+    return nodes, links
+
+
 def _validate_point_entry(entry) -> str | None:
     """Return a complaint about a ``synthetic_events`` entry, else None.
 
@@ -762,12 +946,57 @@ def _validate_link_entry(entry) -> str | None:
     return None
 
 
+def _validate_onboarding_entry(entry) -> str | None:
+    """Return a complaint about an ``onboarding_snapshot`` entry, else None.
+
+    The entry is the `:OnboardingState` property map itself (the
+    `batch_snapshot` / `session_snapshot` shape), keyed by ``org_id`` — the
+    identity every onboarding writer uses. Checking the props here is what
+    keeps a non-storable value (a planted sidecar's, or one the graph somehow
+    holds) from reaching the driver AFTER the wipe.
+    """
+    if not isinstance(entry, dict):
+        return f"not an object ({type(entry).__name__})"
+    if not isinstance(entry.get("org_id"), str):
+        return f"org_id {entry.get('org_id')!r} is not a string"
+    for key, value in entry.items():
+        if not _is_snapshot_primitive(value):
+            return (f"property {key!r} value {value!r} is not a primitive "
+                    f"or an array of primitives")
+    return None
+
+
+def _validate_onboarding_step_link(entry) -> str | None:
+    """Return a complaint about an ``onboarding_step_links`` entry, else None.
+
+    Shape only — a 2-element pair of strings, exactly like the other link
+    sections. There is deliberately NO vocabulary-membership check.
+
+    #4641 review round 4: an earlier version rejected a ``step_id`` outside
+    ``ONBOARDING_STEPS``, on the reasoning that such an id was inert. It is
+    not, and rejecting it was a data-loss path that could FORGE a completion:
+    the gates in ``tortoise/onboarding/state.py``
+    (``resolve_wire_completion`` / ``recompute_completion``) compute
+    ``agent_steps = [s for s in done if s not in _NON_AGENT_STEPS]`` and
+    require ``not agent_steps`` — an unrecognised id is an AGENT step, so
+    while its edge exists it BLOCKS the grandfathered completion, and a
+    rebuild that dropped it would UNBLOCK (create) it. Preserving every edge
+    the live graph held is therefore the fail-safe choice; the vocabulary is
+    the domain module's business, not this validator's. (The values stay
+    `$`-bound and the labels stay module constants, so relaxing this cannot
+    inject Cypher.)
+    """
+    return _validate_link_entry(entry)
+
+
 _SNAPSHOT_ENTRY_CHECK = {
     "synthetic_events": _validate_point_entry,
     "batch_snapshot": _validate_batch_entry,
     "batch_point_links": _validate_link_entry,
     "session_snapshot": _validate_session_entry,
     "session_point_links": _validate_link_entry,
+    "onboarding_snapshot": _validate_onboarding_entry,
+    "onboarding_step_links": _validate_onboarding_step_link,
     "config_snapshot": _validate_config_entry,
 }
 # Node properties a snapshot Point carries that the replay does not fully
@@ -873,6 +1102,27 @@ def _validate_prewipe_snapshot(data: dict, path: str) -> None:
             f"{version!r} (this build reads "
             f"{list(_PREWIPE_SNAPSHOT_READABLE_VERSIONS)}) — "
             f"refusing to wipe the graph (#2943). Migrate or delete the file."
+        )
+    # #4641 review round 6: a section this build cannot restore is a REFUSAL,
+    # whatever the version says. The version is a FORMAT gate, not a
+    # SECTION-SET gate: two sibling builds can claim the same version with
+    # different section sets, and a same-version file is then accepted while
+    # its unknown section is never read (the loop below walks only
+    # `_SNAPSHOT_SECTIONS` and the union reads only known keys) — so the wipe
+    # lands and the class that section carried is destroyed silently. That is
+    # precisely the fail-open the version bump exists to prevent, one level
+    # down.
+    unknown_sections = sorted(
+        set(data) - set(_SNAPSHOT_SECTIONS) - _PREWIPE_SNAPSHOT_META_KEYS)
+    if unknown_sections:
+        raise RuntimeError(
+            f"a pre-wipe snapshot at {path} carries section(s) "
+            f"{unknown_sections} this build cannot restore (it reads "
+            f"{list(_SNAPSHOT_SECTIONS)}) — refusing to wipe the graph "
+            f"(#2943, #4641): the wipe is unconditional and only the journal "
+            f"is replayed, so ignoring an unknown section would destroy the "
+            f"class it carries. Land the build that carries it, or delete "
+            f"the file to accept the loss."
         )
     for key in _SNAPSHOT_SECTIONS:
         section = data.get(key, [])
@@ -1119,13 +1369,24 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
     positional seq space the fold sweeps index on is preserved by keeping
     every leftover entry and appending only fresh-only ids). A colliding id in
     a NODE section is merged FIELD-wise by ``_merge_entry`` — fresh truth
-    where it exists, leftover values where the fresh capture has none. The two
+    where it exists, leftover values where the fresh capture has none. The
     LINK sections are deduped WITHOUT a merge (``merge=False``), because an
     entry there is a two-element pair, not a property map: the surviving
     occurrence is merely kept. The pair order differs by section:
     ``batch_point_links`` is ``(point id, batch id)`` (captured
     ``RETURN p.id, p.batch_id``), while ``session_point_links`` is
-    ``(session id, point id)`` (captured ``RETURN s.id, p.id``).
+    ``(session id, point id)`` (captured ``RETURN s.id, p.id``) and
+    ``onboarding_step_links`` is ``(org id, step id)`` (captured
+    ``RETURN n.org_id, s.step_id``).
+
+    ``onboarding_snapshot`` (#4641) is the second PER-KEY node union: like
+    ``config_snapshot`` it keeps a colliding LEFTOVER entry rather than
+    field-merging it, because a self-healed default re-created for the same
+    ``org_id`` must not overwrite recovered truth (see the leg's comment) —
+    with exactly ONE field-level exception, ``org_subject_id`` (the org-anchor
+    carrier), which is taken fresh-wins because nothing self-heals it and the
+    post-restore check compares against this merged list, so swallowing a
+    fresh anchor would silently destroy a live `onboards` edge.
     """
     leftover = leftover or {}
 
@@ -1198,6 +1459,74 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
         + list(fresh.get("session_point_links") or []),
         _link_key, "session_point_links", merge=False)
         if _link_key(entry) is not None]
+    # #4641: the onboarding state machine. The NODE leg is a PER-ORG union
+    # with the LEFTOVER kept (see the ONE exception below) — deliberately NOT
+    # `_merge_entry`'s fresh-wins field merge, for the same reason
+    # `config_snapshot` avoids it:
+    # a self-healed default must not overwrite recovered truth. The concrete
+    # case is `_ensure_onboarding_node_after_provision`
+    # (`tortoise/supabase_control.py`) re-creating a DEFAULT
+    # `{status:'active', version:1, member_progress:'{}'}` node for an org
+    # between an interrupted wipe and the retry — fresh-wins would then
+    # overwrite the recovered `status='complete'`/`compact`/`member_progress`
+    # and silently re-onboard the org, which is the exact harm #4641 removes.
+    # A FRESH-ONLY org — onboarding started after the interrupted wipe — is
+    # APPENDED; dropping it would put it into the retry's own wipe with
+    # nothing to restore it from. `.get` on the fresh side mirrors the session
+    # sections (partial dicts are legal for the offline union tests).
+    def _org_key(entry):
+        oid = entry.get("org_id") if isinstance(entry, dict) else None
+        return oid if isinstance(oid, str) else None
+
+    fresh_orgs: dict = {}
+    for entry in fresh.get("onboarding_snapshot") or []:
+        _foid = _org_key(entry)
+        if _foid is not None:
+            fresh_orgs.setdefault(_foid, entry)
+
+    onboarding_nodes: list[dict] = []
+    onboarding_seen: set = set()
+    for entry in (list(leftover.get("onboarding_snapshot") or [])
+                  + list(fresh.get("onboarding_snapshot") or [])):
+        oid = _org_key(entry)
+        if oid is None:
+            # Unkeyable. The CAPTURE raises on this (so a live graph can never
+            # produce one); only a planted/hand-edited sidecar can, and the
+            # pre-wipe validator refuses it before the wipe.
+            onboarding_nodes.append(entry)
+            continue
+        if oid in onboarding_seen:
+            # Leftover-first iteration: the LEFTOVER entry is kept verbatim.
+            continue
+        onboarding_seen.add(oid)
+        # #4641 review round 3: the ONE field the verbatim rule must NOT
+        # swallow. The node rules above exist because a self-healed DEFAULT
+        # node (`_ensure_onboarding_node_after_provision`) can overwrite
+        # recovered truth — but NOTHING self-heals the org-ANCHOR pointer, it
+        # is the carrier of the `onboards` EDGE, and the post-restore check
+        # compares the rebuilt graph against THIS merged list. So a leftover
+        # entry that predates the org's anchor would drop the fresh
+        # `org_subject_id`, the restore would skip the edge, and the check
+        # would compare against the same stale set and report a clean, full
+        # restore while a LIVE anchor edge was destroyed. Carry it fresh-wins
+        # (fresh when it is a str, leftover otherwise); a fresh-only value
+        # means the anchor was linked after the interrupted run captured its
+        # sidecar, so it is the newer truth.
+        fresh_entry = fresh_orgs.get(oid)
+        fresh_sid = (fresh_entry.get("org_subject_id")
+                     if isinstance(fresh_entry, dict) else None)
+        if isinstance(fresh_sid, str) and \
+                entry.get("org_subject_id") != fresh_sid:
+            entry = {**entry, "org_subject_id": fresh_sid}
+        onboarding_nodes.append(entry)
+    # The LINK leg is `merge=False` like every other link section: an entry is
+    # a two-element pair, not a property map, and leftover-first keeps the
+    # recovered pair.
+    onboarding_links = [tuple(entry[:2]) for entry in _union(
+        list(leftover.get("onboarding_step_links") or [])
+        + list(fresh.get("onboarding_step_links") or []),
+        _link_key, "onboarding_step_links", merge=False)
+        if _link_key(entry) is not None]
     # #2814: authoritative configuration. This is a PER-KEY union on
     # `_config_key` — NOT `_merge_entry` and NOT a wholesale section discard:
     #
@@ -1234,6 +1563,8 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
             "batch_point_links": links,
             "session_snapshot": session_containers,
             "session_point_links": session_links,
+            "onboarding_snapshot": onboarding_nodes,
+            "onboarding_step_links": onboarding_links,
             "config_snapshot": config_entries}
 
 
@@ -1953,6 +2284,26 @@ _NO_PROJECTION_FOLD = frozenset({
     "EntityBindingRefused",
 })
 
+# #3305: the Point-lifecycle terminalizers whose replay fold is a per-event
+# status/validity/CORRECTS re-stamp (+ the belief decay at the event's own
+# position). Declared ONCE so the two replay dispatchers cannot drift apart:
+# ``FalkorProjection.apply()`` — the ONE-RECORD engine behind ``rebuild()``,
+# ``recover_from_log()`` and the backup JSONL restore — and
+# ``FalkorProjection.rebuild_all()``'s pass-1b trailing sweep, which folds the
+# id-reuse SURVIVORS of the same family. Before this declaration ``apply()``
+# had no branch for either type, so an apply()-based replay dropped the fold
+# and served a dead Point as ``status='live'``. (Neither type belongs in
+# ``_NO_PROJECTION_FOLD`` above: it is the set of records folded NOWHERE.)
+#
+# A type added here is dispatched to ``_fold_point_restamp``; that fold's own
+# dispatch is exhaustive over this set (a member with no arm warns rather than
+# silently no-op'ing), and ``tests/test_pointsuperseded_rebuild.py`` /
+# ``tests/test_pointinvalidated_rebuild.py`` pin BOTH engines on each member.
+_POINT_RESTAMP_EVENT_TYPES = frozenset({
+    "PointSuperseded",
+    "PointInvalidated",
+})
+
 # ``_apply_one`` is the POINT-ONLY in-memory fold (a ``{id: point}`` dict), so
 # every recognized non-point record is a no-op there as well: the non-point
 # entities and the flat edge descriptor have no representation in that index.
@@ -2088,6 +2439,223 @@ def _owns_point(label: object) -> bool:
     treated as possibly owning one (the fold falls back id-wide there too).
     """
     return not (isinstance(label, str) and label in _NON_POINT_ENTITY_LABELS)
+
+
+def plan_point_restamp_folds(
+    events,
+) -> tuple[dict[int, tuple[bool, bool]], dict[str, int]]:
+    """#3305: the ONE whole-journal plan for the Point lifecycle terminalizer
+    folds — the survivor rule, the supersede canonicalization and BOTH belief
+    anchors, computed once and obeyed by every replay engine.
+
+    The two replay algorithm families cannot share a *schedule*: ``apply()``
+    replays ONE record at a time in journal order (so it folds at the event's
+    own position), while ``rebuild_all`` hoists every creation into pass-1a and
+    must reconstruct chronology in a trailing sweep. What they CAN and MUST
+    share is the fold *selection* — before this plan, the sweep's survivor
+    rule and supersede canonicalization lived only in ``rebuild_all``, so an
+    ``apply()``-based replay (``rebuild(EventLog)``, ``recover_from_log``, the
+    backup JSONL restore) folded terminalizers ``rebuild_all`` deliberately
+    drops: a ghost ``S1→A`` CORRECTS beside the canonical ``S2→A`` for a raw
+    double supersede, and a pre-re-emit invalidate that a bare same-id
+    ``PointAdded`` supersedes.
+
+    Returns ``(decisions, fold_seq)``:
+
+    * ``decisions`` — ``{journal seq: (apply_decay, apply_stamp)}`` for every
+      event whose NORMALIZED type is in ``_POINT_RESTAMP_EVENT_TYPES``. A
+      record that is INELIGIBLE — an id that is not a non-empty writable str
+      (``_writable_id`` rejects NUL/lone-surrogate and the empty-id check
+      rejects ``""``) — maps to ``(False, False)`` and is reported with a
+      warning here. A ``PointSuperseded`` with no ``new_id`` is a different
+      case: it is ineligible for the DECAY (never ``(True, ...)``) but is still
+      a STAMP candidate when it is the id's last recreate-surviving supersede,
+      i.e. ``(False, True)`` — the fold then returns 0 and the CONSUMER warns
+      (``apply()`` / ``rebuild_all``'s sweep / ``apply_journal_point_restamp``),
+      so the warning fires exactly once per engine. No terminalizer seq is ever
+      omitted from the map.
+    * ``fold_seq`` — ``{old_id: journal seq of the surviving supersede fold}``,
+      the pass-2b operator/direct edge-transfer discriminator.
+
+    The rules, each mirrored from ``rebuild_all``'s pass-1a/pass-1b contract:
+
+    * ``last_recreate_seq[(Point, id)]`` — the id's LAST ``PointAdded`` /
+      ``OperatorAdded`` — bounds the STAMP half. A fold at or before it died
+      with the replaced node. ``PointPromoted`` is deliberately NOT a boundary
+      (same-node draft→live: it clears neither ``outdated`` nor CORRECTS), so
+      seeding from it would silently drop a pre-promote invalidate fold.
+    * ``last_ann_drop_seq[(Point, id)]`` — the id's last REAL
+      delete→recreate (``EntityMutated op=delete`` / ``PointsMerged`` followed
+      by a creation of the same kind) — bounds the BELIEF half. A bare same-id
+      re-emit MERGEs live and KEEPS the decayed belief, so gating the decay on
+      the recreate boundary (as the stamp half does) would drop a decay live
+      actually applied (#2884 A3 the two families cannot hold opposite
+      policies for one journal shape).
+    * the decay also requires the target to EXIST at the record's seq: a
+      terminalizer that PRECEDES the id's first creation — a single journal
+      file holding a record before its target's ``PointAdded``, or a
+      multi-file rebuild where an earlier-sorted file journals the terminalizer
+      (#21's cross-file ordering) — would fold before the node is replayed,
+      missing on the chronological apply() arm while ``rebuild_all``'s pass-1a
+      hoist lands it. The decay is therefore suppressed so BOTH engines agree.
+      This DELIBERATELY changes ``rebuild_all`` relative to its pre-#3305
+      behaviour for that shape (it used to decay, at 0.5, while the apply arm
+      missed). The justification is NOT that no live truth exists — it is true
+      only for the SINGLE-FILE shape, and FALSE multi-file: there the live graph
+      had the node (created earlier, journaled into a later-sorted file) and
+      live DID apply the decay, so dropping it regresses live parity. The gate
+      is chosen anyway because engine agreement is the contract this plan
+      exists to enforce and a record may not be folded before its target is
+      replayed; the multi-file cost is accepted, named here rather than
+      claimed away (#21's cross-file ordering). The STAMP half needs the SAME existence gate — on a
+      promote-materialized node (``PointPromoted`` is not a recreate boundary,
+      so no ``PointAdded`` follows to suppress the stamp) it would otherwise
+      land on ``rebuild_all``'s trailing sweep while missing on the
+      chronological apply() arm. Both halves are therefore gated on
+      ``first_materialize``, and "EXIST" is any replay MATERIALIZATION, not
+      just the recreate boundary: a ``PointPromoted`` / ``OperatorPromoted``
+      snapshot counts, because the capture path can journal the promote as the
+      node's ONLY durable record (#2256) and ``apply()`` upserts it. Promote
+      seeds the existence map ONLY; the survivor boundary above stays
+      promote-free.
+    * a supersede is canonicalized per old id: only the LAST applicable
+      supersede decays and only the LAST surviving supersede folds, so an
+      earlier ``S1→A`` CORRECTS cannot ghost beside the final ``S2→A``.
+      Invalidates are NOT canonicalized (#2498) — every survivor folds and
+      every applicable one decays.
+    * a ``PointSuperseded`` with no ``new_id`` is inapplicable to the fold
+      (``_fold_point_superseded`` no-ops): it never decays. It is still a STAMP
+      candidate when it is the id's last recreate-surviving supersede, so the
+      sweep's fold-miss warning still fires for it exactly as before.
+    """
+    last_recreate: dict[tuple[str, str], int] = {}
+    # EXISTENCE map (distinct from the survivor boundary above): the first seq at
+    # which the replay MATERIALIZES the node. A promote snapshot is the capture
+    # path's only durable record for some nodes (#2256), and ``apply()`` upserts
+    # it — so a promote makes the node exist for the forward-reference gate below
+    # even though it is deliberately NOT a ``last_recreate`` boundary.
+    first_materialize: dict[tuple[str, str], int] = {}
+    last_drop: dict[tuple[str, str], int] = {}
+    pending_deleted: set[tuple[str, str]] = set()
+    terminalizers: list[tuple[int, dict]] = []
+    for seq, raw in enumerate(events):
+        ev = _norm(raw) if isinstance(raw, dict) else {}
+        t = ev.get("type")
+        if t == "EntityMutated" and ev.get("op") == "delete":
+            rid = ev.get("id")
+            if isinstance(rid, str) and _owns_point(ev.get("label")):
+                pending_deleted.add(("Point", rid))
+            continue
+        if t == "PointsMerged":
+            for mid in ev.get("merge_ids") or []:
+                if isinstance(mid, str):
+                    pending_deleted.add(("Point", mid))
+            continue
+        if t in ("PointAdded", "OperatorAdded"):
+            p = ev.get("point")
+            if isinstance(p, dict) and isinstance(p.get("id"), str):
+                key = ("Point", p["id"])
+                last_recreate[key] = seq
+                first_materialize.setdefault(key, seq)
+                if key in pending_deleted:
+                    last_drop[key] = seq
+                    pending_deleted.discard(key)
+            continue
+        if t in ("PointPromoted", "OperatorPromoted"):
+            p = ev.get("point")
+            if isinstance(p, dict) and isinstance(p.get("id"), str):
+                # Existence only — NOT a recreate boundary (#2256): a promote
+                # re-applies a snapshot of an existing node, so seeding a
+                # survivor anchor from it would wrongly clear a pending
+                # terminalizer's recreate gate.
+                first_materialize.setdefault(("Point", p["id"]), seq)
+            continue
+        if t in _POINT_RESTAMP_EVENT_TYPES:
+            terminalizers.append((seq, ev))
+
+    # ELIGIBILITY — the SAME gate the fold body applies (``_fold_point_restamp``):
+    # a non-empty id ``_writable_id`` accepts. Computed once and reused by every
+    # half below, so the plan can never schedule (or derive a ``fold_seq`` for)
+    # a record the fold would refuse.
+    eligible: dict[int, bool] = {}
+    for seq, ev in terminalizers:
+        rid = ev.get("id")
+        eligible[seq] = bool(rid) and _writable_id(rid)
+
+    # BELIEF half. A supersede's decay is the LAST applicable supersede's
+    # (canonicalization subsumes the earlier instance); EVERY applicable
+    # invalidate decays.
+    supersede_decay: dict[str, int] = {}
+    decays: set[int] = set()
+    for seq, ev in terminalizers:
+        if not eligible[seq]:
+            continue
+        rid = ev.get("id")
+        if ev.get("type") == "PointSuperseded" and not ev.get("new_id"):
+            continue
+        drop = last_drop.get(("Point", rid))
+        if drop is not None and seq <= drop:
+            continue
+        # The target must exist at this seq — see the forward-reference rule.
+        first = first_materialize.get(("Point", rid))
+        if first is not None and seq < first:
+            continue
+        if ev.get("type") == "PointSuperseded":
+            supersede_decay[rid] = seq
+        else:
+            decays.add(seq)
+    decays |= set(supersede_decay.values())
+
+    # STAMP half: the recreate boundary, the EXISTENCE gate, then the supersede
+    # canonicalization.
+    recreate_ok: dict[int, bool] = {}
+    for seq, ev in terminalizers:
+        if not eligible[seq]:
+            recreate_ok[seq] = False
+            continue
+        rid = ev.get("id")
+        anchor = last_recreate.get(("Point", rid))
+        first = first_materialize.get(("Point", rid))
+        # A fold at or before the recreate anchor died with the replaced node;
+        # a fold BEFORE the node's first materialization has nothing to fold
+        # into on the chronological apply() arm (the promote case above — a
+        # node whose only durable record is ``PointPromoted``). Both gates are
+        # what make the two engines agree.
+        recreate_ok[seq] = (anchor is None or seq > anchor) and (
+            first is None or seq >= first)
+    # Only the LAST recreate-surviving supersede per old id folds, so an
+    # earlier ``S1→A`` CORRECTS cannot ghost beside the final ``S2→A``. The
+    # canonicalization is on the FOLD, not on ``new_id``: a later supersede
+    # that carries no ``new_id`` still supersedes the earlier one as the id's
+    # last published successor event (it folds 0 rows and is warned about
+    # exactly as before). Invalidates are NOT canonicalized (#2498).
+    supersede_last_seq: dict[str, int] = {}
+    for seq, ev in terminalizers:
+        if ev.get("type") != "PointSuperseded":
+            continue
+        if not eligible[seq] or not recreate_ok.get(seq):
+            continue
+        supersede_last_seq[ev["id"]] = seq
+    decisions: dict[int, tuple[bool, bool]] = {}
+    for seq, ev in terminalizers:
+        if not eligible[seq]:
+            # Ineligible: not a non-empty id ``_writable_id`` accepts (NUL /
+            # lone surrogate / empty). Reported, not silent — main classified
+            # such an id as a str and let the fold-miss warning fire (#3299),
+            # and the stricter gate must not make the drop quiet.
+            logger.warning(
+                "plan_point_restamp_folds: %s has no writable non-empty id "
+                "(event_id=%s id=%r) — no terminalizer fold",
+                ev.get("type"), ev.get("event_id"), ev.get("id"))
+            decisions[seq] = (False, False)
+            continue
+        rid = ev["id"]
+        if ev.get("type") == "PointSuperseded":
+            stamp = supersede_last_seq.get(rid) == seq
+        else:
+            stamp = recreate_ok.get(seq, False)
+        decisions[seq] = (seq in decays, stamp)
+    return decisions, dict(supersede_last_seq)
 
 
 def _apply_one(points: dict[str, dict], ev: dict) -> None:
@@ -3134,9 +3702,28 @@ class FalkorProjection(
                 from tortoise.consistency import recover_from_log
                 result = recover_from_log(events_dir, self)
                 if result.get("recovered"):
-                    logger.warning(
-                        "auto-recovered empty embedded DB from %s (%s events)",
-                        events_dir, result.get("log_points"))
+                    # #4641: a completed recovery can still leave the graph's
+                    # onboarding state NOT confirmed intact — a restore gap
+                    # (raw writes no journal event carries), an unverified
+                    # restore, or a state-UNKNOWN rescue file. Reporting only
+                    # the clean "auto-recovered" line there IS the silent
+                    # partial loss, so name it on the same line the operator
+                    # reads. Which of the three it is lives in `reason` and in
+                    # the rebuild ERROR log; the aggregate gap is the trigger.
+                    if result.get("onboarding_gap"):
+                        logger.warning(
+                            "auto-recovered empty embedded DB from %s "
+                            "(%s events) BUT its onboarding state is NOT "
+                            "confirmed intact — re-run onboarding for the "
+                            "affected org(s) and see the rebuild ERROR log "
+                            "(#4641). Recovery reason: %s",
+                            events_dir, result.get("log_points"),
+                            result.get("reason"))
+                    else:
+                        logger.warning(
+                            "auto-recovered empty embedded DB from %s "
+                            "(%s events)",
+                            events_dir, result.get("log_points"))
                 elif result.get("reason"):
                     # Lost-graph case but recovery declined (ambiguous/unreadable
                     # log) — warn loudly instead of silently continuing with an
@@ -3146,7 +3733,13 @@ class FalkorProjection(
                         result.get("reason"))
 
     def _recover_or_raise(self, events_dir: str) -> None:
-        """Run recover_from_log and fail loud if it did not recover."""
+        """Run recover_from_log, fail loud if it did not recover.
+
+        A completed recovery with an onboarding gap is NOT a reason to refuse
+        to open the store (it is usable, and refusing would be strictly worse)
+        — but it must not pass unmentioned either, since this is the caller for
+        the unresponsive-graph path where no other surface reports it (#4641).
+        """
         from tortoise.consistency import recover_from_log
         result = recover_from_log(events_dir, self)
         if not result.get("recovered"):
@@ -3154,6 +3747,13 @@ class FalkorProjection(
                 f"DB health check failed and recovery did not complete: "
                 f"{result.get('reason')}. "
                 f"See operations/skills/tortoise-rebuild/SKILL.md")
+        if result.get("onboarding_gap"):
+            logger.warning(
+                "recovery completed but the rebuilt graph's onboarding state "
+                "is NOT confirmed intact — re-run onboarding for the "
+                "affected org(s) and see the rebuild ERROR log (#4641). "
+                "Recovery reason: %s",
+                result.get("reason"))
 
     @classmethod
     def from_uri(cls, uri: str, graph_name: str | None = None) -> "FalkorProjection":  # noqa: UP037
@@ -3310,6 +3910,33 @@ class FalkorProjection(
                         "MATCH (n:Point {id:$id}) SET n.status = 'live'",
                         params={"id": oid},
                     )
+        elif t in _POINT_RESTAMP_EVENT_TYPES:
+            # #3305: the Point-lifecycle terminalizer fold, for the ONE-RECORD
+            # contract (a live caller, or any whole-journal engine that has not
+            # been wired to the shared plan). This engine has no journal view,
+            # so it folds the record at its position — chronology, so the belief
+            # decay rides along, and the fold can never be applied with a
+            # survivor decision the journal would contradict.
+            #
+            # The apply()-based REPLAY engines do NOT use this branch: they call
+            # ``apply_journal_point_restamp`` with the plan
+            # ``plan_point_restamp_folds`` builds, because folding EVERY
+            # terminalizer here would diverge from ``rebuild_all``'s selection
+            # (a pre-recreation fold, or a non-canonical supersede, must not
+            # fold). Before this branch existed the type fell through to the
+            # ``unrecognized event type`` warning below, so
+            # ``recover_from_log`` / the backup JSONL restore re-materialized a
+            # superseded or invalidated Point as ``status='live'`` with the
+            # CORRECTS edge and belief decay gone. The 0-row warning mirrors
+            # ``rebuild_all``'s sweep so a one-record caller is not quieter
+            # than an engine (#3299: a dropped fold must be audible).
+            if self._fold_point_restamp(ev) == 0:
+                logger.warning(
+                    "apply: %s folded no Point (event_id=%s id=%r "
+                    "new_id=%r) — inapplicable (no writable id / no new_id) "
+                    "or the target was never created",
+                    t, ev.get("event_id"), ev.get("id"), ev.get("new_id"))
+            return
         elif t == "PointsMerged":
             # #331 (review r2): `or []` also covers "merge_ids": null.
             for mid in ev.get("merge_ids") or []:
@@ -3377,9 +4004,11 @@ class FalkorProjection(
         else:
             # P2-1 (#3299): a record type outside the recognized vocabulary
             # must not be dropped silently. A type that IS recognized but has
-            # no branch HERE — e.g. PointSuperseded / PointInvalidated /
-            # DirectEdgeRepoint, folded only by rebuild_all's deferred pass —
-            # still warns: that is a genuine rebuild-parity gap, not noise.
+            # no branch HERE — e.g. DirectEdgeRepoint, replayed only by
+            # rebuild_all's pass-2b — still warns: that is a genuine
+            # rebuild-parity gap, not noise. (PointSuperseded /
+            # PointInvalidated were the other two until #3305 gave them the
+            # branch above.)
             logger.warning("unrecognized event type %r — skipped", t)
 
     def _episodic_point_ids(self) -> set[str]:
@@ -3564,11 +4193,46 @@ class FalkorProjection(
         # link whose endpoint was hard-deleted AFTER it must not resurrect.
         hard_delete_seqs = journal_hard_delete_seqs(events)
         entity_link_events: list[tuple[int, dict]] = []
+        # #3305: compute the shared terminalizer SELECTION once for the whole
+        # journal. This engine replays one record at a time, so it cannot use
+        # ``apply()``'s inline branch for these two types — that branch folds
+        # EVERY terminalizer, while ``rebuild_all`` deliberately drops the
+        # pre-recreation ones and canonicalizes supersedes. Feeding each
+        # record through the plan keeps the two engines on ONE selection.
+        restamp_plan, _ = plan_point_restamp_folds(events)
+        # #3305: a terminalizer's CORRECTS edge names a SUCCESSOR this
+        # chronological pass may not have materialized yet, so the inline
+        # MERGE no-ops where ``rebuild_all``'s after-creations sweep succeeds.
+        # Buffer the endpoints and re-apply them after the pass — the same
+        # forward-reference treatment ``EntityLinked`` gets below.
+        deferred_corrects: list[tuple[int, str, str]] = []
         for seq, ev in enumerate(events):
             if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
                 entity_link_events.append((seq, ev))
                 continue
+            # Key the dispatch on the PLAN, not the raw envelope type: the plan
+            # selects by the NORMALIZED type (``_norm`` splices a nested
+            # payload), so a ``type``-in-``point`` record is planned here but
+            # would miss a raw-type guard and fall through to ``apply()``'s
+            # inline branch — which folds EVERY terminalizer, skipping this
+            # engine's selection (#325/#3722's raw-vs-normalized class).
+            if seq in restamp_plan:
+                edge = self.apply_journal_point_restamp(ev, seq, restamp_plan)
+                if edge is not None:
+                    deferred_corrects.append(edge)
+                continue
             self.apply(ev)
+        if deferred_corrects:
+            # Guarded like the other two engines' sweeps: ``fold_deferred_*``
+            # must never abort a post-wipe replay (the graph was already
+            # DETACH DELETE'd above), so a failure is logged, not raised.
+            try:
+                self.fold_deferred_corrects_edges(
+                    deferred_corrects, hard_delete_seqs)
+            except Exception:
+                logger.exception(
+                    "rebuild: deferred CORRECTS fold failed; %d edge(s) not "
+                    "replayed", len(deferred_corrects))
         self.fold_deferred_entity_links(entity_link_events, hard_delete_seqs)
 
     def _prewipe_graph_identity(self) -> dict:
@@ -3804,6 +4468,44 @@ class FalkorProjection(
             capture_failed.append(
                 f"config snapshot/#2814 ({type(e).__name__}: {e})")
 
+        # ── Onboarding state snapshot (#4641) ───────────────────────
+        # `tortoise/onboarding/state.py` writes `:OnboardingState`,
+        # `:OnboardingStep` and the `COMPLETED_STEP` edges with RAW Cypher —
+        # no journal record, and (before this change) `rg OnboardingState
+        # tortoise/projection` was zero hits, so a replay cannot re-create any
+        # of it. The writers'
+        # contracts make the loss visible rather than benign: `fork` is
+        # set-once and never re-asked, `status` is server-owned and
+        # gate-written. Captured as a SECTION pair (node maps + step links)
+        # rather than a `_config_classes()` row because the registry carries
+        # nodes with a single identity property while `:OnboardingStep` is
+        # composite `(org_id, step_id)` and the edge is not a node at all — a
+        # node-only row would restore the node and silently drop the edges.
+        #
+        # Best-effort read, funneled into the SAME `capture_failed` gate: a
+        # graph that cannot answer this read NEVER reaches the wipe (I3).
+        onboarding_snapshot: list[dict] = []
+        onboarding_step_links: list[tuple[str, str]] = []
+        try:
+            # Imported HERE, PRE-wipe, and REUSED by the restore leg below.
+            # The restore leg runs after `MATCH (n) DETACH DELETE n`, so a
+            # renamed or removed symbol would raise with the store already
+            # emptied (#2943). Binding all four before the capture funnels
+            # that failure into `capture_failed`, which aborts with the graph
+            # untouched — the pre-wipe guard and the post-wipe consumer now
+            # read the SAME symbols (#4641 review round 6).
+            from tortoise.onboarding.state import (
+                COMPLETED_STEP_EDGE,
+                ONBOARDING_NODE_LABEL,
+                ONBOARDING_STEP_LABEL,
+                ONBOARDS_EDGE,
+            )
+            onboarding_snapshot, onboarding_step_links = (
+                _capture_onboarding_snapshot(self.g))
+        except Exception as e:
+            capture_failed.append(
+                f"onboarding snapshot/#4641 ({type(e).__name__}: {e})")
+
         # ── #2943: a FAILED capture must not fall through to the wipe ───
         # Both capture blocks above are best-effort by design (the graph may
         # be corrupt), but proceeding after a failed capture would wipe the
@@ -3947,6 +4649,7 @@ class FalkorProjection(
                 "rebuild: found a leftover pre-wipe snapshot at %s (%d "
                 "graph-only point event(s), %d batch(es), %d batch link(s), "
                 "%d session container(s), %d session link(s), "
+                "%d onboarding state(s), %d onboarding step link(s), "
                 "%d config entry(ies)) "
                 "from an interrupted rebuild — merging it before this "
                 "wipe+replay",
@@ -3956,6 +4659,8 @@ class FalkorProjection(
                 len(leftover.get("batch_point_links") or []),
                 len(leftover.get("session_snapshot") or []),
                 len(leftover.get("session_point_links") or []),
+                len(leftover.get("onboarding_snapshot") or []),
+                len(leftover.get("onboarding_step_links") or []),
                 len(leftover.get("config_snapshot") or []))
         merged = _union_prewipe_snapshot(leftover, {
             "synthetic_events": synthetic_events,
@@ -3963,6 +4668,8 @@ class FalkorProjection(
             "batch_point_links": batch_point_links,
             "session_snapshot": session_snapshot,
             "session_point_links": session_point_links,
+            "onboarding_snapshot": onboarding_snapshot,
+            "onboarding_step_links": onboarding_step_links,
             "config_snapshot": config_snapshot,
         })
         synthetic_events = merged["synthetic_events"]
@@ -3977,6 +4684,29 @@ class FalkorProjection(
         # `covered` set (journal ∪ synthetic snapshot) cannot account for.
         session_snapshot = merged["session_snapshot"]
         session_point_links = merged["session_point_links"]
+        # #4641: the onboarding sections need the same reassignment for the
+        # same reason — on the sidecar-recovery path the live capture is empty
+        # (the wipe already landed), so restoring from the pre-union locals
+        # would restore nothing. The write payload below is derived from
+        # `merged` too, so a crash between the sidecar write and the replay
+        # keeps the recovered onboarding state in the retry's rescue file.
+        onboarding_snapshot = merged["onboarding_snapshot"]
+        onboarding_step_links = merged["onboarding_step_links"]
+        # #4641: the pre-preservation window, computed HERE (pre-wipe) so the
+        # flag can be CARRIED into this run's own sidecar. A leftover with no
+        # onboarding section key — or one carrying the flag a previous run
+        # staged — was written by a build that did not record the class, so
+        # whether the wipe destroyed onboarding state CANNOT be determined
+        # from the file. `or`, not `and`: a file carrying only ONE of the two
+        # keys recorded half the class. Mirrors #2814's `config_reset` T2
+        # staging, and the flag is a METADATA key (see
+        # `_PREWIPE_SNAPSHOT_META_KEYS`) so a second interruption does not let
+        # this run's own empty sections erase the evidence.
+        onboarding_unknown = bool(
+            (leftover or {}).get("onboarding_unknown")) or (
+            leftover is not None
+            and ("onboarding_snapshot" not in leftover
+                 or "onboarding_step_links" not in leftover))
         # #2814: same reason as the session sections — on the sidecar-recovery
         # path the live graph is already empty, so the leftover's config is the
         # only record of it. Assigned from `merged` (not from the capture
@@ -4103,6 +4833,13 @@ class FalkorProjection(
                         list(entry) if isinstance(entry, tuple) else entry
                         for entry in merged[section]
                     ]
+                # #4641: carry the state-UNKNOWN signal (see above) into the
+                # file this run writes. Without it, a SECOND interruption
+                # leaves a retry reading a sidecar whose onboarding keys are
+                # now present-but-empty, which is indistinguishable from
+                # "captured and empty" — and the UNKNOWN would be lost.
+                if onboarding_unknown:
+                    payload["onboarding_unknown"] = True
                 _write_prewipe_snapshot(snapshot_path, payload)
             except (OSError, TypeError, ValueError) as e:
                 raise RuntimeError(
@@ -4113,7 +4850,10 @@ class FalkorProjection(
                     f"{len(batch_point_links)} batch link(s), "
                     f"{len(session_snapshot)} :Session container(s) and "
                     f"{len(session_point_links)} session link(s) with no "
-                    f"durable record (#2943, #3947) — and the "
+                    f"durable record (#2943, #3947), the "
+                    f"{len(onboarding_snapshot)} onboarding state(s) / "
+                    f"{len(onboarding_step_links)} step link(s) that ride no "
+                    f"journal record at all (#4641) — and the "
                     f"{len(config_snapshot)} captured authoritative config "
                     f"entr(y/ies) with them (#2814). Fix the cause — write "
                     f"permissions/space on the event-log directory, or a "
@@ -4187,9 +4927,12 @@ class FalkorProjection(
         # Pass 1a: create all Point/Operator nodes first
         # (skip edges), so cross-file PointRevised always has a node to revise (#21).
         # #2488: last_recreate_seq[id] = journal seq of the id's LAST
-        # PointAdded — the pass-1b trailing-sweep survivor anchor (recorded
-        # here because pass-1a sees PointAdded in journal order over the
-        # SAME events list the pass-1b sweep's enumerate indexes).
+        # PointAdded — the anchor the pass-1b terminalizer SURVIVOR rule uses
+        # (recorded here because pass-1a sees PointAdded in journal order over
+        # the SAME events list the pass-1b sweep enumerates; #3305 moved the
+        # rule itself into ``plan_point_restamp_folds``, which derives the same
+        # anchor from the whole journal so the apply()-based engines obey it
+        # too).
         #
         # #3689 review P2: a SECOND anchor, ``last_ann_drop_seq``, is the
         # equivalent boundary for the NON-terminalizing annotator folds —
@@ -4348,10 +5091,21 @@ class FalkorProjection(
                     # node does not (the #330/#3312 parity break), and a leaked
                     # `true` would make a later re-emit store the new vector
                     # RAW and skip the R1 attestation.
+                    #
+                    # #5256: `sourceVersionTransit` is wiped here for the SAME
+                    # reason — it is a declared NODE property whose clause (`SET
+                    # n.sourceVersionTransit=$sv`) is only emitted when the
+                    # payload carries one, so without this a re-creation with no
+                    # `extractedFrom` would inherit the dead incarnation's
+                    # transit and the rebuilt node would diverge from live.
+                    # (The dead incarnation's `extractedFrom` EDGE is a
+                    # separate, PRE-EXISTING pass-2 resurrection — see the
+                    # change's residual note; this wipe is the node-prop half.)
                     self.g.query(
                         "MATCH (n:Point {id:$id}) "
                         "SET n.embedding = NULL, n.content_hash = NULL, "
-                        "    n.embedding_verbatim = NULL",
+                        "    n.embedding_verbatim = NULL, "
+                        "    n.sourceVersionTransit = NULL",
                         params={"id": p["id"]})
                 # Property parity with apply()/apply_one (#330): the shared
                 # helper writes ALL node properties incl. authoredBy,
@@ -4474,34 +5228,26 @@ class FalkorProjection(
         #
         # Resolve, PER OLD-ID, the surviving supersede whose decay applies —
         # the LAST event not obsoleted by a REAL hard-delete boundary. The
-        # anchor is ``last_ann_drop_seq`` (advanced only by a real
-        # ``EntityMutated op=delete`` / ``PointsMerged`` creation), NOT the
-        # terminalizing ``last_recreate_seq``: a bare same-id re-emit MERGEs
-        # live and keeps belief state, so gating the decay on it would drop a
-        # decay live actually applied. Pass 1a has populated both anchors
-        # before this runs, over the SAME ``events`` list the sweep enumerates.
-        supersede_decay_seq: dict[str, int] = {}
-        for seq, ev in enumerate(events):
-            ev = self._norm(ev)
-            if ev.get("type") != "PointSuperseded":
-                continue
-            _sd_rid = ev.get("id")
-            # Mirror ``_fold_point_superseded``'s applicability guard
-            # (``if not oid or not new_id: return 0``) EXACTLY: the sweep fold
-            # IGNORES an event that lacks ``new_id``, so the inline decay must
-            # not fire for one either — live never decayed for such an event,
-            # and a decay here would be a belief write the graph never
-            # received. The falsy-id test matters as much as the type test: an
-            # EMPTY-STRING id passes ``isinstance(..., str)`` (and
-            # ``_writable_id``) but is skipped by the fold, so a type-only gate
-            # would decay a node the fold ignores.
-            if (not isinstance(_sd_rid, str) or not _sd_rid
-                    or not ev.get("new_id")):
-                continue
-            _sd_drop = last_ann_drop_seq.get(("Point", _sd_rid))
-            if _sd_drop is not None and seq <= _sd_drop:
-                continue
-            supersede_decay_seq[_sd_rid] = seq
+        # anchor is the REAL delete→recreate boundary (advanced only by an
+        # ``EntityMutated op=delete`` / ``PointsMerged`` followed by a
+        # creation), NOT the terminalizing recreate anchor: a bare same-id
+        # re-emit MERGEs live and keeps belief state, so gating the decay on it
+        # would drop a decay live actually applied. Pass 1a has populated the
+        # anchors before this runs, over the SAME ``events`` list the sweep
+        # enumerates.
+        #
+        # #3305: the WHOLE selection — both belief anchors, the recreate
+        # survivor rule and the supersede canonicalization, for both families —
+        # is now computed by ``plan_point_restamp_folds`` and obeyed by the
+        # apply()-based engines too (``rebuild(EventLog)``/``recover_from_log``
+        # /the backup JSONL restore), so the two algorithm families cannot pick
+        # different terminalizers from one journal. See that function for the
+        # rules.
+        restamp_plan, _ = plan_point_restamp_folds(events)
+        # The hard-delete map is needed TWICE below (the supersede/invalidate
+        # sweep's edge staleness rule and the EntityLinked tail) — compute it
+        # once, here.
+        hard_delete_seqs = journal_hard_delete_seqs(events)
         # Pass 1b: apply revisions + other non-edge events AFTER all nodes exist
         for seq, ev in enumerate(events):
             ev = self._norm(ev)
@@ -4848,80 +5594,52 @@ class FalkorProjection(
                 if isinstance(_sname, str):
                     _supersede_seq[("name", _sname)] = max(
                         seq, _supersede_seq.get(("name", _sname), -1))
-            elif t == "PointSuperseded":
-                # #2423 pass-1b rebuild parity: the POINT-side analog of
-                # #2164 (ObjectSuperseded above) — apply() has no supersede
-                # branch because live supersede_point mutates the graph
-                # directly (sdk.py status block + CORRECTS MERGE), but the
-                # REBUILD chain had NO branch either: a journaled
-                # PointSuperseded silently fell through and the superseded
-                # Point reverted to status='live' (its PointAdded snapshot
-                # predates the supersede), losing outdated/validTo/
-                # expiredAt + the CORRECTS edge (indicator 1) — a dead
-                # claim reappearing in default reads. Mirror the #2164
-                # pattern: defer the status/validity/CORRECTS fold to a
-                # trailing sweep (below, after this loop) so a later
-                # PointAdded/PointPromoted re-creation of the same id cannot
-                # resurrect it — the fold is an idempotent SET, so ordering
-                # vs its own creation event is irrelevant and later
-                # re-creations are re-folded correctly. (The operator-edge
-                # re-point + DirectEdgeRepoint replay half is pass-2b —
-                # after pass-2 rebuilds edges from operator snapshots that
-                # still name the OLD input.)
+            elif t in _POINT_RESTAMP_EVENT_TYPES:
+                # #2423 (PointSuperseded) + #2488 (PointInvalidated) pass-1b
+                # rebuild parity, in ONE branch because the two families share
+                # one SELECTION: the POINT-side analog of #2164
+                # (ObjectSuperseded above). Live supersede_point/
+                # invalidate_point mutate the graph directly (sdk.py status/
+                # flag block + CORRECTS MERGE) and the REBUILD chain had NO
+                # branch for either: a journaled terminalizer silently fell
+                # through and the superseded Point reverted to status='live'
+                # (its PointAdded snapshot predates the supersede), losing
+                # outdated/validTo/expiredAt + the CORRECTS edge (indicator 1)
+                # — a dead claim reappearing in default reads, or the #2488
+                # ghost re-entering EP voting. Mirror the #2164 pattern: defer
+                # the status/validity/CORRECTS fold to a trailing sweep (below,
+                # after this loop) so a later PointAdded/PointPromoted
+                # re-creation of the same id cannot resurrect it — the fold is
+                # an idempotent SET, so ordering vs its own creation event is
+                # irrelevant and later re-creations are re-folded correctly.
+                # (The operator-edge re-point + DirectEdgeRepoint replay half
+                # is pass-2b — after pass-2 rebuilds edges from operator
+                # snapshots that still name the OLD input.)
                 #
-                # #2884 A3: the BELIEF-decay half (`decay_clause`) folds INLINE
-                # HERE too, at the surviving event's own journal seq (resolved
-                # by the ``supersede_decay_seq`` pre-pass above) — NOT in the
-                # trailing sweep. The sweep fold below no longer writes any
-                # belief prop, so inline and sweep are mutually exclusive by
-                # construction for the same event (only this branch writes the
-                # decay). The anchor is ``last_ann_drop_seq``, NOT
-                # ``last_recreate_seq`` (see the pre-pass).
-                if isinstance(ev.get("id"), str):
-                    if supersede_decay_seq.get(ev["id"]) == seq:
-                        self._decay_point_belief(ev["id"])
-                    point_re_stamp_folds.append((seq, ev))
-            elif t == "PointInvalidated":
-                # #2488 pass-1b rebuild parity: the POINT-side invalidate
-                # analog of the PointSuperseded branch above — live
-                # invalidate_point mutates the graph directly (outdated flag
-                # SET + CORRECTS MERGE, no status write) and the REBUILD
-                # chain had NO branch either: a journaled PointInvalidated
-                # silently fell through, so a JSONL wipe+rebuild replayed
-                # the pre-invalidate PointAdded and RESURRECTED the claim to
-                # EP voting/reads (the #2488 ghost). Defer to the SAME
-                # trailing sweep as PointSuperseded (one cross-family list)
-                # with the enumerate seq — the survivor rule drops
-                # pre-re-creation folds and the sweep folds survivors in
-                # journal-append order. The fold applies outdated=true +
-                # validTo/expiredAt/updatedAt + CORRECTS only — it never
-                # writes status (an invalidated point stays status='live').
-                #
-                # #2884 A3: the BELIEF half (`decay_clause`) folds INLINE
-                # HERE, at the event's own journal position, NOT in the
-                # trailing sweep. The sweep runs after the whole pass-1b
-                # loop, so a decay applied there clobbers every LATER
-                # same-id inline belief writer (ConfidenceChanged / a
-                # PointRevised carrying confidence): replay ended at 0.5
-                # while live ended at the later writer's value. Inline
-                # application makes journal order decide, as live
+                # #2884 A3: the BELIEF decay folds INLINE HERE, at the event's
+                # own journal seq — NOT in the trailing sweep. The sweep runs
+                # after the whole pass-1b loop, so a decay applied there
+                # clobbers every LATER same-id inline belief writer
+                # (ConfidenceChanged / a PointRevised carrying confidence):
+                # replay ended at 0.5 while live ended at the later writer's
+                # value. Inline application makes journal order decide, as live
                 # chronology does; the sweep keeps the stamp/CORRECTS half.
-                # #2884 A3b: the BELIEF decay anchors on the REAL hard-delete
-                # boundary (``last_ann_drop_seq``) — the same anchor the
-                # supersede pre-pass and the ConfidenceChanged fold use.
-                # ``last_recreate_seq`` is the STATUS half's anchor: it is
-                # advanced by ANY PointAdded, including a bare same-id re-emit
-                # that MERGEs live (``n.confidence = coalesce($cf,
-                # n.confidence)``) and therefore KEEPS the decayed belief.
-                # Gating belief on it suppressed the decay for that shape, so
-                # replay ended at the pre-invalidate value while live held the
-                # decayed one. The two families cannot hold opposite policies
-                # for one journal shape.
-                if isinstance(ev.get("id"), str):
-                    _inv_rid = ev["id"]
-                    _inv_anchor = last_ann_drop_seq.get(("Point", _inv_rid))
-                    if _inv_anchor is None or seq > _inv_anchor:
-                        self._decay_point_belief(_inv_rid)
+                # Its anchor is the REAL delete→recreate boundary, NOT the
+                # terminalizing recreate anchor — a bare same-id re-emit MERGEs
+                # live and KEEPS the decayed belief, so gating belief on the
+                # recreate anchor suppressed a decay live actually applied.
+                # The two halves therefore cannot hold opposite policies for
+                # one journal shape, and both are decided by the ONE plan
+                # shared with the apply()-based engines.
+                #
+                # The fold itself applies different columns per family, by
+                # design: superseded writes status='superseded', invalidated
+                # writes the outdated flag only (an invalidated point stays
+                # status='live'). See ``_fold_point_restamp``.
+                _decay, _stamp = restamp_plan.get(seq, (False, False))
+                if _decay:
+                    self._decay_point_belief(ev["id"])
+                if _stamp:
                     point_re_stamp_folds.append((seq, ev))
             elif t == "DirectEdgeRepoint":
                 # #2423: supersede's 2a-DIRECT transfer emits a flat
@@ -5049,54 +5767,44 @@ class FalkorProjection(
         # races). Folds are idempotent; the sweep mirrors the ObjectSuperseded
         # pattern above.
         #
-        # Cross-family survivor rule (#2488, replaces the #2423 last_per_oid
-        # dedup): per old_id, keep ONLY re-stamping folds whose journal seq
-        # is AFTER the id's last PointAdded re-creation (last_recreate_seq,
-        # pass-1a). A delete+recreate id-reuse wipes every pre-recreation
-        # fold's stamps/CORRECTS live (they died with the deleted node) — a
-        # raw producer reusing an id between two supersedes leaves TWO
-        # PointSuperseded events for one old_id, and only the post-recreate
-        # one is live-truth (acceptance c). A None anchor = "no re-creation
-        # seen → keep all folds" (legacy journals, single-incarnation ids).
-        #
-        # Supersede-kind canonicalization (retained from #2423 last_per_oid):
-        # a superseded point is status-TERMINAL and live supersede of a
-        # terminal point raises — a second same-id PointSuperseded in one
-        # journal (raw producer that did not journal its delete+recreate)
-        # is never live-truth, so keep the LAST supersede survivor per old
-        # id (the earlier fold's CORRECTS S1→A would ghost beside the final
-        # S2→A). PointInvalidated folds ALL survive the id filter and are
-        # NOT canonicalized — #2498: the SDK now REJECTS the repeat (the
-        # outdated=true flag is terminal), but a raw/legacy producer can still
-        # journal it, so every survivor folds (distinct corrected_by → 2
-        # CORRECTS, acceptance b).
+        # #3305: the cross-family survivor rule and the supersede-kind
+        # canonicalization no longer live here — they are computed ONCE by
+        # ``plan_point_restamp_folds`` and shared with the apply()-based
+        # engines, so pass-1b above has already applied them. In brief (the
+        # full rules and their rationale are on the plan): a fold at or before
+        # the id's last ``PointAdded``/``OperatorAdded`` died with the replaced
+        # node and is dropped; a superseded point is status-TERMINAL, so only
+        # the LAST recreate-surviving ``PointSuperseded`` per old id folds (an
+        # earlier ``S1→A`` CORRECTS would ghost beside the final ``S2→A``);
+        # ``PointInvalidated`` folds ALL survive the id filter and are NOT
+        # canonicalized (#2498 — the repeat is now rejected by the SDK, but a
+        # raw/legacy producer can still journal it, so every survivor folds).
         # Chains A→B→C have distinct old ids — each link folds independently.
-        supersede_last: dict[str, tuple[int, dict]] = {}
-        invalidate_survivors: list[tuple[int, dict]] = []
-        for fsq, ev in point_re_stamp_folds:
-            anchor = last_recreate_seq.get(("Point", ev["id"]))
-            if anchor is not None and fsq <= anchor:
-                # Pre-re-creation fold — dropped (id-reuse survivor rule).
-                continue
-            if ev["type"] == "PointSuperseded":
-                supersede_last[ev["id"]] = (fsq, ev)
-            else:
-                invalidate_survivors.append((fsq, ev))
-        # Journal-append order (ascending event index). Do NOT sort by ts —
-        # ts collides within the same ms and the JSONL carries no seq.
-        point_sweep = sorted(
-            [*supersede_last.values(), *invalidate_survivors],
-            key=lambda pair: pair[0])
+        # ``point_re_stamp_folds`` is therefore the survivor list, in
+        # journal-append order.
+        # #3305: the survivor rule and the supersede canonicalization already
+        # ran in ``plan_point_restamp_folds`` (shared with the apply()-based
+        # engines), so ``point_re_stamp_folds`` holds ONLY the survivors, in
+        # journal-append order (pass-1b collected them in seq order). Do NOT
+        # re-sort by ts — ts collides within the same ms and the JSONL carries
+        # no seq. ``supersede_last`` is re-derived here because pass-2b's edge
+        # transfer discriminates on the supersede-kind survivors.
+        supersede_last: dict[str, tuple[int, dict]] = {
+            ev["id"]: (fsq, ev) for fsq, ev in point_re_stamp_folds
+            if ev.get("type") == "PointSuperseded"}
+        point_sweep = point_re_stamp_folds
         for fsq, ev in point_sweep:
             if ev["type"] == "PointInvalidated":
                 # #2488 updatedAt seq-gate (NOT clock comparison): pass-1a's
                 # _upsert_point_props already stamped every replayed node
                 # updatedAt=rebuild-now, and rebuild-now always postdates the
                 # journaled invalidate ts — a `$ts >= n.updatedAt` CASE could
-                # never fire. Unlike a superseded old (status terminal,
-                # frozen), an invalidated point stays status='live' — a LATER
-                # same-id PointRevised/PointPromoted (inline, stamped
-                # rebuild-now in pass-1b) is a legitimate newer writer.
+                # never fire. A superseded old is status-TERMINAL but its
+                # updatedAt is not frozen either (a revision after a supersede
+                # is accepted live — see the supersede arm), and an invalidated
+                # point stays status='live' — a LATER same-id
+                # PointRevised/PointPromoted (inline, stamped rebuild-now in
+                # pass-1b) is a legitimate newer writer.
                 # skip_updated_at fires when max_inline_seq[id] > this
                 # invalidate's seq: the gate suppresses ONLY the updatedAt
                 # column — outdated/validTo/expiredAt/CORRECTS fold always
@@ -5106,8 +5814,17 @@ class FalkorProjection(
                 # UNCONDITIONALLY (exact live parity, supersede's precedent).
                 later_inline = max_inline_seq.get(ev["id"])
                 skip_ua = later_inline is not None and later_inline > fsq
-                matched = self._fold_point_invalidated(
-                    ev, skip_updated_at=skip_ua)
+                successor = ev.get("corrected_by")
+                edge_ok = not _hard_delete_suppresses(
+                    hard_delete_seqs, ev["id"], "Point", fsq) and not (
+                    successor and _hard_delete_suppresses(
+                        hard_delete_seqs, successor, "Point", fsq))
+                # #3305: the shared home for both lifecycle families — the
+                # SAME dispatch ``apply()`` calls, so the two engines cannot
+                # drift. ``decay=False``: pass-1b already applied the belief
+                # half inline at the surviving event's seq.
+                matched = self._fold_point_restamp(
+                    ev, skip_updated_at=skip_ua, decay=False, edge=edge_ok)
                 if matched == 0:
                     logger.warning(
                         "rebuild: PointInvalidated fold matched no Point "
@@ -5118,7 +5835,30 @@ class FalkorProjection(
                         ev.get("event_id"), ev.get("id"),
                         ev.get("corrected_by"))
             else:
-                matched = self._fold_point_superseded(ev)
+                # #3305: same shared dispatch as the invalidate arm above (and
+                # as ``apply()``). ``decay=False`` — pass-1b already applied
+                # the decay inline at the surviving supersede's seq. The
+                # updatedAt seq-gate is the INVALIDATE arm's, mirrored: without
+                # it the sweep writes the older journaled supersede ts while
+                # the chronological apply() arm leaves the later PointRevised's
+                # replay-now stamp, and the two engines disagree. (Live
+                # ``update_point`` on a plain Point does not itself advance
+                # updatedAt — the replay-now value is the separate,
+                # pre-existing replay-vs-live class, not claimed here.)
+                # KNOWN DIVERGENCE (#6239): a ``PointPromoted``
+                # AFTER a supersede still re-livens ``status`` on the apply()
+                # arm while this sweep keeps it terminal — live refuses to
+                # promote a superseded point, so the shape is raw-producer /
+                # cross-file only. Tracked, not reconciled here.
+                later_inline = max_inline_seq.get(ev["id"])
+                skip_ua = later_inline is not None and later_inline > fsq
+                successor = ev.get("new_id")
+                edge_ok = not _hard_delete_suppresses(
+                    hard_delete_seqs, ev["id"], "Point", fsq) and not (
+                    successor and _hard_delete_suppresses(
+                        hard_delete_seqs, successor, "Point", fsq))
+                matched = self._fold_point_restamp(
+                    ev, skip_updated_at=skip_ua, decay=False, edge=edge_ok)
                 if matched == 0:
                     logger.warning(
                         "rebuild: PointSuperseded fold matched no Point "
@@ -5338,6 +6078,262 @@ class FalkorProjection(
                 params={"sid": sid, "pid": pid},
             )
 
+        # ── #4641: restore the onboarding state machine ─────────────────
+        # Same class as the :Session / :Batch markers above, and the same
+        # reason: `tortoise/onboarding/state.py`'s `:OnboardingState`,
+        # `:OnboardingStep` and `COMPLETED_STEP` writes are RAW Cypher that
+        # ride no journal record and that `projection` never re-derives. Runs
+        # here — after pass 1b (the journaled `:Subject` nodes exist, so the
+        # `onboards` edge has an endpoint) and before pass 2 (which does not
+        # touch onboarding). Labels / edge types / ids come from the DOMAIN
+        # module, never re-typed.
+        #
+        # The node write is `SET n += $props` (not replace): an unrelated live
+        # property must not be dropped, and the captured properties are the
+        # pre-wipe truth for the fields they carry.
+        #
+        # A failure here runs AFTER the wipe, so — like the `:Session` and
+        # config restores — it must DEGRADE rather than raise (#2943: a
+        # post-wipe raise leaves the store empty). Every failure is counted,
+        # reported once below, and the post-restore check turns a resulting
+        # gap into an ERROR.
+        # `COMPLETED_STEP_EDGE` / `ONBOARDING_NODE_LABEL` /
+        # `ONBOARDING_STEP_LABEL` / `ONBOARDS_EDGE` are bound by the PRE-wipe
+        # import in the capture block above, so a rename fails before the
+        # wipe rather than here (#4641 review round 6).
+        onboarding_restore_failures = 0
+        onboarding_restored_orgs: set[str] = set()
+        for props in onboarding_snapshot:
+            oid = props.get("org_id") if isinstance(props, dict) else None
+            if not isinstance(oid, str):
+                continue
+            clean = {k: v for k, v in props.items() if k != "org_id"}
+            try:
+                self.g.query(
+                    f"MERGE (n:{ONBOARDING_NODE_LABEL} {{org_id:$oid}}) "
+                    "SET n += $props",
+                    params={"oid": oid, "props": clean},
+                )
+            except Exception as e:
+                onboarding_restore_failures += 1
+                logger.warning(
+                    "rebuild: onboarding-state restore for org %s failed "
+                    "(%s: %s) — the pre-wipe state was NOT restored (#4641)",
+                    oid, type(e).__name__, e,
+                )
+                continue
+            onboarding_restored_orgs.add(oid)
+            # The `onboards` edge is a RAW write too and nothing in the journal
+            # carries it. It is DERIVED from the captured `org_subject_id`
+            # (which rode the node entry), so no separate section is needed.
+            # `MATCH` on BOTH endpoints — the anchor `:Subject` is journaled
+            # (`sdk.create_subject` emits SubjectAdded) so replay re-creates
+            # it; a MATCH means a genuinely absent Subject (a pre-#2194/#2295
+            # or hosted write path that journals nothing) drops the edge
+            # rather than minting an endpoint-less one. That drop raises NO
+            # exception, so it is caught by the post-restore verification
+            # below, which reads this edge and compares it to the captured
+            # `(org_id, org_subject_id)` pairs (#4641).
+            sid = props.get("org_subject_id")
+            if isinstance(sid, str):
+                try:
+                    self.g.query(
+                        f"MATCH (n:{ONBOARDING_NODE_LABEL} {{org_id:$oid}}), "
+                        "(s:Subject {id:$sid}) "
+                        f"MERGE (n)-[:{ONBOARDS_EDGE}]->(s)",
+                        params={"oid": oid, "sid": sid},
+                    )
+                except Exception as e:
+                    onboarding_restore_failures += 1
+                    logger.warning(
+                        "rebuild: onboarding `onboards` edge restore for "
+                        "org %s (subject %s) failed (%s: %s) — the org "
+                        "anchor link was NOT restored (#4641)",
+                        oid, sid, type(e).__name__, e,
+                    )
+        for oid, step_id in onboarding_step_links:
+            if oid not in onboarding_restored_orgs:
+                # The node entry is absent or its restore failed: the edge's
+                # endpoint does not exist. Counted (the post-restore check
+                # reports the gap) rather than minting a property-less
+                # `:OnboardingState` via MERGE, which would be a NEW incoherent
+                # state the next rebuild would capture and persist.
+                onboarding_restore_failures += 1
+                continue
+            try:
+                self.g.query(
+                    f"MATCH (n:{ONBOARDING_NODE_LABEL} {{org_id:$oid}}) "
+                    f"MERGE (s:{ONBOARDING_STEP_LABEL} "
+                    "{org_id:$oid, step_id:$step_id}) "
+                    f"MERGE (n)-[:{COMPLETED_STEP_EDGE}]->(s)",
+                    params={"oid": oid, "step_id": step_id},
+                )
+            except Exception as e:
+                onboarding_restore_failures += 1
+                logger.warning(
+                    "rebuild: onboarding step edge restore for org %s step "
+                    "%s failed (%s: %s) — the completed step was NOT "
+                    "restored (#4641)",
+                    oid, step_id, type(e).__name__, e,
+                )
+        # Post-restore verification: compare the REBUILT graph against the
+        # captured set through the same reader the capture used, so the
+        # comparison cannot drift from the capture's scope. Never raise (this
+        # runs after the wipe). A failed verification READ is treated as a
+        # mismatch — "could not confirm" must not read as "confirmed".
+        #
+        # Placement: this runs HERE, before pass 2, while the analogous config
+        # verification runs after pass 2b. That is safe only because NO later
+        # pass touches this class — the only bulk delete in `rebuild_all` is
+        # the unconditional `MATCH (n) DETACH DELETE n` above, and every later
+        # `DELETE` matches `(old:Point {id:$old})-[r]->(t)` (or the supersede
+        # re-point sweep's `(op:Point)` edge), so its source endpoint is
+        # always a `:Point` and it cannot match `:OnboardingState`,
+        # `:OnboardingStep`, `onboards` or `COMPLETED_STEP`. A future pass-2
+        # change that touched the class would silently green this check; move
+        # it to the end if that happens.
+        onboarding_expected_orgs = {
+            e.get("org_id") for e in onboarding_snapshot
+            if isinstance(e, dict) and isinstance(e.get("org_id"), str)}
+        onboarding_expected_links = {
+            (o, s) for o, s in onboarding_step_links}
+        # The `onboards` edge is restored from each node entry's captured
+        # `org_subject_id`, but the restore `MATCH`es BOTH endpoints — so when
+        # the anchor `:Subject` is genuinely absent (a pre-#2194/#2295 or
+        # hosted write path that journals nothing) the MATCH yields no rows,
+        # the MERGE never runs, and NO exception is raised. Without this leg
+        # the run would report a clean, complete restore while the edge was
+        # destroyed — the silent partial restore this change exists to remove.
+        onboarding_expected_onboards = {
+            (e.get("org_id"), e.get("org_subject_id"))
+            for e in onboarding_snapshot
+            if isinstance(e, dict) and isinstance(e.get("org_id"), str)
+            and isinstance(e.get("org_subject_id"), str)}
+        onboarding_missing_orgs: set = set()
+        onboarding_missing_links: set = set()
+        onboarding_missing_onboards: set = set()
+        onboarding_verified = True
+        try:
+            live_nodes, live_links = _capture_onboarding_snapshot(self.g)
+            live_orgs = {e.get("org_id") for e in live_nodes
+                         if isinstance(e, dict)}
+            live_link_pairs = {(o, s) for o, s in live_links}
+            live_onboards = {
+                (r[0], r[1]) for r in self.g.query(
+                    f"MATCH (n:{ONBOARDING_NODE_LABEL})"
+                    f"-[:{ONBOARDS_EDGE}]->(s:Subject) "
+                    "RETURN n.org_id, s.id").result_set}
+            onboarding_missing_orgs = onboarding_expected_orgs - live_orgs
+            onboarding_missing_links = (onboarding_expected_links
+                                        - live_link_pairs)
+            onboarding_missing_onboards = (onboarding_expected_onboards
+                                           - live_onboards)
+        except Exception as e:
+            onboarding_verified = False
+            logger.error(
+                "rebuild: could not VERIFY the restored onboarding state "
+                "(%s: %s) — treating it as not restored (#4641)",
+                type(e).__name__, e,
+            )
+        # The pre-preservation UNKNOWN signal was computed PRE-wipe (see the
+        # payload block: the flag rides this run's sidecar too). It is logged
+        # here rather than there only because this is where the operator
+        # reads the restore outcome.
+        # ONE canonical gap count, returned to the callers so the projection,
+        # `consistency.recover_from_log` and the CLI cannot drift apart.
+        # Deliberately NOT `restore_failures + missing_*`: a failed restore
+        # lands in BOTH (its node is absent), which reported a single
+        # destroyed org as two gaps; and a restore that RAISED after the write
+        # landed (a timeout) is a failure with nothing missing, which must not
+        # read as loss.
+        onboarding_missing_total = (len(onboarding_missing_orgs)
+                                    + len(onboarding_missing_links)
+                                    + len(onboarding_missing_onboards))
+        onboarding_gap = onboarding_missing_total
+        if not onboarding_verified:
+            # "Could not confirm" is itself a gap, gated on the verification
+            # result ALONE — never on the expected counts (#4641 review round
+            # 11). Gating it on the expected sets made the reporting surfaces
+            # disagree about ONE completed rebuild: the projection still
+            # logged the UNVERIFIED ERROR and the CLI still printed its
+            # UNVERIFIED line, while `onboarding_gap` stayed 0 — so
+            # `consistency.recover_from_log` and both automatic-recovery
+            # callers reported a clean success. A failed verification read
+            # means the class was not confirmed intact. With nothing expected
+            # that is a weak signal, which is why the expected-count nuance
+            # belongs in the MESSAGE, not in the trigger.
+            onboarding_gap = max(onboarding_gap, 1)
+        if onboarding_unknown:
+            onboarding_gap = max(onboarding_gap, 1)
+
+        if onboarding_unknown:
+            logger.error(
+                "rebuild: the leftover pre-wipe snapshot at %s does not "
+                "carry a usable onboarding record — it either predates "
+                "onboarding preservation, carries only one of the two "
+                "onboarding sections, or carries a state-UNKNOWN marker "
+                "from an earlier interrupted rebuild — so whether the "
+                "destroyed graph held any onboarding state CANNOT be "
+                "determined. This is a state-UNKNOWN signal, not proof the "
+                "state is absent. Re-run onboarding for any org whose "
+                "onboarding state is uncertain (#4641).",
+                snapshot_path,
+            )
+        if not onboarding_verified:
+            # "Could not confirm" must not be reported as "confirmed" in
+            # EITHER direction: the missing sets are still EMPTY here (the
+            # verification read never ran, so nothing was observed absent), so
+            # this branch must not print the expected denominators as "ABSENT"
+            # and assert the data is gone. The `None` values for those counts
+            # are produced by the return mapping below, not by the sets here.
+            logger.error(
+                "rebuild: onboarding-state post-restore verification "
+                "COULD NOT RUN (%d restore failure(s)) — the rebuilt "
+                "graph's onboarding state is UNVERIFIED: not confirmed "
+                "intact, and NOT observed gone. Re-check the %d expected "
+                "org state(s), %d expected step edge(s) and %d expected "
+                "`onboards` anchor edge(s) before trusting them — "
+                "see #4641.",
+                onboarding_restore_failures,
+                len(onboarding_expected_orgs),
+                len(onboarding_expected_links),
+                len(onboarding_expected_onboards),
+            )
+        elif onboarding_missing_total:
+            # The MISSING SETS are the "gone" evidence — NOT the inflated
+            # `onboarding_gap` (which is also raised by the UNKNOWN flag and by
+            # an unverified read) and NOT `restore_failures`: a restore call
+            # can raise while the server already applied the write (a timeout
+            # or a connection blip), and calling that "gone" would be a false
+            # loss claim over intact state (see the `elif` below). Gating on
+            # the missing sets also keeps the UNKNOWN-only shape from being
+            # re-described here as observed loss (#4641 review round 7).
+            logger.error(
+                "rebuild: onboarding-state post-restore verification "
+                "FAILED — %d of %d expected org state(s), %d of %d expected "
+                "step edge(s) and %d of %d expected `onboards` anchor "
+                "edge(s) are ABSENT from the rebuilt graph (%d restore "
+                "attempt(s) raised). This is a TRUE POSITIVE, not a silent "
+                "success: the wipe is unconditional and only the journal is "
+                "replayed, so those onboarding states/edges are gone. "
+                "Re-run onboarding for the affected org(s) — see #4641.",
+                len(onboarding_missing_orgs),
+                len(onboarding_expected_orgs),
+                len(onboarding_missing_links),
+                len(onboarding_expected_links),
+                len(onboarding_missing_onboards),
+                len(onboarding_expected_onboards),
+                onboarding_restore_failures,
+            )
+        elif onboarding_restore_failures:
+            logger.warning(
+                "rebuild: %d onboarding restore attempt(s) raised, but the "
+                "post-restore verification confirms every expected org state "
+                "and edge is PRESENT — treated as transient (an error after "
+                "the write landed), not as loss (#4641).",
+                onboarding_restore_failures,
+            )
+
         # ── #2814: restore the authoritative configuration ──────────────
         # After pass-1a (so a `:PackInstall` is not clobbered by a later replay
         # write) and before pass 2, alongside the other sidecar-borne graph
@@ -5491,7 +6487,7 @@ class FalkorProjection(
         # skip, counted as dropped and never applied (see
         # `fold_deferred_entity_links`).
         self.fold_deferred_entity_links(
-            entity_link_events, journal_hard_delete_seqs(events))
+            entity_link_events, hard_delete_seqs)
 
         # Pass 2b (#2423): PointSuperseded EDGE re-point replay +
         # DirectEdgeRepoint descriptor replay — AFTER pass-2 rebuilt operator
@@ -5953,7 +6949,38 @@ class FalkorProjection(
                 if config_verified else 0,
                 "config_reset": (config_reset_marker is not None
                                  or config_reset_read_failed),
-                "config_reset_read_failed": config_reset_read_failed}
+                "config_reset_read_failed": config_reset_read_failed,
+                # #4641: additive, and the caller-visible half of the
+                # post-restore verification. The onboarding restore's only
+                # other signal is an ERROR line, and the pending sidecar is
+                # retired afterwards (deliberately — #4305: retaining the
+                # single graph-wide blob would re-merge pre-wipe truth for
+                # EVERY id and resurrect post-wipe deletes), so without these
+                # counts a programmatic caller (`consistency.recover_from_log`)
+                # would report a success-shaped result over a destroyed
+                # onboarding state. `onboarding_restored` is 0 when the
+                # verification READ failed ("could not confirm" must not read
+                # as "confirmed").
+                "onboarding_expected": len(onboarding_expected_orgs),
+                "onboarding_verified": onboarding_verified,
+                "onboarding_missing_orgs": (
+                    len(onboarding_missing_orgs)
+                    if onboarding_verified else None),
+                "onboarding_restored": (len(onboarding_expected_orgs)
+                                       - len(onboarding_missing_orgs))
+                if onboarding_verified else 0,
+                "onboarding_missing_links": (len(onboarding_missing_links)
+                                             if onboarding_verified else None),
+                "onboarding_missing_onboards": (
+                    len(onboarding_missing_onboards)
+                    if onboarding_verified else None),
+                "onboarding_restore_failures": onboarding_restore_failures,
+                # The single canonical gap the callers read (see above), plus
+                # the pre-preservation UNKNOWN signal — an old-build rescue
+                # file cannot say whether the class was lost or never present.
+                "onboarding_gap": onboarding_gap,
+                "onboarding_missing_total": onboarding_missing_total,
+                "onboarding_state_unknown": onboarding_unknown}
 
     def query(self, cypher: str, **params):
         # P0 guard (#99): refuse bulk graph-wipe on non-test graphs.
