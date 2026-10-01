@@ -434,7 +434,7 @@ def guarded_client_class(base_client):
         _GUARDED_CLIENT_CLASSES[base_client] = _guarded_client_factory
         return _guarded_client_factory
 
-    class _GuardedClient(base_client):
+    class _GuardedClient(base_client):  # type: ignore[valid-type]  # a class object, not a type alias (#5414)
         """Vendor FalkorDB client whose every graph handle is guarded."""
 
         def select_graph(self, graph_id):
