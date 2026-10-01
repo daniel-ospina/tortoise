@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import textwrap
 from pathlib import Path
 
 import yaml
@@ -119,7 +120,12 @@ def test_prephase_is_pr_only_and_never_uses_pytest_lf_fallback():
     # and the whole pre-phase is gated on the PR event + the restored state.
     guard = next(i for i, ln in enumerate(lines)
                  if "github.event_name" in ln and ln.strip().startswith("if "))
-    assert '"pull_request"' in lines[guard], lines[guard]
+    # The POLARITY is the pin, not the token: `!in` would leave every other
+    # assertion here green while the pre-phase ran on every push EXCEPT a PR —
+    # i.e. the feature silently off where it is meant to run (mutation-checked).
+    assert lines[guard].strip().startswith(
+        'if [ "${{ github.event_name }}" = "pull_request" ]'), lines[guard]
+    assert "!=" not in lines[guard], lines[guard]
     assert "[ -s .pytest_cache/v/cache/lastfailed ]" in lines[guard], lines[guard]
 
 
@@ -147,6 +153,46 @@ def test_nodeid_intersection_actually_selects_this_halfs_failures(tmp_path):
         capture_output=True, text=True, check=True).stdout
     assert out.splitlines() == ["tests/test_a.py::test_one[c 1]",
                                 "tests/test_b.py::test_two"], repr(out)
+
+
+def test_a_vanished_nodeid_is_pruned_so_the_prephase_cannot_lock_itself_out(tmp_path):
+    """Execute the workflow's OWN prune payload over a fixture (#6142 P2).
+
+    rc 4 means pytest could not find one of the nodeids and aborted the WHOLE
+    pre-phase (zero tests ran) — and LFPlugin keeps a cache entry it never
+    collected, so an unpruned vanished nodeid (a renamed or re-parametrized
+    test) would disable the fast-fail for that half on EVERY later push. The
+    prune is what makes that self-healing; without it this test reds because
+    the vanished entry survives in the cache.
+    """
+    script = _run_script()
+    block = re.search(r"<<'LF_PRUNE'\n(.*?)\n *LF_PRUNE", script, re.S)
+    assert block, script
+    code = textwrap.dedent(block.group(1))
+    cache = tmp_path / "lastfailed"
+    cache.write_text(json.dumps({
+        "tests/test_a.py::test_gone": True,
+        "tests/test_a.py::test_live": True,
+    }))
+    log = tmp_path / "pytest.log"
+    # pytest's real shape for a nodeid it cannot find
+    log.write_text(
+        "ERROR: not found: tests/test_a.py::test_gone\n"
+        "(no name 'tests/test_a.py::test_gone' in any of [<Module test_a.py>])\n")
+    code = code.replace(".pytest_cache/v/cache/lastfailed", str(cache))
+    code = code.replace("/tmp/pytest.log", str(log))
+    out = subprocess.run(["python3", "-c", code], capture_output=True,
+                         text=True, check=True).stdout
+    assert "pruned 1 vanished nodeid(s)" in out, out
+    assert json.loads(cache.read_text()) == {
+        "tests/test_a.py::test_live": True}, cache.read_text()
+    # ...and a log naming nothing is a NO-OP, not a wipe: the entries a real
+    # failure left must survive an rc-4 run that found no missing nodeid.
+    log.write_text("1 failed, 2 passed\n")
+    subprocess.run(["python3", "-c", code], capture_output=True, text=True,
+                   check=True)
+    assert json.loads(cache.read_text()) == {
+        "tests/test_a.py::test_live": True}, cache.read_text()
 
 
 def test_full_run_is_outside_the_guard_and_unconditional():

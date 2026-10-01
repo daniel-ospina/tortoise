@@ -811,6 +811,25 @@ jobs:
             timeout -s INT -k 10 10m stdbuf -oL python -m pytest "${LF_NODEIDS[@]}" -v --timeout=300 -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit-lf.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
             LF_RC=$?
             echo "last-failed fast-fail phase: rc=$LF_RC"
+            # #6142 P2: rc 4 means pytest could not FIND one of the nodeids and
+            # aborted the whole pre-phase (zero tests ran) — and LFPlugin KEEPS a
+            # cache entry it never collected, so without pruning one renamed or
+            # re-parametrized test would silently disable the fast-fail for that
+            # half on every later push. Prune exactly the nodeids pytest reported
+            # as missing; the full run below still runs either way (fail-open).
+            if [ "$LF_RC" -eq 4 ]; then
+              python3 - <<'LF_PRUNE'
+          import json, pathlib, re
+          cache = pathlib.Path(".pytest_cache/v/cache/lastfailed")
+          log = pathlib.Path("/tmp/pytest.log").read_text(errors="replace")
+          gone = set(re.findall(r"not found:\s*(\S+)", log))
+          if gone and cache.exists():
+              data = json.loads(cache.read_text() or "{}")
+              kept = {k: v for k, v in data.items() if k not in gone}
+              cache.write_text(json.dumps(kept))
+              print(f"last-failed fast-fail: pruned {len(data) - len(kept)} vanished nodeid(s)")
+          LF_PRUNE
+            fi
             # FAIL-OPEN on 0 (passed — the full half still runs), 4/5 (nothing
             # collected: a nodeid vanished or the marker deselected it) and
             # 2/124/137 (interrupted, or the PRE-PHASE watchdog fired — 10m on
@@ -820,6 +839,13 @@ jobs:
             if [ "$LF_RC" -ne 0 ] && [ "$LF_RC" -ne 2 ] && [ "$LF_RC" -ne 4 ] && [ "$LF_RC" -ne 5 ] && [ "$LF_RC" -ne 124 ] && [ "$LF_RC" -ne 137 ]; then
               echo "==================== pytest summary (last-failed, tail) ===================="
               tail -n 200 /tmp/pytest.log
+              # #3470: EVERY `/tmp/*.log` tail in these workflows reports through
+              # the reporter, and the pre-phase is no exception — omitting this
+              # call is exactly the silent-omission hole #3470 exists to close
+              # (and `tests/test_pytest_attribution.py` reds on it by design,
+              # because this leg's failure set is a SUBSET of the half).
+              # One definition: pytest-attribution.sh.
+              bash .github/scripts/pytest-attribution.sh --log /tmp/pytest.log --rc "$LF_RC"
               echo "==================== pytest failure nodeids ===================="
               grep -E '^(FAILED|ERROR) ' /tmp/pytest.log || echo "(no FAILED/ERROR nodeids)"
               echo "ci-selection: last-failed-subset (#6142) — this half ran only its previous failures; the FULL half did NOT run in this job"
