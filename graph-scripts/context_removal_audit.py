@@ -7,7 +7,7 @@ carried which context values — the ONLY way to answer "what was in the X subgr
 after Phase 2 removes n.context.
 
 Usage:
-  TORTOISE_DB_URI=docker://:@localhost:16379/tortoise \\
+  TORTOISE_DB_URI=docker://:@127.0.0.1:16379/tortoise \\
     python3 graph-scripts/context_removal_audit.py
 
   # Dry-run (print what would be written):
@@ -113,7 +113,7 @@ def main() -> int:
     args = parser.parse_args()
 
     uri = args.uri or os.environ.get(
-        "TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise"
+        "TORTOISE_DB_URI", "docker://:@127.0.0.1:16379/tortoise"
     )
     cfg = _parse_uri(uri)
 
