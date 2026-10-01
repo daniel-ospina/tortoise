@@ -26,10 +26,20 @@ The two things this exists to prove, per #4282:
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/bridge_table.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/bridge_table.py`"
+    )
+
 import argparse
 import ast
 import re
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -240,7 +250,9 @@ DISCRIMINATORS = {
 
 VALID_DEST = set(TARGET_MCP) | {"REMOVED"}
 
-# Destinations the SIBLING SDK rename table (`docs/product/sdk-rename-table.md` §C3b, and
+# Destinations the SIBLING SDK rename table (`docs/product/sdk-rename-table.md`, GENERATED
+# ON DEMAND — not committed, #5373; render with `uv run python tools/sdk_rename_table.py`;
+# `§C3b`, and
 # its C6 fold record) records as WRONG. `tools/sdk_rename_table.py` reconciles the two
 # artifacts and determined that beta's row — and the owner-approved MCP list it rests on —
 # puts these two on `update_knowledge`, not `refresh_confidence`.
@@ -762,7 +774,7 @@ def render(rows: list[dict], sdk_defs: dict[str, int], cites: dict[str, dict]) -
         + ", ".join(f"`{n}`" for n in retired_names),
         "",
         "**A `⚠️` after a destination means the sibling SDK rename table**",
-        "**(`docs/product/sdk-rename-table.md` §C3b, and its C6 fold record) records that**",
+        "**(`docs/product/sdk-rename-table.md` (generated on demand) §C3b, and its C6 fold record) records that**",
         "**destination as WRONG.** The map is owner-approved, so it is NOT edited here; §D2c states",
         "the documented reading and the authority for it.",
         "",
@@ -906,7 +918,7 @@ def render(rows: list[dict], sdk_defs: dict[str, int], cites: dict[str, dict]) -
         "",
         "#### D2c — destinations the sibling SDK rename table records as WRONG",
         "",
-        "`docs/product/sdk-rename-table.md` reconciles the same surface this file maps, and its",
+        "`docs/product/sdk-rename-table.md` (generated on demand) reconciles the same surface this file maps, and its",
         "§C3b finding plus its C6 fold record name a different destination for the rows below.",
         "**The destination map here is owner-approved, so it is reported, not edited** — the same",
         "rule D2 states. Each row's documented reading and the authority for it are shown, so the",

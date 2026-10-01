@@ -1015,7 +1015,7 @@ def _render_block(h: dict) -> str:
     else:
         sid = hit_session_id(h)
         prefix = f"[session {sid}]" if sid else "[session ?]"
-    sdate = h.get("session_date")
+    sdate = _one_line(h.get("session_date"))
     if sdate:
         prefix = f"{prefix} (session date {sdate})"
     # E3 (#1535): speaker decoration — mirrors the deterministic leg's
@@ -1025,19 +1025,59 @@ def _render_block(h: dict) -> str:
     # "[role] text" AND have the speaker prop — decorating both would
     # double-attribute, e.g. "[user] [user] ..." on the deterministic leg's
     # primary recall surface).
-    spk = h.get("speaker") or ""
+    spk = _one_line(h.get("speaker"))
     # only the deterministic leg's own role-bracket shape suppresses the
     # decoration — a non-role bracket prefix ([context], [IMPORTANT])
     # must not suppress speaker attribution
     if spk and not _ROLE_PREFIX.match(h.get("content", "")):
         prefix = f"{prefix} [{spk}]"
-    marker = _validity_marker(h)
+    # The marker carries the SAME free-text class as the two values above: the
+    # superseded/supersedes snippets are stored Point content, and the
+    # valid/expired window fields are too (truncated to 10 chars only when
+    # LONGER than 10, so a short payload carrying a newline survives intact).
+    # Collapsed here rather than field by field inside _validity_marker — one
+    # choke point covers every present and future free-text field the marker
+    # interpolates.
+    marker = _one_line(_validity_marker(h))
     if marker:
-        # _validity_marker already returns self-bracketed groups
+        # _validity_marker returns self-bracketed groups
         # (e.g. "[SUPERSEDED BY: x] [valid 2026-06-10 → 2026-06-12]") — no
         # extra wrap.
         prefix = f"{prefix} {marker}"
     return f"{prefix} {h.get('content', '')}"
+
+
+def _one_line(value: object) -> str:
+    """Collapse a decoration value to a SINGLE LINE (#3844).
+
+    Three free-text sources are interpolated into the reader-evidence
+    annotation prefix: ``session_date``, ``speaker``, and the whole validity
+    marker (``superseded_by``/``supersedes`` content snippets plus the
+    valid/expired window fields). All were interpolated raw. The session id
+    beside them is NOT safe by construction — on the ask/search surface it is
+    the client-writable ``session_id``/``sessionId`` too, made safe only by the
+    identifier-shape ALLOWLIST in :func:`_safe_session_tag`. That is exactly why
+    the neighbours were missed: the guarded id LOOKED structural while its
+    siblings were plain free text.
+
+    The values are free text from a captured session, so a newline inside one
+    FORGES an annotation line: it fabricates a turn the reader will read as a
+    real ``[user] …`` message, or a fake ``(session date …)``. That is prompt
+    injection into the evidence the model is asked to reason over, and the model
+    cannot tell the fabricated line from a real one.
+
+    Whitespace-collapse rather than strip-a-blacklist: it neutralises every
+    line-forging sequence (``\\n``, ``\\r``, ``\\r\\n``, unicode line separators,
+    vertical tab, form feed) without needing the list to be complete, which is
+    the property a blacklist cannot offer.
+
+    Byte-identical for ordinary values — ``"Alice"`` and an ISO date both pass
+    through unchanged, and a missing value still yields ``""`` (falsy), so
+    absent-decoration rendering is unchanged.
+    """
+    if value is None:
+        return ""
+    return " ".join(str(value).split())
 
 
 def _has_claim_text(h: dict) -> bool:

@@ -98,6 +98,17 @@ NOT re-implemented here — it is already asserted by
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/mergify_config_guard.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/mergify_config_guard.py`"
+    )
+
 import argparse
 import ast
 import hashlib
@@ -105,7 +116,6 @@ import json
 import re
 import shlex
 import subprocess
-import sys
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -350,12 +360,50 @@ def _triggers(doc: dict) -> Any:
     return None
 
 
+# A check emitted by a workflow triggered this way is emittable AT QUEUE ENTRY: entry is
+# evaluated against the author PR head, and these triggers run on the same pull-request
+# events (`opened`/`synchronize`/`reopened`/`edited`) and report their check-runs against
+# that head. The difference between them is which revision of the workflow is loaded and
+# which secrets it may see — not whether a PR run produces the check. Deliberately NOT
+# extended to `push`/`workflow_run`: those are not PR-scoped, so a check emitted only by
+# them still cannot be relied on at entry (clause (vi)'s failure, kept red).
+#
+# This arm exists because `ai-review-gate` — this repo's review-record gate, and the ENTRY
+# condition #5433 added to `.mergify.yml` — is `pull_request_target`-only, so the stricter
+# spelling refused the one check the enforcement point needs, on a predicate that did not
+# model how the check is emitted.
+PR_TRIGGERS = ("pull_request", "pull_request_target")
+
+
 def _has_pull_request(triggers: Any) -> bool:
+    """Emission test for clause (vi): does a PR run produce this workflow's checks?
+
+    True for either PR trigger. Use `_has_pull_request_strict` where the question is
+    whether the job RUNS AGAINST THE PR'S TREE — see its docstring.
+    """
+    if isinstance(triggers, str):
+        return triggers in PR_TRIGGERS
+    if isinstance(triggers, (list, dict)):
+        return any(trigger in triggers for trigger in PR_TRIGGERS)
+    return False
+
+
+def _has_pull_request_strict(triggers: Any) -> bool:
+    """`pull_request` ONLY — the predicate for "runs against the PR's own tree".
+
+    The two triggers are NOT interchangeable for that question. `pull_request_target`
+    loads the workflow from the BASE revision and, absent an explicit checkout of the
+    PR head, runs base code — so a job hosted there never validates the PR's tree, and
+    an `if: github.event_name == 'pull_request'` predicate inside it is FALSE (the step
+    is skipped while a static reader counts it as running). Clause (vi) only asks
+    whether a check is EMITTED on a PR (so it takes both triggers), while
+    `_validator_candidates` (clause (vii)) asks whether the validator SEES the PR —
+    which only `pull_request` supports. Keeping the two questions on one widened
+    predicate would have certified a union validator that cannot see the union.
+    """
     if isinstance(triggers, str):
         return triggers == "pull_request"
-    if isinstance(triggers, list):
-        return "pull_request" in triggers
-    if isinstance(triggers, dict):
+    if isinstance(triggers, (list, dict)):
         return "pull_request" in triggers
     return False
 
@@ -825,7 +873,7 @@ def _validator_candidates(docs: dict[str, dict], required_workflow: str, closure
     """
     candidates: list[dict] = []
     for workflow, doc in docs.items():
-        if workflow != required_workflow or not _has_pull_request(_triggers(doc)):
+        if workflow != required_workflow or not _has_pull_request_strict(_triggers(doc)):
             continue
         jobs = doc.get("jobs")
         if not isinstance(jobs, dict):
@@ -1402,7 +1450,7 @@ def _clause_iii(doc: dict) -> tuple[int, str]:
 
 
 def _clause_iv(doc: dict, record: dict | None) -> tuple[int, str]:
-    """I2b: under `merge` injection the five cheap contexts are explicit
+    """I2b: under `merge` injection the cheap contexts are explicit
     `check-success` ENTRY conditions (the merge-time injected path accepts
     neutral/skipped — the named residual of E1)."""
     active = [rule for rule in doc["queue_rules"] if _effective_mode(rule) == "merge"]
@@ -1471,16 +1519,25 @@ def _clause_v(doc: dict) -> tuple[int, str]:
 
 def _clause_vi(doc: dict, emitters: list[dict]) -> tuple[int, str]:
     """Emission (structural): every check named in either list maps to a job's
-    effective name in a workflow with a `pull_request` trigger."""
+    effective name in a workflow with a `pull_request` OR `pull_request_target` trigger.
+
+    Both are PR-scoped and both report their check-runs against the PR head, so both
+    can satisfy a `check-success` at queue entry — which is the property this clause
+    exists to protect (a check no PR run emits would block entry forever).
+    `pull_request_target` was added in #5433: this repo's own review gate is
+    `pull_request_target`-only, so the narrower spelling refused the one check the
+    enforcement point needs. For the DIFFERENT question — does the job run against the
+    PR's own tree — see `_has_pull_request_strict`.
+    """
     required = sorted({name for _, name, _ in _all_check_pairs(doc["queue_rules"])})
     pr_names = {e["name"] for e in emitters if e["has_pr"]}
     missing = [name for name in required if name not in pr_names]
     if missing:
         return (
             EXIT_DIVERGED,
-            f"named checks with no pull_request-emitting workflow job: {missing}",
+            f"named checks with no PR-triggered workflow job: {missing}",
         )
-    return EXIT_OK, f"{required} are emitted on a pull_request workflow"
+    return EXIT_OK, f"{required} are emitted on a pull_request/pull_request_target workflow"
 
 
 def _clause_viii_a(root: Path, record: dict | None) -> tuple[int, str]:
