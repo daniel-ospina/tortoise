@@ -53,10 +53,11 @@ _TESTS_ROOT = Path(__file__).resolve().parent
 # The swept (renamed) sites are the test_-prefixed literals/constants the
 # guard passes on their own — the table documents the residual declarations.
 ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
-    # 2026-09-29: test_github_connect.py:453 seeds the 'registry' namespace
-    # directly. The literal IS the code under test, so a test_* rename would
-    # seed a different namespace than the github-connect path resolves.
-    "test_github_connect.py": {"registry": "github-connect"},
+    # The seed helper does `_make_sdk(namespace="registry")._get_registry()
+    # .query(CREATE :Team ...)` — i.e. it seeds a Team through the CANONICAL
+    # namespace PROD code resolves, the same `prod-coupled` class as the
+    # test_agent_signup / test_dr_endpoints / test_billing entries below.
+    "test_github_connect.py": {"registry": "prod-coupled"},
     # 2026-08-28 merge-reconciliation: #1785/#1816 files use the 'registry'
     # literal (session/extraction tests) — routed so the markers gate passes
     # repo-wide.
@@ -196,11 +197,22 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
 #                              name, but it must stay CONSISTENT between the
 #                              seed, the call and the read-back assert.
 ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
-    # 2026-09-29: test_backup_ledger_5062.py reads the production-shaped
-    # registry_tortoise graph at 4 sites (304, 324, 399, 625). These are READS
-    # of the real graph the backup ledger is derived from, so a test_* rename
-    # would read a different graph than the code under test writes.
-    "test_backup_ledger_5062.py": {'"registry_tortoise"': "read-only"},
+    # #5711/#5062: the nine backup-ledger sites take the registry handle
+    # straight from their own FalkorProjection and hand it to `create_backup`
+    # / `_backup_graph` DIRECTLY — the file never imports `tortoise.hosted_api`
+    # and makes no endpoint call, so NOTHING resolves `registry_tortoise`:
+    # `create_backup` consumes the passed handle verbatim
+    # (`hosted_backup.py:1516-1530`; `_stamp_backup_latest` at :1490-1494).
+    # Verified, not assumed: replacing all nine literals with a scratch name
+    # leaves the module green, so the name is NOT production-shape by
+    # contract. Production's backup handle is `registry_control_plane`, a
+    # different name (`hosted_api.py:26682-26704`, `sdk.py:3161`). Declared
+    # `test-constructed`, matching this table's in-file precedent for the
+    # identical direct-create_backup stamp-seam scratch handle `"registry_3895"`
+    # (:283) and its own criterion at :228-232 ("nothing resolves X...").
+    "test_backup_ledger_5062.py": {
+        '"registry_tortoise"': "test-constructed",
+    },
     "test_dr_endpoints.py": {
         'f"org_{org_id}"': "endpoint-constrained",  # seed write — drill/backup resolve org_{id}
         # #2823 Supabase-lane sweep seed — the DATA plane stays FalkorDB in

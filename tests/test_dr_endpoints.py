@@ -148,6 +148,65 @@ def _reset_graph(db, graph_name: str) -> None:
     db.select_graph(graph_name).query("MATCH (n) DETACH DELETE n")
 
 
+def _sweep_diagnosis(body: dict) -> str:
+    """What a `degraded` sweep actually says, in one line.
+
+    pytest truncates a dict used as the assertion message BEFORE it reaches
+    ``graph_failures`` — the one field that names why a graph was not backed
+    up, and effectively the only place that cause survives: the per-graph
+    error paths return without logging, so the failure message and the app log
+    both carry nothing. Surfacing it explicitly makes a red attributable from
+    the log instead of from a re-run (#5049 — a verdict from ambient machine
+    state must still say what happened).
+
+    Total by construction: this runs while building a failure message, so it
+    must never raise — an exception here would replace the real assertion
+    error and mask the very failure it exists to explain.
+    """
+    if not isinstance(body, dict):
+        return f"sweep body is not a dict: {type(body).__name__}"
+    causes: list[str] = []
+    if body.get("error"):
+        # `enum_failed` puts the cause at the top level with no results map
+        # at all, so a results-only fallback would drop it.
+        causes.append(str(body["error"]))
+    failures = body.get("graph_failures")
+    if isinstance(failures, list):
+        for f in failures:
+            if isinstance(f, dict):
+                causes.append(
+                    f"{f.get('org_id')}/{f.get('graph_id')}: {f.get('error')}")
+    results = body.get("results")
+    if isinstance(results, dict):
+        for tid, res in results.items():
+            if not isinstance(res, dict) or res.get("status") == "backed_up":
+                continue
+            # A non-error status (empty_skipped, data_loss_candidate,
+            # p0_guard_failed, aborted_size_guard) names the cause in
+            # `status` itself; an error result carries `error` as well.
+            detail = res.get("error")
+            causes.append(f"{tid}: {res.get('status')}"
+                          + (f" ({detail})" if detail else ""))
+    incidents = body.get("incidents")
+    if isinstance(incidents, list):
+        # A sweep can report `no_teams` / `no_eligible_teams` with the reason in
+        # `incidents[].kind` (NO_ELIGIBLE_TEAMS, ENUM_DELTA) and nothing in
+        # `error`/`graph_failures`/`results` — so incidents are a cause source too.
+        for inc in incidents:
+            if isinstance(inc, dict) and inc.get("kind"):
+                causes.append(f"incident {inc.get('kind')}")
+    if not causes:
+        # Nothing in the body claims a cause. Say exactly what it carried, and
+        # do not call a normal status a failure: several (no_teams, no_work)
+        # are self-describing outcomes, not errors.
+        causes.append("no cause in error/graph_failures/results/incidents; "
+                      f"top-level keys={sorted(body, key=str)}")
+    return (f"sweep status={body.get('status')} "
+            f"teams={body.get('teams_backed_up')} "
+            f"totals={body.get('graph_totals')} "
+            f"source={body.get('source')} causes=[{'; '.join(causes)}]")
+
+
 def _held_proj_db():
     """A data-plane `db` handle whose SDK is HELD for the session.
 
@@ -411,7 +470,7 @@ class TestDrSweep:
         r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["status"] == "backed_up"
+        assert body["status"] == "backed_up", _sweep_diagnosis(body)
         assert ("resolve", "ENUM_DELTA", "") in fake.calls
         assert ("resolve", "P0_GUARD_FAIL", "team_x") in fake.calls
         # Not open → no resolve call. (This line would hold even without the
@@ -474,7 +533,7 @@ class TestDrSweep:
         r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
         assert r.status_code == 200
         body = r.json()
-        assert body["status"] == "backed_up"
+        assert body["status"] == "backed_up", _sweep_diagnosis(body)
         assert body["teams_backed_up"] == 1
         assert body["results"]["team_x"]["status"] == "backed_up"
         manifests = [k for k in mem_storage.list("backups/team_x/") if k.endswith("manifest.json")]
@@ -526,7 +585,7 @@ class TestDrSweep:
         r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["status"] == "backed_up", body
+        assert body["status"] == "backed_up", _sweep_diagnosis(body)
         assert body["teams_backed_up"] == 2
         assert body["source"] == "supabase"
         assert set(body["results"]) == {"team_s1", "team_s2"}
