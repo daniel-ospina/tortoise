@@ -300,8 +300,8 @@ git commit -m "fix(security): drop INSTANTIATES from KNOWN_REL_TYPES — removed
 Event-[:aboutObject]->Object per ONTOLOGY v3.2 (predicate removed in #214).
 
 Usage:
-  python3 graph-scripts/migrate_instantiates_to_about.py --dry-run [--db URI] [--graphs a,b]
-  python3 graph-scripts/migrate_instantiates_to_about.py [--db URI] [--graphs a,b]
+  uv run python graph-scripts/migrate_instantiates_to_about.py --dry-run [--db URI] [--graphs a,b]
+  uv run python graph-scripts/migrate_instantiates_to_about.py [--db URI] [--graphs a,b]
 """
 ```
 
@@ -309,7 +309,7 @@ Logic per graph: `MATCH (e:Event)-[r:INSTANTIATES]->(o:Object) MERGE (e)-[:about
 
 **Step 2: Dry-run (all namespaces)**
 
-Run: `python3 graph-scripts/migrate_instantiates_to_about.py --dry-run`
+Run: `uv run python graph-scripts/migrate_instantiates_to_about.py --dry-run`
 Expected: prints per-graph edge counts; no writes.
 
 **Step 3: Verify count parity per graph**
