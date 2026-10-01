@@ -1207,7 +1207,12 @@ CONTROL_PLANE_OFFLOAD_OUTCOMES = (
     "completed",           # the callable returned
     "bound_miss_refused",  # the bound fired and the callable will never run
     "bound_miss_running",  # the bound abandoned the AWAIT; the callable still runs
-    "domain_error",        # fn raised its own failure — not a saturation event
+    "domain_error",        # fn failed, or the seam itself failed (catch-all)
+                           # — not a saturation event. The two are NOT told
+                           # apart: at this seam a non-timeout exception out of
+                           # the await cannot be attributed to fn vs the
+                           # plumbing without a traceback heuristic that would
+                           # mislabel more than it fixes. Named residual.
     "cancelled",           # the AWAITING task was cancelled
 )
 
@@ -1328,6 +1333,17 @@ def record_control_plane_offload(
     the metric definitions above).
     """
     if outcome not in CONTROL_PLANE_OFFLOAD_OUTCOMES:
+        # NOT silent. A caller-side typo (`"complete"` for `"completed"`) would
+        # otherwise land in an unremarkable `unknown` child, and a BROKEN
+        # measurement would read as a clean one — precisely the failure this
+        # metric exists to expose. A warning (not a raise) is required because
+        # this runs inside a `finally`: raising here would replace the caller's
+        # real exception with a bookkeeping error.
+        logger.warning(
+            "control-plane offload: unknown outcome %r clamped to 'unknown' "
+            "(op=%r pool=%r) — the metric will UNDER-COUNT this terminal state",
+            outcome, op, pool,
+        )
         outcome = "unknown"
     with _CP_RECORDS_LOCK:
         _CP_OFFLOAD_RECORDS.append((op, duration_s, outcome, pool))

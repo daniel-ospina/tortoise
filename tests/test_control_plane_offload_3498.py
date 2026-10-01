@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import threading
 import time
 from pathlib import Path
@@ -159,6 +160,13 @@ def test_a_missed_wait_bound_is_recorded(monkeypatch):
     monkeypatch.setattr(monitoring, "CONTROL_PLANE_OFFLOAD_TIMEOUT_S", 0.05)
     gate = threading.Event()
     mark = len(monitoring.control_plane_offload_records())
+    # DELTA-SCOPED, not `>= 1`: this suite's other tests also move the same
+    # child, so a bare `>= 1` can be satisfied by an EARLIER test and would stay
+    # green if THIS call stopped recording entirely. Bound the expected move to
+    # exactly one increment of THIS child.
+    _bound_child = monitoring.CONTROL_PLANE_OFFLOAD_COUNT.labels(
+        pool="telemetry", outcome="bound_miss_running")
+    _before = _bound_child._value.get()
 
     async def _run():
         with pytest.raises(monitoring.ControlPlaneOffloadError):
@@ -182,9 +190,10 @@ def test_a_missed_wait_bound_is_recorded(monkeypatch):
     )
     assert records[-1][3] == "telemetry", records[-1]
     # ...and the exported metric moved for THAT outcome, so Prometheus sees it.
-    counter = monitoring.CONTROL_PLANE_OFFLOAD_COUNT.labels(
-        pool="telemetry", outcome=records[-1][2])
-    assert counter._value.get() >= 1, "the bound-miss counter child did not move"
+    assert _bound_child._value.get() == _before + 1, (
+        "the bound-miss counter child moved "
+        f"{_bound_child._value.get() - _before} time(s), expected exactly 1"
+    )
 
 
 def test_a_saturated_backlog_is_recorded_as_refused(monkeypatch):
@@ -298,23 +307,44 @@ def test_a_cancelled_await_is_recorded_as_cancelled():
     )
 
 
-def test_an_out_of_vocabulary_outcome_is_clamped():
+def test_an_out_of_vocabulary_outcome_is_clamped(caplog):
     """#5840: the writer CLAMPS an unknown outcome, bounding label cardinality.
 
     The metric's child set is bounded only if the writer cannot be handed a
     new label value; the clamp is that bound, so it is pinned directly rather
     than only through the callers (which happen to use literals today).
+
+    The clamp must also be VISIBLE (review round 2): a silent clamp turns a
+    caller-side typo into an unremarkable `unknown` child, so a BROKEN
+    measurement reads as a clean one — the exact failure this metric exists to
+    expose. Both halves are pinned: the label is bounded, and the bound is
+    announced.
     """
-    monitoring.record_control_plane_offload(
-        "clamp-probe", 0.01, outcome="not-a-real-outcome", pool="auth")
+    child = monitoring.CONTROL_PLANE_OFFLOAD_COUNT.labels(
+        pool="auth", outcome="unknown")
+    before = child._value.get()
+    # DELTA, not `>= 1` — the raw value must not become a label, and a bare
+    # presence check could be satisfied by any earlier test.
+    with caplog.at_level(logging.WARNING, logger=monitoring.logger.name):
+        monitoring.record_control_plane_offload(
+            "clamp-probe", 0.01, outcome="not-a-real-outcome", pool="auth")
     last = monitoring.control_plane_offload_records()[-1]
     assert last[2] == "unknown", last
     assert "unknown" not in monitoring.CONTROL_PLANE_OFFLOAD_OUTCOMES
     # The clamped child is the one that moved — the raw value never became a
     # Prometheus label.
-    child = monitoring.CONTROL_PLANE_OFFLOAD_COUNT.labels(
-        pool="auth", outcome="unknown")
-    assert child._value.get() >= 1
+    assert child._value.get() == before + 1, (
+        "the clamp did not move the bounded child exactly once"
+    )
+    # ...and it SAID SO. Without this the typo path is indistinguishable from
+    # a healthy `completed` in the logs.
+    assert any(
+        "not-a-real-outcome" in r.getMessage() and r.levelno == logging.WARNING
+        for r in caplog.records
+    ), (
+        "an unknown outcome was clamped SILENTLY — a caller typo would then "
+        f"under-count the metric with no diagnostic: {[r.getMessage() for r in caplog.records]}"
+    )
 
 
 def test_the_offload_metrics_reach_the_metrics_endpoint():
@@ -342,8 +372,14 @@ def test_the_offload_metrics_reach_the_metrics_endpoint():
     )
     # The child carries BOTH labels — a pool-attributed, outcome-attributed
     # series is what makes "is the TELEMETRY pool saturated" answerable.
-    assert 'pool="telemetry"' in text and 'outcome="completed"' in text, (
-        "the exported series is not pool/outcome attributed"
+    # EXACT SERIES, not two independent substrings: `'pool="telemetry"' in text
+    # and 'outcome="completed"' in text` also passes when those labels sit on
+    # DIFFERENT series, so it cannot see a child that lost one of them. Label
+    # order is the EXPORTER's (prometheus_client sorts names), so it is checked
+    # as rendered rather than as declared.
+    assert ('tortoise_control_plane_offload_total'
+            '{outcome="completed",pool="telemetry"}') in text, (
+        "the exported series is not pool/outcome attributed on ONE child"
     )
 
 
