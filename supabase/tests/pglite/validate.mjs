@@ -352,6 +352,13 @@ const suites = [
   '20260919000001_metering_period_end_repair.sql',  // #4216
   '20260925000001_oauth_referential_integrity.sql',  // #3036
   '20260925000002_oauth_redemption_state.sql',  // #3027
+  // #5045 — the capture-token accumulator.
+  // NOTE: this list is EXPLICIT, not a glob — a suite file that is not named
+  // here never runs, and "the suite exists" is then mistaken for "the suite
+  // passes". Add the entry in the same commit as the file. (The sibling #5331
+  // branch adds its own entry to this same list, so the two will conflict
+  // textually on merge; keep BOTH entries.)
+  '20260926000001_metering_capture_tokens.sql',  // #5045
   '20260927000001_metering_unmetered_increments.sql',  // #4779
 ];
 for (const suite of suites) {

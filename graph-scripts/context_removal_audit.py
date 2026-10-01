@@ -7,7 +7,7 @@ carried which context values — the ONLY way to answer "what was in the X subgr
 after Phase 2 removes n.context.
 
 Usage:
-  TORTOISE_DB_URI=docker://:@localhost:16379/tortoise \\
+  TORTOISE_DB_URI=docker://:@127.0.0.1:16379/tortoise \\
     python3 graph-scripts/context_removal_audit.py
 
   # Dry-run (print what would be written):
@@ -18,10 +18,20 @@ Usage:
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"graph-scripts/context_removal_audit.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python graph-scripts/context_removal_audit.py`"
+    )
+
 import argparse
 import json
 import os
-import sys
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -113,7 +123,7 @@ def main() -> int:
     args = parser.parse_args()
 
     uri = args.uri or os.environ.get(
-        "TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise"
+        "TORTOISE_DB_URI", "docker://:@127.0.0.1:16379/tortoise"
     )
     cfg = _parse_uri(uri)
 

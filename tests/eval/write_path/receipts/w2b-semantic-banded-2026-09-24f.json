@@ -1,0 +1,2688 @@
+{
+  "receipt_version": 1,
+  "run_id": "w2b-c449f58c61d6",
+  "date": "2026-09-24T21:52:06Z",
+  "run_status": "completed",
+  "verdict": "regression",
+  "failure_origin": "gate_regression",
+  "commit": "61ba2bb8e",
+  "corpus_hash": "sha256:943a99ec619b4c67b8e31fefb90316ea023bbaddd1905d835b9d930243518324",
+  "judge_pin": "w2-write-path-mechanical-v2",
+  "resolved_config": {
+    "lanes": [
+      "verbatim",
+      "facts",
+      "dream"
+    ],
+    "mode": "BPRE",
+    "harness": "all",
+    "seed": 42,
+    "extractor_posture": "llm"
+  },
+  "cost_usd": 0.0,
+  "metrics": {
+    "salient_unit_survival_macro": 0.4111111111111111,
+    "salient_unit_survival_strict": 0.4111111111111111,
+    "distractor_leakage_per_run": 1,
+    "sessions_emitting": 1.0,
+    "quote_fidelity": 1.0,
+    "provenance_accuracy": 1.0
+  },
+  "quote_spans_total": 0,
+  "justification": null,
+  "session_results": [
+    {
+      "session_id": "wp01_quarry_debug",
+      "emitted": true,
+      "macro": {
+        "survived": 12,
+        "total": 16
+      },
+      "strict": {
+        "survived": 12,
+        "total": 16
+      },
+      "leaked": [],
+      "quotes": {
+        "grounded": 0,
+        "total": 0
+      },
+      "provenance": {
+        "provenanced": 26,
+        "total": 26
+      },
+      "memory_points": 26,
+      "operator_counts": {
+        "IMPL": 2,
+        "INPUT": 2
+      },
+      "planted_operators": [
+        {
+          "id": "wp01_quarry_debug_op_01",
+          "expected_kind": "SUPPORTS",
+          "verdict": "to_content_missing",
+          "edge_correct": false,
+          "forms_found": null
+        },
+        {
+          "id": "wp01_quarry_debug_op_02",
+          "expected_kind": "MITIGATES",
+          "verdict": "to_content_missing",
+          "edge_correct": false,
+          "forms_found": null
+        }
+      ],
+      "failed_units": [
+        {
+          "id": "wp01_quarry_debug_u_06",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp01_quarry_debug_u_07",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp01_quarry_debug_u_09",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp01_quarry_debug_u_11",
+          "failure": "content_missing"
+        }
+      ]
+    },
+    {
+      "session_id": "wp02_lumen_refactor",
+      "emitted": true,
+      "macro": {
+        "survived": 4,
+        "total": 13
+      },
+      "strict": {
+        "survived": 4,
+        "total": 13
+      },
+      "leaked": [
+        "wp02_lumen_refactor_d_02"
+      ],
+      "quotes": {
+        "grounded": 0,
+        "total": 0
+      },
+      "provenance": {
+        "provenanced": 19,
+        "total": 19
+      },
+      "memory_points": 19,
+      "operator_counts": {
+        "IMPL": 20,
+        "NAND": 2,
+        "INPUT": 22
+      },
+      "planted_operators": [
+        {
+          "id": "wp02_lumen_refactor_op_01",
+          "expected_kind": "MITIGATES",
+          "verdict": "from_content_missing",
+          "edge_correct": false,
+          "forms_found": null
+        }
+      ],
+      "failed_units": [
+        {
+          "id": "wp02_lumen_refactor_u_01",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp02_lumen_refactor_u_02",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp02_lumen_refactor_u_03",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp02_lumen_refactor_u_13",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp02_lumen_refactor_u_04",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp02_lumen_refactor_u_05",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp02_lumen_refactor_u_09",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp02_lumen_refactor_u_10",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp02_lumen_refactor_u_12",
+          "failure": "content_missing"
+        }
+      ]
+    },
+    {
+      "session_id": "wp03_ember_design",
+      "emitted": true,
+      "macro": {
+        "survived": 5,
+        "total": 15
+      },
+      "strict": {
+        "survived": 5,
+        "total": 15
+      },
+      "leaked": [],
+      "quotes": {
+        "grounded": 0,
+        "total": 0
+      },
+      "provenance": {
+        "provenanced": 17,
+        "total": 17
+      },
+      "memory_points": 17,
+      "operator_counts": {
+        "IMPL": 14,
+        "INPUT": 14
+      },
+      "planted_operators": [
+        {
+          "id": "wp03_ember_design_op_01",
+          "expected_kind": "MITIGATES",
+          "verdict": "edge_missing",
+          "edge_correct": false,
+          "forms_found": null
+        },
+        {
+          "id": "wp03_ember_design_op_02",
+          "expected_kind": "MITIGATES",
+          "verdict": "to_content_missing",
+          "edge_correct": false,
+          "forms_found": null
+        },
+        {
+          "id": "wp03_ember_design_op_03",
+          "expected_kind": "MITIGATES",
+          "verdict": "to_content_missing",
+          "edge_correct": false,
+          "forms_found": null
+        }
+      ],
+      "failed_units": [
+        {
+          "id": "wp03_ember_design_u_01",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp03_ember_design_u_10",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp03_ember_design_u_03",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp03_ember_design_u_04",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp03_ember_design_u_06",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp03_ember_design_u_07",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp03_ember_design_u_08",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp03_ember_design_u_09",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp03_ember_design_u_11",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp03_ember_design_u_13",
+          "failure": "content_missing"
+        }
+      ]
+    },
+    {
+      "session_id": "wp04_aurora_perf",
+      "emitted": true,
+      "macro": {
+        "survived": 3,
+        "total": 13
+      },
+      "strict": {
+        "survived": 3,
+        "total": 13
+      },
+      "leaked": [],
+      "quotes": {
+        "grounded": 0,
+        "total": 0
+      },
+      "provenance": {
+        "provenanced": 16,
+        "total": 16
+      },
+      "memory_points": 16,
+      "operator_counts": {
+        "IMPL": 20,
+        "INPUT": 20
+      },
+      "planted_operators": [
+        {
+          "id": "wp04_aurora_perf_op_01",
+          "expected_kind": "SUPPORTS",
+          "verdict": "to_content_missing",
+          "edge_correct": false,
+          "forms_found": null
+        },
+        {
+          "id": "wp04_aurora_perf_op_02",
+          "expected_kind": "MITIGATES",
+          "verdict": "from_content_missing",
+          "edge_correct": false,
+          "forms_found": null
+        },
+        {
+          "id": "wp04_aurora_perf_op_03",
+          "expected_kind": "MITIGATES",
+          "verdict": "from_content_missing",
+          "edge_correct": false,
+          "forms_found": null
+        }
+      ],
+      "failed_units": [
+        {
+          "id": "wp04_aurora_perf_u_01",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp04_aurora_perf_u_02",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp04_aurora_perf_u_03",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp04_aurora_perf_u_04",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp04_aurora_perf_u_05",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp04_aurora_perf_u_06",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp04_aurora_perf_u_09",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp04_aurora_perf_u_10",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp04_aurora_perf_u_11",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp04_aurora_perf_u_12",
+          "failure": "content_missing"
+        }
+      ]
+    },
+    {
+      "session_id": "wp05_retro_writeup",
+      "emitted": true,
+      "macro": {
+        "survived": 7,
+        "total": 15
+      },
+      "strict": {
+        "survived": 7,
+        "total": 15
+      },
+      "leaked": [],
+      "quotes": {
+        "grounded": 0,
+        "total": 0
+      },
+      "provenance": {
+        "provenanced": 16,
+        "total": 16
+      },
+      "memory_points": 16,
+      "operator_counts": {
+        "NAND": 4,
+        "IMPL": 6,
+        "INPUT": 10
+      },
+      "planted_operators": [
+        {
+          "id": "wp05_retro_writeup_op_01",
+          "expected_kind": "NEGATE",
+          "verdict": "edge_correct",
+          "edge_correct": true,
+          "forms_found": [
+            "NAND",
+            "NAND"
+          ]
+        },
+        {
+          "id": "wp05_retro_writeup_op_02",
+          "expected_kind": "SUPPORTS",
+          "verdict": "edge_correct",
+          "edge_correct": true,
+          "forms_found": [
+            "IMPL",
+            "IMPL"
+          ]
+        }
+      ],
+      "failed_units": [
+        {
+          "id": "wp05_retro_writeup_u_03",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp05_retro_writeup_u_06",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp05_retro_writeup_u_07",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp05_retro_writeup_u_08",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp05_retro_writeup_u_10",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp05_retro_writeup_u_11",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp05_retro_writeup_u_13",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp05_retro_writeup_u_15",
+          "failure": "content_missing"
+        }
+      ]
+    },
+    {
+      "session_id": "wp06_quarry_rollout",
+      "emitted": true,
+      "macro": {
+        "survived": 5,
+        "total": 9
+      },
+      "strict": {
+        "survived": 5,
+        "total": 9
+      },
+      "leaked": [],
+      "quotes": {
+        "grounded": 0,
+        "total": 0
+      },
+      "provenance": {
+        "provenanced": 18,
+        "total": 18
+      },
+      "memory_points": 18,
+      "operator_counts": {
+        "NAND": 2,
+        "IMPL": 2,
+        "INPUT": 4
+      },
+      "planted_operators": [
+        {
+          "id": "wp06_quarry_rollout_op_01",
+          "expected_kind": "SUPPORTS",
+          "verdict": "to_content_missing",
+          "edge_correct": false,
+          "forms_found": null
+        }
+      ],
+      "failed_units": [
+        {
+          "id": "wp06_quarry_rollout_u_03",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp06_quarry_rollout_u_06",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp06_quarry_rollout_u_07",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp06_quarry_rollout_u_08",
+          "failure": "content_missing"
+        }
+      ]
+    },
+    {
+      "session_id": "wp07_bluepeak_followup",
+      "emitted": true,
+      "macro": {
+        "survived": 1,
+        "total": 9
+      },
+      "strict": {
+        "survived": 1,
+        "total": 9
+      },
+      "leaked": [],
+      "quotes": {
+        "grounded": 0,
+        "total": 0
+      },
+      "provenance": {
+        "provenanced": 13,
+        "total": 13
+      },
+      "memory_points": 13,
+      "operator_counts": {
+        "NAND": 4,
+        "IMPL": 2,
+        "INPUT": 6
+      },
+      "planted_operators": [
+        {
+          "id": "wp07_bluepeak_followup_op_02",
+          "expected_kind": "NEGATE",
+          "verdict": "to_content_missing",
+          "edge_correct": false,
+          "forms_found": null
+        },
+        {
+          "id": "wp07_bluepeak_followup_op_03",
+          "expected_kind": "MITIGATES",
+          "verdict": "edge_missing",
+          "edge_correct": false,
+          "forms_found": null
+        },
+        {
+          "id": "wp07_bluepeak_followup_op_04",
+          "expected_kind": "SUPERSEDE",
+          "verdict": "edge_missing",
+          "edge_correct": false,
+          "forms_found": null
+        }
+      ],
+      "failed_units": [
+        {
+          "id": "wp07_bluepeak_followup_u_01",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp07_bluepeak_followup_u_02",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp07_bluepeak_followup_u_03",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp07_bluepeak_followup_u_04",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp07_bluepeak_followup_u_05",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp07_bluepeak_followup_u_06",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp07_bluepeak_followup_u_07",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp07_bluepeak_followup_u_08",
+          "failure": "content_missing"
+        }
+      ]
+    }
+  ],
+  "notes": [
+    "wp01_quarry_debug: capture ok=True extraction_mode=llm:openrouter extracted=26",
+    "wp02_lumen_refactor: capture ok=True extraction_mode=llm:deepseek-direct extracted=19",
+    "wp03_ember_design: capture ok=True extraction_mode=llm:openrouter extracted=17",
+    "wp04_aurora_perf: capture ok=True extraction_mode=llm:deepseek-direct extracted=16",
+    "wp05_retro_writeup: capture ok=True extraction_mode=llm:openrouter extracted=16",
+    "wp06_quarry_rollout: capture ok=True extraction_mode=llm:openrouter extracted=18",
+    "wp07_bluepeak_followup: capture ok=True extraction_mode=llm:openrouter extracted=13",
+    "dream EP pass: total_affected=62 coverage=1.0 converged_all=True",
+    "operator-edge audit (#2514): 2/15 planted operator edges graded edge_correct (audit dimension only \u2014 not yet a gated metric). #2552: endpoint anchors + mitigation reasons grade verbatim-first with the #2405-style paraphrase band \u2014 a correctly wired edge whose endpoint claim was distilled still grades edge_correct",
+    "operator persistence (#2552): 39/39 reified operator Points entered the retrievable memory layer (eventId-stamped) \u2014 a lower numerator is the structural drop the layer-2 WIRE fix closed",
+    "semantic judge (additive, NOT a gated metric): band-weighted=0.782222 probability_mean=0.822222 survival>=0.50=0.844444 dist={'same_fact': 70, 'likely': 2, 'maybe': 4, 'likely_not': 14}",
+    "quote_fidelity 1.0 is VACUOUS: the corpus gold contains no double-quoted spans (quote_spans_total=0) \u2014 this number is a floor, not a fidelity bar; it will not hold under a future corpus that quotes",
+    "cost not tracked: the extractor seam reported no llm_cost_usd in any session (mock/unknown adapter) \u2014 receipt cost_usd is 0.0 with this note, never a silently-fake measured figure"
+  ],
+  "log": [
+    "parser round-trip ok (codex, 26 turns)",
+    "parser round-trip ok (codex, 22 turns)",
+    "parser round-trip ok (pi, 24 turns)",
+    "parser round-trip ok (pi, 20 turns)",
+    "parser round-trip ok (claude-desktop, 23 turns)",
+    "parser round-trip ok (codex, 22 turns)",
+    "parser round-trip ok (codex, 22 turns)",
+    "metrics: {\"salient_unit_survival_macro\": 0.4111, \"salient_unit_survival_strict\": 0.4111, \"distractor_leakage_per_run\": 1, \"sessions_emitting\": 1.0, \"quote_fidelity\": 1.0, \"provenance_accuracy\": 1.0}"
+  ],
+  "operator_audit": {
+    "planted": 15,
+    "edge_correct": 2,
+    "content_ok": 5,
+    "operators_total": 39,
+    "operators_provenanced": 39
+  },
+  "semantic_judge": {
+    "status": "completed",
+    "pin": "w2-semantic-banded-v1+w2-salience-paraphrase-v1",
+    "protocol": "w2-semantic-banded-v1",
+    "model": "solar-pro4",
+    "paraphrase_model": "solar-pro4",
+    "extractor_model": "deepseek/deepseek-v4-flash",
+    "model_independence": "judge model differs from the extractor's resolved model \u2014 the default judge (upstage/solar-pro4) is a different provider family from the deepseek extractor default; residual overlap is a shared vendor only if an operator overrides --judge-model",
+    "temperature": 0.7,
+    "samples": 5,
+    "orders": [
+      "probes_first",
+      "memory_first"
+    ],
+    "band_thresholds": {
+      "same_fact": 0.8,
+      "likely": 0.7,
+      "maybe": 0.5,
+      "likely_not": 0.0
+    },
+    "band_weights": {
+      "same_fact": 0.9,
+      "likely": 0.75,
+      "maybe": 0.6,
+      "likely_not": 0.25
+    },
+    "units": [
+      {
+        "session_id": "wp01_quarry_debug",
+        "unit_id": "wp01_quarry_debug_u_01",
+        "probe": "The value has remained at 62 percent since 3 a.m.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp01_quarry_debug",
+        "unit_id": "wp01_quarry_debug_u_02",
+        "probe": "The wire queue is staffed by four workers.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp01_quarry_debug",
+        "unit_id": "wp01_quarry_debug_u_03",
+        "probe": "The dataset contains zero lease entries.",
+        "probability": 0.7,
+        "band": "likely",
+        "votes_yes": 7,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 2,
+            "total": 5,
+            "probability": 0.4
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp01_quarry_debug",
+        "unit_id": "wp01_quarry_debug_u_04",
+        "probe": "It appears the retry mechanism may have skipped the verification of batch ownership.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp01_quarry_debug",
+        "unit_id": "wp01_quarry_debug_u_05",
+        "probe": "The ingest queue saw two workers each pull the identical batch on two separate occasions.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp01_quarry_debug",
+        "unit_id": "wp01_quarry_debug_u_06",
+        "probe": "I spent the entire week worrying about the backfill, so it is a relief now that it is done.",
+        "probability": 0.0,
+        "band": "likely_not",
+        "votes_yes": 0,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 0,
+            "total": 5,
+            "probability": 0.0
+          },
+          "memory_first": {
+            "yes": 0,
+            "total": 5,
+            "probability": 0.0
+          }
+        }
+      },
+      {
+        "session_id": "wp01_quarry_debug",
+        "unit_id": "wp01_quarry_debug_u_07",
+        "probe": "Each batch claim is structured as a lease held by a single owner.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp01_quarry_debug",
+        "unit_id": "wp01_quarry_debug_u_08",
+        "probe": "The decision was to forgo implementing a distributed lock service.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp01_quarry_debug",
+        "unit_id": "wp01_quarry_debug_u_09",
+        "probe": "The batch should be retried following a one-minute delay.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp01_quarry_debug",
+        "unit_id": "wp01_quarry_debug_u_10",
+        "probe": "This approach provides crash recovery automatically without any additional effort.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp01_quarry_debug",
+        "unit_id": "wp01_quarry_debug_u_11",
+        "probe": "The shipment was dispatched prior to the October 15 freeze.",
+        "probability": 0.9,
+        "band": "same_fact",
+        "votes_yes": 9,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 4,
+            "total": 5,
+            "probability": 0.8
+          }
+        }
+      },
+      {
+        "session_id": "wp01_quarry_debug",
+        "unit_id": "wp01_quarry_debug_u_12",
+        "probe": "Each batch contained five thousand events.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp01_quarry_debug",
+        "unit_id": "wp01_quarry_debug_u_13",
+        "probe": "Halcyon was the subject of twelve million events.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp01_quarry_debug",
+        "unit_id": "wp01_quarry_debug_u_14",
+        "probe": "The ingest queue service is under Maya Chen's ownership.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp01_quarry_debug",
+        "unit_id": "wp01_quarry_debug_u_15",
+        "probe": "The backfill process was halted as of September 30.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp01_quarry_debug",
+        "unit_id": "wp01_quarry_debug_u_16",
+        "probe": "The scheduled maintenance window takes place on Friday at 2am.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp02_lumen_refactor",
+        "unit_id": "wp02_lumen_refactor_u_01",
+        "probe": "Lumen authentication is being restructured so that each graph receives its own dedicated API key.",
+        "probability": 0.8,
+        "band": "same_fact",
+        "votes_yes": 8,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 3,
+            "total": 5,
+            "probability": 0.6
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp02_lumen_refactor",
+        "unit_id": "wp02_lumen_refactor_u_02",
+        "probe": "Last Friday, the group gave their final approval.",
+        "probability": 0.0,
+        "band": "likely_not",
+        "votes_yes": 0,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 0,
+            "total": 5,
+            "probability": 0.0
+          },
+          "memory_first": {
+            "yes": 0,
+            "total": 5,
+            "probability": 0.0
+          }
+        }
+      },
+      {
+        "session_id": "wp02_lumen_refactor",
+        "unit_id": "wp02_lumen_refactor_u_03",
+        "probe": "The naming convention assigns the tt_ prefix to graph keys.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp02_lumen_refactor",
+        "unit_id": "wp02_lumen_refactor_u_04",
+        "probe": "The token remains valid for a full day.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp02_lumen_refactor",
+        "unit_id": "wp02_lumen_refactor_u_05",
+        "probe": "Old keys stay usable until the rotation window is closed.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp02_lumen_refactor",
+        "unit_id": "wp02_lumen_refactor_u_06",
+        "probe": "The pilot customer for the program is Bluepeak Logistics.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp02_lumen_refactor",
+        "unit_id": "wp02_lumen_refactor_u_07",
+        "probe": "The registry service is owned by Priya.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp02_lumen_refactor",
+        "unit_id": "wp02_lumen_refactor_u_08",
+        "probe": "The system was configured to deny access and return an HTTP 401 status code when authentication failed.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp02_lumen_refactor",
+        "unit_id": "wp02_lumen_refactor_u_09",
+        "probe": "Key usage events must be retained for a period of ninety days.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp02_lumen_refactor",
+        "unit_id": "wp02_lumen_refactor_u_10",
+        "probe": "The rollout was executed in two distinct stages.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp02_lumen_refactor",
+        "unit_id": "wp02_lumen_refactor_u_11",
+        "probe": "The sandbox organization operates using them for a period of seven days.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp02_lumen_refactor",
+        "unit_id": "wp02_lumen_refactor_u_12",
+        "probe": "That page has been waiting for cleanup for months, and I have been intending to address it for just as long.",
+        "probability": 0.0,
+        "band": "likely_not",
+        "votes_yes": 0,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 0,
+            "total": 5,
+            "probability": 0.0
+          },
+          "memory_first": {
+            "yes": 0,
+            "total": 5,
+            "probability": 0.0
+          }
+        }
+      },
+      {
+        "session_id": "wp02_lumen_refactor",
+        "unit_id": "wp02_lumen_refactor_u_13",
+        "probe": "The compromised authentication credential remained operational for several weeks.",
+        "probability": 0.1,
+        "band": "likely_not",
+        "votes_yes": 1,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 0,
+            "total": 5,
+            "probability": 0.0
+          },
+          "memory_first": {
+            "yes": 1,
+            "total": 5,
+            "probability": 0.2
+          }
+        }
+      },
+      {
+        "session_id": "wp03_ember_design",
+        "unit_id": "wp03_ember_design_u_01",
+        "probe": "The pager activated twelve times each week.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp03_ember_design",
+        "unit_id": "wp03_ember_design_u_02",
+        "probe": "Approximately three out of every ten notifications lack any actionable value.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp03_ember_design",
+        "unit_id": "wp03_ember_design_u_03",
+        "probe": "Ember alerts are directed according to which service owns them rather than by the page group they belong to.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp03_ember_design",
+        "unit_id": "wp03_ember_design_u_04",
+        "probe": "Within lumen, the ownership table is designated as the authoritative reference for all ownership data.",
+        "probability": 0.8,
+        "band": "same_fact",
+        "votes_yes": 8,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 3,
+            "total": 5,
+            "probability": 0.6
+          }
+        }
+      },
+      {
+        "session_id": "wp03_ember_design",
+        "unit_id": "wp03_ember_design_u_05",
+        "probe": "It is assigned to the standard rotation and noted in the weekly ownership report.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp03_ember_design",
+        "unit_id": "wp03_ember_design_u_06",
+        "probe": "The decision was to reduce the pager to four actionable pages each week.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp03_ember_design",
+        "unit_id": "wp03_ember_design_u_07",
+        "probe": "A preflight check for severity was introduced that mandates a statement describing actual user impact.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp03_ember_design",
+        "unit_id": "wp03_ember_design_u_08",
+        "probe": "Alerts are automatically suppressed whenever a maintenance window has been officially declared.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp03_ember_design",
+        "unit_id": "wp03_ember_design_u_09",
+        "probe": "Aisha proposed that the declarations should remain under human ownership instead of being automated.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp03_ember_design",
+        "unit_id": "wp03_ember_design_u_10",
+        "probe": "For three weeks during September, Tomas handled two roles simultaneously.",
+        "probability": 0.0,
+        "band": "likely_not",
+        "votes_yes": 0,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 0,
+            "total": 5,
+            "probability": 0.0
+          },
+          "memory_first": {
+            "yes": 0,
+            "total": 5,
+            "probability": 0.0
+          }
+        }
+      },
+      {
+        "session_id": "wp03_ember_design",
+        "unit_id": "wp03_ember_design_u_11",
+        "probe": "The migration will be carried out one service at a time across two development cycles.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp03_ember_design",
+        "unit_id": "wp03_ember_design_u_12",
+        "probe": "The process begins by identifying the ten services that produce the most noise.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp03_ember_design",
+        "unit_id": "wp03_ember_design_u_13",
+        "probe": "The initial cutover review has been set for October 2.",
+        "probability": 0.0,
+        "band": "likely_not",
+        "votes_yes": 0,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 0,
+            "total": 5,
+            "probability": 0.0
+          },
+          "memory_first": {
+            "yes": 0,
+            "total": 5,
+            "probability": 0.0
+          }
+        }
+      },
+      {
+        "session_id": "wp03_ember_design",
+        "unit_id": "wp03_ember_design_u_14",
+        "probe": "Even when notifications are muted, they continue to appear in the daily morning summary.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp03_ember_design",
+        "unit_id": "wp03_ember_design_u_15",
+        "probe": "The goal is to encourage staff to trigger alerts promptly rather than suppress or conceal them.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp04_aurora_perf",
+        "unit_id": "wp04_aurora_perf_u_01",
+        "probe": "The duration reached 4.2 seconds during the afternoon of the previous day.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp04_aurora_perf",
+        "unit_id": "wp04_aurora_perf_u_02",
+        "probe": "The surge aligns with the October 5 launch.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp04_aurora_perf",
+        "unit_id": "wp04_aurora_perf_u_03",
+        "probe": "A single page containing forty rows triggers forty distinct calls.",
+        "probability": 0.5,
+        "band": "maybe",
+        "votes_yes": 5,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 0,
+            "total": 5,
+            "probability": 0.0
+          }
+        }
+      },
+      {
+        "session_id": "wp04_aurora_perf",
+        "unit_id": "wp04_aurora_perf_u_04",
+        "probe": "The p95 latency spike was caused by the N+1 embedding calls.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp04_aurora_perf",
+        "unit_id": "wp04_aurora_perf_u_05",
+        "probe": "Each page should consolidate its lookups into one call.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp04_aurora_perf",
+        "unit_id": "wp04_aurora_perf_u_06",
+        "probe": "Store the embedding results in memory and assign them a ten-minute time-to-live.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp04_aurora_perf",
+        "unit_id": "wp04_aurora_perf_u_07",
+        "probe": "They should be updated before the subsequent viewing occurs.",
+        "probability": 0.1,
+        "band": "likely_not",
+        "votes_yes": 1,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 1,
+            "total": 5,
+            "probability": 0.2
+          },
+          "memory_first": {
+            "yes": 0,
+            "total": 5,
+            "probability": 0.0
+          }
+        }
+      },
+      {
+        "session_id": "wp04_aurora_perf",
+        "unit_id": "wp04_aurora_perf_u_08",
+        "probe": "The system handles approximately forty thousand load requests each day.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp04_aurora_perf",
+        "unit_id": "wp04_aurora_perf_u_09",
+        "probe": "The team decided to release this feature only to users in specific regions by gating it behind a flag.",
+        "probability": 0.5,
+        "band": "maybe",
+        "votes_yes": 5,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 0,
+            "total": 5,
+            "probability": 0.0
+          }
+        }
+      },
+      {
+        "session_id": "wp04_aurora_perf",
+        "unit_id": "wp04_aurora_perf_u_10",
+        "probe": "The dashboard performance review is conducted by Felix.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp04_aurora_perf",
+        "unit_id": "wp04_aurora_perf_u_11",
+        "probe": "Any time a write operation is recorded, the corresponding team's cached data should be cleared.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp04_aurora_perf",
+        "unit_id": "wp04_aurora_perf_u_12",
+        "probe": "The p95 latency is reduced to below 800 milliseconds again.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp04_aurora_perf",
+        "unit_id": "wp04_aurora_perf_u_13",
+        "probe": "It is reassuring that the measurement was completed, given that the dashboard has been experiencing a gradual decline in speed over the past several months.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp05_retro_writeup",
+        "unit_id": "wp05_retro_writeup_u_01",
+        "probe": "The search operation was degraded for a duration of three hours and forty-one minutes.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp05_retro_writeup",
+        "unit_id": "wp05_retro_writeup_u_02",
+        "probe": "The initial indication came from the error budget burn alert at 9:15am.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp05_retro_writeup",
+        "unit_id": "wp05_retro_writeup_u_03",
+        "probe": "The deployment was released at 9:12 in the morning.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp05_retro_writeup",
+        "unit_id": "wp05_retro_writeup_u_04",
+        "probe": "The first inquiry pointed to the search index as the cause.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp05_retro_writeup",
+        "unit_id": "wp05_retro_writeup_u_05",
+        "probe": "The underlying issue originated from the configuration partition.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp05_retro_writeup",
+        "unit_id": "wp05_retro_writeup_u_06",
+        "probe": "At 12:40pm, the configuration was reverted to the prior partition.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp05_retro_writeup",
+        "unit_id": "wp05_retro_writeup_u_07",
+        "probe": "Introduce a validation step before deployment that verifies whether the assigned partition weights align with the shard capacity model.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp05_retro_writeup",
+        "unit_id": "wp05_retro_writeup_u_08",
+        "probe": "The deployment review process was updated to display the configuration differences.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp05_retro_writeup",
+        "unit_id": "wp05_retro_writeup_u_09",
+        "probe": "Nora proposed both options.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp05_retro_writeup",
+        "unit_id": "wp05_retro_writeup_u_10",
+        "probe": "Maya is responsible for the pre-deployment verification, which must be completed by November 2.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp05_retro_writeup",
+        "unit_id": "wp05_retro_writeup_u_11",
+        "probe": "The responsibility for surfacing configuration diffs belongs to Diego, with a deadline of November 9.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp05_retro_writeup",
+        "unit_id": "wp05_retro_writeup_u_12",
+        "probe": "The service level objective for search operations is set at 99.9 percent.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp05_retro_writeup",
+        "unit_id": "wp05_retro_writeup_u_13",
+        "probe": "The default setting for incident writeups is now opt-out.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp05_retro_writeup",
+        "unit_id": "wp05_retro_writeup_u_14",
+        "probe": "Keeping a steady demeanor during the on-call shift is ultimately more valuable than any technical solution.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp05_retro_writeup",
+        "unit_id": "wp05_retro_writeup_u_15",
+        "probe": "The status updates were authored by Sam, who works in customer engineering.",
+        "probability": 0.2,
+        "band": "likely_not",
+        "votes_yes": 2,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 2,
+            "total": 5,
+            "probability": 0.4
+          },
+          "memory_first": {
+            "yes": 0,
+            "total": 5,
+            "probability": 0.0
+          }
+        }
+      },
+      {
+        "session_id": "wp06_quarry_rollout",
+        "unit_id": "wp06_quarry_rollout_u_01",
+        "probe": "The staging matrix currently shows a green status.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp06_quarry_rollout",
+        "unit_id": "wp06_quarry_rollout_u_02",
+        "probe": "The situation persisted through the cold snap that occurred in October.",
+        "probability": 0.0,
+        "band": "likely_not",
+        "votes_yes": 0,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 0,
+            "total": 5,
+            "probability": 0.0
+          },
+          "memory_first": {
+            "yes": 0,
+            "total": 5,
+            "probability": 0.0
+          }
+        }
+      },
+      {
+        "session_id": "wp06_quarry_rollout",
+        "unit_id": "wp06_quarry_rollout_u_03",
+        "probe": "The chaos harness was executed against each of the two rollout configurations.",
+        "probability": 0.0,
+        "band": "likely_not",
+        "votes_yes": 0,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 0,
+            "total": 5,
+            "probability": 0.0
+          },
+          "memory_first": {
+            "yes": 0,
+            "total": 5,
+            "probability": 0.0
+          }
+        }
+      },
+      {
+        "session_id": "wp06_quarry_rollout",
+        "unit_id": "wp06_quarry_rollout_u_04",
+        "probe": "It may be feasible to resume competing for duplicate-processing slots during the period when the queue is emptying.",
+        "probability": 0.3,
+        "band": "likely_not",
+        "votes_yes": 3,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 3,
+            "total": 5,
+            "probability": 0.6
+          },
+          "memory_first": {
+            "yes": 0,
+            "total": 5,
+            "probability": 0.0
+          }
+        }
+      },
+      {
+        "session_id": "wp06_quarry_rollout",
+        "unit_id": "wp06_quarry_rollout_u_05",
+        "probe": "A single batch is simultaneously claimed by two workers at the precise instant a region switches state.",
+        "probability": 0.4,
+        "band": "likely_not",
+        "votes_yes": 4,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 4,
+            "total": 5,
+            "probability": 0.8
+          },
+          "memory_first": {
+            "yes": 0,
+            "total": 5,
+            "probability": 0.0
+          }
+        }
+      },
+      {
+        "session_id": "wp06_quarry_rollout",
+        "unit_id": "wp06_quarry_rollout_u_06",
+        "probe": "The rollout was completed in a single day rather than spending a week monitoring a canary deployment.",
+        "probability": 0.7,
+        "band": "likely",
+        "votes_yes": 7,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 2,
+            "total": 5,
+            "probability": 0.4
+          }
+        }
+      },
+      {
+        "session_id": "wp06_quarry_rollout",
+        "unit_id": "wp06_quarry_rollout_u_07",
+        "probe": "A single individual had the operational procedures document open on their screen.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp06_quarry_rollout",
+        "unit_id": "wp06_quarry_rollout_u_08",
+        "probe": "The flip is naturally driven by Maya.",
+        "probability": 0.6,
+        "band": "maybe",
+        "votes_yes": 6,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 1,
+            "total": 5,
+            "probability": 0.2
+          }
+        }
+      },
+      {
+        "session_id": "wp06_quarry_rollout",
+        "unit_id": "wp06_quarry_rollout_u_09",
+        "probe": "The lease migration was completed before the maintenance window scheduled for Friday.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp07_bluepeak_followup",
+        "unit_id": "wp07_bluepeak_followup_u_01",
+        "probe": "The hydrate queue contained duplicate claims for roughly six minutes.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp07_bluepeak_followup",
+        "unit_id": "wp07_bluepeak_followup_u_02",
+        "probe": "The transition of on-call duties proceeded without any issues.",
+        "probability": 0.0,
+        "band": "likely_not",
+        "votes_yes": 0,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 0,
+            "total": 5,
+            "probability": 0.0
+          },
+          "memory_first": {
+            "yes": 0,
+            "total": 5,
+            "probability": 0.0
+          }
+        }
+      },
+      {
+        "session_id": "wp07_bluepeak_followup",
+        "unit_id": "wp07_bluepeak_followup_u_03",
+        "probe": "The global flag was switched exactly one time during the cutover.",
+        "probability": 0.0,
+        "band": "likely_not",
+        "votes_yes": 0,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 0,
+            "total": 5,
+            "probability": 0.0
+          },
+          "memory_first": {
+            "yes": 0,
+            "total": 5,
+            "probability": 0.0
+          }
+        }
+      },
+      {
+        "session_id": "wp07_bluepeak_followup",
+        "unit_id": "wp07_bluepeak_followup_u_04",
+        "probe": "There is now some doubt about whether the decision to do everything at once was the right move.",
+        "probability": 0.6,
+        "band": "maybe",
+        "votes_yes": 6,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 1,
+            "total": 5,
+            "probability": 0.2
+          }
+        }
+      },
+      {
+        "session_id": "wp07_bluepeak_followup",
+        "unit_id": "wp07_bluepeak_followup_u_05",
+        "probe": "The first duplicate occurs two hours after the toggle.",
+        "probability": 0.8,
+        "band": "same_fact",
+        "votes_yes": 8,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 4,
+            "total": 5,
+            "probability": 0.8
+          },
+          "memory_first": {
+            "yes": 4,
+            "total": 5,
+            "probability": 0.8
+          }
+        }
+      },
+      {
+        "session_id": "wp07_bluepeak_followup",
+        "unit_id": "wp07_bluepeak_followup_u_06",
+        "probe": "The longest recorded duration we have measured is eleven seconds.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp07_bluepeak_followup",
+        "unit_id": "wp07_bluepeak_followup_u_07",
+        "probe": "The decision was to set the grace period to thirty seconds.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp07_bluepeak_followup",
+        "unit_id": "wp07_bluepeak_followup_u_08",
+        "probe": "For the next seven days, Priya will monitor the log that records when the grace period ends.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      },
+      {
+        "session_id": "wp07_bluepeak_followup",
+        "unit_id": "wp07_bluepeak_followup_u_09",
+        "probe": "The single point of failure has always been the global flag.",
+        "probability": 1.0,
+        "band": "same_fact",
+        "votes_yes": 10,
+        "votes_total": 10,
+        "orders": {
+          "probes_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          },
+          "memory_first": {
+            "yes": 5,
+            "total": 5,
+            "probability": 1.0
+          }
+        }
+      }
+    ],
+    "memory_by_session": {
+      "wp01_quarry_debug": [
+        "The Halcyon event archive re-ingest was stuck at 62% since 3am.",
+        "The stall is in the wire stage; four workers at full CPU with flat queue depth indicates contention, not starvation.",
+        "No lease rows with active processing indicates the batch ownership check was bypassed on the retry path.",
+        "The retry loop added in the batch runner caused every worker to retry the same handful of batches in a loop.",
+        "Two workers grabbed the same batch twice from the ingest queue and each marked its own copy complete, causing the completion race that stalled progress.",
+        "The fix is to make ownership explicit before the work starts.",
+        "Each batch must claim a single-owner lease before processing, and the claim is the only thing that can complete it.",
+        "A simple lease row with an expiry is enough; no distributed lock service is needed.",
+        "A lease row keyed by batch id with a thirty-second expiry and a compare-and-swap update on completion gives single-owner semantics without a lock service.",
+        "The losing worker should retry the batch after a sixty-second backoff rather than drop it, because losing the batch silently is how events are lost.",
+        "Sixty-second backoff on the non-owner path, then re-check the lease; if the lease expired and the owner never completed, the batch becomes claimable again, providing crash recovery for free.",
+        "The lease change must ship before the October 15 freeze, with no scope creep.",
+        "The completion path needs the owner check, but nothing else changes.",
+        "The wire queue processes batches of five thousand events each, and with the lease round-trip, budget roughly a second per batch.",
+        "Re-ingesting about twelve million events for Halcyon equals twenty-four hundred batches end to end.",
+        "At a second per batch with four workers, processing takes about ten minutes, well inside the maintenance window.",
+        "Maya Chen owns the ingest queue service now; she took it over when the old platform group split.",
+        "The hydrate stage was clean; it was already audited.",
+        "The backfill cutoff should be set at September 30 so we do not re-ingest events that already landed after the incident window.",
+        "The cutoff will be added as a constant so the next backfill does not guess at it.",
+        "The DB maintenance window is Friday at 2am, and the lease table migration should land before then so the schema is stable during the window.",
+        "The migration is additive: a new lease table with an index on batch id; landing it before Friday's maintenance window avoids any interaction with the vacuum job.",
+        "For future stalls in this queue, the escalation path is Tomas, who knows the queue internals from the last incident.",
+        "Final plan: lease-before-claim on the wire queue, sixty-second backoff for non-owners, completion guarded by the owner check, backfill cutoff at September 30, migration landed before Friday.",
+        "The losing worker should retry the batch after a sixty-second backoff rather than drop it.",
+        "Losing the batch silently is how events are lost."
+      ],
+      "wp02_lumen_refactor": [
+        "Every graph key starts with tt_ and nothing else in the system may mint that prefix.",
+        "Keys encode the graph id rather than the team id, so the registry must resolve a key to exactly one graph.",
+        "Every graph key gets a twenty-four hour lifetime with rotation on the boundary.",
+        "Legacy team tokens remain valid until the rotation window closes, but we stop minting new ones on flip day.",
+        "Revoked keys fail closed with a 401 and no fallback to team scope.",
+        "Key usage events are retained for ninety days, matching the rest of the audit log.",
+        "Deployment is two-phase: phase one mints graph keys; phase two flips enforcement after the sandbox org exercises the full path for a week.",
+        "Bluepeak Logistics is the pilot customer for the per-graph rollout.",
+        "Priya owns the registry service, inherited with the data platform handoff.",
+        "The admin screen renders the team token on the settings page; it will be replaced with a per-graph key table.",
+        "The platform key standard is tt_ plus a random 32-byte secret.",
+        "Legacy team tokens have historically never expired, which is the exact failure mode this migration removes.",
+        "The registry already logs issuance and revocation.",
+        "Deployment is two-phase: phase one mints graph keys with enforcement off; phase two flips enforcement after the sandbox org runs on them for a week.",
+        "Priya will be looped into the interface review before the resolver is touched.",
+        "A single-commit flip across issuance, resolution, and enforcement is risky.",
+        "Forcing every team to rotate on day one would break the pilot.",
+        "Short-lived keys make a leak a one-day problem instead of a quarterly audit finding.",
+        "The quarterly demo is next Tuesday."
+      ],
+      "wp03_ember_design": [
+        "The on-call pager fired twelve times per week on average last quarter",
+        "Roughly a third of the pages were not actionable",
+        "Roughly thirty percent of alerts are unactionable because the ownership lookup fails",
+        "The ember redesign routes alerts by service ownership via the lumen ownership table instead of by page group",
+        "A service with no owner row falls to the default rotation and is flagged in the weekly ownership report",
+        "The load target is four actionable pages per week before the end of the quarter",
+        "The four-pages-per-week target is a two-thirds cut from today and requires cutting noise at the source, not just routing it better",
+        "A severity preflight requires a real user impact statement before a page goes out; an alert that cannot state the impact is an incident log entry, not a page",
+        "ember auto-suppresses alerts during declared maintenance windows, reading windows declared in lumen",
+        "Window declarations stay human-owned, with owners declaring windows for their own services, per Aisha's suggestion",
+        "Window declaration coverage has been solid since the SLO review",
+        "The ownership-table migration is staged service by service over two sprints, starting with the ten noisiest services",
+        "Pager load is re-checked after each sprint to tell whether the routing change is actually helping",
+        "Tomas wants to watch the first two weeks of ownership-based routing before expanding",
+        "Suppressed alerts still land in the morning digest so nothing disappears",
+        "Blameless handling is the intent: people should page early, not hide alerts",
+        "Changing routing for the whole fleet at once is risky"
+      ],
+      "wp04_aurora_perf": [
+        "The p95 latency hit 4.2 seconds yesterday afternoon, an order of magnitude past the customer-facing SLO.",
+        "The regression correlates with the October 5 release that added the related-memory sidebar; before that release p95 was comfortably under a second.",
+        "The dashboard serves about forty thousand load requests per day across all customers.",
+        "Root cause: For every visible memory row the dashboard fires one embedding lookup to rank related items, resulting in N+1 calls.",
+        "Chosen approach: batch the embedding lookup into a single call per page.",
+        "Chosen approach: in-memory cache with ten-minute TTL and refresh-ahead.",
+        "Chosen approach: write-triggered invalidation per team.",
+        "Chosen approach: flag-gated rollout, default off until perf review signs off.",
+        "Target: get p95 back under 800 milliseconds.",
+        "Felix owns the dashboard perf review and flagged the sidebar as a risk in the design review.",
+        "Durable lesson: The dashboard had been getting slower for months with no single identifiable cause; measuring it finally surfaced the N+1 pattern.",
+        "Durable lesson: The design-review risk flag on the sidebar was correct and was not acted on.",
+        "Risk: the cache can serve stale related items if the underlying memory changes between refreshes.",
+        "The same dashboards are opened all day by the same account managers, so sidebar queries repeat constantly.",
+        "Writes are rare compared to reads, so cache invalidation traffic is tiny.",
+        "The ten-minute TTL is a backstop rather than the primary consistency mechanism; write-triggered invalidation is primary."
+      ],
+      "wp05_retro_writeup": [
+        "The Bluepeak search outage ran from 9:12am to 12:53pm on Monday, three hours and forty-one minutes of degraded search",
+        "The first signal was the error budget burn alert at 9:15am, three minutes after the deploy that introduced the bad configuration landed at 9:12am",
+        "The initial investigation blamed the search index and drove a reindex for the first forty minutes",
+        "The config partition was the root cause: the deploy shipped a config that split query traffic unevenly across the search shards and one shard saturated",
+        "Config-partition faults present as index symptoms; the config diff is the faster discriminator",
+        "The config was rolled back to the previous partition at 12:40pm; traffic normalized within thirteen minutes and search was fully healthy by 12:53pm",
+        "The rollback went smoothly because the deploy tooling kept the previous config one click away",
+        "The on-call stayed calm under pressure, which the team judged more valuable than any tooling",
+        "The search SLO is 99.9 percent and the month landed at 99.86 percent, so the SLO was breached",
+        "Bluepeak was offered a service credit and their account team accepted",
+        "The first customer-facing status was posted at 9:40am and the all-clear at 1:05pm, written by Sam with Aisha",
+        "Maya owns the pre-deploy check comparing partition weights against the shard capacity model, due November 2",
+        "Diego owns surfacing the config diff in deploy review, due November 9",
+        "The search team will run a shard capacity review before the end of the year, with Priya volunteering to lead it",
+        "Both follow-ups were proposed by Nora",
+        "Incident writeups are opt-out by default and published company-wide, a standing decision made after the August incident"
+      ],
+      "wp06_quarry_rollout": [
+        "the lease-before-claim fix for the quarry lease stall is merged and the staging matrix is green",
+        "the rollout must ship to the Halcyon queue before the October freeze, making it a today decision",
+        "the open question was rollout scope: all shards at once behind one global kill flag versus one shard at a time over a week with each shard watched before the next flip",
+        "the worry was that flipping mid-rollout could re-enter the duplicate-processing race while the queue drained",
+        "the original stall was a no-lease bug, not a flip bug",
+        "the race can only re-enter when two workers can claim one batch, and the lease CAS makes that impossible regardless of what toggles around it",
+        "scope independence became the explicit hypothesis under test",
+        "the chaos harness kills workers but does not toggle flags, so it cannot directly exercise a flag-flip glitch; the boundary case was covered by the lease CAS argument instead",
+        "the chaos run took longer than expected because it was queued behind the nightly embedding job",
+        "every batch was claimed exactly once after lease expiry, no duplicates anywhere",
+        "the chaos run confirmed that the lease guarantee is scope-independent, settling scope by data rather than by argument",
+        "we ship the lease fix all-at-once behind a single global kill flag",
+        "reversibility is the global flag; the watch is the queue drain after the flip, pull the flag on any regression",
+        "one driver with the runbook open, not a group-chat decision at 2am \u2014 Maya, who owns the ingest queue service and ran the staging matrix",
+        "cutoff stays September 30 as agreed",
+        "the lease migration already landed ahead of Friday's maintenance window",
+        "The user's shift ends at six.",
+        "Rollout flips should be driven by a single person with the runbook open, not decided in a group chat."
+      ],
+      "wp07_bluepeak_followup": [
+        "The global flag during the all-at-once rollout caused the six-minute duplicate-claim anomaly on the hydrate queue in the Bluepeak region.",
+        "The anomaly was the exact class the lease was supposed to prevent.",
+        "The flag was stable for two hours before the anomaly, and lease renewal stamps showed no overlap.",
+        "The region's clock drifted eleven seconds \u2014 the worst observed skew, when the SLO assumed sub-second \u2014 causing the lease to expire early, allowing a second worker to claim.",
+        "The skew-tolerant lease grace period of 30 seconds was shipped to every region.",
+        "The expiry check now prevents a lagging region from clobbering a live lease, logging any expiry inside the grace window.",
+        "This closes the clock-skew root cause.",
+        "Reverse the all-at-once rollout call.",
+        "Replace the single global flag with per-service flags, so a bad region cannot take the entire fleet down.",
+        "The global flag was a single point of failure \u2014 a single bad region made it a fleet-wide event; per-service flags isolate the blast radius.",
+        "The grace-expiry log will be tracked by Priya for a week.",
+        "Clock skew between regions can make lease expiry unsafe: a lagging region's renewal can clobber a live lease in another region.",
+        "The hydrate queue will be re-run before the next rollout."
+      ]
+    },
+    "logprobs": {
+      "available": false,
+      "token_logprob_mean": null,
+      "token_probability_geomean": null,
+      "note": "the judge adapter exposes no token logprobs \u2014 the probability stands on repeated-judgement agreement alone (the protocol's primary signal)"
+    },
+    "cost_usd": 0.01492,
+    "judge_calls": 160,
+    "paraphrase_leak_retries": 0,
+    "paraphrase_leak_rejections": 0,
+    "units_total": 90,
+    "band_distribution": {
+      "same_fact": 70,
+      "likely": 2,
+      "maybe": 4,
+      "likely_not": 14
+    },
+    "band_weighted_score": 0.782222,
+    "probability_mean": 0.822222,
+    "semantic_survival_rate": 0.844444,
+    "same_fact_rate": 0.777778
+  },
+  "semantic_judge_pin": "w2-semantic-banded-v1+w2-salience-paraphrase-v1"
+}

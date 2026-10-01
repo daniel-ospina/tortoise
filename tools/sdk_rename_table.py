@@ -49,12 +49,36 @@ is no longer in the doc it names **or is a truncation of it**.
 USAGE
     uv run python tools/sdk_rename_table.py            # write the doc
     uv run python tools/sdk_rename_table.py --check    # verify only, non-zero on drift
+
+NOT COMMITTED (#5373)
+    `docs/product/sdk-rename-table.md` is GENERATED ON DEMAND and gitignored. It is a
+    function of `sdk.py` line numbers, so committing it made any two concurrent
+    `sdk.py` PRs conflict on it even when their real changes were orthogonal — measured
+    2026-09-26: it was the sole conflict in 8 of the 44 PRs that did not merge cleanly,
+    and normalising `sdk.py:<line>` made the two sides byte-identical.
+
+    It is deliberately NOT `merge=union` (two regenerations are different documents; a
+    line-level union duplicates rows and matches neither side) and NOT a custom merge
+    driver (a driver would have to regenerate from the MERGED `sdk.py`, which does not
+    exist while a per-file driver runs). Not committing it removes the conflict class.
+    `tests/test_sdk_rename_table.py` renders it to a temp file and asserts every row
+    against independent AST/doc oracles, so the mapping is still checked on every run.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/sdk_rename_table.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/sdk_rename_table.py`"
+    )
+
 import argparse
 import re
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 

@@ -3767,6 +3767,47 @@ class CollisionPreflightTest(unittest.TestCase):
                 self.assertIn("JEV UNAVAILABLE", out)
                 self.assertIn("fail-closed", out)
 
+    def test_explicit_jev_env_file_does_not_fall_through_to_a_key_on_disk(self):
+        """An explicit JEV env-file override is AUTHORITATIVE (#5278).
+
+        The override used to be PREPENDED to the candidate list, with the
+        implicit ``<cwd>/.env`` still consulted afterwards. So a run that
+        declared a KEYLESS env file picked a key up anyway — and, on a machine
+        carrying one, made a real, billable JEV call while believing it had no
+        credential at all.
+
+        This is hermetic and needs no network: a decoy key is written exactly
+        where an implicit candidate looks (``<cwd>/.env`` — the harness's temp
+        repo), the override names a keyless file, and the tool must report that
+        no ``JEV_API_KEY`` was found. Through the old fall-through it found the
+        decoy and failed with a transport error instead, so this assertion is
+        what pins the invariant — the existing ``no-key`` subtest below does
+        NOT, because in a checkout without a ``.env`` (CI) both behaviours
+        return no key and it passes either way.
+        """
+        body = (
+            "Consolidated under #5063 (one binding from a written claim to the "
+            "system it describes)."
+        )
+        self.gh_fixtures(issue=self.issue_payload(comments=[("test-agent", body)]))
+        # A decoy key at a location the IMPLICIT candidate list would read.
+        (self.repo / ".env").write_text(
+            "JEV_API_KEY=implicit-candidate-decoy\n", encoding="utf-8",
+        )
+        keyless = self.tmp / "keyless.env"
+        keyless.write_text("# deliberately carries no JEV_API_KEY\n", encoding="utf-8")
+
+        rc, out = self.run_tool(env_extra={
+            "COLLISION_PREFLIGHT_JEV": "on",
+            "COLLISION_PREFLIGHT_JEV_ENV_FILE": str(keyless),
+        })
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("JEV UNAVAILABLE", out)
+        # THE DISCRIMINATOR: the run must have found NO key. Had it fallen
+        # through to the decoy it would have attempted a call and reported a
+        # transport failure instead of the missing-key reason.
+        self.assertIn("no JEV_API_KEY", out)
+
     def test_same_body_decides_identically_and_warm_cache_makes_no_call(self):
         self.jev_rules(default=0.03)  # CLEAN
         body = (
