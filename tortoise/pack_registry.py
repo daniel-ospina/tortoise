@@ -196,9 +196,18 @@ def registered_source_types() -> frozenset[str]:
     """
     return KNOWN_SOURCE_TYPES | frozenset(SOURCE_KIND_DEFAULTS)
 
-# Core mechanism predicates (S3 pipeline emits IMPL/NAND; MITIGATES for
-# mitigations) — valid chain-edge / enforcement targets without a pack relation.
-CORE_PREDICATES = frozenset({"IMPL", "NAND", "MITIGATES"})
+# Core mechanism predicates — valid chain-edge / enforcement targets without a
+# pack relation. IMPL/NAND ONLY. `MITIGATES` is not a predicate: the F1 ruling
+# (#2552, ontology v3.17, implemented by #4937 / PR #5225) retired it from the
+# OPERATOR MENU, and a mitigation is a Point attached to the operator bridge it
+# damps — `(op:Point {is_operator:true})-[:mitigated_by]->(m)`, ontology §3.9.
+# `MITIGATES` does survive as a PAYLOAD op_type some writers still emit (see
+# `commit_schema`), routed to `sdk.mitigate_operator`; that spelling is not this
+# set, and the distinction matters. Admitting it HERE let a pack declare
+# `chains[].edges: [MITIGATES]` and validate clean WITHOUT declaring a relation —
+# advertising a chain edge the engine cannot build.
+# (#4626 / #2766 / #5322)
+CORE_PREDICATES = frozenset({"IMPL", "NAND"})
 
 # ── Manifest v3.1 (epic #909 §1.4/§1.5): extraction behaviour slots (#1026) ──
 # Per-pack slots that let a pack shape extraction for its own domain while the
@@ -255,7 +264,7 @@ MAX_PROMPT_FRAGMENTS_CHARS = 4 * MAX_PROMPT_FRAGMENTS_TOKENS
 
 #: `valueGate` keys the template documents. A mistyped gate key is silent dead
 #: config of exactly the species the unknown-key rule exists to catch, so the
-#: neighbouring slot's strictness is matched here (review of PR #5647).
+#: neighbouring slot's strictness is matched here.
 VALID_VALUE_GATE_KEYS = frozenset({"keep", "drop"})
 
 
@@ -304,8 +313,7 @@ def _kind_ref_shape_error(ref: Any) -> str | None:
     What it catches is the MALFORMATION itself. ``_resolve_kind_ref`` would
     report ``":kind"``, ``"ns:"`` and ``"a:b:c"`` only as the generic "does
     not resolve to any known kind", which does not say what is wrong with them;
-    this check names it, at the per-manifest layer that drops the pack first
-    (review of PR #5647).
+    this check names it, at the per-manifest layer that drops the pack first.
     """
     if not isinstance(ref, str) or not ref.strip():
         return "must be a non-empty string"
@@ -1094,8 +1102,7 @@ class PackRegistry:
                     )
 
         # relationTemplates: pack-typical IMPL/NAND shapes. The mechanism
-        # vocabulary is the pair `relations[].mechanism` already enforces — see
-        # the note at the check below for why it is NOT `CORE_PREDICATES`.
+        # vocabulary is the pair `relations[].mechanism` already enforces.
         templates = extraction.get("relationTemplates")
         if templates is not None and not isinstance(templates, list):
             errors.append("extraction.relationTemplates must be a list")
@@ -1114,23 +1121,19 @@ class PackRegistry:
                             f"toKind, description)"
                         )
                 mechanism = tpl.get("mechanism")
-                # IMPL|NAND — the SAME pair `relations[].mechanism` enforces,
-                # deliberately NOT `CORE_PREDICATES`. That set still carries
-                # MITIGATES, which ONTOLOGY v3.17 (#4937, the F1 ruling on
-                # #2552) RETIRED: `sdk.create_operator` refuses it, and the
-                # ontology's own PREAMBLE states that where the document and
-                # the code disagree, the DOCUMENT is right. Accepting it here
-                # would advertise, on the author-facing template, an edge the engine
-                # cannot build — and would make this slot BROADER than its own
-                # sibling. `CORE_PREDICATES` still admitting MITIGATES is a
-                # separate, pre-existing defect: #5322.
+                # IMPL|NAND — the pair this check hardcodes and
+                # `relations[].mechanism` hardcodes. `MITIGATES` is RETIRED
+                # (ONTOLOGY v3.17, #4937, the F1 ruling on #2552) and
+                # `sdk.create_operator` refuses it, so accepting it here would
+                # advertise, on the author-facing template, an edge the engine
+                # cannot build. `CORE_PREDICATES` holds that same pair
+                # (#2766 / #5322).
                 # `predicate` is the one REFERENCE among these slots. The
                 # sibling `ontology.relations` requires a non-empty camelCase
                 # predicate and both kind sides, and a template naming none of
                 # them describes nothing — but this field was checked by
                 # NEITHER pass, so `{"predicate": 123}` and `{}` both
-                # validated clean (review of PR #5647, found independently by
-                # the architecture and security agents).
+                # validated clean.
                 template_pred = tpl.get("predicate")
                 if not isinstance(template_pred, str) or not template_pred:
                     errors.append(
@@ -1142,13 +1145,14 @@ class PackRegistry:
                         f"extraction.relationTemplates[{i}].predicate "
                         f"'{template_pred}' must be camelCase"
                     )
-                if "fromKind" in tpl or "toKind" in tpl:
-                    if "fromKind" not in tpl or "toKind" not in tpl:
-                        errors.append(
-                            f"extraction.relationTemplates[{i}]: both fromKind "
-                            f"and toKind are required when either is given "
-                            f"(a half-declared shape cannot be matched)"
-                        )
+                if ("fromKind" in tpl or "toKind" in tpl) and (
+                    "fromKind" not in tpl or "toKind" not in tpl
+                ):
+                    errors.append(
+                        f"extraction.relationTemplates[{i}]: both fromKind "
+                        f"and toKind are required when either is given "
+                        f"(a half-declared shape cannot be matched)"
+                    )
                 if mechanism is not None and mechanism not in ("IMPL", "NAND"):
                     errors.append(
                         f"extraction.relationTemplates[{i}].mechanism must be "
@@ -1377,7 +1381,7 @@ class PackRegistry:
             # _validate; RESOLUTION needs every pack loaded, which is why it
             # happens here — the same split `relations` uses. Without this the
             # slots were the one place a ref was accepted and handed to nobody,
-            # so a dangling `ns:kind` validated clean (review of PR #5647).
+            # so a dangling `ns:kind` validated clean.
             v31_kinds = self._pack_kind_set(pack)
             v31_extraction = pack.extraction or {}
             v31_refs: list[tuple[str, str]] = [

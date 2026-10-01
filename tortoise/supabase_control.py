@@ -3355,23 +3355,31 @@ def metering_increment_ask(cp, org_id: str, period_start: str,
 def metering_increment_capture_cost(cp, org_id: str, period_start: str,
                                     period_end: str, *,
                                     calls: int = 0,
+                                    tokens_in: int = 0,
+                                    tokens_out: int = 0,
                                     cost_usd: float = 0.0) -> None:
-    """Increment the org's MEASURED capture-extraction cost for the window
-    ``[period_start, period_end)`` (#3665) via the
-    ``metering_increment_capture_cost`` SQL RPC (20260918000001 re-issues it)
+    """Increment the org's MEASURED capture-extraction cost and TOKEN WORKLOAD
+    for the window ``[period_start, period_end)`` (#3665, #5045) via the
+    ``metering_increment_capture_cost`` SQL RPC (20260926000001 re-issues it)
     — the capture-side mirror of ``metering_increment_ask`` (atomic under
     Postgres row locking; best-effort by contract — the caller swallows
     exceptions).
 
-    #3825: the window, not a month label, is the row key. NOTE the RPC is
-    DROPPED and recreated by 20260918000001 rather than replaced in place:
-    a new argument list would otherwise be an OVERLOAD, leaving the old
-    month-keyed function callable — the silent second path #3825 removes.
+    ``tokens_in``/``tokens_out`` are the extraction LLM token counts the
+    caller ALREADY measured (``hosted_api._capture_cost_props`` reads them
+    from ``meta["stats"]["llm"]``) — they are WORKLOAD, never price, and are
+    never read by any spend cap (#5045).
+
+    #3825/#5045: the window, not a month label, is the row key. NOTE the RPC
+    is DROPPED and recreated (20260918000001, then 20260926000001) rather than
+    replaced in place: a new argument list would otherwise be an OVERLOAD,
+    leaving the old signature callable — the silent second path #3825 removes.
     """
     cp.rpc(
         "metering_increment_capture_cost",
         {"p_org_id": org_id, "p_period_start": period_start,
          "p_period_end": period_end, "p_calls": calls,
+         "p_tokens_in": tokens_in, "p_tokens_out": tokens_out,
          "p_cost_usd": cost_usd},
     )
 

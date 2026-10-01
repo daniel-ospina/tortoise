@@ -193,11 +193,12 @@ Streamable HTTP, but `"streamable-http"` is only a Claude Code alias:
 Cursor's IDE may tolerate it while the Cursor CLI can drop the whole config
 file, and Pi ignores `type` entirely. Never teach `"streamable-http"`;
 `"http"` is the only universally safe value.
-Claude Code **requires** `"type": "http"` in a JSON `.mcp.json` entry (a
-`url` with no `type` is read as stdio and the server is skipped); Cursor and
-Pi infer the transport from `url` and carry **no** `type` — that is also the
-tested shape in `tortoise/__main__.py::_harness_mcp_config` and the
-dashboard wizard (`website/apps/dashboard/src/harnesses.js`).
+Claude Code **requires** a `type` on a remote entry — `claude mcp add
+--transport http` writes `"type": "http"`, and a hand-written `.mcp.json`
+entry must carry it (a `url` with no `type` is read as stdio and the server is
+skipped); Cursor and Pi infer the transport from `url` and carry **no** `type`
+— that is also the tested shape in `tortoise/__main__.py::_harness_mcp_config`
+and the dashboard wizard (`website/apps/dashboard/src/harnesses.js`).
 
 > **After the config WRITE, and before you hand the restart to the user,
 > checkpoint `connection-written`.** The write is the one step no server can
@@ -228,41 +229,60 @@ dashboard wizard (`website/apps/dashboard/src/harnesses.js`).
 ### Claude Code (self-install)
 
 ```bash
+export TORTOISE_API_KEY=tt_YOUR_KEY   # this shell
 claude mcp add --transport http tortoise https://api.premiselabs.co/mcp/ \
   --header "Authorization: Bearer ${TORTOISE_API_KEY}"
 ```
 
-`$TORTOISE_API_KEY` must be exported in your shell profile first
-(`export TORTOISE_API_KEY=<key>` in `~/.zshrc` / `~/.bashrc`). Validate the
-config was written (`claude mcp list` shows `tortoise`).
+The export must reach the shell you run this in — a profile edit does not — and
+you'll want it in your profile for later sessions (`~/.zshrc` / `~/.bashrc`; if
+that profile is version-controlled, use a non-committed include instead). The
+shell
+expands it, so the key lands in **`~/.claude.json`** — local scope, under this
+project's entry: private to you, this project only, **never committed**.
+Validate the config was written (`claude mcp list` shows `tortoise`).
 
-> ⏸ **One-time approval (not a failure):** servers registered at **project
-> scope** (`.mcp.json` — `claude mcp add --scope project`, the default in
-> older clients) show as **Pending approval** in `claude mcp list` until the
-> human approves once — have them start `claude` in the project and allow
-> the prompt (or use `/mcp`). The tools stay disabled until then. (The
-> current `claude mcp add` default is *local* scope — active immediately,
-> no approval.)
+> ⏸ **Approval, on both paths (not a failure).** Local scope skips the
+> **project-scope server approval** below, but no scope is approval-free:
+> Claude Code prompts for permission the first time it calls each MCP tool —
+> allow that once, or pre-allow `mcp__tortoise__*`. `Added …` means the entry
+> was written, not that it connected.
+>
+> **Sharing the config with the repo instead?** `claude mcp add --scope project`
+> writes a **committable** `.mcp.json` at the project root. ⛔ **Single-quote
+> the header there** — `--header 'Authorization: Bearer ${TORTOISE_API_KEY}'` —
+> so the shell passes the reference through; double-quoted, the shell expands
+> it and the **literal key** lands in the file you are about to commit. (A
+> hand-written `${TORTOISE_API_KEY}` in `url` / `headers` is key-free too.)
+> A project-scope server stays `⏸ Pending approval` until the human approves
+> it once per machine: start `claude` in the project and allow the prompt, or
+> run `/mcp` and approve it there (`claude mcp reset-project-choices` resets
+> the choice). Its tools stay disabled until then.
 
 ### Cursor (self-install)
 
-Create/merge `.cursor/mcp.json` in the project:
+Create/merge `.cursor/mcp.json` in the project — the file is **committable**
+(project scope), so it carries the env reference, never the key:
 
 ```json
 { "mcpServers": { "tortoise": { "url": "https://api.premiselabs.co/mcp/", "headers": { "Authorization": "Bearer ${env:TORTOISE_API_KEY}" } } } }
 ```
 
-Set `TORTOISE_API_KEY` in your environment (Cursor settings or shell
-profile). Restart Cursor so it picks up the config.
+Set `TORTOISE_API_KEY` in the environment Cursor is launched with — your shell
+profile when you start Cursor from a shell (if that profile is
+version-controlled, use a non-committed include instead), or the system
+environment for a Finder launch (`launchctl setenv TORTOISE_API_KEY …`, then
+relaunch). Restart Cursor so it picks up the config.
 
 ### Codex CLI (self-install)
 
 ```bash
-export TORTOISE_API_KEY=<key>
+export TORTOISE_API_KEY=tt_YOUR_KEY
 codex mcp add tortoise --url https://api.premiselabs.co/mcp/ --bearer-token-env-var TORTOISE_API_KEY
 ```
 
-Persist the export in your shell profile. The skill installer writes Codex
+Persist the export in your shell profile — if it is version-controlled, use a
+non-committed include instead. The skill installer writes Codex
 skills to `.agents/skills` (Codex's documented skill root — NOT `.codex/skills`,
 which Codex never loads) and adds a repo-root AGENTS.md standing-instructions
 block:
@@ -302,15 +322,15 @@ bearer token (`Authorization: Bearer`) and a 401 — not a config error:
 # Idempotent: a bare `>>` stacks a second export on every re-run.
 # Shell profiles are often version-controlled — if yours is, keep the key
 # out of it and use a non-committed include instead.
-grep -q 'export TORTOISE_API_KEY=' ~/.zshrc || echo 'export TORTOISE_API_KEY=<key>' >> ~/.zshrc   # or ~/.bashrc
+grep -q 'export TORTOISE_API_KEY=' ~/.zshrc || echo 'export TORTOISE_API_KEY=tt_YOUR_KEY' >> ~/.zshrc   # or ~/.bashrc
 ```
 
 `TORTOISE_API_KEY` is the canonical name, and the **only** one any code path
 reads — the MCP HTTP client (`tortoise/mcp_client.py`), the hosted SDK
 (`tortoise/sdk.py`), the CLI (`tortoise/__main__.py`), and
 `serve --http --auth static` (`tortoise/auth.py`). Giving the MCP credential a
-different name is a legitimate policy choice (#3615) — but the committed
-`.mcp.json` expands `${TORTOISE_API_KEY}` from `process.env`, so a
+different name is a legitimate policy choice (#3615) — but the committable
+`.mcp.json` (project scope) expands `${TORTOISE_API_KEY}` from `process.env`, so a
 differently-named credential that is NOT also aliased sends an empty Bearer and
 401s while every entry point above goes unauthenticated — a config-name
 mismatch that reads as an auth failure (#5153). If the profile names it
@@ -319,7 +339,7 @@ separately, alias it:
 ```bash
 # A profile that names its MCP credential separately (e.g. to keep one key per
 # purpose) must ALSO export the canonical name, or only the MCP header works.
-export TORTOISE_MCP_API_KEY=<key>                  # the MCP Bearer header
+export TORTOISE_MCP_API_KEY=tt_YOUR_KEY           # the MCP Bearer header
 # Export it under the canonical name too — every other entry point reads it.
 export TORTOISE_API_KEY="$TORTOISE_MCP_API_KEY"
 ```
@@ -338,7 +358,8 @@ What gates hosted capture is **per-surface**, and not yet uniform (#3615):
   until it closes, treat that export on a Pi host as a data-sharing opt-in, not
   a credential-only change.
 
-**2. Create/merge `.mcp.json` in the project** (MERGE — never replace an
+**2. Create/merge the committable `.mcp.json` (project scope) in this project**
+(MERGE — never replace an
 existing `mcpServers` block; if the EFFECTIVE config already has a `tortoise`
 entry — even one that only lives in the home/base config — run the collision
 protocol below BEFORE writing):

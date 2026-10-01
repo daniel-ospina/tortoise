@@ -1,4 +1,28 @@
 version: 1
+
+# #6135: how many parallel shards the fast pool (`test`) is split into. The PR
+# gate's critical path IS `max(shard)`, so this single number decides it.
+#
+# WHY A REVIEWED LITERAL (and not derived from `durations` per diff): the shard
+# set IS the required-check name set (`test (a)`, `test (b)`, …). The merge
+# rail's lane-parity subtracts the PR's job names from main's, and branch
+# protection / the Mergify queue name `python-ci-gate` — so a set that drifted
+# per diff would change an unreviewed contract run to run. Raising S here is a
+# one-line, reviewable change; the labels are positional letters so an S-adding
+# diff stays a SUPERSET of main's names (a rename would refuse every merge).
+#
+# The value (recomputable from the committed `durations` map:
+# `max(s['est_seconds'] for s in push_legs({**m, 'fast_shards': S})['shards'])`):
+# LPT puts max(shard) at 6.8 min of test time at S=9 (30.6 min at S=2, 5.6 at
+# S=11), and the measured per-shard fixed cost is ~3.4 min, so T ≈ 10.2 min —
+# at the epic's 10-minute goal. S≥12 buys nothing more: the largest single fast
+# file (`test_onboarding_state_split.py`, 310.7 s = 5.18 min) is then
+# max(shard) itself, which is #6133's floor expressed as a number. Raising this
+# trades WALL CLOCK for AGGREGATE runner time (~61 min of test time + ~9 × 3.4
+# min of setup ≈ 92 min at S=9, the same self-hosted capacity the epic is
+# trying to enlarge), so it is a wall-clock lever, not a free win.
+fast_shards: 9
+
 surfaces:
   api:
   - test_1162_add_operator_local_svbp.py
@@ -11,6 +35,12 @@ surfaces:
   # #3820: the analytics sink's OUTCOME contract + degraded-sink incident. Load-bearing
   # here: the file it guards most (tortoise/hosted_api.py) selects the `api` surface.
   - test_analytics_fallback_alert.py
+  # #5199: DUAL-REGISTERED with `core` for the same reason as `test_boot_regressions.py`
+  # BELOW in this list. `tortoise/hosted_api.py` is an exact-surface (`api`) match that REPLACES the
+  # `core` fallback, but this file's structural guard pins the session→document call
+  # site in that module — so without this arm a hosted_api.py-only revert of the
+  # `"Document"` spelling (the D10 regression) would run no guard at all.
+  - test_source_version_references_5199.py
   - test_backups_v1_alias.py
   - test_battery_parity_executors.py
   - test_battery_parity_hash.py
@@ -198,6 +228,7 @@ surfaces:
   - test_verbatim_span.py  # #5007: the fourth layer's SPAN link is a POINTER into the Source's raw text, not a payload — schema all-or-nothing + node round-trip + the "no verbatim text on the node" trap (registered here with test_commit_schema.py: it guards the same contract, and `tortoise/sdk.py` selects this surface)
   - test_cross_subdomain_cookie_sync.py
   - test_cursor_mcp_exit_evidence.py  # B2(c) #3657/#3497: Cursor MCP connect -> per-harness capture receipt end-to-end (hermetic; drives real OAuth AS + mounted MCP)
+  - test_dashboard_client_paths_resolve.py  # #4446: the client's literal call paths vs the runtime route table + the Pages function tree; replaces the text scan dropped in `ed0079b73`
   - test_dashboard_login.py
   - test_direct_edge.py
   - test_dr_endpoints.py
@@ -565,6 +596,7 @@ surfaces:
   # counts. Editing any of those selected NO surface, so the drift gate never ran
   # on precisely the PRs that can break it. `core` is the docs/default surface.
   - test_bridge_table.py
+  - test_ci_verdict.py
   - test_env_isolation.py
   - test_graph_name_ownership.py
   # #3634: guards the graph-name ownership vocabulary (the prefix sets that
@@ -580,6 +612,13 @@ surfaces:
   # gap is #4454's job, not this registration's; do not read this entry as
   # covering a hand-edited document.
   - test_mcp_rename_table.py
+  # #6138: the queue-conflict census. Hermetic (no DB, no network — every live
+  # read is injected through a fixture), so `core` can run it on engine-wide
+  # changes; it pins tools/queue_conflict_census.py, the instrument that makes
+  # the conflicting share of the open queue a reproducible number instead of a
+  # hand count. Same surface as its siblings test_merge_throughput.py /
+  # test_queue_window_observe.py.
+  - test_queue_conflict_census.py
   - test_rotate_key.py
   # #3981: dual-registered with `api` (the arm that fires on a tortoise/hosted_api.py-only
   # change); this `core` entry is the fallback arm, since core is only added when nothing
@@ -591,6 +630,7 @@ surfaces:
   # a `tortoise/analyze.py`-only change selects `ep` and would otherwise never
   # run the drift guard (#2938 convention).
   - test_run_with_eval_keys.py
+  - test_salience_labels_4917.py
   # #4282 Phase 0.3b: dual-registered with `api` for the same reason — `api` is
   # keyed on SOURCE PATTERNS and `tools/sdk_rename_table.py` is named there.
   # NOTE: docs paths are in NON_PYTHON_PREFIXES, not SOURCE_PATTERNS, so editing
@@ -621,6 +661,12 @@ surfaces:
   - test_subject_binding_1370.py
   - test_ci_expected_manifests.py
   - test_ci_guard_invocation.py
+  # #3470: the pytest-attribution reporter (`.github/scripts/pytest-attribution.sh`,
+  # called from python-ci.yml). It reads the workflow, the reporter script and the
+  # rail's parser (`scripts/ci_exemption.py`) and needs no DB, so `core` — the
+  # default surface — is where it runs when nothing else matched. Registered here
+  # because `integrity()` requires every `tests/**/test_*.py` to be classified.
+  - test_pytest_attribution.py
   - test_client_cli_probe.py
   # #3677: dual-registered with `api` for the same reason as test_boot_regressions.py
   # above. `api` is the arm that actually fires on a tortoise/hosted_api.py-only change;
@@ -695,6 +741,20 @@ surfaces:
   # never run.
   - test_source_fts.py
   - test_source_identity.py
+  # #5199: the derivation-link version anchor (`sourceVersion` on a derivation
+  # `references` link) — `tortoise/projection/edges.py` + `tortoise/projection/entities.py`
+  # select the `core` surface, so the guard for the anchor runs with the code it
+  # guards. DUAL `core`+`api`: the structural guard also pins
+  # `tortoise/hosted_api.py`'s session→document call site, and an `api` match
+  # REPLACES the `core` fallback — so a hosted_api.py-only change (exactly the
+  # D10 spelling regression this guard exists to catch) would otherwise never run
+  # it. Same reason as `test_boot_regressions.py` above. Hermetic (embedded DB per
+  # test, no URI).
+  - test_source_version_references_5199.py
+  # #5199 read half: the note is actually READABLE — the SDK provenance reader
+  # (`get_provenance_chain`) reports it per link. `tortoise/search_engine.py`
+  # selects this surface too, so the wiring's guard runs with the code it guards.
+  - test_source_version_read_wiring_5199.py
   - test_subject_layer_read_surfaces_4889.py  # #4889: the Subject-layer read surfaces fail loud instead of silently empty
   - test_transport_wait_bound.py  # #3834: transport wait bound + cold-half gate wiring (dual: api)
   # #2877: DB-free guards that a dead backup watcher degrades /health (the file
@@ -757,6 +817,12 @@ surfaces:
   - test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan
   - test_session_attribution.py
   - test_ci_selection.py
+  # #6673: the docker-lane service ports are EPHEMERAL (a `services:` block's
+  # fixed host ports collided across runners sharing one Docker daemon and made
+  # the runner abort in `initialize_containers`). Hermetic — it pins
+  # tests/_live_utils.py's port seam, the python-ci/pmv provisioning wiring and
+  # .github/actions/falkordb-{provision,teardown}.
+  - test_runner_ports_6673.py
   # #5215 (merge-throughput plan, Task 3): the queue-window observer that feeds
   # M3/M4/M5/M6 records to the instrument. Hermetic (no DB, no network) — it
   # pins tools/queue_window_observe.py, which `core` runs on engine-wide changes.
@@ -1180,6 +1246,13 @@ surfaces:
   - test_unjournaled_mutation_class.py
   - test_uri_env_mutations_declared.py
   - test_validity_windows.py
+  # #5365: a fail-open supersession skip must be VISIBLE — the refusal from
+  # #4021 lands in an OPTIONAL `skipped` result channel on
+  # commit_ops.apply_supersessions and in promote_point's response, instead of
+  # being only a callback warning. `tortoise/commit_ops.py` and
+  # `tortoise/sdk.py` are SHARED_MODULEs -> full matrix; `core` is the default
+  # home, the same surface as the E6 window suite above.
+  - test_5365_fail_open_visible.py
   # #5358: fail-closed refusal for an INVERTED predecessor window in
   # invalidate_point (a future-dated validFrom would be stamped validTo=now).
   # `tortoise/sdk.py` is a SHARED_MODULE -> full matrix, so no single surface
@@ -1348,6 +1421,11 @@ surfaces:
   - test_w4_why_enrichment.py
   - test_weights.py
   onboarding:
+  # `test_dashboard_client_paths_resolve.py` is DUAL-REGISTERED (#4446): a change to
+  # `website/apps/dashboard/src/` selects THIS surface and not `api`, and that is the
+  # half of the invariant a client edit breaks — registering it only under `api` would
+  # leave the guard asleep exactly when the client moved.
+  - test_dashboard_client_paths_resolve.py
   # #4097: the env-truthiness non-divergence guard scans all of `tortoise/**`,
   # including `tortoise/onboarding/**`, and an `onboarding` surface match replaces
   # the `core` fallback (tools/ci_selection.py) — so the guard needs this arm too.
@@ -1474,6 +1552,11 @@ surfaces:
   - longmem_eval/test_assembly_arm.py  # #2165 Task 7: v2-lane eval arm — drives ask_lane.run_ask_assembled/run_ask_lane (also under `eval`)
   - test_ask_regression_llm.py
   - test_ask_retrieval_levers.py
+  # #5534: the D3/A4 instrument's INPUT guard — the fixture seeder must seed
+  # the E3 search_keys substrate A4's PRF expansion harvests (unit /
+  # mechanism / arm-difference), and the shared capture-exact seeder must NOT
+  # (the golden-store contract).
+  - test_a4_instrument_input.py
   - test_ask_retrieval_budget.py  # #4105: ask-lane reader window — resolved/tandem caps + honest byte ceiling (hermetic)
   - test_ask_sdk.py
   - test_ask_seed_shape.py   # #3914: every ask-lane seeder emits the CAPTURE shape (Session + CONTAINS edge, no sessionId/eventId prop) — asserted on the RESOLVED graph, mutation-proven against the edge
@@ -2005,9 +2088,11 @@ durations:
   test_oauth_mcp.py: 16.1
   test_oauth_consent_pkce.py: 8.0  # unmeasured — added by #3496, so no leg of the four documented source runs could collect it; refresh from CI junit.
   test_mcp_server.py: 4.4
+  test_dashboard_client_paths_resolve.py: 3.6
   test_dashboard_login.py: 6.8
   test_capture_phase_d_dedup.py: 4.7
   test_ci_selection.py: 18.8
+  test_runner_ports_6673.py: 4.3  # unmeasured (new file, #6673 — no CI junit yet)
   test_epic903_freshness.py: 3.8
   test_onboarding_integration.py: 4.5
   test_pack_cli.py: 4.5
@@ -2109,6 +2194,7 @@ durations:
   test_subjectadded_journal.py: 1.9
   test_turnstile_signup.py: 0.9
   test_validity_windows.py: 4.4
+  test_5365_fail_open_visible.py: 21.2  # unmeasured — local single run (5 tests); refresh from CI junit
   bench/test_degradation_chain.py: 1.3
   longmem_eval/test_measure_temporal.py: 2.2
   test_assembly_fixtures.py: 2.2
@@ -2148,6 +2234,7 @@ durations:
   test_agent_ops_pack.py: 1.0
   test_ask_retrieval_levers.py: 0.9
   test_ask_retrieval_budget.py: 0.3
+  test_a4_instrument_input.py: 5.0  # locally measured (4.5s marginal; the ~14s once-per-leg import cost is not attributed to any file — #3400 method)
   test_ask_shape_rate_receipt_redaction.py: 0.2
   test_battery_arms_real.py: 0.9
   test_capability_catalog.py: 0.9
