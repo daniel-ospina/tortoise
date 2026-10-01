@@ -521,6 +521,78 @@ Every backup + DR operator (sweep, purge, re-baseline, drill, scheduled drill, a
 
 **A 0-team sweep on the wrong dialect used to be indistinguishable from an empty deployment** — it enumerated the graph the #669 flip deleted and reported a benign `no_teams` for 31 days (#2823). The seam now REFUSES a registry-dialect source in the Supabase lane (`enum_failed`, loud — `tortoise/backup_sweep.py:212`), and the driver files `SWEEP_NO_COVERAGE` for an enabled-but-0-backup sweep whose 0 is not corroborated by a **measured-empty** R2 pool — the pool holds ≥1 team prefix, or could not be listed at all. Lane vars: `TORTOISE_CONTROL_PLANE` / `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` (`.env.example` §Control plane).
 
+## Cohort spend cap ↔ provider credit balance (#3873)
+
+The beta's spend is bounded per-team and, in the running system, **unbounded in
+aggregate**: the only cohort-aggregate bound is the provider credit balance — a
+cliff that fails on **availability for every user at once**. `#3780` merged a real
+cohort dollar cap, but a cap only bounds aggregate spend **if the cap sits below
+the available balance**, and nothing in the repo can observe the balance.
+
+**The relation, stated once and enforced by process:**
+
+> **`TORTOISE_COHORT_COST_CAP_USD` must be set to a value STRICTLY BELOW the
+> provider's CURRENT credit balance, and that balance must be re-read after
+> EVERY top-up AND at EVERY billing-period rollover.**
+
+**The cap is PER-PERIOD; the balance is NOT.** The cap's measured spend is
+scoped to a window: `cohort_cost.enforce_cohort_cost_cap` resolves
+`period = metering._current_period(org_id)` (the subscription's own billing
+period, or the calendar month in UTC) and compares
+`get_cohort_spend_usd(ids, period)` against the cap
+(`tortoise/cohort_cost.py:453-460`; the refusal message reads "for this billing
+period"). So the measured spend **resets to zero at each rollover while the
+provider balance only ever falls** — and the rollover is an event nothing
+announces. Worked example: arm cap=25 with balance=30; period 1 spends 24, so
+the balance is now ~6; period 2 re-arms at a fresh 0 and the next 25 of spend is
+available to the cap while the balance it is supposed to sit under is **already
+below it**. The cliff then fires first, with **no top-up having occurred** —
+exactly the failure the paragraph below warns about. Re-reading only "after
+EVERY top-up" misses this, because the top-up is the *rarest* event and the
+rollover is the frequent one.
+
+**Why it is written down rather than assumed.** A cap set above the balance lets
+the cliff hit first — every lane starts refusing at once and the cap never fires,
+so the configured ceiling reads as protection while the actual bound is the
+provider's balance. No code path in this repo can see that balance (the metering
+alerts are **write-ops against a plan allowance**, never provider dollars), so the
+relationship cannot be checked from inside the system and must live here as an
+operator step. Re-reading after a top-up matters in both directions: a top-up that
+raises the balance does not disarm the cap, and a **spend-down** moves the balance
+toward the cap with no event to announce it.
+
+**Default posture (state it truthfully): the cap is OFF by default.**
+`cohort_cost.resolve_cohort_cost_cap` returns `None` when
+`TORTOISE_COHORT_COST_CAP_USD` is absent, and it is absent by default — it is
+**not** set in `deploy-hosted.yml` or `fly.toml`, only (commented out) in
+`.env.example`. So on an unarmed deployment the cohort-aggregate bound *is* the
+provider balance, and this relation is vacuous until the cap is armed.
+
+**Reading the balance — the exact endpoints** (a provider's own API; which one
+applies depends on which route the deployment resolves):
+
+| Provider route | Endpoint | Field | Credential |
+|---|---|---|---|
+| OpenRouter key limit (the deploy-default route) | `GET https://openrouter.ai/api/v1/key` | `limit_remaining` | the **existing inference key** — no new secret |
+| OpenRouter account credits | `GET https://openrouter.ai/api/v1/credits` | `total_credits`, `total_usage` | requires a **Management API key** (a separate credential, not provisioned) |
+| DeepSeek direct | `GET https://api.deepseek.com/user/balance` | `is_available`, `balance_infos[].total_balance`, `balance_infos[].currency` (**CNY** *or* **USD**) | the existing `DEEPSEEK_API_KEY` |
+
+On the OpenRouter key read, `limit_remaining` is only meaningful when a
+**key-level limit** is set; a key with no limit falls back to account credits, so
+treat it as a lower bound, not the account balance. Note the DeepSeek shape:
+`total_balance` is a member of `balance_infos[]`, **not** a top-level field, and
+`currency` is `CNY` *or* `USD` depending on the account — so read the currency
+the response actually reports rather than assuming CNY. The two providers expose
+two APIs and two currencies — a cap in USD must be compared to the balance in
+the **same** currency.
+
+**No number is set here.** The page threshold, whether a trip is advisory or also
+refuses, and whether a Management API key may be provisioned are owner decisions,
+not runbook values — this section records the *relation* only. The post-hoc
+counterpart is the `PROVIDER_BILLING_EXHAUSTED` incident (triage row below): it
+records the cliff after the provider's own refusal, and it is deliberately not a
+warning ahead of it.
+
 ## Alert taxonomy + triage
 | Kind | Meaning | Triage |
 |---|---|---|
@@ -553,6 +625,7 @@ Every backup + DR operator (sweep, purge, re-baseline, drill, scheduled drill, a
 | ABUSE_DECISION_FAULT | #4872: a store call on the abuse **enforcement DECISION path** raised, so the evaluation could not complete — the lane is `window_sum`, `clean_window_episode_end`, `latest_flag_at`, or `rule_event_between`. **PLATFORM-SCOPED (subject `_`)**: the cause is a shared substrate fault (PostgREST schema-cache miss `PGRST202`, ACL `42501`, transport), so ONE incident covers every org. Detail is a bounded, message-free vocabulary — `lane`, `error_type`, `rule` (`point_create`/`key_create`), `subject_org` (**the FIRST org to fault — evidence, NOT scope**: the body is written create-once, so later orgs are not recorded), and `fallback` (what the swallow DID: `return_none`/`reflag`/`continuity_true`). TWO lanes push **TOWARD** a suspension — `continuity_true`, and the `clean_window_episode_end` leg (a failed guard read or clear write leaves the flag episode ARMED, so the stale anchor survives and a later over-threshold evaluation can still suspend); `window_sum`/`reflag` fall away from one. The same create-once rule as `subject_org` applies to `lane`/`fallback`: they name the FIRST faulting lane of the incident's life (an R1 `flag_org` failure can own the body while an R2 `suspend_org` failure in the same request is throttled), so the UNTHROTTLED ERROR records are the complete per-lane evidence. The ERROR record carries the resolved `kind` and the `exc_info` stack (the stack at most once per lane per 60s — a shared-substrate outage must not amplify logs); the PostgREST message is the diagnosis. **Not gated on `BACKUP_SWEEP_ENABLED`** (the un-gated `operator_alert` seam, D5a); with no `DR_ISSUES_PAT` the ERROR log is the residual | Identify the failing store call from `lane` and the substrate cause from `error_type`; `subject_org` names only the first org whose evaluation failed. This is OBSERVABILITY: it does not suspend anyone and does not repair the fault. Confirm the substrate fault (PostgREST logs / `pg_get_function_arguments` / a direct `service_role` call), then decide whether the affected orgs' missed enforcement must be applied by hand. The sibling `abuse_suspended` filing (`notify.py`) is still sweep-gated — see #4778. **Manual close:** close the GitHub issue **first**, then delete `ops/alerts/ABUSE_DECISION_FAULT/_.json` (that order matches `AlertStore.resolve_incident` — close, then delete-to-resolve; deleting the object first leaves the issue open and re-arms a recurrence as a SECOND issue) |
 | ABUSE_ENFORCEMENT_FAULT | #4872: the abuse **enforcement ACTION** could not be applied — the lane is `suspend_org` (a stage-2 suspension did not land) or `flag_org` (a stage-1 flag row was not written, while the caller still returns `flag` and still notifies "flagged"). Kept a DIFFERENT kind from `ABUSE_DECISION_FAULT` because the incident body is written create-once: a transient evaluation-read blip must never mask a failed suspension. **PLATFORM-SCOPED (subject `_`)** for the same shared-substrate reason. Detail: `lane`, `error_type`, `rule`, `subject_org` (first org to fault, evidence not scope), `fallback` (`return_breach` = `_evaluate` returned `"breach"`, indistinguishable from "still inside the staging window"; `return_flag`). `lane`/`fallback` obey the same create-once rule as `subject_org`: they name the FIRST faulting lane for the incident's life, so read the UNTHROTTLED ERROR records for the full per-lane picture. The ERROR record names the resolved `kind` and carries the `exc_info` stack (bounded to one per lane per 60s). **Not gated on `BACKUP_SWEEP_ENABLED`** (D5a); with no `DR_ISSUES_PAT` the ERROR log is the residual | `lane=suspend_org` is the #4872 instance: the `abuse_suspend` RPC did not commit for a stage-2-eligible org (no `suspend` row in `abuse_events`). Determine WHY the call did not land from `error_type` + the ERROR record's `exc_info` (the PostgREST message), or by a direct `service_role` call / `pg_get_function_arguments('public.abuse_suspend')` / `NOTIFY pgrst, 'reload schema'` then retry. ⛔ **Do NOT "repair" the RPC blindly**: any org already flagged past the staging window with continuity satisfied suspends on its next `point_create` evaluation (403/-32006). Arming is an owner decision with the cause in hand. **Manual close:** close the GitHub issue **first**, then delete `ops/alerts/ABUSE_ENFORCEMENT_FAULT/_.json` (close, then delete-to-resolve) |
 | BILLING_NOTIFY_REFUSED | #4456: a Stripe billing notification was **dropped** — the #3498 offload seam REFUSED the submission (the telemetry pool's backlog was full, or a queued submission was cancelled before any worker ran it). The `WebhookEvent` idempotency marker commits **before** the notification, so Stripe's retry sees `is_first=False` and the notification is lost **permanently**: the org is never told its plan changed. Subject is **PLATFORM-SCOPED** (`""`, stored as `_`) by the #4456 plan — one Resend account serves every team AND the shared telemetry pool makes the refusal cross-tenant, so a per-org key would file N issues for one outage; the affected org travels in the detail, a fixed, message-free vocabulary — `op` (`billing_notify`), `event_type` (the Stripe event type), `org_id`. **Not gated on `BACKUP_SWEEP_ENABLED`** (D5a); with no `DR_ISSUES_PAT` (or an unbuildable object store) the site's rate-limited **ERROR** line is the residual | The dropped notification is **not recoverable from this incident**. Confirm the org's current tier, then re-fire it manually (`notify_billing_event(kind, {org_id, tier}, …)`); and investigate why the seam refused — a wedged best-effort call parking all `CONTROL_PLANE_TELEMETRY_WORKERS` slots. **Manual close:** close the GitHub issue **first**, then delete `ops/alerts/BILLING_NOTIFY_REFUSED/_.json` (that order matches `AlertStore.resolve_incident` — close, then delete-to-resolve). Deleting the object first leaves the issue open and re-arms a recurrence as a SECOND issue |
+| PROVIDER_BILLING_EXHAUSTED | #3873: a serving model lane's provider refused on its **OWN budget/limit** — HTTP 402, or an OpenRouter 403 carrying a key-limit body signature (`model_adapters.is_billing_exhausted`). This is the POST-HOC record of the beta's aggregate spend bound (the provider credit balance) being reached: `RotatingModel` cooled the lane and rotated and, before this kind existed, told no operator. **It carries NO threshold** — the trigger is the provider's own refusal, an observed event, never a policy line, and the trip is **advisory only** (it never refuses a request; the refusal already happened). Subject is the **serving leg's provider slug** (`deepseek-direct`/`openrouter`/`venice`), not the platform sentinel and not an org: the alert names the leg that ACTUALLY refused (a hop can reach a leg that was not the configured primary), and per-leg dedup keeps a second lane's exhaustion visible instead of swallowing it under the first's open incident. Detail is a fixed, message-free vocabulary — `provider`, `error_type`, `status`, `has_alternative` (`true` = more than one lane was configured, so this lane is rotated AWAY from and the call continues on the rotation path; `false` = the refusal was raised with no alternative configured, i.e. the cliff for that call. ⚠️ `true` does **not** mean the call ultimately succeeded — every other lane can still refuse, which is the all-lanes-down shape). Filed through the un-gated `operator_alert` seam (D5a); with no `DR_ISSUES_PAT` the WARNING log is the residual | Confirm the provider's balance and top up — see **Cohort spend cap ↔ provider credit balance** below. The incident records that the cliff ARRIVED; it is not a warning ahead of it, and nothing here sets the cap. **Manual close only:** close the GitHub issue **first**, then delete `ops/alerts/PROVIDER_BILLING_EXHAUSTED/{provider}.json` (that order matches `AlertStore.resolve_incident` — close, then delete-to-resolve); deleting the object first leaves the issue open and re-arms a recurrence as a SECOND issue |
 
 ### How incidents CLOSE
 

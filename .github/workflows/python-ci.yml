@@ -376,6 +376,17 @@ jobs:
         # vacuous). The step-shape contract is pinned in
         # tests/test_mergify_config_guard.py::test_mutation_removing_the_guard_step_would_remove_the_enforcement.
         run: python3 tools/mergify_config_guard.py --static
+      - name: "Registry integrity (union merge fails closed, #5373)"
+        # `config/ci-surfaces.yml` and `config/surface-manifest.yml` carry
+        # `merge=union` in .gitattributes: two lanes appending a new entry to the same
+        # anchor no longer produce a manual conflict, and union is a git BUILT-IN, so
+        # no clone needs driver config. But union is LINE-level and will just as
+        # happily emit a duplicate mapping key or a duplicate entry — and
+        # `yaml.safe_load` silently keeps the LAST duplicate, so no existing consumer
+        # can see it. This step is the validator that pairing requires: a duplicate
+        # key, a duplicate entry, or a malformed document FAILS here. Fail-closed,
+        # <1s, no dependency beyond the pyyaml installed above.
+        run: python3 tools/registry_integrity.py
 
   test:
     # #880: split into parallel shards (matrix). #6135: the COUNT is
@@ -2322,9 +2333,80 @@ jobs:
   # NON-ZERO per red leg, a leg dropped from `needs:` fails closed instead of
   # vanishing, and a `skipped` leg is forgiven only when the selector declined
   # it).
+  workflow-lint:
+    # #6253: a malformed Actions expression makes GitHub refuse the WHOLE
+    # workflow file — zero jobs, zero logs, and therefore ZERO check-runs. The
+    # required aggregate below then does not exist on that head at all: not
+    # red, ABSENT, and an absent required check cannot block a merge. Observed
+    # on #6212, where the run reported `total_count: 0` with "This run likely
+    # failed because of a workflow file issue".
+    #
+    # SCOPE LIMIT, stated because it bounds what this leg can claim: the leg
+    # reads every workflow file it can LOAD, so it catches a malformed
+    # expression in any workflow OTHER than this one. If this file
+    # (`python-ci.yml`) is itself malformed, GitHub refuses it, this leg never
+    # starts, `python-ci-gate` stays ABSENT, and nothing here changes.
+    #
+    # THE UNCOVERED CASE IS #6253'S ACTUAL CASE (#6212 was a malformed
+    # `python-ci.yml`), and the blocker is NOT branch protection — an earlier
+    # revision of this comment claimed that and it was wrong. No new required
+    # check is needed: `ci.yml` is triggered on `pull_request`, so it still
+    # runs when GitHub refuses this file, and its `docs`, `pricing-artifact`,
+    # `test-isolation` and `license-surface` jobs are always-on (no `if:`/
+    # `needs:`) and ALREADY enforced by `.mergify.yml` `queue_conditions` as
+    # `check-success=…`. The same actionlint step placed in any of them would
+    # lint this file and red an already-required check with no branch-
+    # protection change at all.
+    #
+    # The real blocker is only the CHOICE to keep the lint inside
+    # `python-ci.yml`. Closing the #6212 case therefore means relocating (or
+    # duplicating) this step into an always-on required job in `ci.yml`; until
+    # that is done, #6253 must NOT be closed as fixed, because the file it
+    # reports remains uncovered.
+    #
+    # The expression is evaluated over the ENTIRE `run:` scalar, so a shell
+    # comment is NOT exempt — that is how the #6212 instance slipped past
+    # YAML-level parsers, which never evaluate expressions at all.
+    #
+    # The pinned actionlint image is invoked directly and deliberately NOT via
+    # scripts/check-workflow-actionlint.sh: `scripts` is a tracked symlink
+    # (git mode 120000) pointing outside this repository, so that file does not
+    # exist in a CI checkout, and its default scope also names a templates/
+    # tree this repository does not have (it exits 3 at the glob).
+    #
+    # Both extensions are linted: GitHub loads either `.yml` or `.yaml`, so a
+    # `*.yml`-only glob would silently skip a `.yaml` workflow.
+    # Ungated on purpose: this leg has no diff selector, so its LEGS row is
+    # `-` and it must therefore always resolve to SUCCESS — the aggregate fails
+    # closed on a `skipped` row whose third field is not `false` (#5219). The
+    # malformed-file class applies to EVERY diff, so gating it on a selector
+    # would leave whole diff classes unguarded.
+    #
+    # Bounded like `manifest-integrity`: this job pulls a Docker image to feed
+    # the REQUIRED aggregate, so a stalled registry must not hold
+    # `python-ci-gate` pending for hours on every PR.
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: actionlint (workflow syntax + Actions-expression errors)
+        run: |
+          # `nullglob` makes an unmatched pattern expand to NOTHING rather than
+          # to the literal pattern text, so the emptiness check below tests a
+          # real empty set. An array (not a bare expansion) keeps the paths
+          # intact through word splitting and shellcheck.
+          shopt -s nullglob
+          files=(.github/workflows/*.yml .github/workflows/*.yaml)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "no workflow files matched — refusing to certify an empty surface"
+            exit 1
+          fi
+          docker run --rm -v "$PWD:/repo" -w /repo \
+            rhysd/actionlint:1.7.12 -shellcheck= "${files[@]}"
+
   python-ci-gate:
     if: always()
-    needs: [changes, manifest-integrity, test, test-slow, test-carve-out, test-concurrency-falkor, packs-compile, test-track-b, test-d14-hosted-api, surface-guard]
+    needs: [changes, manifest-integrity, workflow-lint, test, test-slow, test-carve-out, test-concurrency-falkor, packs-compile, test-track-b, test-d14-hosted-api, surface-guard]
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate matrix result
@@ -2362,6 +2444,7 @@ jobs:
           done <<'LEGS'
           changes|${{ needs.changes.result }}|-
           manifest-integrity|${{ needs.manifest-integrity.result }}|-
+          workflow-lint|${{ needs.workflow-lint.result }}|-
           test|${{ needs.test.result }}|${{ needs.changes.outputs.python }}
           test-slow|${{ needs.test-slow.result }}|${{ needs.changes.outputs.slow_run }}
           test-carve-out|${{ needs.test-carve-out.result }}|${{ needs.changes.outputs.carve_out_run }}

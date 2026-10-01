@@ -582,8 +582,6 @@ def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
     extractor clamps operators ≤ points (LLMExtractor.run dedupe+cap, #1194) —
     a permissive relation model can no longer write more operator nodes than
     points, which would have bypassed this estimate and the 402 gate it feeds."""
-    from tortoise.extractor import _SENT
-
     lines: list[str] = []
     n_sentences = 0
     for turn in conversation:
@@ -597,10 +595,12 @@ def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
             speaker = "Speaker"
         raw = turn.get("content")
         content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
-        body = " ".join(content[:_CAPTURE_TURN_CAP].split())
-        sents = [s.group(0).strip() for s in _SENT.finditer(body)]
-        sents = [s for s in sents if len(s) >= 3]
-        capped = sents[:MAX_EXTRACTIONS_PER_TURN]
+        # #6246: the "does this turn have anything to say" predicate has ONE
+        # home (_extractable_sentences) — the same one the shared extraction
+        # view blanks on, so the m2 lane and the default v2 lane cannot
+        # disagree about which turns contribute a unit.
+        capped = _extractable_sentences(
+            content[:_CAPTURE_TURN_CAP])[:MAX_EXTRACTIONS_PER_TURN]
         n_sentences += len(capped)
         if capped:
             lines.append(f"{speaker}: {' '.join(capped)}")
@@ -640,6 +640,60 @@ def _capture_turn_window(
         content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
         t["content"] = content[:cap]
         out.append(t)
+    return out
+
+
+def _extractable_sentences(content: str) -> list[str]:
+    """The >=3-char sentences *content* contributes, from its flattened body.
+
+    The ONE home of "does this turn have anything to say" (#6246). It is the
+    exact predicate ``_session_llm_transcript`` has always applied inline (and
+    the transcript is the lane that already REFUSED a turn it yields nothing
+    for). Extracting it here lets the shared extraction view apply the SAME
+    test before the default v2 lane sees the turns, so the two lanes cannot
+    drift apart about emptiness.
+    """
+    from tortoise.extractor import _SENT
+
+    body = " ".join(content.split())
+    return [s.group(0).strip() for s in _SENT.finditer(body)
+            if len(s.group(0).strip()) >= 3]
+
+
+def _capture_extraction_window(
+    conversation: list[dict], cap: int = _CAPTURE_TURN_CAP) -> list[dict]:
+    """The SHARED extraction view of a capture conversation (#6246).
+
+    ``_capture_turn_window`` is the STORED view: it clips silently and the
+    clipped text is what the turn Points hold. Both extraction lanes consume
+    THIS view instead, and it blanks a turn that was CLIPPED and still has no
+    extractable sentence of its own — so a cut whose readable body has nothing
+    to say contributes no unit to EITHER lane.
+
+    The invariant ("a turn with no extractable content of its own yields no
+    claims", #4897) previously lived only inside ``_session_llm_transcript``,
+    which is why the m2 lane enforced it and the default v2 lane
+    (``_edus_from_conversation``, which keeps any turn with truthy content)
+    did not. It is built ONCE per capture loop — selfhost ``capture_session``
+    and hosted ``_capture_session_impl`` — and each loop hands the SAME list
+    to whichever lane runs, so no lane re-decides emptiness for itself.
+
+    NARROW BY CONSTRUCTION: only a turn that was CLIPPED (``len > cap``) is
+    eligible, so an ordinary short turn (``"ok"``) is untouched — this is not
+    "drop every sentence-less turn from v2". The list LENGTH is preserved (the
+    turn is blanked, never removed): ``extractor_v2._edus_from_conversation``
+    derives each edu's turn index from its POSITION and ``_resolve_source_turn``
+    anchors quotes to those indices, so shortening the list would renumber
+    every later turn.
+    """
+    windowed = _capture_turn_window(conversation, cap)
+    out: list[dict] = []
+    for turn, win in zip(conversation, windowed, strict=True):
+        raw = turn.get("content")
+        content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
+        if len(content) > cap and not _extractable_sentences(win["content"]):
+            win = {**win, "content": ""}
+        out.append(win)
     return out
 
 
@@ -1697,6 +1751,25 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
             "'outdated' is a server-managed lifecycle flag — use "
             "invalidate_point() or supersede_point() to terminalize a claim."
         )
+    # #5256: the `extractedFrom` READ-VERSION anchor is server-derived (it is
+    # read from the :Source node by `resolve_source_versions` on the LIVE path
+    # and carried in the Point's journaled snapshot), so a tenant must never be
+    # able to set it. Accepting it would let a caller forge provenance — claim
+    # a Point was read from a different version than the one recorded — and,
+    # because the value persists live while the replay re-derives it, it is
+    # also a live/replay parity break. Rejected on EVERY spelling
+    # (`sourceVersion`, `sourceVersions`, `sourceVersionTransit`): the plural
+    # spelling is the natural caller guess (mirrors `extractedFrom`'s own
+    # accepts-list/str shape) and must not slip through as an unknown prop.
+    _source_version_keys = [k for k in
+                            ("sourceVersion", "sourceVersions",
+                             "sourceVersionTransit")
+                            if k in props]
+    if _source_version_keys:
+        raise ValueError(
+            f"{_source_version_keys} are server-managed provenance fields and "
+            "cannot be set via props."
+        )
     if reject_id and "id" in props:
         raise ValueError("'id' is server-managed and cannot be set via props.")
     return props
@@ -2416,12 +2489,6 @@ def _stream_to_payload(summary: dict, session_id: str, stream: dict) -> dict:
                       "llm_cost_usd": None, "extraction_ms": 0, "retry_count": 0,
                       "last_error_code": None, "confidence_histogram": None},
     }
-
-
-def _now_iso() -> str:
-    """UTC now in ISO format (module-level — shared by write paths)."""
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
 
 def _source_merge_lock_for(url: str) -> threading.Lock:
@@ -3960,6 +4027,23 @@ class TortoiseSDK:
         # the pre-#2952 code applied props in a post-CREATE `SET n += $props`
         # (so props won), and `createdAt` is a normal caller prop — api.py,
         # ingest.py and the source-inheritance path all pass one.
+        #
+        # #5256: the extractedFrom read-version is resolved from the :Source
+        # HERE, on the LIVE path only, and carried in the CREATE map — i.e. in
+        # the Point's OWN journaled snapshot (`get_point` rides it into the
+        # PointAdded payload below). The replay must never re-read the Source:
+        # `_upsert_source`'s in-place contentHash bump is unjournalled (#5024),
+        # so a Source read at rebuild time may hold a NEWER hash than the one
+        # this Point was actually read from. A Source that does not exist yet
+        # (or has an empty hash) contributes nothing — honest-absent, and the
+        # stub `_link_source` mints below has no hash either way.
+        _source_versions: dict[str, str] = {}
+        _source_version_sv = None
+        if props.get("extractedFrom"):
+            from .projection.edges import _source_version_transit, resolve_source_versions
+            _source_versions = resolve_source_versions(
+                proj.g, props["extractedFrom"])
+            _source_version_sv = _source_version_transit(_source_versions)
         _create_map: dict[str, str] = {
             "id": "$id", "content": "$c", "pointKind": "$k",
             "is_operator": "false", "status": "$st",
@@ -3968,6 +4052,9 @@ class TortoiseSDK:
         if not _born_terminal:
             _create_map["ep_dirty"] = "true"
             _create_map["ep_dirty_at"] = "$_epv"
+        if _source_version_sv is not None:
+            _create_map["sourceVersionTransit"] = "$sv"
+            _create_params["sv"] = _source_version_sv
         if _create_baseline is not None:
             _create_params.update(_baseline_create_params(_create_baseline))
             _create_map.update(_baseline_create_fields())
@@ -4048,7 +4135,8 @@ class TortoiseSDK:
             self._sync_tags(proj, pid, tags)
         # P1-1: Ontology v2.1 — link Point → Source via extractedFrom
         if props.get("extractedFrom"):
-            proj._link_source(pid, props["extractedFrom"])
+            proj._link_source(pid, props["extractedFrom"],
+                              source_versions=_source_versions)
             # Inheritance gate dirty-mark: a freshly-sourced point is always
             # inherit-eligible on the next EP run (no interval wait, #398).
             # #2952: a born point carries no `inherited_at` stamp, so the
@@ -4680,6 +4768,12 @@ class TortoiseSDK:
         # structured contract — the M2 branch's meta now carries
         # errors/warnings/mode (no fabricated empty meta) so the assembly is
         # branch-independent and fails closed on either extractor.
+        # #6246: the SHARED extraction view — built ONCE and handed to
+        # whichever lane runs below, so a clipped turn with nothing to say
+        # contributes no unit to EITHER the m2 transcript lane or the default
+        # v2 lane. The STORED turns above keep their clipped text (this is a
+        # copy); only the extraction input is blanked.
+        extraction = _capture_extraction_window(conversation)
         # W5 Phase F (#2104): the #1727 replay skip — a re-capture of an
         # existing session_id is a NO-OP replay (extraction_mode "replayed",
         # 0 new non-episodic nodes), byte-parity with hosted_api's replay
@@ -4736,10 +4830,10 @@ class TortoiseSDK:
             }
         elif os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2":
             extracted, meta = self._extract_session_llm(
-                windowed, session_id, now)
+                extraction, session_id, now)
         else:
             extracted, meta = self._extract_session_v2(
-                windowed, session_id, now)
+                extraction, session_id, now)
 
         # P1 #1529: the fail-closed assembly consumes the shared contract.
         extraction_errors = list(meta.get("errors") or [])
@@ -6264,6 +6358,18 @@ class TortoiseSDK:
     def update(self, id: str, **props) -> dict:
         """One update for a Point OR an entity (epic #888 W2).
 
+        A graph operator IS a Point (``is_operator=true``), so it takes the
+        Point arm below: ``update(<operator_id>, label=...)`` edits an existing
+        operator edge in place. So ``update`` belongs to the operator-mutation
+        vocabulary even though ``operator_action`` exposes only mitigate/annotate
+        (#6131).
+
+        Note what this path does NOT do: unlike ``create_operator``, which returns
+        a structured ``undeclared_relation`` warning when no installed pack
+        declares the predicate, ``update(<operator_id>, label=...)`` performs no
+        declaredness check and installs the label silently. Take valid predicates
+        from ``list_relations()``.
+
         Detects the node type by label:
           - Point → point-lifecycle semantics (delegates to update_point):
             draft→live promote via status (only transition allowed), version
@@ -6283,6 +6389,12 @@ class TortoiseSDK:
 
     def delete(self, id: str) -> bool:
         """One delete for a Point OR an entity (epic #888 W2).
+
+        An operator IS a Point (``is_operator=true``), so
+        ``delete(<operator_id>)`` removes an operator edge — operators are not
+        delete-less, and a mislabelled or superseded edge is not permanent
+        (#6131). The verb is deliberately generic, so its name says Point/entity
+        rather than naming operators.
 
         Destructive. Detects the node type by label:
           - Point → delete_point (tag GC + `PointRetracted` :GraphEvent)
@@ -6921,12 +7033,18 @@ class TortoiseSDK:
         # guard's agreement boundary IS the read path's contiguity boundary.
         # It normalizes a purely cosmetic encoding difference
         # ("…T00:00:00Z" vs "…T00:00:00+00:00") and that is therefore
-        # accepted. It parses a DATE-ONLY value as LOCAL midnight (issue
-        # #3982), so a date-only-vs-offset-aware pair is a real instant
-        # difference off UTC — refused there, accepted on a UTC host. That is
-        # deliberate: `_covers` has the same host-dependence, so a
-        # host-independent verdict here would disagree with the read path.
-        # #3982 owns the decision on date-only semantics.
+        # accepted. Since #3982 it ANCHORS a DATE-ONLY value to UTC midnight
+        # (ECMA-262 §21.4.3.2: with no offset, date-only forms are UTC). So a
+        # date-only value and the SAME day stated as midnight UTC
+        # ("…T00:00:00Z") compare EQUAL, and that pair is ACCEPTED on every
+        # host — the equality does not depend on the reader's zone.
+        # The equality is specific to the midnight-UTC ENCODING, not to the
+        # calendar day: the same date at any other time of day names a
+        # different instant and is still refused, as is any pair on different
+        # days. Those verdicts are now host-INDEPENDENT rather than
+        # host-dependent. The read path consumes the same primitive
+        # (`_covers`), so the guard and the read path continue to agree. A
+        # zone-less date-TIME is unaffected and still reads locally.
         #
         # The guard's PRESENCE predicate is the read path's, not the
         # resolution branch's. `_covers` gates on `vf is not None`, so a
@@ -7812,10 +7930,22 @@ class TortoiseSDK:
 
         For each new non-operator Point whose pointKind is 'decision':
         Tier 1 — content-hash vs existing decision Points; Tier 2 — embedding
-        cosine vs existing decision Points. On a hit:
-          - existing prior is DRAFT → wire the "already decided" IMPL now
-            (draft-to-draft, create_operator(promote_source=False)) and flag
-            the candidate (DedupeRecorded event).
+        cosine vs existing decision Points. A hit is always FLAGGED for the
+        review queue; whether it is also WIRED is decided by the D12/O4
+        never-across boundary (#5316). Tier 2 matches on embedding similarity
+        alone, and a connective swap (`and`/`or`, `then`/`else`, `than`/`as`,
+        `to`/`from`) sits well inside the 0.94 band, so a rival pair can land
+        here. A pair is therefore wired only when
+        `fold_allowed(prior_content, content)` holds — the same predicate the
+        four other near-duplicate consumers consult.
+          - existing prior is DRAFT and the boundary allows → wire the
+            "already decided" IMPL now (draft-to-draft,
+            create_operator(promote_source=False)) and flag the candidate
+            (DedupeRecorded event).
+          - existing prior is DRAFT and the boundary refuses → flag, do NOT
+            wire (counted in `boundary_blocked`): the pair differs in a
+            distinguishing dimension, so the IMPL would assert that two rival
+            claims are one decision.
           - existing prior is LIVE → flag the candidate WITHOUT wiring
             (W-2 live-prior rule: a draft must never wire an operator to a
             live Point) — the link is scheduled for D2's promotion time
@@ -7823,9 +7953,11 @@ class TortoiseSDK:
         Idempotent: points already carrying dedup_candidate=true are skipped
         (re-run → no duplicate IMPL, no new DedupeRecorded — DE2E-3).
 
-        Returns {"hits": n, "wired_draft_to_draft": n, "deferred_live_prior": n}.
+        Returns {"hits": n, "wired_draft_to_draft": n, "deferred_live_prior": n,
+                 "boundary_blocked": n}.
         """
         threshold = self.DEDUP_REVIEW_THRESHOLD if threshold is None else threshold
+        from tortoise.extractor_v2 import fold_allowed
         proj = self._get_proj()
         rows = proj.g.query(
             "MATCH (n:Point) WHERE n.id IN $ids "
@@ -7834,7 +7966,7 @@ class TortoiseSDK:
             "       coalesce(n.dedup_candidate, false)",
             params={"ids": list(point_ids)},
         ).result_set
-        hits = wired = deferred = 0
+        hits = wired = deferred = boundary_blocked = 0
         for pid, content, kind, status, already in rows:
             if already or status != "draft" or kind != "decision":
                 continue
@@ -7847,6 +7979,9 @@ class TortoiseSDK:
                                          exclude_id=pid)
             method = "hash"
             similarity = 1.0
+            # Tier 1 is a content hash, so a hit there IS the same text — the
+            # boundary is trivially satisfied and only tier 2 needs it.
+            prior_content = content
             if prior is None:
                 # Tier 2: embedding similarity vs existing decisions,
                 # excluding the candidate itself (self-cosine 1.0 would
@@ -7862,12 +7997,21 @@ class TortoiseSDK:
                 if not pairs:
                     continue
                 prior = pairs[0]["existing"]
+                prior_content = pairs[0].get("existing_content")
                 method = "embedding"
                 similarity = pairs[0]["similarity"]
             if prior == pid:
                 # Belt-and-braces: never self-target.
                 _logger.warning("dedup: candidate %s matched itself — skipped", pid)
                 continue
+            # D12/O4 never-across boundary (#5316). The flag below is
+            # review-queue state, so a boundary refusal must not silence it —
+            # what it must stop is the IMPL wire, which asserts the two claims
+            # are ONE decision. Fail-closed toward KEEP: `fold_allowed`
+            # refuses an unreadable pair, so an unknown prior body refuses the
+            # wire rather than assuming the claims match.
+            boundary_ok = (prior_content is not None
+                           and fold_allowed(prior_content, content))
             # Mark the candidate (review-queue state on the Point).
             proj.g.query(
                 "MATCH (n:Point {id:$id}) SET n.dedup_candidate = true, "
@@ -7883,8 +8027,13 @@ class TortoiseSDK:
             ).result_set
             prior_status = (prow[0][0] if prow else None) or "live"
             if prior_status == "draft":
-                # Variant A: draft-to-draft "already decided" IMPL.
-                if sdk_for_wiring is not None:
+                if not boundary_ok:
+                    # #5316: a distinguishing difference makes these rival
+                    # claims, not one decision. The flag above stays (a human
+                    # should still see the pair); the wire does not happen.
+                    boundary_blocked += 1
+                elif sdk_for_wiring is not None:
+                    # Variant A: draft-to-draft "already decided" IMPL.
                     sdk_for_wiring.create_operator(
                         "IMPL", pid, [prior], label="alreadyDecided",
                         direction="unidirectional", promote_source=False)
@@ -7894,7 +8043,8 @@ class TortoiseSDK:
                 deferred += 1
             self._emit_event("DedupeRecorded", point=self.get_point(pid))
         return {"hits": hits, "wired_draft_to_draft": wired,
-                "deferred_live_prior": deferred}
+                "deferred_live_prior": deferred,
+                "boundary_blocked": boundary_blocked}
 
     def list_dedup_candidates(self, candidate_type: str = "content",
                               limit: int = 50) -> list[dict]:
@@ -8297,6 +8447,13 @@ class TortoiseSDK:
         action='annotate' → annotate_operator(id=..., bias=..., precision=...,
             consistency=..., directness=...) — structured epistemic dims.
 
+        This is NOT the whole operator-mutation vocabulary. Operators are also
+        edited and removed by the GENERIC verbs — ``update(<operator_id>, ...)``
+        and ``delete(<operator_id>)`` — because an operator IS a Point and so
+        takes their Point arm (#6131). This action set exists for the two
+        operations that need a reason or epistemic dimensions; their absence
+        here is not evidence that operators cannot be changed.
+
         Unknown action raises ValueError.
         """
         if action == "mitigate":
@@ -8309,7 +8466,9 @@ class TortoiseSDK:
                 kwargs["consistency"], kwargs["directness"])
         raise ValueError(
             f"operator_action: unknown action {action!r} — must be "
-            f"'mitigate' or 'annotate'")
+            f"'mitigate' or 'annotate'. This is not the whole operator "
+            f"vocabulary: operators are also edited and removed by the generic "
+            f"verbs update(id, ...) and delete(id) (#6131).")
 
     def annotate_operator(self, id: str, bias: float, precision: float,
                           consistency: float, directness: float) -> dict:
@@ -8989,6 +9148,23 @@ class TortoiseSDK:
                 "message": f"ingest: {section}[{index}] _server_id is "
                            f"server-managed and cannot be set on bundle items",
             })
+        # #5256: the `extractedFrom` READ-VERSION anchor is server-derived (it
+        # is read from the :Source by `resolve_source_versions` and carried in
+        # the Point's journaled snapshot). NOTE, unlike `_server_id` above: these
+        # keys are NOT declared parameters of `create_point`, so they would land
+        # in `**props` where `_sanitize_props` DOES reject them — the sanitizer is
+        # the backstop, not the gap. This shape-time check is what makes the
+        # refusal a Phase-1 abort (zero mutation, evaluated before any write)
+        # rather than a mid-write one, and it covers EVERY section, including the
+        # ones that never reach `_sanitize_props` at all. Rejected on every
+        # spelling.
+        for _svk in ("sourceVersion", "sourceVersions", "sourceVersionTransit"):
+            if _svk in item:
+                violations.append({
+                    "section": section, "index": index,
+                    "message": f"ingest: {section}[{index}] {_svk} is "
+                               f"server-managed and cannot be set on bundle items",
+                })
         if section == "points":
             # kind is OPTIONAL (CYCLE-25: kind-absent defaults to
             # 'statement'); content is required.
@@ -19040,6 +19216,19 @@ class TortoiseSDK:
     def _update_entity(self, id_val: str, **props) -> dict:
         # #329: id + sourcePath/source_path are server-managed — reject
         props = _sanitize_props(props, reject_id=True)
+        # #5482: `search_keys` must reach the graph FLAT, exactly as it does on
+        # `create_point` and `update_point` — both flatten immediately after
+        # `_sanitize_props`, and this surface did not. It wrote caller props
+        # straight through `SET n += $props`, so a list-valued `search_keys`
+        # landed as an ARRAY; FalkorDB's fulltext index does not index
+        # array-valued properties, so the Point became permanently unfindable
+        # by `queryNodes` while the write reported success. Flattening once,
+        # before the per-label loop, covers every write site below: each
+        # derives its props from this dict on a later line.
+        # NOTE: on the Point branch this write is live-only — `PointRevised`
+        # carries the annotator dims, not `search_keys` — so a replay does not
+        # restore it. That is pre-existing (#4094) and unchanged here.
+        _flatten_search_keys_prop(props)
         # E4 (#5007, re-review P2): the span invariant has to hold HERE too.
         # This is the generic tenant surface (`tortoise_update_entity`) and
         # its Point branch below writes caller props straight through
@@ -22003,6 +22192,20 @@ class TortoiseSDK:
                     f"props — use the sanctioned create_source({sanctioned}=) "
                     f"keyword (epic #900 §4.1)."
                 )
+        # #5256: the `extractedFrom` read-version anchor and its node carrier
+        # are server-derived. `create_source` is the one writer that BYPASSES
+        # `_sanitize_props` (`_create_entity(..., _skip_sanitize=True)`), so it
+        # needs this reject itself — otherwise a caller-supplied `sourceVersion`
+        # would persist on the Source node (unjournalled-value mismatch: the
+        # value means nothing there, but it is a forged-looking provenance
+        # field the tenant never owned). Same key family as the Point reject.
+        for _svk in ("sourceVersion", "sourceVersions",
+                     "sourceVersionTransit"):
+            if _svk in props:
+                raise ValueError(
+                    f"{_svk!r} is a server-managed provenance field and cannot "
+                    f"be set via props."
+                )
         ev = {
             "url": url,
             "sourceKind": sourceKind,
@@ -22942,14 +23145,11 @@ class TortoiseSDK:
     # operator surface is the CLI (see `tortoise/__main__.py`). Both delegate to
     # the module-level helpers so the reader/writer contract has ONE driver.
     #
-    # The imports are FUNCTION-LOCAL, and that is load-bearing: the generated
-    # rename table (`docs/product/sdk-rename-table.md`) cites `sdk.py` LINE
-    # NUMBERS, so a two-line import at the top of this file re-stales every
-    # citation below it (`tests/test_sdk_rename_table.py::test_part_a_*`,
-    # `::test_check_mode_is_clean`) — a documentation-drift failure with no
-    # relation to this fix. These methods sit AFTER the last cited line, so
-    # importing here shifts nothing. (Same reason `_config_classes()` imports
-    # `PACK_INSTALL_LABEL` locally in `projection/__init__.py`.)
+    # NOTE (#5373): the imports below are FUNCTION-LOCAL. The generated
+    # `docs/product/sdk-rename-table.md` is produced ON DEMAND from this module and
+    # is NOT committed (gitignored), so its `sdk.py:N` citations are re-rendered
+    # from the current file on every run and no committed copy pins this file's
+    # line numbers.
     def _config_reset_state(self) -> dict | None:
         """The sticky `config_reset` marker's properties, or None if never set.
 
@@ -23115,6 +23315,13 @@ def _summary_to_payload(summary: dict, session_id: str,
 
 
 def _now_iso() -> str:
+    """UTC now in ISO format.
+
+    One of this module's timestamp helpers, not a single shared clock: some call sites
+    here use it, while others inline ``datetime.now(timezone.utc).isoformat()``
+    directly (e.g. ``update_point``, ``invalidate_point``, ``supersede_point``) and
+    several other modules define their own ``_now_iso``.
+    """
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
