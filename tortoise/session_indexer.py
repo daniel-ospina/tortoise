@@ -22,6 +22,7 @@ If you add or rename an extractor/indexer, update the catalog reference.
 from __future__ import annotations  # noqa: I001
 
 import json
+import logging
 import os
 import re
 import sys
@@ -34,6 +35,8 @@ from .file_indexer import (
     derive_session_id,
     parse_frontmatter,
 )
+
+logger = logging.getLogger(__name__)
 
 # ── YAML frontmatter parsing ──────────────────────────────────────
 # Canonical home: tortoise.file_indexer (_FM_RE + parse_frontmatter). The
@@ -139,31 +142,144 @@ def _tfidf_keywords(content: str, top_n: int = 8) -> list[str]:
 # Cached FalkorDB connection for graph entity lookups
 _graph_db = None
 
+# Latches WITHIN an outage: the FIRST failure is logged at WARNING, so a
+# PERSISTENT outage (the broken client stays cached, and this runs once per
+# session file) does not emit one identical WARNING per document (#3067 review
+# note). Subsequent cached-broken failures are logged at DEBUG, still with
+# endpoint + error. It is re-armed on the first SUCCESSFUL query, so the next
+# outage warns again — a per-process latch made every outage after the first
+# DEBUG-only, i.e. SILENT under ``logging.lastResort``, the exact failure mode
+# #3067 exists to remove.
+_graph_warned = False
+
+# A literal shorter than this cannot be scrubbed safely: the scrub is a
+# literal replace, so a 1-2 char value mangles far more diagnostic than it
+# protects (``AuthenticationError`` -> ``Auth***nticationError``, breaking the
+# class name the log line is read for), and a 2-char all-``*`` value re-expands
+# the mask on a second pass. Three characters keeps the scrub idempotent and
+# the class name intact.
+_MIN_SCRUB_LEN = 3
+
+
+def _redact_exc(e: BaseException,
+                secrets: tuple[str | None, ...]) -> str:
+    """``redact_error`` plus a scrub of the URI's known credentials.
+
+    ``redact_error`` masks a ``://userinfo@`` span, but a client that echoes
+    the credentials it was handed may print them OUTSIDE that span — in either
+    the DECODED (``p@ss`` from a ``p%40ss`` URI) or the PERCENT-ENCODED
+    (``p%40ss``) form the URI carried. Both are known to the caller, so scrub
+    every form explicitly (#3067). Values shorter than ``_MIN_SCRUB_LEN`` are
+    skipped (see the constant above).
+
+    The scrub runs on the UNTRUNCATED message; the 200-char cap is applied
+    afterwards. ``redact_error`` cuts to ``msg[:200]`` first, and a literal
+    replace on an already-cut string can only match the WHOLE secret — so a
+    credential straddling that boundary survived as a fragment (``secretpw``
+    at offset 195 logged ``secre``), the same half-credential class this
+    function exists to prevent.
+    """
+    from tortoise.security import _redact_message
+    msg = _redact_message(e)
+    # LONGEST-first: a shorter secret that is a PREFIX of a longer one would
+    # otherwise consume the longer secret's first occurrence (``user`` scrubbed
+    # before ``userpass`` turns ``userpass`` into ``***pass``, retaining half
+    # the credential). Sorting by descending length removes the overlap.
+    for secret in sorted(
+            {s for s in secrets if s and len(s) >= _MIN_SCRUB_LEN},
+            key=len, reverse=True):
+        msg = msg.replace(secret, '***')
+    return f"{e.__class__.__name__}: {msg[:200]}"
+
+
 def _graph_entity_keywords(content: str) -> list[str]:
-    """Find Object and Subject names from the graph mentioned in content."""
+    """Find Object and Subject names from the graph mentioned in content.
+
+    Best-effort: a lookup failure degrades to "no graph terms" rather than
+    aborting keyword extraction — but it is never silent (#3067). The FIRST
+    failure of each outage is logged at WARNING with the host/port and a
+    redacted exception; further failures of the same outage are DEBUG, because
+    the broken client stays cached and this runs once per session file. The
+    warning is re-armed by the next successful query, so an outage after a
+    recovery warns again. The URI itself is not logged — it carries credentials.
+    """
     global _graph_db
+    global _graph_warned
     content_lower = content.lower()
     matches = []
+    # #3067 (P2): the endpoint and the decoded credentials are resolved BEFORE
+    # `_graph_db` is consulted. The connection is a process-wide cache, so the
+    # normal case in a long-lived process is a cache HIT — resolving them only
+    # inside `if _graph_db is None` made a cache-hit failure log the
+    # placeholder `localhost:None` (and left the redactor without the secrets).
+    host = 'localhost'
+    port: int | None = None
+    username: str | None = None
+    password: str | None = None
+    # The ENCODED forms, resolved before the try so the handler below never
+    # NameErrors on an early failure (a missing import, a malformed URI).
+    raw_username: str | None = None
+    raw_password: str | None = None
     try:
-        import os as _os
-        uri = _os.environ.get('TORTOISE_DB_URI', '')
+        uri = os.environ.get('TORTOISE_DB_URI', '')
         if not uri:
             return []
+        from urllib.parse import urlparse
+
+        from tortoise.config import parse_uri_userinfo, raw_uri_userinfo
+        parsed = urlparse(uri)
+        host = parsed.hostname or 'localhost'
+        port = parsed.port or 16379
+        # The ENCODED pair is fetched through ``tortoise.config`` — the single
+        # module that owns the URI-credential rule — rather than read off
+        # ``parsed`` here: this module CONSTRUCTS a FalkorDB client, so a
+        # raw-userinfo exemption for it would blind the #3039 source guard to
+        # exactly the bug class it guards (its ``continue`` is file-wide).
+        # ``raw_uri_userinfo`` returns the percent-ENCODED forms; that is what a
+        # client echoing the DSN it was handed may print. Both forms are handed
+        # to the redactor, and the DECODED pair reaches ``FalkorDB`` via
+        # ``parse_uri_userinfo`` (#3067).
+        raw_username, raw_password = raw_uri_userinfo(uri)
+        username, password = parse_uri_userinfo(uri)
         if _graph_db is None:
-            from falkordb import FalkorDB  # noqa: I001
-            from urllib.parse import urlparse
-            parsed = urlparse(uri)
-            host = parsed.hostname or 'localhost'
-            port = parsed.port or 16379
-            _graph_db = FalkorDB(host=host, port=port)
+            from falkordb import FalkorDB
+            # #3067: forward the DECODED userinfo through the single shared
+            # rule. Dropping it makes an auth-required server (the canonical
+            # `docker://:pw@host:6379/tortoise` config) answer
+            # AuthenticationError — which the handler below used to swallow
+            # as "the graph has no matching entities", silently dropping
+            # every graph term from the extracted keywords.
+            _graph_db = FalkorDB(host=host, port=port,
+                                 username=username, password=password,
+                                 ssl=(parsed.scheme == 'rediss'))
         g = _graph_db.select_graph('tortoise')
         rows = g.query('MATCH (n) WHERE (n:Object OR n:Subject) AND n.name IS NOT NULL RETURN DISTINCT n.name').result_set
+        # Re-arm the outage latch: the graph is demonstrably healthy again, so
+        # the NEXT failure must warn rather than be downgraded to DEBUG.
+        _graph_warned = False
         for row in rows:
             name = str(row[0])
             if len(name) > 3 and name.lower() in content_lower:
                 matches.append(name)
-    except Exception:
-        pass
+    except Exception as e:
+        # #3067: observable, not silent — a misconfigured/unreachable graph
+        # must be distinguishable from "the graph has no matching entities".
+        # WARNING on the FIRST failure of each OUTAGE; DEBUG thereafter, because
+        # the broken client stays cached and this handler then runs for every
+        # session file — one identical WARNING per document is noise, not
+        # observability. The latch re-arms on the next successful query, so a
+        # later outage warns again rather than degrading to silent.
+        # Both levels name the endpoint and the redacted error.
+        msg = _redact_exc(e, (username, password, raw_username, raw_password))
+        if _graph_warned:
+            logger.debug(
+                "graph entity keyword lookup still failing at %s:%s — %s; "
+                "graph entities omitted from keywords", host, port, msg)
+        else:
+            _graph_warned = True
+            logger.warning(
+                "graph entity keyword lookup failed at %s:%s — %s; "
+                "graph entities omitted from keywords", host, port, msg)
     return matches
 
 

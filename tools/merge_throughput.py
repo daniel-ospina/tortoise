@@ -896,6 +896,44 @@ def fetch_statuses(sha: str):
     return statuses, body.get("total_count")
 
 
+# --- Task 8 (#5215 D13): the main-health job-id -> context map --------------
+# The five contexts below are emitted ONLY by ci.yml, which was
+# `pull_request:`-only — so `main` had no signal for them.
+# `.github/workflows/main-health-nightly.yml` calls ci.yml via
+# `on.workflow_call` (`main_health: true`), so the SAME jobs emit check-runs on
+# main — but a reusable workflow's check runs are named
+# `<caller job> / <called job>`: verified live in this repo on
+# `dashboard-js-tests`' node-ci call (`dashboard-js-tests / unit-test`). The
+# nightly therefore emits `main-health / docs`, NOT a bare `docs`, so the
+# mapping MUST strip the caller prefix; without it every context reads
+# NO_MAIN_SIGNAL after a green nightly — the exact false negative Task 8 exists
+# to remove. The inner job id -> context name map is identity today (none of the
+# five carries a `name:`), pinned by
+# `test_main_health_context_mapping_pins_the_real_reusable_name_shape`.
+MAIN_HEALTH_CALLER = "main-health"
+MAIN_HEALTH_JOB_ID_TO_CONTEXT = {
+    "pricing-artifact": "pricing-artifact",
+    "docs": "docs",
+    "test-isolation": "test-isolation",
+    "license-surface": "license-surface",
+    "legal-e2e": "legal-e2e",
+}
+
+
+def main_health_context(name):
+    """Resolve a check-run name emitted via the main-health reusable call.
+
+    Strips the `<caller> / ` prefix GitHub puts on a reusable workflow's check
+    runs, then maps the called job id to the required context. A bare name is
+    accepted unchanged (the non-reusable shape) and an unrecognised name is
+    returned as-is, so `_strict_main_gate`'s behaviour for every other run is
+    unchanged.
+    """
+    s = str(name)
+    inner = s[len(MAIN_HEALTH_CALLER) + 3:] if s.startswith(MAIN_HEALTH_CALLER + " / ") else s
+    return MAIN_HEALTH_JOB_ID_TO_CONTEXT.get(inner, s)
+
+
 def required_contexts():
     body = _gh_api(f"repos/{OWNER_REPO}/branches/main/protection")
     if body is UNKNOWN or not isinstance(body, dict):
@@ -1025,14 +1063,18 @@ def collect_fast_files_unclassified():
 
 # --- Task 4b (#5215 M8): the shard metric + the durations-map observation ----
 #
-# `shard-balance` measures OBSERVED WALL TIME — the two heavy legs of the latest
-# completed push-to-main run — never the durations map: a perfectly balanced map
-# with a 10-minute observed split is the whole point (M8/S8). The map's capture
-# age comes from the machine-readable `durations_captured_at` key the collector's
-# `--refresh-durations` bridge writes, never from the file's git commit date
-# (any unrelated edit would reset that).
-
-HEAVY_LEG_JOBS = {"a": "test (a)", "b": "test (b)"}
+# `shard-balance` measures OBSERVED WALL TIME — the fast-pool shards of the
+# latest completed push-to-main run — never the durations map: a perfectly
+# balanced map with a 10-minute observed max is the whole point (M8/S8). The
+# map's capture age comes from the machine-readable `durations_captured_at` key
+# the collector's `--refresh-durations` bridge writes, never from the file's git
+# commit date (any unrelated edit would reset that).
+#
+# #6135: the legs are the `test (<letter>)` family, ALL of them, discovered from
+# the run rather than a literal a/b map. The old map returned {} whenever the
+# leg set was not exactly {a, b}, so the metric silently vanished the moment the
+# shard count rose — and the critical path the epic cares about IS `max(shard)`.
+HEAVY_LEG_RE = re.compile(r"^test \(([a-z])\)$")
 DURATIONS_DIVERGENCE_TOLERANCE = 0.5
 
 
@@ -1044,9 +1086,34 @@ def _job_wall_seconds(job: dict):
     return (end - start).total_seconds()
 
 
+def _configured_shard_set():
+    """The shard labels `config/ci-surfaces.yml::fast_shards` currently selects,
+    or None when the selector cannot be consulted (a non-repo checkout).
+
+    #6135: the shard count is a reviewed config value, so "which legs should
+    exist" is knowable. Used to refuse a PARTIAL read rather than measure it.
+    """
+    try:
+        sys.path.insert(0, str(REPO / "tools"))
+        import ci_selection as cs
+
+        return set(cs.shard_labels(cs.fast_shard_count(cs.load_manifest())))
+    except Exception:
+        return None
+
+
 def collect_shard_balance():
-    """Observed wall time of the two heavy legs on the latest completed
-    push-to-main python-ci run. Never derived from the durations map."""
+    """Observed wall time of the fast-pool shards on the latest completed
+    push-to-main python-ci run. Never derived from the durations map.
+
+    #6135: reads the `test (<letter>)` family from the run (every shard), so the
+    metric survives a shard-count change. `max_shard_minutes` is the number the
+    epic actually bounds (the PR gate's critical path is `max(shard)`);
+    `shard_imbalance_minutes` is kept as the balance signal. A PARTIAL family is
+    not a measurement: the observed set must equal the CONFIGURED shard set, or
+    this returns {} rather than under-reporting the critical path over whatever
+    page of jobs happened to be fetched. Absence is never a measurement.
+    """
     try:
         sys.path.insert(0, str(REPO / "tools"))
         import ci_timing
@@ -1061,20 +1128,29 @@ def collect_shard_balance():
     for job in jobs:
         if not isinstance(job, dict):
             continue
-        key = next(
-            (k for k, name in HEAVY_LEG_JOBS.items() if job.get("name") == name),
-            None,
-        )
-        if key is None:
+        m = HEAVY_LEG_RE.match(str(job.get("name") or ""))
+        if m is None:
             continue
         wall = _job_wall_seconds(job)
         if wall is None:
             continue
-        legs[key] = {"conclusion": job.get("conclusion"), "wall_seconds": wall}
-    if set(legs) != {"a", "b"}:
+        legs[m.group(1)] = {"conclusion": job.get("conclusion"),
+                            "wall_seconds": wall}
+    # FAIL CLOSED when the configured set cannot be read: skipping the check in
+    # that case would measure whatever page of jobs happened to be fetched and
+    # silently under-report `max(shard)` — the number the epic bounds — in
+    # exactly the degraded environment the guard exists for.
+    expected = _configured_shard_set()
+    if expected is None or set(legs) != expected:
         return {}
-    imbalance = abs(legs["a"]["wall_seconds"] - legs["b"]["wall_seconds"]) / 60.0
-    return {"legs": legs, "shard_imbalance_minutes": imbalance,
+    # A single leg is never a balance measurement (imbalance is trivially 0).
+    if len(legs) < 2:
+        return {}
+    walls = [v["wall_seconds"] for v in legs.values()]
+    return {"legs": legs,
+            "shard_imbalance_minutes": (max(walls) - min(walls)) / 60.0,
+            "max_shard_minutes": max(walls) / 60.0,
+            "shard_count": len(legs),
             "run_id": run_id, "read_ok": True}
 
 
@@ -1223,7 +1299,9 @@ def _strict_main_gate(runs, required) -> int:
     observed = 0
     for name in required:
         name = str(name)
-        name_runs = [run for run in runs if str(run.get("name")) == name]
+        name_runs = [
+            run for run in runs if main_health_context(run.get("name")) == name
+        ]
         if not name_runs:
             excluded.append(name)
             continue
@@ -1617,12 +1695,15 @@ def _check_cycle(payload: dict, opts: dict) -> int:
 
 def _check_shard_balance(payload: dict, opts: dict) -> int:
     legs = payload.get("legs")
-    if not isinstance(legs, dict):
+    if not isinstance(legs, dict) or len(legs) < 2:
         return 2
-    for leg_name in ("a", "b"):
-        leg = legs.get(leg_name)
+    # #6135: EVERY observed shard must be green — not just `a` and `b`. The
+    # collector now observes the whole `test (<letter>)` family, so a check
+    # hardcoded to two of nine would pass a run with a red shard outside a/b
+    # ("a red leg is a coverage failure, not a three-minute pass").
+    for leg_name, leg in sorted(legs.items()):
         if not isinstance(leg, dict) or leg.get("conclusion") != "success":
-            print(f"2: heavy leg {leg_name!r} absent or not success")
+            print(f"2: shard leg {leg_name!r} absent or not success")
             return 2
     value = _as_number(payload.get("shard_imbalance_minutes", UNKNOWN))
     if value is None or value < 0:
@@ -2245,6 +2326,12 @@ def build_report(fixture=None):
         "max_batch_size": batch.get("max_batch_size", UNKNOWN),
         "shard_imbalance_minutes": (shard.get("shard_imbalance_minutes", UNKNOWN)
                                     if isinstance(shard, dict) else UNKNOWN),
+        # #6135: the metric the epic actually bounds (the PR gate's critical
+        # path is max(shard)) — surfaced, not merely computed.
+        "max_shard_minutes": (shard.get("max_shard_minutes", UNKNOWN)
+                              if isinstance(shard, dict) else UNKNOWN),
+        "shard_count": (shard.get("shard_count", UNKNOWN)
+                        if isinstance(shard, dict) else UNKNOWN),
         "legs": shard.get("legs", UNKNOWN) if isinstance(shard, dict) else UNKNOWN,
         "queue_depth": UNKNOWN,
         "fast_files_unclassified": ff.get("fast_files_unclassified", UNKNOWN),

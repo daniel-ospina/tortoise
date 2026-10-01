@@ -443,6 +443,27 @@ STATE_FIELDS="kind first_failure_ts down_runs last_down_ts last_comment_ts cap_n
 # patch, or close a returned item (round 3, P2-2/P2-3).
 INCIDENT_STATE_MARKER='<!-- availability-watchdog-state -->'
 
+# ── heartbeat (#4573): the rolling liveness record ──────────────────────────
+# The monitor's OWN liveness, on a channel INDEPENDENT of the Telegram leg it
+# uses to page. See emit_heartbeat() and availability-liveness.sh. The title is
+# the dedupe key and the body marker is what makes a same-titled issue ours
+# (same machine-author + exact-title + marker posture as the incidents).
+HEARTBEAT_MARKER='<!-- availability-watchdog-heartbeat -->'
+HEARTBEAT_TITLE='[OPS] availability-watchdog heartbeat (rolling)'
+# An operator kill switch, mirroring ESCALATE_ENABLED: ONLY a byte-exact `0`
+# disables recording. It is NOT a safety valve — the liveness check alarms on a
+# stale/absent record, so turning it off makes that checker red BY DESIGN (a
+# silence is never an all-clear). Unset/empty = enabled.
+HEARTBEAT_ENABLED="${HEARTBEAT_ENABLED:-}"
+# INTERNAL, not an operator knob. A scheduled JOB invokes this script once per
+# PROBE STEP, and exactly ONE step must emit: otherwise the same run writes the
+# record twice seconds apart, and the second write's "update, don't create"
+# depends on GitHub's SEARCH index having caught up (not guaranteed) — a miss
+# files a DUPLICATE rolling heartbeat issue (the #2706 duplicate class, and a
+# duplicate also makes the checker's record selection ambiguous). The workflow
+# sets HEARTBEAT_EMIT=0 on the non-emitting step. Default 1.
+HEARTBEAT_EMIT="${HEARTBEAT_EMIT:-1}"
+
 DOWN_MARKER="[monitor] PROD DOWN"
 DOWN_TITLE="${DOWN_MARKER} — ${PROBE_HOST_LABEL} is not answering the availability probe"
 DEGRADED_MARKER="[monitor] PROD DEGRADED"
@@ -1069,9 +1090,10 @@ create_issue() { # <title> <body> -> number ("" on failure)
 # AUTHORITATIVE: a failed update returns 1 and the caller decides (the restart
 # path aborts rather than restarting without a durable cooldown/cap record).
 # INVARIANT (security): the target number must have come from search_open_alert
-# (machine-author verified) or create_issue (authored by our own token, i.e.
-# the Actions app) — a PATCH here writes machine state into the issue, so it
-# must NEVER be pointed at a human/attacker-authored look-alike.
+# or search_heartbeat (both machine-author verified) or create_issue (authored
+# by our own token, i.e. the Actions app) — a PATCH here writes machine state
+# into the issue, so it must NEVER be pointed at a human/attacker-authored
+# look-alike.
 update_issue_body() { # <n> <body> -> 0 ok / 1 failed
   local payload
   payload="$(jq -n --arg b "$(redact_text "$2")" '{body:$b}')"
@@ -1096,6 +1118,114 @@ close_issue() { # <n> -> 0 ok / 1 failed
   if ! printf '%s' '{"state":"closed"}' | gh api "repos/${REPO}/issues/$1" --method PATCH --input - >/dev/null 2>&1; then
     warn "close failed on #$1"
     return 1
+  fi
+  return 0
+}
+
+# ── heartbeat (#4573) ───────────────────────────────────────────────────────
+# The rolled-up liveness record. `search_open_alert` cannot be reused: its jq
+# body check is hard-keyed on the incident marker (a separate marker is the
+# whole point of a separate issue), and its non-machine-match warning is about
+# incident adoption. Same SECURITY posture though: machine author + EXACT title
+# + body marker, so a PUBLIC-repo look-alike is never trusted as the heartbeat.
+# Echoes a positive issue number, "" when none exists, "__ERR__" on a failed or
+# unparseable search (never treated as "none" — see emit_heartbeat).
+search_heartbeat() {
+  local q enc out n
+  q="repo:${REPO} is:issue is:open in:title author:app/github-actions \"$HEARTBEAT_TITLE\""
+  enc="$(urlencode "$q")"
+  if ! out="$(gh api "search/issues?q=${enc}&per_page=100" --paginate 2>/dev/null)"; then
+    printf '__ERR__'; return 0
+  fi
+  if ! n="$(printf '%s' "$out" | jq -rs --arg login 'github-actions[bot]' --arg title "$HEARTBEAT_TITLE" --arg marker "$HEARTBEAT_MARKER" \
+      '[.[].items[]? | select((.user.login // "") == $login) | select((.title // "") == $title) | select(((.body // "") | contains($marker)))][0].number // empty' 2>/dev/null)"; then
+    printf '__ERR__'; return 0
+  fi
+  # EMPTY means "no such issue", which is NOT an error and NOT a number — the
+  # caller must be able to tell "none" (create one) from "the search broke"
+  # (do not create, do not lie). Only a NON-EMPTY non-numeric value is ERR.
+  [ -n "$n" ] || { printf ''; return 0; }
+  case "$n" in
+    *[!0-9]*) printf '__ERR__'; return 0 ;;
+  esac
+  printf '%s' "$n"
+}
+
+# Write the rolling heartbeat record for THIS run. Called once, right after the
+# verdict is known — the cheap, non-invasive point that means "this run reached
+# a verdict".
+#
+# ⛔ BEST-EFFORT, DELIBERATELY. A failed write is logged and the run continues:
+# the companion checker is FAIL-CLOSED on the READ side, so a heartbeat that
+# stops arriving IS the alarm. Making this fatal would redden a green monitor
+# during a heartbeat-issue outage without adding any detection power.
+#
+# ⛔ SCHEDULED RUNS ONLY. A `workflow_dispatch` run (a drill, an operator
+# re-probe) proves the SCRIPT works — not that the SCHEDULE delivers. The whole
+# failure surface here is a dropped/disabled schedule, so a manual run must not
+# refresh the dead-man switch. Unset (the local/test harness) defaults to
+# emitting, so the behaviour exercised by the suite is the production one.
+#
+# The residual it does NOT close: a crash AFTER the verdict is a red run, which
+# GitHub's own notifications surface — it is not silence, so it is out of scope
+# for a silence detector.
+emit_heartbeat() { # <verdict>
+  local verdict="$1" event issue body now iso run attempt
+  # Kill switch, ESCALATE_ENABLED semantics: the value AS RECEIVED is the only
+  # predicate. Only a byte-exact `0` disables; `1`/unset/empty enable quietly;
+  # EVERYTHING else (`true`, `yes`, `2`, `00`, `0abc`, a YAML block scalar
+  # yielding `0\n`) resolves to ENABLED and warns — a malformed operator value
+  # must never choose the silent direction on a fail-closed surface.
+  case "$HEARTBEAT_ENABLED" in
+    0)
+      log "heartbeat: disabled (HEARTBEAT_ENABLED=0) — the liveness check will alert on a stale record"
+      return 0 ;;
+    1|"") : ;;
+    *)
+      warn "HEARTBEAT_ENABLED='[${HEARTBEAT_ENABLED}]' is not 0 or 1 — treating it as 1 (fail CLOSED toward recording; a kill switch must be the literal 0)" ;;
+  esac
+  if [ "$HEARTBEAT_EMIT" != "1" ]; then
+    log "heartbeat: skipped (HEARTBEAT_EMIT=${HEARTBEAT_EMIT}; another step in this job is the designated emitter)"
+    return 0
+  fi
+  event="${GITHUB_EVENT_NAME:-schedule}"
+  if [ "$event" != "schedule" ]; then
+    log "heartbeat: skipped (event=${event}; only a scheduled run proves the schedule delivers)"
+    return 0
+  fi
+  now="$(now_epoch)"
+  iso="$(fmt_iso "$now")"
+  run="${GITHUB_RUN_ID:-unknown}"
+  attempt="${GITHUB_RUN_ATTEMPT:-1}"
+  body="${HEARTBEAT_MARKER}
+heartbeat_at=${iso}
+heartbeat_epoch=${now}
+verdict=${verdict}
+http=${PROBE_CODE}
+host=${PROBE_HOST_LABEL}
+run=${run}
+attempt=${attempt}
+event=${event}
+
+Rolling liveness record for the out-of-band availability pager (#4573). Written by \`.github/scripts/availability-watchdog.sh\` on every scheduled run that reaches a verdict — a DOWN/DEGRADED run included, because a pager that is working during an incident is ALIVE. Read by \`.github/scripts/availability-liveness.sh\`, which alarms (a GitHub issue + a red run, never Telegram) when this record goes stale. Operator runbook: docs/infra-runbook.md → § *Out-of-band availability watchdog*."
+  issue="$(search_heartbeat)"
+  case "$issue" in
+    __ERR__)
+      warn "heartbeat: search failed — record NOT written; the liveness check will see it stale and alert (this run's own verdict is unaffected)"
+      return 0 ;;
+  esac
+  if [ -z "$issue" ]; then
+    if ! issue="$(create_issue "$HEARTBEAT_TITLE" "$body")" || [ -z "$issue" ]; then
+      warn "heartbeat: could not create the rolling heartbeat issue — the liveness check will see it stale and alert"
+      return 0
+    fi
+    log "heartbeat: created rolling record #${issue} (verdict=${verdict})"
+  else
+    if ! update_issue_body "$issue" "$body"; then
+      warn "heartbeat: could not update rolling record #${issue} — the liveness check will see it stale and alert"
+      return 0
+    fi
+    log "heartbeat: recorded on #${issue} (verdict=${verdict})"
   fi
   return 0
 }
@@ -1875,6 +2005,9 @@ main() {
 
   probe
   log "verdict: ${PROBE_VERDICT} (HTTP ${PROBE_CODE})"
+  # #4573: the independent-liveness record. Emitted for EVERY verdict (see
+  # emit_heartbeat) — a working pager during an incident must not read as dead.
+  emit_heartbeat "$PROBE_VERDICT"
 
   # ── UP ───────────────────────────────────────────────────────────────────
   if [ "$PROBE_VERDICT" = "UP" ]; then
@@ -1949,10 +2082,11 @@ The service failed ${STATE_DOWN_RUNS} probe run(s), starting $(fmt_iso "$STATE_F
     fi
 
     # Unconfirmed recovery (the app answered once, then failed): an OPEN
-    # incident is already the standing alert, so leave it open and stay green.
-    # With NO incident open, reporting green after observing a full failure
-    # would be the "green while down" failure mode — fall through to the
-    # DOWN/UNEXPECTED path below with the failing confirmation probe's verdict.
+    # incident is already the standing alert, so leave it open. Either way the
+    # run must NOT report green after observing a full failure — that is the
+    # "green while down" failure mode — so both branches below end RED. With NO
+    # incident open we still fall through to the DOWN/UNEXPECTED path with the
+    # failing confirmation probe's verdict, which files the incident.
     local any_open=0
     for kind_loop in DOWN DEGRADED; do
       if [ "$kind_loop" = "DOWN" ]; then marker="$DOWN_MARKER"; title_loop="$DOWN_TITLE"; else marker="$DEGRADED_MARKER"; title_loop="$DEGRADED_TITLE"; fi
@@ -1966,15 +2100,54 @@ The service failed ${STATE_DOWN_RUNS} probe run(s), starting $(fmt_iso "$STATE_F
     done
     if [ "$any_open" = "1" ]; then
       note "recovery not confirmed and an incident is already open — leaving it open (the standing alert)"
-      # #3887: this early exit sits BEFORE the sustained-incident escalation leg,
-      # so a flapping service can hold an open incident for hours while that leg
-      # never runs — nothing is paged and the run is GREEN. Changing WHEN a flap
-      # counts as still-failing is a behavioural change that needs its own
-      # design, so this run NAMES the gap instead (mirroring the corrupt-ledger
-      # path) rather than leaving "no page" to be read as "nothing to page
-      # about". See runbook § *Known limits*.
-      warn "recovery not confirmed (flapping) and an incident is already open — the sustained-incident escalation leg is NOT reached on this path, so NO escalation page is sent this run; the open incident is the standing alert (runbook § Known limits)"
-      exit 0
+      # #5021 — DECISION (see runbook § *Known limits*, "observed through a
+      # FLAP"): this path advances NO state and sends NO escalation page. Both
+      # halves of that are deliberate, and the reason is the RESTART GATE.
+      #
+      # THE INVARIANT (verified against decide_restart/decide_escalation):
+      #   * decide_escalation's RUN leg reads STATE_DOWN_RUNS — the SAME counter
+      #     decide_restart's run leg reads — and normalize_escalation_knobs keeps
+      #     `ESCALATE_MIN_RUNS >= SUSTAINED_MIN_RUNS`. So ANY flap that ADVANCED
+      #     that counter to satisfy the pager's run leg would simultaneously
+      #     satisfy the restart leg's run window. That is not a licensing
+      #     message: it is why this branch does not touch the counter.
+      #   * decide_escalation's WALL-CLOCK leg is anchored on
+      #     STATE_ESCALATE_ANCHOR_TS (the incident's server-side `created_at`),
+      #     which a flap does not move.
+      # A flap is a run whose first probe verdict was UP — NOTE: probe() returns
+      # on the FIRST UP attempt, so that means at least one of its
+      # PROBE_ATTEMPTS attempts answered, NOT all of them — followed by a
+      # recovery-confirmation probe that failed. Advancing the shared counter
+      # for such a run moves the restart window for a service that was answering
+      # UP moments ago, and a self-heal restart of an intermittently-up service
+      # is the outcome the restart gate exists to bound. So the flap advances
+      # nothing.
+      #
+      # WHAT IS *NOT* CLAIMED: that a page is impossible from here. It is not.
+      # Because decide_escalation is a pure function of PERSISTED state, when an
+      # incident has ALREADY accumulated `ESCALATE_MIN_RUNS` observed failing
+      # runs (and is past its wall-clock anchor), the leg can be run against the
+      # state the incident already holds and a page sent while persisting ONLY
+      # `escalate_state`/`escalate_ts`/`page_ok_ts` — decide_restart reads none
+      # of those, so nothing is armed. That is a change to the escalation state
+      # machine, and the owner recorded on #5021 that this issue is consolidated
+      # under the one-incident-substrate refactor (tortoise #5047) and is **not
+      # an independent patch**; the mechanism is written up there instead. The
+      # residual that #5047 owns: a service that flaps from creation and never
+      # records a genuine DOWN run keeps `down_runs` below `ESCALATE_MIN_RUNS`,
+      # so the run leg is never satisfied and it still never pages.
+      #
+      # WHAT THIS CHANGE DOES: the run is no longer GREEN. The recovery-
+      # confirmation probe FAILED (a DOWN verdict exhausts every PROBE_ATTEMPTS
+      # attempt, while an UNEXPECTED verdict returns on its FIRST attempt), and a
+      # run that observed a failure must not read as an all-clear — the same
+      # "green while down" rule the NO-open-incident sibling below already
+      # enforces (pinned by test 47). The open incident remains the standing
+      # alert; the RED run is the signal that leaves GitHub today, and it carries
+      # the refusal and its reason so "no page" is never read as "nothing to
+      # page about". See runbook § *Known limits*.
+      fail "recovery not confirmed (flapping) and an incident is already open — the sustained-incident escalation leg is NOT run on this path, so NO escalation page is sent this run: advancing STATE_DOWN_RUNS to reach it would also satisfy the RESTART leg's run window for a service that was answering UP, and running the leg against the persisted state (which IS possible) is the escalation-substrate change consolidated in #5047 (#5021). The open incident is the standing alert; this RED run is the signal (runbook § Known limits)"
+      exit 1
     fi
     warn "recovery NOT confirmed (${PROBE_VERDICT}, HTTP ${PROBE_CODE}) and NO incident is open — filing an incident for the observed failure"
     # fall through: PROBE_VERDICT / PROBE_CODE / PROBE_EVIDENCE are the failing

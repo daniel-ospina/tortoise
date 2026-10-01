@@ -4619,3 +4619,42 @@ def test_live_fixture_server_reports_rdb_save_disabled(tmp_path):
     finally:
         with contextlib.suppress(Exception):
             proj.close()
+
+
+def test_embedded_start_refuses_a_db_directory_that_is_gone(tmp_path, capfd):
+    """#3653: redis-server must never be spawned with a config ``dir`` that is gone.
+
+    redislite renders ``dir <dirname(db)>`` from ``self.dbdir``
+    (``configuration.py``: ``config_dict['dir'] = config_dict['dbdir']``), so a
+    start against a removed tree kills redis-server inside its own config parse:
+
+        *** FATAL CONFIG FILE ERROR (Redis 8.6.2) ***
+        >>> 'dir '/tmp/tmpXXXX''
+
+    Six of those, six different dirs, all inside one test file, in a PASSING CI
+    lane (run 36432057326) — naming neither the db nor the holder whose tree was
+    removed. The seam is ``RedisMixin._start_redis``, which the guard wraps.
+    ``FalkorProjection`` happens to mask this locally by recreating the parent
+    dir, so the client construction is what the guard itself is measured on.
+    """
+    import redislite.client as _rc
+
+    # The guard installer is armed at `tortoise` import time and installs as soon
+    # as redislite is importable, so no explicit install call is needed here.
+    from tortoise.embedded_lifecycle import EmbeddedDbDirGoneError
+
+    tree = tmp_path / "hosted"
+    tree.mkdir()
+    db = str(tree / "test.db")
+    tree.rmdir()  # exactly what a function-scoped fixture teardown does
+
+    with pytest.raises(EmbeddedDbDirGoneError) as excinfo:
+        _rc.Redis(dbfilename=db)
+    assert str(tree) in str(excinfo.value), (
+        "the refusal must name the directory that is gone")
+    assert not os.path.isdir(tree), "the guard must not recreate the directory"
+
+    captured = "".join(capfd.readouterr())
+    assert "FATAL CONFIG FILE ERROR" not in captured, (
+        "redis-server was spawned into a missing db dir — the unattributable "
+        "FATAL this guard exists to prevent")

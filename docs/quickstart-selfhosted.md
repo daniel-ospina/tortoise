@@ -104,7 +104,7 @@ tortoise init --yes    # same, no prompts (auto-indexes the repo you're inside, 
 To index an existing repo's markdown files:
 
 ```bash
-tortoise index github https://github.com/your/repo --db <path-or-uri>
+tortoise index github https://github.com/your/repo --db '<path-or-uri>'
 ```
 
 `index github` clones the repo (or accepts a local path), extracts deterministically with offline mock models, and writes Points/Operators to the graph — idempotent across runs. For richer LLM-based extraction, use the standalone ingest CLI instead — `tortoise-ingest transcript.txt --db <path-or-uri>` (or `python -m tortoise.ingest`). It ingests a transcript file, requires `--db`, and defaults to offline mock models; pass `--point-model`/`--relation-model` (e.g. `ollama:llama3.2:3b`) to use a real LLM. `tortoise onboard` runs the full init → index → demo → doctor flow and passes the same resolved DB target to each step, so it works in embedded-only mode too (it used to crash; fixed in #705).
@@ -323,7 +323,7 @@ python -c 'from tortoise.sdk import TortoiseSDK; TortoiseSDK().rebuild_all("<eve
 3. Re-index the corpus:
 
 ```bash
-tortoise index directory <corpus-dir>
+tortoise index directory '<corpus-dir>'
 ```
 
 4. **Verify — including an EDGE check.** `session_index_health` is edge-blind;
@@ -395,18 +395,25 @@ other way around — the Docker path has no stdio config.
 The compose daemon serves MCP at `http://localhost:8000/mcp`:
 
 ```bash
-claude mcp add tortoise http://localhost:8000/mcp
+claude mcp add --transport http tortoise http://localhost:8000/mcp
 ```
 
-> ℹ️ **Claude Code one-time approval:** servers registered at **project
-> scope** (`.mcp.json` — `claude mcp add --scope project`, the default in
-> older clients) show as **⏸ Pending approval** in `claude mcp list` until
-> you approve them once — start `claude` in this project and allow the
-> prompt (or use `/mcp`). The tools stay disabled until then; this is
-> expected, not a failure. (The current `claude mcp add` default is *local*
-> scope — active immediately, no approval.)
+> ℹ️ **Claude Code scope + approval.** `claude mcp add` writes **local**
+> scope by default — `~/.claude.json`, under this project's entry: private to
+> you, this project only, **never committed**. It skips the project-scope
+> server approval, but no scope is approval-free: Claude Code asks permission
+> the first time it calls each MCP tool (allow it once, or pre-allow
+> `mcp__tortoise__*`). `Added …` means the entry was written, not that it
+> connected — `claude mcp list` is the check.
+>
+> **Sharing the config with the repo instead?** `--scope project` writes a
+> **committable** `.mcp.json` at the project root, approved once per machine —
+> start `claude` in the project and allow the prompt, or run `/mcp`
+> (`claude mcp reset-project-choices` resets the choice). This command sends no
+> `--header`, so the file carries no key at all.
 
-Or add to `.mcp.json`:
+Or add to `.mcp.json` — **project scope, so the file is committable** (no
+key here: a local daemon needs none):
 
 ```json
 {
@@ -438,7 +445,9 @@ print(status())
 
 ### No-Docker path (single-agent eval) — stdio
 
-Add a `tortoise` server to your MCP client's config (`.mcp.json` for Claude Code / Cursor, or the equivalent for your client):
+Add a `tortoise` server to your MCP client's config — `.mcp.json` for Claude
+Code, or the equivalent for your client (Cursor: `.cursor/mcp.json`, whose
+stdio entry needs `"type": "stdio"`):
 
 ```json
 {
@@ -515,13 +524,13 @@ Tortoise ships a first-class migration path: **`tortoise export` → hosted impo
 3. **Connect a working directory to cloud**:
 
    ```bash
-   tortoise init --api-key tt_<your-key>   # saves .tortoise config in this directory
+   tortoise init --api-key 'tt_<your-key>'   # saves .tortoise config in this directory
    ```
 
 4. **Import the artifact** into the team graph (owner session auth — the import endpoint is owner-scoped, like export):
 
    ```bash
-   curl -X POST https://api.premiselabs.co/v1/organizations/<org_id>/import \
+   curl -X POST "https://api.premiselabs.co/v1/organizations/<org_id>/import" \
      -H "Authorization: Bearer <owner-session-jwt>" \
      -H "Content-Type: application/vnd.tortoise.export.v1" \
      -H "X-Tortoise-Import-Key: <key_b64>" \

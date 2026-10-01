@@ -352,6 +352,14 @@ const suites = [
   '20260919000001_metering_period_end_repair.sql',  // #4216
   '20260925000001_oauth_referential_integrity.sql',  // #3036
   '20260925000002_oauth_redemption_state.sql',  // #3027
+  // #5045 — the capture-token accumulator.
+  // NOTE: this list is EXPLICIT, not a glob — a suite file that is not named
+  // here never runs, and "the suite exists" is then mistaken for "the suite
+  // passes". Add the entry in the same commit as the file. (The sibling #5331
+  // branch adds its own entry to this same list, so the two will conflict
+  // textually on merge; keep BOTH entries.)
+  '20260926000001_metering_capture_tokens.sql',  // #5045
+  '20260927000001_metering_unmetered_increments.sql',  // #4779
 ];
 for (const suite of suites) {
   const sql = readFileSync(`${TESTS_DIR}/${suite}`, 'utf8');
@@ -544,6 +552,43 @@ try {
   console.log('✓ #3027: redemption-state migration re-applies idempotently (a live claim survives)');
 } catch (e) {
   console.error(`✗ #3027 migration re-apply FAILED:\n  ${e.message.split('\n').slice(0, 4).join('\n  ')}`);
+  process.exit(1);
+}
+
+// ── #4779: the unmetered-increment representation survives a re-apply ────────
+// The migration is written to be re-applicable (CREATE TABLE IF NOT EXISTS,
+// CREATE OR REPLACE FUNCTION, DROP POLICY IF EXISTS) — the shape a deploy hits
+// when the migration was applied out-of-band and `supabase db push --include-all`
+// re-selects it. This drill is the ONE thing a re-apply must not do: erase the
+// evidence. The represented drop is written BEFORE the re-apply, so a migration
+// body that dropped/recreated the table (losing rows) or reset `first_observed_at`
+// REDs here — which is the loss class #4779 exists to remove.
+try {
+  await db.exec(`
+    INSERT INTO public.organizations (id, name, graph_name)
+      VALUES ('4779-reapply-org', '4779-reapply-org', 'org_4779-reapply-org');
+    SELECT public.metering_record_unmetered(
+        '4779-reapply-org', 'write_op', 'window_unresolvable', 'QuotaCheckError');
+    UPDATE public.metering_unmetered_increments
+       SET first_observed_at = '2026-01-01T00:00:00+00:00'
+     WHERE org_id = '4779-reapply-org';
+  `);
+  await db.exec(readFileSync(`${MIG_DIR}/20260927000001_metering_unmetered_increments.sql`, 'utf8'));
+  const r = await db.query(`SELECT increments, first_observed_at, last_error_type,
+      drop_class FROM public.metering_unmetered_increments
+     WHERE org_id = '4779-reapply-org'`);
+  const d = r.rows[0] || {};
+  const first = d.first_observed_at instanceof Date
+    ? d.first_observed_at.toISOString() : String(d.first_observed_at);
+  if (d.increments !== 1 || !first.startsWith('2026-01-01') ||
+      d.last_error_type !== 'QuotaCheckError' || d.drop_class !== 'window_unresolvable') {
+    console.error(`✗ #4779 migration re-apply CLOBBERED the representation: ${JSON.stringify(d)}`);
+    process.exit(1);
+  }
+  await db.exec(`DELETE FROM public.organizations WHERE id = '4779-reapply-org';`);
+  console.log('✓ #4779: the unmetered-increment representation survives a re-apply');
+} catch (e) {
+  console.error(`✗ #4779 migration re-apply FAILED:\n  ${e.message.split('\n').slice(0, 4).join('\n  ')}`);
   process.exit(1);
 }
 
