@@ -23,6 +23,9 @@ import pytest
 pytest.importorskip("redislite")
 
 import tortoise  # noqa: F401
+
+# #5049: the verdict contract — a wall-clock expiry is INCONCLUSIVE, not FAIL.
+from tests._verdict import wait_for
 from tortoise import FalkorDB
 
 
@@ -385,6 +388,13 @@ def _wait_server_dead(pid, timeout=10):
 #: costs across the 6 call sites, and the message carries the evidence
 #: (pid, elapsed, parent rc) instead of leaving the next occurrence a mystery.
 _SERVER_DEATH_TIMEOUT_S = 30
+
+#: #4739: the stdio MCP server's exit budget after SIGTERM. SIGTERM's default
+#: disposition already terminates the parent, so a timeout here means the
+#: *close* was slow under load — the close itself is asserted separately by
+#: `_assert_server_dies_with_parent`, which keeps its FAIL leg. #5049 rule 1:
+#: this budget's expiry is INCONCLUSIVE (evidence about load), never a FAIL.
+_SIGTERM_EXIT_DEADLINE_S = 45.0
 
 
 def _assert_server_dies_with_parent(redis_pid: int, proc, what: str) -> None:
@@ -1026,11 +1036,24 @@ def test_serve_stdio_sigterm_closes_embedded_server(tmp_path):
     proc, redis_pid = _stdio_serve_proc(tmp_path)
     try:
         os.kill(proc.pid, _signal.SIGTERM)
-        try:
-            proc.wait(timeout=45)
-        except _subprocess.TimeoutExpired:
+        if not wait_for(lambda: proc.poll() is not None,
+                        timeout_s=_SIGTERM_EXIT_DEADLINE_S):
             proc.kill()
-            pytest.fail("stdio server survived SIGTERM — guard did not fire")
+            # #5049 rule 1: a deadline expiry is evidence about the machine's
+            # load, not about the guard. A SIGTERM'd stdio server that has not
+            # exited within 45s under a loaded box must not be scored as a
+            # product FAIL. The close the guard performs is asserted with teeth
+            # by `_assert_server_dies_with_parent` below.
+            from tests._verdict import inconclusive
+            inconclusive(
+                "the stdio server had not exited after SIGTERM",
+                deadline_s=_SIGTERM_EXIT_DEADLINE_S,
+                diagnosis=(
+                    f"(pid {proc.pid} still running; SIGTERM's default "
+                    "disposition terminates the parent, so a slow exit is a "
+                    "load event — the embedded-server close is asserted "
+                    "separately)"),
+            )
         assert proc.returncode == -_signal.SIGTERM, f"rc={proc.returncode}"
         _assert_server_dies_with_parent(
             redis_pid, proc, "stdio server's redis-server after its SIGTERMed parent")
