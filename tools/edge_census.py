@@ -253,6 +253,22 @@ def relationship_census(graph: Any) -> dict[str, Any]:
         for slot, count in by_slot.items()
         if count > total
     )
+    # Subset relations, per slot. `ep_bearing` counts edges carrying ANY slot, so it is
+    # an upper bound on each single slot's count; `all_four_slots` counts edges carrying
+    # EVERY slot, so it is a LOWER bound on each. Checking only the extremes above left
+    # two impossible readings printable (round-2 review, probed): an all-four census of 0
+    # beside a per-slot count HIGHER than `ep_bearing`, and an all-four census larger than
+    # the slot that must contain it. Both describe a graph no single snapshot can have.
+    impossible.extend(
+        f"by_slot[{slot}]={count} exceeds ep_bearing={ep_bearing}"
+        for slot, count in by_slot.items()
+        if count > ep_bearing
+    )
+    impossible.extend(
+        f"all_four_slots={all_four} exceeds by_slot[{slot}]={count}"
+        for slot, count in by_slot.items()
+        if all_four > count
+    )
     if impossible:
         raise CensusError(
             "incoherent census — the reads disagree, which a concurrent write to the "

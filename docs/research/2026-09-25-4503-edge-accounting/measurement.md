@@ -39,7 +39,7 @@ against `a2a08beaa` on **2026-09-26** and is unchanged. Three things make that s
 assumption:
 - The branch tree contains the declared base — `git merge-base --is-ancestor a2a08beaa HEAD` succeeds.
   That is pinned to the SHA, **not** to the moving `origin/main` ref: a sentence citing the live ref
-  stops reproducing as soon as main advances, which it has (to `9c8f9c805`).
+  stops reproducing as soon as main advances, which it has (to `87b9bdf45`).
 - Because the instrument is branch-only, comparing it across two MAIN trees is not a check anyone can
   run: an empty `git diff <a> <b> -- tools/edge_census.py` between two revisions that both lack the
   file would mean absent at both ends, not unchanged.
@@ -54,10 +54,11 @@ so it reads STALE here by construction. That check asks whether the tree a
 finding was measured on contains today's main — a question about *product* findings, which can be
 overtaken. This one cannot be: the instrument is branch-only, so no main tree could ever have produced
 it, and the commits main gained touch nothing in the measured path — the counting, capping and pricing
-surfaces. `git show --name-only 9c8f9c805` gives `tortoise/mcp_server.py`, `tortoise/sdk.py`, two tests,
-`config/ci-surfaces.yml` and a generated doc: no `quota.py`, `metering.py`, `ep.py` or `pricing.json`.
-(`tortoise/sdk.py` is imported by the instrument, but the change there is a private
-`_assert_window_start_not_inverted` guard, not a counting path.) The line is kept rather than dropped because
+surfaces. The commit main gained past the declared base is `87b9bdf45`;
+`git show --name-only 87b9bdf45` gives `tools/drift-guard.py` and its test: no `tortoise/mcp_server.py`,
+`quota.py`, `metering.py`, `ep.py` or `pricing.json`, so it touches nothing in the measured path. (An
+earlier revision of this paragraph cited `9c8f9c805` — a commit that is an ANCESTOR of the declared base
+`228f416e9`, so it was never "the commit main gained"; corrected per the #5395 round-2 review.) The line is kept rather than dropped because
 the gate's own doctrine is that unknown provenance is not a pass, and a reader must be able to see
 exactly which tree produced these numbers.
 **Instrument:** `tools/edge_census.py` (shipped with this report) · **Status:** measurement only.

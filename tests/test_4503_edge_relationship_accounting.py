@@ -631,6 +631,42 @@ def test_relationship_census_refuses_a_slot_exceeding_the_total():
         relationship_census(graph)
 
 
+def test_relationship_census_refuses_a_slot_exceeding_ep_bearing():
+    """A single slot cannot outnumber the ANY-slot count that must contain it.
+
+    `ep_bearing` counts edges carrying at least one slot; `by_slot[s]` counts edges
+    carrying slot `s`. Round-2 review probed this pair and found it printable before
+    the subsumption arms existed.
+    """
+    graph = _FakeGraph([
+        [["IMPL", 10]],                # total = 10
+        [[7]], [[1]], [[1]], [[1]],    # by_slot: 7 > ep_bearing, impossible
+        [[5]],                         # ep_bearing
+        [[1]],                         # all_four_slots
+    ])
+
+    with pytest.raises(CensusError, match="exceeds ep_bearing"):
+        relationship_census(graph)
+
+
+def test_relationship_census_refuses_all_four_exceeding_a_slot():
+    """The ALL-slots count cannot exceed any single slot's count.
+
+    Every all-four edge necessarily carries each individual slot, so `all_four_slots`
+    is a lower bound on every `by_slot[s]`. Round-2 review probed this too — the
+    extremes-only check let an all-four census larger than its own subset print.
+    """
+    graph = _FakeGraph([
+        [["IMPL", 10]],                # total = 10
+        [[6]], [[6]], [[6]], [[6]],    # by_slot: all 6
+        [[6]],                         # ep_bearing
+        [[8]],                         # all_four_slots = 8 > every slot, impossible
+    ])
+
+    with pytest.raises(CensusError, match="exceeds by_slot"):
+        relationship_census(graph)
+
+
 def test_relationship_census_refuses_an_unreadable_per_type_row():
     # A row the tool cannot read must fail loud: reporting a PARTIAL breakdown
     # as the whole one would make `total` a lie, which is the failure this

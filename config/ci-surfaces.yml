@@ -2144,10 +2144,10 @@ durations:
   test_runner_ports_6673.py: 4.3  # unmeasured (new file, #6673 — no CI junit yet)
   # A YAML mapping keeps only the LAST duplicate key, and tools/registry_integrity.py refuses
   # duplicates outright (`manifest-integrity`, a `python-ci-gate` dependency) — keep exactly ONE
-  # entry per file. #4503 reviewer: measured 38 tests; the DURATION below is the docker lane's
-  # 42.6s wall-pytest (the embedded carve-out runs 323.9s, ~7.6x, and is not this field's consumer
+  # entry per file. #4503 reviewer: measured 42 tests; the DURATION below is the docker lane's
+  # ~42.6s wall-pytest (the embedded carve-out runs far higher and is not this field's consumer
   # — `durations` only feeds fast-matrix sharding, where erring high is correct).
-  test_4503_edge_relationship_accounting.py: 53.0  # unmeasured — #4503: locally measured (38 tests; 42.6s wall-pytest docker lane; earlier revisions of this file read 14-21s, so the figure is variable and errs high); refresh from CI junit — no leg of the sweep's four source runs carried it (the file did not exist then).
+  test_4503_edge_relationship_accounting.py: 53.0  # unmeasured — #4503: locally measured (42 tests; ~42.6s wall-pytest docker lane; earlier revisions of this file read 14-21s, so the figure is variable and errs high); refresh from CI junit — no leg of the sweep's four source runs carried it (the file did not exist then).
   test_epic903_freshness.py: 3.8
   test_onboarding_integration.py: 4.5
   test_pack_cli.py: 4.5
