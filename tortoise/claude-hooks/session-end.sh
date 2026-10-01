@@ -91,9 +91,15 @@ _record_breadcrumb() {
   esac
   stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
   mkdir -p "$crumb_dir" 2>/dev/null || true
-  printf '{\n  "harness": "%s",\n  "detail": "%s",\n  "recorded_at": "%s",\n  "kind": "install-inert"\n}\n' \
-    "$harness" "$detail" "$stamp" \
-    > "$crumb_dir/$harness.json" 2>/dev/null || true
+  # #5919: redirect the WHOLE write block. Bash opens redirections left to
+  # right and reports a failed open of the STDOUT target BEFORE a trailing
+  # `2>/dev/null` takes effect, so an unwritable target dir leaked the shell's
+  # own error onto the hook's stderr. A block's stderr is established first.
+  {
+    printf '{\n  "harness": "%s",\n  "detail": "%s",\n  "recorded_at": "%s",\n  "kind": "install-inert"\n}\n' \
+      "$harness" "$detail" "$stamp" \
+      > "$crumb_dir/$harness.json"
+  } 2>/dev/null || true
 }
 
 # Claude Code passes SessionEnd hook metadata as JSON on stdin:

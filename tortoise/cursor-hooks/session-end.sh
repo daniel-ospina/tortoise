@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tortoise-hook-version: 2
+# tortoise-hook-version: 3
 # Tortoise session capture for Cursor — sessionEnd hook (#3819).
 #
 # The `tortoise-hook-version` marker above is the install-contract generation
@@ -143,9 +143,15 @@ _record_breadcrumb() {
   esc_harness="${esc_harness//$'\f'/\\f}"
   esc_harness="$(printf '%s' "$esc_harness" | tr -d '\000-\010\013\014\016-\037')"
   mkdir -p "$crumb_dir" 2>/dev/null || true
-  printf '{\n  "harness": "%s",\n  "detail": "%s",\n  "recorded_at": "%s",\n  "kind": "%s"\n}\n' \
-    "$esc_harness" "$esc" "$stamp" "$kind" \
-    > "$crumb_dir/$harness.json" 2>/dev/null || true
+  # #5919: redirect the WHOLE write block. Bash opens redirections left to
+  # right and reports a failed open of the STDOUT target BEFORE a trailing
+  # `2>/dev/null` takes effect, so an unwritable target dir leaked the shell's
+  # own error onto the worker's stderr. A block's stderr is established first.
+  {
+    printf '{\n  "harness": "%s",\n  "detail": "%s",\n  "recorded_at": "%s",\n  "kind": "%s"\n}\n' \
+      "$esc_harness" "$esc" "$stamp" "$kind" \
+      > "$crumb_dir/$harness.json"
+  } 2>/dev/null || true
 }
 
 # Echo `$1` when it is a readable `.jsonl` transcript, or the same-stem
