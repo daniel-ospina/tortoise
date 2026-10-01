@@ -1791,3 +1791,160 @@ def test_rotating_note_stall_cooldowns_active_provider(monkeypatch):
     out = model.complete(system="s", user="u")
     assert out.startswith("openrouter:"), out
     assert a.calls <= 1, "cooled provider must not be re-called after the stall"
+
+
+# ── #3873: the billing exhaustion that rotates ALSO files an operator alert ──
+#
+# Before this, ``RotatingModel`` classified the provider's own refusal, cooled
+# the lane, rotated and (with no alternative) raised — and told no operator. The
+# beta's only cohort-aggregate spend bound is the provider credit balance, so the
+# exhaustion arrived as an outage (every lane refusing at once) and was invisible
+# from the repo. These tests pin the post-hoc record (analysis option C).
+
+def test_rotating_model_alerts_operator_on_402_exhaustion(monkeypatch):
+    """The refusal that makes us rotate is also the operator's record.
+
+    REDs on: removing the ``_alert_provider_billing_exhausted`` call from
+    ``_attempt`` (no dispatch — the pre-fix state), and on firing it without the
+    classification (see the credential-403 negative control below).
+    """
+    import random as _random
+
+    import tortoise.operator_alert as oa
+    from tortoise.model_adapters import RotatingModel
+
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        oa, "alert_operator",
+        lambda kind, org_id, detail=None: seen.append((kind, org_id, detail)))
+
+    a = _RotatingStub("a", fail_status=402)
+    b = _RotatingStub("b")
+    _orig = _rotating_rng(monkeypatch, [0.1, 0.9])  # A picked first → B answers
+    try:
+        out = RotatingModel([a, b], cooldown_s=300).complete(system="s", user="u")
+    finally:
+        _random.random = _orig
+
+    assert out == "ok-b"
+    assert seen == [(oa.PROVIDER_BILLING_EXHAUSTED_KIND, "a", {
+        "provider": "a",
+        "error_type": "HTTPError",
+        "status": 402,
+        "has_alternative": True,
+    })], (
+        f"the 402 that rotated was not recorded as an operator incident "
+        f"(alerts seen: {seen}) — the aggregate spend bound stays invisible "
+        "(#3873)"
+    )
+
+
+def test_rotating_model_alert_classification_ignores_credential_and_config_faults(
+        monkeypatch):
+    """The alert rides the SAME classification as the rotation: a key-limit 403
+    (the provider's own budget) files the incident with status 403, while a
+    signature-less 403 — a wrong credential — and a config 4xx file NOTHING
+    (they are not billing events, and alerting on them would be a false spend
+    signal).
+
+    REDs on: alerting on every ``is_fatal`` fault instead of on
+    ``is_billing_exhausted``.
+    """
+    import random as _random
+
+    import tortoise.operator_alert as oa
+    from tortoise.model_adapters import RotatingModel
+
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        oa, "alert_operator",
+        lambda kind, org_id, detail=None: seen.append((kind, org_id, detail)))
+
+    # Positive: the key-limit 403 body rotates AND alerts (status 403).
+    a = _RotatingStub("a", fail_status=403, body=OR_KEY_LIMIT_BODY)
+    b = _RotatingStub("b")
+    _orig = _rotating_rng(monkeypatch, [0.1, 0.9])
+    try:
+        out = RotatingModel([a, b], cooldown_s=300).complete(system="s", user="u")
+    finally:
+        _random.random = _orig
+    assert out == "ok-b"
+    assert seen == [(oa.PROVIDER_BILLING_EXHAUSTED_KIND, "a", {
+        "provider": "a", "error_type": "HTTPError", "status": 403,
+        "has_alternative": True})], seen
+
+    # Negative: a wrong-credential 403 (no limit signature) re-raises without
+    # alerting, and so does a config 4xx.
+    for status, body in ((403, None), (403, OR_BAD_CREDENTIAL_BODY), (400, None)):
+        seen.clear()
+        c = _RotatingStub("a", fail_status=status, body=body)
+        d = _RotatingStub("b")
+        _orig = _rotating_rng(monkeypatch, [0.1])
+        try:
+            with pytest.raises(requests.HTTPError):
+                RotatingModel([c, d], cooldown_s=300).complete(system="s", user="u")
+        finally:
+            _random.random = _orig
+        assert seen == [], (
+            f"a non-billing fault ({status}/{body!r}) filed a spend incident: "
+            f"{seen} — the alert must ride is_billing_exhausted, not is_fatal"
+        )
+
+
+def test_rotating_model_alerts_before_the_no_alternative_raise(monkeypatch):
+    """With NO alternative lane the refusal is RAISED — and the alert must have
+    fired before it: that shape is the cliff itself (the provider refused and
+    nothing could serve). ``has_alternative=False`` records that no alternative
+    existed, so a triager can tell the two shapes apart.
+
+    REDs on: moving the dispatch below the ``billing and n == 1`` raise.
+    """
+    import tortoise.operator_alert as oa
+    from tortoise.model_adapters import RotatingModel
+
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        oa, "alert_operator",
+        lambda kind, org_id, detail=None: seen.append((kind, org_id, detail)))
+
+    pool = RotatingModel([_RotatingStub("a", fail_status=402, fails=10)],
+                         cooldown_s=300)
+    with pytest.raises(requests.HTTPError):
+        pool.complete(system="s", user="u")
+
+    assert seen == [(oa.PROVIDER_BILLING_EXHAUSTED_KIND, "a", {
+        "provider": "a", "error_type": "HTTPError", "status": 402,
+        "has_alternative": False})], (
+        f"the no-alternative cliff raised WITHOUT an operator alert "
+        f"(alerts seen: {seen}) — that is the exact outage shape #3873 owns"
+    )
+
+
+def test_rotating_model_rotation_survives_an_alert_plane_failure(monkeypatch):
+    """Best-effort (#3873 requirement): an alert failure must not change the
+    request's outcome or turn a rotation into a 500.
+
+    REDs on: letting the alert exception propagate (the request would raise
+    instead of rotating onto the healthy lane).
+    """
+    import random as _random
+
+    import tortoise.operator_alert as oa
+    from tortoise.model_adapters import RotatingModel
+
+    def _boom(kind, org_id, detail=None):
+        raise RuntimeError("alert plane down")
+
+    monkeypatch.setattr(oa, "alert_operator", _boom)
+
+    a = _RotatingStub("a", fail_status=402)
+    b = _RotatingStub("b")
+    _orig = _rotating_rng(monkeypatch, [0.1, 0.9])
+    try:
+        out = RotatingModel([a, b], cooldown_s=300).complete(system="s", user="u")
+    finally:
+        _random.random = _orig
+
+    assert out == "ok-b", (
+        "a failing operator alert broke the rotation — the request's outcome "
+        "must not depend on the alert plane (#3873)")

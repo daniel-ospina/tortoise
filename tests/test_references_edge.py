@@ -301,7 +301,9 @@ def test_provenance_chain_returns_data_for_ingested_document():
         # the corpus #205 Source (url = source_url) and the document Source
         # (url = doc id) — and the corpus Source carries the references edge to
         # the document Source. _upsert_document wires that via
-        # link_source_to_entity(source_url, doc_id, "Source").
+        # link_source_to_entity(source_url, doc_id, "Document") — the RETIRED
+        # label survives as the relation's spelling, and it is what marks the
+        # link a derivation so it takes the #5199 sourceVersion anchor.
         corpus_url = "corpus://doc-ingest-1"
         proj.apply({"type": "DocumentCreated", "id": "doc-ingest-1",
                      "title": "Ingested Document", "source_url": corpus_url})

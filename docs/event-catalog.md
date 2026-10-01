@@ -55,6 +55,15 @@ that the payload does not name:
   `docs/durability-posture.md` → *Derived properties that are STORED, not
   recomputed*; do not restate the list here (it has drifted once already).
 
+- **The `sourceVersionTransit` carrier on a Point snapshot** (#5256) — a Point created against a
+  `:Source` with a non-blank `contentHash` records the version it was read from as a list of
+  `[<raw extractedFrom ref>, <contentHash>]` pairs. It is the *transit* for the edge-authoritative
+  `r.sourceVersion` (stamped `ON CREATE` only — a re-link never advances it), so the replay re-stamps
+  the edge from the snapshot instead of re-reading the Source: that read is unjournalled (#5024) and
+  would record a version the Point was never read from. The key is the **raw** ref — the
+  journal-stable spelling — never a live-time resolution of it. **Honest-absent:** no Source, or a
+  Source whose hash is blank (empty or whitespace-only) or non-string, writes **no key at all** (never `''`, never `[]`).
+
 - **`OperatorAnnotated`** (#3689) — the JSONL line carries `id` plus the
   **canonical** `annotator_bias`/`annotator_precision`/`annotator_consistency`/
   `annotator_directness` (the payload above keeps the SHORT names
