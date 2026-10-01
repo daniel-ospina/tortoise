@@ -26,6 +26,15 @@ Coverage (the issue's own mutations, plus the guard that matters):
     turns it RED.
   * a run whose bound cannot be derived -> skip: bound-underivable, never
     cancelled (empty green population, and a pending shard with no green sample)
+  * a FULLY-HUNG matrix (every shard in_progress, green covering each) -> cancel;
+    the old `target_completed == 0` gate declined the tool's PRIMARY case as
+    bound-underivable
+  * a fully-hung matrix with a pool shard that has no green sample -> still
+    bound-underivable (the newly-allowed path stays fail-closed)
+  * an scp-like origin with a DIGIT-LEADING owner (`git@github.com:1inch/foo.git`)
+    resolves to `1inch/foo`, not a stripped `foo`; lookalike hosts still rejected
+  * an argparse usage error (a bad/abbreviated flag) exits 3, never 2, so 2 means
+    INCOMPLETE and only 2 means INCOMPLETE
   * an unreadable run object -> skip: run-unreadable, never cancelled
   * an unreadable job list -> skip: jobs-unreadable, never cancelled
   * the bound is DERIVED PER RUN: the same elapsed is in-budget under a slow
@@ -57,6 +66,15 @@ PYTHON = sys.executable
 #: A fixed clock. The tool reads it through RUN_REAPER_NOW, so every elapsed
 #: figure below is exact and the suite is timezone/clock independent.
 NOW = 1_800_000_000
+
+
+def _load_tool_module():
+    """Import tools/run_reaper.py as a module (for the pure-unit surfaces)."""
+    spec = importlib.util.spec_from_file_location("run_reaper_under_test", TOOL)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
 
 GH_STUB = r"""#!/usr/bin/env bash
 set -u
@@ -187,6 +205,19 @@ class RunReaperTestCase(unittest.TestCase):
                           elapsed_s=100, workflow_id=workflow_id)
             self.make_jobs(gid, [job(name, secs) for name, secs in maxes.items()])
         return ids
+
+    def repo_with_origin(self, url: str) -> Path:
+        """A real (local, network-free) git repo whose origin is exactly ``url``.
+
+        `git remote get-url origin` is a purely local read, so this exercises the
+        tool's REAL subprocess path against real git without any network.
+        """
+        d = Path(tempfile.mkdtemp(prefix="reaper-origin-", dir=self.tmp))
+        subprocess.run(["git", "init", "-q", str(d)], check=True,
+                       capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(d), "remote", "add", "origin", url],
+                       check=True, capture_output=True, text=True)
+        return d
 
     # ── driver ──────────────────────────────────────────────────────────────
 
@@ -329,6 +360,53 @@ class RunReaperTestCase(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
         self.assertEqual(self.cancelled(), [])
 
+    def test_fully_hung_matrix_is_reaped(self):
+        """A matrix where EVERY shard is still in_progress IS reapable.
+
+        This is the tool's PRIMARY case: a globally-hung matrix (dead dependency,
+        expired token, a deadlock in every shard) has no completed job at all.
+        The bound is nevertheless fully derivable — the target supplies only the
+        shard SET and which shards are unfinished, and every ceiling is measured
+        on the green population — so it must be judged, not declined.
+        """
+        self.make_run("111", elapsed_s=7200, workflow_id=7)
+        self.make_jobs("111", [job("test (a)", None, status="in_progress"),
+                               job("test (g)", None, status="in_progress")])
+        self.green_population(7, maxes={"test (a)": 500, "test (g)": 1072})
+
+        row = self.rows(["--run", "111"])["111"]
+        self.assertEqual(row["action"], "cancel")
+        self.assertEqual(row["reason"], "verified-overrun")
+        self.assertEqual(row["bound_s"], 2144)          # max(floor, 2*1072)
+        self.assertEqual(row["bound_shard"], "test (g)")
+        self.assertEqual(row["elapsed_s"], 7200)
+        self.assertEqual(self.cancelled(), [], "dry-run must mutate nothing")
+
+        res = self.run_tool(["--run", "111"])
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertIn("WOULD CANCEL", res.stdout)
+        res = self.run_tool(["--run", "111", "--apply"])
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertEqual(self.cancelled(), ["111"])
+
+    def test_fully_hung_matrix_without_a_green_sample_stays_underivable(self):
+        """The newly-allowed path is STILL fail-closed on coverage.
+
+        Every shard is unfinished (so the old `target_completed == 0` gate no
+        longer applies), but ``test (g)`` has never gone green: no honest bound
+        covers the shard that might be the wedge, so the run is skipped.
+        """
+        self.make_run("555", elapsed_s=99999, workflow_id=7)
+        self.make_jobs("555", [job("test (a)", None, status="in_progress"),
+                               job("test (g)", None, status="in_progress")])
+        self.green_population(7, maxes={"test (a)": 500})   # no "test (g)" sample
+        row = self.rows(["--run", "555"])["555"]
+        self.assertEqual(row["action"], "skip")
+        self.assertEqual(row["reason"], "bound-underivable")
+        res = self.run_tool(["--run", "555", "--apply"])
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertEqual(self.cancelled(), [])
+
     # ── fail-closed reads ───────────────────────────────────────────────────
 
     def test_unreadable_run_object_is_skipped_not_cancelled(self):
@@ -461,6 +539,54 @@ class RunReaperTestCase(unittest.TestCase):
         self.assertEqual(self.cancelled(), ["111"])
 
     # ── wiring ──────────────────────────────────────────────────────────────
+
+    def test_scp_like_remote_with_a_digit_leading_owner_resolves(self):
+        """scp-like `[user@]host:path` has NO port — the path is the path.
+
+        `git@github.com:1inch/foo.git` used to be parsed as `host:port` and the
+        owner segment was stripped, so the remote failed closed and the operator
+        had to pass `--repo 1inch/foo` by hand. GitHub owners may start with a
+        digit (`1inch`, `0xProject`, `4GeeksAcademy`).
+        """
+        mod = _load_tool_module()
+        for url, want in [
+            ("git@github.com:1inch/foo.git", "1inch/foo"),
+            ("git@github.com:0xProject/foo.git", "0xProject/foo"),
+            ("git@github.com:4GeeksAcademy/foo.git", "4GeeksAcademy/foo"),
+            ("git@github.com:tortoise/foo.git", "tortoise/foo"),
+            ("https://github.com/1inch/foo.git", "1inch/foo"),
+        ]:
+            repo = str(self.repo_with_origin(url))
+            self.assertEqual(mod._slug_from_remote(repo), want, url)
+            self.assertEqual(mod.resolve_slug(repo), want, url)
+
+    def test_scp_like_lookalike_hosts_are_still_rejected(self):
+        """A host that merely contains `github.com` never yields a github slug."""
+        mod = _load_tool_module()
+        for url in ("git@mygithub.com:1inch/foo.git",
+                    "git@github.com.evil.test:1inch/foo.git",
+                    "https://github.com.evil.test/1inch/foo.git",
+                    "https://mygithub.com/1inch/foo.git"):
+            repo = str(self.repo_with_origin(url))
+            self.assertIsNone(mod._slug_from_remote(repo), url)
+            with self.assertRaises(ValueError):
+                mod.resolve_slug(repo)
+
+    def test_usage_errors_exit_3_not_2(self):
+        """A bad/abbreviated flag is a USAGE error (3), never INCOMPLETE (2).
+
+        argparse itself exits 2 for a usage error, colliding with the documented
+        EXIT_INCOMPLETE = 2: a wrapper keying on the status then could not tell a
+        typo'd arming flag from a transiently unreadable candidate listing.
+        `--help` still exits 0.
+        """
+        for args in (["--nope"], ["--app"], ["--ap"], ["--a"], ["--appl"],
+                     ["--apply=true"], ["--flo", "5"], ["--floor", "0"],
+                     ["--green-runs", "0"], ["--run", ""]):
+            res = self.run_tool(args)
+            self.assertEqual(res.returncode, 3,
+                             f"{args} -> rc={res.returncode}\n{res.stderr}{res.stdout}")
+        self.assertEqual(self.run_tool(["--help"]).returncode, 0)
 
     def test_tool_carveout_pins_the_reaper_tests(self):
         # A tools/run_reaper.py-only diff must still run this file (the flat

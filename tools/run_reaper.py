@@ -62,7 +62,7 @@ Exit codes
   0  complete (dry-run or apply)
   2  INCOMPLETE — the candidate-listing surface was unreadable and no explicit
      ``--run`` was supplied. Nothing was cancelled.
-  3  usage error (bad ``--repo``, malformed flag values)
+  3  usage error (bad ``--repo``, malformed, unrecognized or abbreviated flags)
   4  partial — at least one verified overrun's cancellation was REFUSED by the
      API (the ``Cannot cancel …`` class); other cancellations may have landed.
   5  internal error (an unexpected fault in a helper)
@@ -199,15 +199,17 @@ def _slug_from_remote(repo_dir: str) -> str | None:
     if not url:
         return None
     # scp-like syntax (``git@github.com:owner/name``) carries no scheme, so
-    # urlparse cannot see a host; normalise it to an ssh:// URL first. A
-    # scp-like port (``host:22/owner/name``) is stripped so it cannot leak
-    # into the slug.
+    # urlparse cannot see a host; normalise it to an ssh:// URL first.
     if "://" not in url:
         head, sep, tail = url.partition(":")
         if not sep:
             return None
-        if tail[:1].isdigit() and "/" in tail:
-            tail = tail.split("/", 1)[1]
+        # scp-like syntax IS ``[user@]host:path`` — it carries NO port, so the
+        # path is used VERBATIM. (Only the explicit ``ssh://host:port/...`` form
+        # has a port, and urlparse handles that by itself below.) Stripping a
+        # leading digit segment here mangled a digit-leading owner: GitHub owners
+        # may start with one (`1inch`, `0xProject`, `4GeeksAcademy`), and
+        # ``git@github.com:1inch/foo.git`` became ``foo.git`` and failed closed.
         url = f"ssh://{head}/{tail}"
     parsed = urlparse(url)
     host = parsed.hostname
@@ -374,17 +376,22 @@ def derive_bound(target_jobs: list[dict], green_job_lists: list[list[dict]],
     substitute a fail-safe for a bound it does not have. A pending shard with no
     green sample makes the whole bound underivable — that shard could be the
     wedge, and no honest bound covers it.
+
+    A run with NO completed job is NOT underivable: the target supplies only the
+    shard SET and which shards are unfinished, and every ceiling is measured on
+    the GREEN population — never on the target's own durations. So a fully-hung
+    matrix (every shard ``in_progress`` — the global-deadlock class this tool
+    exists to reclaim) derives its bound from the unfinished pool exactly as a
+    partly-finished one does. ``not shards`` is what rejects an empty or
+    garbage job list.
     """
     shards: dict[str, dict] = {}
-    target_completed = 0
     for job in target_jobs:
         name = norm_job_name(job.get("name")) or "(unnamed job)"
         rec = shards.setdefault(name, {"unfinished": False})
         if job.get("status") and job.get("status") != "completed":
             rec["unfinished"] = True
-        if job_seconds(job) is not None:
-            target_completed += 1
-    if not shards or target_completed == 0:
+    if not shards:
         return None
 
     green: dict[str, dict] = {}
@@ -702,7 +709,17 @@ def _run_main(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    try:
+        args = build_parser().parse_args(argv)
+    except SystemExit as exc:
+        # argparse's own usage errors exit 2, which collides with the documented
+        # EXIT_INCOMPLETE = 2: a wrapper keying on the process status could not
+        # tell a typo'd/abbreviated arming flag from a transiently unreadable
+        # candidate listing. `--help` (code 0) still exits 0; every other
+        # argparse exit is a usage error (3).
+        if exc.code in (0, None):
+            return EXIT_OK
+        return EXIT_USAGE
     try:
         return _run_main(args)
     except (Incomplete, OSError) as exc:
