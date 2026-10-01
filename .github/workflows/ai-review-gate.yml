@@ -8,7 +8,10 @@ name: ai-review-gate
 # ✅ It IS a required status context as of 2026-09-29 (#5433), and an ENTRY
 # condition of the Mergify queue (`- check-success=ai-review-gate` in
 # .mergify.yml). Verified: live branches/main/protection/required_status_checks
-# lists it, and `python3 tools/mergify_config_guard.py --static` passes. The STATIC tie is
+# lists it — 7 contexts (pricing-artifact, docs, test-isolation, license-surface,
+# legal-e2e, python-ci-gate, ai-review-gate), `strict: false`,
+# `enforce_admins: false` (so an admin merge can still bypass a red) —
+# and `python3 tools/mergify_config_guard.py --static` passes. The STATIC tie is
 # clause (iv)'s agreement sub-check — the config's check set vs the record's
 # `required_contexts` — which runs while a queue rule uses `merge` injection (the live
 # mode of the `main` rule, so this tie IS active today; inert under the default `queue`
@@ -52,8 +55,8 @@ name: ai-review-gate
 # ties the verdict to a commit identity that changes on every merge-only
 # branch update (`gh pr update-branch` inserts a merge commit; the three-dot
 # diff is byte-identical unless main's advancement touched a file the PR also
-# changes, in which case the evidence is genuinely stale). With `strict: true`
-# branch protection that made the
+# changes, in which case the evidence is genuinely stale). With the `strict:
+# true` protection in force at the time (#2982), that made the
 # two policies jointly unsatisfiable: every update invalidated a still-correct
 # verdict, so a green PR could never reach a terminal mergeable state. A marker
 # is therefore accepted when EITHER:
