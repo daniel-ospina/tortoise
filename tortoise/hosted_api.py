@@ -13025,10 +13025,18 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     # gate above is VACUOUS since #4010 (sessions unlimited for every tier).
     #
     # ⛔ SCOPE — stated precisely, because overstating a gate is worse than the
-    # gap it leaves: this bounds the COUNTED share of what the lane writes
-    # (value Points, plus the :Object/:Subject nodes entities mint), because
-    # `_count_resource("points")` counts exactly
+    # gap it leaves: this polices the COUNTED CATEGORY (value Points, plus the
+    # :Object/:Subject nodes entities mint), because `_count_resource("points")`
+    # counts exactly
     # `(n:Point AND non-episodic) OR n:Object OR n:Subject` (tortoise/quota.py).
+    # ⛔ IT GATES THE PRE-STATE, NOT THE PAYLOAD: it refuses when the org's count
+    # is ALREADY at/over `max_points`. It therefore does NOT bound the count this
+    # lane's own commit can leave behind — the lane writes in bulk and carries
+    # no payload estimate, so a commit from just under the cap can finish past
+    # it. (The capture lane's `count + est > max_points` at :10888 IS
+    # estimate-aware; this is the pre-write form every OTHER write endpoint
+    # uses — /v1/points, /v1/objects, /v1/subjects — which is the parity #4051
+    # asked for, NOT a new bound.)
     # It does NOT bound the lane's total node growth and it CANNOT close the
     # uncounted loop this issue is about: a `points: []` commit mints :Session
     # + transcript :Source (D10 — a document is a :Source; :Document is

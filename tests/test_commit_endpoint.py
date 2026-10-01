@@ -2038,7 +2038,10 @@ class TestCommitPointsGate:
         assert detail["limit"] == 1
         assert detail["used"] == 1
         assert self._chain_counts("sGateAt") == (0, 0, 0), (
-            "a refused commit must mint NOTHING")
+            "a refused commit must mint no Session/Event/Source — NOT 'nothing': "
+            "a :CommitRecord with status='partial' IS merged before the gate "
+            "(see the class docstring); replay-safe, and invisible to "
+            "_chain_counts by design")
         assert self._point_count() == before  # no partial Point either
 
     def test_over_max_points_refused_and_mints_nothing(self, client):
@@ -2050,6 +2053,32 @@ class TestCommitPointsGate:
         assert r.status_code == 402, r.text
         assert r.json()["detail"]["resource"] == "points"
         assert self._chain_counts("sGateOver") == (0, 0, 0)
+
+    def test_count_error_fails_closed(self, client, monkeypatch):
+        """#4051: a COUNTING FAILURE must never be a silent pass.
+
+        `_check_org_limit` documents "counting errors raise HTTP 500
+        (QuotaCheckError) — never a silent pass", and that is the property the
+        new gate site must inherit. Without this test the property is
+        unpinned HERE: wrapping the offload in a bare `except Exception: pass`
+        leaves every other test in this class green (verified by mutation),
+        because they only ever exercise a WORKING count.
+        """
+        import tortoise.quota as quota_mod
+        from tortoise.quota import QuotaCheckError
+
+        # Patch the seam the gate CALLS, not the gate itself: `_check_org_limit`
+        # imports `enforce_org_limit` locally and catches QuotaCheckError around
+        # it to raise HTTP 500. Patching `_check_org_limit` instead would bypass
+        # that handler and the exception would escape the TestClient (which
+        # re-raises server exceptions) — proving nothing.
+        def _boom(org, resource, *, slot_credit=0, **kwargs):
+            raise QuotaCheckError("count unavailable")
+
+        monkeypatch.setattr(quota_mod, "enforce_org_limit", _boom)
+        r = _commit(client, _raw_payload(1, session_id="sGateErr", points=[],
+                                         entities=[], provenance_refs=[]))
+        assert r.status_code == 500, r.text
 
     def test_one_under_max_points_still_commits(self, client):
         """#4051 boundary: at max_points - 1 the same payload lands — a normal
