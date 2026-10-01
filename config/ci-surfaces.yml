@@ -744,6 +744,10 @@ surfaces:
   - test_finding_provenance.py
   - test_health_client_effect.py  # #3811: /health client-visible effect over a real port (dual: api)
   - test_branch_reaper.py   # #4408: local-branch reaper — PR-state classification + safety guards
+  # #6868: the wedged-CI-run reaper. Hermetic (stub gh; no network), so it pins
+  # no api/engine surface: `core` runs it on engine-wide changes. Its carve-out
+  # below keeps a tools/run_reaper.py-only diff out of the tier-1 smoke fallback.
+  - test_run_reaper.py
   - test_health_ready_nonblocking.py  # #2988: /health/ready off-loop + bounded probes
   - test_selfhost_health_probe_executor.py  # #3287/#2988/#3243: selfhost health probes (dual-registered)
   - test_server_hygiene_gate.py
@@ -2140,6 +2144,7 @@ durations:
   test_transport_wait_bound.py: 5.8
   test_collision_preflight.py: 13.1
   test_branch_reaper.py: 2.0  # unmeasured — no measurement in the four source runs; flat default
+  test_run_reaper.py: 2.0  # unmeasured — new file (#6868); no CI junit yet, flat default
   test_control_plane_offload_3498.py: 1.4
   test_analytics_offloop_4015.py: 0.6
   test_free_team_entitlement.py: 4.8

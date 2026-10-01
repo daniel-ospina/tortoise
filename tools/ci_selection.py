@@ -807,6 +807,15 @@ TOOL_CARVEOUTS = (
     # SOURCE_PATTERNS entry matches it, so it lands in the unknown-path branch
     # -> FULL matrix (fail closed) — the safe default for a destructive-ref tool.
     "tools/branch_reaper.py",
+    # #6868: the wedged-CI-run reaper (tools/run_reaper.py) owns
+    # tests/test_run_reaper.py. Exact same silent-drop class as the
+    # branch-reaper carve-out above: the flat "tools/" prefix in
+    # NON_PYTHON_PREFIXES would swallow a reaper-only change, `changed` comes
+    # back empty, select() takes the docs-only path, and the run-reaper's
+    # mutation tests never run on the PR that changes it. No SOURCE_PATTERNS
+    # entry matches it, so it lands in the unknown-path branch -> FULL matrix
+    # (fail closed) — the safe default for a tool that CANCELS CI runs.
+    "tools/run_reaper.py",
     # #2573: the CI embedder gate (tools/embedder_provision.py) owns
     # tests/test_embedder_provision.py. Same silent-drop class as the
     # preflight carve-out above: no SOURCE_PATTERNS entry matches it, so a
