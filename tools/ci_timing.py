@@ -29,13 +29,23 @@ failure, not the exit-1 manifest-gate meaning below. Deterministic output
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/ci_timing.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/ci_timing.py`"
+    )
+
 import argparse
 import glob
 import json
 import os
 import re
 import subprocess
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -432,7 +442,13 @@ def integrity_problems(manifest_text: str) -> list[str]:
     rendered — sub-floor, finer precision, or negative — a non-empty map whose
     every weight is the `0.0` sentinel, and a stale capture date) and both
     callers compose it, so the invariant is structural rather
-    than a convention each caller has to re-implement. The one UNKNOWN class the
+    than a convention each caller has to re-implement. `check` reaches those
+    checks through `ci_manifest.map_issues`, which ALSO carries main's two
+    newer manifest checks (`fast_shard_issues` for the top-level `fast_shards`
+    declaration and `duplicate_entries` for the same-surface `merge=union`
+    gate) — so when main added them beside this change they were folded into
+    the same one place instead of being re-added at this call site. The one
+    UNKNOWN class the
     enforcing gate promotes to RED — a capture stamp that is PRESENT but
     unparseable — is likewise one shared decision,
     `ci_manifest.unparseable_stamp_issue`, composed by BOTH callers (see the
@@ -478,7 +494,7 @@ def integrity_problems(manifest_text: str) -> list[str]:
     problems += wf_issues
     if not wf_issues:
         legs = cs.push_legs(manifest)
-        halves = {"a": set(legs["half_a"]), "b": set(legs["half_b"])}
+        halves = {s["name"]: set(s["files"]) for s in legs["shards"]}
         problems += cs.workflow_halves_issues(manifest, halves)
     else:
         problems += cs.workflow_halves_issues(

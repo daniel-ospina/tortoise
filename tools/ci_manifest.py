@@ -36,7 +36,12 @@ Each of the four checks the ruling names is implemented at ONE level:
 
 ``tools/ci_selection.py --integrity`` and the refresh's own gate in
 ``tools/ci_timing.py`` both call :func:`check`, so a check cannot be
-half-wired into one entry point and missing from the other.
+half-wired into one entry point and missing from the other. :func:`map_issues`
+is the ONE composition, and it carries every manifest-level check the two
+entry points used to call loose — the three duration checks plus
+``fast_shard_issues`` (#6135) and ``duplicate_entries`` (#2913/#5373), which
+landed on main beside this change and must therefore run here rather than at a
+call site.
 
 CLI::
 
@@ -369,17 +374,30 @@ def plausibility_issues(manifest: dict) -> list[str]:
 
 
 def map_issues(manifest: dict) -> list[str]:
-    """The map checks that already exist, composed in the #3407 order.
+    """The manifest checks that already exist, composed in the #3407 order.
 
     ``duration_issues`` MUST run before ``leg_coverage_issues``: the latter
     calls ``push_legs()`` -> ``split_fast_gate()``, so before the ordering fix a
     malformed weight raised inside the packer, before the check that NAMES it
     had run.
+
+    This is the ONE composition both enforcing entry points reach
+    (``ci_selection --integrity`` and ``ci_timing.integrity_problems``, via
+    :func:`check`), so a check added here cannot be half-wired. ``#6135``'s
+    ``fast_shard_issues`` and ``#2913/#5373``'s ``duplicate_entries`` are
+    carried here for exactly that reason: both landed on main beside the
+    #5050 validator, and leaving them at a call site would have made them
+    reachable from one entry point only — the half-wired state this
+    composition exists to prevent. Order follows main's own composition
+    (``fast_shard_issues`` first, ``duplicate_entries`` last) so a diagnostic
+    list reads the same on either entry point.
     """
     cs = _ci_selection()
-    return (cs.duration_issues(manifest)
+    return (cs.fast_shard_issues(manifest)
+            + cs.duration_issues(manifest)
             + cs.leg_coverage_issues(manifest)
-            + cs.duration_coverage_issues(manifest))
+            + cs.duration_coverage_issues(manifest)
+            + cs.duplicate_entries(manifest))
 
 
 def check(manifest: dict,

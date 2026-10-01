@@ -130,6 +130,14 @@ both compose `ci_manifest.check`. Before, the refresh's gate **duplicated** the
 same three `ci_selection` calls in a second place, held in step by a docstring;
 now the invariant is structural.
 
+Two manifest checks that landed on `main` while this branch was open —
+`fast_shard_issues` (#6135, the top-level `fast_shards` declaration) and
+`duplicate_entries` (#2913/#5373, the same-surface `merge=union` gate) — are
+carried by that same composition (`ci_manifest.map_issues`), so the merged tree
+runs the **union** of both pipelines instead of either side's list. Neither is
+dropped and neither is re-added at a call site; reachability from both entry
+points is verified, not asserted.
+
 ## 4. Exit-code semantics (`tools/ci_manifest.py`)
 
 | code | meaning | conditions |

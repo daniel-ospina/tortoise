@@ -383,8 +383,21 @@ CLAIM_COLLISION_CORPUS = {
 }
 
 def _git(repo: Path, *args: str) -> None:
+    # A temp repo has no committer identity, so any git commit through this
+    # helper dies with exit 128 ("Author identity unknown") on a machine with
+    # no global user.email. Set it in the ENVIRONMENT rather than by running
+    # `git config user.email` per repo: the environment covers every temp repo
+    # this module creates, including the ones built inside a test body, and it
+    # cannot be forgotten at a new call site the way a per-repo config can.
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "Test",
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "Test",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+    }
     subprocess.run(["git", *args], cwd=repo, check=True,
-                   capture_output=True, text=True)
+                   capture_output=True, text=True, env=env)
 
 
 def _write_exec(path: Path, body: str) -> Path:
@@ -1437,6 +1450,99 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("[remote branches]", out)
         self.assertIn("refs/remotes/origin/fix/3061-collision", out)
 
+    def test_merge_queue_hash_branch_is_not_a_claim(self):
+        # #3611 (escalation to a BLOCKING surface): `mergify/merge-queue/<hash>`
+        # is a GENERATED branch — created and deleted by the merge queue for
+        # each queued PR — so its name is a hash that can begin with the issue
+        # number. Measured instance: `mergify/merge-queue/6160bad001` made
+        # `collision_preflight 6160` report exit 1 with that queue branch as its
+        # ONLY hit, so an issue nobody held was reported as held and dropped
+        # from the queue.
+        #
+        # The number here LEADS the hex run, which the digest guard deliberately
+        # does NOT exclude (`3061cafe` must stay a live reference), so ORIGIN is
+        # the only thing that can separate these two cases — which is why the
+        # fix tests the namespace rather than loosening the number rule.
+        _git(self.repo, "update-ref",
+             "refs/remotes/origin/mergify/merge-queue/3061bad001", "HEAD")
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertNotIn("do NOT dispatch", out)
+        # The ref WAS present, so a green run is not a fixture artefact.
+        self.assertNotIn("mergify/merge-queue", out)
+
+    def test_lane_branch_leading_a_hex_run_still_collides(self):
+        # Control for the test above: excluding a GENERATED namespace must not
+        # exclude a lane's branch that merely LOOKS hex-ish. `3061cafe` is a
+        # name a lane can write, so it must remain a blocking hit — this pins
+        # the fix against being widened into "nothing hex-looking counts".
+        _git(self.repo, "update-ref",
+             "refs/remotes/origin/fix/3061cafe", "HEAD")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("refs/remotes/origin/fix/3061cafe", out)
+
+    def test_a_lane_branch_under_mergify_not_merge_queue_still_collides(self):
+        # ⛔ THE WIDTH OF THE FILTER IS A FAIL-CLOSED DECISION. A lane CAN create
+        # `mergify/<issue>-name` locally, and any namespace wider than
+        # `mergify/merge-queue/` renders that branch invisible on a BLOCKING
+        # surface: a false CLEAN, which for this tool is strictly worse than a
+        # false COLLISION. This pins the narrower namespace so the filter cannot
+        # be widened again without a decision.
+        for ref in (f"mergify/{ISSUE}-lane", f"mergify/{ISSUE}-lane-local"):
+            with self.subTest(ref=ref):
+                _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", "HEAD")
+                rc, out = self.run_tool()
+                self.assertNotEqual(rc, 0, f"ref={ref!r}\n{out}")
+                self.assertIn("VERDICT: COLLISION", out)
+                self.assertIn(f"refs/remotes/origin/{ref}", out)
+
+    def test_second_mergify_namespace_and_ci_bot_branch_are_not_claims(self):
+        # Two further generated namespaces exist in this repo's real refs.
+        # `mq/merge-queue/` is a second Mergify merge-queue namespace;
+        # `chore/ci-timing-refresh-` is minted by this repo's own workflow from
+        # `git rev-parse --short HEAD`, so a short SHA can LEAD with an issue
+        # number exactly like the hash this filter exists for.
+        for ref in (f"mq/merge-queue/{ISSUE}bad001",
+                    f"chore/ci-timing-refresh-{ISSUE}bad001"):
+            with self.subTest(ref=ref):
+                _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", "HEAD")
+                rc, out = self.run_tool()
+                self.assertEqual(rc, 0, f"ref={ref!r}\n{out}")
+                self.assertIn("VERDICT: CLEAN", out)
+                self.assertNotIn("do NOT dispatch", out)
+                self.assertNotIn(ref, out)
+
+    def test_worktree_on_a_generated_branch_is_still_found_by_its_path(self):
+        # ⛔ THE WORKTREE HALF IS THE LOAD-BEARING ONE. The filter skips only the
+        # BRANCH; the PATH must still be matched in full, or a real worktree on a
+        # generated branch becomes invisible on a BLOCKING surface.
+        self.add_worktree(f"{ISSUE}-queue-wt",
+                          branch=f"mergify/merge-queue/{ISSUE}bad001")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("[local worktrees]", out)
+        self.assertIn(f"{ISSUE}-queue-wt", out)
+
+    def test_ci_timing_branch_with_a_descriptive_tail_is_still_a_claim(self):
+        # `chore/ci-timing-refresh-` sits under the LANE-OWNED `chore/`
+        # namespace, so the bare prefix would be too wide — a lane could write a
+        # descriptive tail. The generator mints a lowercase short SHA, so the
+        # tail is anchored to lowercase hex; anything else stays a claim, because
+        # hiding one on a BLOCKING surface is worse than a false COLLISION.
+        for ref in (f"chore/ci-timing-refresh-{ISSUE}-manual",
+                    f"chore/ci-timing-refresh-{ISSUE}",
+                    f"chore/ci-timing-refresh-{ISSUE}BAd001"):
+            with self.subTest(ref=ref):
+                _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", "HEAD")
+                rc, out = self.run_tool()
+                self.assertNotEqual(rc, 0, f"ref={ref!r}\n{out}")
+                self.assertIn("VERDICT: COLLISION", out)
+                self.assertIn(ref, out)
+
     def test_local_branch_hit(self):
         _git(self.repo, "branch", "fix/3061-collision-preflight")
         rc, out = self.run_tool()
@@ -1810,14 +1916,12 @@ class CollisionPreflightTest(unittest.TestCase):
         # issue number, so the hit comes from `closingIssuesReferences` and only
         # the self-identity gate can suppress it.
         _git(self.repo, "checkout", "-q", "-b", "release/hub-work")
-        other = self.tmp / "other-repo"
-        other.mkdir()
-        _git(other, "init", "-q", "-b", "main", "--template=")
-        _git(other, "remote", "add", "origin",
-             "https://github.com/other-owner/other-repo.git")
-        (other / "seed.txt").write_text("seed\n")
-        _git(other, "add", "seed.txt")
-        _git(other, "commit", "-qm", "seed")
+        # ⛔ USE THE SHARED FIXTURE HELPER — do not hand-roll this repo. This
+        # block was an inline copy of `_sibling_repo` that had dropped its two
+        # identity lines (`git config user.email` / `git config user.name`),
+        # which the seed commit below needs. Going through the helper keeps that
+        # in one place, so a hand-rolled copy cannot drop it again.
+        other = self._sibling_repo("other-repo", "other-owner/other-repo")
 
         self.gh_fixtures(open_prs=[{
             "number": 5199, "title": "fix: land the thing",
@@ -2015,7 +2119,7 @@ class CollisionPreflightTest(unittest.TestCase):
         self.gh_fixtures(open_prs=[])
         rc, out = self.run_tool()
         self.assertEqual(rc, 0, out)
-        remote_row = [ln for ln in out.splitlines() if ln.startswith("remote branches")][0]
+        remote_row = next(ln for ln in out.splitlines() if ln.startswith("remote branches"))
         self.assertIn("terminal tests are NOT applied here", remote_row)
         self.assertNotIn("already merged into main", remote_row)
 
@@ -2258,8 +2362,8 @@ class CollisionPreflightTest(unittest.TestCase):
         rc, out = self.run_tool()
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
-        wt_row = [ln for ln in out.splitlines()
-                  if ln.startswith("local worktrees")][0]
+        wt_row = next(ln for ln in out.splitlines()
+                      if ln.startswith("local worktrees"))
         self.assertIn("HIT", wt_row, wt_row)
         self.assertNotIn("merged into origin/main", wt_row)
 
@@ -2385,8 +2489,8 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
         for row_prefix in ("local branches", "local worktrees"):
-            row = [ln for ln in out.splitlines()
-                   if ln.startswith(row_prefix)][0]
+            row = next(ln for ln in out.splitlines()
+                       if ln.startswith(row_prefix))
             self.assertIn("HIT", row, row)
         self.assertNotIn("merged into origin/main", out)
 
@@ -3662,6 +3766,47 @@ class CollisionPreflightTest(unittest.TestCase):
                 self.assertIn("VERDICT: COLLISION", out)
                 self.assertIn("JEV UNAVAILABLE", out)
                 self.assertIn("fail-closed", out)
+
+    def test_explicit_jev_env_file_does_not_fall_through_to_a_key_on_disk(self):
+        """An explicit JEV env-file override is AUTHORITATIVE (#5278).
+
+        The override used to be PREPENDED to the candidate list, with the
+        implicit ``<cwd>/.env`` still consulted afterwards. So a run that
+        declared a KEYLESS env file picked a key up anyway — and, on a machine
+        carrying one, made a real, billable JEV call while believing it had no
+        credential at all.
+
+        This is hermetic and needs no network: a decoy key is written exactly
+        where an implicit candidate looks (``<cwd>/.env`` — the harness's temp
+        repo), the override names a keyless file, and the tool must report that
+        no ``JEV_API_KEY`` was found. Through the old fall-through it found the
+        decoy and failed with a transport error instead, so this assertion is
+        what pins the invariant — the existing ``no-key`` subtest below does
+        NOT, because in a checkout without a ``.env`` (CI) both behaviours
+        return no key and it passes either way.
+        """
+        body = (
+            "Consolidated under #5063 (one binding from a written claim to the "
+            "system it describes)."
+        )
+        self.gh_fixtures(issue=self.issue_payload(comments=[("test-agent", body)]))
+        # A decoy key at a location the IMPLICIT candidate list would read.
+        (self.repo / ".env").write_text(
+            "JEV_API_KEY=implicit-candidate-decoy\n", encoding="utf-8",
+        )
+        keyless = self.tmp / "keyless.env"
+        keyless.write_text("# deliberately carries no JEV_API_KEY\n", encoding="utf-8")
+
+        rc, out = self.run_tool(env_extra={
+            "COLLISION_PREFLIGHT_JEV": "on",
+            "COLLISION_PREFLIGHT_JEV_ENV_FILE": str(keyless),
+        })
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("JEV UNAVAILABLE", out)
+        # THE DISCRIMINATOR: the run must have found NO key. Had it fallen
+        # through to the decoy it would have attempted a call and reported a
+        # transport failure instead of the missing-key reason.
+        self.assertIn("no JEV_API_KEY", out)
 
     def test_same_body_decides_identically_and_warm_cache_makes_no_call(self):
         self.jev_rules(default=0.03)  # CLEAN

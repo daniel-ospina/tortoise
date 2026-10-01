@@ -26,8 +26,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # contamination pattern), because pytest imports all modules before running
 # any test.
 
-from tortoise.sdk import TortoiseSDK  # noqa: I001
+from tests import _live_utils
 from tortoise.ep import TortoiseEP
+from tortoise.sdk import TortoiseSDK
 from tortoise.weights import compute_operator_weight
 
 # Requires live FalkorDB (Docker). Skip gracefully when unavailable so the
@@ -35,7 +36,7 @@ from tortoise.weights import compute_operator_weight
 # in tests/test_integration_search.py. The probe targets the DOCKER URI
 # explicitly — embedded mode is "available" but does not provide the docker
 # graph semantics these tests need.
-_DB_URI = "docker://:falkordb@localhost:6379/tortoise_test_dir_impl_fix"
+_DB_URI = _live_utils.docker_uri("tortoise_test_dir_impl_fix")
 FALKORDB_AVAILABLE = False
 _OLD_URI = os.environ.get("TORTOISE_DB_URI")
 try:
