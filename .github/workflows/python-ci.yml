@@ -2341,9 +2341,11 @@ jobs:
     #
     # Both extensions are linted: GitHub loads either `.yml` or `.yaml`, so a
     # `*.yml`-only glob would silently skip a `.yaml` workflow.
-    # Ungated on purpose: a leg that reaches these `needs` but SKIPS has no row
-    # that can fail closed, so the required check could certify a shard that
-    # never ran (#5219). It therefore always runs and must always succeed.
+    # Ungated on purpose: this leg has no diff selector, so its LEGS row is
+    # `-` and it must therefore always resolve to SUCCESS — the aggregate fails
+    # closed on a `skipped` row whose third field is not `false` (#5219). The
+    # malformed-file class applies to EVERY diff, so gating it on a selector
+    # would leave whole diff classes unguarded.
     #
     # Bounded like `manifest-integrity`: this job pulls a Docker image to feed
     # the REQUIRED aggregate, so a stalled registry must not hold
