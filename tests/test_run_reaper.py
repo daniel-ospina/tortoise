@@ -348,7 +348,7 @@ class RunReaperTestCase(unittest.TestCase):
         """No green history -> no bound -> no cancel (fail closed)."""
         self.make_run("555", elapsed_s=99999, workflow_id=7)
         self.make_jobs("555", [job("test (a)", 600),
-                               job("test (g)", None, status="in_progress")])
+                               job("test (g)", None, status="in_progress", started_s=5000)])
         # success_ids intentionally absent -> green_run_ids returns []
         row = self.rows(["--run", "555"])["555"]
         self.assertEqual(row["action"], "skip")
@@ -366,7 +366,7 @@ class RunReaperTestCase(unittest.TestCase):
         """
         self.make_run("555", elapsed_s=99999, workflow_id=7)
         self.make_jobs("555", [job("test (a)", 600),
-                               job("test (g)", None, status="in_progress")])
+                               job("test (g)", None, status="in_progress", started_s=5000)])
         self.green_population(7, maxes={"test (a)": 500})   # no "test (g)" sample
         row = self.rows(["--run", "555"])["555"]
         self.assertEqual(row["action"], "skip")
@@ -654,6 +654,72 @@ class RunReaperTestCase(unittest.TestCase):
         finally:
             mod._run_main = orig
         self.assertEqual(rc2, mod.EXIT_INCOMPLETE)
+
+    def test_the_issued_flag_is_set_BEFORE_the_post(self):
+        """THE ORDERING IS THE MECHANISM, so drive the REAL path.
+
+        A test that sets the flag by hand pins the handler, not the ordering —
+        and then moving the assignment to AFTER ``cancel_run(...)`` (or deleting
+        it, which literally reinstates the original defect) passes the whole
+        suite green. So let the POST actually land on the stub, fault the
+        RENDER that follows it, and assert exit 6 AND that the cancel was
+        recorded. This turns red if the flag is not set before the POST.
+        """
+        mod = _load_tool_module()
+        self.make_run("111", elapsed_s=25740, workflow_id=7)
+        self.make_jobs("111", [job("test (a)", 600),
+                               job("test (g)", None, status="in_progress", started_s=25740)])
+        self.green_population(7, maxes={"test (a)": 500, "test (g)": 1072})
+        env = {"RUN_REAPER_GH": str(self.gh), "GH_STUB_DIR": str(self.gh_dir),
+               "RUN_REAPER_NOW": str(NOW)}
+        saved = {k: os.environ.get(k) for k in env}
+        os.environ.update(env)
+
+        def boom(*_a, **_k):
+            raise OSError("broken pipe while rendering the report")
+
+        orig = mod._render_human
+        mod._render_human = boom
+        try:
+            rc = mod.main(["--repo", "owner/repo", "--run", "111", "--apply"])
+        finally:
+            mod._render_human = orig
+            for k, v in saved.items():
+                os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+
+        self.assertEqual(rc, mod.EXIT_INCOMPLETE_AFTER_CANCEL)
+        # The POST really landed on the stub before the render faulted.
+        self.assertEqual(self.cancelled(), ["111"])
+
+    def test_the_internal_error_arm_also_honours_the_issued_flag(self):
+        """The BaseException arm needs its OWN pin.
+
+        The fault used above is Incomplete/OSError, caught by the EARLIER arm, so
+        the later arm is never reached and neutering its check leaves the suite
+        green. Both arms must answer 6 once a POST has been issued.
+        """
+        mod = _load_tool_module()
+
+        def boom_after(_args):
+            mod._CANCEL_ISSUED = True
+            raise RuntimeError("unexpected fault after the POST was issued")
+
+        orig, mod._run_main = mod._run_main, boom_after
+        try:
+            rc = mod.main(["--repo", "owner/repo"])
+        finally:
+            mod._run_main = orig
+        self.assertEqual(rc, mod.EXIT_INCOMPLETE_AFTER_CANCEL)
+
+        def boom_none(_args):
+            raise RuntimeError("unexpected fault with nothing issued")
+
+        orig, mod._run_main = mod._run_main, boom_none
+        try:
+            rc2 = mod.main(["--repo", "owner/repo"])
+        finally:
+            mod._run_main = orig
+        self.assertEqual(rc2, mod.EXIT_INTERNAL)
 
     def test_listing_unreadable_but_explicit_run_still_reaps(self):
         """The listing is an INDEX; an explicit --run stands on its own."""
