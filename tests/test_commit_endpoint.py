@@ -2041,7 +2041,7 @@ class TestCommitPointsGate:
             "a refused commit must mint no Session/Event/Source — NOT 'nothing': "
             "a :CommitRecord with status='partial' IS merged before the gate "
             "(`store.acquire(..., status='partial')`, hosted_api.py:13006, which "
-            "runs ahead of the gate at :13063); replay-safe, and invisible to "
+            "runs ahead of the gate at :13061); replay-safe, and invisible to "
             "_chain_counts by design")
         assert self._point_count() == before  # no partial Point either
 
@@ -2063,8 +2063,8 @@ class TestCommitPointsGate:
         new gate site must inherit.
 
         ⛔ IT MUST DISCRIMINATE THE POINTS SITE FROM THE SESSIONS SITE. The lane
-        calls `_check_org_limit(org, "sessions")` (:13024) BEFORE the #4051
-        points gate (:13063), and BOTH call the same `enforce_org_limit` — so a
+        calls `_check_org_limit(org, "sessions")` (:13023) BEFORE the #4051
+        points gate (:13061), and BOTH call the same `enforce_org_limit` — so a
         patch that fails EVERY resource makes the SESSIONS gate raise the 500
         first and the request never reaches the new site. That was the first cut
         of this test, and it pinned nothing: with only the points gate made to
