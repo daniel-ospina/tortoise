@@ -819,15 +819,55 @@ jobs:
             # as missing; the full run below still runs either way (fail-open).
             if [ "$LF_RC" -eq 4 ]; then
               python3 - <<'LF_PRUNE'
-          import json, pathlib, re
+          import json, os, pathlib, re, sys
+
+          # pytest names what it could not collect, and NEITHER shape is a
+          # `lastfailed` key:
+          #   not found: /abs/path/tests/test_a.py::test_gone      (renamed test)
+          #   file or directory not found: tests/test_a.py::test_x (renamed file)
+          # — the first is resolved ABSOLUTE while the keys are repo-relative, and
+          # a vanished PARAMETRIZED id loses its `[param]` suffix (pytest says
+          # `…::test_p`, not `…::test_p[c two]`). So comparing the log verbatim
+          # against a key matches nothing and prunes nothing — which is how the
+          # first cut of this fix shipped, silently. Normalise BOTH sides.
+          try:
+              log = pathlib.Path("/tmp/pytest.log").read_text(errors="replace")
+          except OSError:
+              sys.exit(0)
+          root = os.path.realpath(os.getcwd())
+          gone = set()
+          for token in re.findall(r"not found:\s*(\S+)", log):
+              path, _, names = token.partition("::")
+              rel = os.path.relpath(os.path.realpath(path), root)
+              if rel.split(os.sep, 1)[0] == "..":
+                  continue  # outside the invocation dir — not one of ours
+              gone.add(f"{rel}::{names}" if names else rel)
+          if not gone:
+              sys.exit(0)
           cache = pathlib.Path(".pytest_cache/v/cache/lastfailed")
-          log = pathlib.Path("/tmp/pytest.log").read_text(errors="replace")
-          gone = set(re.findall(r"not found:\s*(\S+)", log))
-          if gone and cache.exists():
+          try:
               data = json.loads(cache.read_text() or "{}")
-              kept = {k: v for k, v in data.items() if k not in gone}
+          except (OSError, ValueError):
+              sys.exit(0)
+          if not isinstance(data, dict):
+              sys.exit(0)
+          # A vanished nodeid also covers the parametrized keys pytest named
+          # without their suffix. Dropping one costs at most a lost
+          # optimization (the full half still runs); KEEPING one costs the
+          # fast-fail itself.
+          kept = {k: v for k, v in data.items()
+                  if k not in gone and k.split("[", 1)[0] not in gone}
+          if len(kept) == len(data):
+              sys.exit(0)
+          if kept:
               cache.write_text(json.dumps(kept))
               print(f"last-failed fast-fail: pruned {len(data) - len(kept)} vanished nodeid(s)")
+          else:
+              # Nothing left to fast-fail on: remove the file so the guard's
+              # `-s` test skips the pre-phase. An empty `{}` would instead run
+              # the WHOLE half here and again in the gating run.
+              cache.unlink()
+              print(f"last-failed fast-fail: pruned all {len(data)} vanished nodeid(s); cache removed")
           LF_PRUNE
             fi
             # FAIL-OPEN on 0 (passed — the full half still runs), 4/5 (nothing

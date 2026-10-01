@@ -15,6 +15,7 @@ green, so these tests pin the shape that prevents exactly that.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import textwrap
@@ -77,6 +78,34 @@ def _is_narrowing(args: list[str]) -> list[str]:
     return hits
 
 
+def _prune_code() -> str:
+    """The workflow's own rc-4 prune payload, extracted verbatim.
+
+    Running the payload (rather than grepping it) is what lets a pin see a
+    regex that matches NOTHING: the first version of this fix compared the log
+    verbatim against the cache keys, pruned nothing in production, and stayed
+    green against a hand-made log of a shape pytest never emits.
+    """
+    block = re.search(r"<<'LF_PRUNE'\n(.*?)\n *LF_PRUNE", _run_script(), re.S)
+    assert block, _run_script()
+    return textwrap.dedent(block.group(1))
+
+
+def _run_prune(code: str, tmp_path, keys: dict, log_text: str):
+    """Run the prune payload against a cache + log fixture; return (stdout,
+    the cache AFTER — None when the payload removed the file)."""
+    cache = tmp_path / "lastfailed"
+    cache.write_text(json.dumps(keys))
+    log = tmp_path / "pytest.log"
+    log.write_text(log_text)
+    out = subprocess.run(
+        ["python3", "-c",
+         code.replace(".pytest_cache/v/cache/lastfailed", str(cache))
+             .replace("/tmp/pytest.log", str(log))],
+        capture_output=True, text=True, check=True).stdout
+    return out, (json.loads(cache.read_text()) if cache.exists() else None)
+
+
 def test_full_gating_run_is_not_narrowed():
     """The run that writes the canonical junit (the GATING run) must carry no
     narrowing flag — the #4164 property this change must preserve."""
@@ -117,16 +146,17 @@ def test_prephase_is_pr_only_and_never_uses_pytest_lf_fallback():
     # the predicate itself: `not in files` would invert the per-half scoping
     # (run the complement — a dead optimization, or another half's tests).
     assert "[0] in files" in script
-    # and the whole pre-phase is gated on the PR event + the restored state.
+    # and the whole pre-phase is gated on the PR event AND the restored state.
     guard = next(i for i, ln in enumerate(lines)
                  if "github.event_name" in ln and ln.strip().startswith("if "))
-    # The POLARITY is the pin, not the token: `!in` would leave every other
-    # assertion here green while the pre-phase ran on every push EXCEPT a PR —
-    # i.e. the feature silently off where it is meant to run (mutation-checked).
-    assert lines[guard].strip().startswith(
-        'if [ "${{ github.event_name }}" = "pull_request" ]'), lines[guard]
-    assert "!=" not in lines[guard], lines[guard]
-    assert "[ -s .pytest_cache/v/cache/lastfailed ]" in lines[guard], lines[guard]
+    # The SHAPE is the pin, not the tokens: `!=` inverts the polarity (the
+    # feature silently off where it is meant to run) and `||` drops the
+    # restored-state precondition (the pre-phase driven by an EMPTY nodeid
+    # array on a push) — and a token/substring check leaves both green.
+    # Mutation-checked: `=`→`!=`, `&&`→`||`, `-s`→`-e` each red this line.
+    assert lines[guard].strip() == (
+        'if [ "${{ github.event_name }}" = "pull_request" ] '
+        '&& [ -s .pytest_cache/v/cache/lastfailed ]; then'), lines[guard]
 
 
 def test_nodeid_intersection_actually_selects_this_halfs_failures(tmp_path):
@@ -164,35 +194,74 @@ def test_a_vanished_nodeid_is_pruned_so_the_prephase_cannot_lock_itself_out(tmp_
     test) would disable the fast-fail for that half on EVERY later push. The
     prune is what makes that self-healing; without it this test reds because
     the vanished entry survives in the cache.
+
+    The fixture log uses pytest's REAL shape — the resolved ABSOLUTE path, not
+    the relative one the nodeid was passed as (measured on pytest 8.4.2 and
+    9.1.1). A pin written against a relative log passes while the prune matches
+    nothing, which is exactly how this fix first shipped broken.
     """
-    script = _run_script()
-    block = re.search(r"<<'LF_PRUNE'\n(.*?)\n *LF_PRUNE", script, re.S)
-    assert block, script
-    code = textwrap.dedent(block.group(1))
-    cache = tmp_path / "lastfailed"
-    cache.write_text(json.dumps({
+    code = _prune_code()
+    root = os.path.realpath(os.getcwd())
+    out, cache = _run_prune(code, tmp_path, {
         "tests/test_a.py::test_gone": True,
         "tests/test_a.py::test_live": True,
-    }))
-    log = tmp_path / "pytest.log"
-    # pytest's real shape for a nodeid it cannot find
-    log.write_text(
-        "ERROR: not found: tests/test_a.py::test_gone\n"
-        "(no name 'tests/test_a.py::test_gone' in any of [<Module test_a.py>])\n")
-    code = code.replace(".pytest_cache/v/cache/lastfailed", str(cache))
-    code = code.replace("/tmp/pytest.log", str(log))
-    out = subprocess.run(["python3", "-c", code], capture_output=True,
-                         text=True, check=True).stdout
+    }, f"ERROR: not found: {root}/tests/test_a.py::test_gone\n"
+       "(no match in any of [<Module test_a.py>])\n")
     assert "pruned 1 vanished nodeid(s)" in out, out
-    assert json.loads(cache.read_text()) == {
-        "tests/test_a.py::test_live": True}, cache.read_text()
+    assert cache == {"tests/test_a.py::test_live": True}, cache
+
+    # A renamed FILE is named differently (`file or directory not found:`), and
+    # there pytest echoes the path AS GIVEN (relative here) — both shapes must
+    # prune, so the payload may not assume one spelling.
+    out, cache = _run_prune(code, tmp_path, {
+        "tests/test_nope.py::test_x": True,
+        "tests/test_a.py::test_live": True,
+    }, "ERROR: file or directory not found: tests/test_nope.py::test_x\n")
+    assert "pruned 1 vanished nodeid(s)" in out, out
+    assert cache == {"tests/test_a.py::test_live": True}, cache
+
     # ...and a log naming nothing is a NO-OP, not a wipe: the entries a real
     # failure left must survive an rc-4 run that found no missing nodeid.
-    log.write_text("1 failed, 2 passed\n")
-    subprocess.run(["python3", "-c", code], capture_output=True, text=True,
-                   check=True)
-    assert json.loads(cache.read_text()) == {
-        "tests/test_a.py::test_live": True}, cache.read_text()
+    out, cache = _run_prune(code, tmp_path, {"tests/test_a.py::test_live": True},
+                            "1 failed, 2 passed\n")
+    assert "pruned" not in out, out
+    assert cache == {"tests/test_a.py::test_live": True}, cache
+
+
+def test_a_vanished_parametrized_nodeid_is_pruned_despite_the_dropped_suffix(tmp_path):
+    """pytest names a vanished parametrized id WITHOUT its `[param]` suffix.
+
+    `…::test_p[c two]` (removed) is reported as `…::test_p`, so a prune that
+    only matches whole keys leaves EVERY parametrized key behind and the
+    lock-out survives — the same permanently-disabled fast-fail this payload
+    exists to prevent. Dropping the sibling `[c one]` that still exists is
+    acceptable: it costs at most a lost optimization, never a verdict.
+    """
+    code = _prune_code()
+    root = os.path.realpath(os.getcwd())
+    out, cache = _run_prune(code, tmp_path, {
+        "tests/test_a.py::test_p[c one]": True,
+        "tests/test_a.py::test_p[c two]": True,
+        "tests/test_a.py::test_live": True,
+    }, f"ERROR: not found: {root}/tests/test_a.py::test_p\n")
+    assert "pruned 2 vanished nodeid(s)" in out, out
+    assert cache == {"tests/test_a.py::test_live": True}, cache
+
+
+def test_pruning_the_last_entry_removes_the_cache_so_the_guard_skips(tmp_path):
+    """An emptied cache must be REMOVED, not written as `{}`.
+
+    The guard is `[ -s … ]`, which a two-byte `{}` satisfies — so an empty dict
+    would make the next push run the WHOLE half in the pre-phase (no keys left
+    to subtract) and then AGAIN in the gating run. Removing the file makes the
+    guard skip the pre-phase entirely.
+    """
+    code = _prune_code()
+    root = os.path.realpath(os.getcwd())
+    out, cache = _run_prune(code, tmp_path, {"tests/test_a.py::test_gone": True},
+                            f"ERROR: not found: {root}/tests/test_a.py::test_gone\n")
+    assert cache is None, cache
+    assert "pruned all 1 vanished nodeid(s); cache removed" in out, out
 
 
 def test_full_run_is_outside_the_guard_and_unconditional():
@@ -295,12 +364,11 @@ def test_lastfailed_cache_is_keyed_per_job_half_and_ref():
 def test_cache_provider_enabled_so_lastfailed_is_written():
     """The feature rides on pytest WRITING `.pytest_cache/v/cache/lastfailed`.
 
-    Every OTHER pytest invocation in this workflow disables the cache provider
-    (`-p no:cacheprovider` — 5 sites here, 15 repo-wide, the population #6142
-    documents), so re-adding
-    it to this job's two invocations is a plausible "restore consistency"
-    edit — and it would silently kill the optimization (no cache file, no
-    pre-phase, no red, ever). Pin the absence.
+    Every OTHER pytest invocation in this workflow still disables the cache
+    provider (`-p no:cacheprovider`; this PR removes it from exactly ONE — this
+    job's gating run), so re-adding it to this job's two invocations is a
+    plausible "restore consistency" edit — and it would silently kill the
+    optimization (no cache file, no pre-phase, no red, ever). Pin the absence.
     """
     script = _run_script()
     lines = _pytest_lines(script)
