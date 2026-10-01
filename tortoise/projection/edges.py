@@ -284,9 +284,10 @@ _DERIVATION_REFERENCES_LABELS = frozenset({"Event", "Document"})
 # content the target describes), ``e.file_hash`` on the repair path — see
 # :meth:`_EdgeHandlers.link_source_to_legacy_event` — and the caller-bound ``$v`` on the
 # `extractedFrom` writer (:meth:`_EdgeHandlers._link_source`). The ``$v`` caller is the
-# first to run on the REPLAY path as well: LIVE fills it from
+# only one whose version is JOURNALED rather than re-read at replay: LIVE fills it from
 # :func:`resolve_source_versions`, REPLAY passes the value carried in the Point's own
-# journaled snapshot, so a replay never re-reads the Source.
+# snapshot. (The ``s.contentHash`` callers ALSO run during a rebuild — ``_upsert_document``
+# and ``_materialize_connector_source`` in pass 1b — and DO re-read the Source there.)
 #
 # ⚠️ KNOWN LIMITATION — the anchor does not advance when the TARGET is rewritten in place
 # (#5199, under owner review). ``ON CREATE`` means a target rebuilt from a NEWER version
@@ -316,7 +317,9 @@ def resolve_source_versions(g, source_ref) -> dict[str, str]:
     Python (the separate ``references`` anchors read ``s.contentHash`` inside
     their own MERGE — see ``_DERIVATION_ANCHOR_SET``); it runs on the LIVE write
     path and its result is carried in the Point's own journaled snapshot, so the
-    REPLAY never re-reads the Source. That distinction is load-bearing:
+    REPLAY never re-reads the Source for the ``extractedFrom`` anchor (the separate
+    ``references`` anchors DO re-read it on the rebuild path). That distinction is
+    load-bearing:
     ``_upsert_source``'s in-place ``contentHash`` bump is unjournalled (#5024),
     so a Source read at replay time can have advanced since the Point was read —
     a FALSE current.

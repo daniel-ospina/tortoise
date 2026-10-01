@@ -337,9 +337,8 @@ scalar case is now test 1; `EventAPI.add_point` sets the transit **only when non
 `sourceVersionTransit: null`); `_upsert_point_edges` guards a falsy value before `dict(...)`; test 2 also
 asserts the journal payload has no key; test 15 scoped to the two in-scope producers (the R3 connection leg excluded).
 
-**Cycle 5 — code review (4 always-on + Architecture + Data + Config).** Folded: the generated
-`docs/product/sdk-rename-table.md` was REGENERATED after the `sdk.py` insertions shifted its line
-numbers (a red CI gate); the node carrier was RENAMED `sourceVersion` → `sourceVersionTransit` so a
+**Cycle 5 — code review (4 always-on + Architecture + Data + Config).** Folded: the node carrier was
+RENAMED `sourceVersion` → `sourceVersionTransit` so a
 Point read does not shadow §4.6's edge scalar with a pair-list; `_upsert_point_props` now validates
 the payload shape via ONE shared all-or-nothing `_valid_transit_pairs` predicate, also used by
 `_upsert_point_edges` — a per-pair filter on one side and `all()` on the other let a
