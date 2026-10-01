@@ -431,6 +431,12 @@ def test_prephase_failopen_codes_are_pinned():
         script.count('] && [ "$LF_RC" -ne'))
     # the red path must EXIT with that code, not fall through to the full run.
     assert "exit $LF_RC" in script
+    # ...and the rc-4 SELF-HEAL must key off exactly rc 4, the one code that
+    # means "pytest could not collect a nodeid". Shifting it is a one-character
+    # edit that disables the prune outright: rc 5 (everything deselected) logs
+    # no `not found:` token, so the stale entry that locks the fast-fail out for
+    # good would come back unmarked and unred.
+    assert 'if [ "$LF_RC" -eq 4 ]; then' in script
     # ...and the capture itself: without it LF_RC stays 0 and neither the red
     # branch nor the watchdog banner can ever fire (pre-phase AND full always run).
     assert "LF_RC=$?" in script
