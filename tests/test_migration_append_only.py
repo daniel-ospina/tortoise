@@ -206,14 +206,27 @@ def test_diff_unapplied_rename_allowed_with_token():
 def test_diff_unapplied_renumber_with_edited_content_allowed():
     # #2240: the drift gate's remedy is "re-land its DDL as a FORWARD migration",
     # which corrects the file's own self-referencing header — i.e. a rename that
-    # ALSO edits content. A version with no schema_migrations row has never run
-    # anywhere, so the edit cannot diverge prod and must not be blocked.
+    # ALSO edits content. A FORWARD prefix rename of an unapplied version has no
+    # schema_migrations row and sorts after REMOTE_MAX, so it cannot diverge prod
+    # and must not be blocked. A realistic migration body keeps the similarity
+    # high enough for git to report R<sim> (as the live R092 case does).
+    body = (
+        "-- Migration 20260813000099: metering capture tokens (#2240)\n"
+        + "\n".join(
+            f"-- explanatory line {i} about the CAPTURE lane workload"
+            for i in range(12)
+        )
+        + "\nCREATE TABLE IF NOT EXISTS t (id int);\n"
+    )
     d = _make_repo(["20260813000099_a.sql"])
+    (d / MIG / "20260813000099_a.sql").write_text(body)
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "realistic base")
     base = _git_sha(d)
     (d / MIG / "20260813000099_a.sql").rename(d / MIG / "20260813100100_a.sql")
-    body = (d / MIG / "20260813100100_a.sql").read_text()
     (d / MIG / "20260813100100_a.sql").write_text(
-        body + "-- re-landed forward from 20260813000099 (#2240)\n"
+        body.replace("20260813000099", "20260813100100")
+        + "-- re-landed forward (#2240)\n"
     )
     _git(d, "add", "-A")
     _git(d, "commit", "-q", "-m", "renumber unapplied, header corrected")
@@ -276,18 +289,20 @@ def test_diff_applied_content_edit_never_exempt_with_token():
     assert "append-only" in r.stdout.lower(), r.stdout
 
 
-def test_diff_unapplied_content_edit_allowed_with_token():
-    # #2240: the guard's authority is prod divergence, and a version with no
-    # schema_migrations row has never run anywhere — so editing it cannot
-    # diverge prod. The exempted line is still printed to the job log.
+def test_diff_unapplied_content_edit_is_blocked_with_token():
+    # #2240 scope (c)+(a), never (b): an in-place edit (M) has NO destination
+    # version, so there is no content-independent forward bound that can make it
+    # safe against the applied-set API's documented multi-day lag. It is a
+    # violation even when the edited version reads as unapplied.
     d = _make_repo(["20260813000099_a.sql"])
     base = _git_sha(d)
     (d / MIG / "20260813000099_a.sql").write_text("-- changed content\n")
     _git(d, "add", "-A")
     _git(d, "commit", "-q", "-m", "edit unapplied")
     r = _run_script_with_token("diff", d, base, versions=["0001"])
-    assert r.returncode == 0, r.stdout
-    assert "exception" in r.stdout.lower(), r.stdout
+    assert r.returncode == 1, r.stdout
+    assert "append-only" in r.stdout.lower(), r.stdout
+    assert "20260813000099" in r.stdout, r.stdout
 
 
 def _run_with_body(repo: Path, base_sha: str, raw_body: str,
@@ -359,14 +374,21 @@ def test_multi_element_applied_set_still_blocks():
 
 
 def test_multi_element_unapplied_set_still_exempts():
-    # The same multi-element shape in the safe direction: the edited version is
-    # genuinely absent, so the exemption must still fire.
-    d, base = _edited_applied_fixture()
+    # The same multi-element shape in the safe direction: a FORWARD prefix rename
+    # whose endpoints are genuinely absent must still be exempt. (A stream-wide
+    # `tr -d '[:space:]'` would merge these tokens into one and make the match
+    # fail, silently blocking every rename — so the multi-element case matters.)
+    d = _make_repo(["20260813000099_a.sql"])
+    base = _git_sha(d)
+    (d / MIG / "20260813000099_a.sql").rename(d / MIG / "20260813100100_a.sql")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "forward renumber, multi-element applied set")
     r = _run_with_body(
         d, base,
-        '[{"version":"20260813000098"},{"version":"20260813100100"}]',
+        '[{"version":"20200101000000"},{"version":"20260813000001"}]',
     )
     assert r.returncode == 0, r.stdout
+    assert "exception" in r.stdout.lower(), r.stdout
 
 
 def test_wellformed_applied_body_still_blocks():
@@ -408,9 +430,11 @@ def test_d_plus_a_renumber_onto_an_applied_version_is_blocked():
     assert "append-only" in r.stdout.lower(), r.stdout
 
 
-def test_d_plus_a_renumber_onto_an_unapplied_version_is_exempt():
-    # The same shape in the safe direction: neither endpoint is applied, so the
-    # re-land the drift gate prescribes must go through.
+def test_d_plus_a_renumber_onto_an_unapplied_version_is_blocked():
+    # A re-land whose content delta is large enough that git reports it as D+A
+    # (not R<sim>) is NOT a prefix rename: the `D` line carries no destination
+    # version and therefore no forward bound, so it cannot be exempted under
+    # #2240 scope (c)+(a). Only a git-detected R* forward rename is admissible.
     d = _make_repo(["20260813000099_a.sql"])
     base = _git_sha(d)
     (d / MIG / "20260813000099_a.sql").unlink()
@@ -420,7 +444,8 @@ def test_d_plus_a_renumber_onto_an_unapplied_version_is_exempt():
     _git(d, "add", "-A")
     _git(d, "commit", "-q", "-m", "D+A renumber onto free version")
     r = _run_script_with_token("diff", d, base, versions=["20260813000098"])
-    assert r.returncode == 0, r.stdout
+    assert r.returncode == 1, r.stdout
+    assert "append-only" in r.stdout.lower(), r.stdout
 
 
 def test_added_file_at_an_already_applied_version_is_blocked():
@@ -460,3 +485,74 @@ def test_added_file_without_token_is_allowed():
     _git(d, "commit", "-q", "-m", "add, no token")
     r = _run_script("diff", d, base)
     assert r.returncode == 0, r.stdout
+
+
+# ── #2240 scope fix: only a FORWARD R* prefix rename is exempt ─────────────
+# The widened exemption admitted M/D/T because `new_ver` was empty for every
+# non-R status; a `D` also had no direction check. Both are now closed, and an
+# addition with no numeric prefix is no longer misread as an edit.
+
+
+def test_diff_unapplied_deletion_is_a_violation():
+    # Deleting an unapplied merged migration carries NO destination version, so
+    # there is no forward bound that could make it safe against the applied-set
+    # API's lag. It must be reported as a violation, never silently exempted.
+    d = _make_repo(["20260813000099_a.sql"])
+    base = _git_sha(d)
+    (d / MIG / "20260813000099_a.sql").unlink()
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "delete unapplied")
+    r = _run_script_with_token("diff", d, base, versions=["20260813000098"])
+    assert r.returncode == 1, r.stdout
+    assert "append-only" in r.stdout.lower(), r.stdout
+    assert "20260813000099" in r.stdout, r.stdout
+
+
+def test_diff_unapplied_migration_rewrite_is_a_violation():
+    # An in-place rewrite (M) of an unapplied migration was the primary
+    # fail-open: `new_ver` stayed empty, `[ -z "$new_ver" ]` was true, and the
+    # branch exempted a content rewrite to arbitrary DDL. No destination version
+    # means no forward bound, so M is never exempt.
+    d = _make_repo(["20260813000099_a.sql"])
+    base = _git_sha(d)
+    (d / MIG / "20260813000099_a.sql").write_text("DROP TABLE users;\n")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "rewrite unapplied")
+    r = _run_script_with_token("diff", d, base, versions=["20260813000098"])
+    assert r.returncode == 1, r.stdout
+    assert "append-only" in r.stdout.lower(), r.stdout
+    assert "20260813000099" in r.stdout, r.stdout
+
+
+def test_diff_backward_renumber_is_a_violation():
+    # A prefix rename whose destination sorts BEFORE the newest applied version
+    # is a backward renumber: it could land under a version prod already ran,
+    # and the applied-set API's lag means "absent" alone cannot prove it did not.
+    # The forward bound must reject it even with both endpoints unapplied.
+    d = _make_repo(["20260813000099_a.sql"])
+    base = _git_sha(d)
+    (d / MIG / "20260813000099_a.sql").rename(d / MIG / "20260813000001_a.sql")
+    (d / MIG / "20260813000001_a.sql").write_text(
+        (d / MIG / "20260813000001_a.sql").read_text() + "-- content edit\n"
+    )
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "backward renumber")
+    r = _run_script_with_token("diff", d, base, versions=["20260813000098"])
+    assert r.returncode == 1, r.stdout
+    assert "append-only" in r.stdout.lower(), r.stdout
+
+
+def test_diff_added_non_prefixed_file_is_allowed():
+    # An ADDED file with no numeric prefix (e.g. a README) is not a migration: the
+    # CLI cannot apply it, so diff mode must not invent a violation for it.
+    # Pre-fix, its empty old_ver fell through to a violation with a misleading
+    # "edit/rename/delete" message.
+    d = _make_repo(["20260813000099_a.sql"])
+    base = _git_sha(d)
+    (d / MIG / "README.md").write_text("# migrations\n")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "add README")
+    r = _run_script_with_token("diff", d, base, versions=["20260813000098"])
+    assert r.returncode == 0, r.stdout
+    assert "::error::" not in r.stdout, r.stdout
+    assert "exception" not in r.stdout.lower(), r.stdout

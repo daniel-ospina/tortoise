@@ -11,22 +11,30 @@
 #            files (status A against the base) are allowed — the author can
 #            fix their own new migration before merge.
 #
-#            EXCEPTION (#1235, duplicate-prefix repair; widened by #2240): a
-#            PREFIX RENAME of a base-tree migration is allowed when the OLD
-#            VERSION is PROVABLY UNAPPLIED (not in the remote applied set,
-#            queried via the Supabase Management API) — the canonical fix for
-#            the 0012x2/0015x2 class, and the very remedy the drift gate
-#            prescribes for an out-of-order repo-ahead migration (#4278/#2240).
-#            The version's PROD STATE is the authority, so the content MAY also
+#            EXCEPTION (#1235, duplicate-prefix repair; scoped by #2240): a
+#            FORWARD PREFIX RENAME (git status R*) of a base-tree migration is
+#            allowed when BOTH its old and new versions are PROVABLY UNAPPLIED
+#            (absent from the remote applied set, queried via the Supabase
+#            Management API) AND its destination sorts strictly AFTER the
+#            newest applied version (REMOTE_MAX) — the canonical fix for the
+#            0012x2/0015x2 class, and the very remedy the drift gate prescribes
+#            for an out-of-order repo-ahead migration (#4278/#2240). The
+#            version's PROD STATE is the authority, so the content MAY also
 #            change in the same rename: a version with no schema_migrations row
 #            has never run anywhere, so editing it cannot diverge prod. Gating
 #            on byte-identity instead REPRODUCED the contradiction this check
 #            exists to avoid — the gate's own remedy ("re-land its DDL as a
 #            FORWARD migration") corrects the file's self-referencing header,
-#            and a byte-identity requirement rejected exactly that. Fail-closed:
+#            and a byte-identity requirement rejected exactly that. The forward
+#            bound is what keeps the lagging applied-set API from being the
+#            sole authority for "never applied": a prefix after REMOTE_MAX
+#            cannot have run before prod's newest migration. Fail-closed:
 #            without a token the remote set cannot be verified, so the strict
-#            block stands (fork PRs keep today's behavior). No-ops (A-only) and
-#            edits/deletes of an APPLIED migration (M/D) are never exempt.
+#            block stands (fork PRs keep today's behavior). Non-rename
+#            statuses — edits (M/T) and deletions (D) — carry no destination
+#            version, so they have no such bound and are NEVER exempt (#2240
+#            scope (c)+(a), never (b)); neither is a change to an APPLIED
+#            version (#1001).
 #
 # The check logic lives in this SHARED script (not inline YAML) so the
 # hermetic pytest suite exercises the shipped logic, not a Python copy.
@@ -49,6 +57,10 @@
 #   1 — violation found (print the offending file(s))
 #   2 — usage/environment error
 set -euo pipefail
+
+# Byte-deterministic, locale-independent ordering for the version comparison in
+# diff mode — mirrors check-migration-drift (the authority on REMOTE_MAX).
+export LC_ALL=C
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 REPO="${DRIFT_REPO:-$REPO_ROOT}"
@@ -201,20 +213,27 @@ if [ -n "$VIOLATIONS" ] || [ -n "$ADDED" ]; then
       # BASE-TREE file's version: for "R<sim>\told\tnew" that is the OLD path;
       # for "M\tpath" / "D\tpath" / "T\tpath" the path itself.
       #
-      # #2240 — WHY PROD STATE, NOT GIT STATUS, IS THE TEST. This guard's
-      # authority is prod divergence (#1001: an edit to an APPLIED migration
-      # diverged repo from prod). A version with NO schema_migrations row has
-      # never run anywhere, so renumbering, re-landing or removing it cannot
-      # diverge prod. Gating on git status instead produced two false blocks
-      # that this fix removes:
-      #   (1) a byte-identity requirement rejected the drift gate's OWN remedy
-      #       ("re-land its DDL as a FORWARD migration"), which corrects the
-      #       file's self-referencing header; and
-      #   (2) that remedy routinely degrades to D+A rather than R<sim>, because
-      #       git pairs files by SIMILARITY (--find-renames=20%) — so the
-      #       exemption was unreachable for exactly the re-land it was for.
-      # The exempted line is still printed, so every unapplied-version change
-      # stays visible in the job log.
+      # #2240 — WHAT IS EXEMPT, AND WHY. This guard's authority is prod
+      # divergence (#1001: a change to an APPLIED migration diverged repo from
+      # prod). A version with NO schema_migrations row has never run anywhere, so
+      # re-landing it cannot diverge prod — and the drift gate's prescribed
+      # remedy is exactly a FORWARD re-land ("re-land its DDL as a FORWARD
+      # migration ... so it sorts after $REMOTE_MAX"). The exemption therefore
+      # admits ONLY a git-detected PREFIX RENAME (R*) whose destination sorts
+      # strictly AFTER $REMOTE_MAX with BOTH endpoints unapplied:
+      #
+      #   * The forward bound is CONTENT-INDEPENDENT. The applied-set API
+      #     documents a multi-day lag, so "absent from REMOTE_APPLIED" alone
+      #     cannot prove a version was never applied; a prefix after the newest
+      #     applied version cannot have run before it.
+      #   * M/T/D carry NO destination version, hence no such bound, so they are
+      #     never exempt — an edit or deletion of a merely-unapplied migration is
+      #     reported as a violation, not silently allowed (#2240 scope (c)+(a),
+      #     never (b)). Byte-identity is NOT required on the rename itself: the
+      #     remedy corrects the file's self-referencing header.
+      # The exempted line is still printed, so every exempted change stays
+      # visible in the job log.
+      REMOTE_MAX="$(printf '%s\n' "$REMOTE_APPLIED" | sort | tail -n1)"
       KEEP=""
       while IFS= read -r line; do
         [ -z "$line" ] && continue
@@ -226,6 +245,26 @@ if [ -n "$VIOLATIONS" ] || [ -n "$ADDED" ]; then
           R*)
             old_path="${rest%%$'\t'*}"
             new_ver="$(basename "${rest#*$'\t'}" | sed -nE 's#^([0-9]+)_.*#\1#p')"
+            ;;
+          A)
+            # An ADDED file with no numeric prefix is not a migration the CLI can
+            # apply (its basename does not match ^[0-9]+_), so it can neither be
+            # applied nor diverge prod — diff mode must not invent a violation
+            # for it (prefix mode still reports non-conforming *.sql). Only a
+            # prefix-bearing addition is evaluated below.
+            if ! printf '%s' "$(basename "$rest")" | grep -qE '^[0-9]+_'; then
+              continue
+            fi
+            ;;
+          *)
+            # M / T / D — an edit or a deletion of a base-tree file. No
+            # destination version exists, so there is no content-independent
+            # ordering bound to make it safe, and the applied-set API lags prod.
+            # Only a FORWARD PREFIX RENAME (R*) carries that bound, so every
+            # other status falls through to KEEP and is reported, never dropped.
+            KEEP="$KEEP
+$line"
+            continue
             ;;
         esac
         old_ver="$(basename "$old_path" | sed -nE 's#^([0-9]+)_.*#\1#p')"
@@ -242,9 +281,16 @@ if [ -n "$VIOLATIONS" ] || [ -n "$ADDED" ]; then
           # there is no exception to announce, so drop it silently rather than
           # reporting it as one.
           case "$status" in A) continue;; esac
-          EXEMPT_RENAMES="$EXEMPT_RENAMES
+          # #2240 (a): the destination must sort strictly AFTER REMOTE_MAX (the
+          # newest applied version — the same ordering reference
+          # check-migration-drift uses). This is the content-independent bound
+          # against the applied-set API's documented lag; a backward or equal
+          # prefix is a violation.
+          if [[ "$new_ver" > "$REMOTE_MAX" ]]; then
+            EXEMPT_RENAMES="$EXEMPT_RENAMES
 $line"
-          continue
+            continue
+          fi
         fi
         KEEP="$KEEP
 $line"
