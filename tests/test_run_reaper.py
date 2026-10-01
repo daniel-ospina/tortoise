@@ -721,6 +721,72 @@ class RunReaperTestCase(unittest.TestCase):
             mod._run_main = orig
         self.assertEqual(rc2, mod.EXIT_INTERNAL)
 
+    def test_an_ambiguous_post_whose_handler_faults_still_means_6(self):
+        """THE ORDERING PIN — the flag must be set BEFORE the POST.
+
+        The case that a moved (or deleted) assignment reverts silently: the
+        POST's outcome is UNREADABLE, so the per-cancel handler runs, and the
+        RENDER INSIDE IT then faults. The fault escapes from inside the handler,
+        and only a flag set BEFORE the POST can still tell the top-level handler
+        that a cancel may have landed. Without it this answers exit 2 with
+        "Nothing was cancelled" — the exact defect this series fixed.
+        """
+        mod = _load_tool_module()
+        self.make_run("111", elapsed_s=25740, workflow_id=7)
+        self.make_jobs("111", [job("test (a)", 600),
+                               job("test (g)", None, status="in_progress", started_s=25740)])
+        self.green_population(7, maxes={"test (a)": 500, "test (g)": 1072})
+        # The POST's outcome is unreadable -> cancel_run raises Incomplete.
+        (self.gh_dir / "cancel_incomplete_111").write_text("x\n")
+        env = {"RUN_REAPER_GH": str(self.gh), "GH_STUB_DIR": str(self.gh_dir),
+               "RUN_REAPER_NOW": str(NOW)}
+        saved = {k: os.environ.get(k) for k in env}
+        os.environ.update(env)
+
+        def boom(*_a, **_k):
+            raise OSError("broken pipe while rendering inside the handler")
+
+        orig = mod._render_human
+        mod._render_human = boom
+        try:
+            rc = mod.main(["--repo", "owner/repo", "--run", "111", "--apply"])
+        finally:
+            mod._render_human = orig
+            for k, v in saved.items():
+                os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+
+        self.assertEqual(rc, mod.EXIT_INCOMPLETE_AFTER_CANCEL,
+                         "a POST whose outcome is unknown must never report "
+                         "nothing was cancelled, even when its handler faults")
+        self.assertNotEqual(rc, mod.EXIT_INCOMPLETE)
+
+    def test_a_statusless_job_is_unfinished_not_completed(self):
+        """A degraded job payload must fail CLOSED, not read as completed.
+
+        `job.get("status") and job.get("status") != "completed"` classified a job
+        with an ABSENT or EMPTY status as FINISHED: it never entered the
+        unstarted-shard guard and its started_at was never recorded, so if it was
+        the max-ceiling shard the deciding clock fell back to the RUN clock and
+        the run was cancelled on queue wait — the very P0 this guard stops. An
+        unknown status is not evidence of completion.
+        """
+        mod = _load_tool_module()
+        run = {"id": 111, "status": "in_progress", "run_started_at": iso(NOW - 25740)}
+        green = [[{"name": "test (g)", "status": "completed", "conclusion": "success",
+                   "started_at": iso(NOW - 1072), "completed_at": iso(NOW)}]]
+        for bad_status in ("", None):
+            jobd = {"name": "test (g)", "conclusion": "success",
+                    "started_at": None, "completed_at": None}
+            if bad_status is not None:
+                jobd["status"] = bad_status
+            row = mod.decide(run, [jobd], green, now=NOW, floor=300)
+            self.assertNotEqual(
+                row["action"], "cancel",
+                f"status={bad_status!r} is a degraded payload and must fail closed; "
+                f"got {row['action']} via {row.get('reason')}")
+            self.assertIsNone(row["shard_elapsed_s"],
+                              "no shard clock was available, so no shard clock may be claimed")
+
     def test_listing_unreadable_but_explicit_run_still_reaps(self):
         """The listing is an INDEX; an explicit --run stands on its own."""
         self.make_run("111", elapsed_s=25740, workflow_id=7)

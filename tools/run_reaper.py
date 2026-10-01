@@ -417,7 +417,14 @@ def derive_bound(target_jobs: list[dict], green_job_lists: list[list[dict]],
     for job in target_jobs:
         name = norm_job_name(job.get("name")) or "(unnamed job)"
         rec = shards.setdefault(name, {"unfinished": False, "started_at": None})
-        if job.get("status") and job.get("status") != "completed":
+        # ANY non-`completed` status is UNFINISHED — including an ABSENT or EMPTY
+        # one. `job.get("status") and ...` treated a statusless job (a degraded
+        # payload) as FINISHED, so it never reached the unstarted-shard guard and
+        # its started_at was never recorded: if it was the max-ceiling shard,
+        # shard_started_at stayed None and decide() fell back to the RUN clock,
+        # cancelling on queue wait — the exact P0 this guard exists to stop.
+        # Fail closed on the malformed surface instead.
+        if job.get("status") != "completed":
             rec["unfinished"] = True
             # THE SHARD'S OWN START CLOCK. A job that is still queued/waiting/
             # requested has no started_at: it holds no runner slot and has made
