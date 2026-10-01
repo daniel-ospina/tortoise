@@ -2326,7 +2326,7 @@ jobs:
     # tree this repository does not have (it exits 3 at the glob).
     #
     # Both extensions are linted: GitHub loads either `.yml` or `.yaml`, so a
-    # `*.yml`-only glob would silently skip a `.yaml` workflow.    #
+    # `*.yml`-only glob would silently skip a `.yaml` workflow.
     # Ungated on purpose: a leg that reaches these `needs` but SKIPS has no row
     # that can fail closed, so the required check could certify a shard that
     # never ran (#5219). It therefore always runs and must always succeed.
