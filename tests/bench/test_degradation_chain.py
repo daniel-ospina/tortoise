@@ -20,8 +20,9 @@ when that rescan looks, and a stub that overshoots the cap by ~100ms leaves the
 rescan gap almost no room. That is the shape observed on `7153f608e`: `fts` was
 collected and `vector` was not, although both sleep an identical duration in the
 same pool — one-of-two can only come from scheduling at the boundary, not from
-the strategy itself. Hence the margin below is ~4x the cap rather than 1.2x.
-Do not tighten it back toward the cap.
+the strategy itself. Hence the stub latency below is a multiple of the cap rather
+than a hair over it; the constants and guards that hold that apart are at the
+top of the file. Do not tighten it back toward the cap.
 """
 from __future__ import annotations
 
@@ -45,19 +46,35 @@ def _reset_breakers():
     reset_circuit_breakers()
 
 
-#: Stub latency for the two "slow" strategies. Must be comfortably GREATER
-#: than the 500ms collective cap (the excess is the safety margin against the
-#: rescan gap) and comfortably LESS than the 5000ms elevated window that must
-#: still collect them. 2.0s clears the cap by 1.5s and sits well inside the
-#: elevated window; see the module docstring (#6842) for why the margin, not
-#: the ordering, is the thing that decides this test.
+#: The two windows this test has to sit BETWEEN: the default collective cap,
+#: which must DROP the slow legs, and the elevated window, which must COLLECT
+#: them. ELEVATED_MS is threaded into the call below. CAP_MS mirrors the
+#: implementation's own default (the API takes no cap), and is checked
+#: behaviourally by the censored assertion as well as by the margin guard.
+CAP_MS = 500
+ELEVATED_MS = 5000
+
+#: The margin the stub must clear the cap by, so that it is still RUNNING when
+#: the post-deadline rescan looks (see the module docstring). This is the guard
+#: that actually protects #6842, and it is deliberately NOT "greater than the
+#: cap": the regression WAS a stub 100ms above the cap, which satisfies that
+#: and still flakes, because the rescan gap is scheduling noise rather than a
+#: fixed budget. A mutation test pins it — setting SLOW_STUB_S back to 0.6 must
+#: fail on this line (verified; a plain `stub > cap` assertion passed it).
+MIN_MARGIN_S = 1.0
+
+#: Stub latency for the two "slow" strategies. Must clear CAP_MS by at least
+#: MIN_MARGIN_S, and fit comfortably inside ELEVATED_MS. 2.0s gives a 1.5s
+#: margin and sits well inside the elevated window.
 SLOW_STUB_S = 2.0
 
 
 def test_elevated_timeout_collects_more_than_censored(monkeypatch):
-    """A slow strategy (2.0s) is dropped by the 500ms collective cap but
-    collected under elevated_timeout_ms=5000 — proving the override actually
-    elevates the measurement window (more strategies → more collected rows)."""
+    """A slow strategy is dropped by the default collective cap but collected
+    under an elevated window — proving the override actually elevates the
+    measurement window (more strategies → more collected rows). The exact
+    latencies are the constants above; deliberately not restated here, so they
+    cannot go stale."""
 
     def slow_fts(graph, query, entity_type="point", limit=20, timeout_ms=500,
                  excluded_statuses=None, keep_numeric=False,
@@ -89,15 +106,22 @@ def test_elevated_timeout_collects_more_than_censored(monkeypatch):
     )
     assert set(censored) == {"structural"}
 
-    # Elevated: 5000ms window → all three strategies complete. This window
-    # must stay ABOVE SLOW_STUB_S or the override test inverts (see docstring).
-    assert 5000 / 1000.0 > SLOW_STUB_S, (
-        "the elevated window must exceed the stub latency, else the override "
-        "test cannot distinguish elevated from censored"
+    # Both bounds are load-bearing and BOTH are asserted. The margin is the
+    # #6842 direction: a stub only just past the cap is collected by the
+    # post-deadline rescan, so the invariant is the SIZE of the margin, not the
+    # ordering. The upper bound keeps the elevated case able to collect at all.
+    assert SLOW_STUB_S - CAP_MS / 1000.0 >= MIN_MARGIN_S, (
+        f"stub latency {SLOW_STUB_S}s must clear the {CAP_MS}ms default cap by "
+        f"at least {MIN_MARGIN_S}s, or the post-deadline rescan collects it and "
+        "the censored case flakes (#6842)"
+    )
+    assert SLOW_STUB_S < ELEVATED_MS / 1000.0, (
+        f"stub latency {SLOW_STUB_S}s must fit inside the {ELEVATED_MS}ms "
+        "elevated window, else the override test inverts (see docstring)"
     )
     elevated = degradation_chain(
         graph=None, query="q", kind="claim", query_vec=[0.1, 0.2, 0.3],
-        strategies=strategies, elevated_timeout_ms=5000,
+        strategies=strategies, elevated_timeout_ms=ELEVATED_MS,
     )
     assert set(elevated) == {"fts", "vector", "structural"}
     # The elevated column collected strictly more strategy results than the
