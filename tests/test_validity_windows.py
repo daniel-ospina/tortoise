@@ -1023,7 +1023,7 @@ def test_window_end_numeric_kwarg_resolved_before_measure():
     raw = 1780000000.0  # a fixed epoch comfortably before old_vf's instant
     assert _created_sort_key(raw) < _created_sort_key("2026-06-10"), (
         "the raw-vs-resolved discriminator needs a raw epoch strictly before "
-        "the predecessor's (host-local) start"
+        "the predecessor's (UTC-anchored) start"
     )
     out = _window_end("2026-06-10", valid_from=raw)
     # (a) the resolved (persisted) value keys unparseable, so it is NOT an

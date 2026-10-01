@@ -305,7 +305,7 @@ def test_epoch_and_iso_still_compare_by_real_instant():
 
 
 def test_unparseable_values_still_bucket_last():
-    """Existing contract: junk sorts last, deterministically.
+    r"""Existing contract: junk sorts last, deterministically.
 
     Includes a trailing-newline spelling, because that is what separates the
     ``\Z`` anchor from ``$``: ``$`` also matches immediately BEFORE a trailing
