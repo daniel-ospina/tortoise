@@ -115,6 +115,13 @@ case "$path" in
     if [ -f "$d/cancel_fail_$rid" ]; then
       echo "Cannot cancel a workflow run that is not in progress." >&2; exit 1
     fi
+    if [ -f "$d/cancel_incomplete_$rid" ]; then
+      # An EMPTY body on exit 0 is the documented Incomplete shape: the POST's
+      # outcome is genuinely unreadable, so the cancel is AMBIGUOUS — it may
+      # have landed. Used to pin the exit-6 path (a fault after a cancel may
+      # have been issued must never be reported as "nothing was cancelled").
+      exit 0
+    fi
     printf '%s\n' "$rid" >> "$d/cancelled"
     echo "{}"; exit 0 ;;
   */jobs*)
@@ -137,13 +144,21 @@ def iso(epoch: int) -> str:
 
 
 def job(name: str, secs: int | None, *, status: str = "completed",
-        conclusion: str | None = "success") -> dict:
+        conclusion: str | None = "success", started_s: int | None = None) -> dict:
     """A job fixture whose duration is exactly ``secs``.
 
     ``status="in_progress"`` yields a job with no ``completed_at`` — an
     UNFINISHED shard, which is what the bound pool is computed over.
+
+    ``started_s`` is the shard's OWN age in seconds and defaults to ``secs``. A
+    job with NEITHER has NOT STARTED: ``started_at`` is None, meaning it is
+    queued/waiting behind a starved fleet. The fixture must never FABRICATE a
+    start clock for that case — a fabricated one-second-old clock is precisely
+    what let ``decide()`` cancel a run whose shard had never started, and let
+    this suite assert that as correct.
     """
-    started = iso(NOW - secs) if secs is not None else iso(NOW - 1)
+    age = started_s if started_s is not None else secs
+    started = iso(NOW - age) if age is not None else None
     completed = iso(NOW) if status == "completed" else None
     return {"name": name, "status": status,
             "conclusion": (conclusion if status == "completed" else None),
@@ -243,7 +258,7 @@ class RunReaperTestCase(unittest.TestCase):
         """A run past its OWN derived bound is cancelled (and the API is called)."""
         self.make_run("111", elapsed_s=25740, workflow_id=7)
         self.make_jobs("111", [job("test (a)", 600),
-                               job("test (g)", None, status="in_progress")])
+                               job("test (g)", None, status="in_progress", started_s=25740)])
         self.green_population(7, maxes={"test (a)": 500, "test (g)": 1072})
 
         row = self.rows(["--run", "111"])["111"]
@@ -262,7 +277,7 @@ class RunReaperTestCase(unittest.TestCase):
     def test_overrun_is_only_reported_on_the_default_dry_run(self):
         self.make_run("111", elapsed_s=25740, workflow_id=7)
         self.make_jobs("111", [job("test (a)", 600),
-                               job("test (g)", None, status="in_progress")])
+                               job("test (g)", None, status="in_progress", started_s=25740)])
         self.green_population(7, maxes={"test (a)": 500, "test (g)": 1072})
         res = self.run_tool(["--run", "111"])
         self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
@@ -274,7 +289,7 @@ class RunReaperTestCase(unittest.TestCase):
         """A genuinely-still-running run inside its bound is left alone."""
         self.make_run("111", elapsed_s=1500, workflow_id=7)
         self.make_jobs("111", [job("test (a)", 600),
-                               job("test (g)", None, status="in_progress")])
+                               job("test (g)", None, status="in_progress", started_s=1500)])
         self.green_population(7, maxes={"test (a)": 500, "test (g)": 1072})
         row = self.rows(["--run", "111"])["111"]
         self.assertEqual(row["action"], "skip")
@@ -292,7 +307,7 @@ class RunReaperTestCase(unittest.TestCase):
         """
         self.make_run("111", elapsed_s=2144, workflow_id=7)
         self.make_jobs("111", [job("test (a)", 600),
-                               job("test (g)", None, status="in_progress")])
+                               job("test (g)", None, status="in_progress", started_s=2144)])
         self.green_population(7, maxes={"test (a)": 500, "test (g)": 1072})
 
         row = self.rows(["--run", "111"])["111"]
@@ -370,8 +385,8 @@ class RunReaperTestCase(unittest.TestCase):
         on the green population — so it must be judged, not declined.
         """
         self.make_run("111", elapsed_s=7200, workflow_id=7)
-        self.make_jobs("111", [job("test (a)", None, status="in_progress"),
-                               job("test (g)", None, status="in_progress")])
+        self.make_jobs("111", [job("test (a)", None, status="in_progress", started_s=7200),
+                               job("test (g)", None, status="in_progress", started_s=7200)])
         self.green_population(7, maxes={"test (a)": 500, "test (g)": 1072})
 
         row = self.rows(["--run", "111"])["111"]
@@ -388,6 +403,54 @@ class RunReaperTestCase(unittest.TestCase):
         res = self.run_tool(["--run", "111", "--apply"])
         self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
         self.assertEqual(self.cancelled(), ["111"])
+
+    def test_a_never_started_shard_is_not_reaped(self):
+        """A run waiting on a QUEUED shard is a CAPACITY WAIT, not a wedge.
+
+        The shard holds no runner slot and has made no progress to measure, so
+        cancelling reclaims nothing — and the run's own clock is queue wait, not
+        work. This is the tool's DOMINANT waiting state, so it must fail closed.
+        Before the per-shard clock this run was cancelled as "verified-overrun";
+        the fixture used to fabricate a one-second-old start clock for exactly
+        this shape, which is why the suite asserted the cancel as correct.
+        """
+        self.make_run("111", elapsed_s=25740, workflow_id=7)
+        self.make_jobs("111", [job("test (a)", 600),
+                               job("test (g)", None, status="in_progress")])
+        self.green_population(7, maxes={"test (a)": 500, "test (g)": 1072})
+
+        row = self.rows(["--run", "111"])["111"]
+        self.assertEqual(row["action"], "skip")
+        self.assertEqual(row["reason"], "bound-underivable")
+        self.assertIsNone(row["shard_elapsed_s"])
+
+        res = self.run_tool(["--run", "111", "--apply"])
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertEqual(self.cancelled(), [], "a queued shard must never be reaped")
+
+    def test_a_just_started_shard_inside_a_long_run_is_not_reaped(self):
+        """THE UNIT MISMATCH, pinned.
+
+        A run genuinely 25740s old whose deciding shard started 60s ago is
+        HEALTHY: it was queued behind a starved fleet. The bound is a PER-SHARD
+        ceiling, so it must be compared against the SHARD's own clock. Judging it
+        on the run clock cancelled healthy runs — the exact class the tool's own
+        start-clock comment warns about.
+        """
+        self.make_run("111", elapsed_s=25740, workflow_id=7)
+        self.make_jobs("111", [job("test (a)", 600),
+                               job("test (g)", None, status="in_progress", started_s=60)])
+        self.green_population(7, maxes={"test (a)": 500, "test (g)": 1072})
+
+        row = self.rows(["--run", "111"])["111"]
+        self.assertEqual(row["action"], "skip")
+        self.assertEqual(row["reason"], "in-budget")
+        self.assertEqual(row["shard_elapsed_s"], 60)
+        self.assertEqual(row["elapsed_s"], 25740, "the run clock is still reported")
+
+        res = self.run_tool(["--run", "111", "--apply"])
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertEqual(self.cancelled(), [], "a freshly-started shard is healthy")
 
     def test_fully_hung_matrix_without_a_green_sample_stays_underivable(self):
         """The newly-allowed path is STILL fail-closed on coverage.
@@ -497,10 +560,10 @@ class RunReaperTestCase(unittest.TestCase):
 
         self.make_run("111", elapsed_s=3000, workflow_id=7)
         self.make_jobs("111", [job("test (a)", 600),
-                               job("test (g)", None, status="in_progress")])
+                               job("test (g)", None, status="in_progress", started_s=3000)])
         self.make_run("222", elapsed_s=3000, workflow_id=8)
         self.make_jobs("222", [job("test (a)", 600),
-                               job("test (g)", None, status="in_progress")])
+                               job("test (g)", None, status="in_progress", started_s=3000)])
 
         rows = self.rows(["--run", "111", "--run", "222"])
         self.assertEqual(rows["111"]["action"], "cancel")
@@ -517,7 +580,7 @@ class RunReaperTestCase(unittest.TestCase):
         for rid in ("111", "222"):
             self.make_run(rid, elapsed_s=25740, workflow_id=7)
             self.make_jobs(rid, [job("test (a)", 600),
-                                 job("test (g)", None, status="in_progress")])
+                                 job("test (g)", None, status="in_progress", started_s=25740)])
         (self.gh_dir / "cancel_fail_222").write_text("refuse\n")
 
         res = self.run_tool(["--json", "--run", "111", "--run", "222", "--apply"])
@@ -527,11 +590,37 @@ class RunReaperTestCase(unittest.TestCase):
         self.assertEqual(rows["222"]["cancel_result"], "refused")
         self.assertIn("REFUSED", rows["222"]["detail"])
 
+    def test_an_ambiguous_cancel_post_is_exit_6_not_a_nothing_was_cancelled_claim(self):
+        """A fault AFTER a cancel was ISSUED must not claim nothing happened.
+
+        A cancel POST whose outcome is unreadable is AMBIGUOUS — it may have
+        landed. Reporting EXIT_INCOMPLETE's "Nothing was cancelled" over it is a
+        false statement, and discarding the report would hide the cancels that
+        DID land earlier in the same loop. Mirrors branch_reaper.py's
+        EXIT_INCOMPLETE_AFTER_DELETE.
+        """
+        self.green_population(7, maxes={"test (g)": 1072})
+        for rid in ("111", "222"):
+            self.make_run(rid, elapsed_s=25740, workflow_id=7)
+            self.make_jobs(rid, [job("test (a)", 600),
+                                 job("test (g)", None, status="in_progress", started_s=25740)])
+        (self.gh_dir / "cancel_incomplete_222").write_text("x\n")
+
+        res = self.run_tool(["--json", "--run", "111", "--run", "222", "--apply"])
+        self.assertEqual(res.returncode, 6, res.stderr + res.stdout)
+        self.assertNotIn("Nothing was cancelled", res.stderr)
+        # THE SIBLING CANCEL STILL LANDED, so the report must survive the fault.
+        self.assertEqual(self.cancelled(), ["111"])
+        rows = {str(d["run_id"]): d for d in json.loads(res.stdout)["decisions"]}
+        self.assertEqual(rows["111"]["cancel_result"], "cancelled")
+        self.assertEqual(rows["222"]["cancel_result"], "unknown")
+        self.assertIn("AMBIGUOUS", rows["222"]["detail"])
+
     def test_listing_unreadable_but_explicit_run_still_reaps(self):
         """The listing is an INDEX; an explicit --run stands on its own."""
         self.make_run("111", elapsed_s=25740, workflow_id=7)
         self.make_jobs("111", [job("test (a)", 600),
-                               job("test (g)", None, status="in_progress")])
+                               job("test (g)", None, status="in_progress", started_s=25740)])
         self.green_population(7, maxes={"test (g)": 1072})
         res = self.run_tool(["--run", "111", "--apply"],
                             extra_env={"GH_STUB_LIST_FAIL": "1"})

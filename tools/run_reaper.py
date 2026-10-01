@@ -95,6 +95,11 @@ EXIT_INCOMPLETE = 2
 EXIT_USAGE = 3
 EXIT_PARTIAL = 4
 EXIT_INTERNAL = 5
+# A cancel POST was ISSUED and its outcome is UNKNOWN (a timeout is ambiguous:
+# the request may have landed). EXIT_INCOMPLETE's contract is "Nothing was
+# cancelled", which does NOT hold here — mirrors branch_reaper.py's
+# EXIT_INCOMPLETE_AFTER_DELETE.
+EXIT_INCOMPLETE_AFTER_CANCEL = 6
 
 #: The rail's own defaults (``ADMIN_MERGE_RERUN_FLOOR`` / ``ADMIN_MERGE_GREEN_RUNS``),
 #: so the reaper judges a run by the SAME bound the rail would have waited on.
@@ -321,10 +326,22 @@ def green_run_ids(slug: str, workflow: str, *, limit: int) -> list[str]:
 
 
 def cancel_run(slug: str, run_id: str) -> tuple[bool, str]:
-    """POST the cancel. Returns (accepted, error_text). A refusal is NOT fatal."""
+    """POST the cancel. Returns (accepted, error_text). A refusal is NOT fatal.
+
+    An exit-0 EMPTY body is the SAME hazard the read paths already refuse: a
+    valid API payload is never empty, so an empty one means the POST's outcome
+    is UNREADABLE — it may have landed. Reading that as success would report a
+    cancel that did not happen; reading it as a refusal would report a cancel
+    that possibly did. It is neither, so it raises ``Incomplete`` and the caller
+    answers with EXIT_INCOMPLETE_AFTER_CANCEL (the POST was ISSUED).
+    """
     res = _run([_gh_bin(), "api", "--method", "POST",
                 f"repos/{slug}/actions/runs/{run_id}/cancel"], timeout=60)
     if res.returncode == 0:
+        if not res.stdout.strip():
+            raise Incomplete(
+                f"the cancel POST for run {run_id} returned an empty body with exit 0 "
+                f"— the outcome is UNREADABLE and the cancel may have landed")
         return True, ""
     return False, (res.stderr or res.stdout).strip() or "non-zero exit"
 
@@ -388,9 +405,17 @@ def derive_bound(target_jobs: list[dict], green_job_lists: list[list[dict]],
     shards: dict[str, dict] = {}
     for job in target_jobs:
         name = norm_job_name(job.get("name")) or "(unnamed job)"
-        rec = shards.setdefault(name, {"unfinished": False})
+        rec = shards.setdefault(name, {"unfinished": False, "started_at": None})
         if job.get("status") and job.get("status") != "completed":
             rec["unfinished"] = True
+            # THE SHARD'S OWN START CLOCK. A job that is still queued/waiting/
+            # requested has no started_at: it holds no runner slot and has made
+            # no progress to measure. It is a CAPACITY WAIT, not a wedge, so it
+            # must never be counted as an overrun (see the `unstarted` guard
+            # below, and the per-shard clock in decide()).
+            ts = _parse_ts(job.get("started_at"))
+            if ts is not None:
+                rec["started_at"] = ts.timestamp()
     if not shards:
         return None
 
@@ -412,6 +437,15 @@ def derive_bound(target_jobs: list[dict], green_job_lists: list[list[dict]],
 
     unfinished = [s for s in shards if shards[s]["unfinished"]]
     if unfinished:
+        # AN UNSTARTED SHARD IS NOT A WEDGE. If any unfinished job has no
+        # started_at it is still waiting for a runner: the run may be perfectly
+        # healthy behind a starved fleet, cancelling it reclaims no slot, and
+        # its "elapsed" is queue wait rather than work. The bound would also be
+        # measured over a shard that cannot be shown to be stuck, so this is
+        # UNDERIVABLE, not merely in-budget — fail closed.
+        unstarted = [s for s in unfinished if shards[s]["started_at"] is None]
+        if unstarted:
+            return None
         pool, reason = unfinished, "slowest unfinished shard"
     else:
         pool, reason = list(shards), "slowest shard (every shard completed)"
@@ -428,7 +462,10 @@ def derive_bound(target_jobs: list[dict], green_job_lists: list[list[dict]],
     win = max(sorted(pool), key=lambda n: ceilings[n])
     rec = green[win]
     return {"bound": ceilings[win], "shard": win, "green_n": rec["n"],
-            "green_max": rec["max"], "reason": reason, "pool": sorted(pool)}
+            "green_max": rec["max"], "reason": reason, "pool": sorted(pool),
+            # The clock the bound must be compared against. None only in the
+            # every-shard-completed case, where the RUN itself is the wedge.
+            "shard_started_at": shards[win]["started_at"]}
 
 
 # ── the decision (pure) ──────────────────────────────────────────────────────
@@ -443,6 +480,7 @@ def decide(run: dict, target_jobs: list[dict], green_job_lists: list[list[dict]]
         "status": run.get("status"),
         "conclusion": run.get("conclusion"),
         "elapsed_s": None,
+        "shard_elapsed_s": None,
         "bound_s": None,
         "bound_shard": None,
         "green_n": 0,
@@ -496,20 +534,32 @@ def decide(run: dict, target_jobs: list[dict], green_job_lists: list[list[dict]]
     row["green_n"] = derived["green_n"]
     row["green_max_s"] = derived["green_max"]
 
-    # (4) CANCEL ONLY ON A VERIFIED OVERRUN.
-    if elapsed > derived["bound"]:
+    # (3b) THE CLOCK MUST BE THE DECIDING SHARD'S OWN. The run's clock includes
+    # the queue wait of every leg queued after the run began, so comparing it to
+    # a PER-SHARD ceiling charges the shard for time it spent unscheduled: a
+    # shard that started 5 minutes ago inside a 2h-old run is judged at ~2h and
+    # cancelled while healthy. Measure the shard the bound is about.
+    shard_started = derived.get("shard_started_at")
+    shard_elapsed = int(now - shard_started) if shard_started is not None else elapsed
+    row["shard_elapsed_s"] = shard_elapsed
+
+    # (4) CANCEL ONLY ON A VERIFIED OVERRUN — measured on the deciding shard.
+    if shard_elapsed > derived["bound"]:
         row["action"] = ACTION_CANCEL
         row["reason"] = REASON_OVERRUN
         row["detail"] = (
-            f"elapsed {elapsed}s > its own derived bound {derived['bound']}s "
+            f"the deciding shard {derived['shard']!r} has itself run {shard_elapsed}s > "
+            f"its own derived bound {derived['bound']}s "
             f"({derived['reason']}: {derived['shard']}, green n={derived['green_n']}, "
-            f"green max={derived['green_max']}s) while still in_progress")
+            f"green max={derived['green_max']}s) while still in_progress"
+            + (f" [run clock {elapsed}s]" if shard_started is not None else ""))
         return row
 
     row["reason"] = REASON_IN_BUDGET
     row["detail"] = (
-        f"elapsed {elapsed}s is within its own derived bound {derived['bound']}s "
-        f"({derived['shard']}) — verified still running")
+        f"the deciding shard {derived['shard']!r} has run {shard_elapsed}s, within its "
+        f"own derived bound {derived['bound']}s — verified still running"
+        + (f" [run clock {elapsed}s]" if shard_started is not None else ""))
     return row
 
 
@@ -682,7 +732,32 @@ def _run_main(args) -> int:
         row = decide(run, target_jobs, green_lists, now=now, floor=args.floor)
         # Dry-run (the default) stops here: the decision is reported, not applied.
         if row["action"] == ACTION_CANCEL and args.apply:
-            ok, err = cancel_run(slug, str(row["run_id"]))
+            # MARK THE ATTEMPT BEFORE ISSUING IT. A cancel POST that times out is
+            # AMBIGUOUS — it may have landed — so the flag is set first and an
+            # escaping Incomplete must never be reported as "nothing was
+            # cancelled" over a cancel that did (branch_reaper.py's _LANDED
+            # pattern, EXIT_INCOMPLETE_AFTER_DELETE = 6).
+            cancel_issued = str(row["run_id"])
+            try:
+                ok, err = cancel_run(slug, cancel_issued)
+            except (Incomplete, OSError) as exc:
+                row["cancel_result"] = "unknown"
+                row["detail"] = (
+                    f"cancel POST for run {cancel_issued} raised {exc} — AMBIGUOUS: "
+                    f"it may have landed, so this run is NOT known to be uncancelled")
+                decisions.append(row)
+                # ALWAYS RENDER: the fault must not swallow the cancels that DID
+                # land earlier in this loop.
+                if args.json:
+                    print(json.dumps({"repo": slug, "apply": args.apply,
+                                      "candidates": ordered, "decisions": decisions,
+                                      "exit": EXIT_INCOMPLETE_AFTER_CANCEL}, indent=2))
+                else:
+                    _render_human(slug, args.apply, decisions)
+                print(f"run_reaper: INCOMPLETE AFTER CANCEL — the cancel POST for run "
+                      f"{cancel_issued} is ambiguous (it may have landed). The report "
+                      f"above is authoritative.", file=sys.stderr)
+                return EXIT_INCOMPLETE_AFTER_CANCEL
             row["applied"] = ok
             if ok:
                 row["cancel_result"] = "cancelled"
