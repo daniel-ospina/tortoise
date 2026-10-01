@@ -3681,6 +3681,37 @@ class CollisionPreflightTest(unittest.TestCase):
                 self.assertIn("--closed-pr-timeout", out)
                 self.assertNotIn("Traceback", out)
 
+    def test_a_pre_3_12_interpreter_is_usage_not_collision(self):
+        # #4053: the module-level version guard is a PRE-QUERY failure — it runs
+        # before any surface is touched. `SystemExit(<str>)` exits 1, which is
+        # EXIT_COLLISION, so an interpreter mismatch read as "another lane is on
+        # this issue": no VERDICT line, and nothing in the output saying the
+        # check never ran. That is exactly the class the env-typo case above was
+        # fixed for (#3619), left behind on the one path that cannot be reached
+        # by importing the module.
+        #
+        # The guard sits at module scope and deliberately runs before the imports
+        # (#5128), so it cannot be exercised by importing. Execute the source
+        # under a faked `sys.version_info` in a subprocess instead.
+        shim = (
+            "import sys\n"
+            "sys.version_info = (3, 11, 0, 'final', 0)\n"
+            f"exec(compile(open({str(TOOL)!r}).read(), {str(TOOL)!r}, 'exec'))\n"
+        )
+        proc = subprocess.run(
+            [PYTHON, "-c", shim], capture_output=True, text=True, cwd=str(ROOT),
+        )
+        self.assertEqual(proc.returncode, 3, proc.stderr)
+        # 1 is the specific wrong answer: it is indistinguishable from a real
+        # collision to anything gating on `must exit 0`.
+        self.assertNotEqual(proc.returncode, 1)
+        self.assertIn("requires Python >= 3.12", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+        # No VERDICT may be printed. No surface was queried, so emitting one
+        # would be the "confident verdict about a scope it did not establish"
+        # bug this exit-code contract exists to prevent.
+        self.assertNotIn("VERDICT", proc.stdout)
+
 
     # ── JEV claim gate (#5070) ──────────────────────────────────────────────
 
