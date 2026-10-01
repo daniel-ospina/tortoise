@@ -35,7 +35,7 @@ Usage:
         [--uri URI] [--all-tenants] [--limit N] [--batch-size N]
         [--force-re-embed] [--repair-embeddings]
 
-Defaults to TORTOISE_DB_URI env var (or docker://:falkordb@localhost:16379/tortoise).
+Defaults to TORTOISE_DB_URI env var (or docker://:falkordb@127.0.0.1:16379/tortoise).
 
 Requires the embeddings extra: pip install 'tortoise-graph[embeddings]'
 (or sentence-transformers + scikit-learn). --dry-run only reports counts and
@@ -43,12 +43,22 @@ does NOT require the model.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"graph-scripts/backfill_embeddings.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python graph-scripts/backfill_embeddings.py`"
+    )
+
 import argparse
 import json
 import os
-import sys
 
-DEFAULT_URI = "docker://:falkordb@localhost:16379/tortoise"
+DEFAULT_URI = "docker://:falkordb@127.0.0.1:16379/tortoise"
 DEFAULT_BATCH = 500
 
 # Entity types to embed + their text property (what gets vectorized) and

@@ -7721,7 +7721,8 @@ def _empty_cost_bucket() -> dict:
     """
     return {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
             "cost_usd": 0.0, "calls_without_cost": 0,
-            "calls_without_usage": 0, "usage_present": True}
+            "calls_without_usage": 0, "calls_without_tokens": 0,
+            "usage_present": True}
 
 
 def _bounded_cost_sum(current, delta) -> tuple[float, bool]:
@@ -7759,6 +7760,7 @@ def _merge_cost_bucket(tgt: dict, src: dict) -> None:
         # disclose the aggregate that could not be represented
         tgt["calls_without_cost"] += 1
     tgt["calls_without_usage"] += int(src.get("calls_without_usage", 0) or 0)
+    tgt["calls_without_tokens"] += int(src.get("calls_without_tokens", 0) or 0)
     tgt["usage_present"] = bool(
         tgt["usage_present"] and src.get("usage_present", True))
 
@@ -7793,11 +7795,73 @@ def _merge_cost_accumulator(tgt_stats: dict, src_stats: dict) -> None:
     acc["calls_without_usage"] = (
         int(acc.get("calls_without_usage", 0))
         + int(src.get("calls_without_usage", 0) or 0))
+    acc["calls_without_tokens"] = (
+        int(acc.get("calls_without_tokens", 0))
+        + int(src.get("calls_without_tokens", 0) or 0))
     for provider, models in (src.get("by_route") or {}).items():
         for model, bucket in (models or {}).items():
             _merge_cost_bucket(
                 acc.setdefault("by_route", {}).setdefault(provider, {})
                 .setdefault(model, _empty_cost_bucket()), bucket)
+
+
+def _normalise_token_count(value) -> int | None:
+    """#5854: validate ONE provider-reported token count.
+
+    Returns a non-negative ``int``, or ``None`` when the value is PRESENT but
+    is not a valid token count. ``None`` is a DISCLOSED ABSENCE — the caller
+    counts it via ``calls_without_tokens`` and never substitutes a shaped
+    ``0`` for it.
+
+    The split follows ``int()`` itself. Where ``int(value)`` SUCCEEDS but
+    yields something that cannot be a token count, the coercion would silently
+    SHAPE a plausible wrong number (the #5854 defect) and the value is
+    REJECTED:
+
+    * ``bool`` — checked FIRST, because ``True`` IS ``1`` in Python, so
+      ``int(True)`` FABRICATES a token out of a flag;
+    * a non-integral ``float`` — ``int(100.9)`` TRUNCATES. The issue's open
+      decision is REJECT + DISCLOSE, not floor: flooring is the same
+      silent-shaping defect class this issue is about;
+    * a negative — impossible for a token count, and unguarded it sign-flips a
+      session total NEGATIVE while the row still reads ``fully_priced``;
+    * ``abs > 1e300`` — the magnitude bound the report-time reader
+      (``costing._price_lane._tok``) already applies.
+
+    Where ``int(value)`` RAISES (a non-numeric type, or a non-finite float —
+    ``inf``/``nan`` cannot be represented as an ``int`` at all), that raise is
+    PRESERVED: it already discloses the call atomically through the caller's
+    residual (``unattributed``), and PR #5822 pins that contract
+    (``test_m2_a_raising_usage_sink_must_not_erase_the_call``).
+
+    ``int()`` is deliberately NOT re-implemented (no float rounding, no
+    string parsing changes): a value ``int()`` accepts and this rejects is
+    exactly the shapeable class.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            # ``int(inf)`` OverflowError / ``int(nan)`` ValueError — keep the
+            # raise (the #5822 atomic contract; the residual discloses it).
+            return int(value)
+        if not value.is_integer():
+            # ``int(100.9)`` would truncate — reject, never floor.
+            return None
+    elif not isinstance(value, int):
+        # Not a real number. A value ``int()`` cannot parse raises here,
+        # preserving the #5822 atomic contract; a number-LIKE non-number
+        # (a numeric string, a ``Decimal``) is parsed only to trigger that
+        # raise and is then REJECTED — parsing it would shape a count out of
+        # a non-JSON number, the same defect in another disguise.
+        int(value)
+        return None
+    if abs(value) > 1e300:
+        return None
+    n = int(value)
+    return n if n >= 0 else None
 
 
 def _accumulate_call_cost(stats: dict, *, prompt_tokens, completion_tokens,
@@ -7816,10 +7880,29 @@ def _accumulate_call_cost(stats: dict, *, prompt_tokens, completion_tokens,
     charge (the deepseek-direct lane today); ``calls_without_usage``
     discloses calls with no usage block at all. Neither is ever silently
     priced at $0.
+
+    #5854: a TOKEN field the provider sent but that is not a valid count
+    (a boolean, a fractional float, a negative, an absurd magnitude) is
+    rejected by ``_normalise_token_count`` and disclosed through
+    ``calls_without_tokens`` — the same sibling-counter shape as the other
+    two, so a malformed measurement is an ABSENCE the row names rather than a
+    shaped number it cannot distinguish from a real one.
     """
     acc = stats.setdefault("cost", {})
-    ptoks = int(prompt_tokens or 0)
-    ctoks = int(completion_tokens or 0)
+    # #5854: normalise BOTH provider token fields before the first mutation
+    # into ``acc``, exactly as the #5822 charge guard does — a rejected token
+    # contributes no number, so the disclosure counter is the only trace it
+    # leaves. ``None`` here means ABSENT (``prompt_tokens`` was ``None``) or
+    # REJECTED (present but unusable); the two are distinguished below so the
+    # counter fires only for the rejected ones — an honest ``0`` is not a
+    # rejection.
+    ptoks = _normalise_token_count(prompt_tokens)
+    ctoks = _normalise_token_count(completion_tokens)
+    tokens_rejected = (
+        (ptoks is None and prompt_tokens is not None)
+        or (ctoks is None and completion_tokens is not None))
+    ptoks = ptoks or 0
+    ctoks = ctoks or 0
     # #5822 review P3: normalise EVERY provider-controlled value before the
     # first mutation into ``acc``. ``cost_usd`` is the last raise point, and it
     # used to be coerced AFTER the token counters had already been bumped — so a
@@ -7887,6 +7970,13 @@ def _accumulate_call_cost(stats: dict, *, prompt_tokens, completion_tokens,
         acc["calls_without_usage"] = (
             int(acc.get("calls_without_usage", 0)) + 1)
         lane["calls_without_usage"] += 1
+    if tokens_rejected:
+        # #5854: the token measurement was rejected, never shaped. A call with
+        # no usable token count is NOT a $0-token call, so it is disclosed
+        # here and rolled to the session level beside the other counters.
+        acc["calls_without_tokens"] = (
+            int(acc.get("calls_without_tokens", 0)) + 1)
+        lane["calls_without_tokens"] += 1
     lane["usage_present"] = bool(lane["usage_present"] and has_usage)
 
 
@@ -7941,6 +8031,12 @@ def _rollup_llm(llm_stats: dict, stage_stats: dict,
     llm_stats["calls_without_usage"] = (
         llm_stats.get("calls_without_usage", 0)
         + int(cost.get("calls_without_usage", 0) or 0))
+    # #5854: the token-rejection disclosure — a call whose provider token
+    # count was malformed, rolled like the other counters so the emitted row
+    # names the absence instead of carrying a shaped number.
+    llm_stats["calls_without_tokens"] = (
+        llm_stats.get("calls_without_tokens", 0)
+        + int(cost.get("calls_without_tokens", 0) or 0))
 
     by_stage = llm_stats.setdefault("by_stage", {})
     for provider, models in (cost.get("by_route") or {}).items():
@@ -8015,10 +8111,16 @@ def _call_once(model, system: str, user: str, *, deadline_s: int,
         # normalization mirrors ``_billed()`` (sdk.py:216) so mocks
         # without the token attrs contribute 0, never a TypeError).
         box["finish_reason"] = getattr(model, "last_finish_reason", None)
-        box["prompt_tokens"] = int(
-            getattr(model, "last_prompt_tokens", None) or 0)
-        box["completion_tokens"] = int(
-            getattr(model, "last_completion_tokens", None) or 0)
+        # #5854: capture the RAW provider counts — an ``int()`` here would
+        # FABRICATE (``True`` -> 1) or TRUNCATE (``100.9`` -> 100) BEFORE the
+        # normaliser (`_normalise_token_count`) could see the malformed value,
+        # which is exactly why the v2 lane shared the #5854 defect. A missing
+        # attr still becomes 0 (the #2134 Task 0 contract below), and
+        # ``_complete`` rejects + discloses a present-but-unusable one.
+        _pt = getattr(model, "last_prompt_tokens", None)
+        _ct = getattr(model, "last_completion_tokens", None)
+        box["prompt_tokens"] = 0 if _pt is None else _pt
+        box["completion_tokens"] = 0 if _ct is None else _ct
         # #3359: the provider's own charge + the route that served it,
         # captured in the SAME thread as the call (same cross-thread-race
         # reason as the tokens above; ``is None`` — 0.0 is authoritative).
@@ -8179,10 +8281,20 @@ def _complete(model, system: str, user: str, *, deadline_s: int | None = None,
     for attempt in range(1, retries + 2):
         try:
             (resp, finish_reason,
-             prompt_tokens, completion_tokens,
+             prompt_tokens_raw, completion_tokens_raw,
              call_cost_usd, call_provider, call_model) = _call_once(
                  model, system, user, deadline_s=deadline_s,
                  max_tokens=max_tokens, stats=stats)
+            # #5854: the per-call SNAPSHOT fields are the NORMALISED counts
+            # (0 for an absent or rejected value); the accumulator is handed
+            # the RAW value so IT can disclose the rejection through
+            # ``calls_without_tokens``. Normalising here too keeps a malformed
+            # count out of ``stats["prompt_tokens"]`` (the recovery/truncation
+            # read surface) — the shape the v2 lane previously got from
+            # ``_call_once``'s ``int()``, now applied only after validation.
+            prompt_tokens = _normalise_token_count(prompt_tokens_raw) or 0
+            completion_tokens = (
+                _normalise_token_count(completion_tokens_raw) or 0)
             truncated = finish_reason == "length"
             if stats is not None:
                 stats.update(attempts=attempt, retries=attempt - 1,
@@ -8199,8 +8311,8 @@ def _complete(model, system: str, user: str, *, deadline_s: int | None = None,
                 # values come from ``_call_once``'s own return tuple — this
                 # call's capture, never another thread's.
                 _accumulate_call_cost(
-                    stats, prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens,
+                    stats, prompt_tokens=prompt_tokens_raw,
+                    completion_tokens=completion_tokens_raw,
                     cost_usd=call_cost_usd,
                     provider=call_provider,
                     model=call_model)
