@@ -126,12 +126,49 @@ body:
     validations:
       required: false
 
+  - type: markdown
+    attributes:
+      value: |
+        ---
+        ### If you are an agent working this issue — record what you learn in the graph
+
+        Before you close this, write what you found into the **Tortoise graph**
+        (`TORTOISE_DB_URI='docker://:@127.0.0.1:16379/tortoise'`) as an `evidence` point, wired to the
+        **objective it serves** — never to this issue. A finding left in a session dies with it, and the
+        next lane re-derives it from scratch. This is the mechanism that keeps the map current as we work
+        the chain of objectives and, ultimately, find the best path to **revenue**.
+
+        | Objective | Node id |
+        |---|---|
+        | REVENUE (the ultimate goal) | `1a0f4c93565-8ba390705095` |
+        | PILOTS / RECOMMENDATION / RETENTION | `1a0f4c9a91e-a956a099edb6` |
+        | LAUNCH THE PRIVATE ALPHA | `1a0f4c9ae4b-70eda40b4c9f` |
+        | COMPLETE P0/P1 (blocks the alpha) | `1a0f4c9af8a-8b24ff73d40b` |
+        | TEST MARKETING ROUTES (design partners) | `1a0f4c9b189-5ec2d96fe89f` |
+        | BE ABLE TO MERGE | `1a0f4c9b345-7014a92c0f00` |
+        | DRAIN THE PR BACKLOG | `1a0f4c9b542-56f9e229dced` |
+
+        A useful record has **four parts** — omit one and the next reader cannot use it:
+
+        1. **The mechanism** — what actually happens, with `file:line` for the code that decides.
+        2. **The measurement** — the command and its real output.
+        3. **The bound** — what you did *not* verify, and your sample size.
+        4. **The next move** — the exact file and line to start from, or why there is none.
+
+        ⛔ **Do not file a peer issue for a known root.** If this is a symptom of an existing root cause,
+        comment the evidence on the root — the same **root cause**, not the same words.
+
+        ⛔ **Mark deliberate departures** with an `OVERRIDES:` line, so a later reader can tell an
+        intentional ruling from an accident of history.
+
   - type: checkboxes
     id: confirmations
     attributes:
       label: Before submitting
       description: A few quick checks that speed up triage.
       options:
+        - label: I checked whether this is a symptom of an existing root cause
+          required: false
         - label: I searched existing issues and Discussions for this problem first
           required: false
         - label: I've included graph JSON or a screenshot where the bug involves graph data

@@ -37,7 +37,7 @@ Input format (JSON):
 
 Run:
   cd "$(dirname "$0")/.."
-  TORTOISE_DB_URI=docker://:@localhost:16379/tortoise python3 graph-scripts/decide.py --input docs/examples/my-decision.json
+  TORTOISE_DB_URI=docker://:@127.0.0.1:16379/tortoise python3 graph-scripts/decide.py --input docs/examples/my-decision.json
 """
 from __future__ import annotations
 
@@ -134,7 +134,7 @@ def main():
     from tortoise.sdk import TortoiseSDK  # noqa: I001
     from tortoise.projection import FalkorProjection
 
-    uri = args.db or os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise")
+    uri = args.db or os.environ.get("TORTOISE_DB_URI", "docker://:@127.0.0.1:16379/tortoise")
     # Pass the resolved URI through the env so TortoiseSDK() never constructs
     # the DEFAULT embedded store (resolve_db_path) — otherwise the constructor's
     # cross-process busy probe throws EmbeddedStoreBusyError whenever another

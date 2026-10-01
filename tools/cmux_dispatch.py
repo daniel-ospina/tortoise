@@ -25,11 +25,86 @@ of that syscall and are therefore invisible to any exit code:
 
 The rule this tool enforces: **verify the ARTIFACT, not the send.** Confirmation
 is a read of whether the message became a conversation message
-(`cmux list-workspaces --json` -> `latest_submitted_message`), with the pane
+(`cmux list-workspaces --json` -> `latest_submitted_message`) OR entered pi's
+PENDING-TURN queue (the pane's `Steering:` / `Follow-up:` display), with the pane
 screen as the discriminator between "sitting unsent in the composer" (release
 with a bare Enter) and "never arrived" (re-send). A dispatch that cannot be
-confirmed exits non-zero with `sent-but-not-consumed`; it never reports success
-on an unconsumed send.
+confirmed exits non-zero with `sent-but-not-consumed`; it reports success only on
+POSITIVE artifact evidence — the message as the latest submitted message, or a
+NEW pending-turn entry carrying it. That evidence is pi's own render string, not
+a secret, so a verdict means pi's display showed acceptance, not proof of it (see
+RESIDUAL: a lane that deliberately prints pi's hint line can forge it).
+
+QUEUED IS NOT UNCONSUMED (#5979)
+--------------------------------
+`latest_submitted_message` only advances at a TURN BOUNDARY. On a lane that is
+mid-turn — i.e. every lane that is actually working — pi ACCEPTS a submission
+into its queue and consumes it when the current turn ends, so the strict "is it
+the latest submitted message?" test can never be satisfied inside any bounded
+wait. The old verdict called that `sent-but-not-consumed` and the message was in
+fact delivered; three callers (`ask-owner.py`, `turn-classify.py`, `turn-end.py`)
+each discovered this independently and worked around it.
+
+The verdict is therefore queue-aware, and it keys on POSITIVE evidence that pi
+accepted THIS submission: pi's pending-turn display
+(`dist/modes/interactive/interactive-mode.js::updatePendingMessagesDisplay`)
+renders the queued text as `Steering: <text>` / `Follow-up: <text>`, followed by a
+single `\u21b3 \u2026 to edit all queued messages` hint line, in `pendingMessagesContainer`
+— a dock region below the transcript and above the editor. The container is
+located STRUCTURALLY (the run of entries immediately above a hint line carrying
+pi's OWN hint text), not by scanning for a `Steering:`-shaped line anywhere: a
+lane's scrollback legitimately contains arbitrary such text. A pending entry that
+is NEW (a higher COUNT of matching entries) relative to the pre-send screen and
+carries THIS message — exactly, or as a truncated head whose raw text ends in the
+renderer's `...` — is direct evidence the message entered pi's queue -> `queued`,
+exit 0. `Dispatcher.send_message` flattens newlines up front (as `_read_message`
+does), because pi renders a submission as a single line and a first line is not
+message-unique.
+
+The match is on the whole message, not the 40-char fingerprint: a fingerprint is
+not message-unique (the fleet's own nudges share a head, and a short dispatch's
+fingerprint IS the whole dispatch), and accepting any pending line that merely
+starts with it once confirmed a DROPPED `"continue"` against an unrelated queued
+`"continue with the migration"`. Truncation must be EVIDENCED by the `...` the
+renderer appends AND the head must be strictly shorter than the message — a
+shorter line without an ellipsis is a different message, and a longer message cut
+to our length is a different message too. Novelty is required for the same reason
+`is_consumed` requires it: a line already on screen before the send is not
+evidence about this send.
+
+⚠️ RESIDUAL (known, not hidden): the hint text is pi's own public render string,
+and the capture also carries arbitrary lane output, so a lane that DELIBERATELY
+prints `Steering: <our message>` directly above `\u21b3 \u2026 to edit all queued
+messages` can still forge the verdict. Ordinary output does not (the hint text and
+that adjacency are what the bound requires), and a duplicate/stale frame is
+rejected by novelty. Closing this fully needs a per-send capability token that only
+a pi which RECEIVED the bytes could echo; that is a design change, not a matcher
+fix, and is not attempted here.
+
+TWO THINGS THIS DELIBERATELY DOES NOT DO:
+
+  * The pane's COMPOSER is not evidence of a queue. On submit-while-streaming pi
+    runs `editor.setText("")` BEFORE queueing, so a real queue leaves the
+    composer EMPTY, and text still sitting in the composer is the UNSENT state
+    (`SCREEN_COMPOSING_UNSENT`, "UNSENT, no turn"). Composer occupancy is an
+    input to the RECOVERY decision only — it selects the non-duplicating
+    `release-only` (bare Enter) recovery — and can never produce exit 0 on its
+    own. The `queued` verdict does not read the composer at all.
+  * TRANSCRIPT GROWTH is not evidence either, and is deliberately not wired in.
+    The callers that trust it combine it with a SENTINEL CONTENT match, because
+    on a mid-turn lane the transcript is growing for the lane's OWN turn —
+    unattributable growth would fabricate success for a message that never
+    landed. The attributable variant is unavailable at queue time: pi's
+    `_queueSteer` pushes the text into an in-memory array and the session file is
+    appended only on `message_end`, i.e. when the message is CONSUMED at the turn
+    boundary — by which point `latest_submitted_message` also moves. So the
+    pending-turn display is the queue signal.
+
+The fail-closed direction is unchanged: a text that appears in NEITHER a
+submitted message NOR a NEW pending line still fails `sent-but-not-consumed`, and
+a pane whose `read-screen` failed (`screen` -> None) is never a queue. An
+unreadable COMPOSER is not a fail-closed condition for the queue verdict (the
+pending display is independent evidence); it only constrains the recovery.
 
 PREVENTION, then DETECTION
 --------------------------
@@ -50,7 +125,9 @@ USAGE
 
 EXIT CODES
 ----------
-    0  consumed — the message became a conversation message
+    0  consumed — the message became a conversation message, or
+       queued — pi accepted it into its pending queue (the pane's
+       `Steering:`/`Follow-up:` display carries this message) for the next turn
     1  sent-but-not-consumed, or never-became-ready — NOT success
     2  usage error (missing/invalid input, unknown workspace)
     3  cmux transport error (binary missing, socket refused, non-zero rc)
@@ -123,8 +200,53 @@ R_RESEND = "resend"
 R_DISMISS_RESEND = "dismiss-and-resend"
 
 #: pi's input box is delimited by long horizontal rules; the composer is the
-#: region between the LAST TWO of them.
-RULE_RE = re.compile(r"^\s*[\u2500-]{8,}\s*$")
+#: region between the LAST TWO of them. A mid-turn editor draws its TOP border with
+#: the status label embedded (`── ⠼ Working ──…`), so a labelled border counts
+#: too — otherwise the editor's two borders cannot be paired and `composer_region`
+#: either returns None (`cannot tell`) or spans rules across the transcript; either
+#: way an EMPTY composer is never positively identified.
+RULE_RE = re.compile(r"^\s*(?:[\u2500-]{8,}|[\u2500-]{2,}\s+\S.*[\u2500-]{8,})\s*$")
+
+#: pi's PENDING-TURN display, one line per queued submission (#5979).
+#: `dist/modes/interactive/interactive-mode.js::updatePendingMessagesDisplay`:
+#: `theme.fg("dim", `Steering: ${message}`)` for a submission queued while
+#: streaming, `Follow-up: ${message}` for one queued during compaction. The
+#: container is mounted in the input dock (`createChatViewport` order:
+#: transcript, pendingMessages, status, editor, …), so the queued text is NOT in
+#: the composer.
+PENDING_TURN_RE = re.compile(r"^\s*(?:Steering|Follow-up):\s*(?P<text>.*)$")
+
+#: pi's dequeue hint — the last line of the pending container, rendered by
+#: `updatePendingMessagesDisplay` as
+#: `theme.fg("dim", `\u21b3 ${key} to edit all queued messages`)`, where `${key}` is
+#: the resolved key display (e.g. `Option+Up`). Requiring pi's own hint TEXT — not
+#: just the `\u21b3` glyph — keeps ordinary scrollback (which can print `\u21b3`
+#: freely) from being read as a container. It is NOT a secret and so is not proof
+#: against a lane that deliberately renders pi's hint string; see the module
+#: docstring's residual note. `.*` absorbs the keybinding-dependent key display.
+#: A right-truncated hint (a very narrow pane) is not parsed as a container, so the
+#: `queued` verdict fails closed there — and `pending_queue_unparsed` keeps the same
+#: unobservable queue from authorizing a duplicate re-send in recovery.
+PENDING_HINT_RE = re.compile(r"^\s*\u21b3.*to edit all queued messages\s*$")
+
+#: A pi DEQUEUE HINT that the renderer CUT: it still starts with the `\u21b3` glyph
+#: and ends in the truncation ellipsis, but no longer carries the full
+#: `to edit all queued messages` text. A narrow pane truncates pi's own hint, so the
+#: container cannot be located — the queue is unobservable, not absent.
+TRUNCATED_HINT_RE = re.compile(r"^\s*\u21b3.*\.\.\.\s*$")
+
+#: The ellipsis `truncateToWidth` appends to a cut line (its default).
+TRUNCATION_ELLIPSIS = "..."
+
+#: Minimum visible characters for a TRUNCATED pending line to count as ours. The
+#: display is one line (`TruncatedText(text, 1, 0)`) cut by `truncateToWidth` to
+#: roughly `pane_width - 2` (its horizontal padding) with a literal `...` appended.
+#: Measured on this box the fleet's cmux panes are ~142-217 columns, so a real
+#: truncated head is ~127-200 chars and this cap rarely binds: the identity floor
+#: is `max(4, min(PENDING_MIN_CHARS, (len(message) + 1) // 2))` — half the message,
+#: capped here and floored at 4 — so a cut SHORT message on a narrow pane still
+#: matches, while a long message is identified by its first `PENDING_MIN_CHARS`.
+PENDING_MIN_CHARS = 16
 
 
 # --------------------------------------------------------------------------- #
@@ -313,22 +435,280 @@ def composer_empty(screen: str | None) -> bool:
     return region is not None and not region.strip()
 
 
-def recovery_action(screen: str | None, fp: str) -> str:
+def _pending_entries(
+    screen: str | None,
+) -> list[tuple[str, str, bool]]:
+    """The pending-container entries as `(raw, visible, truncated)` triples.
+
+    The container is bounded STRUCTURALLY from pi's own render. Each queue change
+    runs `updatePendingMessagesDisplay`, which clears the container and re-adds:
+    a spacer, one `Steering: <text>` / `Follow-up: <text>` line per queued
+    submission, then a single `\u21b3 <key> to edit all queued messages` hint — all
+    under the same `steering.length || followUp.length` guard. So the entries are
+    exactly the contiguous `Steering:`/`Follow-up:` lines directly ABOVE the last
+    hint line that has them; a `Steering:`-shaped line anywhere else (a lane's
+    transcript, model output, bash output) is scrollback, not evidence about a
+    dispatch.
+
+    There is deliberately NO distance-from-the-bottom bound. pi appends its
+    `bashComponent` to this same container while a lane streams, so live output can
+    sit BELOW the hint and push it arbitrarily far from the end of the capture; a
+    numeric window would then hide the live container, turning a genuinely queued
+    message into a failure (and, with an empty composer, into a duplicate re-send).
+    Staleness is handled by NOVELTY instead, which is the right instrument.
+
+    `truncated` records whether the RAW text carried the renderer's `...`, and
+    `raw` is kept so a message that itself ends in `...` can still be matched
+    exactly. The flag matters the other way too: the ellipsis is the only thing
+    that distinguishes a real truncation of OUR message from a DIFFERENT, shorter
+    message that merely shares a prefix.
+    """
+    rows = (screen or "").splitlines()
+    # Scan hints newest-first: the container's own hint is the LAST hint that has
+    # entries directly above it. A stray line carrying pi's hint text BELOW the
+    # container (a bash output block appended while the lane streams) must not hide
+    # the container's real hint.
+    for hint_at in reversed(
+        [index for index, row in enumerate(rows) if PENDING_HINT_RE.match(row)]
+    ):
+        entries: list[tuple[str, str, bool]] = []
+        for row in reversed(rows[:hint_at]):
+            match = PENDING_TURN_RE.match(row)
+            if not match:
+                break
+            raw = normalize(match.group("text"))
+            truncated = raw.endswith(TRUNCATION_ELLIPSIS)
+            visible = raw[: -len(TRUNCATION_ELLIPSIS)] if truncated else raw
+            entries.append((raw, visible, truncated))
+        if entries:
+            entries.reverse()
+            return entries
+    return []
+
+
+def _entry_matches_message(raw: str, visible: str, truncated: bool, target: str) -> bool:
+    """Is one pending-container entry the WHOLE message `target` (or its cut head)?
+
+    `raw` is the entry's rendered text; `visible` is `raw` with a trailing
+    renderer ellipsis removed. Two shapes are accepted:
+
+      * `raw == target` — the rendered line IS the message (the comparison is on
+        the RAW text, so a message that legitimately ends in `...` matches
+        itself), or
+      * a TRUNCATED head: the raw text carries the renderer's `...`, the visible
+        head is a prefix of the message, and it is STRICTLY SHORTER than the
+        message. That last inequality is what rejects a DIFFERENT, LONGER message
+        whose truncated head happens to equal ours (`Q = target + " tail"` cut to
+        `target...`), and the ellipsis is what rejects a different SHORTER message
+        that merely shares a prefix.
+    """
+    if raw == target:
+        return True
+    if not truncated or not visible:
+        return False
+    # A real cut head is STRICTLY shorter than the message (`len(visible) <
+    # len(target)`) and long enough to identify: half the message, CAPPED at
+    # PENDING_MIN_CHARS and floored at 4, so a genuinely cut SHORT message (a very
+    # narrow pane) is still matchable while a 1-char remnant is not and a long
+    # message is identified by its first PENDING_MIN_CHARS.
+    floor = max(4, min(PENDING_MIN_CHARS, (len(target) + 1) // 2))
+    return len(visible) >= floor and len(visible) < len(target) and target.startswith(visible)
+
+
+def pending_turn_identity(screen: str | None, message: str) -> str | None:
+    """A pending-container entry carrying THIS message, or None (#5979 helper).
+
+    Identity is the WHOLE message, not the 40-char fingerprint. A fingerprint is
+    not message-unique — the fleet's own nudges share a head, and a short
+    dispatch's fingerprint IS the whole dispatch — so accepting any pending line
+    that merely STARTS WITH the fingerprint confirmed a dropped `"continue"`
+    against an unrelated queued `"continue with the migration"`. See
+    `_entry_matches_message` for the accepted shapes; a pending line LONGER than
+    the message is a DIFFERENT message and never matches.
+
+    Returns the entry's visible text (a display value for diagnostics), and None
+    when no entry is ours. Multi-line messages cannot be confirmed: pi renders only
+    the first line, which is not message-unique. `Dispatcher.send_message` flattens
+    a multi-line body up front (as `_read_message` does) so a caller never reaches
+    this state.
+    """
+    if not screen:
+        return None
+    target = normalize(message)
+    if not target:
+        return None
+    for raw, visible, truncated in _pending_entries(screen):
+        if _entry_matches_message(raw, visible, truncated, target):
+            return visible
+    return None
+
+
+def _entry_count(screen: str | None, message: str) -> int:
+    """How many pending-container entries are ours (same predicate as identity)."""
+    if not screen:
+        return 0
+    target = normalize(message)
+    if not target:
+        return 0
+    return sum(
+        1
+        for raw, visible, truncated in _pending_entries(screen)
+        if _entry_matches_message(raw, visible, truncated, target)
+    )
+
+
+def pending_turn_matches(
+    screen: str | None,
+    message: str,
+    before_screen: str | None,
+) -> bool:
+    """True when a NEW pending turn carries THIS message (#5979).
+
+    A submission that never became the latest submitted message but IS shown in
+    pi's pending queue has been ACCEPTED: pi's `latest_submitted_*` advances only
+    at a turn boundary, so a pane that is mid-turn takes the submission into its
+    queue without surfacing it as a turn until the current turn ends. That is a
+    DELIVERED message, not a failed one, and reporting `sent-but-not-consumed`
+    for it is what silently dropped every nudge to a busy lane.
+
+    The evidence is the `Steering: <text>` / `Follow-up: <text>` line pi renders
+    from `pendingMessagesContainer` — a dock region the composer read cannot see
+    (pi clears the editor before queueing).
+
+    NOVELTY, like `is_consumed`'s. A pending entry that was ALREADY on the pane
+    before the send is not evidence that THIS send was accepted: a repeat dispatch
+    of the same brief, or a stale entry in scrollback, would otherwise confirm a
+    send whose bytes never landed. Novelty is a COUNT of our entries, not a
+    string comparison: two identical queued copies of the same brief are a change
+    (`after > before`) even though their identity text is the same, and a
+    width-change that turns an exact entry into a truncated one does not read as
+    novel. `before_screen` is the pre-send capture; when it is None the novelty
+    cannot be established and the verdict stays fail-closed.
+
+    FAIL CLOSED in every other direction too: the composer is NOT consulted here
+    (a real queue has an EMPTY composer, and text in the composer is the UNSENT
+    state), and a message nowhere on screen is not a queue.
+    """
+    if before_screen is None:
+        return False
+    return _entry_count(screen, message) > _entry_count(before_screen, message)
+
+
+def pending_turn_ambiguous(screen: str | None, message: str) -> bool:
+    """A pending line that COULD be a too-short truncation of ours.
+
+    A recovery HINT, never a success verdict. Only this narrow case suppresses the
+    `resend` recovery: the pending text carries the renderer's `...`, is a head of
+    our message, and is shorter than `min(len(message), PENDING_MIN_CHARS)`, the
+    threshold this hint exists for. (The identity floor is at or below this one for
+    messages of at least 4 chars. For a 1-char message the ambiguity branch cannot
+    fire at all (its threshold is 1 and the guard needs `0 < len(visible) < 1`); for
+    a 2-3-char message the hard floor of 4 puts the identity floor above, so an
+    entry there is not an identity. Harmless either way — both branches yield
+    `release`.)
+
+    The `...` requirement is load-bearing in the other direction too: a plain
+    short line that merely shares a head with our message (`Steering: continue`
+    while we send `continue with the migration`) is a DIFFERENT queued message,
+    and suppressing the resend for it would make a lost send undeliverable.
+    """
+    if not screen:
+        return False
+    target = normalize(message)
+    if not target:
+        return False
+    floor = min(len(target), PENDING_MIN_CHARS)
+    for _raw, visible, truncated in _pending_entries(screen):
+        if truncated and 0 < len(visible) < floor and target.startswith(visible):
+            return True
+    return False
+
+
+def pending_queue_unparsed(screen: str | None) -> bool:
+    """pi has a queue the matcher CANNOT parse, so our message may be in it.
+
+    On a narrow pane pi right-truncates its own hint line, so `PENDING_HINT_RE`
+    cannot locate the container and `_pending_entries` returns nothing — the queue
+    is UNOBSERVABLE, not absent. The evidence required is a CUT hint line
+    (`\u21b3 … ...`) with a `Steering:`/`Follow-up:`-shaped line DIRECTLY above it,
+    mirroring the container's own contiguity: a bare `Steering:`-shaped line in a
+    lane's transcript or bash output is scrollback, not a queue, and an unrelated
+    `\u21b3 … ...` line elsewhere must not disable recovery for a genuinely lost
+    send.
+
+    A parsed container is never reported here, and a full hint line with no
+    entries above it is not either (there is no queue to hold our message). When
+    this IS true the queued entry cannot be compared with `message` at all, so the
+    verdict is the module's fail-closed default even if the unparsed entry belongs
+    to another message: a re-dispatch is cheaper than a duplicated turn.
+    """
+    if not screen:
+        return False
+    if _pending_entries(screen):
+        return False
+    rows = screen.splitlines()
+    for index, row in enumerate(rows):
+        if index and TRUNCATED_HINT_RE.match(row) and PENDING_TURN_RE.match(rows[index - 1]):
+            return True
+    return False
+
+
+def recovery_action(screen: str | None, fp: str, message: str = "") -> str:
     """Choose the cheapest safe recovery for an unconsumed send.
 
-    Re-sending is only SAFE when the composer is positively shown to be empty.
-    Anything less — an unreadable pane, an unidentifiable composer, a screen that
-    merely fails to contain the text — falls back to `release-only`, because a
-    bare Enter can never duplicate while a blind re-send can: the composer would
+    Re-sending is only SAFE when the composer is positively shown to be empty AND
+    no queue is present that could hold our message. Anything less — an unreadable
+    pane, an unidentifiable composer, an unparseable pending container, a screen
+    that does not show the text — falls back to `release-only`, because a bare
+    Enter can never duplicate while a blind re-send can: the composer would hold
     hold the message twice and the next Enter would submit it doubled, which
     `is_consumed` would then report as success (the head is unchanged). The
     fail-closed direction costs a re-dispatch; the other corrupts the lane.
+
+    ⚠️ `...` is NECESSARY BUT NOT SUFFICIENT truncation evidence: the renderer
+    appends it, but a queued message may legitimately end in `...` too. A queued
+    DIFFERENT message whose visible head (the text before its trailing `...`) is a
+    prefix of ours and at least the floor long is therefore accepted as a truncated
+    head of ours. That residual needs a coincidental prefix plus a literal
+    ellipsis, and no alternative is observable from a capture (the pane width is
+    not in the text).
+
+    `message` (the full text; `fp` when omitted) narrows the duplicate risk that
+    reaches the re-send branch: a pane whose pending container already carries a
+    head of OUR message. `recovery_action` is reached whenever
+    `pending_turn_matches` did NOT accept the queue — the baseline was unreadable
+    or the count did not grow — so this is the case where our text is on the pane
+    but could not be ATTRIBUTED to this send. Re-sending there queues a second
+    copy, so both branches must suppress it. A pending entry for an UNRELATED
+    message shares no head with ours, and a truncated head that is not ours is not
+    a prefix of ours, so resend stays safe and is still chosen rather than leaving
+    a lost send undeliverable.
     """
     if screen is None:
         return R_RELEASE
     if boot_blocked(screen):
         return R_DISMISS_RESEND
     if text_on_screen(screen, fp):
+        return R_RELEASE
+    if pending_turn_identity(screen, message or fp) is not None or (
+        pending_turn_ambiguous(screen, message or fp)
+    ):
+        # The pane already carries a head of OUR message, so a bare Enter cannot
+        # duplicate while a re-send would queue a SECOND copy. With a readable
+        # baseline a NOVEL entry with an IDENTITY would have been accepted by
+        # `pending_turn_matches` before recovery was reached, leaving only a
+        # pre-existing copy; an entry that is novel but too short to identify has
+        # no identity (`pending_turn_matches` returns False), which is exactly why
+        # the ambiguity disjunct is here. With an unreadable baseline novelty
+        # cannot be established at all, and failing closed here is what keeps the
+        # stale-line false positive out.
+        return R_RELEASE
+    if pending_queue_unparsed(screen):
+        # pi's hint line is CUT and a pending-shaped line exists: the queue is
+        # unobservable, not absent, and the composer reads EMPTY because pi cleared
+        # it — so `composer_empty` would authorize a resend that queues a SECOND
+        # copy. Release instead. (A bare `Steering:`-shaped scrollback line without
+        # a cut hint does NOT reach here; see `pending_queue_unparsed`.)
         return R_RELEASE
     if composer_empty(screen):
         return R_RESEND
@@ -610,6 +990,13 @@ class Dispatcher:
         appear_timeout: float = DEFAULT_APPEAR_TIMEOUT,
         retries: int = DEFAULT_RETRIES,
     ) -> DispatchResult:
+        # Flatten newlines HERE, at the single boundary, exactly as `_read_message`
+        # does for the CLI. A newline would submit early in pi's one-line composer,
+        # and pi renders a queued submission as only its FIRST line — which is not
+        # message-unique, so a multi-line body could be neither confirmed nor
+        # protected from a duplicate re-send. Flattening makes the sent text, the
+        # fingerprint and the confirmation identity the same string.
+        text = " ".join(text.split())
         fp = fingerprint(text)
         if not fp:
             return DispatchResult(False, "empty-message", "nothing to send")
@@ -671,6 +1058,26 @@ class Dispatcher:
                 f"(confirmation will decide)"
             )
 
+        # --- pre-send baseline (novelty for the pending-turn check) --------- #
+        # Captured BEFORE the bytes are written: a pending line already on the pane
+        # is not evidence that THIS send was accepted (#5979 novelty, mirroring
+        # `is_consumed`'s). It is read at the SAME depth as the confirmation read
+        # so the two scopes cannot differ; if it cannot be read, the baseline stays
+        # None and `pending_turn_matches` fails closed. `gate_screen` is NOT reused
+        # as a baseline: the readiness probe reads a shallower window, and mixing
+        # depths is exactly how a line outside the shallow window would read as
+        # novel.
+        before_screen = self.screen(workspace, surface, lines=RECOVERY_SCREEN_LINES)
+        if before_screen is None:
+            # A transient `read-screen` failure is recoverable — retry once before
+            # giving up the `queued` verdict for this send.
+            before_screen = self.screen(workspace, surface, lines=RECOVERY_SCREEN_LINES)
+            if before_screen is None:
+                self.log(
+                    f"{tag}no readable pre-send baseline — the queued verdict "
+                    f"will fail closed for this attempt"
+                )
+
         # --- transmit ------------------------------------------------------- #
         self.log(f"{tag}sending {len(text.encode())} bytes to {workspace}…")
         text_result = self.cmux.send_text(workspace, text, surface)
@@ -720,11 +1127,31 @@ class Dispatcher:
                 )
                 return result
 
+            # A message that never became the latest submission but IS carried by
+            # pi's pending-turn display has been QUEUED for the next turn
+            # (#5979): a mid-turn pane accepts the submission and only surfaces it
+            # as a turn when the current turn ends — later than any bounded wait.
+            # `queued` is a DELIVERED message (exit 0), not a failure. The screen
+            # read is reused by `recovery_action`, so the confirmation itself adds
+            # no cmux call; novelty needs the one pre-send read taken above.
+            screen = self.screen(workspace, surface, lines=RECOVERY_SCREEN_LINES)
+            if pending_turn_matches(screen, text, before_screen):
+                result.ok = True
+                result.status = "queued"
+                result.detail = (
+                    f"{tag}{workspace} confirmed: pi accepted the message into its "
+                    f"pending queue for the next turn (attempt {attempt}, {reason})"
+                )
+                self.log(
+                    f"{tag}queued ({reason}) — the lane is mid-turn; the message is "
+                    f"in pi's pending queue"
+                )
+                return result
+
             if attempt > retries:
                 break
 
-            screen = self.screen(workspace, surface, lines=RECOVERY_SCREEN_LINES)
-            action = recovery_action(screen, fp)
+            action = recovery_action(screen, fp, text)
             result.recoveries.append(action)
             self.log(f"{tag}not consumed ({reason}) — recovery: {action}")
 
@@ -881,6 +1308,13 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     `send` path it must not demand that the submission be newer than a baseline —
     it takes the baseline itself, and a delta test would report an
     already-submitted message as NOT-CONSUMED (exit 1) for ever.
+
+    ⛔ SUBMITTED-ONLY — do NOT use `verify` to audit a `send` verdict. `send` also
+    accepts a message pi queued for the next turn (the pending-turn display, which
+    needs a pre-send baseline), so on a mid-turn lane a message `send` correctly
+    reported as `queued`/exit 0 will print `NOT-CONSUMED` here and exit 1. This is
+    a deliberate contract difference, not a bug: `verify` is a "is it a turn yet?"
+    probe and has no dispatch to be novel against.
     """
     text = _read_message(args)
     if text is None:
@@ -953,7 +1387,11 @@ def build_parser() -> argparse.ArgumentParser:
     ready.add_argument("--json", action="store_true")
     ready.set_defaults(func=_cmd_wait_ready)
 
-    verify = sub.add_parser("verify", help="confirm a message became a turn")
+    verify = sub.add_parser(
+        "verify",
+        help="confirm a message became a turn (SUBMITTED-only: a message `send` "
+        "queued for the next turn reads NOT-CONSUMED here — see _cmd_verify)",
+    )
     verify.add_argument("--workspace", required=True)
     verify.add_argument("--file")
     verify.add_argument("--text")

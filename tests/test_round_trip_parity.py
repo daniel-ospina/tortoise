@@ -4,29 +4,28 @@ Parametrized over TORTOISE_DB_URI set/unset: identical create_point → search
 results on the D1/D5-identical paths; D6/D8 sides assert their own lane."""
 import pytest
 
+from tests import _live_utils
 from tortoise.projection import FalkorProjection
 from tortoise.sdk import TortoiseSDK
 
 
-def _docker_reachable(host: str = "localhost", port: int = 6379) -> bool:
-    """True when a live FalkorDB answers a TCP connect on host:port.
+def _docker_reachable(host: str | None = None,
+                     port: int | None = None) -> bool:
+    """True when the PROVISIONED docker-lane FalkorDB answers a TCP connect.
 
     Repo skip-guard convention (#1436, tests/test_ingest.py): the docker leg
     SKIPS with a FalkorDB-reason when the docker is absent (post-merge-
     validation runs the full suite with NO docker service) — never ERROR on
     redis.ConnectionError. The fast CI job provisions the falkordb service,
     so the probe passes there and the docker leg actually runs.
+
+    #6673: the port used to be the 6379 literal; it is now the ephemeral host
+    port assigned by the provision step (docker `-p 0:6379`). `host=None`
+    resolves through `_live_utils.service_host()`, so a
+    `TORTOISE_TEST_DOCKER_HOST` override reaches the probe exactly as it reaches
+    the clients (the product's `FALKORDB_HOST` is not read — see the seam).
     """
-    import socket
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(1.0)
-    try:
-        s.connect((host, port))
-        return True
-    except OSError:
-        return False
-    finally:
-        s.close()
+    return _live_utils.tcp_reachable(port or _live_utils.docker_port(), host=host)
 
 
 def _round_trip(tmp_path, point_id: str, content: str):
@@ -69,8 +68,8 @@ def test_round_trip_same_shape(leg, tmp_path, monkeypatch):
         monkeypatch.delenv("TORTOISE_TEST_MODE", raising=False)
     else:
         if not _docker_reachable():
-            pytest.skip("live FalkorDB (localhost:6379) not reachable")
-        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
+            pytest.skip(f"live FalkorDB (localhost:{_live_utils.docker_port()}) not reachable")
+        monkeypatch.setenv("TORTOISE_DB_URI", _live_utils.docker_base_uri())
         monkeypatch.setenv("TORTOISE_TEST_MODE", "1")
     hits = _round_trip(tmp_path, "rt-1", "parity claim")
     assert hits and hits[0][0] == "rt-1" and hits[0][1] == "parity claim"

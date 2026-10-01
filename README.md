@@ -91,23 +91,34 @@ One transport per setup — daemon MCP over **HTTP** for hosted + the Docker
 path; **stdio** for the no-Docker single-agent eval path (quickstart §5):
 
 ```bash
-# Hosted
-claude mcp add tortoise https://api.premiselabs.co/mcp/
+# Hosted — export it in this shell (and in your profile for later sessions;
+# if your profile is version-controlled, use a non-committed include instead)
+export TORTOISE_API_KEY=tt_YOUR_KEY
+claude mcp add --transport http tortoise https://api.premiselabs.co/mcp/ \
+  --header "Authorization: Bearer ${TORTOISE_API_KEY}"
 # Self-hosted — Docker path (compose daemon from §1): daemon MCP over HTTP
-claude mcp add tortoise http://localhost:8000/mcp
+claude mcp add --transport http tortoise http://localhost:8000/mcp
 ```
 
-> ℹ️ **Claude Code one-time approval:** servers registered at **project
-> scope** (`.mcp.json` — `claude mcp add --scope project`, the default in
-> older clients) show as **⏸ Pending approval** in `claude mcp list` until
-> you approve them once — start `claude` in this project and allow the
-> prompt (or use `/mcp`). The tools stay disabled until then; this is
-> expected, not a failure. (The current `claude mcp add` default is *local*
-> scope — active immediately, no approval.)
+> ℹ️ **Claude Code scope + approval.** `claude mcp add` writes **local**
+> scope by default — `~/.claude.json`, under this project's entry: private to
+> you, this project only, **never committed**. It skips the project-scope
+> server approval, but no scope is approval-free: Claude Code asks permission
+> the first time it calls each MCP tool (allow it once, or pre-allow
+> `mcp__tortoise__*`). `Added …` means the entry was written, not that it
+> connected — `claude mcp list` is the check.
+>
+> **Sharing the config with the repo instead?** `--scope project` writes a
+> **committable** `.mcp.json` at the project root, approved once per machine —
+> start `claude` in the project and allow the prompt, or run `/mcp`
+> (`claude mcp reset-project-choices` resets the choice). ⛔ Re-using the hosted
+> `--header` there? **Single-quote it** (`'Authorization: Bearer
+> ${TORTOISE_API_KEY}'`) so the shell writes the reference, not your key, into a
+> file you are about to commit.
 
 ```bash
 # Codex
-codex mcp add tortoise http://localhost:8000/mcp --bearer-token-env-var TORTOISE_API_KEY
+codex mcp add tortoise --url http://localhost:8000/mcp --bearer-token-env-var TORTOISE_API_KEY
 ```
 
 Or add to `.mcp.json`:

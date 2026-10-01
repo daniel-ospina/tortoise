@@ -948,9 +948,8 @@ class TestCommittedRepoMcpJson:
     def test_tortoise_entry_keeps_http_type(self):
         # This root file also serves Claude Code, whose schema treats `type` as
         # load-bearing for a url entry; pi ignores `type` and picks the
-        # transport from url-vs-command. Pinned because the sibling doc
-        # docs/quickstart-cloud.md:47 names a DIFFERENT value (streamable-http)
-        # for the same object, and nothing else pins this field.
+        # transport from url-vs-command. Pinned because nothing else pins this
+        # field for the same object; docs/quickstart-cloud.md agrees with it.
         assert self._tortoise().get("type") == "http", (
             f"committed .mcp.json tortoise entry must keep type='http' -- got "
             f"{self._tortoise().get('type')!r}"

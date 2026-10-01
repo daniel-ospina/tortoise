@@ -403,7 +403,7 @@ only dispatch path that confirms the ARTIFACT rather than the send:
 
 ```bash
 python3 tools/cmux_dispatch.py send --workspace <ws> --surface <surf> \
-    --label <lane> --file <brief.txt>        # exit 0 ONLY if it became a turn
+    --label <lane> --file <brief.txt>        # exit 0 only on positive evidence pi got it
 ```
 
 `cmux send` exits 0 when *bytes were written to the terminal*, which is a different event from *the
@@ -418,10 +418,13 @@ are invisible to any exit code (#4292):
    **eaten**, or its prefix is eaten and the remainder submitted as a **truncated turn**.
 
 The dispatcher waits for the pane to be safe to send (dismissing a boot-block prompt instead of
-feeding it the brief), sends text + a bare Enter, then confirms via
-`cmux list-workspaces --json` → `latest_submitted_message`, recovering automatically (release the
-composer with a bare Enter, or dismiss-and-re-send when the text was eaten). It exits non-zero with
-`sent-but-not-consumed` when the message never became a turn.
+feeding it the brief), sends text + a bare Enter, then confirms on **positive evidence that pi
+took the message** — via either `cmux list-workspaces --json` → `latest_submitted_message` (it became
+a turn) **or** the pane's pending-turn display (`Steering:` / `Follow-up:`, the queue pi accepted a
+mid-turn submission into). It recovers automatically (release the composer with a bare Enter, or
+dismiss-and-re-send when the text was eaten). It exits non-zero with `sent-but-not-consumed` when
+the message appears in neither — **text still sitting in the composer is the UNSENT state, never a
+success** (pi clears the editor before it queues).
 
 **One-line check until every caller is migrated:** after dispatching, confirm the lane shows a
 `Working` spinner (`cmux read-screen --workspace <ws> --lines 6`) before assuming it started. A pane

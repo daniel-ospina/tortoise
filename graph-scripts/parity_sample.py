@@ -9,7 +9,7 @@ Block the REMOVE migration if there are unexplained operator-set deltas.
 
 Usage:
   # Sample 50 contexts from the DEV graph:
-  TORTOISE_DB_URI=docker://:@localhost:16379/tortoise \\
+  TORTOISE_DB_URI=docker://:@127.0.0.1:16379/tortoise \\
     python3 graph-scripts/parity_sample.py
 
   # With explicit limit and seed:
@@ -237,7 +237,7 @@ def main() -> int:
     args = parser.parse_args()
 
     uri = args.uri or os.environ.get(
-        "TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise"
+        "TORTOISE_DB_URI", "docker://:@127.0.0.1:16379/tortoise"
     )
     cfg = _parse_uri(uri)
 

@@ -183,8 +183,11 @@ def test_full_run_is_outside_the_guard_and_unconditional():
     # ...nor may the pre-phase invocation itself short-circuit.
     pre_line = next(ln for ln in region if PRE_JUNIT in ln)
     assert not re.search(r"\|\||&&|;", pre_line), pre_line
-    # ...and the gating line carries no shell condition prefix.
-    assert lines[full].strip().startswith("timeout -s INT -k 10 55m"), lines[full]
+    # ...and the gating line carries no shell condition prefix, and uses the
+    # GATING budget — per-shard since #6135 — never the pre-phase's 10m.
+    assert lines[full].strip().startswith(
+        "timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m"), lines[full]
+    assert " -k 10 10m " not in lines[full], lines[full]
 
 
 def test_prephase_marker_equals_gating_marker():
@@ -320,19 +323,26 @@ def test_prephase_failopen_codes_are_pinned():
 
 
 def test_prephase_has_its_own_bounded_watchdog():
-    """#6142 P1: the pre-phase must not borrow the 55m gating watchdog.
+    """#6142 P1: the pre-phase must not borrow the GATING watchdog.
 
     Setup + pre-phase + gating must fit the job cap; if the pre-phase could
-    spend 55m, a *passing* pre-phase would leave the gating run to be killed
-    by the runner cap mid-suite — the #798 death mode this job's own cap
-    comment says is impossible.
+    spend the gating budget, a *passing* pre-phase would leave the gating run to
+    be killed by the runner cap mid-suite — the #798 death mode this job's own
+    cap comment says is impossible.
+
+    #6135 makes that budget per-shard (`matrix.watchdog_minutes`) instead of the
+    literal 55m, so the pin is that the gating run uses the SHARD budget and NOT
+    the pre-phase's 10m: the two must never collapse into one value, or the
+    pre-phase stops being the cheap pre-phase.
     """
     script = _run_script()
     pre = [ln for ln in _pytest_lines(script) if PRE_JUNIT in ln]
     assert len(pre) == 1, pre
     assert "timeout -s INT -k 10 10m" in pre[0], pre[0]
     full = [ln for ln in _pytest_lines(script) if FULL_JUNIT in ln]
-    assert "timeout -s INT -k 10 55m" in full[0], full[0]
+    assert "timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m" in full[0], full[0]
+    # the pre-phase's 10m must NOT be the gating budget
+    assert "timeout -s INT -k 10 10m" not in full[0], full[0]
     # the job cap holds setup + pre-phase watchdog + gating watchdog (>=75m).
     job = yaml.safe_load(WORKFLOW.read_text())["jobs"]["test"]
     assert job["timeout-minutes"] >= 75, job["timeout-minutes"]
