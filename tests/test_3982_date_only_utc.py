@@ -157,14 +157,31 @@ def test_date_time_without_offset_keeps_the_local_reading():
     local. A date-time carrying no offset must therefore still read locally;
     a fix that anchored every zone-less value would be wrong by the same
     standard it cites. This test fails if the change is over-broad.
+
+    The expectation is derived from the STDLIB, not from the primitive under
+    test. Comparing the primitive's UTC reading against its own local reading
+    would be a TAUTOLOGY: both sides come from the same deterministic call, so
+    no input could ever make it red — and a regression that made a zone-less
+    date-TIME read at some constant shifted offset would still pass.
     """
-    shift = _zone_shift_seconds()
-    with _forces_tz(_UTC):
-        utc = _created_sort_key(_AS_NAIVE_DATETIME)[1]
+    from datetime import UTC, datetime
+
+    _zone_shift_seconds()
+    naive = datetime(2026, 6, 10, 0, 0, 0)
     with _forces_tz(_EST):
         est = _created_sort_key(_AS_NAIVE_DATETIME)[1]
-    assert abs(utc - est) == pytest.approx(shift, abs=1), (
-        "a zone-less date-TIME must keep its local reading per the same clause"
+        # The zone the runner ACTUALLY got, read from the stdlib — not the
+        # offset the fixture asked for, and not anything the primitive says.
+        offset = naive.astimezone().utcoffset().total_seconds()
+    assert offset != 0, (
+        "fixture cannot fail: the forced zone is UTC after all, so a local "
+        "reading and a UTC reading would coincide"
+    )
+    # Read locally, a naive datetime lands at UTC midnight MINUS that offset.
+    expected = datetime(2026, 6, 10, tzinfo=UTC).timestamp() - offset
+    assert est == pytest.approx(expected, abs=1), (
+        "a zone-less date-TIME must keep its local reading per the same clause; "
+        f"got {est}, expected {expected} for a local UTC offset of {offset}s"
     )
 
 
