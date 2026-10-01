@@ -451,3 +451,16 @@ int and `5.strip()` raised `AttributeError` out of a plain `create_point`. Added
 had an SDK test but no EventAPI sibling, so dropping the conditional journaled
 `sourceVersionTransit: null`. Added `test_eventapi_payload_omits_the_key_when_there_is_no_anchor`. All
 three mutants go RED by their named test.
+
+**Cycle 11 — code review round 10 (re-review of `a9a66dbf6`).** No P0/P1/P2 — one actionable P3: a FALSE
+rationale. Folded: (1) `sdk.py`'s `_check_item_shape` note claimed the three keys would "splat-bind
+`create_point` below (the key binds the kwarg before `_sanitize_props` ever sees props)". That is wrong
+for keys that are not declared parameters of `create_point`: they land in `**props`, where
+`_sanitize_props` DOES see and reject them, so the sanitizer is the backstop and not the gap. The check
+is still justified, for the reason now stated instead — it makes the refusal a Phase-1 abort (zero
+mutation, before any write) and it covers every section, including the ones that never reach
+`_sanitize_props` at all. (2) §7 now RECORDS the equivalent (un-killable) branches in this diff rather
+than leaving them implied: `_point_source_transit`'s `if not refs: return None`, `_valid_transit_pairs`'
+empty-sequence half, `_point_source_refs`' falsy-member filter and `_link_source`'s falsy-ref guards, and
+the two `is not None` property-writes (`SET n.x = null` REMOVES the property, so emitted-null ==
+absent) — each applied and green, with no reachable discriminating input.
