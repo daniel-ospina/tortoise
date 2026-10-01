@@ -2583,13 +2583,22 @@ def test_workflow_lint_pins_the_actionlint_image_and_its_scope():
     raw = "\n".join(
         str(step.get("run") or "") for step in job.get("steps") or []
     )
-    # Every assertion below targets EXECUTABLE text. Pinning tokens in the raw
-    # body was satisfiable by a `run:` that only MENTIONS them: a comment
-    # carrying `actionlint:1.7.12 -shellcheck= *.yaml` plus the copied
-    # empty-match block passed the whole test while invoking nothing — the very
-    # fail-open this test exists to prevent. Comments are stripped first, and
-    # the invocation itself is pinned STRUCTURALLY so a body that merely names
-    # the tokens cannot pass.
+    # Every assertion below targets EXECUTABLE-looking text: `#`-comment lines
+    # are stripped, shell line-continuations are joined, and the invocation is
+    # pinned STRUCTURALLY, which closes the specific no-op the earlier revision
+    # let through (a commented-out body carrying `actionlint:1.7.12
+    # -shellcheck= *.yaml` plus the copied empty-match block).
+    #
+    # WHAT THIS DOES NOT GUARANTEE, stated because the limit is real: a static
+    # regex over a `run:` scalar can prove the command is WRITTEN, never that it
+    # EXECUTES. A body that prints the script from a quoted heredoc, or that
+    # exits 0 before reaching it, still satisfies every assertion below. This is
+    # therefore a TRIPWIRE against the realistic no-op replacements (deleting
+    # the step's work, commenting it out, unpinning the image, dropping the
+    # `*.yaml` glob or the empty-match refusal) — not proof of execution. Real
+    # proof needs a runtime positive control in the step itself (lint a
+    # deliberately malformed temp workflow and assert actionlint exits
+    # non-zero), which is a change to the leg, not to this test.
     runs = "\n".join(
         line for line in raw.splitlines() if not line.lstrip().startswith("#")
     )
