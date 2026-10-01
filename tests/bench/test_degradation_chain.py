@@ -7,8 +7,21 @@ elevated_timeout_ms lets every strategy complete. Uses monkeypatched strategy
 runners — no graph, no DB.
 
 Note: ThreadPoolExecutor joins worker threads on exit, so the censored call
-waits out the slow futures (~0.6s) even though the collection loop already
-moved on — the test is intentionally tolerant of that.
+waits out the slow futures even though the collection loop already moved on —
+the test is intentionally tolerant of that.
+
+#6842 — WHY THE STUB LATENCY IS FAR PAST THE CAP, NOT JUST PAST IT. The
+collective cap bounds the WAIT, not the collection: when `as_completed` raises
+`TimeoutError` at the deadline, `degradation_chain` rescans every future and
+collects any that is `.done()` BY THEN — not any that was done at the deadline
+(read from the `except TimeoutError` arm; its comment says "discarded", the
+code collects it). So the test passes only if both slow stubs are STILL RUNNING
+when that rescan looks, and a stub that overshoots the cap by ~100ms leaves the
+rescan gap almost no room. That is the shape observed on `7153f608e`: `fts` was
+collected and `vector` was not, although both sleep an identical duration in the
+same pool — one-of-two can only come from scheduling at the boundary, not from
+the strategy itself. Hence the margin below is ~4x the cap rather than 1.2x.
+Do not tighten it back toward the cap.
 """
 from __future__ import annotations
 
@@ -32,21 +45,30 @@ def _reset_breakers():
     reset_circuit_breakers()
 
 
+#: Stub latency for the two "slow" strategies. Must be comfortably GREATER
+#: than the 500ms collective cap (the excess is the safety margin against the
+#: rescan gap) and comfortably LESS than the 5000ms elevated window that must
+#: still collect them. 2.0s clears the cap by 1.5s and sits well inside the
+#: elevated window; see the module docstring (#6842) for why the margin, not
+#: the ordering, is the thing that decides this test.
+SLOW_STUB_S = 2.0
+
+
 def test_elevated_timeout_collects_more_than_censored(monkeypatch):
-    """A 600ms strategy is dropped by the 500ms collective cap but collected
-    under elevated_timeout_ms=5000 — proving the override actually elevates
-    the measurement window (more strategies → more collected rows)."""
+    """A slow strategy (2.0s) is dropped by the 500ms collective cap but
+    collected under elevated_timeout_ms=5000 — proving the override actually
+    elevates the measurement window (more strategies → more collected rows)."""
 
     def slow_fts(graph, query, entity_type="point", limit=20, timeout_ms=500,
                  excluded_statuses=None, keep_numeric=False,
                  expansion_terms=None):
-        time.sleep(0.6)
+        time.sleep(SLOW_STUB_S)
         return [("p1", 1.0)]
 
     def slow_vector(graph, query_vec, limit=20, timeout_ms=500,
                     is_embedded=True, entity_type="point",
                     vector_index_api=None, excluded_statuses=None):
-        time.sleep(0.6)
+        time.sleep(SLOW_STUB_S)
         return [("p2", 0.9)]
 
     def fast_structural(graph, kind, entity_type="point", limit=20, timeout_ms=500,
@@ -67,7 +89,12 @@ def test_elevated_timeout_collects_more_than_censored(monkeypatch):
     )
     assert set(censored) == {"structural"}
 
-    # Elevated: 5000ms window → all three strategies complete.
+    # Elevated: 5000ms window → all three strategies complete. This window
+    # must stay ABOVE SLOW_STUB_S or the override test inverts (see docstring).
+    assert 5000 / 1000.0 > SLOW_STUB_S, (
+        "the elevated window must exceed the stub latency, else the override "
+        "test cannot distinguish elevated from censored"
+    )
     elevated = degradation_chain(
         graph=None, query="q", kind="claim", query_vec=[0.1, 0.2, 0.3],
         strategies=strategies, elevated_timeout_ms=5000,
