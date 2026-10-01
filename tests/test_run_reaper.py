@@ -616,6 +616,45 @@ class RunReaperTestCase(unittest.TestCase):
         self.assertEqual(rows["222"]["cancel_result"], "unknown")
         self.assertIn("AMBIGUOUS", rows["222"]["detail"])
 
+    def test_a_fault_after_a_cancel_was_issued_is_never_nothing_was_cancelled(self):
+        """The TOP-LEVEL handler must not claim "nothing was cancelled" once a
+        cancel POST was ISSUED.
+
+        The per-cancel guard covers a fault INSIDE ``cancel_run()``; this covers
+        one AFTER it — the report write itself (a broken pipe once the output
+        exceeds the stdout buffer, or ENOSPC). ``branch_reaper.py`` guards that
+        class with ``_LANDED`` in its top-level handler; without the same flag
+        here, landed cancels were reported as "nothing" (reproduced: 80 landed,
+        80 claimed as nothing).
+        """
+        mod = _load_tool_module()
+        self.assertFalse(mod._CANCEL_ISSUED, "a fresh process has issued nothing")
+
+        def boom(_args):
+            # The POST has been issued; NOW the report render faults.
+            mod._CANCEL_ISSUED = True
+            raise mod.Incomplete("broken pipe while rendering the report")
+
+        orig, mod._run_main = mod._run_main, boom
+        try:
+            rc = mod.main(["--repo", "owner/repo"])
+        finally:
+            mod._run_main = orig
+        self.assertEqual(rc, mod.EXIT_INCOMPLETE_AFTER_CANCEL)
+        self.assertNotEqual(rc, mod.EXIT_INCOMPLETE)
+
+        # And the SAME fault with NO cancel issued is still the plain exit 2,
+        # so the flag distinguishes the two rather than always escalating.
+        def boom2(_args):
+            raise mod.Incomplete("the listing was unreadable")
+
+        orig, mod._run_main = mod._run_main, boom2
+        try:
+            rc2 = mod.main(["--repo", "owner/repo"])
+        finally:
+            mod._run_main = orig
+        self.assertEqual(rc2, mod.EXIT_INCOMPLETE)
+
     def test_listing_unreadable_but_explicit_run_still_reaps(self):
         """The listing is an INDEX; an explicit --run stands on its own."""
         self.make_run("111", elapsed_s=25740, workflow_id=7)

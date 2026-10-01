@@ -66,6 +66,10 @@ Exit codes
   4  partial — at least one verified overrun's cancellation was REFUSED by the
      API (the ``Cannot cancel …`` class); other cancellations may have landed.
   5  internal error (an unexpected fault in a helper)
+  6  INCOMPLETE AFTER CANCEL — at least one cancel POST was ISSUED and its outcome
+     is unreadable (a timeout, or an empty body on exit 0). The POST may have
+     landed, so exit 2's "Nothing was cancelled" contract does NOT hold. The
+     report rendered above is authoritative, including any cancels that landed.
 
 The per-run read/decide phase is fail-closed PER RUN, not global: an unreadable
 run, job list or green population skips THAT run and never cancels it, and the
@@ -100,6 +104,13 @@ EXIT_INTERNAL = 5
 # cancelled", which does NOT hold here — mirrors branch_reaper.py's
 # EXIT_INCOMPLETE_AFTER_DELETE.
 EXIT_INCOMPLETE_AFTER_CANCEL = 6
+
+#: Set the moment a cancel POST is ISSUED. A timeout or an unreadable body is
+#: AMBIGUOUS — the POST may have landed — so no handler may claim "Nothing was
+#: cancelled" once this is true. The per-cancel guard covers a fault inside
+#: cancel_run(); this covers a fault AFTER it (the report write itself, a broken
+#: pipe, ENOSPC), which is the class branch_reaper.py guards with _LANDED.
+_CANCEL_ISSUED = False
 
 #: The rail's own defaults (``ADMIN_MERGE_RERUN_FLOOR`` / ``ADMIN_MERGE_GREEN_RUNS``),
 #: so the reaper judges a run by the SAME bound the rail would have waited on.
@@ -738,6 +749,8 @@ def _run_main(args) -> int:
             # cancelled" over a cancel that did (branch_reaper.py's _LANDED
             # pattern, EXIT_INCOMPLETE_AFTER_DELETE = 6).
             cancel_issued = str(row["run_id"])
+            global _CANCEL_ISSUED
+            _CANCEL_ISSUED = True
             try:
                 ok, err = cancel_run(slug, cancel_issued)
             except (Incomplete, OSError) as exc:
@@ -784,6 +797,8 @@ def _run_main(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    global _CANCEL_ISSUED
+    _CANCEL_ISSUED = False
     try:
         args = build_parser().parse_args(argv)
     except SystemExit as exc:
@@ -798,11 +813,23 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return _run_main(args)
     except (Incomplete, OSError) as exc:
+        if _CANCEL_ISSUED:
+            # THE POST WAS ALREADY ISSUED and may have landed. EXIT_INCOMPLETE's
+            # "Nothing was cancelled" contract does NOT hold, and the report
+            # rendered by the guarded per-cancel path is authoritative.
+            print(f"run_reaper: INCOMPLETE AFTER CANCEL — {exc}. At least one cancel "
+                  f"POST was ISSUED; its outcome is unknown and the report above is "
+                  f"authoritative.", file=sys.stderr)
+            return EXIT_INCOMPLETE_AFTER_CANCEL
         print(f"run_reaper: INCOMPLETE — {exc}. Nothing was cancelled.", file=sys.stderr)
         return EXIT_INCOMPLETE
     except (SystemExit, KeyboardInterrupt):
         raise
     except BaseException as exc:
+        if _CANCEL_ISSUED:
+            print(f"run_reaper: INTERNAL ERROR AFTER CANCEL — {exc!r}. At least one "
+                  f"cancel POST was ISSUED; its outcome is unknown.", file=sys.stderr)
+            return EXIT_INCOMPLETE_AFTER_CANCEL
         print(f"run_reaper: INTERNAL ERROR — {exc!r}.", file=sys.stderr)
         return EXIT_INTERNAL
 
