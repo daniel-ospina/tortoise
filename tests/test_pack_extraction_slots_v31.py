@@ -33,7 +33,7 @@ import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.pack_registry import (  # noqa: E402
+from tortoise.pack_registry import (
     MAX_PROMPT_FRAGMENT_CHARS,
     MAX_PROMPT_FRAGMENT_TOKENS,
     MAX_PROMPT_FRAGMENTS_TOKENS,
@@ -58,6 +58,15 @@ def _manifest(**extraction):
 
 def _errors(**extraction):
     return PackRegistry("/tmp/nonexistent")._validate(_manifest(**extraction))
+
+
+def _ontology_errors(**ontology):
+    """ALL validation errors for a manifest whose ONLY non-default part is the
+    ``ontology.*`` keys passed here (the base manifest is otherwise valid), so
+    any error returned is attributable to them."""
+    m = _manifest()
+    m["ontology"] = {**m["ontology"], **ontology}
+    return PackRegistry("/tmp/nonexistent")._validate(m)
 
 
 def _extraction_errors(**extraction):
@@ -167,20 +176,45 @@ class TestRelationTemplates:
         }]) == []
 
     def test_the_mechanism_vocabulary_is_the_relations_pair(self):
-        """IMPL|NAND — the pair `ontology.relations` enforces, NOT
-        `CORE_PREDICATES`. A template must not describe an edge the engine
-        cannot build (review of PR #5647, history agent)."""
+        """The template mechanism vocabulary is the literal pair IMPL|NAND. A
+        template must not describe an edge the engine cannot build."""
         errors = _extraction_errors(relationTemplates=[{"mechanism": "SUPPORTS"}])
         assert any("must be IMPL or NAND" in e for e in errors), errors
 
     def test_mitigates_is_refused_as_a_template_mechanism(self):
-        """MITIGATES was RETIRED from the operator menu (ONTOLOGY v3.17, #4937 /
-        #2552) and `sdk.create_operator` refuses it. `CORE_PREDICATES` still
-        carries it, so validating against that set made this slot BROADER than
-        its own sibling `relations[].mechanism` and re-advertised a retired
-        spelling on the author-facing template."""
+        """This check hardcodes the literal pair IMPL|NAND, so `MITIGATES` is
+        refused even though the spelling is a live payload op_type elsewhere."""
         errors = _extraction_errors(relationTemplates=[{"mechanism": "MITIGATES"}])
         assert any("must be IMPL or NAND" in e for e in errors), errors
+
+    def test_mitigates_is_refused_as_a_chain_edge(self):
+        """`MITIGATES` is not a valid chain target.
+
+        `CORE_PREDICATES` admitting `MITIGATES` let a pack declare the retired
+        spelling as a chain edge without declaring a relation, so validation
+        accepted a chain edge the engine cannot build (`sdk.create_operator`
+        refuses the spelling; a mitigation is a `mitigated_by` Point, §3.9).
+        This asserts the validator rejects it (#2766 / #5322)."""
+        errors = _ontology_errors(
+            chains=[{"id": "c1", "steps": ["domainThing"], "edges": ["MITIGATES"]}])
+        assert any("MITIGATES" in e and "c1" in e for e in errors), errors
+
+    def test_mitigates_is_refused_as_an_enforcement_relation(self):
+        """The SECOND read site of the same set: `enforcement.relations` keys are
+        validated against `declared_preds | CORE_PREDICATES`. Both arms must
+        refuse the retired spelling, not just the chain one."""
+        errors = _extraction_errors(
+            enforcement={"relations": {"MITIGATES": "warn"}})
+        assert any("MITIGATES" in e for e in errors), errors
+
+    def test_impl_and_nand_remain_valid_chain_edges(self):
+        """The removal must be NARROW: the two live core predicates still pass
+        without a pack declaring them as relations."""
+        errors = _ontology_errors(chains=[
+            {"id": "c1", "steps": ["domainThing"], "edges": ["IMPL"]},
+            {"id": "c2", "steps": ["domainThing"], "edges": ["NAND"]},
+        ])
+        assert errors == [], errors
 
     def test_an_unknown_template_key_is_rejected(self):
         errors = _extraction_errors(
