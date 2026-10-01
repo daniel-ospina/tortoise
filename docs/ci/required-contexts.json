@@ -473,9 +473,10 @@
       ]
     ]
   },
-  "gate_digest": "537d96d656dd2b9886951ee2d03b66a56fb8af5a2aa132ae5ed16dbe0f0ef3e6",
-  "live_checked_at": "2026-09-28T05:36:59Z",
+  "gate_digest": "c87ec08f1f991eb23a9d4203e1da1a6fdc8e5a7389b1917fac6ae0f00d14fd99",
+  "live_checked_at": "2026-09-29T02:35:26Z",
   "live_observed_contexts": [
+    "ai-review-gate",
     "docs",
     "legal-e2e",
     "license-surface",
@@ -484,9 +485,10 @@
     "test-isolation"
   ],
   "live_result": "SATISFIED",
-  "live_verified_at": "2026-09-28T05:36:59Z",
-  "read_sha": "0469ed1bad8734249081c431b649b6fe455953e2",
+  "live_verified_at": "2026-09-29T02:35:26Z",
+  "read_sha": "9c4788400b838a0ed115cab7225bee93b2e4440b",
   "required_contexts": [
+    "ai-review-gate",
     "docs",
     "legal-e2e",
     "license-surface",
@@ -495,5 +497,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-09-29T07:45:58Z"
+  "verified_at": "2026-09-29T18:30:31Z"
 }
