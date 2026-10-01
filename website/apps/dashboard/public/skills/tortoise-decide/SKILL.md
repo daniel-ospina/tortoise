@@ -22,9 +22,10 @@ evidence lands.
 
 ## Which Tortoise are you on?
 
-- **Hosted (cloud):** your agent uses the Tortoise MCP tools (`tortoise_*`),
-  configured via `claude mcp add tortoise` / the `.mcp.json` snippet pointing
-  at `https://api.premiselabs.co/mcp/` with your API key.
+- **Hosted (cloud):** your agent uses the Tortoise MCP tools (`tortoise_*`).
+  If you installed the skills via the onboarding wizard, the MCP server is
+  already wired. Configuring it by hand? Use the equivalent project-scoped
+  `.mcp.json` entry: `{"type": "http", "url": "https://api.premiselabs.co/mcp/", "headers": {"Authorization": "Bearer ${TORTOISE_API_KEY}"}}` — that file is **committable**, so it carries the env reference, never the key. A project-scope server stays **⏸ Pending approval** until you approve it once — start `claude` in the project and allow the prompt, or run `/mcp`.
 - **Self-hosted:** your agent uses the same `tortoise_*` MCP tools against a
   local MCP server pointed at your own FalkorDB, or runs
   `graph-scripts/decide.py` / the Python SDK directly.

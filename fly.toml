@@ -4,6 +4,22 @@
 app = "tortoise-y4mjjq"
 primary_region = "iad"
 
+# ── #3087 item 1: bound the SIGTERM→SIGKILL window explicitly ──
+# Absent, this ran on Fly's default (5s). Disposal of the capture pool happens
+# at THREADING SHUTDOWN via `tortoise/hosted_api._dispose_capture_executor`
+# (a module-level `threading._register_atexit` hook — deliberately NOT in
+# `_lifespan`, which may legally run more than once per process).
+#
+# ⛔ What this window does NOT do: make teardown graph-write-safe. Only QUEUED
+# work is cancellable; a worker already RUNNING an extraction is not
+# interruptible, and the thread-shutdown join still waits for it. With a
+# token-scaled extraction deadline (~800s) far above this value, a running
+# worker is still SIGKILLed mid-write. This window removes the queued-work term
+# and bounds the shutdown; the running-worker term is bounded by that worker's
+# own deadline, which must be kept below this value for the write to be safe.
+kill_signal = "SIGTERM"
+kill_timeout = 30
+
 [build]
   dockerfile = "Dockerfile.hosted"
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tortoise-hook-version: 7
+# tortoise-hook-version: 8
 # Tortoise memory injection for Claude Code — SessionStart hook.
 #
 # The `tortoise-hook-version` marker above is the install-contract generation
@@ -18,9 +18,11 @@
 #   #   { "hooks": { "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-start.sh", "timeout": 60 }] }] } }
 #
 # The hook prints a Tortoise memory digest to stdout, which Claude Code
-# injects into the session context automatically. If Tortoise isn't
-# reachable (offline, not installed), it exits 0 silently so the session
-# starts normally.
+# injects into the session context automatically. It ALSO prints the local
+# capture breadcrumb when one is present, so a capture that did not land is
+# reported to the agent rather than only to the machine (#4041). If Tortoise
+# isn't reachable (offline, not installed), it exits 0 so the session starts
+# normally — silent only when there is no breadcrumb to report.
 
 set -euo pipefail
 
@@ -101,17 +103,121 @@ _record_breadcrumb() {
   # keeps it distinguishable from a ``sessions import`` capture failure, which
   # writes the same file with ``kind: capture-failure`` (#4314). Best-effort:
   # a breadcrumb write can never break the exit-0 contract.
-  local harness="$1" detail="$2"
+  # `$3` is the timestamp, when the caller already computed one for the
+  # rendered payload — so the record and what the agent is told cannot disagree
+  # by a second (#4041). Absent, it is computed here as before.
+  local harness="$1" detail="$2" stamp="${3:-}"
   # The directory derivation lives in `_tortoise_state_dir` — ONE derivation
   # for the two HOME-scoped writers in this script (#3797), including the
   # trailing-slash, trailing-`/.` and slash-less cases.
-  local crumb_dir stamp
+  local crumb_dir
   crumb_dir="$(_tortoise_state_dir capture-errors)"
-  stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  [ -n "$stamp" ] || stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
   mkdir -p "$crumb_dir" 2>/dev/null || true
   printf '{\n  "harness": "%s",\n  "detail": "%s",\n  "recorded_at": "%s",\n  "kind": "install-inert"\n}\n' \
     "$harness" "$detail" "$stamp" \
     > "$crumb_dir/$harness.json" 2>/dev/null || true
+}
+
+# ── Reading the breadcrumb BACK to the agent (#4041) ─────────────────────
+# The two breadcrumb writers above and in `tortoise.__main__` wrote a file that
+# NOTHING read back: the user's agent was never told that memory had stopped
+# being filed. The owner ruled the agent SESSION is the primary surface (the
+# dashboard was explicitly rejected), so the payload below is printed to
+# stdout, which Claude Code injects into the session context.
+#
+# ONE four-line payload, two renderers, because the two `kind` values have
+# different reachability:
+#
+#   code: install-inert  -> PURE SHELL (`_render_breadcrumb_inert`), which owns
+#          BOTH that record's payload and its recovery text. This record is
+#          reached BECAUSE the interpreter or the module dir could not be
+#          resolved, so a Python-only renderer could never report it.
+#   code: capture-failure -> Python (`tortoise.capture_breadcrumb`), which sends
+#          the detail through `tortoise.security.redact_secrets` — an error
+#          string can carry a token. This record is always written by Python,
+#          so the interpreter IS available on this path.
+#
+# ⛔ The recovery text is factual/available-actions, NEVER imperatives — this is
+# VENDOR-MANDATED, not style. Claude Code's hook documentation warns that
+# output framed as out-of-band system commands trips Claude's prompt-injection
+# defences, which makes Claude surface the text to the user instead of treating
+# it as injected context. `Recovery: `tortoise session drain` retries now` is
+# right; `Run `tortoise session drain` now` costs the payload its injection.
+# Do not "fix" this into imperatives.
+#
+# The exit-0 contract is inviolable: no breadcrumb file -> no output at all.
+# The capture payload is BUFFERED and printed only when the renderer exits 0, so
+# a renderer that fails — including one that writes partial output and THEN
+# exits non-zero — contributes NOTHING to the session context. `set -euo
+# pipefail` is active, so every stage is guarded and each function returns 0.
+
+# The INSTALL-leg renderer. PURE SHELL, no python3 — the branch is reached
+# because the interpreter or module dir did not resolve. The `detail` and stamp
+# are the exact ones just written by `_record_breadcrumb`, so there is nothing
+# to parse back out of the file. Those details are fixed self-authored strings
+# with NO user content, so the redaction the Python half performs is not needed
+# here — said explicitly so its absence cannot be read as an oversight.
+_render_breadcrumb_inert() {
+  local harness="$1" detail="$2" stamp="$3" recovery="$4"
+  printf 'code:     install-inert\n' || true
+  printf 'what:     Tortoise memory for this project has NOT been filed since %s. %s capture is affected.\n' \
+    "$stamp" "$harness" || true
+  printf 'why:      %s\n' "$detail" || true
+  # ⛔ THE RECOVERY IS PER-BRANCH, NOT A CONSTANT (#4041 review round 3, P2). This
+  # renderer serves TWO inert branches with DIFFERENT causes, and the hard-coded
+  # sentence named the first one in both: branch 2's `why:` says a module dir WAS
+  # resolved and only `python3` was missing, while its `next:` said the module dir was
+  # NOT resolved and told the reader to run `tortoise hooks upgrade` — a payload that
+  # contradicted itself and prescribed the wrong remedy. The caller passes the clause
+  # that matches its own cause, so `why:` and `next:` cannot disagree.
+  printf 'next:     Recovery: %s\n' "$recovery" || true
+  return 0
+}
+
+# The CAPTURE-leg renderer. The record's `kind` is decided IN PYTHON by
+# `render_file`, which parses the record as JSON and returns nothing for any
+# kind but `capture-failure`. A `sed`/`head` gate here would be a second,
+# weaker parser: it would silently DISCARD a compact single-line record (the
+# writer's `indent=2` is not a contract) — reintroducing the exact "nobody is
+# told" defect #4041 exists to fix — and it would disable the whole feature
+# wherever `sed`/`head` are absent, even though the interpreter this half exists
+# to use IS present. An `install-inert` record is owned by
+# `_render_breadcrumb_inert`; a STALE one reaching this path renders nothing
+# because Python refuses the kind.
+_render_capture_failure_breadcrumb() {
+  local harness="$1" crumb py payload
+  crumb="$(_tortoise_state_dir capture-errors)/$harness.json"
+  [ -f "$crumb" ] || return 0
+  py="${PYTHON_BIN:-$(command -v python3 || true)}"
+  [ -n "$py" ] || return 0
+  # Same CWE-427 posture as every other embedded block here: drop the process
+  # cwd, then prepend the resolved module dir from ARGV (never `-m`, never
+  # string-interpolated). An EMPTY module dir falls back to the installed
+  # package on `sys.path`; if neither is importable the `|| return 0` below
+  # makes this a silent no-op, never a broken session start.
+  #
+  # ATOMIC: capture the payload and print it ONLY on exit 0. A renderer that
+  # writes partial output and THEN fails would otherwise inject garbage into
+  # the session context at rc 0. `local payload="$(...)"` would MASK that exit
+  # status (`local` always returns 0), so the assignment is deliberately a
+  # separate command carrying its own guard.
+  payload="$("$py" -c '
+import sys
+sys.path[:] = [p for p in sys.path if p not in ("", ".")]
+if sys.argv[1]:
+    sys.path.insert(0, sys.argv[1])
+from tortoise.capture_breadcrumb import render_file
+sys.stdout.write(render_file(sys.argv[2]))
+' "${TORTOISE_MODULE:-}" "$crumb" 2>/dev/null)" || return 0
+  [ -n "$payload" ] || return 0
+  # ⛔ The trailing newline is LOAD-BEARING, not cosmetic. Command substitution
+  # strips EVERY trailing newline, so `printf '%s'` would glue the payload's
+  # last line (`next: …`) onto the memory digest's first line — `tortoise
+  # context` writes to this SAME stdout immediately below — corrupting the
+  # recovery line AND stopping the digest header from being a Markdown heading.
+  printf '%s\n' "$payload" || true
+  return 0
 }
 
 # ── The hook-run observation (#3797) ─────────────────────────────────────
@@ -159,18 +265,37 @@ for CANDIDATE in "${TORTOISE_SRC_DIR:-}" \
   fi
 done
 if [ -z "$TORTOISE_BIN" ] && [ -z "$TORTOISE_MODULE" ]; then
-  _record_breadcrumb claude \
-    "the installed Claude session-start hook could not resolve a tortoise module dir (checked TORTOISE_SRC_DIR, \$HOME/.tortoise/hook-src-dir, and ../..), found no tortoise binary, and injected nothing"
+  # One stamp for the record AND the rendered payload, so they cannot disagree
+  # by a second (#4041).
+  INERT_DETAIL="the installed Claude session-start hook could not resolve a tortoise module dir (checked TORTOISE_SRC_DIR, \$HOME/.tortoise/hook-src-dir, and ../..), found no tortoise binary, and injected nothing"
+  INERT_STAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  _record_breadcrumb claude "$INERT_DETAIL" "$INERT_STAMP"
+  # #4041: tell the AGENT, not only the machine. `install-inert` is rendered
+  # pure shell, because THIS branch is reached with no interpreter to run
+  # Python with.
+  _render_breadcrumb_inert claude "$INERT_DETAIL" "$INERT_STAMP" \
+    '`tortoise hooks upgrade` reinstalls this hook; `tortoise hooks status` reports the drift. The seam resolved no tortoise module dir, and memory is not filed until it does.'
   # #3797: the hook RAN — record that too, so the install is not reported as
   # never-ran.  No probe was attempted, hence the bare `null`.
   _record_hook_run claude false null
   exit 0
 fi
+# #4041: read a `capture-failure` breadcrumb left by a previous capture back to
+# the agent, before the digest. It renders NOTHING when no breadcrumb is
+# present. It never runs in the inert branches above (they have already
+# exited), and it deliberately ignores a STALE `install-inert` record (see
+# `_render_capture_failure_breadcrumb`).
+_render_capture_failure_breadcrumb claude
 if [ -z "$TORTOISE_BIN" ]; then
   PYTHON_BIN="$(command -v python3 || true)"
   if [ -z "$PYTHON_BIN" ]; then
-    _record_breadcrumb claude \
-      "the installed Claude session-start hook resolved a tortoise module dir but found no python3 interpreter, and injected nothing"
+    # Same one-stamp pattern as the branch above (#4041): this branch is the
+    # one reached BECAUSE python3 is missing, so the renderer must be shell.
+    INERT_DETAIL="the installed Claude session-start hook resolved a tortoise module dir but found no python3 interpreter, and injected nothing"
+    INERT_STAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+    _record_breadcrumb claude "$INERT_DETAIL" "$INERT_STAMP"
+    _render_breadcrumb_inert claude "$INERT_DETAIL" "$INERT_STAMP" \
+      'a `python3` on the PATH this hook runs with provides the interpreter the capture half needs (the hook resolves it with `command -v python3`), and memory is not filed until one is there.'
     # #3797: same as the other inert branch — the hook ran, the probe did not.
     _record_hook_run claude false null
     exit 0

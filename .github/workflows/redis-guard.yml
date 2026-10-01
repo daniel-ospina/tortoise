@@ -1,10 +1,50 @@
 # redis-guard CI gate (issue #176, Task 13)
-# Runs the unified hook; must BLOCK merge (branch protection requires it).
+# Runs the unified hook; must BLOCK merge. NOTE: it is NOT in main's
+# required_status_checks (measured 2026-09-30: pricing-artifact, docs,
+# test-isolation, license-surface, legal-e2e, python-ci-gate, ai-review-gate) —
+# this header previously claimed "branch protection requires it", which is false
+# and would wrongly justify running it on every PR.
 name: redis-guard
 on:
   pull_request:
+    # H20: this guard reads ONLY tortoise/**/*.py and graph-scripts/**/*.py
+    # (tools/redis-guard.py:101-103 — with no argv it rglobs exactly those two
+    # trees), so its verdict is a function of those trees ALONE. A PR that
+    # touches neither cannot change it, and running it there is a reservation
+    # that buys no signal. The correctness direction is proved both ways:
+    #   - matching  (touches tortoise/**)      -> still triggers  (no hole)
+    #   - non-matching (docs-only)             -> skipped, and could not have
+    #     failed, because a leak must live in a scanned tree to be found.
+    # The workflow file itself is listed so that editing the guard re-runs it.
+    paths:
+      - 'tortoise/**'
+      - 'graph-scripts/**'
+      - 'tools/redis-guard.py'
+      - '.github/workflows/redis-guard.yml'
   push:
     branches: [main]
+    paths:
+      - 'tortoise/**'
+      - 'graph-scripts/**'
+      - 'tools/redis-guard.py'
+      - '.github/workflows/redis-guard.yml'
+  # H20: GitHub cannot report a required check for a workflow a `paths:` filter
+  # skipped, so a filtered check that is required sits pending forever on a
+  # non-matching PR. redis-guard is NOT required today (measured 2026-09-30), but
+  # the declaration-home file still names it as required — it is stale in BOTH
+  # directions (it omits the 7 real contexts and sets strict: true, where live
+  # protection is strict: false). Reconciling that file is owner decision D9
+  # (#3467) and is deliberately NOT done here.
+  #
+  # `workflow_dispatch` below is a MANUAL-RUN affordance ONLY. It does NOT
+  # satisfy a required status check: GitHub evaluates workflow-job checks only
+  # for pull-request-ish events, and `workflow_dispatch` is not one of them, so a
+  # dispatch run's checks never join the PR's check set (GitHub docs:
+  # "Checks from some workflow jobs are not evaluated"). If the declaration-home
+  # file is ever applied, the remedies are to stop requiring redis-guard, or to
+  # move the filter INSIDE an always-on job behind an aggregate gate, the way
+  # python-ci-gate does.
+  workflow_dispatch:
 
 # #6590: with no concurrency group every push ADDS an uncancellable run to an
 # already-saturated pool, so a superseded run is never replaced — it just waits
@@ -28,5 +68,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # tools/redis-guard.py carries the inline >=3.12 guard (#5128), so the
+      # ambient python3 is no longer good enough — pin it explicitly.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Run redis-guard
         run: python3 tools/redis-guard.py
