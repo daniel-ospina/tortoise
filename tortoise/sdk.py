@@ -6837,6 +6837,16 @@ class TortoiseSDK:
         preview (``_preview_invalidate``) so the two cannot drift — the
         preview contract is that a preview over an input the write would
         reject must reject it too (#4057).
+
+        #5374: the pair comparison itself delegates to the DECLARED contract —
+        ``commit_schema.validate_validity_window`` is the ONE HOME for the
+        measure (``_created_sort_key``) and the presence gate
+        (``is not None``). This method keeps what the declaration does not
+        own: the every-matching-node scan (point ids are not unique) and the
+        ``retract_point`` refusal message. The other live Point writers that
+        persist a window — ``create_point`` / ``update_point`` (caller props)
+        and ``mining._temporal_wire`` — are wired by their own issue (#5359),
+        and ``supersede_point`` by #4021.
         """
         proj = self._get_proj()
         vf_rows = proj.g.query(
@@ -6845,21 +6855,19 @@ class TortoiseSDK:
         ).result_set
         if not vf_rows:
             return
-        from .search_engine import _created_sort_key
-        k_now = _created_sort_key(now)
-        if k_now[0] != 0:
-            return  # `now` is a fresh ISO stamp; defensive symmetry
         # The writer's stamp block MATCHes and stamps EVERY node carrying this
         # id — point ids are not unique (the duplicate fan-out is a tested
         # shape: test_dry_run_preview's count tests), so the guard must refuse
-        # on ANY parseable stored start after `now`, never merely the first
-        # row the server happens to return (row order is server-dependent).
+        # on ANY stored start after `now`, never merely the first row the
+        # server happens to return (row order is server-dependent).
+        from tortoise.commit_schema import validate_validity_window
         for row in vf_rows:
             stored_vf = row[0]
             if stored_vf is None:
                 continue
-            k_vf = _created_sort_key(stored_vf)
-            if k_vf[0] == 0 and k_vf[1] > k_now[1]:
+            try:
+                validate_validity_window(stored_vf, now)
+            except ValueError:
                 raise ValueError(
                     f"invalidate_point: cannot invalidate {point_id!r} — its "
                     f"validFrom {stored_vf!r} is AFTER now ({now!r}), so "
@@ -6868,7 +6876,7 @@ class TortoiseSDK:
                     f"from every temporal query. retract_point is the "
                     f"window-agnostic route (it does not touch the window): "
                     f"call retract_point({point_id!r}) instead."
-                )
+                ) from None
 
     def invalidate_point(self, id: str, corrected_by_id: str) -> dict:
         """Mark a Point outdated, linked to its replacement via CORRECTS edge.
