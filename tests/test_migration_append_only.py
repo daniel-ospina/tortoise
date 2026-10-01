@@ -379,6 +379,8 @@ def test_wellformed_applied_body_still_blocks():
 def test_rename_to_an_already_applied_new_version_is_blocked():
     # Both endpoints must be unapplied. Renaming an unapplied migration ONTO a
     # version prod already ran would put different content at that version.
+    # (Byte-identical content here, so git reports R100 and this exercises the
+    # R* branch; the D+A branch is pinned separately below.)
     d = _make_repo(["20260813000099_a.sql"])
     base = _git_sha(d)
     (d / MIG / "20260813000099_a.sql").rename(d / MIG / "20260813100100_a.sql")
@@ -387,3 +389,74 @@ def test_rename_to_an_already_applied_new_version_is_blocked():
     r = _run_script_with_token("diff", d, base, versions=["20260813100100"])
     assert r.returncode == 1, r.stdout
     assert "append-only" in r.stdout.lower(), r.stdout
+
+
+def test_d_plus_a_renumber_onto_an_applied_version_is_blocked():
+    # The PRIMARY form of the #2240 remedy: a re-land with a real content delta
+    # degrades to D+A rather than R<sim> (git pairs by similarity). The
+    # destination must still be checked — an R*-only check misses this entirely.
+    d = _make_repo(["20260813000099_a.sql"])
+    base = _git_sha(d)
+    (d / MIG / "20260813000099_a.sql").unlink()
+    (d / MIG / "20260813100100_a.sql").write_text(
+        "-- a wholly different body, so git reports D+A and not R\n" * 4
+    )
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "D+A renumber onto applied version")
+    r = _run_script_with_token("diff", d, base, versions=["20260813100100"])
+    assert r.returncode == 1, r.stdout
+    assert "append-only" in r.stdout.lower(), r.stdout
+
+
+def test_d_plus_a_renumber_onto_an_unapplied_version_is_exempt():
+    # The same shape in the safe direction: neither endpoint is applied, so the
+    # re-land the drift gate prescribes must go through.
+    d = _make_repo(["20260813000099_a.sql"])
+    base = _git_sha(d)
+    (d / MIG / "20260813000099_a.sql").unlink()
+    (d / MIG / "20260813100100_a.sql").write_text(
+        "-- a wholly different body, so git reports D+A and not R\n" * 4
+    )
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "D+A renumber onto free version")
+    r = _run_script_with_token("diff", d, base, versions=["20260813000098"])
+    assert r.returncode == 0, r.stdout
+
+
+def test_added_file_at_an_already_applied_version_is_blocked():
+    # An added file is not a violation by itself, but placing one at a version
+    # prod has ALREADY applied is the #1001 divergence: prod skips it, so the
+    # repo's content for that version never ran.
+    d = _make_repo(["20260813000099_a.sql"])
+    base = _git_sha(d)
+    (d / MIG / "20260813100100_new.sql").write_text("-- new\n")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "add at applied version")
+    r = _run_script_with_token("diff", d, base, versions=["20260813100100"])
+    assert r.returncode == 1, r.stdout
+    assert "append-only" in r.stdout.lower(), r.stdout
+
+
+def test_added_file_at_an_unapplied_version_is_allowed():
+    # A normal new migration must not be reported as an exception, and must pass.
+    d = _make_repo(["20260813000099_a.sql"])
+    base = _git_sha(d)
+    (d / MIG / "20260813100100_new.sql").write_text("-- new\n")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "add at free version")
+    r = _run_script_with_token("diff", d, base, versions=["0001"])
+    assert r.returncode == 0, r.stdout
+    # It is an ordinary new migration, not an "exception".
+    assert "exception" not in r.stdout.lower(), r.stdout
+
+
+def test_added_file_without_token_is_allowed():
+    # Fork PRs have no token. Adding migrations is their normal case and must
+    # NOT become a violation just because the applied set is unreadable.
+    d = _make_repo(["20260813000099_a.sql"])
+    base = _git_sha(d)
+    (d / MIG / "20260813100100_new.sql").write_text("-- new\n")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "add, no token")
+    r = _run_script("diff", d, base)
+    assert r.returncode == 0, r.stdout

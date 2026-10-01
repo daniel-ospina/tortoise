@@ -117,6 +117,7 @@ STATUS_OUTPUT="$(
   exit 2
 }
 VIOLATIONS=""
+ADDED=""
 while IFS= read -r line; do
   [ -z "$line" ] && continue
   status="${line%%$'\t'*}"
@@ -125,16 +126,28 @@ while IFS= read -r line; do
       VIOLATIONS="$VIOLATIONS
 $line"
       ;;
+    A)
+      # An ADDED file is normally the whole point of a migration PR, so it is not
+      # a violation in itself — but placing a file at a version prod has ALREADY
+      # applied IS the #1001 divergence: prod skips it, so the repo's content for
+      # that version never ran and the two disagree about what it means. Added
+      # lines are therefore checked against the applied set too, and admitted
+      # only when their version is unapplied.
+      ADDED="$ADDED
+$line"
+      ;;
   esac
 done <<EOF
 $STATUS_OUTPUT
 EOF
 
-if [ -n "$VIOLATIONS" ]; then
-  # ── #1235 exception: pure-prefix rename of a PROVABLY UNAPPLIED migration ──
-  # A rename (R*) whose content is byte-identical and whose old version is NOT
-  # in prod's applied set is the canonical duplicate-prefix repair — the old
-  # version was never applied, so renumbering it cannot diverge prod history.
+if [ -n "$VIOLATIONS" ] || [ -n "$ADDED" ]; then
+  # ── #1235/#2240 exception: a change to a PROVABLY UNAPPLIED version ─────────
+  # The test is the migration version's PROD STATE, not the git status. A version
+  # with no `supabase_migrations.schema_migrations` row has never run anywhere,
+  # so renumbering, re-landing, editing or removing it cannot diverge prod —
+  # which is exactly the remedy `check-migration-drift` prescribes for an
+  # out-of-order repo-ahead migration. An APPLIED version is never exempt (#1001).
   # Fail-closed: the remote set is only reachable with a token; without one
   # (fork PRs) the strict block below stands.
   EXEMPT_RENAMES=""
@@ -225,6 +238,10 @@ if [ -n "$VIOLATIONS" ]; then
         if [ -n "$old_ver" ] \
            && ! printf '%s\n' "$REMOTE_APPLIED" | grep -qxF "$old_ver" \
            && { [ -z "$new_ver" ] || ! printf '%s\n' "$REMOTE_APPLIED" | grep -qxF "$new_ver"; }; then
+          # An added file at an UNAPPLIED version is simply a new migration:
+          # there is no exception to announce, so drop it silently rather than
+          # reporting it as one.
+          case "$status" in A) continue;; esac
           EXEMPT_RENAMES="$EXEMPT_RENAMES
 $line"
           continue
@@ -233,6 +250,7 @@ $line"
 $line"
       done <<EOF
 $VIOLATIONS
+$ADDED
 EOF
       VIOLATIONS="$KEEP"
     else
