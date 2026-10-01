@@ -41,8 +41,9 @@ assumption:
   `git merge-base --is-ancestor 228f416e9 HEAD` succeeds. (`a2a08beaa`, cited here in an earlier
   revision, is the SUPERSEDED pre-rebase base, not the declared one — the command was right, the
   label was not.)
-  That is pinned to the SHA, **not** to the moving `origin/main` ref: a sentence citing the live ref
-  stops reproducing as soon as main advances, which it has (to `d9dee2ca5`, see below).
+  That is pinned to the SHA, **not** to the moving `origin/main` ref: a sentence naming a live ref
+  stops reproducing as soon as main advances — which is why the check below states a PROPERTY to
+  re-run rather than a snapshot to trust.
 - Because the instrument is branch-only, comparing it across two MAIN trees is not a check anyone can
   run: an empty `git diff <a> <b> -- tools/edge_census.py` between two revisions that both lack the
   file would mean absent at both ends, not unchanged.
@@ -56,14 +57,24 @@ assumption:
 so it reads STALE here by construction. That check asks whether the tree a
 finding was measured on contains today's main — a question about *product* findings, which can be
 overtaken. This one cannot be: the instrument is branch-only, so no main tree could ever have produced
-it, and the commits main gained touch nothing in the measured path — the counting, capping and pricing
-surfaces. Main gained TWO commits past the declared base — `git log --oneline 228f416e9..origin/main`
-returns `d9dee2ca5` and `87b9bdf45` — and neither touches the measured path:
-`git show --name-only d9dee2ca5` gives 13 files: `config/ci-surfaces.yml`,
-`docs/plans/2026-09-26-5049-verdicts-from-conditions.md`, `tests/_verdict.py`,
-`tests/_fork_safety_verdict.py`, `tests/conftest.py`, `tools/ci_selection.py` and seven `tests/test_*.py`;
-`git show --name-only 87b9bdf45` gives `tools/drift-guard.py` and `tests/test_drift_guard.py`. No
-`quota.py`, `metering.py`, `ep.py` or `pricing.json` in either.
+it. What matters is a PROPERTY, not a snapshot, and it is stated that way deliberately:
+
+> **No commit `origin/main` gained past the declared base touches the measured path.**
+
+Re-run it at any time — it needs no pinning and cannot go stale:
+
+```sh
+git log --name-only --format= 228f416e9..origin/main \
+  | grep -E 'quota\.py|metering\.py|ep\.py|pricing\.json'   # must print nothing
+```
+
+⛔ **This replaced a COUNT, and the count is why.** Three successive revisions of this paragraph named
+"the" commits main gained — first one SHA that was merely an ancestor of the base, then one commit when
+main had gained two, then "TWO" when main had gained a third. **Each enumeration was false at the tree
+that carried it**, because `origin/main` moves faster than a prose paragraph re-derives. That is the
+general rule, recorded here so it is not rediscovered: **a claim about process has no artifact to check
+it against, so it can only re-stale — delete it rather than re-narrate it.** The property above is
+different in kind: it names no moving ref, so it is true or false independently of when it is read.
 
 (An earlier revision of this sentence summarised the list as "…and assorted tests", which silently
 dropped `tools/ci_selection.py` — a `tools/` module, not a test. Summarise by COUNT and enumerate, or
