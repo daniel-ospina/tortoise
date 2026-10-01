@@ -77,6 +77,100 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+#: #5493 review P2-3: window misconfigurations already warned about, keyed
+#: ``(name, raw_env_value)``. These readers sit on request hot paths — the
+#: unauthenticated signup limiter re-reads its window 2-3x per request — so an
+#: unlatched warning lets a misconfig be driven to arbitrary log volume by
+#: traffic. The operator needs the FIRST occurrence of each distinct
+#: misconfiguration, not one line per read (mirrors ``_WIDTH_MISMATCH_WARNED``
+#: in ``embeddings.py`` and ``_DEV_PEPPER_WARNED`` in ``auth.py``).
+_WINDOW_WARNED: set[tuple[str, str | None]] = set()
+_WINDOW_WARN_LOCK = threading.Lock()
+
+
+def _negative_env(raw: str | None) -> bool:
+    """True when ``raw`` parses as a negative int.
+
+    ``_int_env`` gates on ``isdigit()``, which rejects ``"-1"`` — it therefore
+    returns the knob's DEFAULT, and before #5493's review it did so SILENTLY,
+    leaving the operator-facing promise (a non-positive window is reported)
+    false for the negative half. This is the test that makes it true. A value
+    that does not parse at all is not negative and keeps its existing
+    (unreported) default.
+    """
+    if raw is None:
+        return False
+    try:
+        return int(raw) < 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _window_env(name: str, default: int) -> int:
+    """Env-tunable rate-limit WINDOW, floored so a non-positive value can
+    never fail OPEN (#5493).
+
+    A window is the one limiter knob whose non-positive value *disables*
+    protection instead of tightening it — and it does so in one of two
+    shapes, depending on where the window is applied:
+
+    * **Hosted bucket limiter** (``_check_ip_bucket_rate_limit``): the bucket
+      is pruned (``now - t < window_s``) and THEN compared to the limit. A
+      non-positive window empties it on every request, ``len(bucket) >=
+      limit`` is never reached, and every request is allowed, FOREVER — the
+      fail-open this floor exists to remove.
+    * **In-process velocity trackers** (``ReadVelocityTracker``,
+      ``SignupVelocityTracker``, ``RecoveryVelocityTracker``): the prune runs
+      BEFORE the append and the comparison runs AFTER it, so a non-positive
+      window never prunes and the bucket collapses to this request's sample.
+      ``len(bucket)`` is then ``1``, which clears neither
+      ``ReadVelocityTracker``'s strict ``> threshold`` nor the signup/recovery
+      ``>= threshold`` against the configured thresholds (>1): the breach
+      signal NEVER FIRES — silently disabled — and the notify-dedup test
+      ``now - last < window_s`` is never true, so the once-per-window dedup is
+      defeated too. (Not an allow-everything fail-open here; a lose-the-signal
+      one.)
+
+    Either way ``0`` is a second, undocumented off-switch — the intended one
+    is ``RATE_LIMIT_DISABLED=1`` — so a non-positive window falls back to the
+    knob's DEFAULT (always at least one second). The precedent for an
+    out-of-range env value degrading to its default is the ``max(1,
+    _int_env(...))`` guard on the capture/dream/scorecard executors
+    (``hosted_api.py:210``, and the same pattern at 223/1589/1599). A warning
+    names the variable, the raw value, and the value actually used, and is
+    emitted ONCE per distinct misconfiguration (see ``_WINDOW_WARNED``) —
+    never once per read.
+
+    Do NOT "simplify" this back to ``_int_env``. ``_int_env`` is shared with
+    the THRESHOLD/limit knobs, where a non-positive value is a legitimate
+    fail-CLOSED deny-all (``len(bucket) >= 0`` is always true) — the floor
+    belongs to the window knobs alone, so it lives here and not in
+    ``_int_env``.
+
+    ``_int_env`` treats a NEGATIVE value as unset (its ``isdigit()`` gate) and
+    yields ``default`` — so a negative never arrives as a negative. The RAW
+    value is therefore inspected too: ``"0"`` (and ``"00"``) reaches the
+    warning path as a non-positive ``value``, while a negative is detected by
+    ``_negative_env``. BOTH warn through the same latch, and neither changes
+    the value returned — a non-positive window always yields the knob's
+    default.
+    """
+    raw = os.environ.get(name)
+    value = _int_env(name, default)
+    if value > 0 and not _negative_env(raw):
+        return value
+    fallback = default if default > 0 else 1
+    with _WINDOW_WARN_LOCK:
+        first = (name, raw) not in _WINDOW_WARNED
+        _WINDOW_WARNED.add((name, raw))
+    if first:
+        logger.warning(
+            "%s=%r is not a valid rate-limit window (must be a positive number "
+            "of seconds); using %d so the limiter cannot fail open (#5493)",
+            name, raw, fallback)
+    return fallback
+
+
 def abuse_disabled() -> bool:
     return os.environ.get("TORTOISE_ABUSE_DISABLED") == "1"
 
@@ -604,13 +698,13 @@ class AbuseEngine:
         return _int_env("TORTOISE_ABUSE_POINT_THRESHOLD", 500)
 
     def point_window_s(self) -> int:
-        return _int_env("TORTOISE_ABUSE_POINT_WINDOW_S", 3600)
+        return _window_env("TORTOISE_ABUSE_POINT_WINDOW_S", 3600)
 
     def key_threshold(self) -> int:
         return _int_env("TORTOISE_ABUSE_KEY_THRESHOLD", 10)
 
     def key_window_s(self) -> int:
-        return _int_env("TORTOISE_ABUSE_KEY_WINDOW_S", 86400)
+        return _window_env("TORTOISE_ABUSE_KEY_WINDOW_S", 86400)
 
     def record_point_create(self, org_id: str, n: int = 1,
                             now: datetime | None = None) -> str | None:
@@ -728,7 +822,7 @@ class ReadVelocityTracker:
     def __init__(self, threshold: int | None = None, window_s: int | None = None):
         self.threshold = threshold if threshold is not None else _int_env(
             "TORTOISE_ABUSE_READ_THRESHOLD", 100)
-        self.window_s = window_s if window_s is not None else _int_env(
+        self.window_s = window_s if window_s is not None else _window_env(
             "TORTOISE_ABUSE_READ_WINDOW_S", 300)
         self._by_key: dict[str, list[float]] = defaultdict(list)
         self._by_org: dict[str, list[float]] = defaultdict(list)
@@ -838,7 +932,7 @@ class SignupVelocityTracker:
         self.threshold = threshold if threshold is not None else _int_env(
             "TORTOISE_ABUSE_SIGNUP_THRESHOLD",
             _int_env("TORTOISE_SIGNUP_IP_LIMIT", 2))  # P3-5: defaults follow allowance
-        self.window_s = window_s if window_s is not None else _int_env(
+        self.window_s = window_s if window_s is not None else _window_env(
             "TORTOISE_ABUSE_SIGNUP_WINDOW_S", 86400)
         self._by_ip: dict[str, list[float]] = defaultdict(list)
         self._notified: dict[str, float] = {}  # bare ip -> last notify ts
@@ -967,7 +1061,7 @@ class RecoveryVelocityTracker:
         self.threshold = threshold if threshold is not None else _int_env(
             "TORTOISE_ABUSE_RECOVER_THRESHOLD",
             _int_env("TORTOISE_RECOVER_IP_LIMIT", 5))
-        self.window_s = window_s if window_s is not None else _int_env(
+        self.window_s = window_s if window_s is not None else _window_env(
             "TORTOISE_ABUSE_RECOVER_WINDOW_S", 86400)
         self._by_ip: dict[str, list[float]] = defaultdict(list)
         self._notified: dict[str, float] = {}  # bare ip -> last notify ts

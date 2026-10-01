@@ -15,6 +15,8 @@ from unittest.mock import patch
 
 import pytest
 
+from tests import _live_utils
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tortoise.extractor import MockModel  # noqa: E402, I001, RUF100
@@ -29,7 +31,7 @@ from tortoise.projection import FalkorProjection  # noqa: E402, RUF100
 FALKORDB_AVAILABLE = False
 try:
     _old_uri = os.environ.get("TORTOISE_DB_URI")
-    os.environ["TORTOISE_DB_URI"] = "docker://:@localhost:16379/tortoise_test_ingest125"
+    os.environ["TORTOISE_DB_URI"] = _live_utils.legacy_uri("tortoise_test_ingest125")
     _probe = FalkorProjection.from_uri(os.environ["TORTOISE_DB_URI"])
     _probe.close()  # construction itself connects — raises on refusal
     FALKORDB_AVAILABLE = True
@@ -110,7 +112,7 @@ def _live_uri(test_graph: str) -> str:
     if env:
         parts = urlsplit(env)
         return urlunsplit((parts.scheme, parts.netloc, f"/{test_graph}", "", ""))
-    return f"docker://:@localhost:16379/{test_graph}"
+    return _live_utils.legacy_uri(test_graph)
 
 
 def _docker_falkor_reachable() -> bool:
@@ -118,25 +120,17 @@ def _docker_falkor_reachable() -> bool:
 
     The #125/#133 capture + upgrade tests need a live FalkorDB on
     FALKORDB_HOST:PORT (default localhost:16379). On the P3 docker lane
-    (test-slow) the provisioned falkordb-legacy service (16379) is up so
+    (test-slow) the provisioned falkordb-legacy service is up so
     these RUN; the skip is VISIBLE (never a vacuous return, epic #1647
     Task 9) and the reason is intentionally NOT guard-exempt — a downed
     provisioned service flips the guard red (fail-closed, D-4), never a
     green-skip. Probe before connecting so the suite skips instead of
     raising redis ConnectionError (Error 111/61).
+
+    #6673: the port comes from tests/_live_utils.py — the provisioned service
+    is published on an EPHEMERAL host port (docker `-p 0:6379`), not 16379.
     """
-    import socket
-    host = os.environ.get("FALKORDB_HOST", "localhost")
-    port = int(os.environ.get("FALKORDB_PORT", "16379"))
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(1.0)
-    try:
-        s.connect((host, port))
-        return True
-    except OSError:
-        return False
-    finally:
-        s.close()
+    return _live_utils.tcp_reachable(_live_utils.legacy_port())
 
 
 def _require_live_falkor() -> bool:
@@ -146,7 +140,7 @@ def _require_live_falkor() -> bool:
     if _docker_falkor_reachable():
         return True
     if "pytest" in sys.modules:
-        pytest.skip("live FalkorDB (FALKORDB_HOST:PORT) not reachable")
+        pytest.skip(f"live FalkorDB ({_live_utils.service_host()}:{_live_utils.legacy_port()}) not reachable")
     return False
 
 

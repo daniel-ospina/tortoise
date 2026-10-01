@@ -12,14 +12,35 @@ ownedBy: epistemic-team
 
 # AI Review Merge Gate
 
-`ai-review-gate` is **not** a branch-protection required status check on
-`main` (verified 2026-09-28: the live required contexts are `pricing-artifact`,
-`docs`, `test-isolation`, `license-surface`, `legal-e2e`, `python-ci-gate` —
-#5426). GitHub does not block a merge on it — it is the local rail
-(`scripts/admin-merge.sh`, which computes the failing set and refuses on a red)
-and human/agent triage that read it, and the Mergify merge queue does not
-consult it. The `code-review` skill's evidence is therefore enforced on local
-land paths only (#5433).
+`ai-review-gate` **is** a branch-protection required status context on `main`, and an
+ENTRY condition of the Mergify merge queue, as of 2026-09-29 (#5433). Verified: the live
+required contexts are `pricing-artifact`, `docs`, `test-isolation`, `license-surface`,
+`legal-e2e`, `python-ci-gate`, `ai-review-gate`, and `.mergify.yml` names
+`- check-success=ai-review-gate` in `queue_conditions`. Entry is evaluated against the
+**author PR head** — where this check actually reports — while the synthetic
+`mergify/merge-queue/*` batch deliberately PASSES instead of being evaluated (#5426), so
+naming it at entry cannot deadlock the queue.
+
+Because a required check must also appear in the config guard's record
+(`docs/ci/required-contexts.json`), the queue condition and the record's re-cut must move
+together: the guard's clause-(iv) agreement sub-check reds if the config and the record
+disagree (it is active under `merge` injection). I1 itself — the config's check names vs the
+**live** required set — is read only by `--live` (admin credential), and no workflow runs it,
+so the live half is a deliberate step rather than something CI keeps in sync.
+
+⚠️ **Qualified by #3091:** the check is required, its *harness* is not. Because the gate is
+`pull_request_target`, a PR that weakens it is evaluated by the base revision; with a recorded
+marker it can merge while `ai-review-gate-tests` is red-but-unrequired, after which the weakened
+required check reports Success on later PRs. The enforcement therefore holds only while the gate
+itself is uncompromised — that detection is #3091's open item.
+
+Before #5433 none of that was true — the check was not required and no queue condition
+named it, so nothing on the server-side merge path acted on its conclusion: the enforcers
+were all local (the rail `scripts/admin-merge.sh`, which computes the failing set and
+refuses on a red; `scripts/atomic-land.sh`; and the `review-enforcer` extension). The check
+still ran and read the body; a merge through the queue, or a bare `gh pr merge`, carried an
+unreviewed (or review-invalidated) tree to `main` because no step consulted that verdict. The
+entry condition closes that path.
 
 ## How it works
 
@@ -72,14 +93,18 @@ land paths only (#5433).
 
 ## Why the diff, not just the head sha (#2982)
 
-`strict: true` branch protection requires a PR branch to be up to date with
-`main`. Updating it (`gh pr update-branch`) inserts a merge commit and moves
-the head — but the PR's three-dot diff is byte-identical **whenever `main`'s
+Branch protection on `main` has `strict: false` (verified 2026-09-29), so a PR branch is
+not *required* to be up to date with `main` before merging — a rebase or
+`gh pr update-branch` is a convenience here, not a precondition. The diff-key still earns
+its place, because it is what makes the evidence survive a head move when one happens:
+updating the branch inserts a merge commit and moves the head, but the PR's three-dot
+diff is byte-identical **whenever `main`'s
 advancement did not touch a file the PR also changes** (if it did, the hunk
 context/blob ids change and the evidence is genuinely stale, so a re-record is
-correct). When evidence was keyed only to the head sha, even an untouched
+correct). With evidence keyed only to the head sha, even an untouched
 diff invalidated a still-correct verdict,
-so a green PR could never reach a terminal mergeable state. Keying evidence to
+so a green PR could never reach a terminal mergeable state under `strict: true` (the
+setting this repo does not use). Keying evidence to
 the diff lets the verdict carry forward across a merge-only update. A change
 that actually changes the reviewed diff still invalidates it.
 
@@ -252,6 +277,8 @@ is unambiguous:
 | `normalises to an empty value` | the configured secret is whitespace-only, so the HMAC key would be the empty (public) string | set a real `AI_REVIEW_GATE_KEY` |
 | `HMAC mismatch` | key or signed text differs; prints `sha256` prefixes of the text it checked | compare the prefix with the recording machine, then re-record |
 | `is stale` | marker is for another head sha, and its `diff=` is absent, could not be hashed live, or matches neither the normalized nor the raw digest | re-run the review, re-record at the new head |
+| `NO marker in this PR's body is bound to <head>` | the stale verdict, stated as what it examined: prints `candidate marker(s): N` (with their shas), the head it expected, and `body=<rest-live\|event-snapshot>` | if `body=event-snapshot`, the run judged a body frozen at the event, so re-run the check before acting — a record posted afterwards is invisible to that run; otherwise re-record at the head |
+| `the LIVE body could not be used (…)` | the run fell back to the event payload: the REST read failed, or it succeeded and returned an empty body | re-run the check before acting on the verdict; the evidence may still be valid |
 | `live diff hash could not be computed` | the REST diff fetch failed; a `diff=` marker fails closed rather than carrying forward | re-run the job once the API is reachable — the evidence may still be valid |
 | `carries no well-formed 40-hex recorded sha` | marker's `@` field is not a full sha | re-record with a full 40-char head sha |
 | `malformed marker` | signed, but the line shape drifted from what this gate accepts | update the gate/producer together |
