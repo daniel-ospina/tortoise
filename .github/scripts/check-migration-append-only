@@ -44,9 +44,14 @@
 #            concrete exploit (renumbering onto a version the repository has
 #            already carried), but it cannot see a migration that exists only
 #            in prod and in no commit of this repo — for that case the bound
-#            remains lag-exposed. That is why the exemption is scoped to PREFIX
-#            RENAMES with both endpoints unapplied: the residual exposure needs
-#            all three to coincide. Fail-closed: without a token the remote set
+#            remains lag-exposed. The bound is also DESTINATION-ONLY: it
+#            constrains where the renumber LANDS and says nothing about the
+#            renamed-away SOURCE, so when the API omits a version prod HAS run
+#            and that version is the base tree's source, the rename is still
+#            exempt — the same lag, and the same class of harm, on the source
+#            side. That is why the exemption is scoped to PREFIX RENAMES with
+#            both endpoints unapplied: the residual exposure needs all three to
+#            coincide. Fail-closed: without a token the remote set
 #            cannot be verified, so the strict block stands (fork PRs keep
 #            today's behavior). Non-rename statuses — edits (M/T) and deletions
 #            (D) — carry no destination version, so they have no such bound and
@@ -273,6 +278,18 @@ if [ -n "$VIOLATIONS" ] || [ -n "$ADDED" ]; then
       # already resolved for `git diff` above — no network call, and not another
       # view of the same lagging API. An empty reading (a base tree with no
       # migration) fail-closes: the bound below is skipped and no rename passes.
+      # P2-3 (#6862) — this bound reads a DIFFERENT TREE than the diff it
+      # accompanies. `git diff "$DRIFT_BASE_SHA"...HEAD` above diffs from
+      # `merge-base(DRIFT_BASE_SHA, HEAD)`; the `git ls-tree` below reads
+      # tree(DRIFT_BASE_SHA). When DRIFT_BASE_SHA is not an ancestor of HEAD
+      # those differ, and the bound may OVER-block — reject a rename the printed
+      # diff reads as forward (reproduced: merge-base max 20260813000099, base
+      # max 20260901000000, destination 20260820000000 -> rc=1). It can never
+      # UNDER-block: it is an ADDITIONAL conjunct alongside `new_ver >
+      # REMOTE_MAX`, so it only turns an otherwise-exempt rename into a
+      # violation. The shipped CI path sets DRIFT_BASE_SHA to the base parent of
+      # the pull-request merge commit, where `merge-base(A, HEAD) == A`, so the
+      # two trees are equal and this cannot fire.
       BASE_VERSION_MAX="$(
         git -C "$REPO" ls-tree -r --name-only "$DRIFT_BASE_SHA" -- supabase/migrations/ 2>/dev/null \
           | sed -nE 's#.*/([0-9]+)_.*#\1#p' | sort | tail -n1

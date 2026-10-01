@@ -611,13 +611,58 @@ def test_backward_in_numeric_forward_in_lex_rename_is_blocked():
 def test_same_version_relabel_to_bak_is_blocked():
     # Vector G4: `X_a.sql` → `X_a.sql.bak` applies NOTHING at that version — the
     # exact `D` outcome this guard reports as a violation — yet the pre-change
-    # exemption admitted it (rc=0) because new_ver == old_ver was never checked.
+    # exemption admitted it (rc=0). In THIS fixture the blocker is the
+    # destination-not-a-migration clause (basename must match ^[0-9]+_.*\.sql$):
+    # a `.bak` fails that pattern whatever `new_ver` is, so this test does NOT
+    # exercise the strict-renumber clause. That clause is defence-in-depth
+    # against a base tree that does not contain the renamed source — pinned by
+    # test_same_version_rename_from_a_base_tree_missing_the_source_is_blocked.
     d = _make_repo(["20260813000099_a.sql"])
     base = _git_sha(d)
     (d / MIG / "20260813000099_a.sql").rename(d / MIG / "20260813000099_a.sql.bak")
     _git(d, "add", "-A")
     _git(d, "commit", "-q", "-m", "same-version relabel to .bak")
     r = _run_script_with_token("diff", d, base, versions=["20260813000098"])
+    assert r.returncode == 1, r.stdout
+    assert "append-only" in r.stdout.lower(), r.stdout
+
+
+def test_same_version_rename_from_a_base_tree_missing_the_source_is_blocked():
+    # P2-1 (#6862): the `new_ver != old_ver` clause has exactly ONE load-bearing
+    # world, and this fixture is it. The bound reads tree(DRIFT_BASE_SHA) while
+    # `git diff "$DRIFT_BASE_SHA"...HEAD` diffs from merge-base(A,HEAD); when
+    # the renamed source is DELETED between the merge-base and A, tree(A) no
+    # longer carries the source's version, so BASE_VERSION_MAX sorts BELOW it
+    # and a same-version destination satisfies `new_ver > BASE_VERSION_MAX`.
+    # With the strict-renumber clause removed this rename is EXEMPTED (rc=0);
+    # only that clause blocks it. In an ordinary history the source IS in the
+    # base tree, so old_ver <= BASE_VERSION_MAX and the clause can never fire —
+    # hence this fixture deliberately diverges the two trees.
+    d = FIXTURES / "repo-divergent"
+    if d.exists():
+        subprocess.run(["rm", "-rf", str(d)], check=True)
+    d.mkdir(parents=True)
+    _git(d, "init", "-q", "-b", "main")
+    _git(d, "config", "user.email", "t@t")
+    _git(d, "config", "user.name", "t")
+    (d / MIG).mkdir(parents=True)
+    (d / MIG / "20260813000000_early.sql").write_text("-- early\n")
+    (d / MIG / "20260813000099_src.sql").write_text("-- src body\n")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "merge-base: early + src")
+    # The PR's BASE (A) deletes the source, so tree(A) lacks its version.
+    _git(d, "checkout", "-q", "-b", "base")
+    (d / MIG / "20260813000099_src.sql").unlink()
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "base deletes the source")
+    base = _git_sha(d)
+    # HEAD descends from the merge-base, not from A → A is not an ancestor of
+    # HEAD, and the same version is renamed to a still-valid `.sql` file.
+    _git(d, "checkout", "-q", "main")
+    (d / MIG / "20260813000099_src.sql").rename(d / MIG / "20260813000099_dst.sql")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "same-version rename")
+    r = _run_script_with_token("diff", d, base, versions=["20260813000000"])
     assert r.returncode == 1, r.stdout
     assert "append-only" in r.stdout.lower(), r.stdout
 
