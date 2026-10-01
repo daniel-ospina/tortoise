@@ -349,11 +349,9 @@ def _floor_in_test(node: ast.If) -> tuple[int, int] | None:
     return tuple(values) if len(values) == 2 else None
 
 
-def _system_exit_message(node: ast.If) -> ast.expr | None:
-    """The `SystemExit(...)` argument from a one-statement `raise` body, else None."""
-    if len(node.body) != 1 or not isinstance(node.body[0], ast.Raise):
-        return None
-    exc = node.body[0].exc
+def _raise_message(node: ast.Raise) -> ast.expr | None:
+    """The argument of a `raise SystemExit(<one arg>)`, else None."""
+    exc = node.exc
     if not (
         isinstance(exc, ast.Call)
         and isinstance(exc.func, ast.Name)
@@ -363,6 +361,39 @@ def _system_exit_message(node: ast.If) -> ast.expr | None:
     ):
         return None
     return exc.args[0]
+
+
+def _system_exit_message(node: ast.If) -> ast.expr | None:
+    """The refusal MESSAGE expression from a guard body, else None.
+
+    Two shapes satisfy #5128, and both deliver an attributable refusal:
+
+      * `raise SystemExit(<one message>)` — the historical shape. CPython
+        prints a string argument to stderr, but the process then exits 1.
+      * `print(<message>, file=sys.stderr)` followed by
+        `raise SystemExit(<int>)` — for a guard whose EXIT CODE is itself
+        meaningful (#4053). `SystemExit(<str>)` always exits 1 and
+        `SystemExit(<int>)` carries no message, so a non-1 status can only be
+        expressed by emitting the message explicitly.
+
+    The invariant #5128 protects is that the operator can ATTRIBUTE the
+    refusal — not which statement carries it. A `print` with no argument, or a
+    `print` not followed by a raise, is not a refusal and is rejected.
+    """
+    body = node.body
+    if len(body) == 1 and isinstance(body[0], ast.Raise):
+        return _raise_message(body[0])
+    if (
+        len(body) == 2
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Call)
+        and isinstance(body[0].value.func, ast.Name)
+        and body[0].value.func.id == "print"
+        and body[0].value.args
+        and isinstance(body[1], ast.Raise)
+    ):
+        return body[0].value.args[0]
+    return None
 
 
 def _parse(path: Path) -> ast.Module:
@@ -387,7 +418,9 @@ def _guard_or_fail(path: Path) -> ast.If:
         f"(the repo contract); got {floor!r}"
     )
     assert _system_exit_message(guard) is not None, (
-        f"{_rel(path)}: the guard must raise `SystemExit(<one message>)`"
+        f"{_rel(path)}: the guard must refuse with an ATTRIBUTABLE message — "
+        "either `raise SystemExit(<one message>)` or a `print(<message>)` "
+        "followed by `raise SystemExit(<int>)`"
     )
     return guard
 
@@ -565,6 +598,47 @@ def test_detector_accepts_the_real_guard_shape():
     assert _system_exit_message(body[index]) is not None
 
 
+def test_detector_accepts_the_explicit_print_then_exit_shape():
+    """The positive control for #4053's shape: print, then `raise SystemExit(int)`.
+
+    `SystemExit(<str>)` always exits 1 and `SystemExit(<int>)` carries no
+    message, so a guard whose EXIT CODE is meaningful must emit the message
+    itself. That is still an attributable refusal — the #5128 invariant — so the
+    detector must accept it rather than report the guard as missing. Without
+    this control the acceptance added for #4053 is itself unpinned.
+    """
+    body = _body_of(
+        '"""doc."""\n'
+        "from __future__ import annotations\n"
+        "\n"
+        "import sys\n"
+        "\n"
+        "if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard\n"
+        "    print(\n"
+        '        f"collision-preflight: requires Python >= 3.12",\n'
+        "        file=sys.stderr,\n"
+        "    )\n"
+        "    raise SystemExit(3)\n"
+        "\n"
+        "import argparse\n"
+    )
+    index = _guard_index(body)
+    assert index == 3
+    assert _floor_in_test(body[index]) == FLOOR
+    assert _system_exit_message(body[index]) is not None
+
+
+def test_detector_rejects_a_print_with_no_message():
+    """A `print()` carrying no message is not an attributable refusal."""
+    body = _body_of(
+        "import sys\n"
+        "if sys.version_info < (3, 12):  # noqa: UP036\n"
+        "    print(file=sys.stderr)\n"
+        "    raise SystemExit(3)\n"
+    )
+    assert _system_exit_message(body[1]) is None
+
+
 # ── the properties, per entry point ──────────────────────────────────────────
 
 
@@ -579,7 +653,9 @@ def test_entry_point_guards_the_interpreter_before_its_imports(path: Path):
 
 
 @pytest.mark.parametrize("path", _corpus(), ids=_rel)
-def test_guard_refuses_an_old_interpreter_and_passes_the_floor(path: Path, monkeypatch):
+def test_guard_refuses_an_old_interpreter_and_passes_the_floor(
+    path: Path, monkeypatch, capsys,
+):
     """★ #5128: the guard's BEHAVIOUR under a monkeypatched `sys.version_info`.
 
     The guard node is compiled and executed on its own, so this needs no old
@@ -600,7 +676,17 @@ def test_guard_refuses_an_old_interpreter_and_passes_the_floor(path: Path, monke
         # executing the file's OWN guard node, compiled on its own: no tool's
         # real work runs, and no old interpreter is needed.
         exec(code, namespace)
-    message = str(refusal.value)
+    # The message arrives one of two ways (#4053): as the SystemExit ARGUMENT in
+    # the historical `raise SystemExit(<message>)` shape, or on stderr from an
+    # explicit `print` when the guard's exit code is itself meaningful
+    # (`SystemExit(<int>)` carries no message). Join both so the attribution
+    # assertions below hold for either shape; the refusal must be ascribable to
+    # the file and the interpreter in BOTH cases, which is the #5128 invariant.
+    captured = capsys.readouterr()
+    message = str(refusal.value) + captured.out + captured.err
+    assert "3.12" in message or "SystemExit" in message, (
+        f"{rel}: the guard refused with no message at all: {message!r}"
+    )
     assert ">= 3.12" in message, f"{rel}: refusal must name the floor: {message!r}"
     assert "(got 3.9)" in message, f"{rel}: refusal must name the interpreter it got: {message!r}"
     assert rel in message, f"{rel}: refusal must name the file: {message!r}"
