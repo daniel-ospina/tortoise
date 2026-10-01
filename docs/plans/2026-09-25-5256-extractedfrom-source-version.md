@@ -1,7 +1,7 @@
 # Plan — #5256: record the read version on the create-path `extractedFrom` link
 
 **Issue:** #5256 (`complexity:complex`, Level: task, epic #5088) · **Repo:** `daniel-ospina/tortoise`
-**Branch:** `feat/5256-extractedfrom-anchor` · **Base:** `origin/docs/5199-version-scope @ 52e703f89` (STACKED on PR #5207)
+**Branch:** `feat/5256-extractedfrom-anchor` · **Base:** `main` (planned on `origin/docs/5199-version-scope @ 52e703f89`; that base's #5199 anchor landed as PR #5207)
 **Predecessor:** `docs/plans/2026-09-25-5038-source-version-anchor.md` (Task 1, branch `docs/5038-scoping`)
 **Review cycle:** 10 (see §10).
 
@@ -262,7 +262,9 @@ Every test names the input that makes it FAIL.
      `_upsert_point_props` clause → test 1 (rebuild parity) **and** test 16's positive half, whose
      graph is seeded through `rebuild_all`.)
   6b. the shared `_valid_transit_pairs` non-empty rule (drop it) → test 14c's
-     `bad-empty-hash`/`bad-blank-hash` halves.
+     `bad-empty-hash`/`bad-blank-hash` halves;
+  7. `EventAPI.add_point`'s graph guard → test 7;
+  8. the #4042 recreate wipe (`n.sourceVersionTransit = NULL`) → test 8b.
 
 **Equivalent (un-killable) branches — recorded, NOT claimed as mutation-covered.** These guards in the
 #5256 diff have no reachable discriminating input, so no test can kill them, and none is a robustness
@@ -277,8 +279,6 @@ hole (verified by applying each: all 33 green):
   stubs carry `''`);
 - the `is not None` property-writes in `_upsert_point_props` (`_sv_transit`) and `create_point`
   (`_source_version_sv`) — `SET n.x = null` REMOVES the property, so emitted-null == absent.
-  7. `EventAPI.add_point`'s graph guard → test 7;
-  8. the #4042 recreate wipe (`n.sourceVersionTransit = NULL`) → test 8b.
 
 ## 8. Complexity
 
@@ -432,7 +432,7 @@ abort the very recovery path the malformed-carrier test exists to keep total; th
 case used a STRING, which is a truthy iterable the pair loop already rejects, so it never discriminated
 the clause — added `bad-noniterable`. (2) The blank-KEY rule (`pair[0].strip()`, not `pair[0]`) was
 likewise unkilled: a blank-but-truthy ref survives `_point_source_refs`' falsy filter, so without the
-rule a `[["   ","h9"]]` carrier is written AND anchored — added `test_blank_key_pair_is_dropped`. (3)
+rule a `[["   ","h9"]]` carrier is written for a ref that is not a Source — no edge forms, so no anchor is stamped — added `test_blank_key_pair_is_dropped`. (3)
 `_link_source`'s resolved-first `versions.get(ref)` was killed by no test; added
 `test_link_source_accepts_a_registry_keyed_by_the_resolved_url`, which pins the defensive contract (with
 only the raw-ref lookup, a registry keyed by the resolved url leaves the edge bare).

@@ -351,10 +351,12 @@ def _valid_transit_pairs(value):
     while the authoritative edge carried NULL (and a blank ``'   '`` stamped
     garbage on the edge, since the CASE only matches ``''``) — a gate-invisible
     disagreement between the two writers, re-derived from the same journal line
-    so `check_consistency` saw no divergence. (Note: the LIVE writers write the
-    carrier straight from ``_source_version_transit`` and do NOT run this
-    predicate; the agreement is a property of both sides applying the SAME
-    absent rule, which is why ``resolve_source_versions`` must strip-test too.)
+    so `check_consistency` saw no divergence. (Note: only the SDK
+    ``create_point`` CREATE-map write bypasses this predicate; the EventAPI lane
+    sets the carrier and then emits ``PointAdded``, which reaches
+    ``_upsert_point_props`` and so runs the SAME predicate as replay does. The
+    agreement is a property of both sides applying the same absent rule, which is
+    why ``resolve_source_versions`` must strip-test too.)
     """
     if not isinstance(value, (list, tuple)) or not value:
         return None

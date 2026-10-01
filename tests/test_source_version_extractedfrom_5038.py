@@ -533,7 +533,7 @@ def test_sdk_create_document_rejects_a_forged_source_version(prov):
         with pytest.raises(ValueError, match="server-managed"):
             sdk.create_document("T", "report", **{key: "h9"})
     assert _proj(sdk).g.query(
-        "MATCH (d:Document) RETURN count(d)").result_set[0][0] == 0
+        "MATCH (s:Source) RETURN count(s)").result_set[0][0] == 0
 
 
 def test_ingest_bundle_rejects_a_forged_source_version(prov):
@@ -879,8 +879,9 @@ def test_blank_key_pair_is_dropped(prov):
     FAILS IF ``_valid_transit_pairs`` tests the key on truthiness alone
     (``pair[0]`` instead of ``pair[0].strip()``): a blank-but-truthy ref then
     matches the own-ref filter (``_point_source_refs`` keeps truthy members), so
-    the carrier pair is written and an anchor is stamped for a ref that is not a
-    Source.
+    the carrier pair is written for a ref that is not a Source. No anchor is
+    stamped: a blank ref cannot match a ``:Source`` in the MERGE, so the edge
+    never forms — the mutant is still killed, by the node-carrier assertion.
     """
     sdk, events, log_path = prov
     sdk.create_point("statement", "plain")
