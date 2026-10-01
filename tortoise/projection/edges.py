@@ -307,8 +307,10 @@ def resolve_source_versions(g, source_ref) -> dict[str, str]:
     """LIVE-only: map each source ref to its :Source's non-blank ``contentHash``.
 
     #5256 — the create-path ``extractedFrom`` read-version anchor. This is the
-    ONLY place a version is read from a Source; it runs on the LIVE write path
-    and its result is carried in the Point's own journaled snapshot, so the
+    ONLY place the ``extractedFrom`` read version is read from a Source in
+    Python (the separate ``references`` anchors read ``s.contentHash`` inside
+    their own MERGE — see ``_DERIVATION_ANCHOR_SET``); it runs on the LIVE write
+    path and its result is carried in the Point's own journaled snapshot, so the
     REPLAY never re-reads the Source. That distinction is load-bearing:
     ``_upsert_source``'s in-place ``contentHash`` bump is unjournalled (#5024),
     so a Source read at replay time can have advanced since the Point was read —
