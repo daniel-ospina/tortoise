@@ -1439,6 +1439,13 @@ def carve_shard_entries(manifest: dict) -> list[dict]:
         # `suffix` is the workflow's `name:` tail: '' for shard 0 (so the check
         # is exactly `test-carve-out`), ' (b)'/ ' (c)' after that.
         e["suffix"] = "" if i == 0 else f" ({labels[i]})"
+        # `label` is the ARTIFACT-name tail, and it must NOT be `suffix`: suffix
+        # carries a leading space and parentheses, and `github.job` is the BASE
+        # job id for every matrix leg, so an upload named `pytest-log-${{ github.job }}`
+        # is the SAME name for every shard — upload-artifact@v4 then 409s and,
+        # because the step is continue-on-error, the shard logs vanish silently
+        # (#6263 pins exactly this).
+        e["label"] = labels[i]
     return entries
 
 
@@ -1453,6 +1460,8 @@ def carve_matrix_include(entries: list[dict]) -> dict:
     return {"include": [
         {
             "suffix": e["suffix"],
+            # Distinct per leg, and filesystem-safe — the artifact name tail.
+            "label": e["label"],
             "files": " ".join(e["files"]),
             "watchdog_minutes": e["watchdog_minutes"],
         }

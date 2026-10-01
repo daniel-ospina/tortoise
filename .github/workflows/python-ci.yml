@@ -2004,7 +2004,11 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: pytest-log-${{ github.job }}
+          # PER-LEG: `github.job` is the BASE id for every matrix leg, so the
+          # bare form collides across shards (upload-artifact@v4 409s, and the
+          # step is continue-on-error, so the logs disappear silently).
+          # NOT `matrix.suffix` — it carries a leading space and parentheses.
+          name: pytest-log-${{ github.job }}-${{ matrix.label }}
           path: |
             /tmp/pytest.log
             /tmp/junit.xml
