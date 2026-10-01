@@ -82,6 +82,8 @@ def _assert_uuid_fidelity(table: str, filters: list[tuple[str, str, object]] | N
 # set against the migrations so a forgotten column fails the suite.
 TIMESTAMPTZ_COLUMNS: set[tuple[str, str]] = {
     ("abuse_events", "created_at"),
+    ("account_deletions", "created_at"),
+    ("account_deletions", "deleted_at"),
     ("agent_signup_tokens", "created_at"),
     ("agent_signup_tokens", "last_used_at"),
     ("agent_signup_tokens", "revoked_at"),
@@ -382,6 +384,30 @@ class FakeControlPlane:
         abuse_suspend/abuse_unsuspend RPCs (teams.suspended_at/flagged_at).
         """
         self.rpc_calls.append((fn, dict(body or {})))
+        if fn == "account_deletion_claim_org":
+            # #4029 (cycle-2): the atomic per-org claim. Mirrors the SQL's
+            # single `||` union — appends to claimed_org_ids AND org_ids,
+            # idempotent. A read-then-PATCH would lose an id when two writers
+            # overlap; this is one statement. NOT guarded on `deleted_at`:
+            # the erasure sweep claims an in-window org AFTER the account is
+            # stamped, and a guard there made the claim inert at the one
+            # moment it is needed (#4029 cycle-3 P1).
+            p = body or {}
+            uid = p.get("p_user_id")
+            oid = p.get("p_org_id")
+            for r in self.tables.get("account_deletions", []):
+                if str(r.get("user_id")) != str(uid):
+                    continue
+                if oid is None or not str(oid).strip():
+                    return None
+                claimed = [str(x) for x in (r.get("claimed_org_ids") or [])]
+                if str(oid) in claimed:
+                    return None
+                r["claimed_org_ids"] = [*claimed, str(oid)]
+                intent = [str(x) for x in (r.get("org_ids") or [])]
+                if str(oid) not in intent:
+                    r["org_ids"] = [*intent, str(oid)]
+            return None
         if fn == "abuse_suspend":
             # Mirrors the SQL: set suspended_at only when NULL; flagged_at is
             # NOT touched (the engine's flag-episode state is event-derived).
@@ -1136,6 +1162,20 @@ class FakeControlPlane:
             return updated if select is not None else []
         if method == "POST":
             row = dict(json_body or {})
+            if table == "account_deletions":
+                # #4029: user_id is the PRIMARY KEY. A second INSERT (a
+                # concurrent schedule racing the first) is a unique violation
+                # → PostgREST 409, which DELETE /v1/user/account treats as
+                # already-scheduled. Without this the fake would accept a
+                # duplicate the real table rejects, and the endpoint's
+                # first-write-wins promise would be untested.
+                _uid = row.get("user_id")
+                if _uid is not None and any(
+                        str(r.get("user_id")) == str(_uid)
+                        for r in self.tables.get(table, [])):
+                    raise RuntimeError(
+                        "Supabase control-plane query failed "
+                        f"({table}): HTTP 409")
             if table == "abuse_events" and row.get("created_at") is None:
                 # mirror the DB column default now() — window gt-filters need it
                 from datetime import datetime, timezone

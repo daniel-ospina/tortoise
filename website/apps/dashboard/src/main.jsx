@@ -101,6 +101,7 @@ import {
 // #1765: identity surface — pure predicates + presentational components
 import { bannerShow, shouldRefetchOnFocus } from './identity.js'
 import { RecoveryBanner, ProfileTab, ReauthDialog } from './profile.jsx' 
+import { DeleteAccountSection } from './accountDeletion.js'
 // #2392: minimal a11y focus management for the dialog family — capture the
 // opening trigger, restore focus to it on close (pure, node --test
 // unit-tested — dialogFocus.test.js).
@@ -1034,6 +1035,11 @@ function App() {
   const [identityError, setIdentityError] = React.useState('')
   const [profileBusy, setProfileBusy] = React.useState('') // '' | 'oauth' | 'email' | 'unlink' | 'resend'
   const [profileError, setProfileError] = React.useState('')
+  // #4029: personal-account deletion — the confirm popup is closed by default
+  // and Cancel is a pure local close (no request, no state change).
+  const [deleteAccountOpen, setDeleteAccountOpen] = React.useState(false)
+  const [deleteAccountBusy, setDeleteAccountBusy] = React.useState(false)
+  const [deleteAccountError, setDeleteAccountError] = React.useState('')
   const [reauthOpen, setReauthOpen] = React.useState(false)
   const [reauthBusy, setReauthBusy] = React.useState(false)
   const [reauthError, setReauthError] = React.useState('')
@@ -2447,6 +2453,27 @@ function claimIntentInFlight() {
       setProfileError(e.message || 'Could not resend confirmation')
     } finally {
       setProfileBusy('')
+    }
+  }
+
+  // #4029: confirm-CTA action for the account-delete popup. DELETE
+  // /v1/user/account schedules the deletion server-side (solely-owned teams
+  // are cascaded there); on success the session is ended so the user cannot
+  // keep poking at workspaces that no longer resolve. Cancel is NOT this —
+  // it only closes the popup (no request).
+  async function deleteAccount() {
+    setDeleteAccountBusy(true)
+    setDeleteAccountError('')
+    try {
+      await api('/v1/user/account', { method: 'DELETE', useSession: true })
+      setDeleteAccountOpen(false)
+      await logout()
+    } catch (e) {
+      // A failed DELETE keeps the popup OPEN (armed retry) and surfaces the
+      // reason in it.
+      setDeleteAccountError(e.message || 'Could not delete your account — try again.')
+    } finally {
+      setDeleteAccountBusy(false)
     }
   }
 
@@ -9141,6 +9168,19 @@ function claimIntentInFlight() {
             addError={profileError}
             onResend={handleResend}
             resendBusy={profileBusy === 'resend'}
+          />
+        )}
+        {/* #4029: personal-account deletion lives on the Profile tab and only
+            for a real SESSION account — a key-login has no auth account to
+            delete (the server answers `unsupported` in registry mode). */}
+        {tab === 'profile' && authMode === 'session' && identityInv && !identityInv.unsupported && (
+          <DeleteAccountSection
+            open={deleteAccountOpen}
+            busy={deleteAccountBusy}
+            error={deleteAccountError}
+            onOpen={() => { setDeleteAccountError(''); setDeleteAccountOpen(true) }}
+            onCancel={() => setDeleteAccountOpen(false)}
+            onConfirm={deleteAccount}
           />
         )}
         {tab === 'keys' && (
