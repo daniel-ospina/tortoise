@@ -21,7 +21,7 @@ then EP belief propagation computes per-option confidence.
 
 Run:
   cd "$(dirname "$0")/.."
-  TORTOISE_DB_URI=docker://:@localhost:16379/tortoise python3 graph-scripts/decide_licensing.py
+  TORTOISE_DB_URI=docker://:@127.0.0.1:16379/tortoise python3 graph-scripts/decide_licensing.py
 """
 import os, sys  # noqa: E401, I001
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tortoise.sdk import TortoiseSDK  # noqa: I001
 from tortoise.projection import FalkorProjection
 
-uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise")
+uri = os.environ.get("TORTOISE_DB_URI", "docker://:@127.0.0.1:16379/tortoise")
 
 sdk = TortoiseSDK()
 sdk._proj = FalkorProjection.from_uri(uri)
