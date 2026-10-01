@@ -151,8 +151,39 @@ if [ -n "$VIOLATIONS" ]; then
       -d "$QUERY" 2>&1 || true)"
     HTTP_CODE="$(printf '%s' "$API_RESPONSE" | tail -n1)"
     API_BODY="$(printf '%s' "$API_RESPONSE" | sed '$d')"
+    # The applied set is only TRUSTWORTHY when the body is a non-empty JSON array
+    # in which EVERY element carries a version, so its shape is validated FIRST
+    # and REMOTE_OK gates the whole exemption below (fail closed). This matters
+    # more under #2240 than before: the exemption now admits M/D/T as well as
+    # R*, so a malformed 200 (a gateway HTML page, a renamed API field, a missing
+    # jq) would produce an EMPTY set that reads as "nothing is applied" and
+    # exempt EVERY violation — silently disabling the guard for edits to APPLIED
+    # migrations, the #1001 P0 class. An empty reading is not trusted either:
+    # this project's schema_migrations always has rows.
+    REMOTE_OK=0
     if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
-      REMOTE_APPLIED="$(printf '%s' "$API_BODY" | jq -r '.[].version' 2>/dev/null | sort -u || true)"
+      if printf '%s' "$API_BODY" | jq -e '
+            type == "array" and length > 0
+            and all(.[];
+              if type == "object" then
+                has("version") and (.version != null)
+                and ((.version | type) == "string" or (.version | type) == "number")
+              else false end)' >/dev/null 2>&1; then
+        # Normalise PER ELEMENT, never with a stream-wide `tr -d '[:space:]'`:
+        # that deletes the NEWLINE between versions and merges them into one
+        # token, so `grep -qxF` stops matching ANY version and the guard exempts
+        # everything as soon as prod has two or more migrations. A
+        # single-element fixture cannot see that, so the tests pin a
+        # multi-element applied set explicitly.
+        REMOTE_APPLIED="$(printf '%s' "$API_BODY" \
+          | jq -r '.[] | .version | tostring | gsub("\\s";"")' 2>/dev/null \
+          | sort -u)"
+        if [ -n "$REMOTE_APPLIED" ]; then
+          REMOTE_OK=1
+        fi
+      fi
+    fi
+    if [ "$REMOTE_OK" = "1" ]; then
       # Evaluate each violation line. The version that owns the change is the
       # BASE-TREE file's version: for "R<sim>\told\tnew" that is the OLD path;
       # for "M\tpath" / "D\tpath" / "T\tpath" the path itself.
@@ -177,11 +208,23 @@ if [ -n "$VIOLATIONS" ]; then
         status="${line%%$'\t'*}"
         rest="${line#*$'\t'}"
         old_path="$rest"
-        case "$status" in R*) old_path="${rest%%$'\t'*}";; esac
+        new_ver=""
+        case "$status" in
+          R*)
+            old_path="${rest%%$'\t'*}"
+            new_ver="$(basename "${rest#*$'\t'}" | sed -nE 's#^([0-9]+)_.*#\1#p')"
+            ;;
+        esac
         old_ver="$(basename "$old_path" | sed -nE 's#^([0-9]+)_.*#\1#p')"
-        # Fail closed on a non-conforming filename: an empty version would make
-        # `grep -qxF ""` match an empty REMOTE_APPLIED line and exempt it.
-        if [ -n "$old_ver" ] && ! printf '%s\n' "$REMOTE_APPLIED" | grep -qxF "$old_ver"; then
+        # Both endpoints must be provably UNapplied: the old version must have no
+        # prod row (its DDL has never run), and on a rename the NEW version must
+        # not have one either — otherwise the repo gains a file at a version prod
+        # already ran with DIFFERENT content, which is the divergence this guard
+        # exists to prevent. Fail closed on a non-conforming filename too: an
+        # empty pattern would match an empty REMOTE_APPLIED line.
+        if [ -n "$old_ver" ] \
+           && ! printf '%s\n' "$REMOTE_APPLIED" | grep -qxF "$old_ver" \
+           && { [ -z "$new_ver" ] || ! printf '%s\n' "$REMOTE_APPLIED" | grep -qxF "$new_ver"; }; then
           EXEMPT_RENAMES="$EXEMPT_RENAMES
 $line"
           continue
@@ -193,7 +236,7 @@ $VIOLATIONS
 EOF
       VIOLATIONS="$KEEP"
     else
-      echo "::warning::append-only: Management API returned HTTP $HTTP_CODE — cannot evaluate the #1235 unapplied-rename exception; enforcing the strict block." >&2
+      echo "::warning::append-only: cannot evaluate the #1235/#2240 unapplied-version exception — the Management API returned HTTP $HTTP_CODE and/or a body that is not a NON-EMPTY JSON array of objects carrying a version (this project's schema_migrations always has rows, so an empty reading cannot be trusted). Enforcing the strict block." >&2
     fi
   fi
 
@@ -204,7 +247,7 @@ EOF
     exit 1
   fi
   if [ -n "$EXEMPT_RENAMES" ]; then
-    echo "::notice::Append-only exception (#1235): pure-prefix rename of provably-unapplied migration(s) allowed:"
+    echo "::notice::Append-only exception (#1235/#2240): change to a provably-unapplied migration version allowed (this version has no row in supabase_migrations.schema_migrations):"
     printf '%s\n' "$EXEMPT_RENAMES" | sed '/^$/d' | sed 's/^/  /'
   fi
 fi

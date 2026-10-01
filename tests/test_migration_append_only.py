@@ -288,3 +288,102 @@ def test_diff_unapplied_content_edit_allowed_with_token():
     r = _run_script_with_token("diff", d, base, versions=["0001"])
     assert r.returncode == 0, r.stdout
     assert "exception" in r.stdout.lower(), r.stdout
+
+
+def _run_with_body(repo: Path, base_sha: str, raw_body: str,
+                   http_code: int = 200) -> subprocess.CompletedProcess:
+    """Drive the guard with an arbitrary (possibly malformed) API body."""
+    stub = FIXTURES / "stub-raw.sh"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        f"printf '%s\\n{http_code}\\n' '{raw_body}'\n"
+    )
+    stub.chmod(0o755)
+    env = dict(os.environ)
+    env["DRIFT_REPO"] = str(repo)
+    env["DRIFT_BASE_SHA"] = base_sha
+    env["DRIFT_CURL"] = str(stub)
+    env["DRIFT_API_URL"] = "https://api.supabase.invalid"
+    env["DRIFT_TOKEN"] = "test-token"
+    return subprocess.run(
+        ["bash", str(SCRIPT), "diff"],
+        capture_output=True, text=True, env=env, cwd=REPO_ROOT,
+    )
+
+
+def _edited_applied_fixture() -> tuple[Path, str]:
+    d = _make_repo(["20260813000099_a.sql"])
+    base = _git_sha(d)
+    (d / MIG / "20260813000099_a.sql").write_text("-- edited\n")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "edit")
+    return d, base
+
+
+def test_api_body_that_is_not_a_json_array_fails_closed():
+    # The #2240 widening admits M/D/T as well as R*, so an EMPTY applied set is
+    # no longer harmless: it reads as "nothing is applied" and exempts an edit
+    # to an APPLIED migration — the #1001 class. An HTTP 200 whose body is not a
+    # JSON array must therefore keep the strict block, not silently pass.
+    for body in ('{"message":"boom"}', "[]", '[{"name":"20260813000099"}]',
+                 "[1,2]", '{"version":"20260813000099"}', "not json at all"):
+        d, base = _edited_applied_fixture()
+        r = _run_with_body(d, base, body)
+        assert r.returncode == 1, (
+            f"body={body!r} must fail CLOSED (got {r.returncode})\n{r.stdout}"
+        )
+
+
+def test_whitespace_in_applied_version_still_blocks():
+    # A serialization difference (padding here) must not demote an APPLIED
+    # version to exempt.
+    d, base = _edited_applied_fixture()
+    r = _run_with_body(d, base, '[{"version":" 20260813000099 "}]')
+    assert r.returncode == 1, r.stdout
+
+
+def test_multi_element_applied_set_still_blocks():
+    # Guards a stream-joining regression: normalising the applied set with a
+    # stream-wide `tr -d '[:space:]'` deletes the NEWLINE between versions and
+    # merges them into one token, so `grep -qxF` matches NOTHING and the guard
+    # exempts EVERYTHING as soon as prod has two or more migrations. A
+    # single-element fixture cannot detect that — so this one has several.
+    d, base = _edited_applied_fixture()
+    r = _run_with_body(
+        d, base,
+        '[{"version":"20260813000098"},{"version":"20260813000099"},'
+        '{"version":"20260813100100"}]',
+    )
+    assert r.returncode == 1, r.stdout
+    assert "append-only" in r.stdout.lower(), r.stdout
+
+
+def test_multi_element_unapplied_set_still_exempts():
+    # The same multi-element shape in the safe direction: the edited version is
+    # genuinely absent, so the exemption must still fire.
+    d, base = _edited_applied_fixture()
+    r = _run_with_body(
+        d, base,
+        '[{"version":"20260813000098"},{"version":"20260813100100"}]',
+    )
+    assert r.returncode == 0, r.stdout
+
+
+def test_wellformed_applied_body_still_blocks():
+    # Control: the normal path is unchanged.
+    d, base = _edited_applied_fixture()
+    r = _run_with_body(d, base, '[{"version":"20260813000099"}]')
+    assert r.returncode == 1, r.stdout
+
+
+def test_rename_to_an_already_applied_new_version_is_blocked():
+    # Both endpoints must be unapplied. Renaming an unapplied migration ONTO a
+    # version prod already ran would put different content at that version.
+    d = _make_repo(["20260813000099_a.sql"])
+    base = _git_sha(d)
+    (d / MIG / "20260813000099_a.sql").rename(d / MIG / "20260813100100_a.sql")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "rename onto applied version")
+    r = _run_script_with_token("diff", d, base, versions=["20260813100100"])
+    assert r.returncode == 1, r.stdout
+    assert "append-only" in r.stdout.lower(), r.stdout

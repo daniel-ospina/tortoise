@@ -4993,10 +4993,11 @@ def test_every_changed_set_diff_disables_rename_detection():
       justification ("`--no-renames` would break the gate") no longer holds: the
       exempt arm reads the BASE-TREE version from the `R<sim>` OLD path or from a
       bare `M`/`D` path, and both are admitted on the same prod-state test.
-      `--find-renames` is kept because it is what makes the exempted line REPORT
-      as one migration renumbered rather than as an unexplained delete+add. The
-      rule in this pin is scoped to changed-set *selection* diffs; that file is a
-      deliberate exception.
+      `--find-renames` is kept so that a HIGH-SIMILARITY renumber still reports as
+      one `R` line; a re-land carrying a real content delta degrades to `D`+`A`
+      even with the flag set, and that form is admitted by the `D`-line branch of
+      the BOTH-ENDPOINTS check. The rule in this pin is scoped to changed-set
+      *selection* diffs; that file is a deliberate exception.
     """
     root = Path(__file__).resolve().parents[1]
     wf_dir = root / ".github" / "workflows"
