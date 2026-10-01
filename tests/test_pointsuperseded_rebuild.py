@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from tortoise.log import EventLog
 from tortoise.sdk import TortoiseSDK
 
 
@@ -925,3 +926,722 @@ def test_delete_leg_skips_live_recreated_src(sup):
     assert _struct_edges(proj, x) == {("extractedFrom", s)}, (
         "delete-leg must NOT fire against a live src — the edge is legit"
     )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# #3305 — the apply() replay arm must fold PointSuperseded too
+#
+# ``rebuild(EventLog)`` is the one-record engine behind ``recover_from_log``
+# (DB-loss recovery) and the backup JSONL restore. It had NO branch for
+# PointSuperseded, so the record fell through to the ``unrecognized event
+# type`` warning and a superseded Point re-materialized as status='live' with
+# the CORRECTS edge + belief decay gone. The fold is now shared with
+# ``rebuild_all``'s sweep through ``_fold_point_restamp``.
+# ══════════════════════════════════════════════════════════════════════
+
+def _apply_replay(sdk, events_dir) -> None:
+    """The ``apply()`` arm: wipe + replay via ``rebuild(EventLog)`` — the
+    canonical apply()-based engine. ``consistency.recover_from_log`` and
+    ``backup.restore`` are independent replay loops wired to the SAME shared
+    plan (``plan_point_restamp_folds`` + ``apply_journal_point_restamp``)."""
+    sdk._get_proj().rebuild(EventLog(str(events_dir / "events.jsonl")))
+
+
+def test_apply_replay_folds_supersede(sup):
+    """#3305: an apply()-based replay of a superseded Point must end
+    'superseded' — asserted as the literal live status, not something read
+    back from the replay it is testing."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "old A", status="live")["id"]
+    succ = sdk.create_point("statement", "successor A'", status="live",
+                            valid_from="2026-01-01T00:00:00+00:00")["id"]
+    sdk.supersede_point(a, succ)
+    pre = _point_state(sdk, a)
+    _apply_replay(sdk, events)
+    post = _point_state(sdk, a)
+    assert post["status"] == "superseded", (
+        f"apply() replay resurrected a dead Point: {post}")
+    assert post["outdated"] is True
+    assert post["validTo"] and post["expiredAt"]
+    assert post == pre, (
+        f"apply() replay drifted from live: {pre} != {post}")
+    assert _corr(sdk._get_proj(), a, succ) == 1, (
+        "CORRECTS edge dropped by the apply() arm")
+
+
+def test_apply_replay_folds_the_supersede_belief_decay(sup):
+    """#3305: the terminalizer's BELIEF half rides the same record — an
+    apply()-based replay must decay the claim to the vacuous posterior, or
+    the restored Point keeps a frozen promoted posterior."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "old A", status="live")["id"]
+    succ = sdk.create_point("statement", "successor A'", status="live")["id"]
+    sdk.supersede_point(a, succ)
+    _apply_replay(sdk, events)
+    decayed = sdk.get_point(a)
+    assert decayed["confidence"] == 0.5, (
+        f"belief decay not folded by the apply() arm: {decayed.get('confidence')}")
+    assert decayed["posterior_alpha"] == 1.0
+    assert decayed["posterior_beta"] == 1.0
+
+
+def test_apply_replay_matches_rebuild_all_on_supersede(sup):
+    """#3305: the two replay engines must converge on the same Point state —
+    the shared ``_fold_point_restamp`` dispatch is what keeps them from
+    drifting."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "old A", status="live")["id"]
+    succ = sdk.create_point("statement", "successor A'", status="live")["id"]
+    sdk.supersede_point(a, succ)
+    live = _point_state(sdk, a)
+    assert live["status"] == "superseded"
+
+    _rebuild(sdk, events)
+    via_all = _point_state(sdk, a)
+    _apply_replay(sdk, events)
+    via_apply = _point_state(sdk, a)
+
+    assert via_all == live, f"rebuild_all drifted from live: {via_all}"
+    assert via_apply == via_all, (
+        f"apply() replay != rebuild_all: {via_apply} != {via_all}")
+
+
+def test_apply_replay_keeps_a_live_point_live(sup):
+    """#3305 no-over-correction: a Point with no terminalizer in the journal
+    stays live across the apply() arm — the fix must not fold anything onto
+    an ordinary claim."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "never touched", status="live")["id"]
+    _apply_replay(sdk, events)
+    post = _point_state(sdk, a)
+    assert post["status"] == "live"
+    assert post["outdated"] is None
+    assert post["validTo"] is None
+
+
+def test_apply_replay_shares_rebuild_all_selection_on_double_supersede(sup):
+    """#3305 (review P1): the apply() arm must obey the SAME SELECTION as
+    rebuild_all, not merely the same fold body. A raw id-reusing producer can
+    journal TWO PointSuperseded events for one old id; rebuild_all
+    CANONICALIZES them (only the last folds) so the earlier ``S1→A`` CORRECTS
+    cannot ghost beside the final ``S2→A``. Folding every terminalizer inline
+    would re-introduce that ghost on the recovery path."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "A", status="live")["id"]
+    s1 = sdk.create_point("statement", "S1", status="live")["id"]
+    s2 = sdk.create_point("statement", "S2", status="live")["id"]
+    sdk.supersede_point(a, s1)
+    # A second fold for the SAME old id — the SDK's terminal guard refuses a
+    # live second supersede, so journal it the way a raw producer would.
+    with open(events / "events.jsonl", "a") as fh:
+        fh.write(json.dumps({
+            "event_id": sdk.ulid(), "ts": datetime.now(UTC).isoformat(),
+            "type": "PointSuperseded", "initiated_by": "raw-producer",
+            "projection_version": 2, "id": a, "new_id": s2,
+        }) + "\n")
+
+    _rebuild(sdk, events)
+    via_all = {k: _point_state(sdk, a)[k] for k in ("status", "outdated")}
+    corr_all = (sdk._get_proj().g.query(
+        "MATCH (a:Point {id:$new})-[r:CORRECTS]->(b:Point {id:$old}) "
+        "RETURN a.id",
+        params={"new": s2, "old": a}).result_set)
+    _apply_replay(sdk, events)
+    via_apply = {k: _point_state(sdk, a)[k] for k in ("status", "outdated")}
+    corr_apply = (sdk._get_proj().g.query(
+        "MATCH (a:Point {id:$new})-[r:CORRECTS]->(b:Point {id:$old}) "
+        "RETURN a.id",
+        params={"new": s2, "old": a}).result_set)
+
+    assert via_all["status"] == "superseded"
+    # expiredAt is the ``_now_iso()`` fallback for a raw line that carries no
+    # ``expired_at`` — a replay-time clock, so the comparison is on the fold's
+    # SEMANTIC fields (the selection is what must agree), not on wall clock.
+    assert via_apply == via_all, (
+        f"apply() replay != rebuild_all on double supersede: "
+        f"{via_apply} != {via_all}")
+    assert _corr(sdk._get_proj(), a, s2) == 1
+    assert _corr(sdk._get_proj(), a, s1) == 0, (
+        "ghost CORRECTS from the earlier, non-canonical supersede")
+    assert corr_apply == corr_all
+
+
+def test_apply_replay_warns_when_a_fold_matches_no_point(sup, caplog):
+    """#3305/#3299: a terminalizer whose target was never created is a
+    dropped fold — the whole-journal apply() arm must SAY SO, like the
+    one-record branch and rebuild_all's sweep already do."""
+    import logging
+
+    _, events, sdk = sup
+    sdk.create_point("statement", "kept", status="live")
+    EventLog(str(events / "events.jsonl")).append(
+        {"type": "PointSuperseded", "id": "never-created-id",
+         "new_id": "also-never-created", "event_id": "ghost-1",
+         "ts": "2026-01-02T00:00:00+00:00"})
+    with caplog.at_level(logging.WARNING):
+        _apply_replay(sdk, events)
+    assert any("matched no Point" in r.message for r in caplog.records), (
+        "an apply()-based replay silently dropped a terminalizer fold: "
+        + repr([r.message for r in caplog.records if "fold" in r.message]))
+
+
+def test_apply_one_record_folds_a_terminalizer(sup):
+    """#3305: the ``apply()`` ONE-RECORD default (no journal view) folds a
+    terminalizer at the record's own position — the branch a live caller or an
+    unwired engine uses. Also pins that a ``PointSuperseded`` with no ``new_id``
+    neither folds nor decays."""
+    _, _events, sdk = sup
+    a = sdk.create_point("statement", "A", status="live")["id"]
+    s = sdk.create_point("statement", "S", status="live")["id"]
+    proj = sdk._get_proj()
+    proj.apply({"type": "PointSuperseded", "id": a, "new_id": s,
+                "ts": "2026-01-02T00:00:00+00:00"})
+    post = _point_state(sdk, a)
+    assert post["status"] == "superseded"
+    assert post["outdated"] is True
+    assert _corr(proj, a, s) == 1
+
+    # An inapplicable supersede (no successor) must not decay the target — the
+    # guard runs BEFORE the belief half on the one-record default.
+    c = sdk.create_point("statement", "C", status="live")["id"]
+    before = (sdk.get_point(c) or {}).get("confidence")
+    proj.apply({"type": "PointSuperseded", "id": c})
+    assert (sdk.get_point(c) or {}).get("confidence") == before
+    assert sdk.get_point(c)["status"] == "live"
+
+
+def _synthesize_journal(path, entries) -> None:
+    """Replace the journal with an explicit ordered list (a raw producer can
+    journal in any order; the SDK's guards refuse some of these)."""
+    with open(path, "w", encoding="utf-8") as fh:
+        for e in entries:
+            fh.write(json.dumps(e, ensure_ascii=False) + "\n")
+
+
+def test_apply_replay_matches_rebuild_all_when_a_promote_is_the_only_record(
+        sup):
+    """#3305 (review P1), #2256: a node whose ONLY durable journal record is a
+    ``PointPromoted`` snapshot still EXISTs for the fold's existence gate. A
+    terminalizer journaled before that promote must be inert on BOTH engines —
+    folding it on ``rebuild_all``'s trailing sweep while the chronological
+    apply() arm misses is the divergence this pins. Same for
+    ``OperatorPromoted``."""
+    from tortoise.consistency import recover_from_log
+
+    _, events, sdk = sup
+    for promote_type in ("PointPromoted", "OperatorPromoted"):
+        b = sdk.create_point("statement", f"B {promote_type}",
+                             status="draft")["id"]
+        c = sdk.create_point("statement", f"C {promote_type}",
+                             status="live")["id"]
+        added_c = next(
+            e for e in EventLog(str(events / "events.jsonl")).read_all()
+            if e.get("type") == "PointAdded" and e["point"]["id"] == c)
+        snap = dict(sdk.get_point(b))
+        snap["status"] = "live"
+        ts = "2026-01-01T00:00:00+00:00"
+        # A DEDICATED log dir: the sdk's own journal still holds the
+        # ``PointAdded`` for ``b`` (which is exactly the record this shape
+        # removes), and its buffered writes would land in the fixture's log.
+        synth_dir = events.parent / f"synth-{promote_type}"
+        synth_dir.mkdir()
+        _synthesize_journal(synth_dir / "events.jsonl", [
+            {"event_id": sdk.ulid(), "ts": ts, "type": "PointSuperseded",
+             "initiated_by": "raw-producer", "projection_version": 2,
+             "id": b, "new_id": c},
+            {"event_id": sdk.ulid(), "ts": ts, "type": promote_type,
+             "initiated_by": "raw-producer", "projection_version": 2,
+             "point": snap},
+            added_c,
+        ])
+        proj = sdk._get_proj()
+
+        # ``rebuild_all`` snapshots GRAPH-ONLY nodes and injects them as
+        # synthetic ``PointAdded`` (#548) — which would restore exactly the
+        # ``PointAdded`` for ``b`` this shape removes. Empty the graph first.
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        proj.rebuild_all(str(synth_dir))
+        via_all = _point_state(sdk, b)
+        assert via_all["status"] == "live", (
+            f"{promote_type}: a terminalizer before the node existed must not "
+            f"fold after the promote: {via_all}")
+
+        _apply_replay(sdk, synth_dir)
+        via_apply = _point_state(sdk, b)
+        assert via_apply == via_all, (
+            f"{promote_type}: apply() replay != rebuild_all: "
+            f"{via_apply} != {via_all}")
+
+        # The DB-loss recovery engine shares the same plan.
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        assert recover_from_log(str(synth_dir), proj)["recovered"]
+        assert _point_state(sdk, b) == via_all, (
+            f"{promote_type}: recover_from_log != rebuild_all")
+
+
+def test_apply_replay_routes_a_type_in_point_terminalizer_through_the_plan(
+        sup):
+    """#3305/#325: ``_norm`` splices a nested payload, so a record whose TYPE
+    lives inside ``point`` is planned by ``plan_point_restamp_folds``. The
+    engines must therefore dispatch on the PLAN, not the raw envelope type —
+    otherwise the record falls through to ``apply()``'s inline branch, which
+    folds EVERY terminalizer and re-introduces the ghost ``CORRECTS`` the
+    canonicalization exists to prevent."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "A", status="live")["id"]
+    s1 = sdk.create_point("statement", "S1", status="live")["id"]
+    s2 = sdk.create_point("statement", "S2", status="live")["id"]
+    base = EventLog(str(events / "events.jsonl")).read_all()
+    synth_dir = events.parent / "synth-type-in-point"
+    synth_dir.mkdir()
+    ts = "2026-01-01T00:00:00+00:00"
+    _synthesize_journal(synth_dir / "events.jsonl", [
+        *base,
+        {"event_id": sdk.ulid(), "ts": ts, "initiated_by": "raw-producer",
+         "projection_version": 2,
+         "point": {"type": "PointSuperseded", "id": a, "new_id": s1}},
+        {"event_id": sdk.ulid(), "ts": ts, "initiated_by": "raw-producer",
+         "projection_version": 2,
+         "point": {"type": "PointSuperseded", "id": a, "new_id": s2}},
+    ])
+
+    def _successors(proj) -> list:
+        return sorted(r[0] for r in proj.g.query(
+            "MATCH (a:Point)-[r:CORRECTS]->(b:Point {id:$old}) RETURN a.id",
+            params={"old": a}).result_set)
+
+    proj = sdk._get_proj()
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    proj.rebuild_all(str(synth_dir))
+    via_all = _point_state(sdk, a)
+    assert via_all["status"] == "superseded"
+    corr_all = _successors(proj)
+    assert corr_all == [s2], (
+        f"rebuild_all canonicalization dropped: {corr_all}")
+
+    _apply_replay(sdk, synth_dir)
+    assert _point_state(sdk, a)["status"] == "superseded"
+    assert _successors(sdk._get_proj()) == corr_all, (
+        "the apply() arm folded a non-canonical supersede — the shared "
+        "selection was bypassed (ghost CORRECTS)")
+
+
+def test_apply_replay_matches_rebuild_all_on_a_nested_terminalizer_payload(
+        sup):
+    """#3305/#325: ``_norm`` tolerates a NESTED terminalizer payload
+    (``{"type": ..., "point": {"id": ..., "new_id": ...}}``). The
+    whole-journal apply() arm must normalize like the plan and ``rebuild_all``
+    do, or it silently drops a fold both engines otherwise land — and emits a
+    FALSE fold-miss warning naming the target it could not see."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "A", status="live")["id"]
+    b = sdk.create_point("statement", "B", status="live")["id"]
+    base = EventLog(str(events / "events.jsonl")).read_all()
+    synth_dir = events.parent / "synth-nested"
+    synth_dir.mkdir()
+    _synthesize_journal(synth_dir / "events.jsonl", [
+        *base,
+        {"event_id": sdk.ulid(), "ts": "2026-01-01T00:00:00+00:00",
+         "type": "PointSuperseded", "initiated_by": "raw-producer",
+         "projection_version": 2, "point": {"id": a, "new_id": b}},
+    ])
+
+    proj = sdk._get_proj()
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    proj.rebuild_all(str(synth_dir))
+    via_all = _point_state(sdk, a)
+    assert via_all["status"] == "superseded"
+    assert via_all["outdated"] is True
+    assert _corr(proj, a, b) == 1
+
+    _apply_replay(sdk, synth_dir)
+    # expiredAt is the ``_now_iso()`` fallback (the record carries none) — a
+    # replay-time clock, so compare the fold's SEMANTIC fields, not wall clock.
+    via_apply = _point_state(sdk, a)
+    assert via_apply["status"] == via_all["status"] == "superseded", (
+        "the apply() arm dropped a NESTED terminalizer payload that "
+        "rebuild_all folded")
+    assert via_apply["outdated"] is True
+    assert via_apply["validTo"] == via_all["validTo"]
+    assert _corr(sdk._get_proj(), a, b) == 1, (
+        "the nested payload's CORRECTS edge was dropped")
+
+
+def test_plan_point_restamp_folds_pins_the_shared_selection(caplog):
+    """#3305: the plan is the ONE home for the terminalizer SELECTION (the
+    survivor rule + supersede canonicalization + both belief anchors) that
+    every replay engine obeys. Pinned directly — the two DB-level parity tests
+    above pin the engines' agreement, this pins the contract itself."""
+    from tortoise.projection import plan_point_restamp_folds
+
+    # Two supersedes for ONE old id, no delete/recreate: only the LAST is a
+    # stamp survivor (canonicalization), and only the LAST decays.
+    decisions, fold_seq = plan_point_restamp_folds([
+        {"type": "PointAdded", "point": {"id": "a", "content": "A"}},
+        {"type": "PointAdded", "point": {"id": "s1", "content": "S1"}},
+        {"type": "PointAdded", "point": {"id": "s2", "content": "S2"}},
+        {"type": "PointSuperseded", "id": "a", "new_id": "s1"},
+        {"type": "PointSuperseded", "id": "a", "new_id": "s2"},
+    ])
+    assert decisions[3] == (False, False), (
+        "the non-canonical supersede must neither fold nor decay")
+    assert decisions[4] == (True, True)
+    assert fold_seq == {"a": 4}
+
+    # A bare same-id PointAdded RE-EMIT advances the recreate boundary, so the
+    # pre-re-emit invalidate must NOT stamp — but the belief decay is anchored
+    # on the REAL delete→recreate boundary, so it MUST still fold (#2884 A3).
+    decisions, fold_seq = plan_point_restamp_folds([
+        {"type": "PointAdded", "point": {"id": "a", "content": "A"}},
+        {"type": "PointInvalidated", "id": "a", "corrected_by": "b"},
+        {"type": "PointAdded", "point": {"id": "a", "content": "A2"}},
+    ])
+    assert decisions[1] == (True, False), (
+        "re-emit: decay folds, the pre-recreation stamp is dropped")
+    assert fold_seq == {}
+
+    # A REAL delete→recreate moves BOTH boundaries: nothing about the dead
+    # incarnation folds or decays.
+    decisions, fold_seq = plan_point_restamp_folds([
+        {"type": "PointAdded", "point": {"id": "a", "content": "A"}},
+        {"type": "PointInvalidated", "id": "a", "corrected_by": "b"},
+        {"type": "EntityMutated", "id": "a", "op": "delete",
+         "label": "Point"},
+        {"type": "PointAdded", "point": {"id": "a", "content": "A2"}},
+    ])
+    assert decisions[1] == (False, False)
+    assert fold_seq == {}
+
+    # PointPromoted is deliberately NOT a recreate boundary (same-node
+    # draft→live: it clears neither ``outdated`` nor CORRECTS), so the
+    # pre-promote invalidate SURVIVES and still decays.
+    decisions, fold_seq = plan_point_restamp_folds([
+        {"type": "PointAdded", "point": {"id": "a", "content": "A"}},
+        {"type": "PointInvalidated", "id": "a", "corrected_by": "b"},
+        {"type": "PointPromoted",
+         "point": {"id": "a", "content": "A", "status": "live"}},
+    ])
+    assert decisions[1] == (True, True), (
+        "PointPromoted must not advance the recreate boundary")
+    assert fold_seq == {}
+
+    # A forward-reference journal (the terminalizer precedes its target's
+    # creation) suppresses the DECAY so both engines agree — a chronological
+    # apply() arm would fold before the node exists, while rebuild_all's
+    # pass-1a hoist would land it.
+    decisions, fold_seq = plan_point_restamp_folds([
+        {"type": "PointSuperseded", "id": "a", "new_id": "b"},
+        {"type": "PointAdded", "point": {"id": "a", "content": "A"}},
+        {"type": "PointAdded", "point": {"id": "b", "content": "B"}},
+    ])
+    assert decisions[0] == (False, False)
+    assert fold_seq == {}
+
+    # An empty-string / unwritable id is inapplicable (the plan's non-empty
+    # writable gate) and is REPORTED, not silently dropped (#3299) — the plan is
+    # the only audibility for such a record (it returns (False, False), so
+    # apply_journal_point_restamp's own fold-miss warning never runs).
+    import logging
+
+    for bad_id in ("", "nul\x00id", "lone\ud800id"):
+        caplog.clear()  # per-id: the assertion must be load-bearing for EACH id
+        with caplog.at_level(logging.WARNING):
+            decisions, fold_seq = plan_point_restamp_folds([
+                {"type": "PointSuperseded", "id": bad_id, "new_id": "b"},
+            ])
+        assert decisions[0] == (False, False), bad_id
+        assert fold_seq == {}
+        assert any("has no writable non-empty id" in r.message
+                   for r in caplog.records), (
+            f"ineligible id {bad_id!r} was dropped silently")
+
+    # A supersede with NO new_id still STAMPS when it is the id's last
+    # recreate-surviving supersede (the fold returns 0 and the consumer warns),
+    # but it never decays.
+    decisions, fold_seq = plan_point_restamp_folds([
+        {"type": "PointAdded", "point": {"id": "a", "content": "A"}},
+        {"type": "PointAdded", "point": {"id": "b", "content": "B"}},
+        {"type": "PointSuperseded", "id": "a"},
+    ])
+    assert decisions[2] == (False, True)
+    assert fold_seq == {"a": 2}
+
+
+# ══════════════════════════════════════════════════════════════════════
+# #3305 — the SUCCESSOR arm of the fold's existence gate
+#
+# The plan gates each terminalizer fold on the id it TERMINALIZES (its
+# TARGET), but the CORRECTS edge names the SUCCESSOR — a second endpoint the
+# record may name before the journal creates it. A chronological replay
+# reached the record first, so the inline edge MERGE no-op'd while
+# rebuild_all's after-creations sweep resolved it: the mirror of #3305's own
+# symptom, reachable from every apply()-based engine. The edge half is
+# deferred to a trailing sweep (``fold_deferred_corrects_edges``); the
+# flags/validity half stays inline, because it depends on the target only and
+# the engines already agree on it.
+# ══════════════════════════════════════════════════════════════════════
+
+def test_terminalizer_successor_created_later_folds_the_same_on_every_engine(
+        sup):
+    """#3305 (review P1, sibling arm): for
+    ``[PointAdded a, PointSuperseded a→s2, PointAdded s2]`` the CORRECTS edge
+    must fold IDENTICALLY on ``rebuild_all`` and on BOTH chronological
+    engines — pinning one engine's value is exactly the hole this closes.
+
+    The successor endpoint is created AFTER the record that names it, so the
+    edge can only be merged by a trailing sweep. Asserted for BOTH lifecycle
+    families: ``PointSuperseded`` (``new_id``) and ``PointInvalidated``
+    (``corrected_by``) share the arm."""
+    from tortoise.consistency import recover_from_log
+
+    _, events, sdk = sup
+    ts = "2026-01-01T00:00:00+00:00"
+    proj = sdk._get_proj()
+
+    def _added(pid):
+        return {"event_id": sdk.ulid(), "ts": ts,
+                "initiated_by": "raw-producer", "projection_version": 2,
+                "type": "PointAdded",
+                "point": {"id": pid, "label": "statement", "content": pid,
+                          "status": "live", "confidence": 0.9}}
+
+    shapes = {
+        # ``expired_at`` is journaled, not left to the ``_now_iso()`` fallback:
+        # the folds replay the ORIGINAL stamp verbatim, and a rebuild-time
+        # fallback would differ between the three sequential engine runs.
+        "supersede": {"type": "PointSuperseded", "id": "a", "new_id": "s2",
+                      "valid_to": ts, "expired_at": ts},
+        "invalidate": {"type": "PointInvalidated", "id": "a",
+                       "corrected_by": "c", "valid_to": ts,
+                       "expired_at": ts},
+    }
+    for name, term in shapes.items():
+        successor = term.get("new_id") or term.get("corrected_by")
+        synth_dir = events.parent / f"synth-forward-{name}"
+        synth_dir.mkdir()
+        _synthesize_journal(synth_dir / "events.jsonl", [
+            _added("a"),
+            {"event_id": sdk.ulid(), "ts": ts, "initiated_by": "raw-producer",
+             "projection_version": 2, **term},
+            _added(successor),
+        ])
+
+        def _observable(successor=successor):
+            return (_point_state(sdk, "a"),
+                    _corr(proj, "a", successor),
+                    (sdk.get_point("a") or {}).get("confidence"))
+
+        # rebuild_all (trailing sweep) — the reference value.
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        proj.rebuild_all(str(synth_dir))
+        via_all = _observable()
+
+        # rebuild(EventLog) — the chronological apply() arm.
+        _apply_replay(sdk, synth_dir)
+        via_apply = _observable()
+
+        # recover_from_log — the DB-loss engine, sharing the same plan.
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        assert recover_from_log(str(synth_dir), proj)["recovered"]
+        via_recover = _observable()
+
+        assert via_apply == via_all, (
+            f"{name}: rebuild(EventLog) != rebuild_all — "
+            f"{via_apply} != {via_all}")
+        assert via_recover == via_all, (
+            f"{name}: recover_from_log != rebuild_all — "
+            f"{via_recover} != {via_all}")
+        # The CORRECTS edge IS the subject: a remedy that drops it on BOTH
+        # engines must not pass as "parity".
+        assert via_all[1] == 1, (
+            f"{name}: the CORRECTS edge was dropped on every engine: {via_all}")
+
+
+def test_supersede_then_revision_does_not_end_at_the_supersede_ts(sup):
+    """#3305 (review P2): the supersede sweep needs the invalidate arm's
+    ``updatedAt`` seq-gate — without it the sweep writes the older journaled
+    supersede ts while the chronological apply() arm leaves the later
+    ``PointRevised``'s replay-now stamp, and the engines disagree (measured).
+
+    Pins the gate on ALL three engines by asserting none of them ends at the
+    supersede ts. The exact value is replay-now, which differs per run, so
+    cross-engine VALUE equality is not assertable — only this property is.
+    (Live ``update_point`` on a plain Point does not itself advance
+    ``updatedAt``; that replay-vs-live gap is separate and pre-existing.)"""
+    from tortoise.consistency import recover_from_log
+
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "A", status="live")["id"]
+    b = sdk.create_point("statement", "B", status="live")["id"]
+    sdk.supersede_point(a, b)
+    sdk.update_point(a, content="REVISED-AFTER-SUPERSEDE")
+    records = EventLog(str(events / "events.jsonl")).read_all()
+    sup_ts = next(e["ts"] for e in records
+                  if e.get("type") == "PointSuperseded")
+    proj = sdk._get_proj()
+
+    def _row():
+        out = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.status, n.content, n.updatedAt",
+            params={"id": a}).result_set[0]
+        return out[0], out[1], out[2]
+
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    proj.rebuild_all(str(events))
+    via_all = _row()
+
+    _apply_replay(sdk, events)
+    via_apply = _row()
+
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    assert recover_from_log(str(events), proj)["recovered"]
+    via_recover = _row()
+
+    for name, row in (("rebuild_all", via_all), ("rebuild", via_apply),
+                      ("recover_from_log", via_recover)):
+        assert row[0] == "superseded", f"{name}: status {row[0]!r}"
+        assert row[1] == "REVISED-AFTER-SUPERSEDE", f"{name}: content {row[1]!r}"
+        assert row[2] != sup_ts, (
+            f"{name}: the sweep clobbered the later revision's updatedAt with "
+            f"the older journaled supersede ts ({sup_ts!r})")
+
+
+def test_deferred_corrects_sweep_does_not_resurrect_a_deleted_successor(sup):
+    """#3305 (review P1): the trailing CORRECTS sweep must apply the SAME
+    hard-delete staleness rule ``fold_deferred_entity_links`` applies.
+
+    A successor hard-deleted (``EntityMutated op=delete`` / ``PointsMerged``)
+    AFTER the terminalizer and re-created under the same id must NOT get the
+    edge back on the apply()-based engines — live removes the edge at the
+    delete and re-creation does not restore it. Without the rule the sweep ran
+    purely on node existence and resurrected the edge on ``rebuild`` /
+    ``recover_from_log`` / the backup restore, while ``rebuild_all`` dropped it:
+    a NEW engine divergence introduced by the deferral itself. Asserted on all
+    three engines, for BOTH delete shapes, with a no-delete control that keeps
+    the edge."""
+    from tortoise.consistency import recover_from_log
+
+    _, events, sdk = sup
+    ts = "2026-01-01T00:00:00+00:00"
+    proj = sdk._get_proj()
+
+    def _added(pid):
+        return {"event_id": sdk.ulid(), "ts": ts,
+                "initiated_by": "raw-producer", "projection_version": 2,
+                "type": "PointAdded",
+                "point": {"id": pid, "label": "statement", "content": pid,
+                          "status": "live"}}
+
+    def _supersede():
+        return {"event_id": sdk.ulid(), "ts": ts,
+                "initiated_by": "raw-producer", "projection_version": 2,
+                "type": "PointSuperseded", "id": "a", "new_id": "s2",
+                "valid_to": ts, "expired_at": ts}
+
+    deleters = {
+        "EntityMutated": {"event_id": sdk.ulid(), "ts": ts,
+                          "initiated_by": "raw-producer",
+                          "projection_version": 2, "type": "EntityMutated",
+                          "op": "delete", "id": "s2", "label": "Point"},
+        "PointsMerged": {"event_id": sdk.ulid(), "ts": ts,
+                         "initiated_by": "raw-producer",
+                         "projection_version": 2, "type": "PointsMerged",
+                         "merge_ids": ["s2"]},
+    }
+    shapes = {**deleters, "control": None}
+    for name, deleter in shapes.items():
+        entries = [_added("a"), _added("s2"), _supersede()]
+        if deleter is not None:
+            entries.append(dict(deleter))
+        entries.append(_added("s2"))
+        synth_dir = events.parent / f"synth-deleted-successor-{name}"
+        synth_dir.mkdir()
+        _synthesize_journal(synth_dir / "events.jsonl", entries)
+
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        proj.rebuild_all(str(synth_dir))
+        via_all = _corr(proj, "a", "s2")
+
+        _apply_replay(sdk, synth_dir)
+        via_apply = _corr(proj, "a", "s2")
+
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        assert recover_from_log(str(synth_dir), proj)["recovered"]
+        via_recover = _corr(proj, "a", "s2")
+
+        expected = 1 if deleter is None else 0
+        assert (via_all, via_apply, via_recover) == (expected,) * 3, (
+            f"{name}: engines disagree on a hard-deleted successor edge — "
+            f"rebuild_all={via_all} rebuild={via_apply} "
+            f"recover={via_recover} (expected {expected})")
+
+
+def test_terminalizer_successor_field_is_type_scoped_on_every_engine(sup):
+    """#3305 (review P1): the CORRECTS successor field is read per NORMALIZED
+    type, exactly as the fold dispatch and ``rebuild_all``'s sweep read it.
+
+    ``_fold_point_superseded`` reads ``new_id`` ONLY; ``_fold_point_invalidated``
+    reads ``corrected_by`` ONLY. A deferred sweep that took ``new_id or
+    corrected_by`` would let a record mint an edge its own fold arm never
+    creates — a phantom CORRECTS on the apply() engines that ``rebuild_all``
+    does not produce. Raw-producer journals can carry either name on either
+    type, so this is reachable, not hypothetical."""
+    from tortoise.consistency import recover_from_log
+
+    _, events, sdk = sup
+    ts = "2026-01-01T00:00:00+00:00"
+    proj = sdk._get_proj()
+
+    def _added(pid):
+        return {"event_id": sdk.ulid(), "ts": ts,
+                "initiated_by": "raw-producer", "projection_version": 2,
+                "type": "PointAdded",
+                "point": {"id": pid, "label": "statement", "content": pid,
+                          "status": "live"}}
+
+    # Each shape against the successors it must NOT mint an edge for.
+    shapes = [
+        # supersede carrying only corrected_by (its fold reads new_id only)
+        {"type": "PointSuperseded", "id": "a", "corrected_by": "c",
+         "valid_to": ts, "expired_at": ts}, ["c"],
+        # invalidate carrying only new_id (its fold reads corrected_by only)
+        {"type": "PointInvalidated", "id": "a", "new_id": "x",
+         "valid_to": ts, "expired_at": ts}, ["x"],
+        # invalidate carrying BOTH: only corrected_by may mint the edge
+        {"type": "PointInvalidated", "id": "a", "new_id": "x",
+         "corrected_by": "c", "valid_to": ts, "expired_at": ts}, ["c", "x"],
+    ]
+    for i, (term, candidates) in enumerate(
+            (shapes[0:2], shapes[2:4], shapes[4:6])):
+        entries = [_added("a")] + [_added(c) for c in candidates]
+        entries.append({"event_id": sdk.ulid(), "ts": ts,
+                        "initiated_by": "raw-producer",
+                        "projection_version": 2, **term})
+        synth_dir = events.parent / f"synth-type-scoped-{i}"
+        synth_dir.mkdir()
+        _synthesize_journal(synth_dir / "events.jsonl", entries)
+
+        def _edges():
+            return sorted(tuple(r) for r in proj.g.query(
+                "MATCH (s:Point)-[:CORRECTS]->(b:Point {id:'a'}) "
+                "RETURN s.id").result_set)
+
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        proj.rebuild_all(str(synth_dir))
+        via_all = _edges()
+        _apply_replay(sdk, synth_dir)
+        via_apply = _edges()
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        assert recover_from_log(str(synth_dir), proj)["recovered"]
+        via_recover = _edges()
+
+        allowed = ({"c"} if term["type"] == "PointInvalidated"
+                   and term.get("corrected_by") else set())
+        for name, got in (("rebuild_all", via_all), ("rebuild", via_apply),
+                          ("recover_from_log", via_recover)):
+            assert got == via_all, (
+                f"shape {i}: {name} != rebuild_all on the type-scoped "
+                f"successor field — {got} != {via_all}")
+            assert {e[0] for e in got} <= allowed, (
+                f"shape {i}: {name} minted a phantom CORRECTS from a field its "
+                f"own fold arm ignores: {got} (allowed {allowed})")

@@ -26,14 +26,24 @@ Usage:
 
     --dry-run  report only (DEFAULT — no writes)
     --merge    perform the supersede merges (opt-in)
-    Defaults to TORTOISE_DB_URI env var (or docker://:falkordb@localhost:16379/tortoise).
+    Defaults to TORTOISE_DB_URI env var (or docker://:falkordb@127.0.0.1:16379/tortoise).
     Hosted multi-tenant: run once per tenant graph (--graph team_<org_id>).
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"graph-scripts/1714_dedup_observation.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python graph-scripts/1714_dedup_observation.py`"
+    )
+
 import argparse
 import os
-import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))
@@ -46,7 +56,7 @@ sys.path.insert(0, os.path.dirname(_HERE))
 # observation).
 from tortoise.live import _terminal_excluded  # noqa: E402
 
-DEFAULT_URI = "docker://:falkordb@localhost:16379/tortoise"
+DEFAULT_URI = "docker://:falkordb@127.0.0.1:16379/tortoise"
 
 
 def _resolve_uri(args_uri: str) -> str:

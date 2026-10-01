@@ -61,20 +61,25 @@ Design contract
    ``(?<![0-9])N(?![0-9])`` means ``3061`` never matches ``30610`` — so the
    tool cannot manufacture a collision out of an unrelated number.
 
-Surfaces (7 rows; 6 are hit-capable, the 7th is the keyword source)
--------------------------------------------------------------------
+Surfaces (6 rows, ALL hit-capable)
+----------------------------------------------------------------------------
   open PRs                  gh pr list --state open   (title / headRef;
-                                                         body only as a closing
-                                                         reference)
+                                                         body closing
+                                                         reference;
+                                                         GitHub's
+                                                         closingIssuesReferences)
   recently-closed PRs       gh api REST, ONE request   (title / headRef;
-  · ADVISORY ·              /repos/<owner>/<repo>/pulls   body only as a
-                                                         closing reference)
+  · ADVISORY ·              /repos/<owner>/<repo>/pulls   body closing
+                                                         reference)
                                                          (#5251)
   local branches            git for-each-ref refs/heads
   remote branches           git for-each-ref refs/remotes   (all remotes)
   local worktrees           git worktree list --porcelain   (UNTRUNCATED)
   issue assignee/comments   gh issue view N (assignee + claim comments)
-  issue keywords            gh issue view title, or --keywords (completeness)
+
+The removed 7th row was `issue keywords`. It was deleted with the lexical arm
+(#3504): a row that can only report a guess does not become honest by being
+listed.
 
 NOT PRESENT: a fleet-session surface. #1233 asked for one wired to
 `map-sessions.py`, and it was built and measured for this change — then left
@@ -139,57 +144,66 @@ cost is bounded; it does NOT contain a failure to one chunk — a malformed
 response in ANY chunk aborts the whole candidate set into the fail-closed
 fallback (COLLISION, never CLEAN).
 
-Number matching is applied to full refs/paths/PR text; keyword matching is
-applied only to NAME-LIKE fields (branch refs, worktree basenames, PR head
-refs) and requires at least `--min-keywords` (default 2) DISTINCT keywords to
-coincide. Three precision guards are deliberate, each learned from a real run:
+Number matching is applied to full refs/paths/PR text — and it is the ONLY
+matching there is. There is no lexical arm (#3504): shared domain vocabulary is
+never consulted, so no stoplist, no distinctiveness tier, and no
+`--min-keywords` dial exist or need to. What survives is one precision guard,
+learned from real runs:
 
-  * Keyword matching is NOT applied to PR bodies (prose), to worktree parent
-directories (the literal `.worktrees/` component is structural, and a title
-containing "worktree" must not collide with every worktree on the hub), or to
-REMOTE branches — the remote-tracking namespace here holds hundreds of stale,
-abandoned refs, and keyword-scanning it produced 878 false hits for one
-issue. Remote branches are number-matched only (the convention is
-`<type>/<issue#>-<slug>`), which is what the check actually needs.
-  * A single keyword is too weak: "remote" matches hundreds of branches, so a
-keyword-only hit requires `--min-keywords` distinct keywords. Number hits are
-always hits.
   * PR-BODY PROSE IS NOT A COLLISION. A closed PR cannot be in-flight, and a
 body that merely cross-references an issue ("restored in #2745", "triaged and
 filed as #2751") is not work for it. On the body of a PR only a CLOSING
-REFERENCE (`closes` / `fixes` / `resolves #N`, case-insensitive) is a strong
-hit; a bare number mention is recorded as a WEAK, non-blocking signal — it is
-printed for transparency but can never by itself produce a "do NOT dispatch"
-verdict. This is a live-bug fix: those two exact bodies produced a false
-COLLISION for #2745 and #2751 because every `#N` in prose was treated as work.
+REFERENCE is a strong hit; a bare number mention is recorded as a WEAK,
+non-blocking signal — it is printed for transparency but can never by itself
+produce a "do NOT dispatch" verdict. This is a live-bug fix: those two exact
+bodies produced a false COLLISION for #2745 and #2751 because every `#N` in
+prose was treated as work.
+
+  * REMOTE branches are number-matched and nothing else. That is now true of
+every surface, but it is worth keeping the reason: this repo's remote-tracking
+namespace holds hundreds of stale, abandoned refs, and scanning it lexically
+produced 878 false hits for one issue. The convention is
+`<type>/<issue#>-<slug>`, which is what the check actually needs.
   * A TERMINAL PR IS NOT IN-FLIGHT WORK. The argument above ("a closed PR
 cannot be in-flight") applies to the WHOLE PR, not only to its body prose: on
 the `recently-closed PRs` surface every match — a number in the title, a number
-in the head ref, a closing reference, a keyword in the head ref — is reported
+in the head ref, a closing reference — is reported
 as a non-blocking WEAK signal naming the state that decided it (`merged` /
 `closed`). Immutable history is context, not work (#4886, #5112, #4533), and the
 LIVE surfaces — open PRs, local and remote branches, worktrees, claim comments —
 keep their strength unchanged, so a PR closed minutes ago whose branch is still
-live is still caught by the branch surface. Before this, having shipped part of
-an issue was what blocked shipping the rest: a merged follow-up PR's title
+live is still caught by the branch surface. A TERMINAL BRANCH is excluded on the
+same principle and by two exact predicates (#5186): its tip SHA equals a MERGED
+PR's head SHA (a squash merge loses the commits, so ancestry CANNOT see it —
+GitHub's own docs say the original SHAs are gone), or its tip is an ancestor of
+`origin/main`. `patch-id` is deliberately NOT a third predicate: both of its
+whitespace modes ignore whitespace, so it can call a live branch terminal — a
+false ACCEPT, which is this test's dangerous direction. Before this, having
+shipped part of an issue was what blocked shipping the rest: a merged follow-up
+PR's title
 necessarily names its issue, so the number-in-title match blocked that issue
 forever with no dismissal path.
   * A DIGIT RUN INSIDE A HEX DIGEST IS NOT A REFERENCE. See `number_present`:
 the containing run's shape decides it, so a SHA-256 in a review attestation
 cannot fabricate a hit (#4935, #3611).
 
-Keywords are the issue title's DISTINCTIVE tokens (length >= 5, minus two
-excluded vocabularies: `_GENERIC` process words and `_COMMON_DOMAIN`
-cross-cutting engineering/product words); pass ``--keywords`` to override when
-``gh`` cannot supply the title. Excluding the cross-cutting tier is what keeps
-``graph`` + ``delete`` in two unrelated branch slugs from reading as shared work
-(#3325) while distinctive-term pairs still collide.
+Keywords are GONE, by design (#3504). There is no lexical arm at all: see the
+note where the stoplists used to live. A blocking hit is a match on the ISSUE
+NUMBER (a reference to this issue) or a computed GitHub field; shared domain
+vocabulary is never consulted.
+
+Self-identity is an INPUT, not an inference (#3504 classes 1/3/4). The caller
+declares its own branch(es) and worktree(s) with ``--self-branch`` /
+``--self-worktree`` (and the current branch is detected automatically), so a hit
+on the caller's OWN artifacts is reported as yours and cannot block. Inferring
+"is this mine?" from text is what manufactured those false COLLISIONs.
 
 Usage
 -----
     python3 tools/collision_preflight.py <issue-number>
         [--repo OWNER/NAME | --repo PATH]
-        [--keywords a,b,c] [--min-keywords N] [--gh PATH] [--git PATH]
+        [--self-branch REF] [--self-worktree PATH]
+        [--gh PATH] [--git PATH]
         [--timeout SECS] [--pr-limit N] [--closed-pr-limit N]
         [--closed-pr-timeout SECS]
 
@@ -201,10 +215,17 @@ sibling repos before any verdict is issued.
 
 Exit codes
 ----------
-    0  CLEAN        every surface queried and no hit (weak prose-only
-                    cross-references may be listed; they are non-blocking)
-    1  COLLISION    >= 1 hit on >= 1 surface (do NOT dispatch)
-    2  INCOMPLETE   >= 1 surface could not be queried (NOT clean)
+    0  CLEAN        every BLOCKING surface queried and no STRONG hit. Non-blocking
+                    hits are still LISTED (the caller's own branch/worktree, a
+                    terminal branch or PR, the shared fleet account as assignee, a
+                    prose cross-reference, and every hit on an advisory surface)
+    1  COLLISION    >= 1 STRONG hit on a >= 1 BLOCKING surface (do NOT dispatch).
+                    A weak hit never decides this, and a hit on an ADVISORY
+                    surface never decides it, however it is shaped
+    2  INCOMPLETE   >= 1 BLOCKING surface could not be queried (NOT clean).
+                    A surface that can never produce a blocking hit is EXEMPT and
+                    its failure is only REPORTED: it has no ability to prevent a
+                    duplicate, so its failure cannot conceal one (#5251)
     3  usage / internal error
 
 Env seams (tests point these at stubs; production defaults are the real tools)
@@ -233,6 +254,17 @@ Env seams (tests point these at stubs; production defaults are the real tools)
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/collision_preflight.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/collision_preflight.py`"
+    )
+
 import argparse
 import contextlib
 import hashlib
@@ -243,7 +275,6 @@ import os
 import re
 import shlex
 import subprocess
-import sys
 import time
 import urllib.error
 import urllib.request
@@ -265,7 +296,7 @@ PR_LIMIT = 1000
 # (#5251), and it is the tool's only ADVISORY surface.
 #
 # WHY ONE REQUEST. Since #5129 every match on a TERMINAL PR is `weak`, and
-# `format_report` decides on `strong` -> `keyword_hits` -> `incomplete` — so
+# `format_report` decides on `strong` -> `incomplete` — so
 # this surface's hits cannot block a dispatch, and its failure cannot conceal a
 # collision. Enumerating it to exhaustion (~19 requests at per_page=100 here;
 # measured `Link: rel="last"` = page 19 of 1,848) paid a multi-request cost for
@@ -306,7 +337,6 @@ CLOSED_PR_TIMEOUT = 60.0
 AUTHORITY_BLOCKING = "blocking"
 AUTHORITY_ADVISORY = "advisory"
 
-DEFAULT_MIN_KEYWORDS = 2
 MAX_HITS_SHOWN = 20
 
 SURFACE_OPEN_PRS = "open PRs"
@@ -315,11 +345,17 @@ SURFACE_LOCAL_BRANCHES = "local branches"
 SURFACE_REMOTE_BRANCHES = "remote branches"
 SURFACE_WORKTREES = "local worktrees"
 SURFACE_ISSUE = "issue assignee/comments"
-SURFACE_KEYWORDS = "issue keywords"
 
 # The complete, ordered surface list. `_assert_all_surfaces` proves the run
 # evaluated every row — a partial run is an internal error (exit 3), never a
 # silently-narrower CLEAN.
+#
+# There were SEVEN rows until #3504: a `keywords` row carried the lexical arm's
+# derived vocabulary and its BLIND/INCOMPLETE annotation. With the lexical arm
+# deleted the row had nothing left to report — nothing ever added a hit to it;
+# it existed only to describe a dimension that no longer matches anything — so
+# it is gone rather than kept as a decorative CLEAN line. Surface counts in the
+# verdict read 6/6 accordingly.
 ALL_SURFACES = (
     SURFACE_OPEN_PRS,
     SURFACE_CLOSED_PRS,
@@ -327,7 +363,6 @@ ALL_SURFACES = (
     SURFACE_REMOTE_BRANCHES,
     SURFACE_WORKTREES,
     SURFACE_ISSUE,
-    SURFACE_KEYWORDS,
 )
 
 # Surfaces whose hits and failures CANNOT affect the verdict (#5251). They are
@@ -352,108 +387,33 @@ STATUS_CLEAN = "CLEAN"
 STATUS_HIT = "HIT"
 STATUS_INCOMPLETE = "INCOMPLETE"
 
-# Generic / process vocabulary excluded from title-derived keywords: these words
-# are in a large fraction of issue titles and would match unrelated branches and
-# worktrees, i.e. fabricate collisions. User-supplied --keywords bypass this
-# filter (explicit intent wins).
-_GENERIC = {
-    "issue", "issues", "process", "check", "checks", "checking", "work",
-    "works", "working", "update", "updates", "fix", "fixes", "fixed",
-    "test", "tests", "testing", "add", "adds", "adding", "remove", "removes",
-    "removing", "support", "supports", "improve", "improves", "review",
-    "reviews", "task", "tasks", "code", "docs", "documentation", "feature",
-    "features", "bug", "bugs", "bugfix", "cleanup", "refactor", "implement",
-    "implements", "implementation", "change", "changes", "create", "creates",
-    "enable", "enables", "disable", "disables", "allow", "allows", "make",
-    "makes", "use", "uses", "using", "need", "needs", "needed", "should",
-    "would", "could", "must", "when", "what", "which", "where", "there",
-    "their", "about", "after", "before", "into", "from", "with", "without",
-    "only", "also", "than", "then", "this", "that", "these", "those", "have",
-    "has", "had", "been", "being", "were", "was", "are", "not", "and", "for",
-    "the", "its", "it's", "each", "every", "some", "any", "all", "more",
-    "most", "less", "least", "other", "another", "same", "both", "two",
-    "three", "first", "second", "next", "last", "new", "old", "via", "per",
-    "pre", "post", "non", "sub", "re", "run", "runs", "running", "state",
-    "states", "data", "file", "files", "line", "lines", "path", "paths",
-    "time", "times", "case", "cases", "value", "values", "type", "types",
-    "name", "names", "todo", "note", "notes", "info", "misc", "miscellaneous",
-}
-
-# Cross-cutting ENGINEERING / PRODUCT vocabulary, excluded from title-derived
-# keywords alongside `_GENERIC` (#3325). `_GENERIC` covers process words
-# ("test", "fix", "update"); this set covers engineering/product words that
-# recur across UNRELATED workstreams. Two of them coinciding in a branch slug is
-# not evidence of shared work: the live bug was issue #3214 ("…graph minted …
-# the delete"), whose title cleared the >=2 gate against the unrelated
-# `feat/2701-graphs-rename-delete` branch purely because "graph" + "delete" are
-# common in this repo. A false COLLISION blocks legitimate dispatch, so the gate
-# must count DISTINCTIVE terms only.
+# ── there is NO keyword stoplist here, by design (#3504) ─────────────────────
+# This file used to derive "distinctive" keywords from the issue title and match
+# them against branch names, worktree paths and PR head refs. That whole arm is
+# GONE, and the reason matters more than the code did.
 #
-# Measured document frequency over the repo's 3,375 issue+PR titles when this
-# set was curated (#3325): graph 7.3%, session 6.3%, hosted 6.3%, dashboard
-# 4.9%, signup 4.9%, welcome 4.4%, onboarding 4.0%, backup 3.6%, stale 3.4%,
-# monitor 3.2%, source 2.7%, deploy 2.7%, search 2.4%, error 1.9%, … .
+# A stoplist can never enumerate a repo's vocabulary: every word added to it is a
+# word some other title needs. `capture`, `verify`, `retrieval`, `temporal`,
+# `collision` and `preflight` all passed the ">=5 chars after plural folding and
+# not in the stoplist" test, so ALL of them were labelled DISTINCTIVE and a
+# branch named after any one of them blocked an unrelated issue. Measured on the
+# live beta queue: #3516 (the queue's #3 BLOCKER) was blocked by
+# `feat/3809-capture-verify` on the words `capture`/`verify`; #2520 by
+# `fix/2976-temporal-retrieval`; and #3504 itself — the issue ABOUT this tool —
+# was un-dispatchable on `collision`/`preflight`, because its own title is made
+# of them.
 #
-# Curation rule — a token belongs here iff it is (a) cross-cutting across
-# unrelated workstreams AND (b) NOT the name of a subsystem/concept whose
-# identity the match is meant to reveal. Frequent but IDENTIFYING domain nouns
-# (battery, manifest, retrieval, operator, ontology, projection, parity, dedup,
-# falkordb, …) are deliberately absent: for those a keyword match IS the
-# sensitivity this dial exists to preserve. The mechanism is a static stoplist
-# rather than a corpus-derived IDF score precisely because this is a gate: the
-# same repo state must yield the same verdict, and an IDF threshold would make
-# the dial's strictness drift with unrelated PR traffic and with gh
-# availability. What this trades away is recall on stoplisted terms — a
-# distinctively-named branch whose only shared terms are generic is no longer a
-# keyword hit. Number matching (`<type>/<issue#>-<slug>`) and an explicit
-# `--keywords` override remain the escape hatches.
+# The defect was not "the regex was imprecise". It was that a LEXICAL test was
+# producing a BLOCKING verdict on surfaces it cannot reason about — the caller's
+# own artifacts, ordinary engineering vocabulary, and immutable history. Deleting
+# it IS the fix. The surviving blocking signal is a match on the ISSUE NUMBER,
+# which is a REFERENCE to this issue rather than a guess about meaning. Shared
+# domain vocabulary is not evidence of shared work and is no longer consulted at
+# all (#3504 classes 2 and 5; decision D3).
 #
-# Reproduce / re-curate with:
-#   gh pr list --state all --limit 5000 --json title > /tmp/prs.json
-#   gh issue list --state all --limit 5000 --json title > /tmp/issues.json
-#   python3 - <<'PY'
-#   import json, re, collections
-#   from tools.collision_preflight import _singular
-#   titles = [o["title"] for f in ("/tmp/prs.json", "/tmp/issues.json")
-#             for o in json.load(open(f))]
-#   df = collections.Counter()
-#   for t in titles:
-#       for s in {_singular(w) for w in re.findall(r"[a-z0-9]+", t.lower())}:
-#           df[s] += 1
-#   n = len(titles)
-#   for w, c in df.most_common(120):
-#       print(f"{w:16s} {c:5d} {c / n:6.2%}")
-#   PY
-_COMMON_DOMAIN = {
-    # storage/substrate work — the #3325 false-positive class
-    "graph", "graphs", "delete", "deletes", "deleted", "deleting", "deletion",
-    # web-product surfaces shared by unrelated features
-    "session", "sessions", "dashboard", "dashboards", "onboarding",
-    "signup", "signups", "welcome", "hosted", "stale",
-    # generic software-work verbs/nouns
-    "source", "sources", "server", "servers", "search", "searches",
-    "suite", "suites", "default", "defaults", "deploy", "deploys",
-    "deployed", "deploying", "deployment", "deployments", "merge", "merges",
-    "merged", "merging", "write", "writes", "wrote", "written", "writing",
-    "audit", "audits", "audited", "auditing", "event", "events",
-    "context", "contexts", "product", "products", "object", "objects",
-    "error", "errors", "fail", "fails", "failed", "failing", "failure",
-    "failures", "monitor", "monitors", "monitoring", "migrate", "migrates",
-    "migrated", "migrating", "migration", "migrations", "cache", "caches",
-    "cached", "caching", "backup", "backups",
-}
-
-# The full set of terms that may never count toward a keyword-only hit.
-# Explicit --keywords bypass this (explicit intent wins).
-_STOPLIST = _GENERIC | _COMMON_DOMAIN
-
-# Branch-type prefixes / structural path tokens never treated as keywords.
-_STRUCTURAL = {
-    "feat", "feature", "fix", "fixes", "bugfix", "chore", "hotfix", "release",
-    "refactor", "test", "tests", "docs", "ci", "build", "perf", "style",
-    "revert", "wip", "main", "master", "dev", "develop", "head", "origin",
-    "upstream", "worktree", "worktrees", "detached", "bare",
-}
+# ⛔ Do not reintroduce a stoplist, an IDF threshold, or a similarity score here.
+# The computed surfaces that replace it are the claim registry (#5052) and file
+# overlap (agent-infra #1241) — state, not text over immutable history.
 
 # Claim-shaped comments. This is a GATE, so BOTH failure directions are
 # defects: prose that must NOT force a COLLISION, and genuine claims that must
@@ -562,19 +522,207 @@ class Hit:
     surface: str
     ref: str
     detail: str
-    strength: str  # "strong" (issue number / claim) | "keyword" | "weak"
+    strength: str  # "strong" (issue number / closing reference) | "weak"
+
+
+def _is_default_branch(name: str, defaults: set[str]) -> bool:
+    """Is `name` one of the repo's default-branch names?
+
+    Case-INSENSITIVE on purpose. The `main`/`master` fallback seeds are
+    exact-case, and when `origin/HEAD` cannot be resolved (a bare clone, a
+    fetched-only mirror, a single-ref CI checkout) those seeds are ALL the tool
+    has. A default branch spelled `Main` would then equal no seed, be
+    auto-declared as a self-branch, and demote every PR whose head it is — the
+    P0 re-entered through a spelling. Git branch names ARE case-sensitive, so
+    this is a deliberate WIDENING of the refusal set; erring toward refusing
+    leaves the hit BLOCKING, which is the fail-closed direction.
+
+    The residual gap is stated, not hidden: a default branch outside the seed
+    set entirely (say `trunk` or `develop`) is still auto-declared when
+    `origin/HEAD` is unresolvable. Resolving the symref is the real fix and it
+    covers every normal clone; the seeds are a fallback for the clones that have
+    no symref. This is asserted by
+    `test_case_variant_default_branch_is_refused`, which pins BOTH the widening
+    and the gap so neither can drift unnoticed.
+    """
+    return name.lower() in {n.lower() for n in defaults}
+
+
+def _standing_in(path: str | None) -> bool:
+    """True when `path` IS the directory this process is running from.
+
+    The ONLY condition under which self-identity is auto-detected, and
+    deliberately narrower than "the caller named this path". Naming a path says
+    where to LOOK, not whose work lives there: `--repo /other/lane` points at
+    another lane's checkout, and auto-declaring ITS branch and worktree as the
+    caller's own reported CLEAN on that lane's live work. Standing in a
+    directory is the one thing that does make its checkout yours.
+
+    `realpath` on both sides: `/var` and `/private/var` are the same place on
+    macOS and the two producers disagree on the spelling (the same trap
+    `Identity.owns_worktree` documents).
+    """
+    if not path:
+        return False
+    try:
+        return os.path.realpath(path) == os.path.realpath(os.getcwd())
+    except OSError:  # pragma: no cover - defensive
+        return False
+
+
+def _default_branch_names(git_bin: str, cwd: str, timeout: float) -> set[str]:
+    """Names of the repo's DEFAULT branch, so auto-declaration can refuse them.
+
+    ⛔ A default branch is not a lane's private branch. It is the shared landing
+    target — and on a FORK pull request it is also the ordinary HEAD REF NAME,
+    because a fork pushes from its own `main`. Declaring the default as "mine"
+    therefore demotes a genuine in-flight PR to `weak` and reports CLEAN on real
+    work. Measured: the fleet's hub checkout sits on `main`, so the *default*
+    way to run this tool (`--repo .` from the hub) reproduced it, not an exotic
+    path. Guarding only the SEARCHED-clone case was not enough.
+
+    The resolved `origin/HEAD` is consulted first, with `main`/`master` as a
+    fallback for a clone that has no remote HEAD symref. Erring toward a LARGER
+    set is deliberate: refusing to auto-declare leaves the hit blocking, which
+    is the fail-closed direction.
+    """
+    names = {"main", "master"}
+    rc, out, _err, _to = _run(
+        # NO `--short`: the short form is `origin/<branch>`, which
+        # `_short_branch` deliberately refuses to rewrite (a bare `origin/x` is
+        # indistinguishable from a local branch literally named `origin/x`). Ask
+        # for the full ref so the tested helper — which drops exactly ONE
+        # component, and only the remote one — does the parsing.
+        [git_bin, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+        cwd, timeout,
+    )
+    if rc == 0 and out.strip():
+        # ⛔ `rsplit("/", 1)[-1]` was WRONG here and re-opened the very hole this
+        # function exists to close. It kept only the LAST component, so a default
+        # branch named `release/2024` was registered as `2024`: the real name was
+        # missing from the refusal set, `release/2024` was auto-declared as a
+        # self-branch, and the self arm (which runs FIRST for every PR, branch and
+        # worktree) demoted genuine in-flight work on the default branch — CLEAN
+        # on real work. The P0 re-entered through a parse.
+        names.add(_short_branch(out.strip()))
+    return names
+
+
+def _short_branch(ref: str) -> str:
+    """The bare branch name behind any ref spelling the tool EMITS.
+
+    `refs/heads/x/y` and `refs/remotes/origin/x/y` both collapse to `x/y`.
+    Exactly one component is dropped, and only from the REMOTE prefix: the
+    remote namespace is the one with an extra `<remote>` component to remove.
+
+    ⛔ Dropping a component from `refs/heads/` was a real bug here — a branch
+    name may itself contain slashes, so `refs/heads/fix/3061-mine` became
+    `3061-mine` and stopped matching the declaration, leaving the caller's OWN
+    branch blocking. Caught by the test for exactly that case.
+
+    A bare `origin/x` is deliberately NOT rewritten: it is indistinguishable
+    from a local branch literally named `origin/x`, and guessing would suppress
+    a real hit. Declare the short name or a full ref.
+    """
+    if ref.startswith("refs/heads/"):
+        return ref[len("refs/heads/"):]
+    for prefix in ("refs/remotes/", "remotes/"):
+        if ref.startswith(prefix):
+            rest = ref[len(prefix):]
+            _head, sep, tail = rest.partition("/")
+            return tail if sep else rest
+    return ref
 
 
 @dataclass
 class Identity:
-    """Who is running this pre-flight. `login` is the GitHub account, the only
-    identity the gate consumes: it is what the ASSIGNEE surface compares
-    against, AND it gates which claim comments are MODEL-DECIDED — only the
-    fleet account's candidates are sent to JEV; every other (or unknown) author
-    is a fail-closed rule-hit. It still does NOT attribute a claim to a specific
-    LANE: every lane shares this account, so a login cannot distinguish lanes."""
+    """Who is running this pre-flight.
+
+    `login` is the GitHub account, the only identity the ASSIGNEE surface
+    consumes: it is what the assignee rule compares against, AND it gates which
+    claim comments are MODEL-DECIDED — only the fleet account's candidates are
+    sent to JEV; every other (or unknown) author is a fail-closed rule-hit. It
+    still does NOT attribute a claim to a specific LANE: every lane shares this
+    account, so a login cannot distinguish lanes.
+
+    `self_branches` / `self_worktrees` are the caller's OWN artifacts, and they
+    exist because inferring ownership from TEXT is what manufactured the false
+    COLLISIONs this issue is about (#3504 classes 1 and 4). The caller knows its
+    own branch and worktree at call time, so they are declared here and a hit on
+    one of them is reported as the caller's own work rather than a competing
+    claim. This is an INPUT: nothing about a branch name is inspected to decide
+    "is this mine?".
+
+    ⛔ THE FLAGS AND THE AUTO-DETECTION PULL IN OPPOSITE DIRECTIONS, and the
+    earlier wording of this docstring ran the two together:
+
+      * OMITTING `--self-branch`/`--self-worktree` is fail-CLOSED. Adding a ref to
+        this set REMOVES hits, so a missing declaration can only leave MORE refs
+        blocking (`test_own_branch_declared_is_not_a_claim_but_undeclared_still_
+        blocks` pins exactly that: undeclared => COLLISION).
+      * The AUTO-DETECTION in `main()` is the FAIL-OPEN half: it declares the
+        target checkout's own branch and root without being asked, so a WRONG
+        auto-declaration is what suppresses a real finding.
+
+    That asymmetry is why the repository DEFAULT branch is excluded from
+    auto-declaration, and why an explicit `--self-branch` is never
+    second-guessed. The flags are the authoritative input; the auto-detection is
+    a convenience."""
 
     login: str | None = None
+    self_branches: frozenset[str] = frozenset()
+    self_worktrees: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        """Canonicalise the declared worktrees ONCE, at construction.
+
+        ⛔ A raw string comparison is WRONG here, and it fails in the blocking
+        direction. The same directory has two names on macOS — `/var` and
+        `/private/var` are the same place — and the two producers do not agree:
+        `tempfile` hands out `/var/...`, while `git worktree list --porcelain`
+        prints the resolved `/private/var/...`. Comparing them as strings
+        silently declines to recognise the caller's OWN worktree, which is
+        #3504 class 4 reappearing inside the fix for #3504 class 4. Found by a
+        mutation test: the worktree test only passed because the BRANCH check
+        masked the path check.
+
+        Both sides are normalised (the declaration here, the probe in
+        `owns_worktree`), so the comparison is between canonical paths.
+        """
+        self.self_worktrees = frozenset(
+            os.path.realpath(p) for p in self.self_worktrees if p
+        )
+
+    def owns_branch(self, ref: str | None) -> bool:
+        """True when `ref` names one of the caller's own branches.
+
+        ⛔ BOTH sides are normalised, and the REMOTE namespace is normalised too.
+        A lane that pushes its branch has its own work appear as
+        `refs/remotes/origin/<branch>`, which is a *different string* from the
+        `refs/heads/<branch>` it declared. Stripping only `refs/heads/` left the
+        remote copy comparing unequal and therefore BLOCKING, so the lane's own
+        pushed branch refused its own dispatch — #3504 class 4 surviving in the
+        one namespace every lane actually populates.
+
+        Normalising both sides also removes the one-directional asymmetry the
+        old docstring papered over: it claimed "a caller may pass either", which
+        held for a full candidate against a short declaration but NOT for a
+        short candidate against a full declaration.
+        """
+        if not ref:
+            return False
+        if not self.self_branches:
+            return False
+        return _short_branch(ref) in {_short_branch(b) for b in self.self_branches}
+
+    def owns_worktree(self, path: str | None) -> bool:
+        """True when `path` names one of the caller's own worktrees. Both sides
+        are `realpath`-canonicalised (see `__post_init__`) — a raw comparison
+        does not recognise the caller's own worktree under macOS's `/var` =
+        `/private/var` aliasing, and unrecognised means BLOCKING."""
+        if not path:
+            return False
+        return os.path.realpath(path) in self.self_worktrees
 
 
 @dataclass
@@ -588,6 +736,16 @@ class RepoTarget:
     path: str | None = None
     source: str = "unresolved"
     requested: bool = False
+    # NO `named_by_caller` / `caller_checkout` field. An earlier revision carried
+    # one to mean "the caller pointed at this checkout rather than a clone found
+    # by search", and used it to decide which refs were the caller's own — so
+    # `--repo <another lane's worktree>` declared THAT lane's branch and worktree
+    # as the caller's and reported CLEAN on its live work. The distinction is
+    # NOT an ownership gate (a path is where to LOOK, not whose work lives
+    # there), and once `_standing_in` superseded it as the gate the field had no
+    # reader left. Deleting it is deliberate: a write-only field whose docstring
+    # explains a use that no longer exists is an invitation for the next reader
+    # to "restore" the gate. The reasoning lives on `_standing_in`.
 
 
 @dataclass
@@ -602,11 +760,6 @@ class Surface:
     # `advisory` surfaces are still queried, still reported, and still HIT —
     # they simply cannot block a dispatch and cannot force INCOMPLETE (#5251).
     authority: str = AUTHORITY_BLOCKING
-    # The surface was QUERIED but has no signal to offer (e.g. a title whose
-    # every term is generic, so the keyword dimension is empty). Not INCOMPLETE
-    # — number matching still works — but the verdict must say the surface is
-    # BLIND rather than advertising "7/7 surfaces queried" as complete.
-    blind: bool = False
 
     def add(self, ref: str, detail: str, strength: str) -> None:
         self.hits.append(Hit(self.name, ref, detail, strength))
@@ -702,14 +855,21 @@ def _one_line(text: str, limit: int = 200) -> str:
 class ClaimVerdict:
     """The label for ONE pre-filtered comment. `label` is the branch key
     ("collision" / "clean" / "uncertain" / "untrusted"); `probability` is the
-    calibrated JEV value, None when no usable value was returned; `origin`
-    records where the label came from ("jev" / "cache" / "fallback" / "rule")
-    so the report can say whether the model was consulted. "untrusted" (origin
-    "rule") is a non-fleet author: a hit by rule, with no model call."""
+    calibrated JEV value, None when no usable value was returned. "untrusted" is
+    a non-fleet author: a hit by rule, with no model call.
+
+    NO `origin` FIELD. One used to record where each label came from ("jev" /
+    "cache" / "fallback" / "rule") "so the report can say whether the model was
+    consulted" — but the report answers that from the classifier's own `calls`
+    and `from_cache` counters, so the field was ASSIGNED at every construction
+    site and READ nowhere. A write-only field whose docstring promises a reader
+    that does not exist is an invitation to trust a signal nothing consumes, so
+    it was deleted rather than kept "for later" (the same call as
+    `RepoTarget.named_by_caller`). A per-hit provenance record, if it is ever
+    genuinely wanted, should be added WITH its reader."""
 
     label: str          # "collision" | "clean" | "uncertain" | "untrusted"
     probability: float | None
-    origin: str         # "jev" | "cache" | "fallback" | "rule"
     reason: str = ""
 
     @property
@@ -788,7 +948,7 @@ def _cache_verdict(entry) -> ClaimVerdict | None:
     label = claim_label_for_probability(probability)
     if entry.get("label") != label:
         return None
-    return ClaimVerdict(label, probability, "cache")
+    return ClaimVerdict(label, probability)
 
 
 def _dotenv_value(path: Path, key: str) -> str | None:
@@ -812,12 +972,21 @@ def _read_jev_key(git_bin: str, cwd: str) -> str | None:
     env_key = os.environ.get("JEV_API_KEY", "").strip()
     if env_key:
         return env_key
-    candidates: list[Path] = []
+    # An EXPLICIT override is the caller's declaration of where the credential
+    # lives, so it is AUTHORITATIVE: when it is set, the implicit candidates are
+    # NOT consulted. Prepending it to the list instead let a run that declared a
+    # KEYLESS env file still pick a key up from <repo-root>/.env or <cwd>/.env —
+    # so a run intending to be OFFLINE was not hermetic on any machine carrying
+    # a key, and silently made a real, billable JEV call while believing it had
+    # no credential (#5278). The implicit candidates apply only when no override
+    # was declared, which is the production default and is unchanged.
     override = os.environ.get(JEV_ENV_FILE_ENV, "").strip()
     if override:
-        candidates.append(Path(override))
-    candidates.append(Path(__file__).resolve().parent.parent / ".env")
-    candidates.append(Path(cwd) / ".env")
+        return _dotenv_value(Path(override), "JEV_API_KEY")
+    candidates: list[Path] = [
+        Path(__file__).resolve().parent.parent / ".env",
+        Path(cwd) / ".env",
+    ]
     main = _main_worktree_root(git_bin, cwd, min(JEV_TIMEOUT, 10.0))
     if main:
         candidates.append(Path(main) / ".env")
@@ -1002,7 +1171,7 @@ class ClaimClassifier:
             if probabilities is None:
                 for index in missing:
                     verdicts[index] = ClaimVerdict(
-                        "collision", None, "fallback",
+                        "collision", None,
                         "JEV unavailable — origin/main's _CLAIM_RE (fail-closed)",
                     )
             else:
@@ -1014,12 +1183,12 @@ class ClaimClassifier:
                     if probability is None:
                         # No usable value for THIS body: ambiguous is a hit.
                         verdicts[index] = ClaimVerdict(
-                            "uncertain", None, "jev",
+                            "uncertain", None,
                             "JEV returned no usable probability for this comment",
                         )
                         continue
                     label = claim_label_for_probability(probability)
-                    verdicts[index] = ClaimVerdict(label, probability, "jev")
+                    verdicts[index] = ClaimVerdict(label, probability)
                     cache[hashes[index]] = {
                         "v": JEV_PROMPT_VERSION,
                         "p": probability,
@@ -1034,7 +1203,7 @@ class ClaimClassifier:
         # could hand a CLEAN verdict to the wrong comment.
         return [
             verdict if verdict is not None
-            else ClaimVerdict("collision", None, "fallback", "no verdict produced")
+            else ClaimVerdict("collision", None, "no verdict produced")
             for verdict in verdicts
         ]
 
@@ -1168,6 +1337,85 @@ def _inside_hex_digest(text: str, start: int, end: int) -> bool:
     return lo < start and hi > end
 
 
+#: Branch namespaces that are GENERATED by tooling, never chosen by a lane.
+#: A `mergify/merge-queue/<hash>` branch is created and deleted by the merge
+#: queue for each queued PR, so its name is a hash and carries no intent.
+#:
+#: ⛔ THE WIDTH OF THIS TUPLE IS A FAIL-CLOSED DECISION, NOT A CONVENIENCE. A
+#: lane can create `refs/heads/mergify/3061-lane` locally, and a namespace listed
+#: more broadly than what was measured would render that branch invisible on a
+#: BLOCKING surface: a false CLEAN, which for this tool is strictly worse than a
+#: false COLLISION. Name the sub-namespace that was actually measured, and widen
+#: it only with a decision and a test that pins the widening.
+#:
+#: Every entry must be narrow enough that no lane would choose it. Each one below
+#: is a bot-minted namespace whose refs were verified against their committer
+#: identity in this repo (`mergify/merge-queue/`, `mq/merge-queue/`).
+_GENERATED_BRANCH_PREFIXES = (
+    "mergify/merge-queue/",
+    "mq/merge-queue/",
+)
+
+#: The CI bot's refresh branch sits under a LANE-OWNED namespace (`chore/`), so
+#: its prefix alone would be too wide: `chore/ci-timing-refresh-3061-manual` is a
+#: name a lane could reasonably write, and excluding it would hide a claim on a
+#: BLOCKING surface — again the direction that is strictly worse than a false
+#: COLLISION. The generator mints `<prefix><short SHA>`, so the tail is anchored
+#: to what it actually produces. Anything else stays a claim.
+_CI_TIMING_PREFIX = "chore/ci-timing-refresh-"
+_CI_TIMING_TAIL_MIN = 7
+#: ⚠️ NOT `_HEX_DIGITS`: that set deliberately includes `A-F` because digest
+#: matching needs it, but `git rev-parse --short` emits LOWERCASE only. An
+#: uppercase tail is therefore a name only a lane could write, and filtering it
+#: would be a false CLEAN on a blocking surface.
+_CI_TIMING_TAIL_DIGITS = frozenset("0123456789abcdef")
+
+
+def _is_generated_branch(name: str) -> bool:
+    """True when ``name`` is a tool-generated branch, not a lane's claim.
+
+    WHY THIS EXISTS ALONGSIDE THE HEX-DIGEST RULE (#3611). The digest rule
+    (`_inside_hex_digest`) excludes a number INTERIOR to a hex run, and it is
+    deliberately asymmetric: a number that LEADS a hex-looking run stays a
+    reference, because `3061cafe` is a real branch name a lane wrote. That
+    asymmetry is correct, so `mergify/merge-queue/6160bad001` — where `6160`
+    leads the hash `6160bad001` — is genuinely indistinguishable from
+    `3061cafe` by SHAPE alone. The two differ by ORIGIN, not by spelling, so
+    origin is what this checks.
+
+    Excluding a generated namespace is not fail-open AS LONG AS the namespace
+    holds only tool-minted names: a lane cannot claim one, so a hit there was
+    never in-flight work. It also cannot hide a real claim — a lane's branch
+    (`fix/3611-…`) is untouched by the filter. Without it the surface reports a
+    PHANTOM OWNER, which is worse than a miss: the caller is told `exit 1 =
+    someone holds it` for an issue nobody holds, and the item is dropped from
+    the queue.
+
+    ⚠️ Both halves of that argument are load-bearing, and the first is the one
+    that fails silently. Excluding a namespace WIDER than the measured one
+    converts a false COLLISION into a false CLEAN, and this is a blocking
+    surface — see `_GENERATED_BRANCH_PREFIXES`.
+
+    The name is tested AFTER stripping the ref prefix the surfaces actually
+    carry: `git for-each-ref` hands over `refs/remotes/origin/mergify/…` and
+    `refs/heads/fix/…`, so a test on the bare name never fires on the real
+    input."""
+    stripped = name
+    for prefix in ("refs/remotes/", "refs/heads/"):
+        if stripped.startswith(prefix):
+            stripped = stripped[len(prefix):]
+            break
+    # `refs/remotes/<remote>/<branch>`, so drop the remote segment too.
+    if name.startswith("refs/remotes/"):
+        _, _, rest = stripped.partition("/")
+        stripped = rest or stripped
+    if stripped.startswith(_CI_TIMING_PREFIX):
+        tail = stripped[len(_CI_TIMING_PREFIX):]
+        return (len(tail) >= _CI_TIMING_TAIL_MIN
+                and all(c in _CI_TIMING_TAIL_DIGITS for c in tail))
+    return any(stripped.startswith(p) for p in _GENERATED_BRANCH_PREFIXES)
+
+
 def _pr_terminal_state(pr: dict) -> str | None:
     """The terminal state of a PR, or None while it can still be in flight.
 
@@ -1190,14 +1438,83 @@ def _pr_terminal_state(pr: dict) -> str | None:
     return None
 
 
-def closing_reference(text: str, issue: int) -> bool:
-    """True only for a GitHub CLOSING KEYWORD bound to the issue number
-    (`closes` / `fixes` / `resolves #N`, all inflections, optional colon).
+def _is_issue_number(value: object) -> bool:
+    """True only for a genuine issue number.
 
-    This is a statement that the PR *is* the work for #N. It is deliberately
-    narrower than `number_present`: a body saying "restored in #2745" or
-    "triaged and filed as #2751" only cross-references the issue and is NOT
-    work for it, so it must never block a dispatch for #2745 / #2751.
+    ⛔ NOT `isinstance(value, int)`: `bool` subclasses `int`, so `True` passes —
+    and `issue in [True]` is true for issue #1. One predicate, used by both the
+    mapping and the bare-value arm, so they cannot drift apart.
+    """
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _closing_ref_numbers(pr: dict) -> list[int]:
+    """The issue numbers GITHUB ITSELF computed as closed by this PR.
+
+    `closingIssuesReferences` is the SOURCE, not a re-derivation: it is the
+    field the web UI uses to close issues on merge, so it is exact by
+    construction. This tool used to re-implement it with a
+    `close[sd]?|fix(?:es|ed)?|resolve[sd]?` regex — a second, drifting copy of a
+    grammar GitHub already owns (#3504: "prefer the source over the regex").
+
+    The key is REQUIRED on the blocking surfaces. A missing field is NOT "closes
+    nothing": reading absence as empty would DROP a blocking signal, and
+    dropping a blocking signal is the fail-OPEN direction — it is how a
+    duplicate dispatch gets through. So absence raises, and the surface becomes
+    INCOMPLETE.
+    """
+    refs = pr.get("closingIssuesReferences")
+    if refs is None:
+        raise SurfaceError(
+            "closingIssuesReferences is ABSENT from the PR payload — refusing to "
+            "read a missing field as 'closes nothing', which would silently DROP "
+            "a blocking signal. Request the field explicitly from gh."
+        )
+    if not isinstance(refs, list):
+        raise SurfaceError(
+            "closingIssuesReferences is present but not a list "
+            f"({type(refs).__name__}) — refusing"
+        )
+    numbers: list[int] = []
+    for item in refs:
+        # ⛔ `isinstance(..., int)` is TRUE FOR `bool` (`bool` subclasses `int`),
+        # so `[{"number": true}]` appended `True` — and `issue in [True]` is true
+        # for issue #1. GitHub does not emit it and the effect would only ADD a
+        # hit (fail-closed), but a type check that silently accepts the wrong
+        # type is not a type check. Both arms exclude it, so the element falls
+        # through to the refusal below rather than being read as a number.
+        if isinstance(item, dict) and _is_issue_number(item.get("number")):
+            numbers.append(item["number"])
+        elif _is_issue_number(item):
+            numbers.append(item)
+        else:
+            # ⛔ The contract above is applied PER ELEMENT, not just to the
+            # container. `["3504"]`, `[{"number": "3504"}]` and
+            # `[{"number": None}]` all used to fall through and be appended
+            # NOWHERE — so a field that was present and claimed to close N could
+            # vanish with no INCOMPLETE, which is the same fail-open drop as
+            # reading an absent field as empty. The body-regex union hides it
+            # for a body reference, but GitHub also derives closing references
+            # from the title and commit messages, where the body need not carry
+            # a closing keyword at all. Refuse rather than drop.
+            raise SurfaceError(
+                "closingIssuesReferences contains an element this tool cannot "
+                f"read as an issue number ({item!r}) — refusing to drop a "
+                "closing reference silently"
+            )
+    return numbers
+
+
+def closing_reference(text: str, issue: int) -> bool:
+    """REGEX FALLBACK — ONLY for the surface GitHub cannot supply the field on.
+
+    That is the ADVISORY closed-PR surface, whose payload comes from the REST
+    `/pulls` endpoint and therefore carries no `closingIssuesReferences`. Every
+    hit there is already `weak`, so an imprecise regex cannot block anything.
+
+    Every BLOCKING surface uses `_closing_ref_numbers` instead. Do NOT reach for
+    this one there: it is the re-derivation #3504 exists to remove, kept only
+    because REST cannot answer the question the other way.
     """
     if not text:
         return False
@@ -1207,162 +1524,737 @@ def closing_reference(text: str, issue: int) -> bool:
     return re.search(pattern, text) is not None
 
 
-def _tokens(text: str) -> set[str]:
-    return set(re.findall(r"[a-z0-9]+", (text or "").lower()))
-
-
-def _singular(token: str) -> str:
-    if len(token) <= 4 or not token.endswith("s") or token.endswith("ss"):
-        return token
-    if token.endswith(("ches", "shes", "sses", "xes", "zes")):
-        return token[:-2]  # dispatches -> dispatch, boxes -> box
-    return token[:-1]      # surfaces -> surface, checks -> check
-
-
-def _classify_title(title: str) -> tuple[list[str], list[str]]:
-    """Split a title's candidate tokens into (distinctive, suppressed-generic).
-
-    "Distinctive" = length >= 5 after plural folding and NOT in `_STOPLIST`.
-    The suppressed list is informational only (it makes the precision dial
-    legible in the report); the distinctive list is what matching uses."""
-    kept: list[str] = []
-    dropped: list[str] = []
-    for tok in re.findall(r"[A-Za-z0-9]+", title):
-        low = tok.lower()
-        if low.isdigit() or len(low) < 5:
-            continue
-        sing = _singular(low)
-        if len(sing) < 5:
-            continue
-        generic = sing if sing in _STOPLIST else (low if low in _STOPLIST else None)
-        if generic is not None:
-            if generic not in dropped:
-                dropped.append(generic)
-            continue
-        if sing not in kept:
-            kept.append(sing)
-    return kept, dropped
-
-
-def derive_keywords(title: str | None, explicit: str | None = None) -> list[str]:
-    """Issue keywords: DISTINCTIVE title tokens, or explicit --keywords.
-
-    Generic/process vocabulary (`_STOPLIST`) is dropped so the `--min-keywords`
-    gate counts distinctive terms rather than common engineering nouns/verbs
-    (#3325). Explicit --keywords bypass that filter (explicit intent wins)."""
-    out: list[str] = []
-    if explicit:
-        for raw in explicit.split(","):
-            tok = raw.strip().lower()
-            if tok and tok not in out:
-                out.append(tok)
-        return out
-    if not title:
-        return out
-    kept, _ = _classify_title(title)
-    return kept
-
-
-def suppressed_keywords(title: str | None) -> list[str]:
-    """Title tokens dropped as generic/cross-cutting vocabulary (#3325).
-    Purely informational — surfaced in the report so a suppressed match is
-    never silent. Explicit --keywords are never suppressed, so this is only
-    meaningful for the gh-title path."""
-    if not title:
-        return []
-    _, dropped = _classify_title(title)
-    return dropped
-
-
-def keyword_matches(text: str, keywords: list[str]) -> list[str]:
-    """Whole-token (plural-folded) keyword match against a name-like field.
-    Structural branch/path vocabulary is excluded so 'worktree' in a title
-    cannot match the literal '.worktrees/' directory component."""
-    if not keywords:
-        return []
-    cand = {_singular(t) for t in _tokens(text)} - _STRUCTURAL
-    return [k for k in keywords if _singular(k) in cand]
-
-
-def keyword_hit(text: str, keywords: list[str], minimum: int) -> list[str]:
-    """Keyword hits gated on `minimum` DISTINCT keywords. The gate is what
-    keeps a single common word ('remote') from fabricating hundreds of
-    collisions; number hits are unaffected."""
-    kws = keyword_matches(text, keywords)
-    return kws if len(kws) >= max(1, minimum) else []
-
-
 # ── git surfaces ─────────────────────────────────────────────────────────────
 
-def _git_refs(git_bin: str, repo: str, namespace: str, timeout: float) -> list[str]:
+def _git_refs(
+    git_bin: str, repo: str, namespace: str, timeout: float,
+) -> list[tuple[str, str]]:
+    """(refname, tip-sha) for every ref in `namespace`, in ONE git call.
+
+    The tip SHA rides along in the SAME `for-each-ref` because the terminal test
+    needs it per ref: asking per-ref (`git rev-parse`) would be one subprocess
+    per branch, and this repo carries ~900 local and ~1,300 remote refs.
+    """
     rc, out, err, timed_out = _run(
-        [git_bin, "for-each-ref", "--format=%(refname)", namespace],
+        [git_bin, "for-each-ref", "--format=%(refname)%09%(objectname)", namespace],
         repo, timeout,
     )
     if rc != 0:
         why = "timeout" if timed_out else f"exit {rc}"
         raise SurfaceError(f"git for-each-ref {namespace} failed ({why}): {_one_line(err)}")
-    refs = [ln.strip() for ln in out.splitlines() if ln.strip()]
-    # Remote HEAD symrefs are not work.
-    return [r for r in refs if not r.endswith("/HEAD")]
+    refs: list[tuple[str, str]] = []
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        name, _sep, sha = line.partition("\t")
+        name = name.strip()
+        # Remote HEAD symrefs are not work.
+        if not name or name.endswith("/HEAD"):
+            continue
+        refs.append((name, sha.strip()))
+    return refs
+
+
+def _first_parent_shas(
+    git_bin: str, repo: str, timeout: float,
+) -> set[str] | None:
+    """Every commit on `origin/main`'s FIRST-PARENT chain, or None if unreadable.
+
+    ⛔ THIS IS THE DISCRIMINATOR THAT MAKES PREDICATE 2 SOUND, and without it the
+    ancestor arm was only ONE COMMIT DEEP. `sha != main_tip` refuses to call a
+    branch terminal when its tip is exactly main's tip — but the moment main
+    advances a single commit, a branch with NO COMMITS OF ITS OWN is a STRICT
+    ancestor of main and predicate 2 demoted it. That is not an exotic state, it
+    is the ordinary fleet flow: `git worktree add -b fix/N-slug` (branch at main's
+    tip, nothing committed yet), some other PR merges, and any lane running the
+    pre-flight for N before that first commit gets CLEAN — on a lane that has
+    already claimed the issue by creating the branch. The remote surface cannot
+    mask it, because the branch has not been pushed.
+
+    Membership of main's OWN linear history separates the two states that
+    ancestry alone cannot:
+
+      * "just created" — the tip IS one of main's first-parent commits, because
+        that is exactly what a fresh branch points at. REFUSE to demote.
+      * "absorbed branch head" — the tip entered main as a SECOND parent through
+        a merge, so it is NOT on the first-parent chain. Demote.
+
+    A fast-forward landing puts the branch's own commits on the first-parent
+    chain, so it is NOT demoted — the same fail-closed direction as before, and
+    this repo squash-merges anyway.
+
+    One local call, no API cost (D4 constrains REST calls, not local git). A
+    failure returns None, and the caller treats that as "do not apply predicate
+    2" rather than as "nothing is merged" — an unreadable witness must never
+    become a downgrade.
+    """
+    rc, out, _err, _to = _run(
+        [git_bin, "rev-list", "--first-parent", "origin/main"], repo, timeout,
+    )
+    if rc != 0:
+        return None
+    return {ln.strip() for ln in out.splitlines() if ln.strip()}
+
+
+def _ancestor_merged_refs(
+    git_bin: str, repo: str, namespace: str, timeout: float,
+) -> set[str] | None:
+    """Refs whose tip is an ANCESTOR of origin/main — i.e. already merged.
+
+    ONE call: `--merged` performs the reachability walk once for the whole
+    namespace, where `git merge-base --is-ancestor` per ref would be one
+    subprocess per branch.
+
+    Returns None (not an empty set) when the walk cannot be performed, so the
+    caller can SAY so. This is deliberately NOT fatal: the test only ever
+    DOWNGRADES a hit to `weak`, so failing to compute it can only leave a hit
+    BLOCKING — which is the fail-closed direction. A silent empty set would
+    misreport "nothing is merged" as a measured fact.
+    """
+    rc, out, _err, _timed_out = _run(
+        [git_bin, "for-each-ref", "--format=%(refname)",
+         "--merged=origin/main", namespace],
+        repo, timeout,
+    )
+    if rc != 0:
+        return None
+    return {ln.strip() for ln in out.splitlines() if ln.strip()}
+
+
+def _branch_terminal_state(
+    ref: str, sha: str | None, merged_head_shas: set[str],
+    ancestor_merged: set[str] | None, main_tip: str | None,
+    first_parent: set[str] | None,
+) -> str | None:
+    """Why this branch ref CANNOT be in flight, or None when it might be.
+
+    #5186: a SQUASH-merged branch is the ordinary case in this repo, and its
+    commits are not ancestors of main — so `git branch -d` refuses, and the
+    ancestor test is blind to it BY CONSTRUCTION. The branch then blocks the
+    issue it closed, permanently, with no dismissal path. #5129 fixed exactly
+    this shape for the PR surface and did not cover local branches.
+
+    Two independent predicates:
+
+      1. TIP SHA == a MERGED PR's head SHA. Squash-merging discards the commits
+         but the PR record keeps the original head SHA, so this is the source.
+         It costs ZERO extra API calls: the closed-PR sample is already fetched
+         and carries the head sha and `mergedAt`.
+         ⚠ Coverage is the SAMPLED window, not all of merge history: that sample
+         is bounded to `CLOSED_PR_LIMIT` (100) most recent closed PRs. A
+         squash-merge older than the window is simply NOT detected, and the
+         branch keeps blocking (fail-closed — the safe direction, but the doc
+         must not imply full coverage).
+      2. The tip is an ancestor of origin/main AND is NOT one of main's own
+         first-parent commits — i.e. it entered main as a MERGE parent, which is
+         the shape of an absorbed branch head. One `for-each-ref --merged` walk
+         per namespace, plus one `rev-list --first-parent` for the whole run.
+
+         ⛔ PLAIN ANCESTRY IS NOT ENOUGH, and the failure is fail-open in BOTH
+         directions from the exact tip. A branch created at main's tip with NO
+         COMMITS OF ITS OWN YET is trivially "an ancestor of main" — the ordinary
+         state of a lane between `git worktree add` and its first commit, which is
+         PRECISELY when another lane may dispatch the same issue. An earlier
+         revision excluded only the tip EQUAL to main's tip, which closed the
+         window only until main advanced ONE commit; from then on the fresh branch
+         was strictly behind and demoted. The first-parent exclusion closes the
+         whole window, because a fresh branch's tip IS a main-line commit at any
+         distance. The cost is that a FAST-FORWARD landing is not detected and
+         keeps blocking — the fail-closed direction, and this repo squash-merges
+         anyway.
+
+         ⛔ THE SAME EXCLUSION IS ON PREDICATE 1, and it has to be. Predicate 1
+         matches the tip against the head SHAs of merged PRs, and a fresh branch
+         sitting at main's tip has main's SHA — so if main's tip is itself a
+         merged PR's head (a fast-forward or rebase landing, an empty-diff PR),
+         predicate 1 matched a branch with NO COMMITS OF ITS OWN and demoted it.
+         Restricting the exclusion to the ancestor arm left this primary arm
+         fail-open, which is the same defect the arm was added to close. Any
+         predicate that DOWNGRADES refuses the moment the tip is
+         INDISTINGUISHABLE FROM "JUST CREATED" — i.e. when it equals main's tip.
+
+         ⛔ The two predicates treat an UNRESOLVED tip DIFFERENTLY, and that
+         difference is deliberate rather than an oversight:
+
+           * Predicate 1 (tip-SHA == a merged PR's head) is the EXACT one —
+             decision D4 rests on it precisely because a merged PR record names
+             the branch head as GitHub computed it (correction #2: "the exact
+             tip-SHA test is the predicate"). An unresolvable tip does not make
+             that record any less exact, so it still demotes.
+           * Predicate 2 (tip is an ancestor of main) is the APPROXIMATE one and
+             is fed by a `--merged` walk over the same ref, so an unresolvable
+             tip means the walk failed too and it does not demote at all.
+
+         The residual that this leaves, stated rather than hidden: in a repo
+         whose `origin/main` cannot be resolved, a branch that is FRESH at
+         exactly a merged PR's head is read as landed. It needs the local
+         `origin/main` to be absent or unreadable AND the branch to be sitting
+         on a merged head, and resolving it properly is the stage-1 registry's
+         job (D1) — not a third guess here.
+
+    ⛔ `main_tip` HAS NO DEFAULT, AND `None` MEANS "DO NOT APPLY PREDICATE 2".
+    (`main_tip` and `first_parent` are resolved by separate git calls, so
+    `first_parent` can be readable while `main_tip` is not — a stub that fails
+    only `rev-parse` reproduces exactly that — and this guard is what keeps the
+    arm off in that case.)
+    Both halves are load-bearing:
+
+      * No default, because a defaulted `main_tip=None` made strictness OPT-IN:
+        any caller that omitted it silently got plain (non-strict) ancestry, so
+        the fail-open this arm exists to close was one forgotten argument away.
+      * `None` disables the arm rather than loosening it, because this predicate
+        can only ever DOWNGRADE a hit. An unknown tip makes "just created" and
+        "landed behind main" indistinguishable, and the safe answer to "I cannot
+        tell" is to leave the ref BLOCKING. A tip that cannot be resolved (no
+        `origin/main`, no local checkout) therefore costs a false COLLISION at
+        worst, never a false CLEAN.
+
+    Predicate 1 is the EXACT one (a merged PR record names the branch's head);
+    predicate 2 is the secondary, approximate one. Its remaining imprecision is
+    stated rather than hidden: a branch whose tip entered main as a merge parent
+    while its own work did NOT land is still read as terminal, and a fast-forward
+    landing and rebase residue are both missed. The durable fix for that residue
+    is the stage-1 registry (decision D1), not another guess here.
+
+    BOTH apply to LOCAL branches only. A remote-tracking ref is a local CACHE of
+    the last fetch, not the remote's state: a branch that was squash-merged and
+    then REUSED for new work still reads as its old, merged sha until someone
+    fetches. Judging that terminal would be a false ACCEPT — a live branch read
+    as free — so remote-tracking refs are never demoted by these predicates.
+
+    ⛔ `patch-id` is deliberately NOT a third predicate (D1; agent-infra #1362
+    ledger 09-23). `--stable` and the default `--unstable` both IGNORE
+    WHITESPACE, so a patch-id match can call a branch merged when its content
+    differs — a FALSE ACCEPT, which is this test's dangerous direction, because
+    a live branch read as terminal is a live lane read as free.
+    """
+    if not ref.startswith("refs/heads/"):
+        # ⛔ REMOTE-TRACKING REFS ARE A CACHE, so a terminal verdict on one can be
+        # a false ACCEPT: `refs/remotes/origin/<branch>` keeps pointing at a
+        # merged PR's head sha after the branch has been REUSED for new work,
+        # because nothing in this tool fetches. The local `refs/heads/` value is
+        # what the lane actually has and is authoritative for "is there unlanded
+        # work here". Refusing to demote a remote ref leaves the hit BLOCKING,
+        # which is the fail-closed direction — and the local branch, if it still
+        # exists, is judged on its own merits by this same call.
+        return None
+    if (
+        sha
+        and sha in merged_head_shas
+        # ⛔ `sha != main_tip` IS NOT "the only guard left" when `first_parent`
+        # is unavailable — an earlier version of this comment said so, and the
+        # `--merged` fallback added below guards that same state. In every state a
+        # test can construct the fallback SUPERSEDES this comparison (a mutation
+        # deleting this line breaks no test).
+        #
+        # IT IS KEPT ANYWAY, and the reason is specific rather than caution in
+        # general: `main_tip` and `ancestor_merged` come from SEPARATE git calls
+        # (`rev-parse origin/main`, then `for-each-ref --merged=origin/main`). If
+        # they disagree — a force-push landing between them — a ref can point at
+        # `main_tip` and still be absent from the `--merged` set, and in exactly
+        # that state this comparison is the only thing refusing the demotion.
+        # Narrow, unreachable by any stub, and fail-CLOSED, which is why it stays
+        # rather than being deleted on the strength of a green suite.
+        and sha != main_tip
+        # ⛔ THE EXCLUSION BELONGS ON *BOTH* PREDICATES, AND `sha != main_tip`
+        # ALONE IS NOT ENOUGH ON EITHER — it is ONE COMMIT DEEP. A branch created
+        # at `origin/main`'s tip with no commits of its own has exactly main's
+        # SHA, and whenever that SHA is also a merged PR's `head.sha` (a
+        # fast-forward / rebase landing, or an empty-diff PR) this predicate
+        # returned "squash-merged" and demoted a lane that had merely CLAIMED the
+        # issue by creating the branch. Comparing against the CURRENT tip only
+        # closed that while main had not moved; as soon as main advanced, the
+        # fresh branch was strictly behind the tip, `sha != main_tip` was
+        # satisfied, and the same fail-open returned through the PRIMARY arm —
+        # which is the defect cycle 5 closed on predicate 2 and left here. The
+        # discriminator is the same one: a tip on main's own first-parent chain is
+        # a commit main already contains (exactly what a fresh branch points at),
+        # NOT an absorbed branch head, which entered main as a MERGE parent. When
+        # `first_parent` is unreadable the exact-tip comparison still applies, and
+        # the merged-PR record is treated as the exact evidence D4 says it is.
+        and not (first_parent is not None and sha in first_parent)
+        # ⛔ THE FIRST-PARENT WITNESS CAN GO MISSING WHILE MAIN'S TIP IS KNOWN,
+        # and then `sha != main_tip` is the ONLY guard left — which is one commit
+        # deep, i.e. exactly the window cycle 6 closed. A branch created at
+        # main's tip and left behind by ONE commit is "indistinguishable from
+        # just created" in the same sense, and it was demoted to CLEAN whenever
+        # `rev-list --first-parent` failed while `rev-parse` and the `--merged`
+        # walk both succeeded.
+        #
+        # THE FALLBACK DISCRIMINATOR IS THE `--merged` WALK, which answers the
+        # same question from a different git command: a ref that IS merged into
+        # main has a tip main already CONTAINS — which is what a fresh branch
+        # points at — so it must not be called landed; a squash-merge residue is
+        # NOT merged, because squash discards the commits, so it still demotes.
+        # With neither witness available the downgrade is refused, and with main's
+        # tip unresolved this clause is inert (`test_squash_merged_branch_is_
+        # terminal_and_cannot_block` runs in a repo with no `origin/main`).
+        and not (
+            main_tip is not None
+            and first_parent is None
+            and (ancestor_merged is None or ref in ancestor_merged)
+        )
+    ):
+        return ("squash-merged — its tip SHA is a merged PR's head, so its content "
+                "already landed even though its commits are not ancestors of main")
+    if (
+        # Every condition guards a DOWNGRADE, so an unreadable witness leaves the
+        # ref BLOCKING.
+        #
+        # `main_tip is not None` is an INDEPENDENT WITNESS, not a leftover of the
+        # exact-tip comparison it used to guard: `main_tip` and `first_parent`
+        # come from separate git calls, so `first_parent` can be readable while
+        # `main_tip` is not (a stub failing only `rev-parse` reproduces exactly
+        # that), and requiring BOTH is the fail-closed posture for this
+        # approximate arm.
+        main_tip is not None
+        and first_parent is not None
+        and ancestor_merged is not None
+        and ref in ancestor_merged
+        # ⛔ `sha not in first_parent` SUPERSEDES the `sha != main_tip` guard that
+        # used to sit here, and that guard was DELETED rather than kept alongside
+        # it: `rev-list --first-parent origin/main` always contains main's own
+        # tip, so this condition already implies it (a mutation test proved it —
+        # deleting `sha != main_tip` changed no behaviour and broke no test). Two
+        # conditions that LOOK like independent protection but are not is worse
+        # than one, because the next reader cannot tell which is load-bearing.
+        # It is NOT redundant over in predicate 1, which must also work when
+        # `first_parent` is unreadable.
+        and sha not in first_parent
+    ):
+        return "merged into origin/main (its tip is a branch head main absorbed)"
+    return None
 
 
 def scan_branch_surface(
-    surface: Surface, refs: list[str], issue: int, keywords: list[str],
-    min_keywords: int, allow_keywords: bool,
+    surface: Surface, refs: list[tuple[str, str]], issue: int,
+    identity: Identity, merged_head_shas: set[str],
+    ancestor_merged: set[str] | None, main_tip: str | None,
+    first_parent: set[str] | None,
 ) -> None:
-    """Number matching always; keyword matching only where it is precise
-    enough to be useful (`allow_keywords` is False for the remote namespace)."""
-    for ref in refs:
-        if number_present(ref, issue):
-            surface.add(ref, f"matched issue-number ({issue})", "strong")
+    """NUMBER matching only — the lexical arm is gone (#3504).
+
+    A ref is examined only when it names this issue; when it does, the decision
+    is taken in this order, so the caller's own work is never read as a
+    competing claim:
+
+      1. **self** — the ref is the caller's OWN branch (#3504 class 4)
+      2. **terminal** — its content already landed (#5186)
+      3. otherwise **blocking** — a live lane that names this issue
+
+    A self or terminal ref is reported (never silent) at `weak` strength, which
+    cannot contribute to the verdict. Refs that do not name the issue are not
+    reported at all: with the lexical arm gone there is nothing to say about
+    them, and emitting ~170 "already merged" rows would bury the real signal.
+    """
+    for ref, sha in refs:
+        # A tool-generated branch cannot be a lane's claim (#3611) — checked
+        # BEFORE the number test, since the number test is what false-matches.
+        if _is_generated_branch(ref):
             continue
-        if not allow_keywords:
+        if not number_present(ref, issue):
             continue
-        kws = keyword_hit(ref, keywords, min_keywords)
-        if kws:
-            surface.add(ref, "keyword(s): " + ", ".join(kws), "keyword")
+        if identity.owns_branch(ref):
+            surface.add(
+                ref,
+                "your own branch (declared with --self-branch, or the current "
+                "branch of this checkout) — not a competing claim",
+                "weak",
+            )
+            continue
+        terminal = _branch_terminal_state(
+            ref, sha, merged_head_shas, ancestor_merged, main_tip, first_parent,
+        )
+        if terminal is not None:
+            surface.add(
+                ref,
+                f"branch is {terminal} — immutable history, not in-flight work "
+                "(non-blocking)",
+                "weak",
+            )
+            continue
+        surface.add(ref, f"matched issue-number ({issue})", "strong")
 
 
 def _worktree_blocks(porcelain: str) -> list[dict]:
+    """Parse `git worktree list --porcelain`, REFUSING anything it cannot read.
+
+    ⛔ A PATH CONTAINING A NEWLINE SPLITS A RECORD, AND THE OLD PARSER SILENTLY
+    TRUNCATED IT. `--porcelain` does not C-quote a newline; it emits the raw
+    byte, so a worktree whose path is `<tmp>/wt/fix\n3061-mine` arrives as
+    `worktree <tmp>/wt/fix` followed by a bare `3061-mine`. The second line
+    matched no prefix and was DROPPED, the path was truncated at the newline, and
+    the issue number — which sat after it — stopped matching, so the live
+    worktree vanished from the surface with no error at all. Fail-OPEN, on the
+    surface #3061 exists to make untruncated.
+
+    The call-site guard could not catch it: it compared `len(blocks)` against the
+    number of `"worktree "` lines, and this function starts exactly one block per
+    such line, so the two were equal by construction and the guard was
+    unreachable. Validate the SHAPE instead — an unreadable line is a parse loss,
+    and a parse loss is a REFUSAL, never a silently smaller answer.
+    """
     blocks: list[dict] = []
     cur: dict | None = None
     for line in porcelain.splitlines():
+        if not line.strip():
+            continue
         if line.startswith("worktree "):
             if cur is not None:
                 blocks.append(cur)
             cur = {"path": line[len("worktree "):].strip()}
-        elif cur is not None and line.startswith("branch "):
+        elif cur is None:
+            raise SurfaceError(
+                f"worktree porcelain: content before any 'worktree ' record "
+                f"({line[:80]!r}) — refusing a partial scan"
+            )
+        elif line.startswith("branch "):
             cur["branch"] = line[len("branch "):].strip()
-        elif cur is not None and line.startswith("detached"):
-            cur.setdefault("branch", "(detached)")
+        elif line == "detached":
+            cur["branch"] = "(detached)"
+        elif line == "bare":
+            cur["bare"] = True
+        elif line.startswith("locked") or line.startswith("prunable"):
+            pass
+        elif line.startswith("HEAD "):
+            # The worktree's checked-out commit, carried free by --porcelain.
+            #
+            # ⛔ IT REACHES NEITHER TERMINAL PREDICATE when the worktree is
+            # DETACHED. `_branch_terminal_state` refuses every ref that does not
+            # start with `refs/heads/`, and a detached worktree's branch is the
+            # literal `"(detached)"` — so the tip-SHA predicate is refused BEFORE
+            # it is ever compared, and the ancestor predicate tests
+            # `ref in ancestor_merged`, a set of REF NAMES, which `"(detached)"`
+            # cannot be in. A detached worktree is therefore reported as a hit
+            # even at a squash-merged head: fail-closed, and deliberate — with no
+            # branch name there is no ref to name a landing. An earlier version of
+            # this comment claimed the HEAD reached the tip-SHA predicate, which
+            # is false for exactly the detached case it was describing.
+            cur["head"] = line[len("HEAD "):].strip()
+        else:
+            # Reachable exactly when a record did not parse as the format
+            # documents. A truncated (not-porcelain) read and a newline inside a
+            # path both land here as an unrecognised continuation line.
+            raise SurfaceError(
+                f"worktree porcelain: unrecognised line {line[:80]!r} — the "
+                "parse LOST part of a record (a path containing a newline "
+                "splits one), so the answer would be silently smaller than the "
+                "truth; refusing (NOT clean)"
+            )
     if cur is not None:
         blocks.append(cur)
+    if porcelain.strip() and not blocks:
+        raise SurfaceError(
+            "worktree porcelain: non-empty output parsed to zero records — "
+            "refusing a partial scan"
+        )
+    for record in blocks:
+        # `--porcelain` emits HEAD for every record except a `bare` one, so a
+        # record without either is one the parse could not actually see. This is
+        # checked HERE, where the record is built, because the call site can no
+        # longer tell a missing field from a worktree that genuinely has none.
+        if not record.get("path"):
+            raise SurfaceError(
+                "worktree porcelain: a record has no path — refusing a partial "
+                "scan"
+            )
+        if not record.get("head") and not record.get("bare"):
+            raise SurfaceError(
+                "worktree porcelain: a record has neither HEAD nor 'bare' — "
+                "refusing a partial scan"
+            )
+        # ⛔ `branch` IS REQUIRED TOO, for every NON-BARE record, because it is
+        # one of the two fields the hit test reads (`number_present(path, issue)
+        # or number_present(branch, issue)`) and a worktree whose only
+        # issue-naming field is its branch is reported as NO HIT when the field
+        # is absent — read as the empty string and silently dropped. Requiring
+        # `path` and HEAD while leaving `branch` optional applied the "a parse
+        # loss is a REFUSAL" rule to two of the three fields it covers.
+        # `--porcelain` emits `branch <ref>` OR the literal `detached` for every
+        # non-bare record, so absence here is a parse loss, not a shape.
+        if not record.get("bare") and not record.get("branch"):
+            raise SurfaceError(
+                "worktree porcelain: a non-bare record has neither a 'branch' "
+                "line nor 'detached' — the parse lost the field the worktree hit "
+                "test reads; refusing a partial scan"
+            )
     return blocks
 
 
 def scan_worktree_surface(
-    surface: Surface, blocks: list[dict], issue: int, keywords: list[str],
-    min_keywords: int,
+    surface: Surface, blocks: list[dict], issue: int, identity: Identity,
+    merged_head_shas: set[str], ancestor_merged: set[str] | None,
+    main_tip: str | None, first_parent: set[str] | None,
 ) -> None:
-    """Untruncated worktree scan. Number match on the full path and branch;
-    keyword match on the basename and branch only (never the parent dir)."""
+    """Untruncated worktree scan — NUMBER match on the full path and branch.
+
+    Same three-step decision as the branch surface (self, then terminal, then
+    blocking), because a worktree hit is the same claim seen from a different
+    angle: #3504 class 4's reproduction had the caller's OWN worktree among its
+    blocking hits. The path is matched in full — a worktree is named after its
+    issue by convention, and the full path is the honest field to read.
+    """
     for block in blocks:
         path = block.get("path", "")
         branch = block.get("branch", "")
-        basename = Path(path).name
-        if number_present(path, issue) or number_present(branch, issue):
-            surface.add(f"{path} [{branch or 'detached'}]",
-                        f"matched issue-number ({issue})", "strong")
+        # The BRANCH half is skipped for a generated name (a queue checkout
+        # says nothing about ownership); the PATH is still matched in full, so
+        # a real worktree cannot be hidden by this (#3611).
+        branch_matchable = not _is_generated_branch(branch)
+        if not (number_present(path, issue)
+                or (branch_matchable and number_present(branch, issue))):
             continue
-        kws = keyword_hit(basename, keywords, min_keywords) \
-            or keyword_hit(branch, keywords, min_keywords)
-        if kws:
-            surface.add(f"{path} [{branch or 'detached'}]",
-                        "keyword(s): " + ", ".join(kws), "keyword")
+        label = f"{path} [{branch or 'detached'}]"
+        if identity.owns_worktree(path) or identity.owns_branch(branch):
+            surface.add(
+                label,
+                "your own worktree (declared with --self-worktree, or this "
+                "checkout) — not a competing claim",
+                "weak",
+            )
+            continue
+        terminal = _branch_terminal_state(
+            branch, block.get("head"), merged_head_shas, ancestor_merged,
+            main_tip, first_parent,
+        )
+        if terminal is not None:
+            surface.add(
+                label,
+                f"worktree is on a {terminal} — immutable history, not "
+                "in-flight work (non-blocking)",
+                "weak",
+            )
+            continue
+        surface.add(label, f"matched issue-number ({issue})", "strong")
 
 
 # ── GitHub surfaces ──────────────────────────────────────────────────────────
+
+def _require_issue_payload(data: dict, where: str) -> None:
+    """The issue payload's own contract: `comments` and `assignees` must be
+    present, must be lists, and must hold OBJECTS.
+
+    ⛔ TWO FAILURE MODES IN OPPOSITE DIRECTIONS, from the same omission.
+    `gh issue view --json number,title,state,assignees,comments,url` ALWAYS
+    returns both keys (as arrays, often empty), so:
+
+      * a MISSING key is a malformed payload, and reading it as "no comments, no
+        assignees" DROPS a claim comment or a different-account assignee — the
+        fail-OPEN direction, because absence looks exactly like emptiness. Same
+        reasoning that already makes an absent `closingIssuesReferences`
+        INCOMPLETE rather than "closes nothing".
+      * a non-object ELEMENT (`[null]`) reached `.get` and raised
+        `AttributeError`, which is neither `SurfaceError` nor `RuntimeError` — so
+        it escaped as a TRACEBACK with no `VERDICT` line and exit 1, the code
+        this module documents as COLLISION. `_require_pr_dicts` closed that for
+        the PR lists; this closes it for the issue surface, and additionally
+        rejects a non-STRING `login`/`body`, which crashed inside
+        `assignee_attribution`'s `.strip()` and `_strip_control_sequences`.
+
+    ⛔ AND THE FIRST VERSION OF THIS FUNCTION STOPPED THERE, reproducing its own
+    defect one reader over: it validated the ASSIGNEE's login and left the
+    COMMENT AUTHOR's, and several other fields of this payload, to raise inside
+    whatever read them.
+
+    THE RULE: the contract covers every field a reader touches, and the reader
+    set comes from grepping the call sites. Do not restate that set here — a
+    list of readers is a claim about the whole call graph, and it goes stale on
+    the next edit, including an edit made to correct it.
+
+    Raising `SurfaceError` routes every case through the existing handler, which
+    NAMES the reason and marks this surface INCOMPLETE.
+    """
+    for key in ("comments", "assignees"):
+        if key not in data:
+            raise SurfaceError(
+                f"{where} has no {key!r} key — `gh issue view --json` always "
+                "returns it, so absence means a malformed payload, not an empty "
+                "list; reading it as empty would DROP a claim (NOT clean)"
+            )
+        value = data[key]
+        if not isinstance(value, list):
+            raise SurfaceError(
+                f"{where} has a non-list {key!r} ({type(value).__name__}) — "
+                "refusing (NOT clean)"
+            )
+        for index, item in enumerate(value):
+            if not isinstance(item, dict):
+                raise SurfaceError(
+                    f"{where} has a non-object element in {key!r} at index "
+                    f"{index} ({type(item).__name__}) — refusing to read a "
+                    "malformed issue payload as if it were empty (NOT clean)"
+                )
+    for index, assignee in enumerate(data["assignees"]):
+        login = assignee.get("login")
+        if login is not None and not isinstance(login, str):
+            raise SurfaceError(
+                f"{where} has a non-string assignee login at index {index} "
+                f"({type(login).__name__}) — refusing (NOT clean)"
+            )
+    for index, comment in enumerate(data["comments"]):
+        # ⛔ REQUIRED, AND A STRING — not merely "non-None if present". `body` is
+        # the ONLY field the claim gate reads on a comment, and it is read on the
+        # BLOCKING issue surface. A missing key passed the type check, then
+        # `comment.get("body") or ""` turned it into EMPTY, no claim matched, and
+        # the run reported "no in-flight work" — absence indistinguishable from
+        # emptiness, which is the one distinction this contract exists to make.
+        # A null body is refused for the same reason: GitHub sends a string
+        # (possibly empty) for every real comment, so null is malformation, not
+        # an empty comment.
+        if "body" not in comment:
+            raise SurfaceError(
+                f"{where} has a comment with no 'body' at index {index} — a "
+                "reader consumes it on a BLOCKING surface, so absence would "
+                "silently drop a claim (NOT clean)"
+            )
+        body = comment["body"]
+        if not isinstance(body, str):
+            raise SurfaceError(
+                f"{where} has a non-string comment body at index {index} "
+                f"({type(body).__name__}) — refusing (NOT clean)"
+            )
+        # The comment AUTHOR login goes through the SAME `.strip()` as the
+        # assignee login, one branch over, and `_comment_ref` feeds `url` to
+        # `re.search`. Both were unguarded.
+        author = comment.get("author")
+        if isinstance(author, dict):
+            author_login = author.get("login")
+            if author_login is not None and not isinstance(author_login, str):
+                raise SurfaceError(
+                    f"{where} has a non-string comment AUTHOR login at index "
+                    f"{index} ({type(author_login).__name__}) — refusing (NOT clean)"
+                )
+        url = comment.get("url")
+        if url is not None and not isinstance(url, str):
+            raise SurfaceError(
+                f"{where} has a non-string comment url at index {index} "
+                f"({type(url).__name__}) — refusing (NOT clean)"
+            )
+    # Top-level scalars. `gh` types `title`/`state`/`url` as STRING and `number`
+    # as an integer, so anything else is a malformed payload. They are checked
+    # because the contract describes the PAYLOAD: a payload that does not match
+    # its documented shape is not one whose remaining fields can be trusted. It
+    # is deliberately NOT justified by which of them some function reads — that
+    # is a claim about the whole call graph, and it goes stale on the next edit.
+    for key in ("title", "state", "url"):
+        if key not in data:
+            raise SurfaceError(
+                f"{where} has no {key!r} key — `gh issue view --json` always "
+                "returns it, so absence means a malformed payload (NOT clean)"
+            )
+        value = data[key]
+        if not isinstance(value, str):
+            raise SurfaceError(
+                f"{where} has a non-string {key!r} ({type(value).__name__}) — "
+                "refusing (NOT clean)"
+            )
+    # `number` is an INTEGER on the wire, not a string, so it is checked with the
+    # shared predicate (which also rejects `bool`) rather than against `str`.
+    if "number" not in data:
+        raise SurfaceError(
+            f"{where} has no 'number' key — `gh issue view --json` always "
+            "returns it, so absence means a malformed payload (NOT clean)"
+        )
+    if not _is_issue_number(data["number"]):
+        raise SurfaceError(
+            f"{where} has a non-integer 'number' "
+            f"({type(data['number']).__name__}) — refusing (NOT clean)"
+        )
+
+
+def _require_pr_dicts(prs: list, where: str, required: tuple = ()) -> None:
+    """Every element of a PR list must be a JSON object.
+
+    ⛔ THE CONTAINER WAS TYPE-CHECKED AND ITS ELEMENTS WERE NOT. A list holding a
+    non-object (`[null]` — a proxy or stub, a truncated write, a future API
+    shape) reached `pr.get("title")` and raised `AttributeError`. That is neither
+    `SurfaceError` nor `RuntimeError`, so it escaped as a TRACEBACK with NO
+    `VERDICT` line and exit 1 — the code this module documents as COLLISION. The
+    direction is fail-closed, but exit 1 is read by callers as "another lane is
+    on it", so the run would be mistaken for contention and the lane waited for
+    would never appear. Raise `SurfaceError` instead: the surrounding handler
+    turns it into a named INCOMPLETE on the surface that failed.
+    """
+    for index, pr in enumerate(prs):
+        if not isinstance(pr, dict):
+            raise SurfaceError(
+                f"{where} returned a non-object element at index {index} "
+                f"({type(pr).__name__}) — refusing to read a malformed PR list "
+                "as if it were empty (NOT clean)"
+            )
+        # Checking only that the element was an object left the string fields it
+        # carries to raise inside whatever read them — a traceback with no
+        # VERDICT line and exit 1, which callers read as COLLISION.
+        #
+        # WHAT IS REQUIRED IS DECIDED BY ABSENCE LOSING INFORMATION, and the
+        # decisive case is not obvious: a field that reads as the empty string
+        # turns into "no problem here" on a surface that can BLOCK. A required
+        # field whose absence only removes an ADVISORY demotion is not the same
+        # thing, and requiring it would trade a real refusal for a cosmetic one.
+        #
+        # Two classes sit behind that rule:
+        #   * the fields every payload of this shape carries, checked here;
+        #   * the fields only ONE transport projects, which the caller names in
+        #     `required` — a field the other transport never sends cannot be
+        #     required of it.
+        for key in ("title", "headRefName", "body", "mergedAt"):
+            if key not in pr:
+                raise SurfaceError(
+                    f"{where} returned an element with no {key!r} at index "
+                    f"{index} — absence reads as empty, and a reader consumes it "
+                    "on a BLOCKING surface, so a missing key would silently drop "
+                    "that signal (NOT clean)"
+                )
+        # ⛔ `number` is the field the hit test compares against the issue. It is
+        # an INTEGER on the wire, and `_is_issue_number` also rejects `bool`
+        # (`isinstance(True, int)` is True).
+        if "number" not in pr:
+            raise SurfaceError(
+                f"{where} returned an element with no 'number' at index {index} "
+                "— refusing a malformed PR list (NOT clean)"
+            )
+        if not _is_issue_number(pr["number"]):
+            raise SurfaceError(
+                f"{where} returned a non-integer 'number' at index {index} "
+                f"({type(pr['number']).__name__}) — refusing (NOT clean)"
+            )
+        # ⛔ `state` is REQUIRED, STRING, AND NON-BLANK. The blank case is the
+        # fail-OPEN one: `_pr_terminal_state` strips it, `""` is not in
+        # ("open", "opened"), and a truthy `mergedAt` then marks a LIVE PR
+        # terminal — every match on the BLOCKING open-PR surface goes out as
+        # `weak` and the run reports CLEAN. A blank `state` is not a value either
+        # transport produces, so it is a malformed payload, not a state.
+        if "state" not in pr:
+            raise SurfaceError(
+                f"{where} returned an element with no 'state' at index {index} — "
+                "refusing a malformed PR list (NOT clean)"
+            )
+        if not isinstance(pr["state"], str) or not pr["state"].strip():
+            raise SurfaceError(
+                f"{where} returned a blank or non-string 'state' at index "
+                f"{index} ({pr['state']!r}) — a blank state is not a state: it "
+                "drops the liveness short-circuit and demotes a live PR to "
+                "immutable history (NOT clean)"
+            )
+        for key in ("merged_at", *required):
+            if key not in pr and key in required:
+                raise SurfaceError(
+                    f"{where} returned an element with no {key!r} at index "
+                    f"{index} — this transport projects it, so its absence means "
+                    "the payload is malformed, not that the value is empty "
+                    "(NOT clean)"
+                )
+        # The TYPE half. `title`/`headRefName` are in it as well as the presence
+        # loop above: `isinstance(5, str)` is False and the value would reach
+        # `_one_line(...)`/`re.search`, so presence alone is not the check.
+        for key in ("title", "headRefName", "body", "mergedAt", "merged_at",
+                    *required):
+            if key in pr and pr[key] is not None and not isinstance(pr[key], str):
+                raise SurfaceError(
+                    f"{where} returned a non-string {key!r} at index {index} "
+                    f"({type(pr[key]).__name__}) — refusing (NOT clean)"
+                )
+
 
 def _gh_json(gh_bin: str, args: list[str], repo: str, timeout: float):
     rc, out, err, timed_out = _run([gh_bin, *args], repo, timeout)
@@ -1402,9 +2294,12 @@ def _closed_pr_sample(gh_bin: str, slug: str | None, cwd: str,
 
     ``partial`` is decided by EVIDENCE, never by whether a parse succeeded: it is
     True when more pages provably exist (a ``rel="next"``, or a ``rel="last"``
-    total larger than the page) and False only when the response carries no
-    ``Link`` header at all. Any ``Link`` header the parser cannot read is treated
-    as partial with a floor total rather than as completeness.
+    total larger than the page). It is False when no ``Link`` header is present
+    at all, OR when the advertised last page contains the whole list — so a
+    ``Link`` header CAN be present on a ``partial=False`` response, and "no Link
+    header" is not the only way to reach completeness. Any ``Link`` header the
+    parser cannot read is treated as partial with a floor total rather than as
+    completeness.
 
     ``--paginate`` is deliberately absent. Following the ``rel="next"`` chain
     to exhaustion cost ~19 requests on this repo (measured ``Link: rel="last"``
@@ -1438,7 +2333,8 @@ def _closed_pr_sample(gh_bin: str, slug: str | None, cwd: str,
         f"repos/{slug}/pulls?state=closed&per_page={page_size}",
         "--jq",
         "map({number, title, body, state, url, "
-        "headRefName: .head.ref, mergedAt: .merged_at})",
+        "headRefName: .head.ref, headSha: (.head.sha // \"\"), "
+        "mergedAt: .merged_at})",
     ]
     rc, out, err, timed_out = _run([gh_bin, *args], cwd, timeout)
     if rc != 0:
@@ -1493,7 +2389,14 @@ def _closed_pr_sample(gh_bin: str, slug: str | None, cwd: str,
     has_next = _LINK_NEXT_RE.search(link_values) is not None
     if last_match:
         approx_total = int(last_match.group(1)) * page_size
-        partial = approx_total > len(prs)
+        # ⛔ `has_next` IS DECISIVE, exactly as the invariant above says. Reading
+        # only `last` here meant that when the two relations disagreed — `last`
+        # parseable, `next` present — the page was reported as "the complete
+        # list" while the response itself proved a further page existed, i.e. the
+        # sample-as-everything failure this tool exists to prevent. The advisory
+        # surface cannot change an exit code, so no test caught it; the human
+        # reading the report is the one who was misled.
+        partial = has_next or approx_total > len(prs)
     elif has_next or link_values:
         # More pages provably exist, or a Link header exists that this parser
         # could not interpret. Report partial-with-a-floor rather than claiming
@@ -1521,24 +2424,35 @@ def _pr_ref(pr: dict) -> str:
 
 
 def scan_pr_surface(
-    surface: Surface, prs: list[dict], issue: int, keywords: list[str],
-    min_keywords: int,
+    surface: Surface, prs: list[dict], issue: int, identity: Identity,
+    use_closing_field: bool,
 ) -> None:
     """PR surface matching.
 
+    ⛔ ORDER IS LOAD-BEARING. The caller's OWN PR, and a PR that simply *is* the
+    issue, are decided FIRST — before any match test. #4567 found this order
+    inverted: the keyword test ran first and `continue`d unconditionally, so the
+    self-PR suppression below it was **dead code** and `exit 0` was unreachable
+    for any issue whose number is also a PR. Deleting the keyword arm removes
+    that particular trap, but the ordering rule stays explicit because "test
+    something before self" is the defect, not the keyword arm itself.
+
     STRONG hits are name-like or contractual fields: the title (this repo's
-    convention is `type(scope): #N ...`), the head ref (`<type>/<N>-<slug>`),
-    or a BODY CLOSING REFERENCE (`Closes #N`). The body is otherwise PROSE:
-    a bare `#N` mention there is recorded as a WEAK, non-blocking signal —
-    cross-reference prose is not work (live bug: "restored in #2745" on closed
-    PR #2926 and "filed as #2751" on PR #2754 read as strong COLLISIONs).
-    Keyword matching applies to the head ref only (name-like), never prose.
+    convention is `type(scope): #N ...`), the head ref (`<type>/<N>-<slug>`), or
+    a COMPUTED closing reference. The body is otherwise PROSE: a bare `#N`
+    mention there is a WEAK, non-blocking signal — cross-reference prose is not
+    work (live bug: "restored in #2745" on closed PR #2926, "filed as #2751" on
+    PR #2754).
 
     A TERMINAL PR (merged or closed) cannot be in flight, so every match on one
-    is immutable history: it is REPORTED, but at `weak` strength, which
-    `format_report` never counts toward the verdict. The state is derived from
-    the PR itself, which leaves the open-PR surface untouched — its PRs are not
-    terminal by construction (#4886, #5112, #4533).
+    is immutable history: REPORTED, at `weak` strength, which `format_report`
+    never counts toward the verdict (#4886, #5112, #4533).
+
+    `use_closing_field` selects the closing-reference test. It is True on the
+    BLOCKING open-PR surface, which asks gh for `closingIssuesReferences` —
+    GitHub's own field, exact by construction. It is False on the ADVISORY
+    closed-PR surface, whose REST payload has no such field, so that one falls
+    back to the regex — and every hit it can produce there is already `weak`.
     """
     for pr in prs:
         title = pr.get("title") or ""
@@ -1549,6 +2463,19 @@ def scan_pr_surface(
             f" — PR is {terminal}: immutable history, not in-flight work "
             "(non-blocking)"
         )
+        # 1. SELF, FIRST (#3504 class 4; #4567's ordering root cause).
+        if identity.owns_branch(head):
+            surface.add(_pr_ref(pr),
+                        "your own PR (its head branch is one of --self-branch) — "
+                        "not a competing claim", "weak")
+            continue
+        # 2. The PR *is* the issue: not separate in-flight work.
+        if str(pr.get("number")) == str(issue):
+            surface.add(_pr_ref(pr),
+                        f"PR number == issue ({issue}): this PR *is* the issue, "
+                        "not separate in-flight work (non-blocking)", "weak")
+            continue
+        # 3. Real match tests.
         if number_present(title, issue):
             surface.add(_pr_ref(pr),
                         f"matched issue-number ({issue}) in title{suffix}",
@@ -1559,21 +2486,34 @@ def scan_pr_surface(
                         f"matched issue-number ({issue}) in branch{suffix}",
                         "weak" if terminal else "strong")
             continue
-        if closing_reference(body, issue):
+        if use_closing_field:
+            # Raises on a missing/malformed field; the caller turns that into
+            # INCOMPLETE rather than silently losing a blocking signal.
+            by_field = issue in _closing_ref_numbers(pr)
+            # DELIBERATE UNION, not redundancy. The computed field is the
+            # SOURCE and is authoritative where it speaks; the regex is kept as
+            # a second, ADDING-ONLY test because a field-only implementation
+            # would DROP a hit the moment GitHub's field misses something a
+            # body states plainly (`Closes #N` in a cross-repo reference, say),
+            # and dropping a blocking signal is the fail-OPEN direction — the
+            # one a gate must never take. The union can only add hits, so
+            # "prefer the source" is honoured without betting the gate on the
+            # source being complete for every edge case. The field's ABSENCE is
+            # still loud: it raises above and becomes INCOMPLETE.
+            by_body = closing_reference(body, issue)
+            if by_field or by_body:
+                how = (
+                    "GitHub's closingIssuesReferences includes" if by_field
+                    else "closing keyword in the body for"
+                )
+                surface.add(_pr_ref(pr), f"{how} #{issue}{suffix}",
+                            "weak" if terminal else "strong")
+                continue
+        elif closing_reference(body, issue):
             surface.add(_pr_ref(pr),
-                        f"closing reference to #{issue} in body{suffix}",
+                        f"closing reference to #{issue} in body (regex fallback — "
+                        f"this surface is advisory){suffix}",
                         "weak" if terminal else "strong")
-            continue
-        kws = keyword_hit(head, keywords, min_keywords)
-        if kws:
-            surface.add(_pr_ref(pr),
-                        "keyword(s): " + ", ".join(kws) + suffix,
-                        "weak" if terminal else "keyword")
-            continue
-        if str(pr.get("number")) == str(issue):
-            surface.add(_pr_ref(pr),
-                        f"PR number == issue ({issue}): this PR *is* the issue, "
-                        "not separate in-flight work (non-blocking)", "weak")
             continue
         if number_present(body, issue):
             surface.add(_pr_ref(pr),
@@ -1582,17 +2522,28 @@ def scan_pr_surface(
 
 
 def assignee_attribution(login: str | None, identity: Identity) -> str:
-    """Attribute an issue assignee: ``other`` | ``unknown``.
+    """Attribute an issue assignee: ``other`` | ``shared`` | ``unknown``.
 
     GitHub's assignee is a LOGIN only — unlike a comment it carries no lane or
-    session marker. On this fleet every lane shares ONE account, so an assignee
-    equal to our own login CANNOT be attributed to THIS lane: it could be any
-    lane (or a human) that assigned the shared account. Treating login
-    equality as "self" would make the assignee surface blind to every other
-    lane on the fleet — a false negative, the worse of the two failure modes —
-    so it is deliberately NOT treated as positive evidence. A different login
-    is affirmatively ``other``; everything else is ``unknown`` and is kept as
-    a hit by the caller (fail closed).
+    session marker. The rule is now keyed on the only question that matters:
+    **can this value distinguish one lane from another?**
+
+    * ``other`` — a DIFFERENT login. Affirmatively another party, so it blocks.
+    * ``shared`` — OUR OWN login. On this fleet every lane authenticates as one
+      account, so this value cannot distinguish lanes: it is equally consistent
+      with a human triaging, with this lane, and with any other lane. A signal
+      that is the same in every world carries no information, and the tool has
+      no business blocking a dispatch on it. It is ADVISORY.
+    * ``unknown`` — no login, a placeholder, or we could not resolve our own
+      login. We cannot tell, so it blocks: that is the fail-closed direction.
+
+    This REPLACES the previous rule, which kept the shared-account case as a
+    blocking hit on the argument that suppressing it "would blind the surface
+    to every other lane". That argument is exactly backwards for a gate: a
+    value that is identical for every lane cannot reveal any lane, so treating
+    it as a hit does not preserve sensitivity — it manufactures a permanent
+    false COLLISION. The repo owner is the assignee on 86 of 622 open issues,
+    which is triage, not contention (#3504 class 3).
     """
     if not login or login.strip().lower() in ("", "unknown", "ghost", "none"):
         return "unknown"
@@ -1600,7 +2551,7 @@ def assignee_attribution(login: str | None, identity: Identity) -> str:
         return "unknown"
     if login.strip().lower() != identity.login.strip().lower():
         return "other"
-    return "unknown"
+    return "shared"
 
 
 def _comment_ref(comment: dict, login: str | None) -> str:
@@ -1690,13 +2641,13 @@ def scan_issue_surface(
     (and every uncertain one) carries a REMEDY line naming the comment the lane
     must verify by hand.
 
-    An ASSIGNEE carries only a login, with no lane or session marker. On this
-    shared-account fleet an assignee equal to our own login is therefore NOT
-    attributable to this lane (any lane could have set it), so it is reported
-    as un-attributable and kept as a hit — fail closed. Only a DIFFERENT login
-    is affirmatively another party's. Suppressing same-account assignments
-    would blind the surface to every other lane on the fleet (a false
-    negative), so a lane's own self-assignment still blocks its own dispatch.
+    An ASSIGNEE carries only a login, with no lane or session marker. The rule
+    is "can this value distinguish one lane from another?": a DIFFERENT login is
+    another party's and blocks; OUR SHARED login is identical for every lane and
+    is therefore advisory (see `assignee_attribution`); anything unresolvable
+    blocks. The previous rule blocked the shared-account case too, which made
+    the repo owner's own triage assignments (86 of 622 open issues) permanent
+    false COLLISIONs (#3504 class 3).
     """
     for assignee in issue_data.get("assignees") or []:
         login = assignee.get("login") if isinstance(assignee, dict) else str(assignee)
@@ -1704,15 +2655,24 @@ def scan_issue_surface(
         if who == "other":
             surface.add(
                 f"assignee:{login}",
-                "issue is assigned to another account (not this lane's) — claimed",
+                "issue is assigned to a DIFFERENT account — affirmatively another "
+                "party's claim",
                 "strong",
+            )
+        elif who == "shared":
+            surface.add(
+                f"assignee:{login}",
+                "issue is assigned to the SHARED fleet account — that value is "
+                "identical for every lane, so it cannot distinguish one lane from "
+                "another; triage, not contention (non-blocking)",
+                "weak",
             )
         else:
             surface.add(
                 f"assignee:{login}",
-                "issue is assigned to the shared account; no lane/session marker "
-                "can attribute it to THIS lane, so it counts as a hit (fail "
-                "closed)",
+                "assignee could not be attributed (no login, a placeholder, or "
+                "this tool could not resolve its own login) — counts as a hit "
+                "(fail closed)",
                 "strong",
             )
     fleet_login = (identity.login or "").strip().lower()
@@ -1751,7 +2711,7 @@ def scan_issue_surface(
     candidates = decidable + untrusted
     if candidates:
         if classifier is None:
-            verdicts = [ClaimVerdict("collision", None, "fallback")] * len(candidates)
+            verdicts = [ClaimVerdict("collision", None)] * len(candidates)
         else:
             decided = classifier.classify(
                 [body for _comment, body in decidable], issue_context,
@@ -1761,13 +2721,13 @@ def scan_issue_surface(
                 # Defensive: a short verdict list must never silently DROP a
                 # candidate — pad with a fail-closed COLLISION.
                 decided = list(decided) + [
-                    ClaimVerdict("collision", None, "fallback")
+                    ClaimVerdict("collision", None)
                 ] * (len(decidable) - len(decided))
             # Non-fleet candidates are hits BY RULE — never model-decided, so an
             # untrusted body can neither be cleared nor steer a trusted one.
             verdicts = list(decided) + [
                 ClaimVerdict(
-                    "untrusted", None, "rule",
+                    "untrusted", None,
                     "fleet identity unresolved" if identity_unresolved
                     else "author is not the fleet account",
                 )
@@ -1779,7 +2739,7 @@ def scan_issue_surface(
             # candidate) must be a HIT, never a silent drop. A `zip` would
             # truncate to the shorter list and DROP the tail.
             verdict = verdicts[index] if index < len(verdicts) else ClaimVerdict(
-                "collision", None, "fallback", "no verdict produced",
+                "collision", None, "no verdict produced",
             )
             if not verdict.is_hit:
                 cleaned += 1
@@ -1996,13 +2956,11 @@ def run_preflight(
     gh_bin: str,
     git_bin: str,
     timeout: float,
-    explicit_keywords: str | None = None,
-    min_keywords: int = DEFAULT_MIN_KEYWORDS,
     open_pr_limit: int = PR_LIMIT,
     closed_pr_limit: int = CLOSED_PR_LIMIT,
     closed_pr_timeout: float = CLOSED_PR_TIMEOUT,
     identity: Identity | None = None,
-) -> tuple[list[Surface], str | None, list[str], int, bool]:
+) -> tuple[list[Surface], str | None, int]:
     identity = identity or Identity()
     surfaces: dict[str, Surface] = {
         name: Surface(
@@ -2017,9 +2975,11 @@ def run_preflight(
     cwd = target.path or os.getcwd()
     slug = target.slug
 
-    # 1. Issue metadata FIRST — it is both a surface (assignee/comments) and the
-    #    keyword source for the name-like surfaces. A failure here leaves the
-    #    keyword dimension INCOMPLETE (never silently number-only).
+    # 1. Issue metadata FIRST — it is a surface in its own right (assignee +
+    #    claim comments), and its title is what the report prints in full so a
+    #    wrong-target read is visible at the point of use (#4027). A failure here
+    #    leaves THAT surface INCOMPLETE and does not silently degrade anything
+    #    else: the title used to feed the keyword arm, and that arm is gone.
     #
     #    The target repo (`slug`) is sent EXPLICITLY on every gh call. If it
     #    cannot be resolved the run is INCOMPLETE rather than inferred from the
@@ -2042,6 +3002,10 @@ def run_preflight(
                 cwd, timeout,
             )
             if isinstance(data, dict):
+                # Before anything reads it: a malformed payload must become a
+                # NAMED INCOMPLETE, never a traceback (exit 1 == COLLISION) and
+                # never a silent empty read (fail-open).
+                _require_issue_payload(data, f"gh issue view #{issue} in {slug}")
                 issue_data = data
                 title = data.get("title") or None
             else:
@@ -2065,45 +3029,10 @@ def run_preflight(
             issue_context=_claim_context(issue, slug),
         )
 
-    keywords = derive_keywords(title, explicit_keywords)
-    suppressed = [] if explicit_keywords else suppressed_keywords(title)
-    if keywords:
-        note = (
-            "source: " + ("--keywords" if explicit_keywords else "gh issue title")
-            + f"; {len(keywords)} distinctive keyword(s)"
-        )
-        if suppressed:
-            note += (
-                f"; {len(suppressed)} generic term(s) excluded from the gate "
-                f"({', '.join(suppressed)})"
-            )
-        surfaces[SURFACE_KEYWORDS].note = note
-    elif explicit_keywords:
-        surfaces[SURFACE_KEYWORDS].note = (
-            "source: --keywords; 0 usable keyword(s) after parsing"
-        )
-        surfaces[SURFACE_KEYWORDS].blind = True
-    elif title is not None:
-        # The title WAS fetched — it simply contains no distinctive term. That
-        # is an evaluated, empty keyword dimension (number matching still runs),
-        # NOT an unqueryable surface. Conflating the two turned a title like
-        # "fix graph delete" into a spurious INCOMPLETE (exit 2) once the
-        # cross-cutting stoplist was widened (#3325). It is still BLIND for
-        # keyword matching, and the verdict now says so (#3378 P2-1) instead
-        # of advertising a complete 7/7-surface scan.
-        surfaces[SURFACE_KEYWORDS].note = (
-            "source: gh issue title; 0 distinctive keyword(s) — every title term "
-            "is generic/cross-cutting, so keyword-only matching has no signal "
-            "(number matching is unaffected)"
-        )
-        if suppressed:
-            surfaces[SURFACE_KEYWORDS].note += f"; excluded: {', '.join(suppressed)}"
-        surfaces[SURFACE_KEYWORDS].blind = True
-    else:
-        surfaces[SURFACE_KEYWORDS].incomplete(
-            "keyword-source-unavailable: gh issue title could not be fetched and "
-            "--keywords was not supplied"
-        )
+    # The keyword dimension is GONE (#3504) — see the note where the stoplists
+    # used to live. Nothing is derived from the title any more; `title` is kept
+    # because the report prints it in full, which is what makes a wrong-target
+    # read visible at the point of use (#4027).
 
     # 2. PR surfaces. Open PRs are enumerated to COMPLETENESS over
     #    `gh pr list` (one GraphQL request, fetched as `--limit cap+1`), where
@@ -2115,6 +3044,12 @@ def run_preflight(
     #    enumeration (#5251). The `--search` filter is deliberately NOT used
     #    (the search API silently caps at 1000 results — a partial query wearing
     #    a complete face — and `search/issues` cannot return `head.ref`).
+    # Head SHAs of MERGED PRs, harvested from the closed-PR sample this run
+    # already fetches (`head.sha` + `merged_at` are both on the REST payload).
+    # The branch surface uses them for the squash-merge test (#5186) at ZERO
+    # added API cost — decision D4, which is why that test reuses this list
+    # instead of issuing a `gh pr list --head <ref>` per branch.
+    merged_head_shas: set[str] = set()
     for surface_name, state, limit in (
         (SURFACE_OPEN_PRS, "open", open_pr_limit),
         (SURFACE_CLOSED_PRS, "closed", closed_pr_limit),
@@ -2137,7 +3072,48 @@ def run_preflight(
                 prs, approx_total, partial = _closed_pr_sample(
                     gh_bin, slug, cwd, closed_pr_timeout, limit,
                 )
-                scan_pr_surface(surface, prs, issue, keywords, min_keywords)
+                # Before the harvest AND the scan, so a malformed element cannot
+                # reach `.get()` on either path.
+                _require_pr_dicts(prs, f"the closed-PR sample for {slug}",
+                                  required=("headSha",))
+                for _pr in prs:
+                    if _pr.get("merged_at") or _pr.get("mergedAt"):
+                        # `headSha` is the PROJECTED key this sample actually
+                        # carries (see `_closed_pr_sample`'s jq filter). Reading
+                        # a nested `head.sha` here was a silent no-op: the
+                        # projection never emits it, so the set stayed empty and
+                        # the squash-merge test never ran in production.
+                        _sha = _pr.get("headSha")
+                        if _sha:
+                            merged_head_shas.add(str(_sha))
+                # ⛔ THIS ADVISORY SURFACE'S DATA FEEDS A BLOCKING ONE, and the
+                # authority split does not forbid it — the split is about which
+                # surface can BLOCK, not about where evidence comes from. The
+                # `merged_head_shas` harvested just above (from the closed-PR
+                # sample, authority ADVISORY) are passed to the BLOCKING branch
+                # and worktree scans, where predicate 1 uses them to DEMOTE a hit
+                # to `weak` — so advisory data can turn COLLISION into CLEAN.
+                #
+                # That is deliberate (D4: the sample is already fetched, so the
+                # squash-merge test costs zero API calls) and it is safe in
+                # exactly one direction:
+                #
+                #   * it can only ever REMOVE a hit, never add one — every entry
+                #     is an exact head SHA from a MERGED PR record, and a failed
+                #     or empty sample leaves the branches BLOCKING;
+                #   * so a failed closed-PR sample is fail-CLOSED, which is
+                #     asserted by
+                #     `test_branch_still_blocks_when_the_closed_pr_sample_fails`.
+                #
+                # Keep it that way: this coupling is the one place where the
+                # advisory/blocking split is not structural, and it is the only
+                # reason the report's "ONLY a BLOCKING surface can decide the
+                # verdict" is a statement about BLOCKING, not about evidence.
+                #
+                # `use_closing_field=False`: this payload is REST `/pulls`, which
+                # has no `closingIssuesReferences`. Every hit here is advisory.
+                scan_pr_surface(surface, prs, issue, identity,
+                                use_closing_field=False)
                 if partial:
                     shown = (
                         f"~{approx_total}" if approx_total is not None
@@ -2159,12 +3135,19 @@ def run_preflight(
                         "(this page is the complete list)"
                     )
                 continue
+            # `closingIssuesReferences` is requested explicitly: it is GitHub's
+            # own computed field (#3504), and `scan_pr_surface` REQUIRES it on
+            # this blocking surface — a missing key is INCOMPLETE, never
+            # "closes nothing".
             args = ["pr", "list", "--state", state, "--repo", slug,
                     "--limit", str(limit + 1),
-                    "--json", "number,title,body,headRefName,state,url,mergedAt"]
+                    "--json",
+                    "number,title,body,headRefName,state,url,mergedAt,"
+                    "closingIssuesReferences"]
             prs = _gh_json(gh_bin, args, cwd, timeout)
             if not isinstance(prs, list):
                 raise SurfaceError(f"gh {state}-PR enumeration returned non-list JSON")
+            _require_pr_dicts(prs, f"the {state}-PR enumeration for {slug}")
             if len(prs) > limit:
                 surface.mark_truncated(
                     f"truncated at the {limit} cap — more than {limit} {state} "
@@ -2173,18 +3156,59 @@ def run_preflight(
                     "(or COLLISION_PREFLIGHT_PR_LIMIT)."
                 )
                 prs = prs[:limit]
-            scan_pr_surface(surface, prs, issue, keywords, min_keywords)
-            if not surface.truncated:
+            try:
+                scan_pr_surface(surface, prs, issue, identity,
+                                use_closing_field=True)
+            except SurfaceError as exc:
+                # A missing/malformed closingIssuesReferences would DROP a
+                # blocking signal, so it is INCOMPLETE rather than a silent
+                # pass. Raised from inside the scan, caught here so the other
+                # surfaces still report.
+                surface.incomplete(
+                    f"closing-reference-source-unavailable: {exc}"
+                )
+            # ⛔ `incomplete()` writes into `note`, so an unguarded assignment
+            # here CLOBBERS the reason the surface is INCOMPLETE — and replaces
+            # it with the word "complete", on a surface that just said it could
+            # not be read. The status stayed correct (exit 2), so only the
+            # REPORT lied, which is the failure mode this tool exists to catch.
+            # A test asserts the reason string, which is how this was found.
+            if not surface.truncated and surface.status != STATUS_INCOMPLETE:
                 surface.note = f"{len(prs)} PR(s) enumerated (complete, cap {limit})"
         except SurfaceError as exc:
             surface.incomplete(f"gh-unavailable: {exc}")
 
-    # 3. Branch surfaces. Remote refs are number-matched ONLY: the
+    # 3. Branch surfaces. The TERMINAL predicates are not applied to the
+    #    remote namespace (see `_branch_terminal_state`): a remote-tracking ref
+    #    is a local cache, and demoting on it could call a reused live branch
+    #    merged. Remote refs are number-matched ONLY: the
     #    remote-tracking namespace carries hundreds of stale branches and
     #    keyword-scanning it produced 878 false hits on a real run.
-    for surface_name, namespace, allow_kw in (
-        (SURFACE_LOCAL_BRANCHES, "refs/heads", True),
-        (SURFACE_REMOTE_BRANCHES, "refs/remotes", False),
+    # The local-branch walk, kept so the worktree surface can REUSE it rather
+    # than re-issuing the identical query (and so its unavailability is
+    # reported once, consistently, on every surface that depends on it).
+    ancestor_merged_local: set[str] | None = None
+    # `origin/main`'s tip, resolved ONCE: the ancestor arm must be STRICT (see
+    # `_branch_terminal_state`), and that needs the tip to compare against. If it
+    # cannot be resolved the arm is NOT applied and already-merged refs keep
+    # blocking — the fail-closed direction, never a silent loosening.
+    main_tip: str | None = None
+    if target.path is not None:
+        _rc, _out, _err, _to = _run(
+            [git_bin, "rev-parse", "--verify", "--quiet", "origin/main"],
+            cwd, timeout,
+        )
+        if _rc == 0 and _out.strip():
+            main_tip = _out.strip()
+    # ⛔ The witness predicate 2 actually needs (see `_first_parent_shas`).
+    # Without it, `sha != main_tip` protects a fresh branch only until main
+    # advances one commit, after which plain ancestry reads it as landed.
+    first_parent: set[str] | None = None
+    if target.path is not None:
+        first_parent = _first_parent_shas(git_bin, cwd, timeout)
+    for surface_name, namespace in (
+        (SURFACE_LOCAL_BRANCHES, "refs/heads"),
+        (SURFACE_REMOTE_BRANCHES, "refs/remotes"),
     ):
         surface = surfaces[surface_name]
         if target.path is None:
@@ -2196,10 +3220,46 @@ def run_preflight(
             continue
         try:
             refs = _git_refs(git_bin, cwd, namespace, timeout)
-            scan_branch_surface(surface, refs, issue, keywords, min_keywords, allow_kw)
+            # ONE `--merged` walk per namespace (#5186). `None` means the walk
+            # could not run: the test only ever DOWNGRADES a hit, so the run
+            # stays fail-closed, but the note says so rather than reporting an
+            # inability as "nothing is merged".
+            # ⛔ The `--merged` walk is ONLY meaningful for `refs/heads`.
+            # `_branch_terminal_state` refuses to judge a remote-tracking ref (it
+            # is a fetch cache), so running the walk on `refs/remotes` and
+            # reporting its count told the reader that N remote refs had been
+            # found merged and downgraded — when the surface had refused to
+            # judge a single one. A walk FAILURE there printed an alarming
+            # warning about a test that cannot affect that row. Report what is
+            # measured.
+            if namespace == "refs/heads":
+                ancestor_merged = _ancestor_merged_refs(
+                    git_bin, cwd, namespace, timeout
+                )
+                ancestor_merged_local = ancestor_merged
+            else:
+                ancestor_merged = None
+            scan_branch_surface(
+                surface, refs, issue, identity, merged_head_shas,
+                ancestor_merged, main_tip, first_parent,
+            )
             surface.note = f"{len(refs)} ref(s) enumerated"
-            if not allow_kw and keywords:
-                surface.note += "; number-only (remote refs are stale/numerous)"
+            if namespace != "refs/heads":
+                surface.note += (
+                    "; terminal tests are NOT applied here (a remote-tracking ref "
+                    "is a local fetch cache, so judging it terminal could call a "
+                    "reused live branch merged)"
+                )
+            elif ancestor_merged is None:
+                surface.note += (
+                    "; ⚠ 'merged into main' detection UNAVAILABLE (for-each-ref "
+                    "--merged failed) — already-merged refs are NOT downgraded by "
+                    "that test (the squash-merge test still applies)"
+                )
+            else:
+                surface.note += (
+                    f"; {len(ancestor_merged)} already merged into main"
+                )
         except SurfaceError as exc:
             surface.incomplete(f"git-unavailable: {exc}")
 
@@ -2219,18 +3279,35 @@ def run_preflight(
             if rc != 0:
                 why = "timeout" if timed_out else f"exit {rc}"
                 raise SurfaceError(f"git worktree list failed ({why}): {_one_line(err)}")
+            # `_worktree_blocks` REFUSES an unreadable record, an unrecognised
+            # continuation line, and a record missing its path or HEAD, so a
+            # parse loss is a NAMED INCOMPLETE rather than a silently smaller
+            # answer. The count guard that used to sit here could never fire: it
+            # compared `len(blocks)` with the number of `worktree ` lines, and
+            # the parser built one block per such line.
             blocks = _worktree_blocks(out)
-            if out.strip() and len(blocks) != sum(
-                1 for ln in out.splitlines() if ln.startswith("worktree ")
-            ):
-                raise SurfaceError("worktree porcelain parse lost an entry (refusing partial scan)")
-            scan_worktree_surface(surface, blocks, issue, keywords, min_keywords)
+            # Reuse the LOCAL-BRANCH walk instead of repeating the identical
+            # `for-each-ref --merged=origin/main refs/heads` query, and carry
+            # its availability through: when the walk could not run, the
+            # branch surfaces say so, and this surface claiming a plain
+            # "untruncated" enumeration implied the terminal test had run.
+            _wt_ancestor = ancestor_merged_local
+            scan_worktree_surface(
+                surface, blocks, issue, identity, merged_head_shas,
+                _wt_ancestor, main_tip, first_parent,
+            )
             surface.note = f"{len(blocks)} worktree(s) enumerated (untruncated)"
+            if _wt_ancestor is None:
+                surface.note += (
+                    "; ⚠ 'merged into main' detection UNAVAILABLE (for-each-ref "
+                    "--merged failed) — already-merged refs are NOT downgraded by "
+                    "that test (the squash-merge test still applies)"
+                )
         except SurfaceError as exc:
             surface.incomplete(f"git-unavailable: {exc}")
 
     ordered = [surfaces[name] for name in ALL_SURFACES]
-    return ordered, title, keywords, issue, bool(explicit_keywords)
+    return ordered, title, issue
 
 
 def _assert_all_surfaces(ordered: list[Surface]) -> None:
@@ -2246,14 +3323,18 @@ def format_report(
     issue: int,
     target: RepoTarget,
     title: str | None,
-    keywords: list[str],
-    min_keywords: int,
 ) -> tuple[str, int]:
     _assert_all_surfaces(ordered)
 
     hits = [h for s in ordered for h in s.hits]
     # ── authority (#5251) ───────────────────────────────────────────────────
-    # ONLY a BLOCKING surface can decide the verdict. An advisory surface is
+    # ONLY a BLOCKING surface can decide the verdict — which is a statement about
+    # which surface may BLOCK, NOT about where its evidence comes from: the
+    # advisory closed-PR sample's head SHAs are deliberately consumed by the
+    # blocking branch scans to demote squash-merge residue (D4). That coupling
+    # can only ever REMOVE a hit, and it is stated where the harvest happens.
+    #
+    # An advisory surface is
     # still queried, still hit, and still reported — it simply cannot block a
     # dispatch, and its failure cannot conceal a collision, so it must not set
     # INCOMPLETE either. Filtering by SURFACE (not by hit strength) is what
@@ -2291,11 +3372,15 @@ def format_report(
         h for h in hits
         if h.surface not in advisory_names and h.strength == "strong"
     ]
-    keyword_hits = [
-        h for h in hits
-        if h.surface not in advisory_names and h.strength == "keyword"
-    ]
     weak = [h for h in hits if h.strength == "weak"]
+    # ── the verdict counts the hits that DECIDED it (#3504 class 2) ──────────
+    # `strong` is now the ONLY tier that can block, so it is the only tier the
+    # refusal may count. The verdict line used to print `len(hits)` — EVERY hit,
+    # weak prose and advisory rows included — which is how #2573 read as
+    # "8 hit(s)" and a COLLISION while its actual blocking content was smaller:
+    # the labels said non-blocking and the verdict contradicted them. A refusal
+    # whose stated reason is not what caused it is not verifiable.
+    deciding = strong
 
     lines: list[str] = []
     slug = _sanitize(target.slug) or "(unresolved)"
@@ -2306,18 +3391,17 @@ def format_report(
     )
     # The FULL title, never truncated: this line is what makes a wrong-target
     # read visible at the point of use (#4027). When it is unavailable the
-    # report says so, but that is a VISIBILITY aid, not by itself a fail-closed
-    # gate: `--keywords` can make the keyword dimension complete without a
-    # title. The fail-closed signals are the keyword surface's own status (a
-    # missing title with no --keywords is INCOMPLETE) and the BLIND annotation
-    # on the verdict when no distinctive keyword exists at all.
+    # report says so. That is a VISIBILITY aid, not a fail-closed gate: the
+    # title no longer feeds any decision (the lexical arm that consumed it is
+    # deleted, #3504), so a missing title cannot make a surface unreadable.
+    # The fail-closed signals are the issue surface's own status and every
+    # other surface's; none of them depends on the title.
     lines.append(
         f"title: {' '.join(_sanitize(title).split()) if title else '(unavailable — target not established)'}"
     )
-    lines.append(
-        f"keywords: {', '.join(_sanitize(k) for k in keywords) if keywords else '(none)'}"
-    )
-    lines.append(f"keyword gate: >= {max(1, min_keywords)} distinct DISTINCTIVE keyword(s) for a keyword-only hit")
+    lines.append("keyword gate: none — the lexical arm is deleted (#3504). A blocking "
+                 "hit is a match on the ISSUE NUMBER or a computed GitHub field; shared "
+                 "domain vocabulary is never consulted.")
     lines.append(
         f"claim gate: origin/main `_CLAIM_RE` recall pre-filter -> JEV typed "
         f"decision (CLEAN p<{JEV_CLEAN_MAX:.2f}; COLLISION p>={JEV_COLLISION_MIN:.2f}; "
@@ -2325,7 +3409,6 @@ def format_report(
     )
     lines.append("")
     lines.append(f"{'SURFACE':<24} {'STATUS':<11} {'HITS':<5} NOTE")
-    blind = [s for s in ordered if s.blind and s.status == STATUS_CLEAN]
     for surface in ordered:
         note = surface.note or ""
         if surface.truncated:
@@ -2334,12 +3417,7 @@ def format_report(
                 if surface.authority == AUTHORITY_ADVISORY
                 else "⚠ TRUNCATED — list is partial"
             )
-        if surface in blind:
-            status = "BLIND"
-        elif surface.authority == AUTHORITY_ADVISORY:
-            status = "ADVISORY"
-        else:
-            status = surface.status
+        status = "ADVISORY" if surface.authority == AUTHORITY_ADVISORY else surface.status
         lines.append(f"{surface.name:<24} {status:<11} {len(surface.hits):<5} {note}")
     if hits:
         lines.append("")
@@ -2349,19 +3427,45 @@ def format_report(
             by_surface.setdefault(hit.surface, []).append(hit)
         for surface_name, surface_hits in by_surface.items():
             for hit in surface_hits[:MAX_HITS_SHOWN]:
-                tag = {"strong": "number", "keyword": "keyword",
-                       "weak": "weak"}.get(hit.strength, hit.strength)
+                # Two tiers only, now that the lexical arm is deleted (#3504):
+                # a `keyword` strength no longer exists, so a tag entry for it
+                # would be dead code that reads as a live tier.
+                tag = {"strong": "number", "weak": "weak"}.get(
+                    hit.strength, hit.strength)
                 # An ADVISORY surface's hits are tagged distinctly. A CLEAN
                 # report can now legitimately DISPLAY a hit that would have
                 # blocked on a blocking surface, and the bare `(number)` tag is
                 # exactly what a blocking number hit prints — so an untagged
                 # advisory hit would be indistinguishable from the one that
                 # caused a refusal (review cycle 1).
-                if surface_name in advisory_names and hit.strength != "weak":
-                    tag += " (advisory — cannot block)"
+                #
+                # ⛔ APPLIED TO WEAK HITS TOO. The marker used to be gated on
+                # `hit.strength != "weak"`, which excluded the COMMON case on
+                # this surface: a match on a closed PR is weak whenever that PR
+                # is terminal (merged), i.e. almost always. So the advisory row
+                # printed the bare `(weak)` tag — which is equally what a weak
+                # hit on a BLOCKING surface prints — and the stated rationale
+                # ("distinguishable from a blocking surface's hit") was false for
+                # exactly the hits the surface usually produces. The exemption
+                # protected against nothing; drop it.
+                #
+                # Emitted as its OWN parenthesised group rather than appended to
+                # `tag`: appending produced `(number (advisory — cannot block))`,
+                # and nesting the marker inside the strength tag made a report
+                # line that is read by an agent harder to parse than the two
+                # facts deserve to be.
+                # NOT named `advisory`: that name already holds the LIST of
+                # advisory Surface objects in this function (used below for the
+                # advisory sections), and a str binding here shadowed it —
+                # `AttributeError: 'str' object has no attribute 'truncated'`.
+                # Caught by the existing strong-advisory test.
+                advisory_tag = (
+                    " (advisory — cannot block)"
+                    if surface_name in advisory_names else ""
+                )
                 lines.append(
                     f"  [{hit.surface}] {_sanitize(hit.ref)} — "
-                    f"{_sanitize(hit.detail)} ({tag})"
+                    f"{_sanitize(hit.detail)} ({tag}){advisory_tag}"
                 )
             if len(surface_hits) > MAX_HITS_SHOWN:
                 # The COUNT is complete and visible; only the detail sample is
@@ -2370,18 +3474,43 @@ def format_report(
                     f"  [{surface_name}] … +{len(surface_hits) - MAX_HITS_SHOWN} "
                     f"more hit(s) on this surface (total {len(surface_hits)})"
                 )
-    if weak and not strong and not keyword_hits:
+    if weak and not strong:
+        # ⛔ The heading must not describe only the PROSE kind. Since identity
+        # and terminal detection landed, `weak` also carries hits that plainly
+        # ARE work but cannot block: the caller's own branch/worktree, a
+        # terminal branch, and an assignee equal to the shared fleet account.
+        # Calling all of them "prose-only cross-references" made the report
+        # contradict its own contents — the "unverifiable verdict" class this
+        # change exists to remove (#3504 class 2).
         lines.append("")
-        lines.append("WEAK SIGNALS (non-blocking — prose is not work)")
-        lines.append(
-            f"  {len(weak)} prose-only cross-reference(s) of #{issue}; no title / "
-            "branch / worktree / closing-reference match. These do NOT block."
-        )
+        lines.append("WEAK SIGNALS (reported, non-blocking — these do NOT block)")
+        prose_only = [h for h in weak if "prose" in h.detail]
+        if prose_only:
+            lines.append(
+                f"  {len(prose_only)} prose-only cross-reference(s) of #{issue}; "
+                "no title / branch / worktree / closing-reference match."
+            )
+        rest = len(weak) - len(prose_only)
+        if rest:
+            lines.append(
+                f"  {rest} further non-blocking hit(s) that are NOT prose — your "
+                "own work, a terminal branch/PR, or the shared fleet account."
+            )
+        lines.append("  These do NOT block a dispatch.")
     if incomplete:
         lines.append("")
         lines.append("INCOMPLETE SURFACES")
         for surface in incomplete:
-            lines.append(f"  [{surface.name}] {surface.truncation_note or surface.note}")
+            # BOTH reasons are printed, never `truncation_note or note`: a
+            # surface can be INCOMPLETE *and* truncated, and the `or` form
+            # silently dropped the incompleteness reason — the same
+            # "the report misdescribes what it measured" defect already fixed
+            # once in this change (where an unguarded note assignment clobbered
+            # `incomplete()`'s message).
+            parts = [p for p in (surface.note, surface.truncation_note) if p]
+            lines.append(
+                f"  [{surface.name}] " + (" — ".join(parts) if parts else "unreadable")
+            )
     if advisory:
         lines.append("")
         lines.append(
@@ -2410,10 +3539,18 @@ def format_report(
     lines.append("")
     if strong:
         lines.append(
-            f"VERDICT: COLLISION (exit {EXIT_COLLISION}) — {len(hits)} hit(s) across "
-            f"{len({h.surface for h in hits})} surface(s) for #{issue} in {slug}; "
-            "do NOT dispatch"
+            f"VERDICT: COLLISION (exit {EXIT_COLLISION}) — {len(deciding)} blocking "
+            f"hit(s) across {len({h.surface for h in deciding})} surface(s) for "
+            f"#{issue} in {slug}; do NOT dispatch"
         )
+        # Say the non-deciding hits exist, so a refusal never reads as if the
+        # report contained nothing else — but never let them inflate the count
+        # that states WHY it refused (#3504 class 2).
+        if len(hits) != len(deciding):
+            lines.append(
+                f"  ({len(hits) - len(deciding)} further hit(s) were reported but are "
+                "non-blocking — weak prose/advisory — and did NOT cause this refusal)"
+            )
         # The remedy belongs at the POINT OF REFUSAL. Since #5070 the claim
         # pattern is only a PRE-FILTER: a claim-shaped hit is either a JEV typed
         # decision (the text asserts its author is doing this work) or a
@@ -2454,18 +3591,6 @@ def format_report(
                 f"({', '.join(s.name for s in incomplete)}) — fix gh auth/network and re-run."
             )
         return "\n".join(lines) + "\n", EXIT_COLLISION
-    if keyword_hits:
-        lines.append(
-            f"VERDICT: COLLISION (keyword-only) (exit {EXIT_COLLISION}) — {len(hits)} "
-            f"hit(s) across {len({h.surface for h in hits})} surface(s) for #{issue} in "
-            f"{slug}; do NOT dispatch"
-        )
-        if incomplete:
-            lines.append(
-                f"  ALSO INCOMPLETE: {len(incomplete)} surface(s) could not be queried "
-                f"({', '.join(s.name for s in incomplete)}) — fix gh auth/network and re-run."
-            )
-        return "\n".join(lines) + "\n", EXIT_COLLISION
     if incomplete:
         lines.append(
             f"VERDICT: INCOMPLETE (exit {EXIT_INCOMPLETE}) — {len(incomplete)} surface(s) "
@@ -2474,21 +3599,21 @@ def format_report(
         )
         return "\n".join(lines) + "\n", EXIT_INCOMPLETE
     if weak:
+        # NOT "prose signals": since identity and terminal detection landed,
+        # `weak` also carries the caller's own branch/worktree, a terminal
+        # branch, and an assignee equal to the shared fleet account. The WEAK
+        # SIGNALS block above was already corrected to say so; leaving this line
+        # calling them all "prose" made the report contradict its own contents
+        # eight lines earlier — the same unverifiable-verdict class this change
+        # removes (#3504 class 2).
         lines.append(
-            f"NOTE: {len(weak)} weak prose signal(s) ignored (cross-reference prose "
-            "is not work; non-blocking)"
+            f"NOTE: {len(weak)} weak, non-blocking signal(s) ignored (see WEAK "
+            "SIGNALS above); none can cause a refusal"
         )
     lines.append(
         f"VERDICT: CLEAN (exit {EXIT_CLEAN}) — {len(queried)}/{len(ALL_SURFACES)} "
         f"surfaces queried{advisory_note}, no in-flight work found for #{issue} in {slug}"
     )
-    if blind:
-        lines.append(
-            f"  BLIND: {', '.join(s.name for s in blind)} yielded no distinctive "
-            "keyword(s), so a keyword-only collision could be missed. Number "
-            "matching and every other surface are unaffected; supply --keywords "
-            "to restore the keyword dimension."
-        )
     return "\n".join(lines) + "\n", EXIT_CLEAN
 
 
@@ -2543,6 +3668,9 @@ def _resolve_target(args, timeout: float) -> tuple[RepoTarget | None, int]:
         if current and current.lower() == slug_explicit.lower():
             target.path = path
         else:
+            # A clone FOUND by searching, which is very often the ordinary
+            # checkout the caller is sitting in but is NOT evidence that it is
+            # theirs — hence `_standing_in`, not this branch, decides identity.
             target.path = find_local_clone(slug_explicit, args.git, timeout, roots)
     else:
         slug, how = resolve_slug(args.gh, args.git, path, timeout)
@@ -2616,8 +3744,29 @@ def _ambiguity_refusal(args, target: RepoTarget, timeout: float) -> int | None:
     return None
 
 
+class _UsageParser(argparse.ArgumentParser):
+    """An `ArgumentParser` whose usage errors exit EXIT_USAGE, not argparse's 2.
+
+    argparse's default is `sys.exit(2)`, which COLLIDES with this tool's
+    EXIT_INCOMPLETE. That is not cosmetic. #3504 deleted the lexical arm
+    (`--keywords` / `--min-keywords`), so the most likely way to invoke this tool
+    wrongly is now a stale caller still passing one of those flags — and a
+    caller handed exit 2 learns "a surface could not be read", which is a
+    transient-looking condition it may sensibly RETRY. Retrying a flag that can
+    never be accepted is a loop with no exit. "You called it wrong" and "the
+    world could not be read" are different facts and get different codes.
+
+    Both directions are fail-closed (neither permits a dispatch), so this is a
+    clarity fix, not a safety one — but the whole point of a pre-flight gate is
+    that its answer is legible."""
+
+    def error(self, message: str) -> None:
+        self.print_usage(sys.stderr)
+        self.exit(EXIT_USAGE, f"{self.prog}: error: {message}\n")
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
+    parser = _UsageParser(
         prog="collision_preflight",
         description="Fail-loud, all-surface in-flight-work pre-flight for a GitHub issue (#3061).",
     )
@@ -2629,11 +3778,33 @@ def main(argv: list[str] | None = None) -> int:
              "current directory, with a cross-repo ambiguity refusal rather than a "
              "guess (#4027)",
     )
-    parser.add_argument("--keywords", default=None,
-                        help="comma-separated keyword override when gh cannot supply the title")
-    parser.add_argument("--min-keywords", type=int, default=DEFAULT_MIN_KEYWORDS,
-                        help="distinct DISTINCTIVE keywords required for a keyword-only hit "
-                             f"(default {DEFAULT_MIN_KEYWORDS}; 1 disables the count gate)")
+    # ── self-identity: DECLARED, never inferred (#3504 classes 1/4) ─────────
+    # The caller knows its own branch and worktree at call time. Passing them is
+    # how a hit on the caller's OWN artifacts stops being read as a competing
+    # claim — the fix that a text heuristic could not make, because "is this
+    # mine?" is not a property of the string. Repeatable: a lane may own several
+    # refs. Omitting these flags is fail-CLOSED — adding a ref to the self set
+    # REMOVES hits, so a missing declaration can only leave more refs blocking.
+    # The AUTO-DETECTION below is the opposite: it is fail-OPEN, because it
+    # declares the target checkout's own branch and root unbidden. The flags are
+    # the authoritative input; the auto-detection is the convenience.
+    parser.add_argument(
+        "--self-branch", action="append", default=[], metavar="REF",
+        help="a branch this session OWNS (repeatable). A hit on it is reported "
+             "as your own work and cannot block. The target checkout's current "
+             "branch is added automatically UNLESS it is recognised as the "
+             "repository's default branch. (Recognition seeds main/master and "
+             "resolves origin/HEAD; with origin/HEAD unresolvable, a default "
+             "branch outside the seed set — trunk, develop — is NOT recognised "
+             "and IS auto-declared. A known gap, pinned by a test rather than "
+             "hidden.)",
+    )
+    parser.add_argument(
+        "--self-worktree", action="append", default=[], metavar="PATH",
+        help="a worktree this session OWNS (repeatable). A hit on it is reported "
+             "as your own work and cannot block. The target checkout's own root "
+             "is added automatically.",
+    )
     parser.add_argument("--gh", default=os.environ.get("COLLISION_PREFLIGHT_GH", "gh"),
                         help="gh binary (env COLLISION_PREFLIGHT_GH)")
     parser.add_argument("--git", default=os.environ.get("COLLISION_PREFLIGHT_GIT", "git"),
@@ -2688,9 +3859,6 @@ def main(argv: list[str] | None = None) -> int:
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         print("collision-preflight: --timeout must be finite and > 0", file=sys.stderr)
         return EXIT_USAGE
-    if args.min_keywords < 1:
-        print("collision-preflight: --min-keywords must be >= 1", file=sys.stderr)
-        return EXIT_USAGE
     for flag, attr in (("--pr-limit", "pr_limit"),
                        ("--closed-pr-limit", "closed_pr_limit")):
         try:
@@ -2728,27 +3896,81 @@ def main(argv: list[str] | None = None) -> int:
     if refusal is not None:
         return refusal
 
-    # Identity: only the GitHub login survives. The ASSIGNEE surface compares it
-    # to the assignee, AND it gates which claim comments are model-decided (only
-    # the fleet account's candidates reach JEV; others are fail-closed rule
-    # hits). It does NOT attribute a claim to a specific lane.
-    identity = Identity(login=None)
+    # Identity has TWO halves and they answer different questions.
+    #
+    # `login` is the GitHub account. The ASSIGNEE surface compares it, and it
+    # gates which claim comments are model-decided (only the fleet account's
+    # candidates reach JEV; others are fail-closed rule hits). It does NOT
+    # attribute a claim to a specific lane — every lane shares this account.
+    #
+    # `self_branches` / `self_worktrees` are the caller's OWN refs, and they are
+    # the half that fixes #3504: the caller's own artifacts are excluded by
+    # IDENTITY rather than by inspecting a string. `--self-branch` /
+    # `--self-worktree` are ALWAYS authoritative and are never second-guessed.
+    #
+    # The best-effort auto-detection below is a different matter, and it is
+    # gated on `_standing_in` deliberately. Adding a ref to the self set
+    # REMOVES hits, so "it can only leave more hits" — the claim this block used
+    # to make — is false: it is the FAIL-OPEN direction. And the checkout is not
+    # always the caller's. With `--repo owner/name`, `_resolve_target` searches
+    # for a clone; when the cwd is a different repo it finds the canonical hub
+    # checkout, typically sitting on `main`. Declaring `main` as a self-branch
+    # then suppresses a PR whose head branch is `main` — the ordinary shape for
+    # a fork PR — and reports CLEAN on real in-flight work.
+    #
+    # So: auto-declare only for a checkout the CALLER chose. Omitting
+    # `--self-branch` remains fail-closed, and a caller whose checkout was
+    # searched for can always pass it explicitly.
+    cwd_for_identity = target.path or os.getcwd()
+    self_branches = {b.strip() for b in args.self_branch if b and b.strip()}
+    self_worktrees = {
+        w.strip().rstrip("/") for w in args.self_worktree if w and w.strip()
+    }
+    if target.path and _standing_in(target.path):
+        self_worktrees.add(target.path.rstrip("/"))
+        rc, out, _err, _to = _run(
+            [args.git, "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd_for_identity, args.timeout,
+        )
+        if rc == 0 and out.strip() and out.strip() != "HEAD":
+            # `HEAD` means detached (no branch) — nothing to declare. A failure
+            # here is not reported: it can only leave hits blocking.
+            #
+            # ⛔ AND NEVER THE DEFAULT BRANCH. This is not a refinement, it is the
+            # difference between the tool working and the tool being inert: the
+            # hub checkout sits on `main`, so `--repo .` — the documented,
+            # default invocation — would otherwise declare `main` as a
+            # self-branch, and every open PR whose head is `main` (the ordinary
+            # fork-PR shape) is demoted to weak before the closing-reference test
+            # is reached. An explicit `--self-branch main` is still honoured:
+            # that is the caller ASSERTING it, and the assertion is theirs to
+            # make. This only refuses to make it for them.
+            _branch = out.strip()
+            _defaults = _default_branch_names(
+                args.git, cwd_for_identity, args.timeout
+            )
+            if not _is_default_branch(_branch, _defaults):
+                self_branches.add(_branch)
+
+    identity = Identity(
+        login=None,
+        self_branches=frozenset(self_branches),
+        self_worktrees=frozenset(self_worktrees),
+    )
     rc, out, _err, _to = _run(
         [args.gh, "api", "user", "-q", ".login"],
-        target.path or os.getcwd(), args.timeout,
+        cwd_for_identity, args.timeout,
     )
     if rc == 0 and out.strip():
         identity.login = out.strip()
 
     try:
-        ordered, title, keywords, issue, _ = run_preflight(
-            args.issue, target, args.gh, args.git, args.timeout, args.keywords,
-            args.min_keywords, args.pr_limit, args.closed_pr_limit,
+        ordered, title, issue = run_preflight(
+            args.issue, target, args.gh, args.git, args.timeout,
+            args.pr_limit, args.closed_pr_limit,
             closed_pr_timeout, identity,
         )
-        report, code = format_report(
-            ordered, issue, target, title, keywords, args.min_keywords
-        )
+        report, code = format_report(ordered, issue, target, title)
     except RuntimeError as exc:  # partial-run guard
         print(f"collision-preflight: {exc}", file=sys.stderr)
         return EXIT_USAGE

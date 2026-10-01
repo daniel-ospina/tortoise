@@ -29,13 +29,23 @@ failure, not the exit-1 manifest-gate meaning below. Deterministic output
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/ci_timing.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/ci_timing.py`"
+    )
+
 import argparse
 import glob
 import json
 import os
 import re
 import subprocess
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -172,10 +182,37 @@ def parse_log(path: Path) -> dict:
 
     for line in lines:
         # #1477 review P2: the WATCHDOG banner is shell-echoed to the step's
-        # stdout AFTER pytest's output is redirected, so the artifact never
-        # contains it. pytest's own interrupt summary (KeyboardInterrupt) is
-        # the reliable in-log signal for a watchdog-killed run.
-        if "KeyboardInterrupt" in line or "WATCHDOG:" in line:
+        # stdout AFTER pytest's output is redirected, so the ARTIFACT this
+        # function reads can never contain it — every pytest-log-* upload in
+        # python-ci.yml ships pytest's output files (or the junitxml/nodeids/
+        # step_wall beside them), never a job log.
+        #
+        # #6145: matching the banner string has no GENUINE true positive — the
+        # real banner is never in this artifact — so it is deleted rather than
+        # narrowed. What it can match is a QUOTED copy: any assertion that prints
+        # or diffs the workflow text containing it, which would report a kill
+        # that did not happen. That is reachable by construction, not an observed
+        # misfire (no test currently emits the banner on stdout).
+        #
+        # What survives covers the SIGINT path only. `timeout -s INT -k 10
+        # <budget>` sends INT first, and pytest's interrupt summary carries
+        # "KeyboardInterrupt", which IS in the artifact. KNOWN BLIND SPOT: the
+        # `-k 10` SIGKILL half (rc=137, documented reachable in the workflow)
+        # writes no interrupt summary — pytest emits it during unconfigure,
+        # after session teardown — so on that path this flag stays False. The
+        # deleted clause could not see that path either, so it is a pre-existing
+        # gap, recorded here rather than papered over.
+        #
+        # Residual, stated rather than smoothed: this is still a substring test,
+        # so it is quotable the same way the deleted clause was (an assertion
+        # source line containing the token). It is kept because the signal
+        # genuinely occurs in this input, which the banner does not.
+        #
+        # The wall evidence a kill leaves (/tmp/step_wall.txt) is consumed by
+        # testdb_canary_classify.py's step-wall gate — but only the `test`
+        # matrix uploads that file, so the side lanes leave no wall evidence and
+        # no classifier consumes one for them.
+        if "KeyboardInterrupt" in line:
             killed = True
         if "slowest" in line and "durations" in line:
             in_durations = True
@@ -414,6 +451,7 @@ def integrity_problems(manifest_text: str) -> list[str]:
     manifest = _manifest_of(manifest_text)
     problems = (cs.integrity(manifest)
                 + cs.slow_file_issues(manifest)
+                + cs.fast_shard_issues(manifest)
                 + cs.duration_issues(manifest)
                 + cs.leg_coverage_issues(manifest)
                 + cs.duration_coverage_issues(manifest))
@@ -421,7 +459,7 @@ def integrity_problems(manifest_text: str) -> list[str]:
     problems += wf_issues
     if not wf_issues:
         legs = cs.push_legs(manifest)
-        halves = {"a": set(legs["half_a"]), "b": set(legs["half_b"])}
+        halves = {s["name"]: set(s["files"]) for s in legs["shards"]}
         problems += cs.workflow_halves_issues(manifest, halves)
     else:
         problems += cs.workflow_halves_issues(

@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 
 import pytest
 
+from tests import _live_utils
 from tortoise import acl_graph_users as acl
 
 _SUPPORTED = {"docker", "redis", "rediss"}
@@ -189,7 +190,7 @@ def test_cross_graph_noperm(acl_env):
     try:
         c = redis_py.Redis(
             host=urlparse(os.environ["TORTOISE_DB_URI"]).hostname,
-            port=urlparse(os.environ["TORTOISE_DB_URI"]).port or 16379,
+            port=urlparse(os.environ["TORTOISE_DB_URI"]).port or _live_utils.docker_port(),
             username=cred["username"], password=cred["password"],
             decode_responses=True, socket_timeout=5,
         )
@@ -378,12 +379,12 @@ def test_store_miss_rotate_invalidates_old_secret(acl_env, monkeypatch):
     import redis as redis_py
     uri = _up(os.environ["TORTOISE_DB_URI"])
     with pytest.raises((redis_py.AuthenticationError, redis_py.ResponseError)):
-        redis_py.Redis(host=uri.hostname, port=uri.port or 16379,
+        redis_py.Redis(host=uri.hostname, port=uri.port or _live_utils.docker_port(),
                        username=f"tenant_{gid}", password=cred1["password"],
                        decode_responses=True, socket_timeout=5,
                        ).execute_command("PING")
     # New password authenticates.
-    redis_py.Redis(host=uri.hostname, port=uri.port or 16379,
+    redis_py.Redis(host=uri.hostname, port=uri.port or _live_utils.docker_port(),
                    username=f"tenant_{gid}", password=cred2["password"],
                    decode_responses=True,
                    ).execute_command("PING")

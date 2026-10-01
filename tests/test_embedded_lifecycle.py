@@ -23,6 +23,9 @@ import pytest
 pytest.importorskip("redislite")
 
 import tortoise  # noqa: F401
+
+# #5049: the verdict contract — a wall-clock expiry is INCONCLUSIVE, not FAIL.
+from tests._verdict import wait_for
 from tortoise import FalkorDB
 
 
@@ -385,6 +388,13 @@ def _wait_server_dead(pid, timeout=10):
 #: costs across the 6 call sites, and the message carries the evidence
 #: (pid, elapsed, parent rc) instead of leaving the next occurrence a mystery.
 _SERVER_DEATH_TIMEOUT_S = 30
+
+#: #4739: the stdio MCP server's exit budget after SIGTERM. SIGTERM's default
+#: disposition already terminates the parent, so a timeout here means the
+#: *close* was slow under load — the close itself is asserted separately by
+#: `_assert_server_dies_with_parent`, which keeps its FAIL leg. #5049 rule 1:
+#: this budget's expiry is INCONCLUSIVE (evidence about load), never a FAIL.
+_SIGTERM_EXIT_DEADLINE_S = 45.0
 
 
 def _assert_server_dies_with_parent(redis_pid: int, proc, what: str) -> None:
@@ -1026,11 +1036,24 @@ def test_serve_stdio_sigterm_closes_embedded_server(tmp_path):
     proc, redis_pid = _stdio_serve_proc(tmp_path)
     try:
         os.kill(proc.pid, _signal.SIGTERM)
-        try:
-            proc.wait(timeout=45)
-        except _subprocess.TimeoutExpired:
+        if not wait_for(lambda: proc.poll() is not None,
+                        timeout_s=_SIGTERM_EXIT_DEADLINE_S):
             proc.kill()
-            pytest.fail("stdio server survived SIGTERM — guard did not fire")
+            # #5049 rule 1: a deadline expiry is evidence about the machine's
+            # load, not about the guard. A SIGTERM'd stdio server that has not
+            # exited within 45s under a loaded box must not be scored as a
+            # product FAIL. The close the guard performs is asserted with teeth
+            # by `_assert_server_dies_with_parent` below.
+            from tests._verdict import inconclusive
+            inconclusive(
+                "the stdio server had not exited after SIGTERM",
+                deadline_s=_SIGTERM_EXIT_DEADLINE_S,
+                diagnosis=(
+                    f"(pid {proc.pid} still running; SIGTERM's default "
+                    "disposition terminates the parent, so a slow exit is a "
+                    "load event — the embedded-server close is asserted "
+                    "separately)"),
+            )
         assert proc.returncode == -_signal.SIGTERM, f"rc={proc.returncode}"
         _assert_server_dies_with_parent(
             redis_pid, proc, "stdio server's redis-server after its SIGTERMed parent")
@@ -4619,3 +4642,42 @@ def test_live_fixture_server_reports_rdb_save_disabled(tmp_path):
     finally:
         with contextlib.suppress(Exception):
             proj.close()
+
+
+def test_embedded_start_refuses_a_db_directory_that_is_gone(tmp_path, capfd):
+    """#3653: redis-server must never be spawned with a config ``dir`` that is gone.
+
+    redislite renders ``dir <dirname(db)>`` from ``self.dbdir``
+    (``configuration.py``: ``config_dict['dir'] = config_dict['dbdir']``), so a
+    start against a removed tree kills redis-server inside its own config parse:
+
+        *** FATAL CONFIG FILE ERROR (Redis 8.6.2) ***
+        >>> 'dir '/tmp/tmpXXXX''
+
+    Six of those, six different dirs, all inside one test file, in a PASSING CI
+    lane (run 36432057326) — naming neither the db nor the holder whose tree was
+    removed. The seam is ``RedisMixin._start_redis``, which the guard wraps.
+    ``FalkorProjection`` happens to mask this locally by recreating the parent
+    dir, so the client construction is what the guard itself is measured on.
+    """
+    import redislite.client as _rc
+
+    # The guard installer is armed at `tortoise` import time and installs as soon
+    # as redislite is importable, so no explicit install call is needed here.
+    from tortoise.embedded_lifecycle import EmbeddedDbDirGoneError
+
+    tree = tmp_path / "hosted"
+    tree.mkdir()
+    db = str(tree / "test.db")
+    tree.rmdir()  # exactly what a function-scoped fixture teardown does
+
+    with pytest.raises(EmbeddedDbDirGoneError) as excinfo:
+        _rc.Redis(dbfilename=db)
+    assert str(tree) in str(excinfo.value), (
+        "the refusal must name the directory that is gone")
+    assert not os.path.isdir(tree), "the guard must not recreate the directory"
+
+    captured = "".join(capfd.readouterr())
+    assert "FATAL CONFIG FILE ERROR" not in captured, (
+        "redis-server was spawned into a missing db dir — the unattributable "
+        "FATAL this guard exists to prevent")

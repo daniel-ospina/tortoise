@@ -42,9 +42,14 @@ _log = logging.getLogger(__name__)
 def _load_dotenv(path: str | None = None) -> None:
     """Tiny .env loader — repo-root .env, KEY=VALUE lines, no new deps.
 
-    Only sets environment keys that are empty/unset, so an explicit
-    TORTOISE_DB_URI in the process env always wins. Mirrors the hosted
-    entrypoint philosophy: the DB target must be explicit, never accidental.
+    Only sets environment keys that are ABSENT from ``os.environ`` — a key
+    that is explicitly set, even to the empty string, is never overridden.
+    That presence test is load-bearing: ``tools/ask_shape_rate.py`` narrows
+    the non-pinned provider keys to ``""`` (present-but-unkeyed) so a later
+    ``_load_dotenv()`` cannot re-arm them and defeat the reader pin (#4582).
+    An explicit TORTOISE_DB_URI in the process env always wins. Mirrors the
+    hosted entrypoint philosophy: the DB target must be explicit, never
+    accidental.
     """
     if path is None:
         path = os.path.join(
@@ -911,7 +916,7 @@ _QUOTA_GATED: frozenset[str] = frozenset({
 # absent from that frozenset, and the demo-create tool writes Points via
 # _enforce_quota without the wrapper.
 #
-# The `# noqa: E402` is deliberate: the bottom `tool_registry` import exists
+# The E402 noqa is deliberate: the bottom `tool_registry` import exists
 # for the adapter, and importing the derived helpers here keeps this module's
 # import order unchanged (tool_registry does not import mcp_server — no cycle).
 from tortoise.tool_registry import get_tool_by_name, get_write_tool_names  # noqa: E402
@@ -1264,7 +1269,13 @@ _SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a 
     # recorded decision (PR #3018 review P2) that a caller-supplied vector is
     # stored verbatim; the writer marks it `embedding_verbatim` instead.
     "embedding_model", "embedding_revision", "embedding_text_hash",
-    "embedding_verbatim", "embedding_preserved"})
+    "embedding_verbatim", "embedding_preserved",
+    # #5256: the `extractedFrom` READ-VERSION anchor and its Point node carrier
+    # are server-derived (read from the :Source on the live path and carried in
+    # the Point's journaled snapshot). A tenant setting either would forge
+    # provenance and break live/replay parity. Rejected on ALL spellings, at
+    # this boundary AND in `sdk._sanitize_props` (the fail-closed backstop).
+    "sourceVersion", "sourceVersions", "sourceVersionTransit"})
 
 
 # #2600: client-supplied actor claims are STRIP-AND-IGNORE (never a 4xx —
@@ -2053,6 +2064,12 @@ def tortoise_get_operator(id: str) -> dict:
     Raises error if the Point is not an operator.
     Alias → get(id, type='operator') (epic #888 W3)."""
     point = _safe(_get_org_sdk().get_point, id)
+    # _safe reports ANY failure as an _SafeError — itself a dict subclass — so
+    # the non-operator guard below would match a failed call and fabricate a
+    # domain fact ('is not an operator'), discarding the real cause. Surface
+    # the typed failure FIRST (#4576; same pattern as #3926).
+    if isinstance(point, _SafeError):
+        return point
     if isinstance(point, dict) and point and not point.get("is_operator"):
         return {"error": f"Point {id!r} is not an operator"}
     return point
@@ -3925,8 +3942,10 @@ def tortoise_session_capture(conversation: list[dict],
         _capture_lane,
         _capture_session_impl,
         _capture_session_key,
+        _observed_capture_harness,
         _record_capture_last_error,
         _reserve_capture_slot,
+        _stored_session_harness,
         _submit_off_loop,
     )
     limits = _current_org_limits.get() or {}
@@ -4015,8 +4034,25 @@ def tortoise_session_capture(conversation: list[dict],
         # #3129: likewise the in-flight 409.
         if (status >= 400 and status != 429
                 and detail != _CAPTURE_SESSION_IN_FLIGHT_DETAIL):
+            # #4898: attribute the failure to the SESSION's stored harness, NOT
+            # the caller's raw ``harness`` argument — the SAME resolution the
+            # REST capture applies to both per-harness keys
+            # (``_observed_capture_harness``: stored or claimed,
+            # first-writer-wins; #3681 / #3700). Without it, a failed
+            # re-capture of an existing ``session_id`` whose stored harness
+            # differs writes the error under the CALLER's declaration and the
+            # dashboard paints the failure on another harness's row — the
+            # relabel class #3681 closed for the receipt key, one key down.
+            # ``_stored_session_harness`` fails open to None, which restores
+            # the fresh-session rule (the claim only ever introduces a harness
+            # the server has not stamped).
             with contextlib.suppress(Exception):
-                _record_capture_last_error(org_id, harness, str(detail))
+                _record_capture_last_error(
+                    org_id,
+                    _observed_capture_harness(
+                        org, harness,
+                        asyncio.run(_stored_session_harness(org, session_id))),
+                    str(detail))
         # #3665: a 402 from the shared capture impl is ALWAYS a quota refusal
         # — the points-estimate gate, the cohort cost cap, or the
         # ``_check_org_limit(org, "sessions")`` limit — so carry the shared

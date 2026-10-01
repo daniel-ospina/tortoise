@@ -164,6 +164,11 @@ MAX_ASK_CONTEXT_BYTE_CAP = 1 << 40
 DEFAULT_ASK_RETRIEVAL_LIMIT = 200
 DEFAULT_ASK_CONTEXT_ITEM_CAP = 200
 DEFAULT_ASK_CONTEXT_TOKEN_CAP = 16000
+#: #4235: the ``TORTOISE_ASK_POOL_SIZE`` env-knob default. This is NOT the
+#: pool the lane resolves: because the lane passes an explicit ``pool_size``
+#: (an exact SDK override), ``resolve_ask_retrieval_caps`` applies the SDK's
+#: own ``limit*2`` candidate floor itself, so the shipped 200-wide window
+#: resolves a 400-deep pool. The knob only RAISES that floor.
 DEFAULT_ASK_POOL_SIZE = 200
 
 #: C2 (#1745) / #1945: evidence-mark boost rank-offset multipliers. The
@@ -189,11 +194,15 @@ _POOL_CLAMP = (1, 10000)
 #: changes NOTHING (the gold is cut at ``result_ids[:limit]`` INSIDE
 #: ``tortoise_fts_query`` before dedup/assemble); raising only the window
 #: floods the reader budget. The pre-#4105 defaults were the historical
-#: 40/40/8000/32KiB; #4105 measured the frozen D3 fixture and raised them to
-#: 200/200/16000 (byte ceiling derived) so the ranked-but-unread gold turns
-#: reach the reader. #4105 also adds the POOL depth and the BYTE ceiling to
-#: that same resolution: a window raise past the pool is cut by the pool, and
-#: a window raise past 32 KiB was cut by an un-resolvable literal — both were
+#: 40/40/8000/32KiB; #4105 measured the frozen D3 fixture and raised the
+#: limit/item/token caps to 200/200/16000 (byte ceiling derived) so the
+#: ranked-but-unread gold turns reach the reader. #4105 also adds the POOL
+#: depth and the BYTE ceiling to
+#: that same resolution: the pool applies the SDK's own ``limit*2`` candidate
+#: floor (#4235 — the lane passes an explicit ``pool_size``, which the SDK
+#: treats as an exact override, so the lane must apply the floor itself,
+#: resolving 400 deep at the shipped 200-wide window), and a window raise
+#: past 32 KiB was cut by an un-resolvable literal — the byte ceiling was
 #: silently accepted and dropped.
 ASK_RETRIEVAL_LIMIT_ENV = "TORTOISE_ASK_RETRIEVAL_LIMIT"
 ASK_CONTEXT_ITEM_CAP_ENV = "TORTOISE_ASK_CONTEXT_ITEM_CAP"
@@ -281,7 +290,8 @@ def ask_env_boost_float(name: str, default: float) -> float:
 def resolve_ask_retrieval_caps() -> dict:
     """A6 (#2070) / #4105: resolve the ask lane's retrieval-window limit,
     pool depth and assembly caps IN TANDEM (env-gated; #4105 defaults
-    200/200/200/16000/128000 bytes, measured on the frozen D3 fixture). Returns
+    200/400/200/16000/128000 bytes, measured on the frozen D3 fixture — the
+    400 is the SDK's ``limit*2`` candidate floor, #4235). Returns
     ``{"limit", "pool_size", "context_item_cap", "context_token_cap",
     "context_byte_cap"}`` — the single resolution ``run_ask_lane()`` threads
     into ``tortoise_fts_query(limit=…, pool_size=…)``, ``assemble_context``
@@ -294,9 +304,23 @@ def resolve_ask_retrieval_caps() -> dict:
     * ``limit >= context_item_cap`` — the retrieval call cuts at
       ``result_ids[:limit]`` BEFORE assembly, so an item cap above the
       window could never be honoured; the window is raised to admit it.
-    * ``pool_size >= limit`` — the candidate window is the pool, and a turn
-      at rank R is admitted iff ``R <= min(limit, pool_size)``; a pool
-      above the window is wasted, a pool below it truncates silently.
+    * ``pool_size >= limit`` — ALWAYS holds. ``run_ask_lane`` passes an
+      EXPLICIT ``pool_size``, which the SDK's ``resolve_pool_size(exact=True)``
+      contract treats as an exact override, so the SDK's own candidate floor
+      never applies on this path; the lane applies ``max(env_pool, limit * 2)``
+      itself and then clamps to ``_POOL_CLAMP[1]``. Because ``limit`` is
+      clamped to that same bound, the clamp can never push the pool below the
+      window.
+    * ``pool_size >= limit * 2`` — the SDK's candidate floor, applied **only
+      while it fits the engine bound**. The resolved pool is clamped to
+      ``_POOL_CLAMP[1]`` (10000 — the value ``tortoise_fts_query`` validates
+      ``pool_size`` against, and FalkorDB's own default ``RESULTSET_SIZE``),
+      so for ``limit > 5000`` the floor is truncated at 10000 rather than
+      honoured (``limit=10000`` resolves to pool 10000, not 20000). Above the
+      bound the guarantee that still holds is ``pool_size >= limit``; the
+      clamp — not a lowered floor — is what caps it. This is stated, not
+      silent: it is asserted at the boundaries in
+      ``tests/test_ask_retrieval_budget.py``.
     * ``context_byte_cap`` is resolved (env), not a literal, and when NOT
       set explicitly it is DERIVED from the token cap
       (``max(DEFAULT_CONTEXT_BYTE_CAP, token_cap * BYTES_PER_TOKEN_FLOOR)``)
@@ -315,20 +339,35 @@ def resolve_ask_retrieval_caps() -> dict:
         hi=MAX_ASK_CONTEXT_TOKEN_CAP)
     # Invariant 1: the window can never be narrower than the assembly cap.
     limit = max(limit, item_cap)
-    # Invariant 2: the pool can never be narrower than the window. The
-    # window is clamped to the SAME bound the SDK validates ``pool_size``
-    # against (1..10000), so an out-of-range env value falls back to the
-    # default at resolve time rather than handing the SDK a value it
-    # rejects (which would fail every ask with a retrieval error).
+    # Invariant 2: the pool applies the SDK's OWN candidate floor. The lane
+    # hands ``tortoise_fts_query`` an EXPLICIT ``pool_size``, which the SDK's
+    # ``resolve_pool_size(exact=True)`` contract treats as an exact override —
+    # so the SDK's ``limit*2`` floor never runs on this path. The lane applies
+    # it itself (``max(env_pool, limit*2)``; 400 at the 200/200 defaults), and
+    # ``TORTOISE_ASK_POOL_SIZE`` can only RAISE it.
     #
-    # NOTE the pool is an EXPLICIT ``pool_size`` to ``tortoise_fts_query``,
-    # which the SDK's ``resolve_pool_size(exact=True)`` contract treats as an
-    # exact override — so ``pool_size == limit`` at the defaults is a
-    # deliberate measured choice (the instrument's fusion depth), NOT a floor
-    # over the SDK's own ``limit*2`` resolution. Raise ``TORTOISE_ASK_POOL_SIZE``
-    # to deepen the candidate pool; that changes what fusion sees.
-    pool_size = max(
-        ask_env_int(ASK_POOL_SIZE_ENV, DEFAULT_ASK_POOL_SIZE, hi=10000), limit)
+    # The resolved value is clamped to the SAME bound the SDK validates
+    # ``pool_size`` against (1..10000), so the floor can never hand the SDK a
+    # value it rejects (which would fail every ask with a retrieval error).
+    # ``limit`` is clamped to that bound too, so ``pool_size >= limit`` still
+    # holds after the clamp.
+    #
+    # HONESTY (#4235): the clamp means the SDK floor is applied only WHILE IT
+    # FITS THE ENGINE BOUND. For ``limit > 5000`` the ``limit*2`` floor is
+    # truncated at 10000 (``limit=10000`` -> pool 10000, not 20000). The
+    # guarantee that ALWAYS holds is ``pool_size >= limit``; the guarantee
+    # ``pool_size >= limit*2`` holds exactly while ``limit*2 <= 10000``, which
+    # is the range the fix exists to cover. Rejecting above the bound was
+    # rejected as a behaviour: >5000 is reachable via
+    # ``TORTOISE_ASK_RETRIEVAL_LIMIT`` / ``TORTOISE_ASK_CONTEXT_ITEM_CAP``
+    # (both accept up to 10000), so raising would fail every ask there, and
+    # the bound cannot simply be raised — 10000 is the engine's
+    # ``RESULTSET_SIZE`` default and the SDK's own ``pool_size`` validation
+    # ceiling. Stated here and asserted at the boundaries in
+    # ``tests/test_ask_retrieval_budget.py``.
+    pool_size = min(_POOL_CLAMP[1], max(
+        ask_env_int(ASK_POOL_SIZE_ENV, DEFAULT_ASK_POOL_SIZE, hi=10000),
+        limit * 2))
     # Invariant 3: byte ceiling resolved; derived from the token cap when
     # not set (or set to GARBAGE — a typo must not pin the ceiling to the
     # 32 KiB floor and silently re-introduce the no-op) so a token raise is
@@ -976,7 +1015,7 @@ def _render_block(h: dict) -> str:
     else:
         sid = hit_session_id(h)
         prefix = f"[session {sid}]" if sid else "[session ?]"
-    sdate = h.get("session_date")
+    sdate = _one_line(h.get("session_date"))
     if sdate:
         prefix = f"{prefix} (session date {sdate})"
     # E3 (#1535): speaker decoration — mirrors the deterministic leg's
@@ -986,19 +1025,59 @@ def _render_block(h: dict) -> str:
     # "[role] text" AND have the speaker prop — decorating both would
     # double-attribute, e.g. "[user] [user] ..." on the deterministic leg's
     # primary recall surface).
-    spk = h.get("speaker") or ""
+    spk = _one_line(h.get("speaker"))
     # only the deterministic leg's own role-bracket shape suppresses the
     # decoration — a non-role bracket prefix ([context], [IMPORTANT])
     # must not suppress speaker attribution
     if spk and not _ROLE_PREFIX.match(h.get("content", "")):
         prefix = f"{prefix} [{spk}]"
-    marker = _validity_marker(h)
+    # The marker carries the SAME free-text class as the two values above: the
+    # superseded/supersedes snippets are stored Point content, and the
+    # valid/expired window fields are too (truncated to 10 chars only when
+    # LONGER than 10, so a short payload carrying a newline survives intact).
+    # Collapsed here rather than field by field inside _validity_marker — one
+    # choke point covers every present and future free-text field the marker
+    # interpolates.
+    marker = _one_line(_validity_marker(h))
     if marker:
-        # _validity_marker already returns self-bracketed groups
+        # _validity_marker returns self-bracketed groups
         # (e.g. "[SUPERSEDED BY: x] [valid 2026-06-10 → 2026-06-12]") — no
         # extra wrap.
         prefix = f"{prefix} {marker}"
     return f"{prefix} {h.get('content', '')}"
+
+
+def _one_line(value: object) -> str:
+    """Collapse a decoration value to a SINGLE LINE (#3844).
+
+    Three free-text sources are interpolated into the reader-evidence
+    annotation prefix: ``session_date``, ``speaker``, and the whole validity
+    marker (``superseded_by``/``supersedes`` content snippets plus the
+    valid/expired window fields). All were interpolated raw. The session id
+    beside them is NOT safe by construction — on the ask/search surface it is
+    the client-writable ``session_id``/``sessionId`` too, made safe only by the
+    identifier-shape ALLOWLIST in :func:`_safe_session_tag`. That is exactly why
+    the neighbours were missed: the guarded id LOOKED structural while its
+    siblings were plain free text.
+
+    The values are free text from a captured session, so a newline inside one
+    FORGES an annotation line: it fabricates a turn the reader will read as a
+    real ``[user] …`` message, or a fake ``(session date …)``. That is prompt
+    injection into the evidence the model is asked to reason over, and the model
+    cannot tell the fabricated line from a real one.
+
+    Whitespace-collapse rather than strip-a-blacklist: it neutralises every
+    line-forging sequence (``\\n``, ``\\r``, ``\\r\\n``, unicode line separators,
+    vertical tab, form feed) without needing the list to be complete, which is
+    the property a blacklist cannot offer.
+
+    Byte-identical for ordinary values — ``"Alice"`` and an ISO date both pass
+    through unchanged, and a missing value still yields ``""`` (falsy), so
+    absent-decoration rendering is unchanged.
+    """
+    if value is None:
+        return ""
+    return " ".join(str(value).split())
 
 
 def _has_claim_text(h: dict) -> bool:
@@ -1412,7 +1491,8 @@ def _rank_delta(scored: list[tuple[dict, float, int]], orig_index: int) -> bool:
 # is a FROZEN measurement lens (never a change target); the EVIDENCE PACKAGE
 # handed to it is the product. (#4105 later reopens the WINDOW itself for the
 # ask lane specifically — the caps are now resolved in tandem,
-# 200/200/200/16000/128000 bytes — while this wave's own thesis stands: the
+# 200/400/200/16000/128000 bytes (#4235 applies the SDK's ``limit*2``
+# candidate floor to the pool) — while this wave's own thesis stands: the
 # package, not the window, is where the assembly work invests.) These helpers
 # build that package over the
 # annotated pool (pure functions over hit dicts — no graph dependency, so

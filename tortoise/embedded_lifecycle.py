@@ -770,6 +770,64 @@ def _reclaim_partial_init_server(client) -> None:
     _remove_ephemeral_socket_dir(rdir, sock)
 
 
+class EmbeddedDbDirGoneError(RuntimeError):
+    """#3653: the embedded db's directory is gone — refuse to start a server into it.
+
+    redislite renders ``dir <dirname(db)>`` into the redis-server config
+    (``configuration.py``: ``config_dict['dir'] = config_dict['dbdir']``;
+    ``client.py``: ``self.dbdir = os.path.dirname(db_filename)``). Starting with
+    that directory removed therefore kills redis-server inside its own config
+    parse, printing
+
+        *** FATAL CONFIG FILE ERROR (Redis 8.6.2) ***
+        >>> 'dir '/tmp/tmpXXXX''
+        No such file or directory
+
+    — a line naming neither the db nor the fixture that owned the tree, landing
+    in whichever leg's log happened to be open. Observed on main 2026-09-28:
+    six of them, six different dirs, all inside one test file, in a PASSING lane.
+    A held path whose tree was removed is a lifetime bug in the holder; the
+    trustworthy behaviour is to say so by name, here, while both the path and
+    the reason are still in hand.
+    """
+
+
+def _install_missing_dbdir_guard() -> None:
+    """#3653: refuse an embedded start whose config ``dir`` no longer exists.
+
+    See `EmbeddedDbDirGoneError`. Raising BEFORE the server is spawned is what
+    keeps this honest: a refused construction never spawns redis-server, so no
+    ``FATAL CONFIG FILE ERROR`` line and no partial-init orphan (it dies with no
+    `connection_pool`, which the partial-init cleanup guard handles).
+
+    The check is check-then-spawn, so a removal landing between the `isdir` and
+    redislite's own ``subprocess.call`` still races the render — a residual no
+    snapshot closes, because the holder can always delete the tree one instant
+    later. What this changes is the window: from "whenever a holder deleted the
+    tree before the next start, at any distance in the past" to "inside this
+    call". It does not make the window empty, and does not claim to.
+    """
+    try:
+        from redislite.client import RedisMixin
+    except Exception:  # redislite absent — nothing to guard
+        return
+    if getattr(RedisMixin, "_tortoise_missing_dbdir_guard", False):
+        return
+    original = RedisMixin._start_redis
+
+    def _start_redis(self, *args, **kwargs):
+        dbdir = getattr(self, "dbdir", None)
+        if dbdir and not os.path.isdir(dbdir):
+            raise EmbeddedDbDirGoneError(
+                f"embedded redis db directory is gone: {dbdir!r} "
+                f"(db={getattr(self, 'dbfilename', None)!r}) — refusing to start "
+                f"a server whose config `dir` does not exist (#3653)")
+        return original(self, *args, **kwargs)
+
+    RedisMixin._start_redis = _start_redis
+    RedisMixin._tortoise_missing_dbdir_guard = True
+
+
 def _install_partial_init_cleanup_guard() -> None:
     """#3653: make redislite's `_cleanup` safe for partial clients (once).
 
@@ -2839,7 +2897,7 @@ _REDISLITE_GUARDS_INSTALLED = False
 
 
 def install_redislite_guards() -> None:
-    """Install all three redislite patches, once (#5386).
+    """Install all four redislite patches, once (#5386).
 
     Order is irrelevant (the patch targets are disjoint), and each installer
     is itself idempotent and a no-op when redislite is absent; this wrapper
@@ -2853,13 +2911,14 @@ def install_redislite_guards() -> None:
     _install_partial_init_cleanup_guard()
     _install_owner_record_patch()
     _install_dead_socket_guard()
+    _install_missing_dbdir_guard()
 
 
 class _RedisliteGuardInstaller:
     """Install the redislite patches the moment redislite finishes importing.
 
     #5386: `import tortoise` must not import redislite (it is ~90% of that
-    module's import cost), yet the three patches above MUST be in place before
+    module's import cost), yet the four patches above MUST be in place before
     the first redislite client of ANY kind is constructed — including RAW
     constructions that never go through the guarded `tortoise.FalkorDB`
     (#4487: the reaper's per-server "all owners dead" signal has no other

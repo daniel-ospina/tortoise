@@ -172,6 +172,54 @@ def _p4_uri_required():
     _assert_p4_uri_required()
 
 
+# ── #4883: per-test isolation for the process-shared routing env vars ──────
+# pytest runs one process, so a test that writes one of these keys with a plain
+# `os.environ[...] = ...` (no monkeypatch, no restore) leaks it into everything after
+# it. `tests/test_uri_env_mutations_declared.py` (#2084) already guards this CLASS, but
+# for `TORTOISE_DB_URI` only, so the leak survived for every other routing key.
+#
+# SCOPE — this closes the leak class. It is NOT the fix for the
+# `test_pack_state.py::TestBackfillScript::test_apply_writes_to_introspection_read_target`
+# flake that #4883 was opened for. That flake's root cause is redislite replaying a
+# `.settings` registry whose recorded socket is gone — a recycled live pid satisfies
+# every check in `_is_redis_running()`, which never validates the socket — so the client
+# is handed a dead path and dies with `ConnectionError: Error 2 connecting to
+# ...redis.socket. No such file or directory`. Tracked as #4879, fix in #4892. The victim
+# passes `db_path` explicitly, so per-test env restoration cannot influence it. Do not
+# read this fixture as evidence that flake is fixed.
+#
+# Function-scoped autouse, and ORDER-INSENSITIVE by construction: this fixture snapshots
+# the pre-test values and `monkeypatch` restores the SAME pre-test values, so the end
+# state is identical whichever teardown runs first. (pytest orders same-scope autouse
+# fixtures by NAME, not declaration order — see the redislite-lane note further down — so
+# nothing here may depend on setup order.) It is therefore a no-op for a correctly
+# isolated test and repairs only a genuine un-restored write.
+_ENV_ISOLATION_PREFIXES = ("TORTOISE_", "SUPABASE_", "PACK_STATE_")
+
+
+def _isolated_env_keys():
+    return [k for k in os.environ if k.startswith(_ENV_ISOLATION_PREFIXES)]
+
+
+@pytest.fixture(autouse=True)
+def _isolate_process_env():
+    """#4883: restore TORTOISE_*/SUPABASE_*/PACK_STATE_* env after every test.
+
+    A test may legitimately CHANGE these (via ``monkeypatch``, which undoes
+    itself) — it may not legitimately LEAK them. Restoring the pre-test value
+    per test makes each test hermetic for the keys the suite routes on, so
+    order-dependent state cannot decide a result.
+    """
+    before = {k: os.environ[k] for k in _isolated_env_keys()}
+    yield
+    for k in _isolated_env_keys():
+        if k not in before:
+            os.environ.pop(k, None)
+    for k, v in before.items():
+        if os.environ.get(k) != v:
+            os.environ[k] = v
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _fresh_capture_spool():
     """#3963: start every pytest SESSION with a fresh capture spool.
@@ -1072,6 +1120,38 @@ def _embedded_only_skip_hook(request):
     _embedded_only_skip(request)
 
 
+# ── #5049 rule 4: process globals reset per test ──────────────────────────
+# A test verdict must not depend on process state an earlier test left behind.
+# `tortoise.embedded_lifecycle._atexit_deadline` is a once-armed clock (#4913):
+# the first mid-run seam call anchors a 30 s budget that is never re-armed, so a
+# later test that asserts the seam closed a server reads it as SPENT and takes
+# the budget short-circuit (which returns "handled" while leaving the server
+# RUNNING). `tests/test_embedded_lifecycle.py` already worked around this
+# per-module (#4879); this is the same reset applied suite-wide, and it is the
+# authoritative home. The reset runs BEFORE every test (so an inherited armed
+# clock can never reach a test body) and after. `TORTOISE_API_URL` is deleted
+# too: on a fleet shell it makes the suite non-hermetic — the ask lane fails
+# loud on it (`ask_lane.py:438,848`) and the commit client routes to it
+# (`sdk.py` `_post_commit`). `monkeypatch` restores the env after the test.
+# The `tests._verdict` import is module level (and registered in
+# SHARED_MODULES) so a change to the contract runs the full matrix
+# (`test_ci_selection.py::test_every_conftest_module_level_tests_import_is_shared`).
+from tests._verdict import (  # noqa: E402
+    AMBIENT_ENV_GLOBALS,
+    reset_process_globals,
+)
+
+
+@pytest.fixture(autouse=True)
+def _process_global_isolation(monkeypatch):
+    """#5049 rule 4: reset declared process globals + ambient env per test."""
+    reset_process_globals()
+    for var in AMBIENT_ENV_GLOBALS:
+        monkeypatch.delenv(var, raising=False)
+    yield
+    reset_process_globals()
+
+
 # ── #1930: ambient TORTOISE_PACKS_DIR isolation ───────────────────────────
 # The pack-dir env leg (epic #1891 WF-2) makes the whole suite
 # ambient-env-sensitive: a developer/CI/operator machine that exports
@@ -1216,6 +1296,25 @@ def _analytics_alert_isolation(monkeypatch, tmp_path):
                         {o: 0 for o in ha._ANALYTICS_OUTCOMES})
     monkeypatch.setattr(ha, "_ANALYTICS_FALLBACK_PATH",
                         str(tmp_path / "analytics_fallback.jsonl"))
+    # #4462: the pooled analytics HTTP client is a process-wide cache. A client
+    # built under one test's monkeypatched ``httpx.Client`` (or env) must not
+    # serve the next test — several tests read the client CONSTRUCTED during
+    # their own run (``instances[0].init_kwargs`` in
+    # ``test_analytics_write_path_resolution``). Swapping the cache dict by
+    # reference makes each test start with an empty cache; monkeypatch restores
+    # the untouched original at teardown.
+    #
+    # Neither client is closed here on purpose. The swap leaves each
+    # unreferenced once monkeypatch restores the attribute at teardown, so GC
+    # reclaims them; calling ``_analytics_http_reset()`` instead would close a
+    # client while a straggling telemetry worker (``_cp_offload`` abandons the
+    # AWAIT on a wait-bound miss but never the daemon worker, CPython #87185)
+    # may still be mid-POST — the #4608 class, which turns a delivered event
+    # into a spurious ``fallback``. A test that builds a REAL client AND emits
+    # closes it in its own ``finally`` (``test_pooled_client_reuses_one_tcp_
+    # connection_across_emits``).
+    monkeypatch.setattr(ha, "_ANALYTICS_HTTP_CACHE",
+                        {"key": None, "client": None})
     mon.ANALYTICS_OUTCOME_COUNT.clear()
 
 

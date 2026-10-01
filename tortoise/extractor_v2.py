@@ -57,6 +57,7 @@ from __future__ import annotations
 import contextlib
 import inspect
 import json
+import math
 import os
 import random
 import re
@@ -1838,9 +1839,20 @@ def run_s2(model, story: str, master: dict | None = None, *,
 # ── S3: SEARCH THE GRAPH (real backend, graceful degradation) ─────────────
 
 def resolve_backend_mode() -> str:
-    """'real' when a supported TORTOISE_DB_URI (docker:// / redis:// /
-    rediss://) or a hosted API URL is configured; 'embedded' otherwise
-    (FalkorDBLite — the test/eval-only store S3 must NOT read)."""
+    """The ENV-derived backend label — a diagnostic, NOT the S3 gate.
+
+    Three-valued, and exactly two of them are searchable:
+      * ``"real"`` — a supported ``TORTOISE_DB_URI`` (docker:// / redis:// /
+        rediss://) is configured;
+      * ``"hosted"`` — no supported DB URI, but ``TORTOISE_API_URL`` is;
+      * ``"embedded"`` — neither (FalkorDBLite, the test/eval-only store S3
+        must NOT read).
+
+    ⛔ The label is NOT authoritative for searchability: a process can carry
+    ``TORTOISE_API_URL`` while the client it hands S3 is the embedded
+    FalkorDBLite store (#3679). ``_is_searchable_backend()`` is the gate — it
+    prefers the SDK's OWN backend and falls back to this label only when no
+    client projection is resolvable."""
     import os  # noqa: I001
     from tortoise.config import is_db_uri
     uri = os.environ.get("TORTOISE_DB_URI")
@@ -1849,6 +1861,55 @@ def resolve_backend_mode() -> str:
     if os.environ.get("TORTOISE_API_URL"):
         return "hosted"
     return "embedded"
+
+
+def _sdk_backend_is_embedded(sdk) -> bool | None:
+    """The SDK's OWN embedded flag (``FalkorProjection._is_embedded``).
+
+    ``True`` when the client's actual store is the embedded one, ``False``
+    when it is a real graph, and ``None`` when the client exposes no projection
+    attribute at all (lightweight test doubles / mocks) — the only case in
+    which the caller may fall back to the env-derived label (#3679).
+
+    FAIL-CLOSED: a projection this cannot resolve — ``_get_proj()`` raising,
+    or returning ``None`` — is reported as embedded, NOT as unresolvable.
+    ``_get_proj`` is not guaranteed to raise deterministically (``sdk.py``
+    caches ``_proj`` on success only, so a transient failure retries and
+    succeeds), and the query path calls it again — so treating a raise as
+    "unknown" falls back to the env label, re-opens the gate, and S3 then
+    reads the embedded store this exists to exclude. ``True`` is therefore the
+    fail-closed default — for the reason just stated, not by convention. It
+    happens to match the product package's readers of a FOREIGN projection
+    (``sdk.py:11205``, ``sdk.py:15011``, ``pack_state.py:175``), but it is not
+    a universal: several readers default to ``False``
+    (``projection/__init__.py:5795`` reads its OWN flag;
+    ``graph-scripts/backfill_is_operator.py:155``)."""
+    get_proj = getattr(sdk, "_get_proj", None)
+    if not callable(get_proj):
+        return None
+    try:
+        proj = get_proj()
+    except Exception:  # noqa: BLE001, RUF100 — unresolvable ⇒ fail closed
+        return True
+    if proj is None:
+        return True
+    return bool(getattr(proj, "_is_embedded", True))
+
+
+def _is_searchable_backend(mode: str, sdk=None) -> bool:
+    """S3's single searchability gate: may the extractor read this store?
+
+    A real graph (FalkorDB via docker/redis URI, or a hosted API) is
+    searchable; FalkorDBLite (the test/eval-only embedded store) is NOT. The
+    SDK's actual backend wins when it is resolvable — the env ``mode`` label
+    can diverge from the store the client really holds (#3679: a
+    ``TORTOISE_API_URL``-set process whose SDK is the embedded store must
+    still skip). The label is consulted only for clients without a resolvable
+    projection (mocks)."""
+    embedded = _sdk_backend_is_embedded(sdk)
+    if embedded is not None:
+        return not embedded
+    return mode in ("real", "hosted")
 
 
 def _story_topics(story: str, cap: int = 6) -> list[str]:
@@ -2078,8 +2139,12 @@ def search_graph(sdk, embed_list: dict, story: str, *,
                  session_id: str | None = None) -> dict:
     """S3: search the REAL graph for existing entities/points/events.
 
-    - Resolves the active backend from the environment (design doc §3 owner
-      confirmation: NOT FalkorDBLite). Embedded → skip with a degraded flag.
+    - Resolves searchability from the CLIENT's actual backend when one is
+      provided (design doc §3 owner confirmation: NOT FalkorDBLite) — a real
+      graph (FalkorDB via docker/redis URI or hosted API) is searched,
+      FalkorDBLite is skipped with a degraded flag. The env-derived
+      ``resolve_backend_mode()`` label is the fallback only when the client
+      exposes no projection (mocks) — see ``_is_searchable_backend`` (#3679).
     - Runs the same queries a client would: entity by name+kind, points by
       topic, events by entity (tortoise_fts_query, batch).
     - Graceful degradation: unreachable graph (connection error/timeout)
@@ -2098,8 +2163,10 @@ def search_graph(sdk, embed_list: dict, story: str, *,
     mode = resolve_backend_mode()
     empty = {"mode": mode, "degraded": True, "reason": None,
              "entities": [], "points": [], "events": [], "queries_run": 0}
-    if mode != "real":
-        empty["reason"] = (f"S3 skipped: active backend is {mode!r} — the real "
+    if not _is_searchable_backend(mode, sdk):
+        store = ("FalkorDBLite (embedded)"
+                 if _sdk_backend_is_embedded(sdk) else repr(mode))
+        empty["reason"] = (f"S3 skipped: active backend is {store} — the real "
                            "graph (FalkorDB via docker/redis URI or hosted API) "
                            "is required, not FalkorDBLite")
         return empty
@@ -7651,7 +7718,30 @@ def _empty_cost_bucket() -> dict:
     """
     return {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
             "cost_usd": 0.0, "calls_without_cost": 0,
-            "calls_without_usage": 0, "usage_present": True}
+            "calls_without_usage": 0, "calls_without_tokens": 0,
+            "usage_present": True}
+
+
+def _bounded_cost_sum(current, delta) -> tuple[float, bool]:
+    """Sum two dollar amounts, never returning a non-finite total.
+
+    #5822 cycle-5 P3: an accumulator that bounds its OWN running total can
+    still be undone one function later, because every AGGREGATION seam
+    (``_rollup_llm``'s cross-stage sum, ``_merge_cost_accumulator``,
+    ``_merge_cost_bucket``) re-summed with a plain ``round(a + b, 6)``. Two
+    finite per-stage totals (``1e308`` each) overflow to ``inf`` there, which
+    takes the emitted row off the analytics sink — httpx encodes with
+    ``allow_nan=False``, so the row is dropped from ``analytics_events`` — and
+    makes ``inf + x == inf`` swallow every later charge in the session.
+
+    Returns ``(total, landed)``. On a non-finite sum ``total`` is the UNCHANGED
+    current value and ``landed`` is ``False``, so the caller can disclose the
+    aggregate that could not be represented instead of writing a non-finite.
+    """
+    rolled = float(current or 0.0) + float(delta or 0.0)
+    if math.isfinite(rolled):
+        return round(rolled, 6), True
+    return float(current or 0.0), False
 
 
 def _merge_cost_bucket(tgt: dict, src: dict) -> None:
@@ -7659,10 +7749,15 @@ def _merge_cost_bucket(tgt: dict, src: dict) -> None:
     tgt["calls"] += int(src.get("calls", 0) or 0)
     tgt["prompt_tokens"] += int(src.get("prompt_tokens", 0) or 0)
     tgt["completion_tokens"] += int(src.get("completion_tokens", 0) or 0)
-    tgt["cost_usd"] = round(
-        tgt["cost_usd"] + float(src.get("cost_usd", 0.0) or 0.0), 6)
+    tgt["cost_usd"], _cost_landed = _bounded_cost_sum(
+        tgt["cost_usd"], src.get("cost_usd"))
     tgt["calls_without_cost"] += int(src.get("calls_without_cost", 0) or 0)
+    if not _cost_landed:
+        # the merged total is unrepresentable — keep the last FINITE value and
+        # disclose the aggregate that could not be represented
+        tgt["calls_without_cost"] += 1
     tgt["calls_without_usage"] += int(src.get("calls_without_usage", 0) or 0)
+    tgt["calls_without_tokens"] += int(src.get("calls_without_tokens", 0) or 0)
     tgt["usage_present"] = bool(
         tgt["usage_present"] and src.get("usage_present", True))
 
@@ -7685,20 +7780,85 @@ def _merge_cost_accumulator(tgt_stats: dict, src_stats: dict) -> None:
     acc["completion_tokens"] = (
         int(acc.get("completion_tokens", 0))
         + int(src.get("completion_tokens", 0) or 0))
-    acc["cost_usd"] = round(
-        float(acc.get("cost_usd", 0.0))
-        + float(src.get("cost_usd", 0.0) or 0.0), 6)
+    acc["cost_usd"], _cost_landed = _bounded_cost_sum(
+        acc.get("cost_usd", 0.0), src.get("cost_usd"))
     acc["calls_without_cost"] = (
         int(acc.get("calls_without_cost", 0))
         + int(src.get("calls_without_cost", 0) or 0))
+    if not _cost_landed:
+        # a non-finite merged total must never be written; disclose the drop
+        acc["calls_without_cost"] = (
+            int(acc.get("calls_without_cost", 0)) + 1)
     acc["calls_without_usage"] = (
         int(acc.get("calls_without_usage", 0))
         + int(src.get("calls_without_usage", 0) or 0))
+    acc["calls_without_tokens"] = (
+        int(acc.get("calls_without_tokens", 0))
+        + int(src.get("calls_without_tokens", 0) or 0))
     for provider, models in (src.get("by_route") or {}).items():
         for model, bucket in (models or {}).items():
             _merge_cost_bucket(
                 acc.setdefault("by_route", {}).setdefault(provider, {})
                 .setdefault(model, _empty_cost_bucket()), bucket)
+
+
+def _normalise_token_count(value) -> int | None:
+    """#5854: validate ONE provider-reported token count.
+
+    Returns a non-negative ``int``, or ``None`` when the value is PRESENT but
+    is not a valid token count. ``None`` is a DISCLOSED ABSENCE — the caller
+    counts it via ``calls_without_tokens`` and never substitutes a shaped
+    ``0`` for it.
+
+    The split follows ``int()`` itself. Where ``int(value)`` SUCCEEDS but
+    yields something that cannot be a token count, the coercion would silently
+    SHAPE a plausible wrong number (the #5854 defect) and the value is
+    REJECTED:
+
+    * ``bool`` — checked FIRST, because ``True`` IS ``1`` in Python, so
+      ``int(True)`` FABRICATES a token out of a flag;
+    * a non-integral ``float`` — ``int(100.9)`` TRUNCATES. The issue's open
+      decision is REJECT + DISCLOSE, not floor: flooring is the same
+      silent-shaping defect class this issue is about;
+    * a negative — impossible for a token count, and unguarded it sign-flips a
+      session total NEGATIVE while the row still reads ``fully_priced``;
+    * ``abs > 1e300`` — the magnitude bound the report-time reader
+      (``costing._price_lane._tok``) already applies.
+
+    Where ``int(value)`` RAISES (a non-numeric type, or a non-finite float —
+    ``inf``/``nan`` cannot be represented as an ``int`` at all), that raise is
+    PRESERVED: it already discloses the call atomically through the caller's
+    residual (``unattributed``), and PR #5822 pins that contract
+    (``test_m2_a_raising_usage_sink_must_not_erase_the_call``).
+
+    ``int()`` is deliberately NOT re-implemented (no float rounding, no
+    string parsing changes): a value ``int()`` accepts and this rejects is
+    exactly the shapeable class.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            # ``int(inf)`` OverflowError / ``int(nan)`` ValueError — keep the
+            # raise (the #5822 atomic contract; the residual discloses it).
+            return int(value)
+        if not value.is_integer():
+            # ``int(100.9)`` would truncate — reject, never floor.
+            return None
+    elif not isinstance(value, int):
+        # Not a real number. A value ``int()`` cannot parse raises here,
+        # preserving the #5822 atomic contract; a number-LIKE non-number
+        # (a numeric string, a ``Decimal``) is parsed only to trigger that
+        # raise and is then REJECTED — parsing it would shape a count out of
+        # a non-JSON number, the same defect in another disguise.
+        int(value)
+        return None
+    if abs(value) > 1e300:
+        return None
+    n = int(value)
+    return n if n >= 0 else None
 
 
 def _accumulate_call_cost(stats: dict, *, prompt_tokens, completion_tokens,
@@ -7717,32 +7877,103 @@ def _accumulate_call_cost(stats: dict, *, prompt_tokens, completion_tokens,
     charge (the deepseek-direct lane today); ``calls_without_usage``
     discloses calls with no usage block at all. Neither is ever silently
     priced at $0.
+
+    #5854: a TOKEN field the provider sent but that is not a valid count
+    (a boolean, a fractional float, a negative, an absurd magnitude) is
+    rejected by ``_normalise_token_count`` and disclosed through
+    ``calls_without_tokens`` — the same sibling-counter shape as the other
+    two, so a malformed measurement is an ABSENCE the row names rather than a
+    shaped number it cannot distinguish from a real one.
     """
     acc = stats.setdefault("cost", {})
-    ptoks = int(prompt_tokens or 0)
-    ctoks = int(completion_tokens or 0)
+    # #5854: normalise BOTH provider token fields before the first mutation
+    # into ``acc``, exactly as the #5822 charge guard does — a rejected token
+    # contributes no number, so the disclosure counter is the only trace it
+    # leaves. ``None`` here means ABSENT (``prompt_tokens`` was ``None``) or
+    # REJECTED (present but unusable); the two are distinguished below so the
+    # counter fires only for the rejected ones — an honest ``0`` is not a
+    # rejection.
+    ptoks = _normalise_token_count(prompt_tokens)
+    ctoks = _normalise_token_count(completion_tokens)
+    tokens_rejected = (
+        (ptoks is None and prompt_tokens is not None)
+        or (ctoks is None and completion_tokens is not None))
+    ptoks = ptoks or 0
+    ctoks = ctoks or 0
+    # #5822 review P3: normalise EVERY provider-controlled value before the
+    # first mutation into ``acc``. ``cost_usd`` is the last raise point, and it
+    # used to be coerced AFTER the token counters had already been bumped — so a
+    # payload the provider controls (a string ``cost``, or a JSON integer with
+    # 400 digits that overflows ``float()``) left the failing call's TOKENS in
+    # ``acc`` while ``by_route`` was never created. The M2 sink counts AFTER
+    # this returns (correctly — see ``_session_llm_usage_sink``), so the same
+    # call was simultaneously disclosed as ``unattributed`` AND priced into the
+    # row's top-level token count, contradicting its own ``by_stage`` breakdown.
+    # Parsing up front makes the mutation atomic w.r.t. provider input: a payload
+    # that cannot be coerced raises with ``acc`` untouched, and the caller's
+    # residual then discloses the call with no tokens attributed to it.
+    #
+    # A NON-FINITE charge (an ``inf`` from a JSON ``1e400``, or a string
+    # ``"nan"``/``"Infinity"``) does NOT raise on ``float()``, so it would land
+    # on the row and break the emit: ``_track_analytics_event`` encodes with
+    # httpx's ``allow_nan=False``, so one non-finite value raises
+    # ``ValueError``, the row is only written to the local JSONL fallback, and
+    # it never reaches ``analytics_events`` — the table
+    # ``cost_per_session_distribution`` scans. Worse, ``round(nan + x, 6)``
+    # stays ``nan``, so a single ``nan`` silently SWALLOWS every later valid
+    # charge in the session. An unusable charge is therefore treated exactly
+    # like an absent one: disclosed via ``calls_without_cost``, never a
+    # non-finite row, and the tokens are still kept so the row stays repricable
+    # from the pricing map.
+    cost_val = None if cost_usd is None else float(cost_usd)
+    if cost_val is not None and not math.isfinite(cost_val):
+        cost_val = None
     acc["calls"] = int(acc.get("calls", 0)) + 1
     acc["prompt_tokens"] = int(acc.get("prompt_tokens", 0)) + ptoks
     acc["completion_tokens"] = int(acc.get("completion_tokens", 0)) + ctoks
-    if cost_usd is None:
+    if cost_val is None:
         acc["calls_without_cost"] = int(acc.get("calls_without_cost", 0)) + 1
     else:
-        acc["cost_usd"] = round(
-            float(acc.get("cost_usd", 0.0)) + float(cost_usd), 6)
-    has_usage = bool(ptoks or ctoks or cost_usd is not None)
+        rolled = float(acc.get("cost_usd", 0.0)) + cost_val
+        if math.isfinite(rolled):
+            acc["cost_usd"] = round(rolled, 6)
+        else:
+            # #5822 cycle-4 P3: the charge is FINITE but the ACCUMULATED total
+            # overflows to ``inf`` (two legitimate-looking ``1e308`` charges).
+            # Guarding the OPERAND cannot bound the RESULT, so the consequences
+            # cycle 3 fixed for a non-finite input return here: the row is
+            # dropped from ``analytics_events``, and ``inf + x == inf`` would
+            # swallow every later valid charge. An unusable TOTAL is disclosed
+            # exactly like an unusable charge.
+            cost_val = None
+            acc["calls_without_cost"] = (
+                int(acc.get("calls_without_cost", 0)) + 1)
+    has_usage = bool(ptoks or ctoks or cost_val is not None)
     lane = (acc.setdefault("by_route", {}).setdefault(provider or "unknown", {})
             .setdefault(model or "unknown", _empty_cost_bucket()))
     lane["calls"] += 1
     lane["prompt_tokens"] += ptoks
     lane["completion_tokens"] += ctoks
-    if cost_usd is None:
+    if cost_val is None:
         lane["calls_without_cost"] += 1
     else:
-        lane["cost_usd"] = round(lane["cost_usd"] + float(cost_usd), 6)
+        rolled_lane = lane["cost_usd"] + cost_val
+        if math.isfinite(rolled_lane):
+            lane["cost_usd"] = round(rolled_lane, 6)
+        else:
+            # a per-route overflow is disclosed, never written as ``inf``
+            lane["calls_without_cost"] += 1
     if not has_usage:
         acc["calls_without_usage"] = (
             int(acc.get("calls_without_usage", 0)) + 1)
         lane["calls_without_usage"] += 1
+    if tokens_rejected:
+        # #5854: the token measurement was rejected, never shaped. A call with
+        # no usable token count is NOT a $0-token call, so it is disclosed
+        # here and rolled to the session level beside the other counters.
+        acc["calls_without_tokens"] = (
+            int(acc.get("calls_without_tokens", 0)) + 1)
+        lane["calls_without_tokens"] += 1
     lane["usage_present"] = bool(lane["usage_present"] and has_usage)
 
 
@@ -7780,18 +8011,29 @@ def _rollup_llm(llm_stats: dict, stage_stats: dict,
     llm_stats["completion_tokens"] = (
         llm_stats.get("completion_tokens", 0)
         + int(cost.get("completion_tokens", 0) or 0))
-    llm_stats["cost_usd"] = round(
-        llm_stats.get("cost_usd", 0.0)
-        + float(cost.get("cost_usd", 0.0) or 0.0), 6)
+    llm_stats["cost_usd"], _cost_landed = _bounded_cost_sum(
+        llm_stats.get("cost_usd", 0.0), cost.get("cost_usd"))
     llm_stats["calls_without_cost"] = (
         llm_stats.get("calls_without_cost", 0)
         + int(cost.get("calls_without_cost", 0) or 0))
+    if not _cost_landed:
+        # #5822 cycle-5: the CROSS-STAGE sum is the seam where a per-stage
+        # guard is undone — two finite stage totals (1e308 each) overflow here
+        # and would take the emitted row off the analytics sink.
+        llm_stats["calls_without_cost"] = (
+            int(llm_stats.get("calls_without_cost", 0)) + 1)
     # #3359: a call that returned NO usage block at all (no tokens, no
     # charge) is a different disclosure from one that returned tokens but no
     # charge — roll it too, so the emitted row can say so at session level.
     llm_stats["calls_without_usage"] = (
         llm_stats.get("calls_without_usage", 0)
         + int(cost.get("calls_without_usage", 0) or 0))
+    # #5854: the token-rejection disclosure — a call whose provider token
+    # count was malformed, rolled like the other counters so the emitted row
+    # names the absence instead of carrying a shaped number.
+    llm_stats["calls_without_tokens"] = (
+        llm_stats.get("calls_without_tokens", 0)
+        + int(cost.get("calls_without_tokens", 0) or 0))
 
     by_stage = llm_stats.setdefault("by_stage", {})
     for provider, models in (cost.get("by_route") or {}).items():
@@ -7866,10 +8108,16 @@ def _call_once(model, system: str, user: str, *, deadline_s: int,
         # normalization mirrors ``_billed()`` (sdk.py:216) so mocks
         # without the token attrs contribute 0, never a TypeError).
         box["finish_reason"] = getattr(model, "last_finish_reason", None)
-        box["prompt_tokens"] = int(
-            getattr(model, "last_prompt_tokens", None) or 0)
-        box["completion_tokens"] = int(
-            getattr(model, "last_completion_tokens", None) or 0)
+        # #5854: capture the RAW provider counts — an ``int()`` here would
+        # FABRICATE (``True`` -> 1) or TRUNCATE (``100.9`` -> 100) BEFORE the
+        # normaliser (`_normalise_token_count`) could see the malformed value,
+        # which is exactly why the v2 lane shared the #5854 defect. A missing
+        # attr still becomes 0 (the #2134 Task 0 contract below), and
+        # ``_complete`` rejects + discloses a present-but-unusable one.
+        _pt = getattr(model, "last_prompt_tokens", None)
+        _ct = getattr(model, "last_completion_tokens", None)
+        box["prompt_tokens"] = 0 if _pt is None else _pt
+        box["completion_tokens"] = 0 if _ct is None else _ct
         # #3359: the provider's own charge + the route that served it,
         # captured in the SAME thread as the call (same cross-thread-race
         # reason as the tokens above; ``is None`` — 0.0 is authoritative).
@@ -8030,10 +8278,20 @@ def _complete(model, system: str, user: str, *, deadline_s: int | None = None,
     for attempt in range(1, retries + 2):
         try:
             (resp, finish_reason,
-             prompt_tokens, completion_tokens,
+             prompt_tokens_raw, completion_tokens_raw,
              call_cost_usd, call_provider, call_model) = _call_once(
                  model, system, user, deadline_s=deadline_s,
                  max_tokens=max_tokens, stats=stats)
+            # #5854: the per-call SNAPSHOT fields are the NORMALISED counts
+            # (0 for an absent or rejected value); the accumulator is handed
+            # the RAW value so IT can disclose the rejection through
+            # ``calls_without_tokens``. Normalising here too keeps a malformed
+            # count out of ``stats["prompt_tokens"]`` (the recovery/truncation
+            # read surface) — the shape the v2 lane previously got from
+            # ``_call_once``'s ``int()``, now applied only after validation.
+            prompt_tokens = _normalise_token_count(prompt_tokens_raw) or 0
+            completion_tokens = (
+                _normalise_token_count(completion_tokens_raw) or 0)
             truncated = finish_reason == "length"
             if stats is not None:
                 stats.update(attempts=attempt, retries=attempt - 1,
@@ -8050,8 +8308,8 @@ def _complete(model, system: str, user: str, *, deadline_s: int | None = None,
                 # values come from ``_call_once``'s own return tuple — this
                 # call's capture, never another thread's.
                 _accumulate_call_cost(
-                    stats, prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens,
+                    stats, prompt_tokens=prompt_tokens_raw,
+                    completion_tokens=completion_tokens_raw,
                     cost_usd=call_cost_usd,
                     provider=call_provider,
                     model=call_model)

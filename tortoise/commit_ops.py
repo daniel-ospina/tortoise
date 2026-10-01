@@ -280,11 +280,69 @@ def apply_payload_operators(proj, sdk, operators: list, *,
 
     ⛔ The return is a plain LIST, never ``target_op_ids.values()``: that
     dict is the MITIGATES same-call lookup and is keyed on
-    ``(src, dst, op_type)``, while ``create_operator`` mints unconditionally
-    (#4971) — two payload records that re-key onto the SAME graph triple each
-    create their own node, and a dict keyed on the triple would silently drop
-    the earlier node's id from the provenance set, leaving it unstamped and
-    invisible (the very #4936 defect this return exists to close).
+    ``(src, dst, op_type)``; it must never double as the provenance set
+    (#4936). Before #4971 the two could differ — ``create_operator`` mints
+    unconditionally, so two payload records that re-keyed onto the SAME
+    graph triple each created their own node, and a dict keyed on the triple
+    would silently drop the earlier node's id from the provenance set,
+    leaving it unstamped and invisible. #4971's guard (below) now makes the
+    repeat a no-op, so a triple is unique within a call and the two agree
+    again — but the LIST stays the caller's contract: it is the ordered set
+    of ids this call CREATED, which is what a provenance stamp needs and what
+    a caller must never widen by looking at the MITIGATES dict.
+
+    ⛔ #4971 — IDEMPOTENCY GUARD, keyed on the RESOLVED ``(op_type, src,
+    dst)`` triple. ``create_operator`` mints a fresh ULID on every call with
+    no existence probe, so a commit (or a failed-capture retry) that reaches
+    this pass twice mints a SECOND operator Point for one bridge — and each
+    duplicate is a separately weighted edge (``weights.py::
+    compute_operator_weight`` is per op id), so EP propagates the same link
+    twice (silent belief inflation). The probe below is the eval lane's
+    dup-edge probe (``tools/longmem_eval/ingest_v2.py``, #1369 review P2)
+    hoisted here so the hosted (``hosted_api._execute_commit_writes`` §7) and
+    capture (``sdk._extract_session_v2``) paths share one discipline — the
+    eval lane keeps its own inline copy (it does NOT call this helper).
+
+    ⚠️ The key is the RESOLVED triple, NEVER the payload id: on a re-keyed
+    endpoint the payload id names nothing in the graph (it resolved to a
+    pre-existing node under a DIFFERENT id), so a payload-keyed probe would
+    never match and the duplicate would survive — the identical reasoning the
+    event probe in ``ingest_v2.py`` records ("the key ... NEVER the payload
+    ``id``: extractor_v2's prior-graph search REUSES a prior ... so the
+    payload ``id`` is NOT a stable idempotency key"). It is exactly why the
+    ID-SPACE PRECONDITION above is a precondition: this helper can only be
+    idempotent if its caller handed it graph ids.
+
+    ``direction`` is deliberately NOT part of the key — the acceptance is
+    ONE node per ``(op_type, src, dst)`` triple, matching the eval lane's
+    probe (so the FIRST write's direction wins; pinned by
+    ``test_direction_is_not_part_of_the_key_first_write_wins``). On a repeat
+    the guard ``continue``s (the eval lane's semantics), so the node is
+    neither re-created NOR added to the returned list: the return contract is
+    CREATED ids only, and a caller stamping provenance must never claim a node
+    a prior commit created (the #4936 rule above). Because the guard probes
+    the GRAPH, a duplicate triple WITHIN one payload collapses too, exactly as
+    it does in the eval lane — the same belief inflation otherwise survives as
+    a within-call duplicate (and that is why #4936's
+    ``test_fold_lane_commit_leg_stamps_every_node_when_a_triple_repeats``
+    now pins the collapsed count instead of the old two-node list).
+
+    ⚠️ SCOPE — the probe is SINGLE-TARGET: ``idx:1`` is the only target it
+    reads, because every caller here passes ``[dst]``. ``sdk.create_operator``
+    accepts ``target_ids: list`` and IS called with several targets elsewhere
+    (``sdk.py:9895``), so a future MULTI-TARGET caller would get the first
+    target idempotent and the rest duplicated. Widen the probe to read the
+    whole target set before routing such a caller here.
+
+    ⚠️ The MITIGATES fallback below is IMPL-only (it hardcodes
+    ``op_type:'IMPL'``), so ``continue``-ing a skipped NAND leaves a
+    NAND-targeted mitigation with nothing to attach to and it is dropped with
+    a warning. Not reachable today — ``OperatorTarget.op_type`` is
+    ``Literal["IMPL"]`` (``commit_schema.py:464``) and the extractor emits
+    ``op_type: "IMPL"`` (``extractor_v2.py:5868``) — but this guard is the
+    first thing that makes that fallback load-bearing for a skipped same-call
+    operator, so extend the fallback (``t_op_type`` + the mapped edge) in the
+    same change that widens the schema.
     """
     target_op_ids: dict[tuple, str] = {}
     created_ids: list[str] = []
@@ -296,6 +354,26 @@ def apply_payload_operators(proj, sdk, operators: list, *,
         if not op_type or not src or not dst:
             _logger.warning(
                 "operator write skipped (inputs missing?): %r", op)
+            continue
+        # #4971 — (op_type, src, dst) idempotency probe, on the RESOLVED
+        # triple (see the docstring; a payload-keyed probe never fires on a
+        # re-key). The relation type is mapped exactly as ``create_operator``
+        # maps it for the edge it writes (part/whole ops use ``hasPart``), so
+        # the probe reads the same edge the write would have created rather
+        # than inlining a raw op_type that would make it miss on those ops.
+        _edge_type = ("hasPart" if op_type not in ("IMPL", "NAND")
+                      else op_type)
+        _dup = proj.g.query(
+            f"MATCH (o:Point {{is_operator:true, op_type:$t}})-"
+            f"[:{_edge_type} {{idx:0}}]->(s) WHERE s.id = $src "
+            f"MATCH (o)-[:{_edge_type} {{idx:1}}]->(d) WHERE d.id = $dst "
+            "RETURN count(*) LIMIT 1",
+            params={"t": op_type, "src": src, "dst": dst}).result_set
+        if _dup and _dup[0][0]:
+            # Already bridged by an earlier commit/retry — a no-op. Do NOT
+            # record it in target_op_ids: the MITIGATES second pass falls
+            # back to its own Cypher probe and finds the pre-existing operator
+            # (whose ``mitigate_operator`` is itself idempotent).
             continue
         try:
             result = sdk.create_operator(
@@ -552,7 +630,8 @@ class _PerRecordWarnBudget:
         return max(0, self.total - self._limit)
 
 
-def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
+def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
+                        skipped=None):
     """Apply canonical supersession records — the ONE consumer-side
     discipline (producer side: extractor_v2._supersession_records).
     pt_ records → supersede() CORRECTS (terminal-probed, idempotent);
@@ -609,10 +688,35 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
     producer; one terminal BEFORE the payload still skips (guard-(h)
     semantics). Returns the number of
     records applied.
+
+    ``skipped`` (#5365) is an OPTIONAL caller-supplied list. When given, one
+    ``{"ref", "successor", "reason"}`` dict is appended for every record the
+    function did NOT apply. The return stays an ``int`` so existing callers
+    are untouched, but a caller that passes ``skipped`` can tell a clean
+    batch from one that dropped records — which the callback warning alone
+    does not give it, because a caller that does not read logs sees only the
+    int. The fail-open posture is UNCHANGED and deliberate: a bad record
+    still never aborts the ingest; it just stops being invisible.
     """
     if warn is None:
         warn = _logger.warning
     applied = 0
+
+    def _skip(ref, successor, reason):
+        """Record a record that did NOT apply, in the caller's ``skipped``.
+
+        #5365: the fail-open gates below deliberately swallow a bad record
+        rather than abort the ingest, but before this channel existed the
+        ONLY trace was a callback warning — so a caller that did not read
+        logs (the hosted commit endpoint, eval ingest) could not distinguish
+        a fully-applied batch from one that silently dropped records. #4021
+        made this acute: a retroactive supersession that previously
+        SUCCEEDED (while writing an inverted predecessor window) now raises
+        into the catch below and became a silent unapplied record.
+        """
+        if skipped is not None:
+            skipped.append({"ref": ref, "successor": successor,
+                            "reason": reason})
     # #2249: same-payload chains fold in DEPENDENCY order (a silent stable
     # pre-pass — payloads with <2 entity records or any resolution doubt
     # fall through to payload order). The per-record gates below re-run
@@ -649,6 +753,7 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
         if not ref or not supersedes_by:
             warn(f"supersession record skipped (missing superseded or "
                  f"supersedes_by): {record!r}")
+            _skip(ref, supersedes_by, "missing superseded or supersedes_by")
             continue
         if ref == supersedes_by:
             # self-supersession — meaningless, would fold an Object to
@@ -660,6 +765,7 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
             # consumer-side guard is the defense-in-depth sink, placed
             # BEFORE the pt_/entity dispatch so it guards both lanes.
             warn(f"supersession record skipped (self-supersession): {record!r}")
+            _skip(ref, supersedes_by, "self-supersession")
             continue
         if ref.startswith("pt_"):
             # Point-level → the canonical supersede() CORRECTS (outdated +
@@ -676,6 +782,7 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
             if ref not in state_by_id:
                 warn(f"point supersession ref {ref!r} not found — "
                      f"skipped (fail-open)")
+                _skip(ref, supersedes_by, "ref not found")
                 continue
             # #2498: the SHARED terminal vocabulary (status set + the legacy
             # `outdated=true` flag) — the pre-#2498 3-status tuple let an
@@ -690,6 +797,12 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
                 applied += 1
             except Exception as exc:
                 warn(f"point supersede {ref!r} → {supersedes_by!r} failed: {exc}")
+                # #5365: the fail-open skip this issue is about. #4021 made
+                # an inverted successor RAISE where it previously succeeded
+                # (while writing the bad window), so this pre-existing,
+                # deliberate catch turned a REFUSAL into a silently
+                # unapplied record. Record it for the caller.
+                _skip(ref, supersedes_by, f"supersede refused: {exc}")
             continue
         # Entity-level — successor FIRST: supersedes_by must be visible
         # (payload entities were already written when capture calls this;
@@ -718,10 +831,12 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
                      f"{supersedes_by!r} is a :Subject (a declared §5 "
                      f"subject kind, #1370); entity supersession is "
                      f"Object-only")
+                _skip(ref, supersedes_by, "successor is a :Subject")
             else:
                 warn(f"entity supersession {ref!r} skipped — successor "
                      f"{supersedes_by!r} is not an Object in the payload "
                      f"entities or the graph (dangling successor)")
+                _skip(ref, supersedes_by, "dangling successor")
             continue
         # NB: >1 successor rows are NOT skipped here — the alias scan below
         # (post ref-side resolution) decides. Duplicate names are only
@@ -945,6 +1060,7 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
                  f"{supersedes_by!r} resolves only to id-less, "
                  f"target-identical, or recall-excluded Objects (no "
                  f"visible successor under that name)")
+            _skip(ref, supersedes_by, "no visible successor")
             continue
         try:
             # id-style emission: id + ALL extra kwargs ride the JSONL line
@@ -1001,6 +1117,15 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
                 applied += 1
         except Exception as exc:
             warn(f"ObjectSuperseded emit/fold failed for {obj_name!r}: {exc}")
+            _skip(obj_name, supersedes_by, f"emit/fold failed: {exc}")
+    if skipped:
+        _raw_warn(
+            f"supersession batch of {len(records)} record(s): "
+            f"{applied} applied, {len(skipped)} SKIPPED (fail-open — the "
+            f"caller's `skipped` list carries each one). First: "
+            f"{skipped[0]['ref']!r} → {skipped[0]['successor']!r} "
+            f"({skipped[0]['reason']})"
+        )
     if warn.suppressed:
         _raw_warn(
             f"supersession batch of {len(records)} record(s): "

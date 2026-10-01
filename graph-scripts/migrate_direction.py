@@ -9,15 +9,25 @@ Sets `direction` on every existing operator Point, preserving current semantics:
 Idempotent: skips operators that already have a `direction` property.
 
 Usage:
-  TORTOISE_DB_URI=docker://:@localhost:16379/tortoise python3 graph-scripts/migrate_direction.py
+  TORTOISE_DB_URI=docker://:@127.0.0.1:16379/tortoise python3 graph-scripts/migrate_direction.py
   # Or dry-run:
-  TORTOISE_DB_URI=docker://:@localhost:16379/tortoise python3 graph-scripts/migrate_direction.py --dry-run
+  TORTOISE_DB_URI=docker://:@127.0.0.1:16379/tortoise python3 graph-scripts/migrate_direction.py --dry-run
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"graph-scripts/migrate_direction.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python graph-scripts/migrate_direction.py`"
+    )
+
 import argparse
 import os
-import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
