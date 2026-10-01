@@ -24,7 +24,7 @@ Idempotent — safe to re-run (only touches nodes with is_episodic IS NULL).
 Usage:
     python3 graph-scripts/backfill_is_episodic.py [--dry-run] [--graph GRAPH] [--uri URI] [--yes]
 
-Defaults to TORTOISE_DB_URI env var (or docker://:falkordb@localhost:16379/tortoise).
+Defaults to TORTOISE_DB_URI env var (or docker://:falkordb@127.0.0.1:16379/tortoise).
 Hosted multi-tenant: run once per tenant graph (--graph team_<org_id>).
 Local embedded (--uri <path to embedded.db>, or TORTOISE_DB_PATH): runs on
 the graph named by --graph (default "tortoise").
@@ -42,7 +42,7 @@ import sys
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))
 
-DEFAULT_URI = "docker://:falkordb@localhost:16379/tortoise"
+DEFAULT_URI = "docker://:falkordb@127.0.0.1:16379/tortoise"
 
 # Scoped Cypher statements (review P1, PR #976): capture artifacts only —
 # see the module docstring for the scope rationale. Each statement is

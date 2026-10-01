@@ -120,8 +120,8 @@ def main():
     )
     parser.add_argument(
         "--db-uri",
-        default=os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise"),
-        help="FalkorDB URI (default from TORTOISE_DB_URI or docker://:@localhost:16379/tortoise)",
+        default=os.environ.get("TORTOISE_DB_URI", "docker://:@127.0.0.1:16379/tortoise"),
+        help="FalkorDB URI (default from TORTOISE_DB_URI or docker://:@127.0.0.1:16379/tortoise)",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
