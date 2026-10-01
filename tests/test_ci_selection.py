@@ -2274,9 +2274,10 @@ def test_a_matrix_job_never_uploads_a_fixed_name_artifact():
     a file count against a positive artifact count only at zero, so a partial
     fetch is indistinguishable from a complete one and the loss is silent.
 
-    observed three times over in this repo, each found by hand after the data
-    was already gone: the #3467 plan's defect (i), the canary producer name
-    (#6135), and `pytest-log-test-slow` (#6263).
+    observed in this repo: the #3467 plan's defect (i) is the same instance
+    this change closes (see the plan's own defect list), and `#6135` is the
+    other mechanism — a CONSUMER hardcoding a shard name rather than a
+    producer reusing one.
 
     A name is accepted when it interpolates a matrix key the job actually
     declares, or when the step (or its job) carries an `if:` that mentions the
@@ -2316,7 +2317,7 @@ def test_a_matrix_job_never_uploads_a_fixed_name_artifact():
     assert not offenders, (
         "a matrix job uploads a fixed-name artifact, so its legs collide and "
         "one leg's files are overwritten by the other's without any check "
-        "failing (#6263; same root as the #3467 plan's defect (i) and #6135): "
+        "failing (#6263; same root as the #3467 plan's defect (i)): "
         + "; ".join(offenders))
 
 

@@ -1338,10 +1338,8 @@ jobs:
         # ci-timing.yml then downloads by pattern with `merge-multiple` unset
         # (false), which places same-named artifacts in ONE directory — leg (b)'s
         # `pytest.log` overwrites leg (a)'s, and the durations map silently
-        # measures one half of the slow shard. Same class as `pytest-log-test-slow` ×2
-        # (the #3467 plan's defect (i), observed) and `pytest-canary-producer`
-        # (#6135), both of which were fixed the same way. The `test` job above
-        # already carries its leg and is the in-file precedent.
+        # measures one half of the slow shard. The `test` job above already
+        # carries its leg and is the in-file precedent.
         if: always()
         continue-on-error: true
         uses: actions/upload-artifact@v4
