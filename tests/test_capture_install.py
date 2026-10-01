@@ -3961,3 +3961,70 @@ def test_pi_hooks_status_hides_the_installer_when_a_manual_kind_refuses(cli,
     assert "re-point or copy it to upgrade" in r.stdout, r.stdout
     assert "manual fix" in r.stdout, r.stdout
     assert "hooks upgrade" not in r.stdout, r.stdout
+
+
+def test_pi_hooks_status_keeps_a_non_blocking_note_beside_the_collision(cli):
+    """`ahead-artifact` is a NOTE (`blocking=False`) that names the installer
+    without prescribing it — "`tortoise install pi` would replace it with N".
+
+    It is not the FAIL's repair, and it is the only place the "newer than this
+    CLI" observation is rendered, so the row must print it whole even when the
+    seam is unrepairable.
+
+    Mutation: match the bare command token instead of
+    `hook_install.ARTIFACT_INSTALLER_CLAUSES` — the token now matches, the
+    pointer appears in its place and this REDs.
+    """
+    run, _root, home = cli
+    installed = _stale_pi_seam(home)
+    # NEWER than whatever this CLI ships: the seam's own generation, ahead of
+    # the contract's, which the detector reports as a non-blocking note.
+    installed.write_text("// tortoise-hook-version: 9999\n// tortoise session\n",
+                         encoding="utf-8")
+    root = capture_install.pi_home(home)
+    (root / capture_install.LEGACY_PI_DIRNAME).mkdir()
+    (root / capture_install.PI_DISABLED_DIRNAME).mkdir()
+
+    r = run("hooks", "status", "--harness", "pi")
+
+    assert "ahead-artifact" in r.stdout, r.stdout
+    assert "newer than this CLI" in r.stdout, (
+        "the note names the installer without prescribing it, so it must be "
+        "printed whole:\n" + r.stdout)
+    assert "for the repair path" not in r.stdout, (
+        "a non-blocking note is never the FAIL's repair:\n" + r.stdout)
+
+
+def test_pi_hooks_status_keeps_a_non_blocking_step_that_clears_the_refusal(cli):
+    """`symlinked-install` is a NON-blocking note whose detail DOES embed an
+    installer clause — "replace it with a real directory, then re-run
+    `tortoise install pi`" — so only the `blocking` conjunct keeps it.
+
+    Its first step is the user's and it is the step that clears the refusal, so
+    replacing it with the `session verify` pointer deletes the instruction (the
+    failure the pointer cannot always recover: `session verify` returns before
+    printing a finding when no API key resolves).  A symlinked install ROOT is
+    itself a manual kind, so this holds with or without the legacy collision.
+
+    Mutation: drop the manual-kind exemption from
+    `_artifact_detail_would_refuse` — this note's clause is then read as a bare
+    prescription, the pointer replaces it and this REDs.
+    """
+    run, _root, home = cli
+    real = home / "checkout-extensions"
+    real.mkdir(parents=True)
+    (home / ".pi" / "agent").mkdir(parents=True, exist_ok=True)
+    root = home / ".pi" / "agent" / "extensions"
+    root.symlink_to(real)
+    (real / capture_install.PI_EXTENSION_NAME).write_text(
+        "// tortoise-hook-version: 0\n// tortoise session\n", encoding="utf-8")
+
+    r = run("hooks", "status", "--harness", "pi")
+
+    assert "symlinked-install" in r.stdout, r.stdout
+    assert "replace it with a real directory" in r.stdout, (
+        "the note's first step is the user's and clears the refusal, so it "
+        "must survive:\n" + r.stdout)
+    assert "❌ stale-artifact: run `tortoise session verify --harness pi` "
+    "for the repair path" in r.stdout, (
+        "the BLOCKING finding's command is still withheld:\n" + r.stdout)

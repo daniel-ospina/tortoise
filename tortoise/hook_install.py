@@ -971,6 +971,25 @@ def is_manual_fix(kind: str) -> bool:
     return kind in MANUAL_FIX_KINDS or kind.startswith("symlinked")
 
 
+#: The installer-command CLAUSES the artifact details embed — the ones a caller
+#: must not render while the installer would refuse them (#5351).  Declared
+#: beside the details that write them, and matched as CLAUSES rather than as the
+#: bare `` `tortoise install <h>` `` token, because a caller matches rendered
+#: prose: the token also occurs inside an install PATH (backticks are legal
+#: filename characters), and a caller testing for the token alone withholds a
+#: `chmod` instruction whose path merely looks like a command — measured, and
+#: pinned by
+#: ``tests/test_doctor.py::test_doctor_keeps_a_command_free_detail_when_the_path_looks_like_a_command``
+#: A caller must ALSO exempt the manual kinds: the ``symlinked-install`` note
+#: (also non-blocking) embeds the ``re-run`` clause as the second step of an
+#: instruction whose first step is the user's, so its clause must not be read as
+#: a bare prescription.
+ARTIFACT_INSTALLER_CLAUSES = (
+    "reinstall with `tortoise install {harness}`",
+    "re-run `tortoise install {harness}`",
+)
+
+
 # ── settings helpers ────────────────────────────────────────────────────
 
 

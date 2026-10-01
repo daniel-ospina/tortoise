@@ -1413,3 +1413,43 @@ class TestDoctorPiSeamFreshness:
         assert "bytes differ" in row, (
             "no installer command is embedded, so nothing refuses — the "
             "detail must survive: " + row)
+
+    def test_doctor_keeps_a_command_free_detail_when_the_path_looks_like_a_command(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """The predicate matches a CLAUSE, not the bare command token.
+
+        Every artifact detail interpolates the install PATH, and backticks are
+        legal filename characters — so a $HOME containing the literal
+        `` `tortoise install pi` `` makes the token appear in a detail that
+        names no command at all.  A caller testing for the token alone withholds
+        `bytes differ from the shipped seam` there and leaves the pointer in its
+        place; the clause the detector actually writes does not occur in a path
+        (`hook_install.ARTIFACT_INSTALLER_CLAUSES`).
+
+        Mutation: match the bare token (`f"`tortoise install {harness}`" in
+        detail`) — this REDs.
+        """
+        from tortoise import capture_install as _ci
+        from tortoise.hook_install import detect_artifact_install
+        home = tmp_path / "`tortoise install pi`" / "home"
+        (home / ".pi" / "agent").mkdir(parents=True)
+        res = _ci.install_capture("pi", home=home)
+        assert res.ok, res.error
+        root = home / ".pi" / "agent" / "extensions"
+        seam = root / _pi_seam_name()
+        seam.write_bytes(seam.read_bytes() + b"\n// local edit\n")
+        kinds = {f.kind for f in detect_artifact_install(root, "pi")}
+        assert kinds == {"modified-artifact"}, kinds
+        assert "`tortoise install pi`" in str(seam), (
+            "the fixture's PATH must carry the bare token, or the mutation "
+            "this test pins is not exercised")
+        (root / _ci.LEGACY_PI_DIRNAME).mkdir()
+        (root / _ci.PI_DISABLED_DIRNAME).mkdir()
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert "bytes differ" in row, (
+            "the path merely LOOKS like a command; the detail names none, so "
+            "it must survive: " + row)

@@ -3407,31 +3407,37 @@ def _artifact_detail_would_refuse(finding, harness: str, *,
     either prints a command that refuses or deletes an instruction the user
     needs.
 
-    Three conditions, and each is load-bearing:
+    Three conditions, each load-bearing for a specific kind:
 
     * ``unrepairable`` — the seam's installer refuses right now (a MANUAL kind
       or the legacy collision; the caller decides which findings those are).
       In a repairable seam the detail's command WORKS and must be printed.
-    * the finding is BLOCKING — a non-blocking note is informational.
-    * the detail actually NAMES the installer.  Only the artifact details whose
-      prescription IS the command do that, and withholding one of the others
-      would delete the row's only instruction: ``chmod it so the seam can
-      load``, ``remove or re-point it``, ``bytes differ from the shipped seam``
-      and ``is not installed`` are instructions the installer is not involved
-      in.  (Measured: an earlier kind-based rule withheld those, and the
-      replacement pointer does not always recover them — ``tortoise session
-      verify`` refuses before printing any finding when no API key resolves.)
-    * a MANUAL kind is EXEMPT even then.  Its detail is a CONDITIONAL
-      two-step — ``move it aside, then re-run `tortoise install <h>` `` — whose
-      FIRST step is the instruction and whose second step is the installer, so
-      the row keeps it and names the obstacle that can still block that second
-      step beside it (both surfaces do, on the same row).  Withholding it would
-      trade an immediate counter-signal for a lost instruction.
+    * the detail embeds one of :data:`hook_install.ARTIFACT_INSTALLER_CLAUSES`.
+      The details that name no command are never withheld, because the pointer
+      does not always recover them — ``tortoise session verify`` resolves its
+      transmit identity first and, with no API key configured, returns before
+      printing a single finding.  The clauses are matched whole so an install
+      PATH cannot masquerade as one, and a note that merely MENTIONS the
+      installer (``ahead-artifact``: ``would replace it with N``) embeds none.
+    * the kind is not a MANUAL one.  That exempts the third way a detail can
+      name the installer without being the repair the verdict calls for: a
+      conditional two-step whose first action is the user's — ``foreign-artifact``
+      (``move it aside, then re-run …``) and the ``symlinked-install`` note
+      (``replace it with a real directory, then re-run …``).  Withholding those
+      would delete the step that clears the refusal.
+
+    ``Finding.blocking`` is deliberately NOT consulted: every clause-bearing
+    kind that is a note rather than a verdict is already exempt above, so the
+    test would change no reachable state (measured — dropping it leaves every
+    state's rendering identical), and a future non-blocking detail that names
+    the installer would be one whose first step is the user's, exactly like
+    ``symlinked-install``.
     """
-    from tortoise.hook_install import is_manual_fix
-    return (unrepairable and finding.blocking
+    from tortoise.hook_install import ARTIFACT_INSTALLER_CLAUSES, is_manual_fix
+    return (unrepairable
             and not is_manual_fix(finding.kind)
-            and f"`tortoise install {harness}`" in finding.detail)
+            and any(clause.format(harness=harness) in finding.detail
+                    for clause in ARTIFACT_INSTALLER_CLAUSES))
 
 
 def _cmd_hooks(args) -> int:
@@ -3650,10 +3656,12 @@ def _cmd_hooks(args) -> int:
             unrepairable = bool(manual) or bool(obstacle)
             print(f"Capture-hook install at {root} (contract v{version}):")
             for f in findings:
-                # The call is the SHARED predicate — kind alone would withhold a
-                # manual instruction the installer never owned (`chmod`, `remove
-                # or re-point it`), and the collision alone would withhold
-                # them the moment one exists.
+                # The call is the SHARED predicate; the two rules it replaces
+                # each failed a measured case.  A kind-based rule withheld
+                # `bytes differ from the shipped seam` (non-manual) while
+                # exempting the manual details, and the round-5 collision arm
+                # withheld `chmod it so the seam can load` the moment any
+                # collision existed — neither is a command the installer owns.
                 if (layout is None
                         and _artifact_detail_would_refuse(
                             f, args.harness, unrepairable=unrepairable)):
@@ -7592,14 +7600,18 @@ def _cmd_doctor(args):
             # BOTH surfaces decide that through the same predicate
             # (`_artifact_detail_would_refuse`): the seam is unrepairable
             # (`_manual` OR the collision — the installer refuses either way),
-            # the finding is blocking, the detail actually names the installer,
-            # and the kind is not MANUAL.  A MANUAL kind keeps its detail — a
-            # conditional two-step whose FIRST step is the instruction — and the
-            # collision is named in the hint above it (the non-`elif` arms), so
-            # the row carries the counter-signal its second step can need
-            # instead of silently dropping the instruction.  The replacement
-            # names a command that ACCEPTS the harness: the read-only diagnostic
-            # that carries the finding.
+            # the detail embeds one of `hook_install.ARTIFACT_INSTALLER_CLAUSES`,
+            # and the kind is not MANUAL.  Exempting the manual kinds keeps
+            # instructions whose first step is the user's (`foreign-artifact`,
+            # the `symlinked-install` note), and matching whole clauses keeps a
+            # note that merely mentions the installer (`ahead-artifact`) out,
+            # together with a path that merely looks like a command.
+            # A MANUAL kind's second step can still be blocked by the collision,
+            # and the collision is named in the hint above it (the non-`elif`
+            # arms), so the row carries that counter-signal — `doctor` puts it
+            # in the same summary row, `hooks status` prints it as the following
+            # paragraph.  The replacement names a command that ACCEPTS the
+            # harness: the read-only diagnostic that carries the finding.
             _withhold = (_layout is None
                          and _artifact_detail_would_refuse(
                              first, _harness,
