@@ -973,13 +973,55 @@ reset_case
 seed_issue down "$((NOW - 600))" 2 0 ""
 export STUB_PROBE_CODES="200,000"   # first probe UP, confirmation probe DOWN
 run_watchdog
-assert_eq "$RC" "0" "flapping → exit 0"
+assert_eq "$RC" "1" "flapping with an open incident → RED, never green after a full failure (#5021)"
 assert_eq "$(count_calls 'GH PATCH repos/.*/issues/42$')" "0" "flapping → incident left OPEN (no close)"
 assert_contains "$OUT" "recovery NOT confirmed" "flapping → logged as unconfirmed recovery"
-# F2: this early exit sits BEFORE the escalation leg, so a flapping service
-# keeps an open incident with zero leaving-GitHub signal. The exit semantics are
-# deliberately unchanged; the gap must be NAMED rather than silent.
+# F2/#5021: this early exit sits BEFORE the escalation leg, so a flapping
+# service keeps an open incident with no escalation page. Its exit CODE is no
+# longer green (#5021); the refusal to advance state is deliberate (see 40b) and
+# must be NAMED rather than silent.
 assert_contains "$OUT" "NO escalation page is sent this run" "flapping with an open incident → the missing escalation page is NAMED, not silent"
+
+# ── 40b (#5021): a FLAP must not page even when the escalation thresholds are
+# ALREADY satisfied, and must advance NOTHING — the restart-gate decision. The
+# seed is e2e(b)'s page-boundary state (30 min old + 3 observed runs), so
+# decide_escalation WOULD page if this path reached it (e2e(b) proves that with
+# the SAME seed and a DOWN verdict). Only the verdict changes here: first probe
+# UP, confirmation probe DOWN. The probe codes are load-bearing: without them
+# the e2e(b) assertions themselves would page.
+# NOTE ON WHAT THIS PINS: the MECHANISM — the flap path writes no state and
+# never evaluates the restart leg — not the consequence for a sub-threshold
+# incident, which this seed cannot express (the seeded incident already
+# satisfies the restart gate, so there is no "was it pushed over?" to measure).
+# The sub-threshold residual is recorded in runbook § Known limits (#5047).
+reset_case
+seed_issue down "$((NOW - 1800))" 3 0 ""
+export STUB_PROBE_CODES="200,000"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+run_watchdog
+assert_eq "$RC" "1" "#5021: flapping → RED (the confirmation probe failed)"
+assert_eq "$(count_calls 'CURL telegram')" "0" "#5021: flapping → NO page even though the incident already satisfies the escalation thresholds"
+assert_not_contains "$OUT" "escalation outcome:" "#5021: the flap path never reaches decide_escalation"
+assert_eq "$(count_calls 'GH PATCH repos/.*/issues/42$')" "0" "#5021: flapping → NOTHING is written back, so the RESTART leg's run window cannot advance"
+assert_contains "$(cat "$STUB_TMP/issue.json")" "down_runs=3" "#5021: the seeded failing-run state is present to be measured against"
+assert_not_contains "$OUT" "restart decision:" "#5021: …and the restart leg is never even evaluated, so a flap cannot arm a restart"
+assert_contains "$OUT" "also satisfy the RESTART leg's run window" "#5021: the refusal NAMES the restart-gate reason"
+
+# ── 40c (#5021): the SAME decision for an UNEXPECTED confirmation verdict.
+# probe() returns on its FIRST UNEXPECTED verdict (unlike DOWN, which exhausts
+# PROBE_ATTEMPTS), so this is a ONE-attempt failure — the branch must treat it
+# identically (RED, no page, no state advance). Without this case nothing would
+# catch wording that assumed a full probe cycle had always been exhausted.
+reset_case
+seed_issue down "$((NOW - 1800))" 3 0 ""
+export STUB_PROBE_CODES="200,404"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+run_watchdog
+assert_eq "$RC" "1" "#5021: an UNEXPECTED confirmation verdict → RED"
+assert_eq "$(count_calls 'CURL telegram')" "0" "#5021: an UNEXPECTED confirmation verdict → NO page"
+assert_eq "$(count_calls 'GH PATCH repos/.*/issues/42$')" "0" "#5021: an UNEXPECTED confirmation verdict → no state advance"
 
 # ── 41: the UP path must not stay GREEN when it cannot do its job ──────────
 reset_case
