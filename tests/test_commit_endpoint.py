@@ -763,10 +763,14 @@ class TestExternalSources:
         """#4146 fail-safe — the OTHER direction.
 
         A re-commit that DOES carry a new anchor must still update the hash and
-        bump the version. The fix makes an ABSENT anchor preserve; it must
-        never make a PRESENT one inert. Without this test a "fix" that simply
-        stopped writing contentHash on the external path would pass the
-        preservation tests while silently breaking hash-diff versioning.
+        bump the version: the fix makes an ABSENT anchor preserve, never a
+        PRESENT one inert. Measured counterfactual (mutating the fix to an
+        unconditional ``contentHash=None``): this test, BOTH preservation tests
+        and ``test_sources_external_chain`` all go red — so it is not the sole
+        guard against a stopped-writing fix. It is, however, the only test that
+        reaches the update-direction assertions below (the stored hash CHANGES
+        and the version BUMPS when a new anchor arrives), which nothing else
+        covers.
         """
         url = "https://example.com/pricing"
         a1, a2 = hash_text("pricing v1"), hash_text("pricing v2")
