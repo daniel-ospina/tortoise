@@ -32,12 +32,12 @@ import contextlib
 import hashlib
 import json
 import os
-import socket
 import uuid
 from datetime import UTC, datetime
 
 import pytest
 
+from tests import _live_utils
 from tests.longmem_eval.test_vector_arm import _mini
 from tools.longmem_eval import run as runner
 from tools.longmem_eval.judge import MockJudge
@@ -59,14 +59,15 @@ DB_URI = os.environ.get(
     "TORTOISE_DB_URI",
     # CI's falkordb service requires the password (python-ci.yml
     # `--requirepass falkordb`); local passwordless instances can override.
-    "docker://:falkordb@localhost:6379/tortoise_test_matrix",
+    # #6673: the host port is the PROVISIONED (ephemeral) one, not the 6379
+    # literal — see tests/_live_utils.py.
+    _live_utils.docker_uri("tortoise_test_matrix"),
 )
 
 
 def _falkordb_up() -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.settimeout(1.0)
-        return s.connect_ex(("127.0.0.1", 6379)) == 0
+    """True when the PROVISIONED passworded docker-lane service answers."""
+    return _live_utils.docker_reachable()
 
 
 class _StableModel:
@@ -293,7 +294,8 @@ def test_cache_cli_parser_tristate():
 # ── docker lane: cache lifecycle over the real namespace machinery ─────────
 
 pytestmark = pytest.mark.skipif(
-    not _falkordb_up(), reason="FalkorDB not reachable at docker://localhost:6379"
+    not _falkordb_up(),
+    reason=f"FalkorDB not reachable at docker://localhost:{_live_utils.docker_port()}",
 )
 
 

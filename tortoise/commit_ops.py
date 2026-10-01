@@ -647,7 +647,8 @@ class _PerRecordWarnBudget:
         return max(0, self.total - self._limit)
 
 
-def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
+def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
+                        skipped=None):
     """Apply canonical supersession records — the ONE consumer-side
     discipline (producer side: extractor_v2._supersession_records).
     pt_ records → supersede() CORRECTS (terminal-probed, idempotent);
@@ -705,10 +706,35 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
     producer; one terminal BEFORE the payload still skips (guard-(h)
     semantics). Returns the number of
     records applied.
+
+    ``skipped`` (#5365) is an OPTIONAL caller-supplied list. When given, one
+    ``{"ref", "successor", "reason"}`` dict is appended for every record the
+    function did NOT apply. The return stays an ``int`` so existing callers
+    are untouched, but a caller that passes ``skipped`` can tell a clean
+    batch from one that dropped records — which the callback warning alone
+    does not give it, because a caller that does not read logs sees only the
+    int. The fail-open posture is UNCHANGED and deliberate: a bad record
+    still never aborts the ingest; it just stops being invisible.
     """
     if warn is None:
         warn = _logger.warning
     applied = 0
+
+    def _skip(ref, successor, reason):
+        """Record a record that did NOT apply, in the caller's ``skipped``.
+
+        #5365: the fail-open gates below deliberately swallow a bad record
+        rather than abort the ingest, but before this channel existed the
+        ONLY trace was a callback warning — so a caller that did not read
+        logs (the hosted commit endpoint, eval ingest) could not distinguish
+        a fully-applied batch from one that silently dropped records. #4021
+        made this acute: a retroactive supersession that previously
+        SUCCEEDED (while writing an inverted predecessor window) now raises
+        into the catch below and became a silent unapplied record.
+        """
+        if skipped is not None:
+            skipped.append({"ref": ref, "successor": successor,
+                            "reason": reason})
     # #2249: same-payload chains fold in DEPENDENCY order (a silent stable
     # pre-pass — payloads with <2 entity records or any resolution doubt
     # fall through to payload order). The per-record gates below re-run
@@ -745,6 +771,7 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
         if not ref or not supersedes_by:
             warn(f"supersession record skipped (missing superseded or "
                  f"supersedes_by): {record!r}")
+            _skip(ref, supersedes_by, "missing superseded or supersedes_by")
             continue
         if ref == supersedes_by:
             # self-supersession — meaningless, would fold an Object to
@@ -756,6 +783,7 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
             # consumer-side guard is the defense-in-depth sink, placed
             # BEFORE the pt_/entity dispatch so it guards both lanes.
             warn(f"supersession record skipped (self-supersession): {record!r}")
+            _skip(ref, supersedes_by, "self-supersession")
             continue
         if ref.startswith("pt_"):
             # Point-level → the canonical supersede() CORRECTS (outdated +
@@ -772,6 +800,7 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
             if ref not in state_by_id:
                 warn(f"point supersession ref {ref!r} not found — "
                      f"skipped (fail-open)")
+                _skip(ref, supersedes_by, "ref not found")
                 continue
             # #2498: the SHARED terminal vocabulary (status set + the legacy
             # `outdated=true` flag) — the pre-#2498 3-status tuple let an
@@ -786,6 +815,12 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
                 applied += 1
             except Exception as exc:
                 warn(f"point supersede {ref!r} → {supersedes_by!r} failed: {exc}")
+                # #5365: the fail-open skip this issue is about. #4021 made
+                # an inverted successor RAISE where it previously succeeded
+                # (while writing the bad window), so this pre-existing,
+                # deliberate catch turned a REFUSAL into a silently
+                # unapplied record. Record it for the caller.
+                _skip(ref, supersedes_by, f"supersede refused: {exc}")
             continue
         # Entity-level — successor FIRST: supersedes_by must be visible
         # (payload entities were already written when capture calls this;
@@ -814,10 +849,12 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
                      f"{supersedes_by!r} is a :Subject (a declared §5 "
                      f"subject kind, #1370); entity supersession is "
                      f"Object-only")
+                _skip(ref, supersedes_by, "successor is a :Subject")
             else:
                 warn(f"entity supersession {ref!r} skipped — successor "
                      f"{supersedes_by!r} is not an Object in the payload "
                      f"entities or the graph (dangling successor)")
+                _skip(ref, supersedes_by, "dangling successor")
             continue
         # NB: >1 successor rows are NOT skipped here — the alias scan below
         # (post ref-side resolution) decides. Duplicate names are only
@@ -1041,6 +1078,7 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
                  f"{supersedes_by!r} resolves only to id-less, "
                  f"target-identical, or recall-excluded Objects (no "
                  f"visible successor under that name)")
+            _skip(ref, supersedes_by, "no visible successor")
             continue
         try:
             # id-style emission: id + ALL extra kwargs ride the JSONL line
@@ -1097,6 +1135,15 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
                 applied += 1
         except Exception as exc:
             warn(f"ObjectSuperseded emit/fold failed for {obj_name!r}: {exc}")
+            _skip(obj_name, supersedes_by, f"emit/fold failed: {exc}")
+    if skipped:
+        _raw_warn(
+            f"supersession batch of {len(records)} record(s): "
+            f"{applied} applied, {len(skipped)} SKIPPED (fail-open — the "
+            f"caller's `skipped` list carries each one). First: "
+            f"{skipped[0]['ref']!r} → {skipped[0]['successor']!r} "
+            f"({skipped[0]['reason']})"
+        )
     if warn.suppressed:
         _raw_warn(
             f"supersession batch of {len(records)} record(s): "
