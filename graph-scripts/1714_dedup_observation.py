@@ -26,7 +26,7 @@ Usage:
 
     --dry-run  report only (DEFAULT — no writes)
     --merge    perform the supersede merges (opt-in)
-    Defaults to TORTOISE_DB_URI env var (or docker://:falkordb@localhost:16379/tortoise).
+    Defaults to TORTOISE_DB_URI env var (or docker://:falkordb@127.0.0.1:16379/tortoise).
     Hosted multi-tenant: run once per tenant graph (--graph team_<org_id>).
 """
 from __future__ import annotations
@@ -46,7 +46,7 @@ sys.path.insert(0, os.path.dirname(_HERE))
 # observation).
 from tortoise.live import _terminal_excluded  # noqa: E402
 
-DEFAULT_URI = "docker://:falkordb@localhost:16379/tortoise"
+DEFAULT_URI = "docker://:falkordb@127.0.0.1:16379/tortoise"
 
 
 def _resolve_uri(args_uri: str) -> str:

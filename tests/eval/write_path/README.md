@@ -28,8 +28,29 @@ tests/eval/write_path/
   baselines/main.json             # committed PRODUCT-lane baseline (posture llm)
   baselines/m2.json               # committed CI-lane baseline (posture m2, deterministic)
   receipts/                       # validated run receipts (llm + m2 lanes)
+  salience_labels.jsonl           # #4917: OWNER-confirmed not-an-entity name labels
   test_write_path_corpus.py       # contract tests (S4/S15)
 ```
+
+**`salience_labels.jsonl` is not a fixture of this corpus** — it is the
+**owner-sourced ground truth** for the write path's salience gate (25 real
+Object names the owner ruled are not entities, `owner_confirmed: 2026-09-23`).
+Its role is the one #4917 §1.11 named: the labels come from the owner's review
+verdicts, not from a top-down authored eval. It is a **labelled evaluation** set,
+not a regression test — the shipped predicate does **not** pass it (it positively
+classifies 9 of the 25). It is here because the label FILE was previously outside
+version control (**9** of the 25 names already appear in
+`docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` §1, unlabelled).
+
+⚠️ **It is a detection spec, never a drop list.** These labels classify NAMES, not
+Objects: `not_an_entity` is not authority to delete, and **4 of the 25 names are
+ruled `keep-object` (must-keep) in the later owner artifact
+`docs/engineering/1026-calibration-set.jsonl`** (2026-09-26) — a name can be a
+non-entity and still be a must-keep. Anything reading these rows as discard
+targets would delete must-keeps. It is scored by
+`tests/test_salience_labels_4917.py`, which pins the measured coverage; its
+measured limit — a fixed prod-audit set, **not** a random draw from the rejects,
+so a **coverage** figure and never a population precision — is stated in that file.
 
 ## Schema summary (DM-3/4/5)
 
