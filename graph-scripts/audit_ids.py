@@ -2,7 +2,7 @@
 """Audit Tortoise Point ID formats — catalogs all ID schemes in the graph.
 
 Usage:
-  TORTOISE_DB_URI=docker://:@localhost:16379/tortoise python3 graph-scripts/audit_ids.py
+  TORTOISE_DB_URI=docker://:@127.0.0.1:16379/tortoise python3 graph-scripts/audit_ids.py
 
 FalkorDB does not support =~ regex in Cypher, so all categorization is client-side
 after fetching IDs.
@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tortoise.sdk import TortoiseSDK  # noqa: I001
 from tortoise.projection import FalkorProjection
 
-URI = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise")
+URI = os.environ.get("TORTOISE_DB_URI", "docker://:@127.0.0.1:16379/tortoise")
 
 # ── Canonical ULID pattern (from tortoise/ids.py: ts-hex + "-" + uuid12) ──
 ULID_RE = re.compile(r"^[0-9a-f]+-[0-9a-f]{12}$")

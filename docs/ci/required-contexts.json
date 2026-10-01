@@ -471,9 +471,15 @@
         "welcome-e2e-monitor.yml",
         "welcome-e2e"
       ]
+    ],
+    "workflow-lint": [
+      [
+        "python-ci.yml",
+        "workflow-lint"
+      ]
     ]
   },
-  "gate_digest": "c87ec08f1f991eb23a9d4203e1da1a6fdc8e5a7389b1917fac6ae0f00d14fd99",
+  "gate_digest": "764f9d4077349da715d29d7e857e39a67b475926e5f97049ff67a08a6c0ff1ab",
   "live_checked_at": "2026-09-29T02:35:26Z",
   "live_observed_contexts": [
     "ai-review-gate",
@@ -497,5 +503,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-09-29T18:30:31Z"
+  "verified_at": "2026-09-30T21:54:46Z"
 }
