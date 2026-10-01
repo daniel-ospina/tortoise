@@ -14,8 +14,21 @@ aboutObjects: tortoise/quota.py, tortoise/metering.py, product/pricing.json cost
 # The edge class is outside every accounting surface — measured
 
 **Issue:** [#4503](https://github.com/danielospina/tortoise/issues/4503) · **Lane:** `obj7-4503-edges` · **Date:** 2026-09-25
-**Base:** `origin/main` @ `a2a08beaa` — this branch is rebased onto it, so the branch tree contains it
-Measured at: fix/4503-edge-accounting@26f6c5789d26bf169b1a1220242905f344579c41 on 2026-09-26
+**Base:** `origin/main` @ `228f416e9` — this branch is rebased onto it, so the branch tree contains it
+Measured at: fix/4503-edge-accounting@ba4daf580ca6de21d9333b23421471956f1e77db on 2026-10-01
+**Rebase note (2026-10-01).** The figures in §2–§4 were measured on 2026-09-25/26 at `26f6c578`,
+which this branch was later rebased past — that SHA is now an orphan, so naming it here would be
+unverifiable. It is replaced by the current head, and the substitution is provable rather than
+asserted: the instrument itself is byte-identical between the two revisions —
+`git diff 26f6c578 ba4daf580ca6de21d9333b23421471956f1e77db -- tools/edge_census.py` is EMPTY,
+and both revisions resolve that path to the same blob `df0f0338…`.
+
+⛔ **Both revisions are pinned to SHAs deliberately — do NOT rewrite either to `HEAD`.** This
+document ships in the same commit that edits `tools/edge_census.py`, so a sentence using `HEAD`
+would be true when written and FALSE at the very tree that carries it. Pinned SHAs stay true.
+
+The earlier `Base: a2a08beaa … main has since moved to 9c8f9c805 (behind by 1)` text described the
+pre-rebase tree and is superseded: the real base is `228f416e9`.
 **Measurement history.** The figures in §2–§4 were taken on **2026-09-25** against this branch's tree, and
 naming the branch here is not a convenience — it is the only tree that *can* have produced them:
 `tools/edge_census.py` is **branch-only** and does not exist on `origin/main` at all
@@ -36,8 +49,8 @@ assumption:
   never sets — `grep supersede` in it returns nothing.
 
 ⚠️ **The staleness gate reads STALE, and that verdict cannot invalidate this finding.**
-`tools/finding_provenance.py --validate` exits 1 as soon as `origin/main` advances past the named tree;
-main has since moved to `9c8f9c805` (behind by 1), so it does. That check asks whether the tree a
+`tools/finding_provenance.py --validate` exits 1 as soon as `origin/main` advances past the named tree,
+so it reads STALE here by construction. That check asks whether the tree a
 finding was measured on contains today's main — a question about *product* findings, which can be
 overtaken. This one cannot be: the instrument is branch-only, so no main tree could ever have produced
 it, and the commits main gained touch nothing in the measured path — the counting, capping and pricing

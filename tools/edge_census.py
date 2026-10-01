@@ -233,6 +233,31 @@ def relationship_census(graph: Any) -> dict[str, Any]:
         graph,
         f"MATCH ()-[r]->() WHERE {all_clause} RETURN count(r)",
     )
+    # Fail loud on an INTERNALLY IMPOSSIBLE reading (#4503 review, P2).
+    #
+    # `total`/`by_type` deliberately come from ONE query so they survive a concurrent
+    # write; `by_slot`, `ep_bearing` and `all_four` are separate round-trips. Under a
+    # concurrent write the reads can therefore disagree — `ep_bearing` can exceed
+    # `total`, or `all_four` exceed `ep_bearing` — and the report would print that
+    # impossible set as if it were one coherent snapshot. This tool's whole contract is
+    # "never report a silent 0, never report a number a reader cannot trust", so an
+    # impossible set is an ERROR rather than a report to sanity-check by eye. Same
+    # concurrency class the single-query total was introduced to defeat, other direction.
+    impossible = []
+    if not (total >= ep_bearing >= all_four >= 0):
+        impossible.append(
+            f"total={total} >= ep_bearing={ep_bearing} >= "
+            f"all_four_slots={all_four} is violated")
+    impossible.extend(
+        f"by_slot[{slot}]={count} exceeds total={total}"
+        for slot, count in by_slot.items()
+        if count > total
+    )
+    if impossible:
+        raise CensusError(
+            "incoherent census — the reads disagree, which a concurrent write to the "
+            "graph explains; re-run against a quiescent graph: " + "; ".join(impossible)
+        )
     return {
         "total": total,
         "by_type": by_type,

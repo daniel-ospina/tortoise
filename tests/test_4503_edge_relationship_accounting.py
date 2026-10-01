@@ -592,6 +592,45 @@ def test_relationship_census_never_puts_a_type_name_in_the_query_text():
     assert census["total"] == 2
 
 
+def test_relationship_census_refuses_an_incoherent_ordering():
+    """⛔ A set of reads that cannot all describe ONE graph must fail loud.
+
+    `total`/`by_type` come from a single query precisely so they survive a
+    concurrent write, but `by_slot`, `ep_bearing` and `all_four_slots` are
+    separate round-trips. A concurrent write can therefore make `ep_bearing`
+    exceed `total`. Printing that impossible set as a report hands the reader a
+    number no single snapshot could produce — the silent-wrong-number failure
+    this tool exists to EXPOSE in other accounting surfaces, not commit itself.
+    """
+    graph = _FakeGraph([
+        [["IMPL", 2]],                 # types -> total = 2
+        [[2]], [[2]], [[2]], [[2]],    # by_slot x4
+        [[5]],                         # ep_bearing = 5  > total, impossible
+        [[1]],                         # all_four_slots
+    ])
+
+    with pytest.raises(CensusError, match="incoherent census"):
+        relationship_census(graph)
+
+
+def test_relationship_census_refuses_a_slot_exceeding_the_total():
+    """The per-slot arm of the same invariant, so the guard is not vacuous.
+
+    The ordering check alone would pass this reading (`ep_bearing` and
+    `all_four_slots` are both inside `total`), yet `by_slot` claims more edges
+    carry a slot than exist at all.
+    """
+    graph = _FakeGraph([
+        [["IMPL", 1]],                 # types -> total = 1
+        [[3]], [[0]], [[0]], [[0]],    # by_slot: 3 > total, impossible
+        [[1]],                         # ep_bearing
+        [[1]],                         # all_four_slots
+    ])
+
+    with pytest.raises(CensusError, match="exceeds total"):
+        relationship_census(graph)
+
+
 def test_relationship_census_refuses_an_unreadable_per_type_row():
     # A row the tool cannot read must fail loud: reporting a PARTIAL breakdown
     # as the whole one would make `total` a lie, which is the failure this
