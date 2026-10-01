@@ -3396,6 +3396,44 @@ def _upgrade_artifact_seam(args, root, home) -> int:
     return 0
 
 
+def _artifact_detail_would_refuse(finding, harness: str, *,
+                                  unrepairable: bool) -> bool:
+    """Whether rendering ``finding``'s OWN detail would prescribe a repair
+    the installer refuses (#5351).
+
+    Declared ONCE, because BOTH surfaces that render an artifact finding —
+    ``hooks status`` line by line and ``doctor``'s one summary row — must make
+    this call identically; a copy in each caller drifts, and the drifted copy
+    either prints a command that refuses or deletes an instruction the user
+    needs.
+
+    Three conditions, and each is load-bearing:
+
+    * ``unrepairable`` — the seam's installer refuses right now (a MANUAL kind
+      or the legacy collision; the caller decides which findings those are).
+      In a repairable seam the detail's command WORKS and must be printed.
+    * the finding is BLOCKING — a non-blocking note is informational.
+    * the detail actually NAMES the installer.  Only the artifact details whose
+      prescription IS the command do that, and withholding one of the others
+      would delete the row's only instruction: ``chmod it so the seam can
+      load``, ``remove or re-point it``, ``bytes differ from the shipped seam``
+      and ``is not installed`` are instructions the installer is not involved
+      in.  (Measured: an earlier kind-based rule withheld those, and the
+      replacement pointer does not always recover them — ``tortoise session
+      verify`` refuses before printing any finding when no API key resolves.)
+    * a MANUAL kind is EXEMPT even then.  Its detail is a CONDITIONAL
+      two-step — ``move it aside, then re-run `tortoise install <h>` `` — whose
+      FIRST step is the instruction and whose second step is the installer, so
+      the row keeps it and names the obstacle that can still block that second
+      step beside it (both surfaces do, on the same row).  Withholding it would
+      trade an immediate counter-signal for a lost instruction.
+    """
+    from tortoise.hook_install import is_manual_fix
+    return (unrepairable and finding.blocking
+            and not is_manual_fix(finding.kind)
+            and f"`tortoise install {harness}`" in finding.detail)
+
+
 def _cmd_hooks(args) -> int:
     """Detect and repair drift in an already-installed capture-hook seam.
 
@@ -3580,18 +3618,18 @@ def _cmd_hooks(args) -> int:
                   f"(contract v{version}).")
         else:
             # Repairability is decided BEFORE the findings are rendered, because
-            # an ARTIFACT finding's OWN detail embeds a repair command
+            # an ARTIFACT finding's OWN detail can embed a repair command
             # ("reinstall with `tortoise install pi`") — unconditionally — and
             # the installer REFUSES that command whenever this seam is
             # unrepairable.  That detail is the "second place a refusing
             # recommendation can come from" (the same reason `doctor` withholds
-            # it).  TWO independent reasons make the installer refuse: a MANUAL
-            # kind (`is_manual_fix` is the DECLARED conservative proxy for
-            # refusal — see its docstring; for an artifact leaf link it can be
-            # true where the installer would in fact succeed, which is the
-            # documented cheap error), and the legacy collision (#3713).  A
-            # manual step does not clear the collision, so both are reported
-            # below.
+            # it, through the SAME predicate).  TWO independent reasons make the
+            # installer refuse: a MANUAL kind (`is_manual_fix` is the DECLARED
+            # conservative proxy for refusal — see its docstring; for an
+            # artifact leaf link it can be true where the installer would in
+            # fact succeed, which is the documented cheap error), and the legacy
+            # collision (#3713).  A manual step does not clear the collision, so
+            # both are reported below.
             blocking = [f for f in findings if f.blocking]
             # Some blocking kinds are NOT repairable by `upgrade` (it refuses
             # rather than clobber an unreadable/unsafe/foreign path), so the
@@ -3612,18 +3650,13 @@ def _cmd_hooks(args) -> int:
             unrepairable = bool(manual) or bool(obstacle)
             print(f"Capture-hook install at {root} (contract v{version}):")
             for f in findings:
-                # The rule is KIND-based, deliberately: every BLOCKING,
-                # non-MANUAL artifact finding's detail is withheld when the
-                # seam is unrepairable.  Two of those kinds carry no command
-                # (`missing-artifact`, `modified-artifact`) and so lose a
-                # specific that `session verify` re-reports; the alternative —
-                # a list of kinds that embed a `tortoise …` command — is
-                # exactly the copied-into-a-caller list this repo has been
-                # burned by.  A MANUAL kind's detail is a CONDITIONAL two-step
-                # ("move it aside, then re-run …") whose own condition IS the
-                # manual instruction, so it is kept.
-                if (layout is None and unrepairable and f.blocking
-                        and not is_manual_fix(f.kind)):
+                # The call is the SHARED predicate — kind alone would withhold a
+                # manual instruction the installer never owned (`chmod`, `remove
+                # or re-point it`), and the collision alone would withhold
+                # them the moment one exists.
+                if (layout is None
+                        and _artifact_detail_would_refuse(
+                            f, args.harness, unrepairable=unrepairable)):
                     print(f"  ❌ {f.kind}: run `tortoise session verify "
                           f"--harness {args.harness}` for the repair path")
                 else:
@@ -7555,32 +7588,23 @@ def _cmd_doctor(args):
                          "for the repair path" if _layout is not None else
                          f"run `tortoise install {_harness}` to repair")
             # The finding's OWN detail names the repair command too, so it is
-            # the SECOND place a refusing recommendation can come from, and the
-            # rule that withholds it is the union of the two reasons the
-            # installer refuses an artifact seam: the collision (which refuses
-            # however the first finding reads, and which `hooks status`'s
-            # non-`elif` arms name alongside), and a MANUAL kind — the DECLARED
-            # conservative proxy, so an in-home leaf link the installer would in
-            # fact replace is withheld too (its own docstring calls that the
-            # cheap error; the safe direction).  A finding that is ITSELF a
-            # manual kind keeps its detail when no collision is present: that
-            # detail is a CONDITIONAL instruction ("move it aside, then re-run
-            # …") whose condition the installer honours, and with the collision
-            # present the detail's step two would still refuse, so it is
-            # withheld there — the row still names the kind, and the pointer
-            # re-reports the detail verbatim, so the instruction is one command
-            # away rather than gone.  The replacement names a command that
-            # ACCEPTS the harness: the read-only diagnostic that carries the
-            # finding.  The surfaces differ in WORDING (one summary row here,
-            # one line per finding there — which is why `hooks status` prints a
-            # manual kind's detail even beside the collision: that line IS the
-            # per-finding instruction, and its collision warning is a separate
-            # paragraph); what they guarantee in common is that neither prints
-            # an artifact repair command once the installer refuses.
+            # the SECOND place a refusing recommendation can come from, and
+            # BOTH surfaces decide that through the same predicate
+            # (`_artifact_detail_would_refuse`): the seam is unrepairable
+            # (`_manual` OR the collision — the installer refuses either way),
+            # the finding is blocking, the detail actually names the installer,
+            # and the kind is not MANUAL.  A MANUAL kind keeps its detail — a
+            # conditional two-step whose FIRST step is the instruction — and the
+            # collision is named in the hint above it (the non-`elif` arms), so
+            # the row carries the counter-signal its second step can need
+            # instead of silently dropping the instruction.  The replacement
+            # names a command that ACCEPTS the harness: the read-only diagnostic
+            # that carries the finding.
             _withhold = (_layout is None
-                         and (bool(_legacy_obstacle)
-                              or (bool(_manual)
-                                  and not is_manual_fix(first.kind))))
+                         and _artifact_detail_would_refuse(
+                             first, _harness,
+                             unrepairable=(bool(_manual)
+                                           or bool(_legacy_obstacle))))
             _detail = (
                 f"({first.kind}; run `tortoise session verify "
                 f"--harness {_harness}` for the repair path)" if _withhold

@@ -1305,17 +1305,17 @@ class TestDoctorPiSeamFreshness:
         manual obstacle promises a repair that still refuses.
 
         `foreign-artifact` is BOTH the first blocking finding and a manual kind
-        (it is in `MANUAL_FIX_KINDS`), so the manual arm selects the hint and the
-        `elif` dropped the collision from the row entirely — while the finding's
-        own detail printed the unconditional second step "move it aside, then
-        re-run `tortoise install pi`", a command the collision still refuses.
-        Both halves must hold: the collision is NAMED, and that detail is
-        withheld.
+        (it is in `MANUAL_FIX_KINDS`), so the manual arm selects the hint and
+        the `elif` dropped the collision from the row entirely.  The row must
+        therefore name BOTH obstacles; and because the manual kind's detail is
+        a CONDITIONAL two-step whose first step is the instruction the user
+        needs, the detail stays — the collision sentence ahead of it is the
+        counter-signal for its second step.  (Withholding it was tried and
+        reverted: it deletes "move it aside", and `session verify` refuses
+        before printing any finding when no API key resolves.)
 
-        Mutation: restore the `elif` (or withhold on
-        `not is_manual_fix(first.kind)` without the collision arm) — the
-        collision name disappears and the refusing `re-run … install pi`
-        reappears, and this REDs.
+        Mutation: restore the `elif` (drop the collision append) — the
+        collision name disappears and this REDs.
         """
         from tortoise import capture_install as _ci
         from tortoise.hook_install import detect_artifact_install
@@ -1339,6 +1339,77 @@ class TestDoctorPiSeamFreshness:
         assert _ci.PI_DISABLED_DIRNAME in row, (
             "the collision outlives any manual step, so it must be named: "
             + row)
-        assert "re-run" not in row, (
-            "the detail's step two re-runs an installer the collision refuses: "
-            + row)
+        assert "move it aside, then re-run `tortoise install pi`" in row, (
+            "a MANUAL kind's detail is the instruction, not a bare command, "
+            "so the row keeps it: " + row)
+
+    def test_doctor_keeps_an_instruction_the_installer_is_not_part_of(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """The withholding must key on the DETAIL naming the installer, not on
+        the existence of a collision.
+
+        `not-readable` is a manual kind whose detail is `chmod it so the seam
+        can load` — the collision has nothing to do with it, and the installer
+        is not the remedy.  A collision-arm rule (tried in review round 5)
+        withheld it and left the row with a pointer that does not always
+        recover the text.
+
+        Mutation: withhold on the collision alone (`_withhold = layout is None
+        and bool(_legacy_obstacle) …`) — `chmod it` disappears and this REDs.
+        """
+        from tortoise import capture_install as _ci
+        home = tmp_path / "home"
+        seam = self._seam(home, "// tortoise-hook-version: 0\n// tortoise session\n")
+        seam.chmod(0o000)
+        root = home / ".pi" / "agent" / "extensions"
+        (root / _ci.LEGACY_PI_DIRNAME).mkdir()
+        (root / _ci.PI_DISABLED_DIRNAME).mkdir()
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert _ci.PI_DISABLED_DIRNAME in row, row
+        assert "chmod it so the seam can load" in row, (
+            "the collision does not make `chmod` refuse, so the instruction "
+            "must survive: " + row)
+
+    def test_doctor_keeps_a_non_manual_detail_that_names_no_command(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """A BLOCKING, non-manual kind whose detail carries no command must
+        keep its detail: it names no repair the installer could refuse.
+
+        `modified-artifact` is exactly that ("marker matches … but its bytes
+        differ from the shipped seam"), and the manual-kind exemption does not
+        cover it, so only the content half of the predicate saves it.  The
+        collision is present, so the seam IS unrepairable — the case a
+        kind-and-state rule withholds.
+
+        Mutation: drop the content guard from `_artifact_detail_would_refuse`
+        (keep the `unrepairable`/`blocking`/non-manual tests) — `bytes differ`
+        disappears and this REDs.
+        """
+        from tortoise import capture_install as _ci
+        from tortoise.hook_install import detect_artifact_install
+        home = tmp_path / "home"
+        (home / ".pi" / "agent").mkdir(parents=True)
+        res = _ci.install_capture("pi", home=home)
+        assert res.ok, res.error
+        root = home / ".pi" / "agent" / "extensions"
+        seam = root / _pi_seam_name()
+        seam.write_bytes(seam.read_bytes() + b"\n// local edit\n")
+        kinds = {f.kind for f in detect_artifact_install(root, "pi")}
+        assert kinds == {"modified-artifact"}, (
+            "the fixture must report exactly `modified-artifact` (blocking, "
+            f"non-manual, command-free), or this is another state: {kinds}")
+        (root / _ci.LEGACY_PI_DIRNAME).mkdir()
+        (root / _ci.PI_DISABLED_DIRNAME).mkdir()
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert _ci.PI_DISABLED_DIRNAME in row, row
+        assert "bytes differ" in row, (
+            "no installer command is embedded, so nothing refuses — the "
+            "detail must survive: " + row)
