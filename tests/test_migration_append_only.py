@@ -556,3 +556,96 @@ def test_diff_added_non_prefixed_file_is_allowed():
     assert r.returncode == 0, r.stdout
     assert "::error::" not in r.stdout, r.stdout
     assert "exception" not in r.stdout.lower(), r.stdout
+
+
+# ── #6862: the forward bound is not enough on its own ──────────────────────
+# FIX 1 — REMOTE_MAX is derived from the SAME lagging applied set the bound
+# exists to compensate for (#2240 records a ~4.6-day window in which a deploy
+# reported success while the schema_migrations row was still missing), so a
+# version prod HAS applied but the API omits still satisfies `new_ver >
+# REMOTE_MAX`. The destination must therefore also sort strictly after EVERY
+# version present in the BASE TREE — a renumber must never land on a version the
+# repository has already carried. The base tree is read locally (`git ls-tree`
+# against the ref already used for the diff), so it is not another view of the
+# lagging API.
+
+
+def test_rename_onto_a_version_already_in_the_base_tree_is_blocked():
+    # The API stub LAGS: it omits 20260901000000, which the base tree already
+    # carries (via _later.sql). `new_ver > REMOTE_MAX` therefore HOLDS, and the
+    # pre-change guard exempted the rename (rc=0); the base-tree bound must
+    # reject it.
+    d = _make_repo(["20260813000099_src.sql", "20260901000000_later.sql"])
+    base = _git_sha(d)
+    (d / MIG / "20260813000099_src.sql").rename(d / MIG / "20260901000000_src.sql")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "rename onto base-tree version, API lagging")
+    r = _run_script_with_token("diff", d, base, versions=["20260813000098"])
+    assert r.returncode == 1, r.stdout
+    assert "append-only" in r.stdout.lower(), r.stdout
+    assert "20260901000000" in r.stdout, r.stdout
+
+
+def test_backward_in_numeric_forward_in_lex_rename_is_blocked():
+    # A destination that is numerically EARLIER than the base-tree max but
+    # lexicographically LATER than the lagging REMOTE_MAX: the old forward bound
+    # admitted it (rc=0), the base-tree bound must reject it. The approved live
+    # case (forward past base max) is pinned by
+    # test_approved_live_forward_renumber_still_allowed.
+    d = _make_repo(["20260926000001_src.sql", "20260927000001_later.sql"])
+    base = _git_sha(d)
+    (d / MIG / "20260926000001_src.sql").rename(d / MIG / "20260901000000_src.sql")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "backward renumber past the lagging API")
+    r = _run_script_with_token("diff", d, base, versions=["20260813000098"])
+    assert r.returncode == 1, r.stdout
+    assert "append-only" in r.stdout.lower(), r.stdout
+
+
+# FIX 2 — the exempt condition never required a strict renumber, so a
+# same-version relabel escaped as an "effective deletion", contradicting the
+# header's "M/T/D are NEVER exempt". The destination must be a real migration
+# at a DIFFERENT version.
+
+
+def test_same_version_relabel_to_bak_is_blocked():
+    # Vector G4: `X_a.sql` → `X_a.sql.bak` applies NOTHING at that version — the
+    # exact `D` outcome this guard reports as a violation — yet the pre-change
+    # exemption admitted it (rc=0) because new_ver == old_ver was never checked.
+    d = _make_repo(["20260813000099_a.sql"])
+    base = _git_sha(d)
+    (d / MIG / "20260813000099_a.sql").rename(d / MIG / "20260813000099_a.sql.bak")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "same-version relabel to .bak")
+    r = _run_script_with_token("diff", d, base, versions=["20260813000098"])
+    assert r.returncode == 1, r.stdout
+    assert "append-only" in r.stdout.lower(), r.stdout
+
+
+def test_rename_to_a_non_sql_destination_is_blocked():
+    # A destination the Supabase CLI cannot pick up (basename not
+    # ^[0-9]+_.*\.sql$) is not a migration: exempting the rename would drop the
+    # old file while adding nothing prod can apply. Pre-change: rc=0.
+    d = _make_repo(["20260813000099_a.sql"])
+    base = _git_sha(d)
+    (d / MIG / "20260813000099_a.sql").rename(d / MIG / "20260901000000_a.txt")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "rename to non-sql destination")
+    r = _run_script_with_token("diff", d, base, versions=["20260813000098"])
+    assert r.returncode == 1, r.stdout
+    assert "append-only" in r.stdout.lower(), r.stdout
+
+
+def test_approved_live_forward_renumber_still_allowed():
+    # The APPROVED live case (#2240): rename 20260926000001 → 20261001000001 when
+    # the base tree's max is 20260927000001. It must stay ALLOWED — the FIX 1
+    # base-tree bound tightens the exemption without breaking the forward renumber
+    # the drift gate prescribes.
+    d = _make_repo(["20260926000001_live.sql", "20260927000001_b.sql"])
+    base = _git_sha(d)
+    (d / MIG / "20260926000001_live.sql").rename(d / MIG / "20261001000001_live.sql")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "approved forward renumber")
+    r = _run_script_with_token("diff", d, base, versions=["20260813000098"])
+    assert r.returncode == 0, r.stdout
+    assert "exception" in r.stdout.lower(), r.stdout
