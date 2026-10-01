@@ -3299,7 +3299,7 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # its contract is carried by `hook_install.ARTIFACT_CONTRACTS['pi']`.  Before
 # #4680 the Pi seam carried no marker at all, which is why a two-week-old
 # installed copy read as merely UNVERIFIABLE while capturing the old logic.
-_EXPECTED_INSTALL_CONTRACT = {"claude": 8, "codex": 2, "cursor": 2,
+_EXPECTED_INSTALL_CONTRACT = {"claude": 9, "codex": 3, "cursor": 3,
                              "pi": 1}
 
 
@@ -3318,8 +3318,12 @@ def test_shipped_install_contract_generations(harness):
     BEHAVIOUR once more (session-start.sh now RENDERS the capture breadcrumb to
     stdout, which Claude Code injects into the session context), so claude
     moved 7→8 — again the bump is what carries the new behaviour to an
-    already-installed copy.  Those numbers are a reviewed decision, not a
-    detail, so they are pinned once and explicitly.
+    already-installed copy.  #5838 changed the claude hooks' BEHAVIOUR once
+    more (the two breadcrumb kinds now occupy SEPARATE slots, so an inert
+    install cannot overwrite a live capture-failure refusal), so claude moved
+    8→9; the codex/cursor seams changed their write path the same way, so they
+    moved 2→3.  Those numbers are a reviewed decision, not a detail, so they
+    are pinned once and explicitly.
 
     `pi` (#4680) reaches the same table through the ARTIFACT half of the
     contract: it ships a TypeScript extension and has no `HarnessLayout` —

@@ -1032,10 +1032,13 @@ def _clear_breadcrumb_for(harness: str | None, session_id: str | None) -> None:
     The record is per-HARNESS, so this must be narrow in three directions or it
     destroys evidence about something else (#4714 review):
 
-    * ``kind`` — the shipped hooks write ``install-inert`` to the SAME path, and
-      ``session verify`` reaches INERT only from that record. Unlinking blindly
-      let a drain firing while verify was mid-flight erase it and report an
-      inert install as PROVEN. Only a ``capture-failure`` record is cleared.
+    * ``kind`` — a LEGACY install (or a foreign file) can still sit at the
+      ``capture-failure`` path with ``install-inert`` content, and
+      ``session verify`` reaches INERT only from that record (#5838 moved the
+      LIVE install-inert slot to ``<harness>-install.json``, which this never
+      touches). Unlinking blindly let a drain firing while verify was
+      mid-flight erase it and report an inert install as PROVEN. Only a
+      ``capture-failure`` record is cleared.
     * ``session_id`` — a failure recorded for a DIFFERENT session must survive.
       This is an IDENTITY check; a timestamp check does NOT work, because the
       spool's ``updated_at`` is frozen by the dedup path and so cannot say when
@@ -1052,12 +1055,13 @@ def _clear_breadcrumb_for(harness: str | None, session_id: str | None) -> None:
     try:
         import json
 
-        from tortoise.hook_install import KIND_CAPTURE_FAILURE, local_state_dir
+        from tortoise.hook_install import KIND_CAPTURE_FAILURE, breadcrumb_file
 
         # The WRITER's derivation, not a second one: under an empty or absent
         # override both resolve under ``$HOME``, so a breadcrumb the writer
-        # placed is the one this clears (``local_state_dir`` owns the rule).
-        path = local_state_dir("capture-errors") / f"{harness}.json"
+        # placed is the one this clears (``local_state_dir`` owns the rule, and
+        # ``breadcrumb_file`` owns which of the two slots this kind occupies).
+        path = breadcrumb_file(harness, KIND_CAPTURE_FAILURE)
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):

@@ -949,11 +949,13 @@ def _install_link(harness: str, fired: Any,
     ``PROVEN`` unless the hook left its OWN install-inert breadcrumb, which is
     the install leg's own evidence that it resolved nothing and captured
     nothing (#4314).  Only a record whose ``kind`` is
-    :data:`hook_install.KIND_INSTALL_INERT` counts — the ``sessions import``
-    capture path writes the SAME file with ``kind: capture-failure``, and an
-    API outage must never rewrite a working install as ``INERT``.  The
-    breadcrumb is read under the SAME env the hook was fired with (a
-    non-default HOME reads what the hook wrote there).
+    :data:`hook_install.KIND_INSTALL_INERT` counts.  #5838: that record now
+    lives in its OWN slot (``<harness>-install.json``), separate from the
+    ``capture-failure`` slot the ``sessions import`` path writes — but the kind
+    gate is kept as the read condition, so a legacy install's single-slot
+    record (or a foreign file dropped in the install slot) still cannot read
+    as an inert install.  The breadcrumb is read under the SAME env the hook
+    was fired with (a non-default HOME reads what the hook wrote there).
     """
     breadcrumb = _local_capture_error(harness, env)
     if breadcrumb is not None and breadcrumb.get("kind") == KIND_INSTALL_INERT:
@@ -968,8 +970,9 @@ def _install_link(harness: str, fired: Any,
 
 
 def _local_capture_error_file(harness: str,
-                              env: dict[str, str]) -> Path:
-    """The breadcrumb path for ``harness`` under the HOOK's env, not ours.
+                              env: dict[str, str],
+                              kind: str = KIND_INSTALL_INERT) -> Path:
+    """The breadcrumb slot for ``(harness, kind)`` under the HOOK's env.
 
     Mirrors ``tortoise.__main__._capture_error_file`` — the same location and
     the same ``TORTOISE_IMPORT_RECEIPT_DIR`` override — but resolves the
@@ -977,7 +980,15 @@ def _local_capture_error_file(harness: str,
     never from this process's ``os.environ``: a caller passing a non-default
     HOME must read the breadcrumb the hook wrote under that HOME (#4314 P2).
     When ``env`` supplies neither, the fallback is this process's home.
+
+    #5838: this resolves the base by hand (it must, to honour ``env``), so the
+    FILENAME half comes from the one shared derivation
+    (:func:`hook_install.breadcrumb_name`) rather than a second literal — the
+    install leg reads ``<harness>-install.json``, and ``capture-failure``
+    keeps ``<harness>.json``.
     """
+    from tortoise.hook_install import breadcrumb_name
+
     receipt_dir = env.get("TORTOISE_IMPORT_RECEIPT_DIR")
     if receipt_dir:
         base = Path(receipt_dir)
@@ -985,12 +996,13 @@ def _local_capture_error_file(harness: str,
         home = env.get("HOME")
         base = ((Path(home) if home else Path.home())
                 / ".tortoise" / "import-receipts")
-    return base.parent / "capture-errors" / f"{harness}.json"
+    return base.parent / "capture-errors" / breadcrumb_name(harness, kind)
 
 
 def _local_capture_error(harness: str,
-                         env: dict[str, str]) -> dict[str, Any] | None:
-    """The local breadcrumb from a capture that never landed, or None.
+                         env: dict[str, str],
+                         kind: str = KIND_INSTALL_INERT) -> dict[str, Any] | None:
+    """The local breadcrumb of ``kind`` under the hook's env, or None.
 
     Any well-formed dict is returned so the report can show WHAT was found;
     the caller (:func:`_install_link`) accepts it as install-inert evidence
@@ -998,7 +1010,8 @@ def _local_capture_error(harness: str,
     """
     try:
         data = _json.loads(
-            _local_capture_error_file(harness, env).read_text(encoding="utf-8"))
+            _local_capture_error_file(
+                harness, env, kind).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
@@ -1011,8 +1024,9 @@ def _clear_install_inert_breadcrumb(harness: str,
     The read condition after a fire is "a record produced by THIS fire".
     Clearing the install-inert evidence immediately before the fire is what
     makes that true: a hook that was inert once can no longer fail every later
-    ``session verify`` forever.  A ``capture-failure`` record is left alone —
-    it is different evidence and does not affect the install leg.
+    ``session verify`` forever.  #5838: this clears the INSTALL-inert slot only
+    (``<harness>-install.json``); a ``capture-failure`` record lives in its own
+    slot, is different evidence, and never affects the install leg.
     """
     record = _local_capture_error(harness, env)
     if record is None or record.get("kind") != KIND_INSTALL_INERT:

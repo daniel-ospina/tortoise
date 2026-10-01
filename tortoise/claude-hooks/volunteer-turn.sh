@@ -38,9 +38,11 @@ _record_breadcrumb() {
   # module dir but found no interpreter" branch, which is reached BECAUSE
   # python3 is missing — a python3-written breadcrumb could never run there.
   # The ``install-inert`` kind marks this as the INSTALL leg's own evidence and
-  # keeps it distinguishable from a ``sessions import`` capture failure, which
-  # writes the same file with ``kind: capture-failure`` (#4314). Best-effort:
-  # a breadcrumb write can never break the exit-0 contract.
+  # keeps it distinguishable from a ``sessions import`` capture failure (#4314).
+  # #5838: the two kinds occupy SEPARATE slots, so this writer never touches
+  # the ``capture-failure`` file and cannot destroy a live quota/network
+  # refusal. Best-effort: a breadcrumb write can never break the exit-0
+  # contract.
   local harness="$1" detail="$2"
   local receipt_dir crumb_dir stamp
   receipt_dir="${TORTOISE_IMPORT_RECEIPT_DIR:-${HOME:-/nonexistent}/.tortoise/import-receipts}"
@@ -61,7 +63,7 @@ _record_breadcrumb() {
   mkdir -p "$crumb_dir" 2>/dev/null || true
   printf '{\n  "harness": "%s",\n  "detail": "%s",\n  "recorded_at": "%s",\n  "kind": "install-inert"\n}\n' \
     "$harness" "$detail" "$stamp" \
-    > "$crumb_dir/$harness.json" 2>/dev/null || true
+    > "$crumb_dir/$harness-install.json" 2>/dev/null || true
 }
 
 HARNESS="${1:-codex}"

@@ -1274,11 +1274,14 @@ def test_the_breadcrumb_clear_is_kind_aware_and_identity_aware(
         tmp_path, monkeypatch, codex_jsonl):
     """`_clear_breadcrumb_for` must not destroy evidence about something else.
 
-    The breadcrumb path is shared with the shipped hooks' `install-inert`
-    record, which is the ONLY way `session verify` reaches INERT — so a blind
-    unlink let a drain racing verify make an inert install read as PROVEN. And
-    a failure recorded for a DIFFERENT session is still current, however
-    recently it happened.
+    The install-inert record is the ONLY way `session verify` reaches INERT, so
+    a blind unlink let a drain racing verify make an inert install read as
+    PROVEN.  #5838 moved the LIVE install-inert record to its own slot
+    (`codex-install.json`), which this function never reads at all — so case 1
+    now pins the KIND gate against a LEGACY single-slot record (an install from
+    before #5838) or a foreign file dropped at the capture path.  And a failure
+    recorded for a DIFFERENT session is still current, however recently it
+    happened.
 
     The check is by IDENTITY, not timestamp: the spool's `updated_at` is frozen
     on the dedup path, so it cannot say when a session last failed — the most
@@ -1295,7 +1298,9 @@ def test_the_breadcrumb_clear_is_kind_aware_and_identity_aware(
     crumb = tmp_path / "capture-errors" / "codex.json"
     crumb.parent.mkdir(parents=True, exist_ok=True)
 
-    # (1) An INERT install record is NOT ours to clear.
+    # (1) An INERT install record is NOT ours to clear.  #5838: the live record
+    # is in its own slot, but a LEGACY install (or a foreign file) can still put
+    # this kind at the capture path — the kind gate is what keeps it safe.
     crumb.write_text(json.dumps({
         "harness": "codex", "kind": KIND_INSTALL_INERT,
         "detail": "install is inert",

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tortoise-hook-version: 2
+# tortoise-hook-version: 3
 # Tortoise session capture for Cursor — sessionEnd hook (#3819).
 #
 # The `tortoise-hook-version` marker above is the install-contract generation
@@ -79,9 +79,11 @@ _record_breadcrumb() {
   # module dir but found no interpreter" branch, which is reached BECAUSE
   # python3 is missing — a python3-written breadcrumb could never run there.
   # The ``install-inert`` kind marks this as the INSTALL leg's own evidence and
-  # keeps it distinguishable from a ``sessions import`` capture failure, which
-  # writes the same file with ``kind: capture-failure`` (#4314). Best-effort:
-  # a breadcrumb write can never break the exit-0 contract.
+  # keeps it distinguishable from a ``sessions import`` capture failure (#4314).
+  # #5838: the two kinds occupy SEPARATE slots, so this writer never touches
+  # the ``capture-failure`` file and cannot destroy a live quota/network
+  # refusal. Best-effort: a breadcrumb write can never break the exit-0
+  # contract.
   # The ``kind`` argument distinguishes WHO is recording, and the distinction
   # is load-bearing: ``install-inert`` is the INSTALL leg's own evidence (an
   # installer that fired but captured nothing), while ``capture-failure`` is a
@@ -89,6 +91,8 @@ _record_breadcrumb() {
   # capture failure as ``install-inert`` would report a HEALTHY install as
   # INERT — precisely the inversion #4314 exists to prevent. It defaults to
   # the install-inert kind, so the pre-existing callers are unchanged.
+  # #5838: the kind ALSO decides the SLOT (see below), and this is the ONE
+  # place the filename is derived in this script.
   local harness="$1" detail="$2" kind="${3:-install-inert}"
   local receipt_dir crumb_dir stamp
   receipt_dir="${TORTOISE_IMPORT_RECEIPT_DIR:-${HOME:-/nonexistent}/.tortoise/import-receipts}"
@@ -143,9 +147,17 @@ _record_breadcrumb() {
   esc_harness="${esc_harness//$'\f'/\\f}"
   esc_harness="$(printf '%s' "$esc_harness" | tr -d '\000-\010\013\014\016-\037')"
   mkdir -p "$crumb_dir" 2>/dev/null || true
+  # #5838: `capture-failure` keeps the historical ``<harness>.json``;
+  # `install-inert` takes ``<harness>-install.json``. Decided from the KIND,
+  # which is the one input both the writer and `session verify` agree on.
+  local crumb_file
+  case "$kind" in
+    install-inert) crumb_file="$harness-install.json" ;;
+    *) crumb_file="$harness.json" ;;
+  esac
   printf '{\n  "harness": "%s",\n  "detail": "%s",\n  "recorded_at": "%s",\n  "kind": "%s"\n}\n' \
     "$esc_harness" "$esc" "$stamp" "$kind" \
-    > "$crumb_dir/$harness.json" 2>/dev/null || true
+    > "$crumb_dir/$crumb_file" 2>/dev/null || true
 }
 
 # Echo `$1` when it is a readable `.jsonl` transcript, or the same-stem

@@ -1,15 +1,23 @@
 """Render the local capture breadcrumb for the AGENT session (#4041).
 
-``~/.tortoise/capture-errors/<harness>.json`` is written by two authors — the
-shipped shell hooks (``kind: install-inert``) and
-``tortoise.__main__._record_capture_error`` (``kind: capture-failure``) — and
-until now NOTHING read it back to the user's agent: the failure was observable
-only on the machine that produced it (and, for the server-side half, on the
-dashboard the owner explicitly rejected as the surface).
+``~/.tortoise/capture-errors/`` is written by two authors — the shipped shell
+hooks (``kind: install-inert``) and ``tortoise.__main__._record_capture_error``
+(``kind: capture-failure``) — and until #4041 NOTHING read either record back
+to the user's agent: the failure was observable only on the machine that
+produced it (and, for the server-side half, on the dashboard the owner
+explicitly rejected as the surface).
+
+#5838: the two kinds now occupy SEPARATE slots — this module reads and renders
+the ``capture-failure`` slot (``<harness>.json``), and the ``install-inert``
+evidence lives in ``<harness>-install.json`` (read by ``session_verify`` and
+rendered by the shell half).  The two used to share one file, so an inert
+install DESTROYED a live quota/network refusal and the agent was told the wrong
+cause.  The hook composes the agent-facing payload from BOTH slots, so a
+machine that is over quota AND has a moved checkout is told both facts.
 
 This module is the Python half of the renderer, and it renders ONE kind:
-``capture-failure``.  The agent-facing payload is ONE four-line shape shared
-with the shell half (``_render_breadcrumb_inert`` in
+``capture-failure``.  The agent-facing payload is ONE four-line shape per
+record, shared with the shell half (``_render_breadcrumb_inert`` in
 ``tortoise/claude-hooks/session-start.sh``)::
 
     code:     capture-failure                   (the existing ``kind``)
@@ -302,11 +310,11 @@ def render(record: dict[str, Any]) -> str:
     """The agent-facing payload for a breadcrumb record, or ``""``.
 
     ``""`` is the safe answer for anything that is not ``capture-failure`` (no
-    new taxonomy — #4041, and ``install-inert`` is the shell renderer's): the
-    caller must render nothing rather than invent a code or prose-match the
-    record.  This is also the sole ``kind`` gate on the resolved path, so a
-    STALE ``install-inert`` record is refused here rather than by a shell text
-    match (see the module docstring).
+    new taxonomy — #4041, and ``install-inert`` is the shell renderer's, in its
+    OWN slot since #5838): the caller must render nothing rather than invent a
+    code or prose-match the record.  This kind gate is what refuses a record
+    left at the capture path by a LEGACY single-slot install, rather than a
+    shell text match (see the module docstring).
     """
     kind = record.get("kind")
     if kind != KIND_CAPTURE_FAILURE:

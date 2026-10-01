@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tortoise-hook-version: 8
+# tortoise-hook-version: 9
 # Tortoise memory injection for Claude Code — SessionStart hook.
 #
 # The `tortoise-hook-version` marker above is the install-contract generation
@@ -101,8 +101,11 @@ _record_breadcrumb() {
   # python3 is missing — a python3-written breadcrumb could never run there.
   # The ``install-inert`` kind marks this as the INSTALL leg's own evidence and
   # keeps it distinguishable from a ``sessions import`` capture failure, which
-  # writes the same file with ``kind: capture-failure`` (#4314). Best-effort:
-  # a breadcrumb write can never break the exit-0 contract.
+  # writes ``kind: capture-failure`` (#4314). #5838: the two kinds now occupy
+  # SEPARATE slots, so this writer never touches the ``capture-failure`` file
+  # and cannot destroy a live quota/network refusal — the ``-install`` suffix
+  # is the slot's own name, and `session verify` reads it back from the same
+  # one. Best-effort: a breadcrumb write can never break the exit-0 contract.
   # `$3` is the timestamp, when the caller already computed one for the
   # rendered payload — so the record and what the agent is told cannot disagree
   # by a second (#4041). Absent, it is computed here as before.
@@ -116,7 +119,7 @@ _record_breadcrumb() {
   mkdir -p "$crumb_dir" 2>/dev/null || true
   printf '{\n  "harness": "%s",\n  "detail": "%s",\n  "recorded_at": "%s",\n  "kind": "install-inert"\n}\n' \
     "$harness" "$detail" "$stamp" \
-    > "$crumb_dir/$harness.json" 2>/dev/null || true
+    > "$crumb_dir/$harness-install.json" 2>/dev/null || true
 }
 
 # ── Reading the breadcrumb BACK to the agent (#4041) ─────────────────────
@@ -126,8 +129,8 @@ _record_breadcrumb() {
 # dashboard was explicitly rejected), so the payload below is printed to
 # stdout, which Claude Code injects into the session context.
 #
-# ONE four-line payload, two renderers, because the two `kind` values have
-# different reachability:
+# ONE four-line payload PER RECORD, two renderers, because the two `kind`
+# values have different reachability:
 #
 #   code: install-inert  -> PURE SHELL (`_render_breadcrumb_inert`), which owns
 #          BOTH that record's payload and its recovery text. This record is
@@ -137,6 +140,16 @@ _record_breadcrumb() {
 #          the detail through `tortoise.security.redact_secrets` — an error
 #          string can carry a token. This record is always written by Python,
 #          so the interpreter IS available on this path.
+#
+# #5838: the two kinds live in SEPARATE slots — `capture-failure` in
+# `capture-errors/<harness>.json`, `install-inert` in
+# `capture-errors/<harness>-install.json` — so an inert install can no longer
+# overwrite a live quota/network refusal. The payload is assembled by THIS
+# script and MAY carry BOTH facts: a machine can be over quota AND have a moved
+# checkout, which are independent claims, and neither is picked over the other.
+# The two STALE-source rules are deliberate: a stale `install-inert` record is
+# never rendered on the resolved path (`render_file` refuses that kind), and a
+# stale `capture-failure` record is cleared by the writer on a 2xx.
 #
 # ⛔ The recovery text is factual/available-actions, NEVER imperatives — this is
 # VENDOR-MANDATED, not style. Claude Code's hook documentation warns that
@@ -270,6 +283,13 @@ if [ -z "$TORTOISE_BIN" ] && [ -z "$TORTOISE_MODULE" ]; then
   INERT_DETAIL="the installed Claude session-start hook could not resolve a tortoise module dir (checked TORTOISE_SRC_DIR, \$HOME/.tortoise/hook-src-dir, and ../..), found no tortoise binary, and injected nothing"
   INERT_STAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
   _record_breadcrumb claude "$INERT_DETAIL" "$INERT_STAMP"
+  # #5838: report the INDEPENDENT capture-failure fact too, when a Python
+  # renderer is reachable. The two slots are read separately on purpose: the
+  # install-inert record just written is the CURRENT run's evidence, while the
+  # capture-failure record is a different cause that #5838 exists to preserve.
+  # Best-effort — with no importable `tortoise` this prints nothing (see the
+  # renderer), and the agent still gets the install-inert block below.
+  _render_capture_failure_breadcrumb claude
   # #4041: tell the AGENT, not only the machine. `install-inert` is rendered
   # pure shell, because THIS branch is reached with no interpreter to run
   # Python with.
@@ -282,9 +302,10 @@ if [ -z "$TORTOISE_BIN" ] && [ -z "$TORTOISE_MODULE" ]; then
 fi
 # #4041: read a `capture-failure` breadcrumb left by a previous capture back to
 # the agent, before the digest. It renders NOTHING when no breadcrumb is
-# present. It never runs in the inert branches above (they have already
-# exited), and it deliberately ignores a STALE `install-inert` record (see
-# `_render_capture_failure_breadcrumb`).
+# present. It deliberately ignores a STALE `install-inert` record — that kind
+# is refused by Python (`_render_capture_failure_breadcrumb`), and its own slot
+# is read by `session verify`, not here. In the inert branch ABOVE it has
+# already run (#5838), so both facts can reach the agent.
 _render_capture_failure_breadcrumb claude
 if [ -z "$TORTOISE_BIN" ]; then
   PYTHON_BIN="$(command -v python3 || true)"

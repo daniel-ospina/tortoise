@@ -4363,8 +4363,15 @@ def _capture_error_file(harness: str) -> Path:
     on failure and removes it on a 2xx, so a silent no-capture is at least
     observable on the machine that produced it (the rollout survives on disk
     for a ``sessions import`` backfill).
+
+    #5838: this is the ``capture-failure`` slot ONLY.  An inert install's
+    ``install-inert`` evidence lives in its OWN sibling file
+    (``<harness>-install.json``, :func:`hook_install.breadcrumb_file`) so the
+    two causes coexist instead of overwriting each other.  The slot is decided
+    by the KIND, through the ONE derivation, never by a second literal here.
     """
-    return _state_dir("capture-errors") / f"{harness}.json"
+    from tortoise.hook_install import KIND_CAPTURE_FAILURE, breadcrumb_file
+    return breadcrumb_file(harness, KIND_CAPTURE_FAILURE)
 
 
 def _hook_run_file(harness: str) -> Path:
@@ -4734,11 +4741,14 @@ def _record_capture_error(harness: str, detail: str,
     """Write the local capture-failure breadcrumb. Best-effort only — a
     breadcrumb write must never break the capture path it observes.
 
-    The record carries ``kind: capture-failure`` (a DIFFERENT kind from the
-    shipped hook's ``kind: install-inert``) because both writers share the
-    ``capture-errors/<harness>.json`` path: session verify must never read a
-    capture outage as an inert install, and nothing may read an inert install
-    as a failed capture.
+    The record carries ``kind: capture-failure``.  #5838: it is written to its
+    OWN slot (``capture-errors/<harness>.json``), SEPARATE from the shipped
+    hook's ``install-inert`` evidence (``<harness>-install.json``).  The two
+    used to share one path, so an inert install destroyed a live capture
+    refusal; session verify must never read a capture outage as an inert
+    install, and nothing may read an inert install as a failed capture — the
+    slot split is what keeps both facts on disk.  The slot comes from the ONE
+    derivation (:func:`hook_install.breadcrumb_file`).
     """
     import json as _json
     import time

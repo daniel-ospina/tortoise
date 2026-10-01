@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tortoise-hook-version: 8
+# tortoise-hook-version: 9
 # Tortoise per-turn capture for Claude Code — UserPromptSubmit hook (#3963).
 #
 # The `tortoise-hook-version` marker above is the install-contract generation
@@ -174,6 +174,12 @@ else
     # PURE SHELL, no python3: this is also the evidence path for the "resolved a
     # module dir but found no interpreter" branch, which is reached BECAUSE
     # python3 is missing — a python3-written breadcrumb could never run there.
+    # The record is INSTALL-leg evidence (``kind: install-inert``), kept
+    # distinguishable from a ``sessions import`` capture failure (#4314).
+    # #5838: the two kinds occupy SEPARATE slots, so this writer never touches
+    # the ``capture-failure`` file and cannot destroy a live quota/network
+    # refusal. NOTE this hook's stdout MUST stay empty (see the header); the
+    # slot split adds no output here, unlike `session-start.sh`.
     local harness="$1" detail="$2"
     local receipt_dir crumb_dir stamp
     receipt_dir="${TORTOISE_IMPORT_RECEIPT_DIR:-${HOME:-/nonexistent}/.tortoise/import-receipts}"
@@ -193,7 +199,7 @@ else
     mkdir -p "$crumb_dir" 2>/dev/null || true
     printf '{\n  "harness": "%s",\n  "detail": "%s",\n  "recorded_at": "%s",\n  "kind": "install-inert"\n}\n' \
       "$harness" "$detail" "$stamp" \
-      > "$crumb_dir/$harness.json" 2>/dev/null || true
+      > "$crumb_dir/$harness-install.json" 2>/dev/null || true
   }
 
   # Resolve a candidate module dir — accepted ONLY when it actually holds a
