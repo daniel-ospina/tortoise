@@ -212,6 +212,47 @@ tortoise list-sources && tortoise doctor                         # periodic chec
 
 Run `tortoise doctor` after upgrades.
 
+### What the agent is told when capture does not land (#4041)
+
+Capture is best-effort and a capture that does not land is **spooled locally
+and retried**, so it is never lost. But a silent non-capture used to be
+invisible from inside the agent: the local breadcrumb
+(`~/.tortoise/capture-errors/<harness>.json`) was written and read by nobody
+that could tell the user. The Claude Code `SessionStart` hook now **renders
+that breadcrumb to stdout**, which Claude Code injects into the session
+context — so the agent (and you) are told in the same place the memory digest
+arrives:
+
+```
+code:     capture-failure
+what:     Tortoise memory for this project has NOT been filed since <when>. claude capture is affected.
+why:      <the recorded error, one bounded line, secrets redacted>
+next:     Recovery: `tortoise session drain` retries filing from the local spool now; `tortoise doctor` reports capture health; capture is enabled with TORTOISE_CAPTURE=1. Memory is not filed until a retry succeeds, and the turns stay spooled locally meanwhile.
+```
+
+`code` is the machine-readable marker — the same `kind` the writers use
+(`capture-failure` from a filing that did not land; `install-inert` when the seam could not
+run — either it resolved no module dir, or a module dir resolved but no `python3` was on
+`PATH`). The wording is deliberately factual: memory is **not
+filed**, never "failed", because the turns are still on the local spool — and
+`tortoise session drain` (also run in the background at every session start) is
+what files them. The recovery half is written as available actions rather than
+commands, because Claude Code treats hook output framed as out-of-band system
+commands as a prompt-injection attempt and surfaces it to the user instead of
+injecting it.
+
+The `install-inert` form is rendered by the hook itself in **pure shell**,
+because that record is reached precisely when the interpreter or the module
+directory could not be resolved — a Python-only reader could never report it.
+No breadcrumb file means **no output at all**, and the hook still exits 0.
+
+The dashboard is deliberately not the surface for this: the agent session is.
+
+⚠️ **Coverage gap:** only the Claude Code `SessionStart` seam reads the
+breadcrumb back. Codex and Cursor ship a `session-end.sh` only — they have no
+`SessionStart` hook, so their agents are not told (the breadcrumb is still
+written for them).
+
 ### Upgrading an existing hook install
 
 Installed hooks are per-project copies (`.claude/hooks/session-start.sh`,

@@ -161,6 +161,13 @@ jobs:
                   # skips dashboard-js-tests, so the behavioural tests for the
                   # very file under review would never run.
                   isfile("website/assets/supabase-session.js"),
+                  # #3787: `website/consent.js` is copied into the dashboard's
+                  # dist by `scripts/copy-shared-assets.mjs` as part of
+                  # `npm run build`, and the shipped-artifact guard in
+                  # src/distBundle.test.js reads that copy. Same rule as the
+                  # bridge entry above: naming the input is what makes the
+                  # guard run on the file it scans.
+                  isfile("website/consent.js"),
                   # #3525: the dashboard's security-headers guard also pins the
                   # MARKETING project's CSP, and it SCANS both projects'
                   # `functions/` trees (cookie writers, `text/html` producers) —
@@ -440,6 +447,9 @@ jobs:
                   # changes the served bundle — it too used to surface only
                   # through the committed dist rebuild.
                   isfile("product/pricing.json"),
+                  # #3787: the same copied build input — a consent-only change
+                  # changes the bundle this lane serves.
+                  isfile("website/consent.js"),
                   isfile(".github/workflows/ci.yml"),
               ),
               # ai-review-gate-tests (#2982): the signed-review merge gate's
@@ -473,10 +483,17 @@ jobs:
   #   migration-append-only    — edits/renames/deletions of already-merged
   #                              migrations are rejected (a change to an applied
   #                              migration must be a NEW timestamp file).
-  #                              #1235: when SUPABASE_ACCESS_TOKEN is available
-  #                              (same-repo PRs), a PURE PREFIX RENAME of a
-  #                              provably-unapplied migration is exempt; fork
-  #                              PRs (no token) keep the strict block (fail-closed).
+  #                              #1235/#2240: when SUPABASE_ACCESS_TOKEN is
+  #                              available (same-repo PRs), the exemption covers
+  #                              only a git-detected forward prefix rename (R*)
+  #                              whose destination version sorts strictly AFTER
+  #                              the newest applied version, with BOTH endpoints
+  #                              provably unapplied — the remedy
+  #                              check-migration-drift prescribes for an
+  #                              out-of-order repo-ahead migration. An edit or a
+  #                              deletion (M/T/D) carries no destination version,
+  #                              so it is NEVER exempt. Fork PRs (no token) keep
+  #                              the strict block (fail-closed).
   # Both drive the shared .github/scripts/check-migration-append-only script so
   # tests exercise the shipped logic. fetch-depth: 0 is required for the base
   # SHA to be available to `git diff` (default checkout is depth 1).

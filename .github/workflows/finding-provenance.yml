@@ -5,18 +5,19 @@
 # MEASURED ON and may be FALSE OF THE PRODUCT, and nothing in the report said
 # which tree that was.
 #
-# This gate runs tools/finding_provenance.py against an issue body. It fails
-# when the finding carries no provenance ("unknown provenance is not a pass")
-# or when the tree it names does NOT contain the current origin/main — i.e. the
-# defect it reports may already be fixed. The test is ANCESTRY
-# (git merge-base --is-ancestor), never SHA equality, so a finding measured on
-# a branch that merely CONTAINS main is current, not stale.
+# This gate runs tools/finding_provenance.py against an issue body AND against
+# an issue/PR COMMENT. It fails when the finding carries no provenance ("unknown
+# provenance is not a pass") or when the tree it names does NOT contain the
+# current origin/main — i.e. the defect it reports may already be fixed. The
+# test is ANCESTRY (git merge-base --is-ancestor), never SHA equality, so a
+# finding measured on a branch that merely CONTAINS main is current, not stale.
 #
-# TRIGGER SCOPE — `opened` only (plus workflow_dispatch). This is a
-# forward-looking rule: firing on `edited`/`labeled` would retroactively redden
-# and stamp `provenance-stale` on the ~175 pre-existing `bug` issues that
-# predate the convention, spending the gate on reports it was never written
-# about. Re-check an existing finding by hand:
+# TRIGGER SCOPE — `issues: [opened]`, `issue_comment: [created]` (plus
+# workflow_dispatch). This is a forward-looking rule: firing on
+# `edited`/`labeled` would retroactively redden and stamp `provenance-stale` on
+# the ~175 pre-existing `bug` issues that predate the convention, spending the
+# gate on reports it was never written about. Re-check an existing finding by
+# hand:
 #     gh workflow run finding-provenance.yml -f issue_number=<N>
 #
 # ISSUE SCOPE — a `Measured at:` line is gated FIRST, whatever the labels: an
@@ -24,6 +25,39 @@
 # line is then a finding only if it is `bug`-labeled. `beta-feedback` reports
 # (external, about a released version, no checkout to emit from) are exempt
 # from the REQUIRED case; features, epics and process issues are untouched.
+#
+# COMMENT SCOPE (#4732) — the issue body is written once, usually at filing,
+# BEFORE the investigation that produces the findings; the findings arrive in
+# comments. A comment is gated ONLY when it claims to be a finding — a
+# provenance claim (`Measured at:`, in any form) or the explicit
+# `<!-- finding -->` marker — so ordinary discussion comments pass untouched
+# and unannotated. An over-eager comment gate becomes noise and is ignored,
+# which is its own silent failure. The classifier is tools/finding_provenance.py
+# `--is-finding` (exit 1 = ordinary discussion, skip). A comment's verdict
+# annotates THAT comment (a reply carrying its `#issuecomment-<id>` link) and
+# deliberately does NOT touch the issue-level `provenance-stale` label, which
+# is the issue-body gate's state.
+#
+# COST — every comment now pays the full-history checkout before it can be
+# classified, because the classifier IS the repo's own tool and the checkout is
+# what provides it. That is deliberate: a pre-checkout grep would be a second
+# copy of the predicate, and two copies drift so the cheap one decides
+# silently. This is a public repo, so the hosted runner minutes are free.
+#
+# WHAT THIS DOES NOT DO (#4732 hole 2): a body validated once is never
+# RE-validated as the base moves, so a body that was CURRENT when it was
+# written can go STALE silently. This remains open.
+#
+# INJECTION SAFETY (#4732) — `issue_comment` runs on text anyone can write.
+# The comment body is NEVER interpolated into a `run:` block: only the NUMERIC
+# `github.event.comment.id` and issue number cross the boundary, and they cross
+# it as `env:` scalars; the body is fetched by id through `gh api` into a FILE
+# and read from that file. `${{ github.event.comment.body }}` in `run:` would be
+# a script-injection sink (`$(…)`, backticks and quotes in the comment would
+# execute as shell). Note `issue_comment` fires for PULL-REQUEST comments too
+# (a PR is an issue in GitHub's data model) — the workflow never checks out the
+# PR head, so no untrusted code runs, and the only credential in scope is the
+# auto-provisioned `secrets.GITHUB_TOKEN` (no repository secret is read).
 #
 # EXIT CODES ARE HONORED. The tool separates exit 1 (STALE / UNKNOWN /
 # AMBIGUOUS / PREDATES_FIX — the finding is at fault) from exit 2 (could not
@@ -36,6 +70,8 @@ name: finding-provenance
 on:
   issues:
     types: [opened]
+  issue_comment:
+    types: [created]
   workflow_dispatch:
     inputs:
       issue_number:
@@ -54,24 +90,62 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # tools/finding_provenance.py carries the inline >=3.12 guard (#5128).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
       - name: Resolve the issue body + labels
         id: issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE: ${{ github.event.issue.number }}
+          # NUMERIC ONLY. `github.event.comment.body` must never appear in a
+          # `run:` block — that is the script-injection sink the comment
+          # trigger opens (#4732). The body is fetched by id, below.
+          COMMENT_ID: ${{ github.event.comment.id }}
           INPUT: ${{ github.event.inputs.issue_number }}
         run: |
           N="${ISSUE:-$INPUT}"
           [ -n "$N" ] || { echo "no issue number resolved"; exit 2; }
           echo "number=$N" >> "$GITHUB_OUTPUT"
-          gh issue view "$N" --json body -q .body > "$RUNNER_TEMP/body.md"
+          if [ -n "$COMMENT_ID" ]; then
+            # COMMENT PATH (#4732): the body is fetched by id through the API
+            # and written to a FILE. It is data, never shell source — no
+            # interpolation of comment text into this script.
+            echo "kind=comment" >> "$GITHUB_OUTPUT"
+            echo "comment_id=$COMMENT_ID" >> "$GITHUB_OUTPUT"
+            gh api "repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID" \
+              --jq .body > "$RUNNER_TEMP/body.md"
+          else
+            echo "kind=issue" >> "$GITHUB_OUTPUT"
+            gh issue view "$N" --json body -q .body > "$RUNNER_TEMP/body.md"
+          fi
           gh issue view "$N" --json labels -q '.labels[].name' > "$RUNNER_TEMP/labels.txt"
 
       - name: Decide whether this issue is a finding
         id: decide
+        env:
+          KIND: ${{ steps.issue.outputs.kind }}
         run: |
-          if grep -qE '^Measured at:' "$RUNNER_TEMP/body.md"; then
+          if [ "$KIND" = "comment" ]; then
+            # A COMMENT is gated ONLY when it CLAIMS to be a finding — a
+            # `Measured at:` provenance claim of any form, or the explicit
+            # `<!-- finding -->` marker. Discussion comments pass untouched:
+            # a comment gate that fires on everything is noise, and a gate
+            # that is ignored is its own silent failure (#4732). The
+            # classifier is a separate step-level rc from the gate's.
+            rc=0
+            python3 tools/finding_provenance.py --is-finding \
+              "$RUNNER_TEMP/body.md" || rc=$?
+            case "$rc" in
+              0) echo "run=true" >> "$GITHUB_OUTPUT" ;;
+              1) echo "run=false" >> "$GITHUB_OUTPUT"
+                 echo "ordinary discussion comment (no finding claim) — skipping" ;;
+              *) echo "finding-provenance: classifier failed (exit $rc)"
+                 exit "$rc" ;;
+            esac
+          elif grep -qE '^Measured at:' "$RUNNER_TEMP/body.md"; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           elif grep -qx 'beta-feedback' "$RUNNER_TEMP/labels.txt"; then
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -110,16 +184,28 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           N: ${{ steps.issue.outputs.number }}
+          KIND: ${{ steps.issue.outputs.kind }}
+          CID: ${{ github.event.comment.id }}
         run: |
-          gh label create provenance-stale --color B60205 \
-            --description "Finding measured against a tree that may not contain the fix (#4290)" \
-            2>/dev/null || true
-          gh issue edit "$N" --add-label provenance-stale
+          if [ "$KIND" = "comment" ]; then
+            # Annotate THAT comment (#4732): a reply carrying its permanent
+            # link. The issue-level label is the issue-BODY gate's state and
+            # is deliberately left alone here — so a clean comment can never
+            # clear the body's label, and a stale comment cannot plant a
+            # label that no comment re-run would clear.
+            SUBJECT="[this comment](https://github.com/${GITHUB_REPOSITORY}/issues/${N}#issuecomment-${CID})"
+          else
+            SUBJECT="this finding's issue body"
+            gh label create provenance-stale --color B60205 \
+              --description "Finding measured against a tree that may not contain the fix (#4290)" \
+              2>/dev/null || true
+            gh issue edit "$N" --add-label provenance-stale
+          fi
           {
-            echo "⚠️ **finding-provenance: this finding's measurement is stale or undated (#4290).**"
+            echo "⚠️ **finding-provenance: the measurement in ${SUBJECT} is stale or undated (#4290).**"
             echo
             # 4-space INDENT, not a fence: the verdict echoes an untrusted ref
-            # label out of the issue body, and a fence can be closed by it.
+            # label out of the finding body, and a fence can be closed by it.
             sed 's/^/    /' "$RUNNER_TEMP/verdict.txt"
             echo
             echo "A finding is true of the tree it was measured on and may be false of the product."
@@ -129,7 +215,11 @@ jobs:
             echo '$ python3 tools/finding_provenance.py --emit'
             echo '```'
             echo
-            echo "_Re-run this gate after fixing it:_ \`gh workflow run finding-provenance.yml -f issue_number=$N\`"
+            if [ "$KIND" = "comment" ]; then
+              echo "_This comment is not re-checked in place — replace its provenance line, or post a corrected comment._"
+            else
+              echo "_Re-run this gate after fixing it:_ \`gh workflow run finding-provenance.yml -f issue_number=$N\`"
+            fi
           } > "$RUNNER_TEMP/comment.md"
           gh issue comment "$N" --body-file "$RUNNER_TEMP/comment.md"
 
@@ -149,7 +239,10 @@ jobs:
           gh issue comment "$N" --body-file "$RUNNER_TEMP/comment.md"
 
       - name: Clear a stale annotation on a clean re-run
-        if: always() && steps.gate.outputs.rc == '0'
+        # Issue bodies only: the label is the ISSUE-BODY gate's live state, and
+        # a clean comment must not clear it (nor a stale comment set it) — the
+        # two surfaces keep separate state (#4732).
+        if: always() && steps.gate.outputs.rc == '0' && steps.issue.outputs.kind == 'issue'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           N: ${{ steps.issue.outputs.number }}
