@@ -5,8 +5,12 @@ WHY THIS IS A SCRIPT AND NOT A DOCUMENT
 ---------------------------------------
 The first attempt at the sibling Phase 0.1 artifact was hand-written prose carrying
 `file:line` citations. Five verification passes each found MORE that did not resolve.
-**Hand-written line numbers do not converge**, so every citation here is READ FROM THE
-SOURCE at build time and cannot drift from the code it cites.
+**Hand-written line numbers do not converge** — and neither do committed *derived* ones:
+a `sdk.py:N` offset is a fact about a MOVING source, so every PR that inserted a line
+into `sdk.py` (or was merely behind a main that did) reddened the gate on correct
+content. This artifact therefore cites no line numbers at all. The method set and the
+`def` count are read from the AST at build time; an offset is derived only where a
+diagnostic needs one, and is never committed.
 
 The SDK half of the rename table (the MCP half is a sibling lane). Two questions, per
 #4282:
@@ -22,7 +26,7 @@ Derived (computed, never typed):
   * the **method set** — an AST walk of the `TortoiseSDK` class body (via
     `tools.bridge_table._sdk_targets`, the Phase 0.1 walker; a second copy would be a
     second answer to "what is the public surface" and the two would drift);
-  * every `sdk.py:N` line number, and the def count — **284** `def` statements in
+  * the def count — **284** `def` statements in
     the class body, of which **150** are public (no leading underscore). The 281
     sometimes quoted is 284 minus the 3 dunders; this file uses 284/150 throughout;
   * the **40 targets** — parsed out of `docs/product/beta-sdk-surface.md` (the
@@ -45,6 +49,20 @@ is no longer in the doc it names **or is a truncation of it**.
 USAGE
     uv run python tools/sdk_rename_table.py            # write the doc
     uv run python tools/sdk_rename_table.py --check    # verify only, non-zero on drift
+
+NOT COMMITTED (#5373)
+    `docs/product/sdk-rename-table.md` is GENERATED ON DEMAND and gitignored. It is a
+    function of `sdk.py` line numbers, so committing it made any two concurrent
+    `sdk.py` PRs conflict on it even when their real changes were orthogonal — measured
+    2026-09-26: it was the sole conflict in 8 of the 44 PRs that did not merge cleanly,
+    and normalising `sdk.py:<line>` made the two sides byte-identical.
+
+    It is deliberately NOT `merge=union` (two regenerations are different documents; a
+    line-level union duplicates rows and matches neither side) and NOT a custom merge
+    driver (a driver would have to regenerate from the MERGED `sdk.py`, which does not
+    exist while a per-file driver runs). Not committing it removes the conflict class.
+    `tests/test_sdk_rename_table.py` renders it to a temp file and asserts every row
+    against independent AST/doc oracles, so the mapping is still checked on every run.
 """
 from __future__ import annotations
 
@@ -733,7 +751,12 @@ PHANTOM_CITES: dict[str, tuple[str, str]] = {
 # DERIVATION
 # ─────────────────────────────────────────────────────────────────────
 def _public_methods() -> dict[str, int]:
-    """Public method name → `def` line, from the Phase 0.1 AST walker."""
+    """Public method name → `def` line, from the Phase 0.1 AST walker.
+
+    The offset comes back from the walker and is kept here, but it is **never
+    committed to the doc**: it is a fact about a moving source, and committing it is
+    what broke the gate across 5 PRs (see the module docstring).
+    """
     return {n: ln for n, ln in _sdk_targets().items() if not n.startswith("_")}
 
 
@@ -1003,7 +1026,6 @@ def _rows(methods: dict[str, int], groups: dict[str, list[str]]) -> list[dict]:
             )
         rows.append({
             "name": name,
-            "line": methods[name],
             "group": label,
             "target": disp["target"],
             "disposition": disp["disposition"],
@@ -1442,8 +1464,13 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
         "**GENERATED — do not edit.** `uv run python tools/sdk_rename_table.py`; "
         "verify with `--check`.",
         "",
-        "Every `sdk.py:N` citation is **read from the AST at build time**, so it cannot "
-        "drift from the code it cites. The 40 target names are **parsed out of "
+        "**This table commits no `sdk.py:N` citation.** A line offset is a fact derived "
+        "from a **moving source**, so committing one made every PR that inserted a line "
+        "into `tortoise/sdk.py` — or was merely behind a main that did — red on correct "
+        "content (5 PRs). An offset is derived only where a diagnostic needs one, never "
+        "written down. The method set and the `def` count are **read from the AST at "
+        "build time**, so they cannot drift from the code they describe. The 40 target "
+        "names are **parsed out of "
         "`docs/product/beta-sdk-surface.md`** (owner-approved 2026-09-21), and the "
         "R/W/N group partition out of `docs/product/canonical-sdk-methods.md`; every "
         "count below is arithmetic over those, never a typed number. Each row's citation "
@@ -1508,8 +1535,8 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
         "`index_sources_from_directory`) — the canonical doc itself says beta governs where "
         "the two disagree, and records the renames.",
         "",
-        "| # | Method | Source | Group | Target | Lifecycle | Visibility | Basis | Delete | Citation |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        "| # | Method | Group | Target | Lifecycle | Visibility | Basis | Delete | Citation |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for i, r in enumerate(rows, 1):
         cite = (
@@ -1518,7 +1545,7 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
         )
         target = f"`{r['target']}`" if r["target"] else "\u2014"
         out.append(
-            f"| {i} | `{r['name']}` | `sdk.py:{r['line']}` | {r['group']} | "
+            f"| {i} | `{r['name']}` | {r['group']} | "
             f"{target} | {r['lifecycle'] or '—'} | {r['visibility'] or '—'} | "
             f"{r['basis']} | {r['delete'] or '—'} | {cite} |"
         )
@@ -1574,10 +1601,9 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
         "",
     ]
     if findings["unbacked"]:
-        out += ["| Method | Source | Why it has no destination |", "|---|---|---|"]
+        out += ["| Method | Why it has no destination |", "|---|---|"]
         out += [
-            f"| `{m}` | `sdk.py:{next(r['line'] for r in rows if r['name'] == m)}` | "
-            f"{_cell(UNBACKED_REASON.get(m, 'no doc states a destination'))} |"
+            f"| `{m}` | {_cell(UNBACKED_REASON.get(m, 'no doc states a destination'))} |"
             for m in findings["unbacked"]
         ]
         out.append("")
@@ -1695,13 +1721,13 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
             "are in Part C3. They render `basis: contested` and carry no destination, so",
             "Phase 2 cannot implement them without an owner ruling.",
             "",
-            "| Method | Source | Why it is still contested |",
-            "|---|---|---|",
+            "| Method | Why it is still contested |",
+            "|---|---|",
         ]
         for r in contested_rows:
             retained = ", ".join(f"“{m}”" for m in _retention_clauses(r["quote"]))
             out.append(
-                f"| `{r['name']}` | `sdk.py:{r['line']}` | Its row says "
+                f"| `{r['name']}` | Its row says "
                 f"{retained or 'the capability is retained'} — no destination the docs "
                 f"agree on. |"
             )
