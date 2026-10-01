@@ -2040,7 +2040,8 @@ class TestCommitPointsGate:
         assert self._chain_counts("sGateAt") == (0, 0, 0), (
             "a refused commit must mint no Session/Event/Source — NOT 'nothing': "
             "a :CommitRecord with status='partial' IS merged before the gate "
-            "(see the class docstring); replay-safe, and invisible to "
+            "(`store.acquire(..., status='partial')`, hosted_api.py:13006, which "
+            "runs ahead of the gate at :13063); replay-safe, and invisible to "
             "_chain_counts by design")
         assert self._point_count() == before  # no partial Point either
 
@@ -2059,10 +2060,17 @@ class TestCommitPointsGate:
 
         `_check_org_limit` documents "counting errors raise HTTP 500
         (QuotaCheckError) — never a silent pass", and that is the property the
-        new gate site must inherit. Without this test the property is
-        unpinned HERE: wrapping the offload in a bare `except Exception: pass`
-        leaves every other test in this class green (verified by mutation),
-        because they only ever exercise a WORKING count.
+        new gate site must inherit.
+
+        ⛔ IT MUST DISCRIMINATE THE POINTS SITE FROM THE SESSIONS SITE. The lane
+        calls `_check_org_limit(org, "sessions")` (:13024) BEFORE the #4051
+        points gate (:13063), and BOTH call the same `enforce_org_limit` — so a
+        patch that fails EVERY resource makes the SESSIONS gate raise the 500
+        first and the request never reaches the new site. That was the first cut
+        of this test, and it pinned nothing: with only the points gate made to
+        swallow its 500 it stayed GREEN (verified by mutation). The patch below
+        raises for `resource == "points"` only, so the sessions gate passes and
+        the 500 can come from the new site alone.
         """
         import tortoise.quota as quota_mod
         from tortoise.quota import QuotaCheckError
@@ -2073,6 +2081,8 @@ class TestCommitPointsGate:
         # that handler and the exception would escape the TestClient (which
         # re-raises server exceptions) — proving nothing.
         def _boom(org, resource, *, slot_credit=0, **kwargs):
+            if resource != "points":
+                return  # the sessions gate must PASS — see the docstring
             raise QuotaCheckError("count unavailable")
 
         monkeypatch.setattr(quota_mod, "enforce_org_limit", _boom)

@@ -13027,8 +13027,9 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     # ⛔ SCOPE — stated precisely, because overstating a gate is worse than the
     # gap it leaves: this polices the COUNTED CATEGORY (value Points, plus the
     # :Object/:Subject nodes entities mint), because `_count_resource("points")`
-    # counts exactly
-    # `(n:Point AND non-episodic) OR n:Object OR n:Subject` (tortoise/quota.py).
+    # counts exactly `(n:Point AND (n.is_episodic IS NULL OR n.is_episodic =
+    # false)) OR n:Object OR n:Subject OR (n:Event AND (n.is_episodic IS NULL OR
+    # n.is_episodic = false))` (tortoise/quota.py:734-736).
     # ⛔ IT GATES THE PRE-STATE, NOT THE PAYLOAD: it refuses when the org's count
     # is ALREADY at/over `max_points`. It therefore does NOT bound the count this
     # lane's own commit can leave behind — the lane writes in bulk and carries
