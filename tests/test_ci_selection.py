@@ -1304,7 +1304,10 @@ def test_integrity_reddens_on_a_duplicate_entry(monkeypatch, capsys):
                 "leg_coverage_issues", "duration_coverage_issues",
                 "workflow_matrix_issues"):
         monkeypatch.setattr(cs, leg, lambda *a, **k: [])
-    monkeypatch.setattr(cs, "push_legs", lambda *a, **k: {"half_a": [], "half_b": []})
+    # #6135: `push_legs` now returns `{"shards": [...]}` (N shards), not the old
+    # `half_a`/`half_b` pair — the stub below matches the CURRENT contract so the
+    # duplicate remains the only possible cause of the non-zero exit.
+    monkeypatch.setattr(cs, "push_legs", lambda *a, **k: {"shards": []})
     monkeypatch.setattr(cs, "workflow_halves_issues", lambda *a, **k: [])
     monkeypatch.setattr(cs, "fast_files_absent_from_halves", lambda *a, **k: [])
     monkeypatch.setattr(sys, "argv", ["ci_selection.py", "--integrity"])
