@@ -32,6 +32,8 @@ import {
   PROBE_TIMEOUT_MS,
   REQUEST_TIMEOUT_MS,
   RETRY_MAX_MS,
+  TRUNCATION_SENTINEL,
+  TURN_MAX_CHARS,
   backoffDelay,
   buildCapturePayload,
   captureKey,
@@ -39,6 +41,7 @@ import {
   clampAttempts,
   clampWindow,
   classifyFailure,
+  clipTurnContent,
   contentDigest,
   deriveMachineId,
   discardEntry,
@@ -53,6 +56,7 @@ import {
   readSpoolTurns,
   resolveConfig,
   sourceName,
+  truncationMarker,
   writeSpoolEntry,
 } from "./tortoise-capture.ts";
 import tortoiseCapture from "./tortoise-capture.ts";
@@ -169,12 +173,59 @@ test("extractTurns keeps user/assistant text only, in order", () => {
   ]);
 });
 
-test("extractTurns truncates at the hosted per-turn window", () => {
+test("extractTurns marks a turn cut at the hosted per-turn window (#4897)", () => {
   const long = "a".repeat(9000);
   const turns = extractTurns([
     { type: "message", message: { role: "user", content: long } },
   ]);
-  assert.equal(turns[0].content.length, 5000);
+  // The cut fills the window exactly, and the marker lives INSIDE it so the
+  // server's own cap re-application cannot remove it.
+  assert.equal(Array.from(turns[0].content).length, TURN_MAX_CHARS);
+  assert.ok(turns[0].content.includes(TRUNCATION_SENTINEL));
+  assert.ok(turns[0].content.endsWith(truncationMarker(9000)));
+  assert.ok(turns[0].content.includes("original length 9000"));
+  // The body is the turn's own prefix — nothing synthetic was inserted.
+  const body = turns[0].content.slice(0, turns[0].content.indexOf(TRUNCATION_SENTINEL) - 1);
+  assert.ok(long.startsWith(body));
+});
+
+test("clipTurnContent marks only an actual cut (#4897)", () => {
+  const cap = TURN_MAX_CHARS;
+  for (const n of [0, 1, cap - 1, cap]) {
+    const content = "a".repeat(n);
+    assert.equal(clipTurnContent(content), content, `${n} chars fits`);
+    assert.ok(!clipTurnContent(content).includes(TRUNCATION_SENTINEL));
+  }
+  const clipped = clipTurnContent("a".repeat(cap + 1));
+  assert.equal(Array.from(clipped).length, cap);
+  assert.ok(clipped.endsWith(truncationMarker(cap + 1)));
+  // STABLE under re-application (the server re-applies the window).
+  assert.equal(clipTurnContent(clipped), clipped);
+});
+
+test("clipTurnContent never splits a multi-byte character at the cut (#4897)", () => {
+  const emoji = "\u{1F600}".repeat(6000);
+  const clipped = clipTurnContent(emoji);
+  assert.equal(Array.from(clipped).length, TURN_MAX_CHARS);
+  assert.ok(clipped.includes(TRUNCATION_SENTINEL));
+  assert.ok(clipped.includes("original length 6000"));
+  // No lone surrogate anywhere in the result.
+  for (let i = 0; i < clipped.length; i++) {
+    const code = clipped.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = clipped.charCodeAt(i + 1);
+      assert.ok(next >= 0xdc00 && next <= 0xdfff, "high surrogate not paired");
+      i++;
+    } else {
+      assert.ok(!(code >= 0xdc00 && code <= 0xdfff), "lone low surrogate");
+    }
+  }
+});
+
+test("the marker records the true length and is code-point counted (#4897)", () => {
+  assert.equal(truncationMarker(12000), ` ${TRUNCATION_SENTINEL} original length 12000 chars]`);
+  const astr = "\u{1F600}".repeat(TURN_MAX_CHARS + 5);
+  assert.ok(clipTurnContent(astr).includes(`original length ${TURN_MAX_CHARS + 5}`));
 });
 
 test("extractTurns keeps the MOST RECENT turns at the cap (matches the backfill leg)", () => {

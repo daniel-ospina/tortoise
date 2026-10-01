@@ -3955,8 +3955,16 @@ def _spool_transcript(args) -> dict:
     # (hosted 400) → the spool entry is discarded as a permanent error instead
     # of being filed.
     from tortoise.quota import MAX_SESSION_TURNS
+    from tortoise.sdk import _clip_capture_turn_content
     from tortoise.session_import import window_turns
-    turns = [{"role": t["role"], "content": t["content"][:5000]} for t in turns]
+    # #4897: the per-turn clip is the SDK's ONE definition of the stored window
+    # — this leg used to slice to a bare `5000`, which both re-declared the cap
+    # and cut SILENTLY (a reader could not tell a complete turn from a cut one).
+    # The clip reserves its marker inside the cap, so the server's own
+    # re-application of the window cannot remove it.
+    turns = [{"role": t["role"],
+              "content": _clip_capture_turn_content(t["content"])}
+             for t in turns]
     # The spool's store IS the record and the meta digest is computed over it, so
     # what is stored must be what is posted. Non-conversational roles (the
     # transcript's `System:` lines) are excluded by POLICY — the same policy the
@@ -4950,6 +4958,7 @@ def _cmd_sessions_import(args) -> int:
                 spool_dir,
                 write_spool_entry,
             )
+            from tortoise.sdk import _clip_capture_turn_content
             from tortoise.session_attribution import (
                 derive_machine_id,
                 sanitize_attribution_field,
@@ -4957,12 +4966,15 @@ def _cmd_sessions_import(args) -> int:
 
             if classify_failure(status, detail) != "retry":
                 return
-            # Clamp exactly as `session capture` does. The spool's per-entry
-            # bound is sized on the CLAMPED maximum (500 turns x 5000 chars), so
-            # an unclamped turn can overflow it — and write_spool_entry then
-            # DISCARDS the entry, losing the very session this exists to save.
-            # The server clamps to the same width, so nothing stored differs.
-            spool_turns = [{"role": t["role"], "content": t["content"][:5000]}
+            # Clamp exactly as `session capture` does — through the SDK's ONE
+            # clip definition (#4897), never a bare literal: the spool's
+            # per-entry bound is sized on the CLAMPED maximum (500 turns x the
+            # stored window), so an unclamped turn can overflow it — and
+            # write_spool_entry then DISCARDS the entry, losing the very
+            # session this exists to save. The clip keeps the bound AND marks
+            # the cut, so nothing stored differs from what the server stores.
+            spool_turns = [{"role": t["role"],
+                            "content": _clip_capture_turn_content(t["content"])}
                            for t in turns]
             root = spool_dir()
             spooled = write_spool_entry(root, Snapshot(

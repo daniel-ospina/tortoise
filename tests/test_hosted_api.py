@@ -2600,13 +2600,41 @@ class TestSessionCapture:
     def test_capture_session_blank_conversation_rejected(self, client):
         """P1: whole-conversation blank → 422. Requires the D10 validator
         guard (None content would otherwise 500 in Pydantic before the
-        handler)."""
+        handler).
+
+        ⛔ The last three rows are OVER-CAP blanks (#4897 review round 12). The window
+        appends a truncation marker to a body it clips, so a blank past the cap has
+        NON-blank text at the gate while holding nothing extractable — the gate must judge
+        the marker-FREE body. This list stopped at ``" " * 5000`` — exactly the cap, the
+        one boundary NOT clipped — so reverting only the HOSTED gate to the marked window
+        left the whole suite green while an over-cap blank POST stopped 422-ing.
+
+        ⛔ AND the FINAL THREE rows, for the same reason one round later (#4897 review
+        round 14). Round 14 added "a turn with no content of its own yields no claims" to
+        ``_session_llm_transcript``, which refuses the blank and lookalike rows on its OWN —
+        so reverting this gate to the marked window went green again. These three clip to a
+        body with no >=3-char SENTENCE, which that skip does not cover, so the marker is the
+        only sentence in the transcript unless the gate strips it.
+        """
+        from tortoise.sdk import _capture_truncation_marker
         for conv in ([{"role": "user", "content": "ok"}],
                      [{"role": None, "content": None}],
                      [{"role": "user"}],
                      [{"role": "user", "content": " " * 5000}],
                      [{"role": "user", "content": 0}],
-                     [{"role": "user", "content": "ab"}]):
+                     [{"role": "user", "content": "ab"}],
+                     [{"role": "user", "content": " " * 5001}],
+                     [{"role": "user", "content": "\n" * 6000}],
+                     [{"role": "user", "content": "\t" * 6000}],
+                     # A client-supplied MARKER LOOKALIKE — the row that isolates the gate change.
+                     # The blank rows above are ALSO covered by "a blank retention is not marked",
+                     # so reverting the hosted gate to the marked window left this suite green while
+                     # an over-cap blank POST stopped 422-ing (verified: the mutation survived).
+                     [{"role": "user", "content": _capture_truncation_marker(5001)}],
+                     # the round-14 rows: no >=3-char sentence in the clipped body
+                     [{"role": "user", "content": "X" + " " * 6000}],
+                     [{"role": "user", "content": "  .  " * 2000}],
+                     [{"role": "user", "content": _capture_truncation_marker(5001) + " "}]):
             r = client.post("/v1/sessions", json={"conversation": conv})
             assert r.status_code == 422, (conv, r.text)
 
@@ -5811,10 +5839,13 @@ class TestCaptureSpeakerParity:
             "conversation": [{"role": "user", "content": content}]})
         assert r.status_code == 200, r.text[:300]
         from tortoise.hosted_api import TortoiseSDK as _HASDK
+        from tortoise.sdk import _CAPTURE_TRUNCATION_SENTINEL, _clip_capture_turn_content
         rows = _HASDK(namespace=TEST_ORG_ID)._get_proj().g.query(
             "MATCH (t:Point {pointKind:'event'}) RETURN t.content"
         ).result_set
-        assert rows and rows[0][0] == "[user] " + content[:5000], rows
+        assert rows and rows[0][0] == "[user] " + _clip_capture_turn_content(content), rows
+        assert _CAPTURE_TRUNCATION_SENTINEL in rows[0][0], (
+            "the hosted path must mark the cut too (#4897)")
 
 
 class TestCaptureStoredTurnParity:
