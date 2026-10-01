@@ -21,9 +21,11 @@ fixture key, and pin BOTH ends of the contract:
 * the three failure causes are DISTINGUISHED (no signature / wrong repo /
   HMAC mismatch) and the mismatch path prints sha256 prefixes, never the key.
 
-The block is executed offline: ``gh`` is stubbed to fail so the run block
-falls back to the ``PR_BODY`` env var (its documented fallback), which keeps
-the test hermetic and fast.
+The block is executed offline: ``gh`` is stubbed to fail BY DEFAULT, so the run block
+falls back to the ``PR_BODY`` env var (its documented fallback) — that is the
+``event-snapshot`` path. ``_run_gate(live_body=…)`` opts into the OTHER source: the
+stub then answers the REST body fetch (``body=rest-live``) while still failing the diff
+fetch. Both paths are hermetic and fast.
 """
 
 from __future__ import annotations
@@ -95,12 +97,35 @@ def _run_gate(
     repo: str = _REPO,
     pr: str = _PR,
     secret: str = _FIXTURE_KEY,
+    live_body: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Execute the workflow's run block offline (stubbed ``gh``) on ``body``."""
+    """Execute the workflow's run block offline (stubbed ``gh``) on ``body``.
+
+    ``live_body`` switches which of the gate's TWO body sources is exercised: by
+    default the stub fails and the run falls back to the ``PR_BODY`` event payload
+    (``body=event-snapshot``, the truncated ~48KB path). Passing ``live_body`` makes
+    the stub answer the PR fetch with those bytes, which is the path production
+    normally takes (``body=rest-live``) — and the only way to reach it, since a
+    snapshot body and a live body are otherwise indistinguishable to these tests.
+    """
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
     gh = bindir / "gh"
-    gh.write_text("#!/usr/bin/env bash\nexit 1\n")  # force the PR_BODY fallback
+    if live_body is None:
+        gh.write_text("#!/usr/bin/env bash\nexit 1\n")  # force the PR_BODY fallback
+    else:
+        # Answer ONLY the body fetch (`--jq .body`); the live diff fetch carries the
+        # `Accept: …v3.diff` header and still fails, which is the fail-closed arm a
+        # `diff=` marker must trip.
+        (tmp_path / "live-body.txt").write_text(live_body)
+        gh.write_text(
+            "#!/usr/bin/env bash\n"
+            "case \"$*\" in\n"
+            "  *v3.diff*) exit 1 ;;\n"
+            f'  *.body*) cat "{tmp_path}/live-body.txt" ;;\n'
+            "  *) exit 1 ;;\n"
+            "esac\n"
+        )
     gh.chmod(0o755)
     script = tmp_path / "run.sh"
     script.write_text(_gate_run_block())
@@ -229,14 +254,132 @@ def test_gate_calls_a_whitespace_damaged_signed_marker_malformed(tmp_path: Path)
 
 
 def test_gate_reports_stale_marker(tmp_path: Path) -> None:
-    """Evidence for a different head fails as STALE and names both shas."""
+    """Evidence for a different head fails as STALE, and the verdict says what it READ.
+
+    #4776: the old message was ``latest recorded <sha>`` — but that value is the last
+    sha-bearing line, not the newest record, so a body carrying a marker for the head
+    could still be told "your record is stale/missing". A stale verdict must instead
+    (a) state that no marker is bound to the expected head, (b) list every candidate
+    binding so the reader can see the whole body was considered, and (c) name the body
+    bytes it judged, so the verdict stays falsifiable after the PR moves on.
+    """
     other = "a" * 40
     body = _marker(
         f"review recorded: reviews/{_PR}.json verdict=clean @ {other} diff={_DIFF} ({_REPO})"
     )
     proc = _run_gate(body, tmp_path)
     assert proc.returncode == 1
-    assert f"latest recorded {other} — expected {_HEAD}" in proc.stdout, proc.stdout
+    assert f"NO marker in this PR's body is bound to {_HEAD}" in proc.stdout, proc.stdout
+    assert other[:12] in proc.stdout, "the candidate list must name the marker that IS there"
+    assert f"head expected: {_HEAD}" in proc.stdout, proc.stdout
+    assert "candidate marker(s): 1" in proc.stdout, proc.stdout
+    assert "body=event-snapshot" in proc.stdout, proc.stdout
+    assert "latest recorded" not in proc.stdout, (
+        "the label that overclaimed 'newest record' must be gone (#4776)"
+    )
+
+
+def test_gate_stale_verdict_admits_a_snapshot_may_miss_a_later_record(tmp_path: Path) -> None:
+    """When the live body could not be fetched the run judged a SNAPSHOT.
+
+    A snapshot is fixed at the event that queued the run, so it cannot see a record
+    posted afterwards. The verdict must say so and name the action (re-run), rather
+    than assert staleness about a body it never read. This is the state the contract
+    harness always runs in (its ``gh`` stub fails), so it is also the state that made
+    the old wording ambiguous.
+    """
+    other = "b" * 40
+    body = _marker(
+        f"review recorded: reviews/{_PR}.json verdict=clean @ {other} diff={_DIFF} ({_REPO})"
+    )
+    proc = _run_gate(body, tmp_path)
+    assert "the LIVE body could not be used (the REST read failed)" in proc.stdout, proc.stdout
+    assert "Re-run this check before acting on this verdict" in proc.stdout, proc.stdout
+
+
+def test_gate_calls_an_empty_live_body_a_snapshot_not_a_live_read(tmp_path: Path) -> None:
+    """A SUCCESSFUL read returning an empty body must not be labelled `rest-live`.
+
+    The failure this pins: the source was flipped only when `gh` exited non-zero, so a read
+    that returned an empty string (or `null`) left ``body`` on the event snapshot while
+    ``body_source`` still said ``rest-live`` — the provenance line then certified bytes the
+    run never fetched, which is precisely what it exists to prevent (#4776). The live body
+    here is empty and the snapshot is not, so the two are distinguishable.
+    """
+    other = "e" * 40
+    body = _marker(f"review recorded: reviews/{_PR}.json verdict=clean @ {other} ({_REPO})")
+    proc = _run_gate(body, tmp_path, live_body="")
+    assert proc.returncode == 1
+    assert "body=event-snapshot" in proc.stdout, proc.stdout
+    assert "body=rest-live" not in proc.stdout, (
+        "an empty live read does not make the snapshot the live body"
+    )
+    assert "the REST read returned an empty body" in proc.stdout, proc.stdout
+
+
+def test_gate_stale_diagnostics_survive_the_live_body_path(tmp_path: Path) -> None:
+    """The WHOLE stale verdict prints when the live body was read (#4776).
+
+    The live-body path is the one production normally takes and it had NO coverage: every
+    other test here stubs ``gh`` to fail, so all of them exercise the ``event-snapshot``
+    branch. The failure this pins is that branch blindness: the byte-count diagnostic is
+    only reachable through this path, and a regression that truncates the verdict
+    there (an early exit, or a conditional wrapping the diagnostics) would otherwise pass
+    the entire suite. Asserted on the lines that FOLLOW the provenance hint.
+    """
+    other = "c" * 40
+    body = _marker(
+        f"review recorded: reviews/{_PR}.json verdict=clean @ {other} diff={_DIFF} ({_REPO})"
+    )
+    proc = _run_gate(body, tmp_path, live_body=body)
+    assert proc.returncode == 1
+    assert "body=rest-live" in proc.stdout, proc.stdout
+    assert "the LIVE body could not be used" not in proc.stdout, proc.stdout
+    assert "candidate marker(s): 1" in proc.stdout, proc.stdout
+    assert f"head expected: {_HEAD}" in proc.stdout, proc.stdout
+    assert "the live diff hash could not be computed" in proc.stdout, proc.stdout
+    assert f"record-review.sh {_PR} {_HEAD} clean {_REPO}" in proc.stdout, proc.stdout
+
+
+def test_gate_live_body_sha_digest_matches_the_bytes_it_judged(tmp_path: Path) -> None:
+    """The provenance line names the bytes, so the verdict can be re-checked later."""
+    other = "d" * 40
+    # The em-dash is load-bearing: it makes the character count differ from the byte
+    # count, so a `${#body}` (characters) mislabelled as `bytes` REDS this test.
+    body = "Reviewed — no blockers.\n\n" + _marker(
+        f"review recorded: reviews/{_PR}.json verdict=clean @ {other} ({_REPO})"
+    )
+    proc = _run_gate(body, tmp_path, live_body=body)
+    digest = hashlib.sha256(body.encode()).hexdigest()[:12]
+    assert f"sha256={digest}" in proc.stdout, proc.stdout
+    assert f"bytes={len(body.encode())}" in proc.stdout, proc.stdout
+    assert f"bytes={len(body)}" not in proc.stdout, "the count must be BYTES, not characters"
+
+
+def test_gate_lists_every_candidate_not_only_the_last(tmp_path: Path) -> None:
+    """The candidate list is evidence that the WHOLE body was examined (#4776).
+
+    The failure this pins: the verdict could name one sha (the old `latest recorded`
+    shape) and still satisfy every other test here, because they all carry exactly one
+    candidate — so a regression back to "the last sha-bearing line" would pass. Two
+    stale sha-bearing markers plus a sha-less one must all appear, in body order, with
+    the sha-less count reported separately.
+    """
+    first, second = "1" * 40, "2" * 40
+    body = "\n".join(
+        [
+            _marker(f"review recorded: reviews/{_PR}.json verdict=clean @ {first} ({_REPO})"),
+            _marker(f"review recorded: reviews/{_PR}.json verdict=clean @ {second} ({_REPO})"),
+            _marker(f"review recorded: reviews/{_PR}.json verdict=clean @ not-a-sha ({_REPO})"),
+        ]
+    )
+    proc = _run_gate(body, tmp_path, live_body=body)
+    assert proc.returncode == 1
+    assert "candidate marker(s): 2" in proc.stdout, proc.stdout
+    assert f"bound to: {first[:12]} {second[:12]}" in proc.stdout, (
+        "every candidate must be listed, in body order — not only the last"
+    )
+    assert "1 with no 40-hex sha" in proc.stdout, proc.stdout
 
 
 def test_gate_reports_missing_wellformed_sha(tmp_path: Path) -> None:
@@ -252,6 +395,67 @@ def test_gate_reports_no_evidence_at_all(tmp_path: Path) -> None:
     proc = _run_gate("just a PR description, no marker", tmp_path)
     assert proc.returncode == 1
     assert "No AI review evidence found" in proc.stdout, proc.stdout
+
+
+@pytest.mark.parametrize(
+    "label, body",
+    [
+        ("no evidence", "just a PR description, no marker"),
+        (
+            "unsigned",
+            f"review recorded: reviews/{_PR}.json verdict=clean @ {_HEAD} diff={_DIFF} ({_REPO})",
+        ),
+        (
+            "wrong repo",
+            _marker(
+                f"review recorded: reviews/{_PR}.json verdict=clean "
+                f"@ {_HEAD} diff={_DIFF} (someone-else/other-repo)"
+            ),
+        ),
+        (
+            "malformed",
+            _marker(
+                f"review recorded: reviews/{_PR}.json verdict=clean @ {_HEAD} diff=deadbeef ({_REPO})"
+            ),
+        ),
+        ("no well-formed sha", _marker(f"review recorded: reviews/{_PR}.json verdict=clean @ not-a-sha (someone/other)")),
+        (
+            "stale",
+            _marker(f"review recorded: reviews/{_PR}.json verdict=clean @ {'d' * 40} ({_REPO})"),
+        ),
+        # The `latest_repo` mismatch exit: a well-formed marker for another repo whose sha is
+        # NOT this head. A different branch from "wrong repo" above (that case is head-bound),
+        # and the one body-derived verdict no case here reached.
+        (
+            "stale marker for another repo",
+            _marker(
+                f"review recorded: reviews/{_PR}.json verdict=clean "
+                f"@ {'d' * 40} (someone-else/other-repo)"
+            ),
+        ),
+        ("hmac mismatch", _diff_marker(key="some-other-key")),
+    ],
+)
+def test_every_body_derived_verdict_reports_which_bytes_it_judged(
+    label: str, body: str, tmp_path: Path
+) -> None:
+    """Every body-derived verdict carries its provenance (#4776).
+
+    A verdict is falsifiable only if the log says WHICH body it read: the same
+    evidence reads present or absent depending on whether the live body or the
+    queued snapshot was fetched. Two verdicts had this line and the rest did not, so
+    a snapshot-derived "UNSIGNED" or "HMAC mismatch" was as unfalsifiable as the
+    stale verdict this change set out to fix. Every branch that reads the body is a case
+    here, so deleting the helper call from any one of them reds its own case.
+    """
+    proc = _run_gate(body, tmp_path)
+    assert proc.returncode == 1
+    assert re.search(
+        r"body=(rest-live|event-snapshot) sha256=[0-9a-f]{12} bytes=\d+", proc.stdout
+    ), (
+        f"{label}: the verdict does not say which bytes it judged, so an operator cannot "
+        f"tell a real negative from a snapshot that missed a later record.\n{proc.stdout}"
+    )
 
 
 # ── Static anti-drift guard ────────────────────────────────────────────────
@@ -325,6 +529,16 @@ def test_trigger_and_job_shape_are_pinned_from_parsed_yaml() -> None:
         "the gate must trigger on pull_request_target ONLY: under `pull_request` a "
         f"same-repo PR runs its own copy of the workflow and can self-certify "
         f"the check. Parsed trigger: {on!r}"
+    )
+    # `edited` is LOAD-BEARING since #5433 made this check required + a queue entry
+    # condition: record-review.sh posts the marker by PATCHing the PR body, and that
+    # body-edit event is the only thing that re-runs the gate afterwards. Without it,
+    # a correctly recorded review leaves the gate red on its pre-record run forever.
+    # Asserted on the PARSED types list, because the shell harness can only token-match.
+    types = (on.get("pull_request_target") or {}).get("types")
+    assert isinstance(types, list) and "edited" in types, (
+        "the pull_request_target trigger must include the `edited` activity type: "
+        f"recording a review edits the PR body, which is what re-runs this gate. Got: {types!r}"
     )
     trigger = on["pull_request_target"] or {}
     assert "paths" not in trigger and "paths-ignore" not in trigger, (

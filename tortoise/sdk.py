@@ -2418,12 +2418,6 @@ def _stream_to_payload(summary: dict, session_id: str, stream: dict) -> dict:
     }
 
 
-def _now_iso() -> str:
-    """UTC now in ISO format (module-level — shared by write paths)."""
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()  # noqa: UP017
-
-
 def _source_merge_lock_for(url: str) -> threading.Lock:
     with _source_merge_lock_guard:
         lock = _source_merge_locks.get(url)
@@ -2733,7 +2727,14 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
 
     Resolution order is unchanged and is the ONE home for it::
 
-        str(valid_from) → stored_vf (truthiness) → successor_created_at → now
+        str(valid_from) [a STRING must name an instant; a numeric is exempt]
+                        → stored_vf (TRUTHY and ORDERABLE)
+                        → successor_created_at (ORDERABLE) → now
+
+    ``stored_vf`` is taken only when it is ORDERABLE (#5360), not merely
+    truthy: a present-but-unparseable stored start carries no instant, and
+    persisting it as the end leaves the window unbounded — see the branch
+    comment below.
 
     Returns the value AS PERSISTED.  The ``stored_vf`` branch stays RAW (no
     ``str()``): a numeric stored value must keep keying as ``(0, float)``
@@ -2766,34 +2767,99 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
     legacy or imported point carrying a non-ISO start is reachable, and
     refusing here would make such a point impossible to supersede until its
     window was repaired — foreclosing the very write a caller would use to
-    move past it.  An unparseable resolved END is #5360's residual for the
-    same reason.
+    move past it.  (An unparseable resolved END was #5360's residual; it is
+    closed below on every route reachable under the declared ``str | None``
+    type plus the numeric-epoch extension — the numeric kwarg being the
+    deliberate exemption: the no-kwarg STORED-start branch requires
+    orderability, a STRING ``valid_from`` kwarg that names no instant falls
+    through, and the ``createdAt`` fallback likewise requires an orderable
+    value and otherwise lands on ``now``. So a value naming no instant becomes
+    an orderable instant rather than an end no query can order — see the branch
+    comments below.)
 
     Raises ``ValueError`` BEFORE any mutation at either call site, so no
     event is journaled and no half-write survives a refusal.
 
-    Scope: this refuses the **inverted** direction.  An **unparseable**
-    resolved end (a truthy-but-unparseable stored successor ``validFrom``
-    with no kwarg) is a SEPARATE residual — the orderability gap on the
-    no-kwarg path — deliberately NOT absorbed here.
+    Scope: this refuses the **inverted** direction.  The resolution of an
+    **unparseable** end is handled in the resolution block below (#5360): the
+    no-kwarg STORED-start branch requires orderability, and a STRING
+    ``valid_from`` kwarg that names no instant falls through to
+    ``successor_created_at`` rather than being persisted. A NUMERIC kwarg is
+    deliberately exempt there.
 
     The ``valid_from``-vs-successor agreement guard is NOT here: it is
     reachable only when a kwarg is passed, and it stays inline at its
     reviewed call site.
     """
     from .search_engine import _created_sort_key  # lazy — import cycle
-    if valid_from is not None:
+    if valid_from is not None and not (
+        # #5360 — a STRING kwarg that names no instant must not be persisted as
+        # the end either. A NUMERIC kwarg is deliberately EXEMPT from this and
+        # is passed through to ``str(valid_from)`` as before: that string keys
+        # ``(1, text)`` (no ``-``/``T``), and
+        # ``test_window_end_numeric_kwarg_resolved_before_measure`` (B3) pins
+        # that the guard measures that RESOLVED value, so the numeric case is
+        # NOT an inversion. Gating on ``isinstance(valid_from, str)`` keeps B3's
+        # decision intact — a blanket orderability test here, applied to
+        # numbers too, replaces the numeric kwarg's end and reddens B3.
+        isinstance(valid_from, str)
+        and _created_sort_key(valid_from)[0] != 0
+    ):
         succ_vf = str(valid_from)
-    elif stored_vf:
+    elif stored_vf and _created_sort_key(stored_vf)[0] == 0:
+        # #5360 — ORDERABLE, not merely truthy. A stored start that is present
+        # but unorderable ("not-a-date", "TBD") names no instant, and this
+        # branch used to persist it RAW as the predecessor's window END. The
+        # resulting window has no orderable boundary:
+        # ``_created_sort_key("not-a-date")`` is ``(1, text)``, so the #4021
+        # inversion guard's ``end >= start`` conjunct is trivially satisfied
+        # (that guard skips an unorderable successor — see below), while
+        # ``_covers`` cannot exclude the window either, because
+        # ``(1, x) < (0, y)`` is False. The predecessor then appears to cover
+        # EVERY later instant — the exact overlap class #3980 exists to
+        # prevent, on the one path #3980 does not guard.
+        #
+        # Falling through to ``successor_created_at`` is the SAME treatment a
+        # FALSEY stored start already gets (#3985), and normalising rather
+        # than refusing is this function's own documented policy for the
+        # identical shape on the predecessor side, where a present-but-
+        # unparseable start is "SKIPPED, not refused" — because
+        # ``create_point`` accepts any caller ``validFrom``, so refusing would
+        # make a legacy/imported point impossible to supersede until its
+        # window was repaired, foreclosing the very write a caller would use
+        # to move past it. The successor side is the same shape: refuse there
+        # and such a point could never be superseded at all.
+        #
+        # The test for ORDERABILITY lives HERE and NOT as a normalisation of
+        # the resolved value below, because such a normalisation would reverse
+        # a deliberate, pinned decision: a numeric ``valid_from`` kwarg is
+        # persisted as ``str(valid_from)``, which keys ``(1, text)`` (no
+        # ``-``/``T``), and
+        # ``test_window_end_numeric_kwarg_resolved_before_measure`` (B3) pins
+        # that the guard measures that RESOLVED value — so the numeric case is
+        # NOT an inversion.
         succ_vf = stored_vf
-    elif successor_created_at:
+    elif successor_created_at and _created_sort_key(successor_created_at)[0] == 0:
+        # #5360, the THIRD route (found in the third review cycle): ``createdAt``
+        # is a normal CALLER prop — ``create_point``'s own comment records that
+        # api.py, ingest.py and the source-inheritance path all pass one, and
+        # ``_create_map`` lets a caller override the ``"$now"`` default — so an
+        # unparseable ``createdAt`` is reachable through the public API, and
+        # this fallback used to persist it RAW as the predecessor's END. Same
+        # unbounded window as the other two routes. Requiring orderability here
+        # sends it to ``now`` instead, which is always ISO.
         succ_vf = successor_created_at
     else:
         succ_vf = now  # monotone fallback — never a gap
     if old_vfs:
         k_succ = _created_sort_key(succ_vf)
-        # An unparseable successor start has no instant to compare against;
-        # that is #5360's residual, not this guard's.
+        # A NUMERIC KWARG can still resolve unparseable here and is
+        # DELIBERATELY left that way (see above and B3): the guard measures the
+        # value the writer persists, and an unparseable resolved value is
+        # skipped rather than compared, so it is not an inversion. Every other
+        # route yields an orderable ``succ_vf`` — #5360 closed the no-kwarg
+        # STORED-start route, the string-kwarg route, and the ``createdAt``
+        # fallback.
         if k_succ[0] == 0:
             for old_vf in old_vfs:
                 if old_vf is None:
@@ -6179,11 +6245,8 @@ class TortoiseSDK:
             params=params,
         )
         if event_id:
-            proj.g.query(
-                "MATCH (s:Source {url:$url}), (e:Event {eventId:$eid}) "
-                "MERGE (s)-[:references]->(e)",
-                params={"url": url, "eid": event_id},
-            )
+            # Anchored ON CREATE by the shared derivation writer (#5199).
+            proj.link_source_to_event(url, event_id)
 
     # ── Update / Delete consolidation (epic #888 W2, PR #912) ─────────
     # One update()/delete() for Points AND entities. The legacy methods
@@ -6194,6 +6257,18 @@ class TortoiseSDK:
 
     def update(self, id: str, **props) -> dict:
         """One update for a Point OR an entity (epic #888 W2).
+
+        A graph operator IS a Point (``is_operator=true``), so it takes the
+        Point arm below: ``update(<operator_id>, label=...)`` edits an existing
+        operator edge in place. So ``update`` belongs to the operator-mutation
+        vocabulary even though ``operator_action`` exposes only mitigate/annotate
+        (#6131).
+
+        Note what this path does NOT do: unlike ``create_operator``, which returns
+        a structured ``undeclared_relation`` warning when no installed pack
+        declares the predicate, ``update(<operator_id>, label=...)`` performs no
+        declaredness check and installs the label silently. Take valid predicates
+        from ``list_relations()``.
 
         Detects the node type by label:
           - Point → point-lifecycle semantics (delegates to update_point):
@@ -6214,6 +6289,12 @@ class TortoiseSDK:
 
     def delete(self, id: str) -> bool:
         """One delete for a Point OR an entity (epic #888 W2).
+
+        An operator IS a Point (``is_operator=true``), so
+        ``delete(<operator_id>)`` removes an operator edge — operators are not
+        delete-less, and a mislabelled or superseded edge is not permanent
+        (#6131). The verb is deliberately generic, so its name says Point/entity
+        rather than naming operators.
 
         Destructive. Detects the node type by label:
           - Point → delete_point (tag GC + `PointRetracted` :GraphEvent)
@@ -6744,7 +6825,13 @@ class TortoiseSDK:
         is legal. The comparison needs an INSTANT on both sides: a resolved
         start that is itself unparseable is not compared (it names no instant,
         so a refusal would rest on a lexicographic accident rather than a
-        comparison) — that open orderability residual is #5360's.
+        comparison) — the orderability residual is closed on the WRITE path
+        (#5360) for every route EXCEPT the deliberately-exempt numeric-epoch
+        ``valid_from`` kwarg: an unorderable resolved start or end is otherwise
+        normalised to an orderable instant rather than persisted. That kwarg is
+        still ``str()``-ed and left unorderable (see ``_supersede_window_end``
+        and ``docs/ONTOLOGY.md`` §4.7), so that ONE route can still write a
+        bound ``_covers`` cannot order.
 
         The kwarg is a CLAIM about the successor's window start, so when the
         successor carries a stored ``validFrom`` the two must be parseable
@@ -6753,9 +6840,13 @@ class TortoiseSDK:
         uses). A disagreement raises ``ValueError`` BEFORE any mutation: a
         predecessor ``validTo`` that disagrees either leaves a GAP (a query
         instant covered by neither window) or an OVERLAP (two covering
-        candidates ⇒ ``ambiguous``). The kwarg remains the SOLE source when
-        the successor carries no stored ``validFrom`` (an undated successor),
-        unchanged. See docs/ONTOLOGY.md §4.7 (``validTo``).
+        candidates ⇒ ``ambiguous``). The kwarg is the SOLE source when the
+        successor carries no stored ``validFrom`` (an undated successor)
+        **unless it names no instant**: an unparseable STRING kwarg falls
+        through to the successor's ``createdAt``, and that fallback itself
+        requires an orderable value and otherwise lands on ``now`` (#5360). A
+        numeric-epoch kwarg is deliberately exempt — see
+        ``_supersede_window_end``. See docs/ONTOLOGY.md §4.7 (``validTo``).
 
         Transfers all edges from the old point to the new point:
           - Operator edges (IMPL, NAND, hasPart) with idx
@@ -6842,12 +6933,18 @@ class TortoiseSDK:
         # guard's agreement boundary IS the read path's contiguity boundary.
         # It normalizes a purely cosmetic encoding difference
         # ("…T00:00:00Z" vs "…T00:00:00+00:00") and that is therefore
-        # accepted. It parses a DATE-ONLY value as LOCAL midnight (issue
-        # #3982), so a date-only-vs-offset-aware pair is a real instant
-        # difference off UTC — refused there, accepted on a UTC host. That is
-        # deliberate: `_covers` has the same host-dependence, so a
-        # host-independent verdict here would disagree with the read path.
-        # #3982 owns the decision on date-only semantics.
+        # accepted. Since #3982 it ANCHORS a DATE-ONLY value to UTC midnight
+        # (ECMA-262 §21.4.3.2: with no offset, date-only forms are UTC). So a
+        # date-only value and the SAME day stated as midnight UTC
+        # ("…T00:00:00Z") compare EQUAL, and that pair is ACCEPTED on every
+        # host — the equality does not depend on the reader's zone.
+        # The equality is specific to the midnight-UTC ENCODING, not to the
+        # calendar day: the same date at any other time of day names a
+        # different instant and is still refused, as is any pair on different
+        # days. Those verdicts are now host-INDEPENDENT rather than
+        # host-dependent. The read path consumes the same primitive
+        # (`_covers`), so the guard and the read path continue to agree. A
+        # zone-less date-TIME is unaffected and still reads locally.
         #
         # The guard's PRESENCE predicate is the read path's, not the
         # resolution branch's. `_covers` gates on `vf is not None`, so a
@@ -6859,8 +6956,12 @@ class TortoiseSDK:
         # `(1, <text>)` and IS covered by it, so `""` only hides the successor
         # from parseable queries, which land in the predecessor's window end
         # instead. The resolution
-        # branch below gates on TRUTHINESS instead (`elif stored_vf:`), so for
-        # those two values it falls through to `createdAt`. The guard follows
+        # branch below takes a stored start only when it is TRUTHY **and**
+        # ORDERABLE (#5360), so `0` falls through because it is falsey (it IS
+        # orderable, keying `(0, 0.0)`, which is why truthiness cannot be
+        # dropped from the description) and `""` falls through because it is
+        # falsey too. The guard
+        # follows
         # `_covers`: with a kwarg present it refuses rather than allow an
         # unchecked window end against a start the read path treats as real
         # (a `validFrom=0` successor's `[epoch0, ∞)` window overlaps any
@@ -7459,6 +7560,9 @@ class TortoiseSDK:
         # target can never produce a live point with no event (#1080 review).
         temporal_wired = False
         superseded = False
+        # #5365: unapplied supersessions during this promotion — see the
+        # temporal_replacement loop below.
+        supersede_skipped: list[dict] = []
         temporal_targets = point.get("temporal_target_ids") or []
         if point.get("temporal_target_id") and point.get("temporal_target_id") not in temporal_targets:
             temporal_targets.append(point["temporal_target_id"])
@@ -7496,6 +7600,12 @@ class TortoiseSDK:
                     self.supersede_point(tgt, point_id)
                     superseded = True
                 except ValueError as exc:
+                    # #5365: the same fail-open skip as commit_ops — the
+                    # promotion PROCEEDS without superseding, so the caller
+                    # must be able to SEE that, not just find a log line.
+                    # Reported in the result below.
+                    supersede_skipped.append({"target": tgt,
+                                              "reason": str(exc)})
                     _logger.warning(
                         "promote_point: supersede of %s failed for %s: %s",
                         tgt, point_id, exc)
@@ -7547,6 +7657,14 @@ class TortoiseSDK:
             result["temporal_wired"] = True
         if superseded:
             result["superseded"] = True
+        if supersede_skipped:
+            # #5365: a promotion that could not supersede its temporal target
+            # is a PARTIAL promotion. Surfaced as a counted, listed field so a
+            # caller sees the skip without parsing logs (mirrors the
+            # `race_detected` precedent above: a lost race is reported, not
+            # hidden).
+            result["supersede_skipped"] = supersede_skipped
+            result["supersede_skipped_count"] = len(supersede_skipped)
         if race_detected:
             result["race_detected"] = True
             result["race_warning"] = (
@@ -8197,6 +8315,13 @@ class TortoiseSDK:
         action='annotate' → annotate_operator(id=..., bias=..., precision=...,
             consistency=..., directness=...) — structured epistemic dims.
 
+        This is NOT the whole operator-mutation vocabulary. Operators are also
+        edited and removed by the GENERIC verbs — ``update(<operator_id>, ...)``
+        and ``delete(<operator_id>)`` — because an operator IS a Point and so
+        takes their Point arm (#6131). This action set exists for the two
+        operations that need a reason or epistemic dimensions; their absence
+        here is not evidence that operators cannot be changed.
+
         Unknown action raises ValueError.
         """
         if action == "mitigate":
@@ -8209,7 +8334,9 @@ class TortoiseSDK:
                 kwargs["consistency"], kwargs["directness"])
         raise ValueError(
             f"operator_action: unknown action {action!r} — must be "
-            f"'mitigate' or 'annotate'")
+            f"'mitigate' or 'annotate'. This is not the whole operator "
+            f"vocabulary: operators are also edited and removed by the generic "
+            f"verbs update(id, ...) and delete(id) (#6131).")
 
     def annotate_operator(self, id: str, bias: float, precision: float,
                           consistency: float, directness: float) -> dict:
@@ -20638,9 +20765,13 @@ class TortoiseSDK:
                         self._doc_write(frontmatter, doc_id, title, abs_path, url)
                         repair_work = not base_complete or merge_outcome == "updated"
                     # wire (Source)-[:references]->(Event|Source) — plain edge
-                    # (D10: a document is a :Source, so the doc target is Source)
+                    # (D10: a document is a :Source, so the doc target is keyed by
+                    # url=doc_id). The label stays "Document" for the doc case: it is
+                    # the RELATION's spelling — the writer remaps the identity onto
+                    # `:Source` — and it is what keeps this a derivation link, which is
+                    # what takes the `sourceVersion` anchor (#5199).
                     target = event_id if classifier != "doc" else doc_id
-                    label = "Event" if classifier != "doc" else "Source"
+                    label = "Event" if classifier != "doc" else "Document"
                     proj.link_source_to_entity(url, target, label)
 
             # ── embedding repair (sessions; extract_metadata=True) — runs only
@@ -21626,11 +21757,12 @@ class TortoiseSDK:
         silently no-op on them — the edge must bind the legacy node directly.
         """
         proj = self._get_proj()
-        proj.g.query(
-            "MATCH (s:Source {url:$url}), (e:Event {eventId:$eid}) "
-            "MERGE (s)-[:references]->(e)",
-            params={"url": url, "eid": event_id},
-        )
+        # Anchored ON CREATE, from the version the EVENT records it was read from
+        # (`e.file_hash`) — NOT the Source's current hash. This path runs when the
+        # file was edited since capture (W2): the Source holds the CURRENT hash
+        # while the legacy Event kept its stored `file_hash`, so anchoring the
+        # Source's hash here would report a STALE Event as current.
+        proj.link_source_to_legacy_event(url, event_id)
 
     def index_sessions(self, directory: str, extract_metadata: bool = True,
                        llm_model: str | None = "gpt-5-mini",
@@ -22499,18 +22631,126 @@ class TortoiseSDK:
         as ``entity`` rather than dropping the row. Rows that DO resolve a
         reference are preferred, so a Point extracted from several sources
         keeps returning a referenced entity whenever one exists.
+
+        #5199 — the note is readable for **every** link: one row is returned per
+        ``(source, reference)`` hop, so a source that carries several references
+        reports each one's note rather than one arbitrarily chosen hop. Before
+        this a bare containment link could win and report ``unknown`` for a chain
+        whose note was right there — the ordinary shape, since `hosted_api` gives
+        one Source a document derivation link AND external containment links.
+
+        Row order is a **presentation** choice, pinned for the two distinctions
+        that carry meaning: **resolved** links before the self-terminal fallback,
+        and **annotated** links before unannotated ones. Identity keys follow
+        (node key, note, label, content hash, title) so the shapes the writers
+        produce have a stable order — a fallback row for one source cannot
+        displace another's, a duplicate `:Source` sharing a ``url`` is separated
+        by its hash **when the hashes differ**, and an `:Event` colliding with a
+        `:Source` on its key is separated by its label. Where those keys still
+        agree, the residue paragraph below applies.
+
+        It is **not** a total order, and this docstring will not pretend it is:
+        two rows agreeing on every ordering key (same url/id, note, label, hash,
+        title) come back in engine order, and may still differ in a property the
+        order does not read (``ingestedAt``, say). **Select the link you want by
+        its source/target identity, not by row position.**
+
+        Each row's pair speaks for THAT ``references`` link only, and these rows
+        are **NOT** §4.6's Point-level aggregate: §4.6 aggregates the Point's
+        ``extractedFrom`` links — a DIFFERENT link set, which this method
+        traverses only to enumerate sources and never reads a version off. A
+        caller wanting that verdict has to read those links itself. What these
+        rows answer is the narrower question: *which version was each referenced
+        entity read at, and is that still the source's current version?* Each row
+        carries ``linkRelation`` (the link set it describes — always
+        ``references`` here), ``linkRecordedVersion`` (the version recorded on
+        THAT link, i.e. the edge's own ``sourceVersion`` property),
+        ``sourceCurrentVersion`` (the source's version now) and ``linkCurrency``
+        (the verdict). Every one of those names is scoped to the link on purpose:
+        §4.6's aggregate reads the Point's ``extractedFrom`` link, which records a
+        version of its OWN under the same ``sourceVersion`` property name, so a
+        bare ``sourceVersion``/``currency`` on a Point-addressed call is the
+        conflation the search-hit half was retracted for.
         """
         proj = self._get_proj()
+        from .search_engine import currency_status
+
         r = proj.g.query(
             "MATCH (p:Point {id:$pid})-[:extractedFrom]->(src:Source) "
-            "OPTIONAL MATCH (src)-[:references]->(ref) "
-            "WITH src, ref ORDER BY ref IS NULL LIMIT 1 "
+            "OPTIONAL MATCH (src)-[ref_edge:references]->(ref) "
+            "WITH src, ref_edge, ref "
+            # Order pinned for the two distinctions that carry meaning (resolved
+            # before fallback, annotated before unannotated), then by identity
+            # keys. See the docstring: this is NOT a total order — rows equal on
+            # every key come back in engine order. Deliberately NO `LIMIT`: one
+            # row per link, because a Point extracted from several sources — or a
+            # source referencing several things — must not have its remaining
+            # notes dropped.
+            # (1) a resolved reference beats the self-terminal fallback;
+            # (2) an ANNOTATED reference beats an unannotated one — this decides
+            #     which row LEADS. It is placement, not reachability: there is no
+            #     `LIMIT`, so every link's note comes back either way;
+            # (3) the key terms below. Enumerated in precedence order, most
+            #     significant first — an enumeration, not a claim about which
+            #     term is NEEDED for which shape:
+            #       3a. `coalesce(ref.url, ref.id, ref.eventId, src.url, src.id, '')`
+            #           the target's identity key. `eventId`: a legacy raw-Cypher
+            #           Event carries no `url` and no `id`. `src.url`, then
+            #           `src.id`: the self-terminal fallback row has `ref` NULL, so
+            #           the key falls back to the source's own identity — and a
+            #           url-less `:Source` is producible (a raw producer can wire
+            #           one via `extractedFrom`; `hosted_backup.restore_graph`
+            #           recreates dumped nodes as they were).
+            #       3b. `coalesce(ref_edge.sourceVersion, '')`  the note
+            #       3c. `labels(coalesce(ref, src))`            the target's label
+            #       3d. `coalesce(ref.contentHash, src.contentHash, '')`  hash
+            #       3e. `coalesce(ref.title, src.title, '')`    title
+            #     Every term only breaks ties the earlier ones left, so 3b-3e are
+            #     what separate shapes sharing a key: an `:Event` colliding with a
+            #     `:Source`, two `:Source` nodes sharing a ``url``, or sharing a
+            #     ``url`` AND a hash. (Same-``url`` duplicates need a legacy/raw-Cypher
+            #     write path — #5012's duplication is CANONICAL identity across
+            #     DIFFERENT raw urls (the count itself is unmeasured there) — so
+            #     those terms are defensive.)
+            #     This is NOT a total order — rows equal on every key come back in
+            #     engine order; see the docstring.
+            "ORDER BY ref IS NULL, ref_edge.sourceVersion IS NULL, "
+            "coalesce(ref.url, ref.id, ref.eventId, src.url, src.id, ''), "
+            "coalesce(ref_edge.sourceVersion, ''), "
+            "labels(coalesce(ref, src)), "
+            "coalesce(ref.contentHash, src.contentHash, ''), "
+            "coalesce(ref.title, src.title, '') "
             "RETURN properties(src) as source, "
             "properties(coalesce(ref, src)) as entity, "
-            "labels(coalesce(ref, src)) as labels",
+            "labels(coalesce(ref, src)) as labels, "
+            "ref_edge.sourceVersion as remembered",
             params={"pid": point_id},
         )
-        return [{"source": dict(row[0]), "entity": dict(row[1]), "labels": list(row[2])} for row in r.result_set]
+        out: list[dict] = []
+        for row in r.result_set:
+            source = dict(row[0])
+            remembered = row[3] or ""
+            current = source.get("contentHash") or ""
+            out.append({
+                "source": source,
+                "entity": dict(row[1]),
+                "labels": list(row[2]),
+                # #5199: the version note on THIS hop, and the currency of THIS
+                # link as a READ. `linkRelation` names the link set, so the row is
+                # self-describing: §4.6's aggregate rides a different link.
+                "linkRelation": "references",
+                # It describes the ``source -[references]-> entity`` link — the
+                # version the RETURNED entity was read at — which is deliberately
+                # NOT a claim about the Point: the Point's own `extractedFrom`
+                # version is a different link, and a Point-level verdict has to
+                # aggregate §4.6 across all of them. ``unknown`` whenever the note
+                # or the source's version is absent, so an unnoted link can never
+                # read as current.
+                "linkRecordedVersion": remembered,
+                "sourceCurrentVersion": current,
+                "linkCurrency": currency_status(remembered, current),
+            })
+        return out
 
     def link_source_to_entity(self, source_url: str, entity_id: str, entity_label: str, source_kind: str = "document") -> None:
         """Create Source → Entity references edge (Ontology v3.1 §3.4).
@@ -22524,7 +22764,19 @@ class TortoiseSDK:
             entity_label: the entity label (Source|Event|Object) for the MATCH.
                 The retired ``"Document"`` is accepted as a DEPRECATED ALIAS and
                 resolved to ``Source`` (D10, ONTOLOGY v3.15 §4.4).
+                ⚠️ The alias is NOT equivalent to ``"Source"`` for the caller:
+                it also selects the DERIVATION relation, so the link takes the
+                optional ``sourceVersion`` anchor described below, while
+                ``"Source"`` means referential containment and stays
+                property-free. Pass ``"Document"`` when the link's meaning is
+                "this target was read from that source".
             source_kind: sourceKind to set on auto-created Source (default: "document")
+
+        Anchor (#5199): a DERIVATION link (``Event`` | ``Document``) records the
+        source version its target was read from as an optional ``sourceVersion``,
+        read HERE from the source's own ``contentHash`` so no caller passes it and
+        this signature is unchanged. Written ``ON CREATE`` only. ``Object`` links
+        stay property-free. See ``docs/architecture/STORAGE-ARCHITECTURE.md`` §9.6.
 
         Raises:
             ValueError: if entity_label is not one of Source, Event, Object
@@ -22923,6 +23175,13 @@ def _summary_to_payload(summary: dict, session_id: str,
 
 
 def _now_iso() -> str:
+    """UTC now in ISO format.
+
+    One of this module's timestamp helpers, not a single shared clock: some call sites
+    here use it, while others inline ``datetime.now(timezone.utc).isoformat()``
+    directly (e.g. ``update_point``, ``invalidate_point``, ``supersede_point``) and
+    several other modules define their own ``_now_iso``.
+    """
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 

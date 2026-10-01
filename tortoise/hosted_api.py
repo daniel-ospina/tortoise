@@ -48,7 +48,10 @@ import tortoise
 from tortoise import body_limits as _body_limits  # #2048 shared streaming body cap
 from tortoise import mcp_auth as _mcp_auth
 from tortoise import monitoring as _monitoring  # #2924: call-time bound read
-from tortoise.abuse import _int_env  # #1081 signup limiter env knobs (SignupVelocityTracker)
+from tortoise.abuse import (
+    _int_env,  # #1081 signup limiter env knobs (SignupVelocityTracker)
+    _window_env,  # #5493 window knobs must never fail open
+)
 from tortoise.alert_store import OpenOutcome, ResolveOutcome  # #3820 resolve/open tri-state
 from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op without key)
     api_key_created,
@@ -5393,23 +5396,44 @@ async def _emit_capture_ledger(org_id: str, session_id: str,
     Both writes run off the event loop: the Supabase RPC / embedded registry
     write and ``_track_analytics_event``'s synchronous ``httpx.Client`` POST are
     blocking I/O, and this API runs a single uvicorn worker (the #2988 / #3498
-    class). The analytics emit keeps its OWN best-effort handler — a ledger
-    failure is not an analytics failure and must not be labelled one.
+    class). The analytics emit goes through the SHARED off-loop entry point
+    (``_emit_analytics_off_loop`` → ``_cp_offload`` on the dedicated
+    ``telemetry`` pool, #4468) rather than the loop's SHARED default executor,
+    which the abuse hooks compete on — #4015 moved every other hosted funnel
+    emit there and left this lane for #4468. The ledger write stays on
+    ``asyncio.to_thread`` deliberately: it is a DIFFERENT op (the durable
+    per-period row the spend cap reads, not the analytics row), it has no
+    pooled seam that owns it, and moving it is not #4468's question. The
+    analytics emit keeps its OWN best-effort handler — a ledger failure is not
+    an analytics failure and must not be labelled one.
     """
     try:
         _cost_props = _capture_cost_props(session_id, meta)
         if _cost_props is None:
             return
         from tortoise.metering import record_capture_usage
+        # #5045: the SAME measured token counts ride the ledger as the
+        # analytics row — carried from ``_cost_props``, never re-derived from
+        # cost. WORKLOAD only; the spend ceiling never reads them.
         await asyncio.to_thread(
             record_capture_usage, org_id,
-            cost_usd=float(_cost_props.get("cost_usd") or 0.0))
+            cost_usd=float(_cost_props.get("cost_usd") or 0.0),
+            tokens_in=int(_cost_props.get("prompt_tokens") or 0),
+            tokens_out=int(_cost_props.get("completion_tokens") or 0))
     except Exception as e:  # noqa: BLE001, RUF100 — never block a committed capture
         _alert_unmetered("capture_ledger", org_id, e)
         return
     try:
-        await asyncio.to_thread(
-            _track_analytics_event, org_id, "capture_cost", _cost_props)
+        # #4468: the analytics emit rides the shared off-loop entry point
+        # (telemetry pool) instead of the loop's shared default executor.
+        # ``_emit_analytics_off_loop`` deliberately lets the #3821 strict-mode
+        # ``UnregisteredTelemetryKey`` escape so a misregistered prop cannot be
+        # silently swallowed — and HERE that escape is deliberately re-caught
+        # by the handler below, because this function's contract is that a
+        # committed capture is never failed by bookkeeping. The onboarding
+        # wrapper (``_track_onboarding_event``) depends on the same raise, so
+        # do NOT "unify" the two sites by weakening either one.
+        await _emit_analytics_off_loop(org_id, "capture_cost", _cost_props)
     except Exception:  # noqa: BLE001, RUF100 — never block capture
         logging.getLogger("tortoise.api").exception(
             "capture_cost analytics emit failed (non-fatal)")
@@ -6453,7 +6477,7 @@ async def _check_signup_ip_rate_limit(request: Request) -> None:
     (default 86400). The 429 detail carries the support pointer (P2 #8) —
     hard-limit posture with a documented appeal path.
     """
-    window_s = _int_env("TORTOISE_SIGNUP_IP_WINDOW_S", 86400)
+    window_s = _window_env("TORTOISE_SIGNUP_IP_WINDOW_S", 86400)
     await _check_ip_bucket_rate_limit(
         request, buckets=_SIGNUP_BUCKETS, lock=_SIGNUP_LOCK,
         limit=_int_env("TORTOISE_SIGNUP_IP_LIMIT", 2),
@@ -6510,7 +6534,7 @@ async def _check_recovery_rate_limit(request: Request,
     await _check_ip_bucket_rate_limit(
         request, buckets=_RECOVER_BUCKETS, lock=_RECOVER_LOCK,
         limit=_int_env("TORTOISE_RECOVER_IP_LIMIT", 5),
-        window_s=_int_env("TORTOISE_RECOVER_IP_WINDOW_S", 86400),
+        window_s=_window_env("TORTOISE_RECOVER_IP_WINDOW_S", 86400),
         key=_request_ip_key(request),
         detail={
             "error_code": "over_recovery_ip_rate_limit",
@@ -6522,7 +6546,7 @@ async def _check_recovery_rate_limit(request: Request,
         await _check_ip_bucket_rate_limit(
             request, buckets=_RECOVER_TOKEN_BUCKETS, lock=_RECOVER_TOKEN_LOCK,
             limit=_int_env("TORTOISE_RECOVER_TOKEN_LIMIT", 10),
-            window_s=_int_env("TORTOISE_RECOVER_TOKEN_WINDOW_S", 3600),
+            window_s=_window_env("TORTOISE_RECOVER_TOKEN_WINDOW_S", 3600),
             key=("signup-token", token_hash),
             detail={
                 "error_code": "over_recovery_token_rate_limit",
@@ -6646,14 +6670,14 @@ async def _check_claim_rate_limit(request: Request) -> None:
     # that helper, so it must apply it here.
     ip = _normalize_mapped_ipv6(ip)
     limit = _int_env("TORTOISE_CLAIM_MAX_PER_24H", _CLAIM_MAX_PER_24H_DEFAULT)
-    window_s = _int_env("TORTOISE_CLAIM_WINDOW_S", _CLAIM_WINDOW_DEFAULT)
-    if window_s <= 0:
-        # An invalid window must never fail OPEN: with window_s <= 0 the
-        # in-window test `now - t < window_s` is never true, the bucket is
-        # emptied on every request and the limiter is silently disabled.
-        # Fall back to the default (the D6 convention for an out-of-range
-        # value) — the intended off-switch is RATE_LIMIT_DISABLED.
-        window_s = _CLAIM_WINDOW_DEFAULT
+    # #5493: the WINDOW is read through the floored accessor — with a
+    # non-positive window the in-window test `now - t < window_s` is never
+    # true, the bucket is emptied on every request and this limiter is
+    # silently disabled (fail OPEN). `_window_env` falls back to the default
+    # and warns once per distinct misconfig; the intended off-switch is
+    # RATE_LIMIT_DISABLED. `limit`/`store_cap` stay on `_int_env`: a
+    # non-positive limit is a legitimate fail-CLOSED deny-all.
+    window_s = _window_env("TORTOISE_CLAIM_WINDOW_S", _CLAIM_WINDOW_DEFAULT)
     store_cap = _int_env("TORTOISE_CLAIM_STORE_CAP", _CLAIM_STORE_CAP_DEFAULT)
     # User-facing period, derived so a tuned window cannot make the 429
     # message lie (identical to "24h" at the default window).
@@ -6775,8 +6799,8 @@ async def _check_invite_accept_rate_limit(request: Request, token: str) -> None:
         lock=_INVITE_ACCEPT_TOKEN_LOCK,
         limit=_int_env("TORTOISE_INVITE_ACCEPT_TOKEN_LIMIT",
                        _INVITE_ACCEPT_TOKEN_LIMIT),
-        window_s=_int_env("TORTOISE_INVITE_ACCEPT_TOKEN_WINDOW_S",
-                          _INVITE_ACCEPT_TOKEN_WINDOW_S),
+        window_s=_window_env("TORTOISE_INVITE_ACCEPT_TOKEN_WINDOW_S",
+                             _INVITE_ACCEPT_TOKEN_WINDOW_S),
         key=("invite-accept", "token", token_key),
         detail=detail, retry_after_s=None)
     await _check_ip_bucket_rate_limit(
@@ -6784,8 +6808,8 @@ async def _check_invite_accept_rate_limit(request: Request, token: str) -> None:
         lock=_INVITE_ACCEPT_IP_LOCK,
         limit=_int_env("TORTOISE_INVITE_ACCEPT_IP_LIMIT",
                        _INVITE_ACCEPT_IP_LIMIT),
-        window_s=_int_env("TORTOISE_INVITE_ACCEPT_IP_WINDOW_S",
-                          _INVITE_ACCEPT_IP_WINDOW_S),
+        window_s=_window_env("TORTOISE_INVITE_ACCEPT_IP_WINDOW_S",
+                             _INVITE_ACCEPT_IP_WINDOW_S),
         key=("invite-accept", "ip", ip),
         detail=detail, retry_after_s=None)
     await _check_ip_bucket_rate_limit(
@@ -6793,8 +6817,8 @@ async def _check_invite_accept_rate_limit(request: Request, token: str) -> None:
         lock=_INVITE_ACCEPT_GLOBAL_LOCK,
         limit=_int_env("TORTOISE_INVITE_ACCEPT_GLOBAL_LIMIT",
                        _INVITE_ACCEPT_GLOBAL_LIMIT),
-        window_s=_int_env("TORTOISE_INVITE_ACCEPT_GLOBAL_WINDOW_S",
-                          _INVITE_ACCEPT_GLOBAL_WINDOW_S),
+        window_s=_window_env("TORTOISE_INVITE_ACCEPT_GLOBAL_WINDOW_S",
+                             _INVITE_ACCEPT_GLOBAL_WINDOW_S),
         key=("invite-accept", "global"),
         detail=detail, retry_after_s=None)
 
@@ -12590,12 +12614,33 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         # (keyed on these urls) addresses the SAME node create_source wrote.
         u = sdk._resolve_source_url(src.url)
         external_urls.append(u)
+        # #4146: an ABSENT anchor stays absent — NULL, not "" — exactly as the
+        # session-Source write above does. `_upsert_source`'s ON MATCH preserve
+        # branch fires only WHEN `$hash IS NULL` (entities.py: the JOINT-E2E
+        # #900/#1032 contract: "when the caller carries NO contentHash ... the
+        # ingest must never clobber an index-created Source's contentHash to ''").
+        # Coercing the back-compat NULL to "" made `s.contentHash <> $hash`
+        # TRUE for any stored non-empty hash, so an anchorless re-commit of the
+        # same url WIPED the stored anchor, bumped `version` and rewrote
+        # updatedAt/title — and against a corpus-indexed url it also wiped the
+        # hash the INDEX path owns. It does NOT null `_searchText`: `$st` is
+        # `ev.get("_searchText") or ev.get("title")` and this call carries
+        # NEITHER, so the `coalesce($st, s._searchText)` SET preserves the
+        # stored text.
+        # `or None` (not a bare pass-through) is deliberate: the field admits
+        # "" (no min_length), and an empty anchor is an absent one — the same
+        # normalization the session-Source write applies via its
+        # `next((ref.contentHash for ref in ... if ref.contentHash), None)`.
         sdk.create_source(
             u, src.sourceKind, tier=src.credibilityTier,
-            contentHash=src.contentHash or "", is_episodic=True,
+            contentHash=(src.contentHash or None), is_episodic=True,
         )
     for url in session_urls:
-        sdk.link_source_to_entity(url, doc_id, "Source")
+        # "Document" is the RELATION's spelling (D10 retired the node label and the
+        # writer remaps the identity onto `:Source`) — it is what marks this a
+        # derivation link, so it takes the `sourceVersion` anchor. See
+        # `edges.py::_DERIVATION_REFERENCES_LABELS`.
+        sdk.link_source_to_entity(url, doc_id, "Document")
     for session_url in session_urls:
         for external_url in external_urls:
             proj.g.query(
@@ -16555,19 +16600,19 @@ async def _check_invite_otp_rate_limit(request: Request, token: str) -> None:
     await _check_ip_bucket_rate_limit(
         request, buckets=_INVITE_OTP_TOKEN_BUCKETS, lock=_INVITE_OTP_TOKEN_LOCK,
         limit=_int_env("TORTOISE_INVITE_OTP_TOKEN_LIMIT", 5),
-        window_s=_int_env("TORTOISE_INVITE_OTP_TOKEN_WINDOW_S", 15 * 60),
+        window_s=_window_env("TORTOISE_INVITE_OTP_TOKEN_WINDOW_S", 15 * 60),
         key=("invite-otp", "token", token_key),
         detail=detail, retry_after_s=None)
     await _check_ip_bucket_rate_limit(
         request, buckets=_INVITE_OTP_IP_BUCKETS, lock=_INVITE_OTP_IP_LOCK,
         limit=_int_env("TORTOISE_INVITE_OTP_IP_LIMIT", 10),
-        window_s=_int_env("TORTOISE_INVITE_OTP_IP_WINDOW_S", 3600),
+        window_s=_window_env("TORTOISE_INVITE_OTP_IP_WINDOW_S", 3600),
         key=("invite-otp", "ip", ip),
         detail=detail, retry_after_s=None)
     await _check_ip_bucket_rate_limit(
         request, buckets=_INVITE_OTP_GLOBAL_BUCKETS, lock=_INVITE_OTP_GLOBAL_LOCK,
         limit=_int_env("TORTOISE_INVITE_OTP_GLOBAL_LIMIT", 200),
-        window_s=_int_env("TORTOISE_INVITE_OTP_GLOBAL_WINDOW_S", 3600),
+        window_s=_window_env("TORTOISE_INVITE_OTP_GLOBAL_WINDOW_S", 3600),
         key=("invite-otp", "global"),
         detail=detail, retry_after_s=None)
 
@@ -16583,7 +16628,7 @@ async def _check_invite_resend_rate_limit(request: Request,
     await _check_ip_bucket_rate_limit(
         request, buckets=_INVITE_RESEND_BUCKETS, lock=_INVITE_RESEND_LOCK,
         limit=_int_env("TORTOISE_INVITE_RESEND_LIMIT", 5),
-        window_s=_int_env("TORTOISE_INVITE_RESEND_WINDOW_S", 24 * 3600),
+        window_s=_window_env("TORTOISE_INVITE_RESEND_WINDOW_S", 24 * 3600),
         key=("invite-resend", "invitation", invitation_id),
         detail={"error_code": "over_invite_resend_rate_limit",
                 "message": "Too many resend requests for this invitation."},
@@ -24739,11 +24784,12 @@ async def _emit_analytics_off_loop(org_id: str, event_name: str,
     """#4015: the shared off-loop entry point for a hosted funnel-event emit.
 
     It is the one entry point for the sites that #4352 routed through
-    ``_cp_offload``; the capture-cost lane (``_emit_capture_ledger``) keeps its
-    own ``asyncio.to_thread`` path — still off-loop, but on the loop's SHARED
+    ``_cp_offload``, and since #4468 it is also the capture-cost lane's
+    (``_emit_capture_ledger``) off-loop path: that lane used to keep its own
+    ``asyncio.to_thread`` call — still off-loop, but on the loop's SHARED
     default executor, which the abuse hooks and the selfhost readiness probe
-    also use, so it is not isolated the way this pool is — and ``mcp_server``
-    its own retained emitter. Moving the capture lane onto this pool is #4468.
+    also use, so it was not isolated the way this pool is. ``mcp_server`` keeps
+    its own retained emitter.
 
     ``_track_analytics_event`` is a synchronous ``httpx.Client`` POST and
     ``hosted_api`` runs a SINGLE uvicorn worker, so calling it inline from an

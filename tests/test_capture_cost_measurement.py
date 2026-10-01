@@ -2235,22 +2235,26 @@ def test_capture_cost_props_carries_the_retry_counter():
 
 def test_emission_write_is_handed_off_the_event_loop(
         monkeypatch, _b7_capture_client):
-    """The emit must run OFF the event loop (``asyncio.to_thread``):
-    ``_track_analytics_event`` POSTs synchronously and the API runs a single
-    uvicorn worker, so an inline call stalls every concurrent request for the
-    duration of the Supabase round-trip (the #2988/#3498 class). Asserted
-    BEHAVIOURALLY — the loop thread and the writer thread must differ —
-    because inlining the call leaves every other emission test green (with
-    Supabase unset the write is a fast local append).
+    """The emit must run OFF the event loop, on the dedicated ``telemetry``
+    pool: ``_track_analytics_event`` POSTs synchronously and the API runs a
+    single uvicorn worker, so an inline call stalls every concurrent request
+    for the duration of the Supabase round-trip (the #2988/#3498 class).
+    Asserted BEHAVIOURALLY — the loop thread and the writer thread must differ,
+    and the writer thread must be the shared off-loop entry point's telemetry
+    pool (#4468), NOT the loop's SHARED default executor that the abuse hooks
+    and the selfhost readiness probe compete on — because inlining the call
+    leaves every other emission test green (with Supabase unset the write is a
+    fast local append).
 
     The loop thread is sampled INDEPENDENTLY of the props build (via the
     awaited ``_async_audit`` seam), so a future refactor that moves the whole
-    emission — props build AND write — into one ``to_thread`` closure still
-    passes: the guarded property is "the write is off the loop", not "the
-    write is on a different thread from the props build"."""
+    emission — props build AND write — into one worker closure still passes:
+    the guarded property is "the write is off the loop", not "the write is on
+    a different thread from the props build"."""
     import threading
 
     from tortoise import hosted_api as ha
+    from tortoise import monitoring
     from tortoise import sdk as sdk_mod
 
     monkeypatch.setattr(sdk_mod, "_V2SessionMock",
@@ -2268,6 +2272,7 @@ def test_emission_write_is_handed_off_the_event_loop(
 
     def _record_emit(*args, **kwargs):
         seen["emit_thread"] = threading.get_ident()
+        seen["emit_thread_name"] = threading.current_thread().name
 
     monkeypatch.setattr(ha, "_async_audit", _record_audit)
     monkeypatch.setattr(ha, "_capture_cost_props", _record_props)
@@ -2282,4 +2287,97 @@ def test_emission_write_is_handed_off_the_event_loop(
     assert "emit_thread" in seen, "the emit never reached the writer"
     assert seen["emit_thread"] != seen["loop_thread"], (
         "the analytics write ran ON the event-loop thread — it must be "
-        "handed off via asyncio.to_thread")
+        "handed off via the shared off-loop entry point (#4015 / #4468)")
+    assert seen["emit_thread_name"].startswith(
+        monitoring.CONTROL_PLANE_TELEMETRY_WORKER_NAME), (
+        f"the capture-lane analytics emit ran on {seen['emit_thread_name']!r} "
+        f"— it must use the dedicated telemetry pool "
+        f"({monitoring.CONTROL_PLANE_TELEMETRY_WORKER_NAME!r}), never the "
+        "loop's shared default executor the abuse hooks compete on (#4468)")
+
+
+def test_capture_lane_analytics_emit_rides_the_telemetry_pool(monkeypatch):
+    """#4468: the capture lane's analytics emit is routed through the shared
+    off-loop entry point (``_emit_analytics_off_loop`` → ``_cp_offload`` on the
+    dedicated ``telemetry`` pool), not ``asyncio.to_thread`` on the loop's
+    SHARED default executor that the abuse hooks also use.
+
+    REDs on unpatched main: the emit is
+    ``asyncio.to_thread(_track_analytics_event, …)``, which never reaches
+    ``_cp_offload``, so the recorded route is empty and the assertion fails.
+    """
+    import asyncio
+
+    from tortoise import hosted_api as ha
+
+    seen: dict = {}
+    emitted: list = []
+
+    async def _record_offload(fn, *, op, best_effort=False, **kwargs):
+        # Record the seam the entry point delegates to instead of running the
+        # blocking POST; the callable is exercised separately below.
+        seen.setdefault("offloads", []).append((op, best_effort))
+        seen["fn"] = fn
+        return None
+
+    monkeypatch.setattr(ha, "_cp_offload", _record_offload)
+    monkeypatch.setattr(
+        ha, "_capture_cost_props",
+        lambda session_id, meta: {"session_id": session_id, "cost_usd": 0.001})
+    # The ledger write (the other, unchanged ``asyncio.to_thread`` call) needs
+    # no real registry here; it must not short-circuit before the emit.
+    monkeypatch.setattr("tortoise.metering.record_capture_usage",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(
+        ha, "_track_analytics_event",
+        lambda org_id, event_name, properties=None:
+            emitted.append((org_id, event_name, properties)))
+
+    asyncio.run(ha._emit_capture_ledger("org-4468", "sess-4468", {}))
+
+    assert seen.get("offloads") == [("analytics_event", True)], (
+        "the capture-lane analytics emit did not ride the shared off-loop "
+        f"entry point on the telemetry pool (#4468): {seen.get('offloads')!r}")
+    # The callable the seam was handed IS the capture_cost emit.
+    seen["fn"]()
+    assert emitted == [("org-4468", "capture_cost",
+                        {"session_id": "sess-4468", "cost_usd": 0.001})], (
+        f"the routed emit did not produce the capture_cost row: {emitted!r}")
+
+
+def test_capture_lane_swallows_the_strict_mode_registration_raise(
+        monkeypatch, caplog):
+    """#4468: the capture lane deliberately KEEPS its own ``except Exception``
+    around the emit, so the #3821 strict-mode ``UnregisteredTelemetryKey``
+    that ``_emit_analytics_off_loop`` lets escape is caught HERE — a committed
+    capture is never failed by bookkeeping. ``_track_onboarding_event``
+    depends on that same raise, so both the escape and this swallow are
+    contracts; weakening either is the defect.
+
+    The assertion is bound to the RAISE actually reaching the handler (via
+    the logged ``exc_info``), so the test cannot pass vacuously by the guard
+    never firing.
+    """
+    import asyncio
+    import logging as _logging
+
+    from tortoise import hosted_api as ha
+
+    monkeypatch.setenv(ha._TELEMETRY_STRICT_ENV, "1")
+    monkeypatch.setattr(
+        ha, "_capture_cost_props",
+        lambda session_id, meta: {"cost_usd": 0.001,
+                                  "unregistered_probe_key": 1})
+    monkeypatch.setattr("tortoise.metering.record_capture_usage",
+                        lambda *a, **k: None)
+
+    with caplog.at_level(_logging.ERROR, logger="tortoise.api"):
+        # Must NOT raise, though the strict-mode guard fires inside the emit.
+        asyncio.run(ha._emit_capture_ledger("org-4468", "sess-4468", {}))
+
+    assert any(
+        record.exc_info
+        and isinstance(record.exc_info[1], ha.UnregisteredTelemetryKey)
+        for record in caplog.records), (
+        "the strict-mode raise never reached the capture lane's handler — "
+        "either the test is vacuous or the escape was weakened (#4468)")
