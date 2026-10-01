@@ -751,6 +751,9 @@ class TestExternalSources:
         ])
         r = _commit(client, raw)
         assert r.status_code == 200, r.text
+        assert r.json().get("duplicate") is not True, (
+            "the second commit was deduped as an L1 replay — not a real write"
+        )
         meta = _session_source_meta(url)
         assert meta[0] == anchor, (
             f"an EMPTY-STRING anchor wiped the stored contentHash: {meta[0]!r}"
@@ -760,17 +763,13 @@ class TestExternalSources:
         )
 
     def test_anchored_recommit_still_updates_external_anchor(self, client):
-        """#4146 fail-safe — the OTHER direction.
+        """#4146: a re-commit carrying a NEW anchor must still update the stored
+        hash and bump the version.
 
-        A re-commit that DOES carry a new anchor must still update the hash and
-        bump the version: the fix makes an ABSENT anchor preserve, never a
-        PRESENT one inert. Measured counterfactual (mutating the fix to an
-        unconditional ``contentHash=None``): this test, BOTH preservation tests
-        and ``test_sources_external_chain`` all go red — so it is not the sole
-        guard against a stopped-writing fix. It is, however, the only test that
-        reaches the update-direction assertions below (the stored hash CHANGES
-        and the version BUMPS when a new anchor arrives), which nothing else
-        covers.
+        The fix makes an ABSENT anchor preserve; it must never make a PRESENT
+        one inert. Measured: mutating the fix to an unconditional
+        ``contentHash=None`` turns this test, both preservation tests and
+        ``test_sources_external_chain`` red.
         """
         url = "https://example.com/pricing"
         a1, a2 = hash_text("pricing v1"), hash_text("pricing v2")
