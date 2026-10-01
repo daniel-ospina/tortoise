@@ -457,8 +457,11 @@ never the default. A malformed entry is skipped without aborting the list.
 
 Scope vectors. `SCOPES_SUPPORTED` (`["mcp"]`) stays the client-facing default
 and the RFC 9728 PRM document; `SCOPES_ACCEPTED` (`["mcp",
-"offline_access"]`) is what the DCR gate and the RFC 8414 AS metadata accept, so
-Claude's `offline_access` request no longer 400s.
+"offline_access"]`) is what the DCR gate, the RFC 8414 AS metadata, and the
+authorize/consent/mint gate (`validate_scope`) accept, so Claude's
+`offline_access` request no longer 400s. A scope outside that set is rejected
+with `invalid_scope` on `GET /oauth/authorize`, `POST /oauth/consent`, and at
+the token mint — it cannot reach an authorization code or a token claim.
 
 Accepted limitations (see the code comment for the full list):
 
@@ -487,6 +490,6 @@ Accepted limitations (see the code comment for the full list):
 - The exemption rests on the Fly edge overwriting any client-supplied
   `Fly-Client-IP`; #3126 is the dated re-verification (owner
   @daniel-ospina, 2026-11-15) and carries the operator recipe.
-- Trusted traffic is not charged to the anonymous aggregate; unrelated
-  protocol gaps found en route are filed as #3125 (`_check_claim_rate_limit`
-  proxy-IP keying) and #3128 (unvalidated authorize/consent scope).
+- Trusted traffic is not charged to the anonymous aggregate; an unrelated
+  protocol gap found en route is filed as #3125 (`_check_claim_rate_limit`
+  proxy-IP keying).

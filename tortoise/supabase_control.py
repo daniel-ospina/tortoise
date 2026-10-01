@@ -1889,6 +1889,22 @@ def store_github_credentials(cp, org_id: str, *, token_enc: str, org: str) -> No
     )
 
 
+def clear_github_credentials(cp, org_id: str) -> None:
+    """Clear ``teams.github_token_enc`` + ``github_org`` (service role).
+
+    #4946: the disconnect endpoint's local half — the encrypted OAuth token
+    is removed, not merely a dashboard flag flipped. ``None`` PATCHes both
+    columns to NULL; a missing org row is a no-op, so a repeated disconnect
+    is idempotent.
+    """
+    cp.query(
+        "organizations",
+        method="PATCH",
+        filters=[("id", "eq", org_id)],
+        json_body={"github_token_enc": None, "github_org": None},
+    )
+
+
 # ── Org deletion cascade (E2E-6-D, issue #302 security baseline) ──────────
 #
 # Two-phase deletion: soft delete (immediate access kill + grace stamp) then
@@ -3053,23 +3069,36 @@ def org_billing_state(cp, org_id: str) -> dict:
     ``stripe_customer_id`` mirror lives (#4640): the checkout sync-persist and
     the portal read. A registry-graph read here would miss the authoritative
     row the webhook wrote post-#669.
+
+    ``subscription_id`` (0006 base) was added for ``billing.reconcile_org``
+    (#4726), which reads the SAME identifiers the mirror writes — it must not
+    construct a registry-namespaced SDK in Supabase mode (the #878
+    resurrection vector).
     """
     row = _orgs_row_fail_soft(
         cp, org_id,
-        select=["stripe_customer_id", "subscription_status", "customer_email"],
+        select=["stripe_customer_id", "subscription_id",
+                "subscription_status", "customer_email"],
         additive_tiers=[_ORG_ADDITIVE_BILLING_TIER],
     )
     return row or {}
 
 
 def update_org_billing(cp, org_id: str, updates: dict) -> None:
-    """PATCH billing state on the orgs row (webhook SET twin).
+    """PATCH billing state on the orgs row (the Supabase twin of every
+    registry billing write — the webhook's ``_set``, the checkout customer
+    binding, ``apply_limits``, and ``billing.mirror_subscription``).
 
     ``updates`` is a subset of {tier, stripe_customer_id, subscription_id,
     subscription_status, customer_email, grace_until, current_period_end,
     current_period_start} — only columns that exist on orgs (0006 + 0012 +
     20260918000001) are written. Raises on failure (fail-closed): a dropped
     billing write must surface, not silently lose an upgrade/downgrade/cancel.
+    That includes a PATCH that matches NO row: PostgREST answers a
+    ``return=minimal`` PATCH with an empty body whether it updated one row or
+    zero, so this seam requests ``return=representation`` and raises on ``[]``
+    — an absent/renamed org (or a row deleted under it) must not read as a
+    successful write (#4726 F2).
 
     ``current_period_start`` (#3825) is the METER WINDOW ANCHOR, and its
     omission here is SILENT: the ``if k in allowed`` filter below drops the key
@@ -3095,21 +3124,29 @@ def update_org_billing(cp, org_id: str, updates: dict) -> None:
     # PGlite. The REGISTRY twin stores the int verbatim because
     # ``metering._anchor_instant`` accepts both shapes, but the control plane
     # can only bind an ISO-8601 instant. Normalising HERE — the one seam every
-    # Supabase-lane billing write passes through (checkout and
-    # ``customer.subscription.updated``) — fixes every writer at once without
-    # changing what the webhook handlers pass. (The registry twin does NOT use
-    # this seam: ``mirror_subscription`` writes the graph directly and
-    # ``_anchor_instant`` reads its epoch ints.)
+    # Supabase-lane billing write passes through (checkout, the webhook's
+    # ``_set``/``apply_limits``, and ``billing.mirror_subscription``) — fixes
+    # every writer at once without changing what the callers pass. (The
+    # registry twin does NOT use this seam: it writes the ``:Team`` node
+    # directly and ``_anchor_instant`` reads its epoch ints.)
     for _col in ("current_period_start", "current_period_end"):
         _v = body.get(_col)
         if isinstance(_v, (int, float)) and not isinstance(_v, bool):
             body[_col] = datetime.fromtimestamp(float(_v), tz=UTC).isoformat()
-    cp.query(
+    # ``select`` is what makes PostgREST return the updated rows
+    # (``Prefer: return=representation``) instead of an empty 204 — the only
+    # way a 0-row PATCH is distinguishable from a real write (see docstring).
+    rows = cp.query(
         "organizations",
+        select=["id"],
         method="PATCH",
         filters=[("id", "eq", org_id)],
         json_body=body,
     )
+    if not rows:
+        raise RuntimeError(
+            f"update_org_billing: no organizations row matched id="
+            f"{org_id!r} — the billing write was dropped (fail-closed)")
 
 
 def webhook_event_marker(cp, event_id: str, etype: str) -> bool:
@@ -3318,23 +3355,31 @@ def metering_increment_ask(cp, org_id: str, period_start: str,
 def metering_increment_capture_cost(cp, org_id: str, period_start: str,
                                     period_end: str, *,
                                     calls: int = 0,
+                                    tokens_in: int = 0,
+                                    tokens_out: int = 0,
                                     cost_usd: float = 0.0) -> None:
-    """Increment the org's MEASURED capture-extraction cost for the window
-    ``[period_start, period_end)`` (#3665) via the
-    ``metering_increment_capture_cost`` SQL RPC (20260918000001 re-issues it)
+    """Increment the org's MEASURED capture-extraction cost and TOKEN WORKLOAD
+    for the window ``[period_start, period_end)`` (#3665, #5045) via the
+    ``metering_increment_capture_cost`` SQL RPC (20260926000001 re-issues it)
     — the capture-side mirror of ``metering_increment_ask`` (atomic under
     Postgres row locking; best-effort by contract — the caller swallows
     exceptions).
 
-    #3825: the window, not a month label, is the row key. NOTE the RPC is
-    DROPPED and recreated by 20260918000001 rather than replaced in place:
-    a new argument list would otherwise be an OVERLOAD, leaving the old
-    month-keyed function callable — the silent second path #3825 removes.
+    ``tokens_in``/``tokens_out`` are the extraction LLM token counts the
+    caller ALREADY measured (``hosted_api._capture_cost_props`` reads them
+    from ``meta["stats"]["llm"]``) — they are WORKLOAD, never price, and are
+    never read by any spend cap (#5045).
+
+    #3825/#5045: the window, not a month label, is the row key. NOTE the RPC
+    is DROPPED and recreated (20260918000001, then 20260926000001) rather than
+    replaced in place: a new argument list would otherwise be an OVERLOAD,
+    leaving the old signature callable — the silent second path #3825 removes.
     """
     cp.rpc(
         "metering_increment_capture_cost",
         {"p_org_id": org_id, "p_period_start": period_start,
          "p_period_end": period_end, "p_calls": calls,
+         "p_tokens_in": tokens_in, "p_tokens_out": tokens_out,
          "p_cost_usd": cost_usd},
     )
 
@@ -3386,6 +3431,83 @@ def metering_cohort_spend(cp, org_ids: list[str], period_start: str,
             f"metering_records cohort aggregate is not finite ({value!r}) — "
             "refusing to price the cohort from it (fail-closed)")
     return total
+
+
+# ── #4779: the UNMETERED-increment representation (leg 2 of #3981) ──────────
+#
+# A window-unresolvable (or RPC-failed) increment cannot be written to
+# ``metering_records`` at all: its PK is (org_id, period_start) and both bounds
+# are NOT NULL, so the row's identity IS the window that is missing. These three
+# seams are the SIBLING surface — keyed by (org_id, lane, drop_class), which all
+# exist when the window does not. They are deliberately NOT part of
+# ``metering_cohort_spend`` / ``metering_get``: a count is not spend, and feeding
+# an unattributable figure to a spend ceiling is a behaviour change (#4779
+# constraint 1).
+
+def metering_record_unmetered(cp, org_id: str, lane: str, drop_class: str,
+                              error_type: str, n: int = 1) -> int:
+    """Record *n* dropped increments for ``(org_id, lane, drop_class)``;
+    returns the new cumulative count (#4779).
+
+    ATOMIC: delegates to the ``metering_record_unmetered`` SQL RPC
+    (20260927000001) — ``increments = increments + n`` under Postgres row
+    locking, so two concurrent drops cannot lose an update (the same reason
+    ``metering_increment`` is an RPC rather than a GET-then-PATCH; 0014's
+    review P2, PR #911). ``first_observed_at`` is preserved by the RPC;
+    ``last_observed_at`` advances.
+
+    ``drop_class`` is a CHECK-enforced closed vocabulary
+    (``window_unresolvable`` | ``increment_write_unconfirmed``) — an undeclared
+    class is refused by the database rather than stored as an ad-hoc string.
+    Best-effort by contract: the Python caller swallows failures so metering can
+    never block a request.
+
+    Uses ``rpc_value`` (``return=representation``) so the single round trip
+    carries the new total back — the counter is the reader's whole subject, and
+    a second read-back would be a second failure point for no gain.
+    """
+    value = cp.rpc_value(
+        "metering_record_unmetered",
+        {"p_org_id": org_id, "p_lane": lane, "p_drop_class": drop_class,
+         "p_error_type": error_type, "p_n": n},
+    )
+    return int(value or 0)
+
+
+def metering_unmetered_for_org(cp, org_id: str) -> list[dict]:
+    """Every representation row for ONE org (#4779) — the triage read.
+
+    A ``RETURNS TABLE`` RPC. The row count is bounded by the CALLERS' lane
+    inventory (six swallow sites x two declared classes for this code), not by
+    the schema — ``lane`` is deliberately unconstrained — which is what makes a
+    row LIST safe here: the PostgreSQL ``db-max-rows`` cap PostgREST applies to
+    a row list cannot truncate a set this small. The cohort-wide read is
+    :func:`metering_unmetered_total`, which is a single scalar and therefore
+    row-cap-proof BY CONSTRUCTION rather than by convention.
+
+    Returns ``[]`` for an org with no drops — an org that has never been
+    unmeterable genuinely has nothing to show, and that is the value a control
+    org must produce.
+    """
+    rows = cp.rpc_value("metering_unmetered_for_org", {"p_org_id": org_id})
+    return [dict(r) for r in (rows or [])]
+
+
+def metering_unmetered_total(cp, org_ids: list[str]) -> int:
+    """Dropped increments across a COHORT (#4779) — ONE scalar.
+
+    Read this ALONGSIDE :func:`metering_cohort_spend`, never inside it: the
+    spend ceiling keeps reading only ``ask_cost_usd + capture_cost_usd``.
+
+    A single scalar by construction, so a silently short row list cannot
+    understate how long a cohort has been unmeterable — the exact reason
+    ``metering_cohort_spend`` is an RPC (20260917000001). Empty/NULL cohort
+    reads 0 (``sum`` over an empty set is NULL; the RPC coalesces).
+    """
+    wanted = sorted({str(i) for i in (org_ids or []) if i})
+    if not wanted:
+        return 0
+    return int(cp.rpc_value("metering_unmetered_total", {"p_org_ids": wanted}) or 0)
 
 
 def cohort_org_ids_since(cp, since: str, limit: int) -> list[str]:

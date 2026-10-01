@@ -116,6 +116,37 @@ def restore(backup_dir: str, db_path: str,
     if not events_file.exists():
         return {"events": 0, "status": "error: no events.jsonl in backup"}
 
+    # #3316: the refusal guards the REPLAY, so it applies ONLY to an
+    # invocation that can replay (``into_falkor=True``). The default
+    # ``into_falkor=False`` path replays NOTHING — it only copies the backup
+    # files — so it cannot resurrect removed state and must still copy a
+    # crash-backup. (The CLI's ``tortoise restore`` uses that default; see the
+    # matching note at ``tortoise/__main__.py``.)
+    #
+    # It is taken HERE rather than inside the JSONL fallback below because the
+    # fallback runs AFTER the block that REPLACES the destination store: a
+    # refusal there would leave the caller's DB emptied and its AOF removed
+    # (``remove_stale_aof`` rmtree's it) while claiming the graph was left
+    # alone. So the verdict is bound to the replay-capable invocation, before
+    # the destructive copy. The RDB path is deliberately NOT consulted first —
+    # consulting it needs the snapshot copied over the destination, which is
+    # the very mutation being guarded. The cost is bounded: a torn DESTRUCTIVE
+    # tail also refuses a ``into_falkor=True`` restore whose snapshot could
+    # have carried the graph, and the remedy (repair or truncate the journal in
+    # the backup) is the one every other engine names.
+    _source_records: list[dict] | None = None
+    if into_falkor:
+        from tortoise.log import EventLog, refuse_torn_tail_revival
+        _source_log = EventLog(events_file)
+        try:
+            _source_records = _source_log.read_all()
+            refuse_torn_tail_revival(_source_log.torn_tail_revival_records())
+        except ValueError:
+            # Mid-file corruption is NOT this refusal (it is a parse error, not
+            # a torn tail) and the RDB path does not read the journal at all:
+            # let the JSONL fallback below raise it, as it did before #3316.
+            _source_records = None
+
     # Copy files to target
     shutil.copy2(events_file, events_path)
     if db_file.exists():
@@ -136,6 +167,7 @@ def restore(backup_dir: str, db_path: str,
         from tortoise.projection import (  # noqa: I001
             FalkorProjection,
             journal_hard_delete_seqs,
+            plan_point_restamp_folds,
         )
         from tortoise.log import EventLog
         # RDB-first: open the snapshot directly — it holds the full graph
@@ -155,22 +187,59 @@ def restore(backup_dir: str, db_path: str,
         try:
             # #3664: ``apply()`` is a one-record API, so an ``EntityLinked``
             # whose endpoint is created LATER in the journal folds to nothing
-            # inline. This is the FOURTH whole-journal replay engine (besides
-            # ``rebuild`` / ``rebuild_all`` / ``recover_from_log``) — buffer
-            # the records and fold them AFTER the pass, the same trailing
-            # sweep the other three give the type. The records carry their
+            # inline. This engine buffers the records and folds them AFTER the
+            # pass, the same trailing sweep ``rebuild`` / ``rebuild_all`` /
+            # ``recover_from_log`` give the type. The records carry their
             # journal seq so the sweep can suppress a link whose endpoint was
             # HARD-DELETED afterwards (#3722 review P2). A fold failure is
             # logged, never raised: restore must not abort on one unreplayable
             # link.
-            records = EventLog(events_path).read_all()
+            # #3316: the torn-tail verdict was already taken on the SOURCE
+            # journal above, BEFORE this engine replaced the destination store
+            # — the refusal cannot be re-taken here, after the mutation, and
+            # the copy made above is byte-identical to the source. ``None``
+            # means the source parse hit mid-file corruption; re-reading the
+            # copy raises the same actionable error from the same reader.
+            log = EventLog(events_path)
+            records = (_source_records if _source_records is not None
+                       else log.read_all())
             hard_delete_seqs = journal_hard_delete_seqs(records)
             deferred_links: list[tuple[int, dict]] = []
+            # #3305: the Point lifecycle terminalizers fold through the SHARED
+            # whole-journal plan (the same selection ``rebuild_all`` uses),
+            # not through ``apply()``'s inline branch — that branch folds every
+            # terminalizer, including the pre-recreation ones ``rebuild_all``
+            # drops and the non-canonical supersedes it collapses.
+            restamp_plan, _ = plan_point_restamp_folds(records)
+            # #3305: their CORRECTS edges name a SUCCESSOR this pass may create
+            # later, so defer the edges and re-apply them after the pass (the
+            # inline MERGE no-ops for a forward reference, while
+            # ``rebuild_all``'s after-creations sweep resolves it).
+            deferred_corrects: list[tuple[int, str, str]] = []
             for seq, ev in enumerate(records):
                 if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
                     deferred_links.append((seq, ev))
                     continue
+                # Keyed on the PLAN, not the raw envelope type — the plan
+                # selects by the NORMALIZED type (``_norm`` splices a nested
+                # payload), so a raw-type guard would let a ``type``-in-``point``
+                # terminalizer fall through to ``apply()``'s inline branch and
+                # its unshared selection (#325/#3722's raw-vs-normalized class).
+                if seq in restamp_plan:
+                    edge = proj.apply_journal_point_restamp(
+                        ev, seq, restamp_plan)
+                    if edge is not None:
+                        deferred_corrects.append(edge)
+                    continue
                 proj.apply(ev)
+            if deferred_corrects:
+                try:
+                    proj.fold_deferred_corrects_edges(
+                        deferred_corrects, hard_delete_seqs)
+                except Exception:
+                    logger.exception(
+                        "restore: deferred CORRECTS fold failed; %d "
+                        "edge(s) not replayed", len(deferred_corrects))
             if deferred_links:
                 try:
                     proj.fold_deferred_entity_links(

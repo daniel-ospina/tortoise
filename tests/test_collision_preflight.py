@@ -110,7 +110,13 @@ case "$1 $2" in
     if [ -n "${GH_STUB_CLOSED_PR_TOTAL_PAGES:-}" ]; then
       base="$3"
       printf 'link: <https://api.github.com/%s&page=1>; rel="first", <https://api.github.com/%s&page=%s>; rel="last"\n' "$base" "$base" "$GH_STUB_CLOSED_PR_TOTAL_PAGES"
-      if [ "$GH_STUB_CLOSED_PR_TOTAL_PAGES" -gt 1 ] 2>/dev/null; then
+      # GH_STUB_CLOSED_PR_FORCE_NEXT=1 emits `rel="next"` even when the last
+      # page number says this is a single-page result. That is the only way to
+      # construct the case where the two relations DISAGREE, which is the shape
+      # a page reported as "the complete list" while proving a further page
+      # exists (review cycle 9).
+      if [ "$GH_STUB_CLOSED_PR_TOTAL_PAGES" -gt 1 ] 2>/dev/null \
+         || [ "${GH_STUB_CLOSED_PR_FORCE_NEXT:-0}" = "1" ]; then
         printf 'link: <https://api.github.com/%s&page=2>; rel="next"\n' "$base"
       fi
     fi
@@ -174,6 +180,38 @@ fi
 exec "${REAL_GIT:?REAL_GIT unset}" "$@"
 """
 
+# Fails ONLY the `origin/main` tip lookup, so the `--merged` walk still runs.
+# That is the single combination under which the fail-closed guard in
+# `_branch_terminal_state` is reachable: predicate 2 (which can only DOWNGRADE a
+# hit) has its ancestor set but NOT the tip to judge it against.
+GIT_STUB_NO_MAIN_TIP = r"""#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = "rev-parse" ]; then
+  for a in "$@"; do
+    if [ "$a" = "origin/main" ]; then
+      exit 1
+    fi
+  done
+fi
+exec "${REAL_GIT:?REAL_GIT unset}" "$@"
+"""
+
+# Fails ONLY `rev-list --first-parent`. This is the ONE combination in which
+# `_first_parent_shas` returns None while `main_tip` (a separate `rev-parse`
+# call) and `for-each-ref --merged` are both READABLE. `GIT_STUB_NO_MAIN_TIP`
+# above is the opposite case, so neither stub covers the other's guard.
+GIT_STUB_NO_FIRST_PARENT = r"""#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = "rev-list" ]; then
+  for a in "$@"; do
+    if [ "$a" = "--first-parent" ]; then
+      exit 1
+    fi
+  done
+fi
+exec "${REAL_GIT:?REAL_GIT unset}" "$@"
+"""
+
 SURFACE_ROWS = (
     "open PRs",
     "recently-closed PRs",
@@ -181,7 +219,6 @@ SURFACE_ROWS = (
     "remote branches",
     "local worktrees",
     "issue assignee/comments",
-    "issue keywords",
 )
 
 # Stub JEV client (#5070): reads the `decide` request JSON on stdin, writes a
@@ -223,6 +260,15 @@ if os.environ.get("JEV_STUB_NO_ANSWERS") == "1":
     sys.exit(0)
 if os.environ.get("JEV_STUB_GARBAGE") == "1":
     sys.stdout.write("not-json")
+    sys.exit(0)
+if os.environ.get("JEV_STUB_NON_OBJECT") == "1":
+    # VALID JSON THAT IS NOT AN OBJECT. `_jev_transport` refuses it, and that
+    # guard is the only thing standing between this response and an uncaught
+    # AttributeError in `_decide_chunk` (which immediately calls
+    # `response.get(...)`) — a traceback with no VERDICT line and exit 1, the
+    # code callers read as COLLISION. No other stub mode produced it, so the
+    # guard was unfailable.
+    sys.stdout.write(json.dumps([1, 2]))
     sys.exit(0)
 
 SENTINELS = {
@@ -337,8 +383,21 @@ CLAIM_COLLISION_CORPUS = {
 }
 
 def _git(repo: Path, *args: str) -> None:
+    # A temp repo has no committer identity, so any git commit through this
+    # helper dies with exit 128 ("Author identity unknown") on a machine with
+    # no global user.email. Set it in the ENVIRONMENT rather than by running
+    # `git config user.email` per repo: the environment covers every temp repo
+    # this module creates, including the ones built inside a test body, and it
+    # cannot be forgotten at a new call site the way a per-repo config can.
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "Test",
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "Test",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+    }
     subprocess.run(["git", *args], cwd=repo, check=True,
-                   capture_output=True, text=True)
+                   capture_output=True, text=True, env=env)
 
 
 def _write_exec(path: Path, body: str) -> Path:
@@ -432,10 +491,73 @@ class CollisionPreflightTest(unittest.TestCase):
 
     def gh_fixtures(self, open_prs=None, closed_prs=None, issue=None) -> None:
         if open_prs is not None:
-            (self.gh_dir / "open_prs.json").write_text(json.dumps(open_prs))
+            # AND THE FIELD IS NORMALIZED IN, HERE.
+            #
+            # `gh pr list --json closingIssuesReferences` ALWAYS returns the field
+            # — as a list, often empty — so a fixture that omits it models a
+            # payload the real CLI cannot produce. The tool REQUIRES it on the
+            # blocking open-PR surface (absence is INCOMPLETE, because reading a
+            # missing field as "closes nothing" would DROP a blocking signal).
+            #
+            # Normalizing in ONE place is deliberate: ~20 call sites construct
+            # open-PR fixtures, and updating each of them is how a deletion
+            # misses one (the lesson from #5251's review loop). A test that
+            # wants the missing-field path DELETES the key explicitly — see
+            # `test_missing_closing_reference_field_is_incomplete_not_clean`.
+            normalized = []
+            for pr in open_prs:
+                pr = dict(pr)
+                pr.setdefault("closingIssuesReferences", [])
+                # See the closed-PR normalizer below for why these two are
+                # normalized in rather than left to each call site.
+                pr.setdefault("state", "open")
+                pr.setdefault("body", "")
+                pr.setdefault("mergedAt", None)
+                normalized.append(pr)
+            (self.gh_dir / "open_prs.json").write_text(json.dumps(normalized))
         if closed_prs is not None:
-            (self.gh_dir / "closed_prs.json").write_text(json.dumps(closed_prs))
+            # `state` and `body` are normalized in for the same reason as
+            # `closingIssuesReferences` above: `gh pr list --json` and the REST
+            # `/pulls` projection in `_closed_pr_sample` BOTH always send them, so
+            # a fixture that omits one models a payload neither can produce.
+            #
+            # A test that wants a payload the tool must REFUSE deletes the key
+            # explicitly (see the missing-`state` / missing-`body` tests); a test
+            # that wants a NON-TERMINAL payload sets a state the tool does not
+            # read as terminal rather than deleting the key — `gh pr list --json
+            # state` returns the GRAPHQL casing ("OPEN"), which `_pr_terminal_state`
+            # does not match, so that is a real shape as well as a non-terminal
+            # one.
+            normalized = []
+            for pr in closed_prs:
+                pr = dict(pr)
+                pr.setdefault("state", "closed")
+                pr.setdefault("body", "")
+                # `mergedAt` is the PROJECTED key (`mergedAt: .merged_at`), and
+                # the harvest that feeds the squash-merge demotion is gated on
+                # it, so absence is information loss rather than a shape.
+                pr.setdefault("mergedAt", None)
+                # `headSha` is the PROJECTED key (`headSha: (.head.sha // "")`),
+                # and it is the DATA the `mergedAt` gate is gating — the harvest
+                # reads it to decide whether a branch tip was landed by a merge
+                # GitHub did not keep as an ancestor. It is normalized in for the
+                # same reason as `mergedAt`: the projection always emits it, so
+                # omitting it models a payload the wire cannot produce. A test
+                # that wants the refusal DELETES the key.
+                pr.setdefault("headSha", "")
+                normalized.append(pr)
+            (self.gh_dir / "closed_prs.json").write_text(json.dumps(normalized))
         if issue is not None:
+            # AND BOTH KEYS ARE NORMALIZED IN, HERE. `gh issue view --json
+            # ...,assignees,comments,...` ALWAYS returns them, as lists (often
+            # empty), so a fixture omitting either models a payload the real CLI
+            # cannot produce — the same rule as `closingIssuesReferences` above,
+            # for the same reason: a missing key is a malformed payload, and
+            # reading it as "no claims" would DROP one. A test that wants the
+            # missing-key path DELETES the key explicitly.
+            issue = dict(issue)
+            issue.setdefault("comments", [])
+            issue.setdefault("assignees", [])
             (self.gh_dir / "issue.json").write_text(json.dumps(issue))
 
     def clear_fixtures(self) -> None:
@@ -474,7 +596,9 @@ class CollisionPreflightTest(unittest.TestCase):
 
     # ── runner ──────────────────────────────────────────────────────────────
 
-    def run_tool(self, issue: int = ISSUE, keywords: str | None = None,
+    def run_tool(self, issue: int = ISSUE,
+                 self_branches: tuple[str, ...] = (),
+                 self_worktrees: tuple[str, ...] = (),
                  git_bin: Path | None = None, env_extra: dict | None = None,
                  extra_args: list[str] | None = None,
                  repo_arg: object = "__default__", cwd: Path | None = None,
@@ -498,8 +622,13 @@ class CollisionPreflightTest(unittest.TestCase):
         elif repo_arg is not None:
             cmd += ["--repo", str(repo_arg)]
         cmd += ["--gh", str(gh_bin or self.gh)]
-        if keywords:
-            cmd += ["--keywords", keywords]
+        # Self-identity is DECLARED, never inferred (#3504 classes 1/4): the
+        # caller knows its own refs, and "is this mine?" is not a property of
+        # any string. Every flag is repeatable.
+        for ref in self_branches:
+            cmd += ["--self-branch", ref]
+        for wt in self_worktrees:
+            cmd += ["--self-worktree", wt]
         if git_bin:
             cmd += ["--git", str(git_bin)]
         if extra_args:
@@ -547,9 +676,16 @@ class CollisionPreflightTest(unittest.TestCase):
         # separately because GitHub's REST `/pulls` reports `state: "closed"`
         # for merged AND unmerged PRs alike — a rule keyed on
         # `state == "merged"` would silently never fire (the #5052 F10 trap).
+        # ⛔ The third shape used to omit `state`, which the normalizer now
+        # supplies — and must SUPPLY, because REST `/pulls` always sends it. This
+        # is the pair the comment above is about: `state: "closed"` is true of
+        # merged and unmerged PRs alike, so `mergedAt` is what separates them.
+        # Both read as terminal here, so this pins that the `mergedAt` arm is
+        # present and does not disturb a terminal read — not that it is what
+        # decided the verdict.
         for terminal in ({"state": "closed"},
                          {"state": "CLOSED", "mergedAt": "2026-09-23T03:45:47Z"},
-                         {"mergedAt": "2026-09-23T03:45:47Z"}):
+                         {"state": "closed", "mergedAt": "2026-09-23T03:45:47Z"}):
             with self.subTest(terminal=terminal):
                 self.gh_fixtures(closed_prs=[{
                     "number": 4356,
@@ -643,10 +779,552 @@ class CollisionPreflightTest(unittest.TestCase):
                 rc, out = self.run_tool()
                 self.assertNotEqual(rc, 0, f"body={body!r}\n{out}")
                 self.assertIn("VERDICT: COLLISION", out)
-                self.assertIn("closing reference to #3061", out)
+                # The message names WHICH source spoke: the computed field
+                # or the body regex (the deliberate union). A closing
+                # reference is a STRONG hit, so the run must not be CLEAN.
+                self.assertIn("#3061", out)
+                self.assertIn("closing", out)
+
+    def _write_issue_payload(self, payload: dict) -> None:
+        """Write the issue fixture DIRECTLY, bypassing `gh_fixtures`' normalizer.
+
+        That normalizer adds `comments`/`assignees` because the real
+        `gh issue view --json` always returns them — so a test for the
+        MISSING-key path has to bypass it, which is the point of these tests.
+        """
+        (self.gh_dir / "issue.json").write_text(json.dumps(payload))
+
+    def test_issue_payload_missing_key_is_incomplete_not_clean(self):
+        # ⛔ THE FAIL-OPEN DIRECTION. `gh issue view --json ...,assignees,comments`
+        # ALWAYS returns both keys, so a missing one means a malformed payload —
+        # and reading it as "no comments, no assignees" DROPS a claim comment or a
+        # different-account assignee. Absence looks exactly like emptiness, which
+        # is why the check is on PRESENCE. Same reasoning that already makes an
+        # absent `closingIssuesReferences` INCOMPLETE.
+        for missing in ("comments", "assignees"):
+            payload = {"number": ISSUE, "title": "t", "state": "OPEN",
+                       "comments": [], "assignees": []}
+            del payload[missing]
+            self._write_issue_payload(payload)
+            rc, out = self.run_tool()
+            self.assertEqual(rc, 2, f"missing={missing}\n{out}")
+            self.assertIn("VERDICT: INCOMPLETE", out)
+            self.assertIn(f"has no '{missing}' key", out)
+            self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_issue_payload_malformed_element_is_incomplete_not_a_traceback(self):
+        # ⛔ A non-object ELEMENT reached `.get` and raised `AttributeError`, which
+        # is neither `SurfaceError` nor `RuntimeError` — so it escaped as a
+        # traceback with NO `VERDICT` line and exit 1, the code this module
+        # documents as COLLISION. `_require_pr_dicts` closed that for the PR
+        # lists; the issue payload had no contract at all.
+        for key in ("comments", "assignees"):
+            payload = {"number": ISSUE, "title": "t", "state": "OPEN",
+                       "comments": [], "assignees": []}
+            payload[key] = [None]
+            self._write_issue_payload(payload)
+            rc, out = self.run_tool()
+            self.assertEqual(rc, 2, f"key={key}\n{out}")
+            self.assertIn("VERDICT: INCOMPLETE", out)
+            self.assertIn(f"non-object element in '{key}' at index 0", out)
+            self.assertNotIn("Traceback", out)
+
+    def test_issue_payload_non_string_login_is_incomplete_not_a_traceback(self):
+        # A non-string `login` crashed inside `assignee_attribution`'s
+        # `.strip()`, giving the same verdict-less traceback and exit 1.
+        for bad in (5, True, {"nested": 1}):
+            self._write_issue_payload({
+                "number": ISSUE, "title": "t", "state": "OPEN",
+                "comments": [], "assignees": [{"login": bad}],
+            })
+            rc, out = self.run_tool()
+            self.assertEqual(rc, 2, f"login={bad!r}\n{out}")
+            self.assertIn("non-string assignee login", out)
+            self.assertNotIn("Traceback", out)
+
+    def test_issue_payload_non_string_comment_body_is_incomplete(self):
+        self._write_issue_payload({
+            "number": ISSUE, "title": "t", "state": "OPEN",
+            "assignees": [], "comments": [{"body": 5}],
+        })
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("non-string comment body", out)
+        self.assertNotIn("Traceback", out)
+
+    def test_issue_payload_non_list_container_is_incomplete(self):
+        # ⛔ The per-ELEMENT check cannot cover a malformed CONTAINER, and the
+        # mutation `if not isinstance(value, list): value = []` passed every
+        # test. Treating a malformed container as empty is the same fail-open the
+        # presence check exists for — it DROPS every claim comment, or every
+        # assignee. No fixture supplied a non-list `comments`/`assignees`.
+        for key in ("comments", "assignees"):
+            payload = {"number": ISSUE, "title": "t", "state": "OPEN",
+                       "comments": [], "assignees": []}
+            payload[key] = {"body": "I'll claim this."}
+            self._write_issue_payload(payload)
+            rc, out = self.run_tool()
+            self.assertEqual(rc, 2, f"key={key}\n{out}")
+            self.assertIn("VERDICT: INCOMPLETE", out)
+            self.assertIn(f"non-list '{key}'", out)
+            self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_issue_payload_unvalidated_reader_fields_are_incomplete(self):
+        # ⛔ THE FIRST VERSION OF `_require_issue_payload` REPRODUCED ITS OWN
+        # DEFECT ONE READER OVER: it validated `assignees[*].login` but not the
+        # COMMENT AUTHOR's login, nor `comments[*].url`, nor `title`/`state`/
+        # `number`. A wrong type there did not produce a verdict at all.
+        #
+        # The rule the contract follows is that it covers every field a reader
+        # touches; the reader set is a `grep` of the call sites, not a list kept
+        # here — such a list is a claim about the whole call graph and it goes
+        # stale on the next edit.
+        #
+        # Every case is built on a payload that is otherwise a LIVE CLAIM, so a
+        # regression cannot pass by returning CLEAN for an unrelated reason.
+        base = {
+            "number": ISSUE, "title": "t", "state": "OPEN",
+            "url": "https://example.invalid/issues/3061",
+            "assignees": [],
+            "comments": [{"body": "I'll claim this.", "author": {"login": "test-agent"},
+                          "url": "https://example.invalid/issues/3061#issuecomment-1"}],
+        }
+        cases = [
+            ("comment author login", ("comments", 0, "author"),
+             lambda c: c["comments"][0].__setitem__("author", {"login": 5})),
+            ("comment url", ("comments", 0, "url"),
+             lambda c: c["comments"][0].__setitem__("url", 5)),
+            ("title", ("title",), lambda c: c.__setitem__("title", 5)),
+            ("state", ("state",), lambda c: c.__setitem__("state", 5)),
+            ("number", ("number",), lambda c: c.__setitem__("number", "3061")),
+            ("number bool", ("number",), lambda c: c.__setitem__("number", True)),
+        ]
+        for label, path, mutate in cases:
+            with self.subTest(field=path):
+                payload = json.loads(json.dumps(base))
+                mutate(payload)
+                self._write_issue_payload(payload)
+                rc, out = self.run_tool()
+                self.assertEqual(rc, 2, f"{label}\n{out}")
+                self.assertIn("VERDICT: INCOMPLETE", out)
+                self.assertNotIn("Traceback", out)
+
+    def test_pr_payload_non_string_field_is_incomplete_not_a_traceback(self):
+        # The PR side of the same rule: `_require_pr_dicts` checked that an
+        # element was an OBJECT and left its STRING fields untouched, so a
+        # non-string value in one of them produced a traceback with no VERDICT
+        # line and exit 1 — read by callers as COLLISION. `title`/`headRefName`
+        # are required and must be strings; only `body` may legitimately be
+        # null. `state` is covered here because it is one of those fields, and a
+        # contract has to cover the whole set rather than the three that came
+        # first to mind. See
+        # `test_open_pr_with_null_state_and_truthy_merged_at_is_incomplete` for
+        # why a null `state` is a REFUSAL rather than a nullable field: its
+        # absence removes the liveness short-circuit, so a live open PR carrying
+        # a truthy `mergedAt` was read as merged and reported CLEAN.
+        for key, bad in (("title", 5), ("headRefName", 5), ("body", 5),
+                         ("state", 5)):
+            with self.subTest(field=key):
+                pr = {"number": 5150, "title": "unrelated", "body": "",
+                      "headRefName": "feat/9999-other", "state": "open"}
+                pr[key] = bad
+                self.gh_fixtures(open_prs=[pr])
+                rc, out = self.run_tool()
+                self.assertEqual(rc, 2, f"key={key}\n{out}")
+                self.assertIn("VERDICT: INCOMPLETE", out)
+                self.assertIn(f"non-string '{key}'", out)
+                self.assertNotIn("Traceback", out)
+
+    def test_closed_pr_without_head_sha_cannot_demote_a_branch(self):
+        # ⛔ THE CONTRACT REQUIRED THE HARVEST'S GATE AND NOT ITS DATA.
+        # `mergedAt` was required; `headSha` — the field the harvest actually
+        # READS to populate `merged_head_shas` — was not. Absence read as the
+        # empty string, `if _sha:` was False, the set stayed empty, and the
+        # squash-merge demotion simply did not run: #5186's resignal died
+        # silently while the run reported a clean surface. This is the same
+        # class of hole `_merged_pr_fixture`'s docstring records one key over
+        # (the wrong-key version of it, which made the predicate dead code in
+        # production while every test passed).
+        #
+        # The control is `test_squash_merged_branch_is_terminal_and_cannot_block`
+        # — the identical fixture, with `headSha` present, is CLEAN. Deleting the
+        # key must not produce the same answer.
+        ref = f"docs/research-{ISSUE}-4333"
+        _git(self.repo, "branch", ref)
+        self.gh_fixtures(closed_prs=[self._merged_pr_fixture(ref)])
+        prs = json.loads((self.gh_dir / "closed_prs.json").read_text())
+        del prs[0]["headSha"]
+        (self.gh_dir / "closed_prs.json").write_text(json.dumps(prs))
+        rc, out = self.run_tool(issue=ISSUE)
+        self.assertIn("no 'headSha'", out)
+        # And the DIRECTION is the safe one: with no evidence to demote on, the
+        # branch keeps blocking. The defect was never a wrong verdict on the
+        # happy path — it was a mechanism that had stopped running.
+        self.assertEqual(rc, 1, out)
+        self.assertIn("VERDICT: COLLISION", out)
+
+    def test_blank_state_with_a_truthy_merged_at_is_incomplete_not_clean(self):
+        # ⛔ THE DEMONSTRATED FAIL-OPEN OF THE CYCLE-11 CONTRACT. `state` was
+        # required to be a `str`, which accepts `""` — and `_pr_terminal_state`
+        # STRIPS it, so `""` is not in ("open", "opened"), the liveness
+        # short-circuit does not fire, and a truthy `mergedAt` then marks a LIVE
+        # PR terminal. Every title/head match on the BLOCKING open-PR surface
+        # goes out as `weak` and the run reports CLEAN.
+        #
+        # A blank `state` is not a state either transport produces, so it is a
+        # malformed payload rather than a value, and the refusal has to catch it
+        # where the null case is caught.
+        self.gh_fixtures(open_prs=[{
+            "number": 5150, "title": f"guard retrieval ({ISSUE})", "body": "",
+            "headRefName": "feat/9999-other", "state": "",
+            "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("blank or non-string 'state'", out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        # The counterfactual, stated as an assertion: this exact fixture WITHOUT
+        # the blank-state refusal is CLEAN, because the truthy `mergedAt` demotes
+        # the hit. Pin it so a future relaxation has to delete this line.
+        self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_pr_payload_missing_number_is_incomplete_not_clean(self):
+        # `number` is the field the hit test compares against the issue
+        # (`str(pr.get("number")) == str(issue)`), so its absence is not a
+        # cosmetic `?` in the label: the "this PR IS the issue" demotion stops
+        # matching. Both transports project it, so absence is malformed.
+        self.gh_fixtures(open_prs=[{
+            "number": 5150, "title": "unrelated", "body": "",
+            "headRefName": "feat/9999-other", "state": "open",
+            "mergedAt": None,
+        }])
+        prs = json.loads((self.gh_dir / "open_prs.json").read_text())
+        del prs[0]["number"]
+        (self.gh_dir / "open_prs.json").write_text(json.dumps(prs))
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("no 'number'", out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+
+    def test_pr_payload_missing_state_is_incomplete_not_clean(self):
+        # ⛔ THE VERIFIED FAIL-OPEN. `state` is what `_pr_terminal_state` reads to
+        # decide a PR is still LIVE: `state in ("open", "opened")` returns None
+        # (not terminal) before `mergedAt` is consulted. So a payload with NO
+        # `state` and any truthy `mergedAt` was read as MERGED, and every match on
+        # the BLOCKING open-PR surface went out as `weak` → CLEAN. Both transports
+        # always send `state`, so its absence is malformation and must be a
+        # refusal, not an accidental non-terminal read.
+        self.gh_fixtures(open_prs=[{
+            "number": 5150, "title": f"guard retrieval ({ISSUE})",
+            "body": "", "headRefName": "feat/9999-other", "state": "open",
+        }])
+        # DELETED AFTER the fixture is written, because the normalizer supplies
+        # the key — writing it through `gh_fixtures` and deleting from the tmp
+        # profile is the same shape the missing-`closingIssuesReferences` test
+        # uses, and the only way to model a payload that omits it.
+        prs = json.loads((self.gh_dir / "open_prs.json").read_text())
+        del prs[0]["state"]
+        (self.gh_dir / "open_prs.json").write_text(json.dumps(prs))
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("no 'state'", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_open_pr_with_null_state_and_truthy_merged_at_is_incomplete(self):
+        # The exact payload the review reproduced: a VALID-looking open PR whose
+        # `state` is null and whose `mergedAt` is truthy. It must be REFUSED, not
+        # demoted — `mergedAt` is only trustworthy once `state` has said the PR is
+        # not open, and a null `state` cannot say that.
+        # A null `state` is not a string, so the type check refuses it whatever
+        # `mergedAt` says — which is the point: `mergedAt` is only meaningful
+        # once `state` has said the PR is not open, and null cannot say that.
+        self.gh_fixtures(open_prs=[{
+            "number": 5150, "title": f"guard retrieval ({ISSUE})",
+            "body": "", "headRefName": "feat/9999-other",
+            "state": "open", "mergedAt": None,
+        }])
+        prs = json.loads((self.gh_dir / "open_prs.json").read_text())
+        prs[0]["state"] = None
+        prs[0]["mergedAt"] = "2026-09-01T00:00:00Z"   # well-formed, and truthy
+        (self.gh_dir / "open_prs.json").write_text(json.dumps(prs))
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("non-string 'state'", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        # `mergedAt` gates a DOWNGRADE, so a non-string one (all of these are
+        # truthy) must be refused rather than read as a merge timestamp.
+        for merged in (1, {"any": "object"}, ["x"], True):
+            with self.subTest(merged_at=merged):
+                self.gh_fixtures(open_prs=[{
+                    "number": 5150, "title": f"guard retrieval ({ISSUE})",
+                    "body": "", "headRefName": "feat/9999-other",
+                    "state": "open", "mergedAt": merged,
+                }])
+                rc, out = self.run_tool()
+                self.assertEqual(rc, 2, out)
+                self.assertIn("VERDICT: INCOMPLETE", out)
+                self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_pr_payload_missing_merged_at_is_incomplete_not_clean(self):
+        # ⛔ THE CONTRACT SAID "REQUIRED AND NULLABLE" AND THE CODE ACCEPTED
+        # ABSENCE. `mergedAt` is the key the squash-merge harvest is GATED on
+        # (`if _pr.get("merged_at") or _pr.get("mergedAt")`), so a payload that
+        # omits it contributes NO head SHA — the #5186 demotion silently stops
+        # firing for that PR and the branch stays blocking. Fail-closed, so not a
+        # safety hole, but it is a written contract the code did not implement,
+        # in the function written specifically to stop exactly that.
+        # On the BLOCKING open-PR surface, where a malformed payload is a
+        # NAMED INCOMPLETE and exit 2.
+        self.gh_fixtures(open_prs=[{
+            "number": 5150, "title": "unrelated", "body": "",
+            "headRefName": "feat/9999-other", "state": "open",
+            "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        prs = json.loads((self.gh_dir / "open_prs.json").read_text())
+        del prs[0]["mergedAt"]
+        (self.gh_dir / "open_prs.json").write_text(json.dumps(prs))
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("no 'mergedAt'", out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+
+        # On the ADVISORY closed-PR surface the SAME refusal is still stated, but
+        # #5251 keeps it out of the exit code: the surface cannot conceal a
+        # collision. Asserting both halves is what distinguishes "the guard
+        # fired" from "the guard fired AND the authority split still holds".
+        self.gh_fixtures(closed_prs=[{
+            "number": 4242, "title": "land it", "body": "", "state": "closed",
+            "headRefName": "feat/9999-other",
+            "headSha": "0" * 40, "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        prs = json.loads((self.gh_dir / "closed_prs.json").read_text())
+        del prs[0]["mergedAt"]
+        (self.gh_dir / "closed_prs.json").write_text(json.dumps(prs))
+        (self.gh_dir / "open_prs.json").write_text(json.dumps([]))
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("no 'mergedAt'", out)
+        self.assertIn("ADVISORY SURFACES", out)
+        self.assertNotIn("VERDICT: INCOMPLETE", out)
+
+    def test_pr_payload_missing_body_is_incomplete_not_clean(self):
+        # ⛔ `body` is READ on the blocking open-PR surface: the body-regex union
+        # exists precisely because GitHub's `closingIssuesReferences` can miss a
+        # reference the body states plainly. Reading a MISSING body as "no body"
+        # drops that leg silently, which is the absence-as-emptiness drop the
+        # contract exists to prevent. An unrelated title/branch plus a reference
+        # only in the body is how it fails open.
+        self.gh_fixtures(open_prs=[{
+            "number": 5150, "title": "unrelated title",
+            "body": f"Closes #{ISSUE}.",   # the ONLY reference is in the body
+            "headRefName": "feat/9999-other", "state": "open",
+        }])
+        prs = json.loads((self.gh_dir / "open_prs.json").read_text())
+        del prs[0]["body"]
+        (self.gh_dir / "open_prs.json").write_text(json.dumps(prs))
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("no 'body'", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_worktree_porcelain_without_a_branch_line_is_refused(self):
+        # ⛔ THE SHAPE CHECK COVERED TWO OF THE THREE FIELDS THE HIT TEST READS.
+        # `path` was required, HEAD-or-`bare` was required, and `branch` was not
+        # — yet `scan_worktree_surface` tests `number_present(path, issue) or
+        # number_present(branch, issue)`, so a record with no `branch` line was
+        # accepted, the field read as the EMPTY string, and a worktree whose ONLY
+        # issue-naming field is its branch was reported as no hit at all. That is
+        # the silently-smaller answer this check exists to refuse.
+        mod = _tool_module()
+        with self.assertRaises(mod.SurfaceError):
+            mod._worktree_blocks(
+                "worktree /tmp/wt/fix-3061-mine\n"
+                "HEAD 0123456789abcdef0123456789abcdef01234567\n"
+            )
+        # A `bare` record legitimately has neither, so it must still parse.
+        self.assertEqual(
+            len(mod._worktree_blocks("worktree /tmp/wt/bare\nbare\n")), 1
+        )
+
+    def test_unattributable_assignee_is_a_blocking_hit(self):
+        # ⛔ THE ARM WITH NO COVERAGE, and it is the FAIL-CLOSED one. The claim
+        # gate deliberately moved the SHARED account to advisory (#3504 class 3),
+        # and kept the UNATTRIBUTABLE case blocking — "we cannot tell" is not
+        # "it is not ours". Nothing exercised it: every fixture supplied a
+        # concrete login, so folding this branch into `shared` (an easy
+        # refactor) turned a blocking assignee into a non-blocking one with the
+        # suite still green.
+        for login in ("ghost", None):
+            with self.subTest(login=login):
+                self.gh_fixtures(issue=self.issue_payload(assignees=(login,)))
+                rc, out = self.run_tool()
+                self.assertNotEqual(rc, 0, out)
+                self.assertIn("VERDICT: COLLISION", out)
+                self.assertIn("could not be attributed", out)
+
+    def test_worktree_porcelain_with_a_newline_in_the_path_is_refused(self):
+        # ⛔ THE PARSER SILENTLY TRUNCATED. `git worktree list --porcelain` does
+        # not C-quote a newline in a path — it writes the raw byte — so a worktree
+        # at `<tmp>/wt/fix\n3061-mine` arrives as `worktree <tmp>/wt/fix` plus a
+        # bare `3061-mine`. The old parser ignored the second line, the path was
+        # truncated BEFORE the issue number, the worktree stopped matching, and
+        # the surface silently reported one fewer worktree with no error at all.
+        # The call-site guard could not catch it: it compared `len(blocks)` with
+        # the number of `worktree ` lines, and the parser created one block per
+        # such line, so the two were equal by construction.
+        mod = _tool_module()
+        good = (
+            "worktree /tmp/wt/fix-3061-mine\n"
+            "HEAD 0123456789abcdef0123456789abcdef01234567\n"
+            "branch refs/heads/fix/3061-mine\n\n"
+            "worktree /tmp/wt/other\n"
+            "HEAD abcdef0123456789abcdef0123456789abcdef01\n"
+            "detached\n\n"
+        )
+        self.assertEqual(len(mod._worktree_blocks(good)), 2)
+        # The SAME input with a newline inside the first path.
+        bad = good.replace("/tmp/wt/fix-3061-mine",
+                           "/tmp/wt/fix\n3061-mine")
+        with self.assertRaises(mod.SurfaceError):
+            mod._worktree_blocks(bad)
+        # And a record that parses to no HEAD at all is refused too, so the
+        # "profitable" truncation cannot simply drop the field.
+        with self.assertRaises(mod.SurfaceError):
+            mod._worktree_blocks("worktree /tmp/wt/x\nbranch refs/heads/x\n")
+
+    def test_non_list_closing_reference_container_is_incomplete(self):
+        # ⛔ `_closing_ref_numbers`'s non-list guard was verified by nothing: the
+        # fixtures supplied the field absent, `[]`, or a list of bad elements —
+        # never a bad CONTAINER. Replacing the guard with `return []` passed all
+        # four closing-reference tests, and that mutation is a genuine FAIL-OPEN:
+        # a field GitHub returned in an unreadable shape would be read as
+        # "closes nothing" and the surface would report CLEAN on real work.
+        for bad in ("3061", {}, 5, True):
+            with self.subTest(container=bad):
+                self.gh_fixtures(open_prs=[{
+                    "number": 5150, "title": "unrelated", "body": "",
+                    "headRefName": "feat/9999-other", "state": "open",
+                    "closingIssuesReferences": bad,
+                }])
+                rc, out = self.run_tool()
+                self.assertEqual(rc, 2, f"container={bad!r}\n{out}")
+                self.assertIn("VERDICT: INCOMPLETE", out)
+                self.assertIn("closing-reference-source-unavailable", out)
+                self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_issue_payload_missing_comment_body_is_incomplete_not_clean(self):
+        # ⛔ THE P1 OF CYCLE 9, and it is cycle 8's PR-side fix applied one
+        # surface over and NOT applied here. `body` was type-checked but never
+        # REQUIRED, so a comment carrying no `body` key passed the contract and
+        # then `comment.get("body") or ""` read it as EMPTY — no claim matched,
+        # and the BLOCKING issue surface reported "6/6 surfaces queried, no
+        # in-flight work". Absence indistinguishable from emptiness is the one
+        # distinction this contract exists to make.
+        #
+        # A comment has no second field to carry the hit: on a PR the title, the
+        # head branch and `closingIssuesReferences` all still speak, whereas
+        # `body` is the ONLY thing the claim gate reads on a comment — so absence
+        # here drops strictly more than the PR case rated a P2 in cycle 8.
+        # The comment below carries NO `body` key at all. It is written through
+        # `_write_issue_payload`, which bypasses the fixture normalizer, because
+        # the normalizer's job is to supply keys the real CLI always sends — the
+        # same reason the missing-`comments` test bypasses it.
+        self._write_issue_payload({
+            "number": ISSUE, "title": "t", "state": "OPEN",
+            "url": f"https://example.invalid/issues/{ISSUE}",
+            "assignees": [],
+            "comments": [{"author": {"login": "test-agent"},
+                          "url": f"https://example.invalid/issues/{ISSUE}#issuecomment-1"}],
+        })
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("comment with no 'body'", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_issue_payload_null_comment_body_is_incomplete_not_clean(self):
+        # A null body is refused for the same reason as a missing one: the
+        # reader does `comment.get("body") or ""`, so null reads as EMPTY and
+        # drops the claim identically. GitHub sends a STRING (possibly empty)
+        # for a real comment, so null is malformation, not an empty comment.
+        self._write_issue_payload({
+            "number": ISSUE, "title": "t", "state": "OPEN",
+            "url": f"https://example.invalid/issues/{ISSUE}",
+            "assignees": [],
+            "comments": [{"body": None, "author": {"login": "test-agent"},
+                          "url": f"https://example.invalid/issues/{ISSUE}#issuecomment-1"}],
+        })
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("non-string comment body", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_branch_still_blocks_when_the_closed_pr_sample_fails(self):
+        # ⛔ THE ONE PLACE THE ADVISORY/BLOCKING SPLIT IS NOT STRUCTURAL, pinned
+        # so it cannot drift. `merged_head_shas` — the squash-merge test's ONLY
+        # evidence — is harvested from the ADVISORY closed-PR sample and consumed
+        # by the BLOCKING branch scan. That is deliberate (D4: the sample is
+        # already fetched), and it is safe because it can only ever REMOVE a hit:
+        # when the sample cannot be read, the set stays EMPTY and every branch
+        # stays BLOCKING.
+        #
+        # So the failure direction is fail-CLOSED, and this asserts it: a branch
+        # named after the issue, with a malformed closed-PR sample, must still
+        # COLLIDE. If a later edit ever made advisory data ADD a hit, or made a
+        # failed sample suppress one, this is the test that goes red.
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        _git(self.repo, "branch", f"fix/{ISSUE}-mine")
+        # A malformed element: `_require_pr_dicts` refuses it, so the harvest
+        # never runs and `merged_head_shas` stays empty. Written DIRECTLY,
+        # because the fixture normalizer itself rejects a non-object element.
+        (self.gh_dir / "closed_prs.json").write_text(json.dumps([None]))
+        rc, out = self.run_tool(issue=ISSUE)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("do NOT dispatch", out)
+        self.assertNotIn("squash-merged", out)
+
+    def test_malformed_open_pr_element_is_incomplete_not_a_traceback(self):
+        # ⛔ A list holding a non-object used to CRASH with no VERDICT line and
+        # exit 1 — the code this tool documents as COLLISION. A caller reads exit
+        # 1 as "another lane is on it" and waits for a lane that does not exist,
+        # so a malformed payload was indistinguishable from real contention. The
+        # container was type-checked and its ELEMENTS were not.
+        (self.gh_dir / "open_prs.json").write_text(json.dumps([None]))
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("non-object element at index 0", out)
+        self.assertNotIn("Traceback", out)
+
+    def test_malformed_closed_pr_element_is_named_not_a_traceback(self):
+        # The closed surface is ADVISORY, so a malformed element cannot make the
+        # run INCOMPLETE — but it must still be NAMED and must not traceback.
+        # (Before the fix, the harvest loop hit `.get` on `None` and the process
+        # died with exit 1 and no verdict.)
+        (self.gh_dir / "closed_prs.json").write_text(json.dumps([None]))
+        self.gh_fixtures(open_prs=[])
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("non-object element at index 0", out)
+        self.assertNotIn("Traceback", out)
 
     def test_closed_pr_prose_without_closing_keyword_is_not_a_hit(self):
-        # "fixed in #3061" / "see #3061" are prose, not closing keywords.
+        # "fixed in #3061" / "see #3061" are prose, not closing keywords: the
+        # fallback regex requires the keyword IMMEDIATELY before `#N`.
+        #
+        # ⛔ IT USED TO ASSERT NOTHING ITS NAME CLAIMED, and a verifier proved it
+        # by loosening the regex (`closing_reference` -> `number_present`) and
+        # watching the test still pass. `rc == 0` is vacuous on this surface now
+        # that it is ADVISORY — an advisory surface can never set exit 1 — and
+        # "do NOT dispatch" only ever appears on the COLLISION verdict line, so
+        # neither assertion could observe a hit at all. Assert the PROPERTY, plus
+        # the positive half so the test cannot pass by the surface not running.
         for body in ("fixed in #3061", "see #3061 for context", "restored in #3061"):
             self.gh_fixtures(closed_prs=[{
                 "number": 9996, "title": "unrelated title",
@@ -656,33 +1334,44 @@ class CollisionPreflightTest(unittest.TestCase):
             rc, out = self.run_tool()
             self.assertEqual(rc, 0, f"body={body!r}\n{out}")
             self.assertNotIn("do NOT dispatch", out)
+            # The property: no CLOSING-REFERENCE hit was derived from prose...
+            self.assertNotIn("closing reference to #3061", out)
+            # ...while the body WAS read and reported as a weak prose mention.
+            self.assertIn("prose mention of #3061", out)
 
     def test_number_inside_a_hex_digest_is_not_a_reference(self):
         # #4935 / #3611: a review-signature value is hex, so every 4-digit
         # substring occurs inside it by chance. The SHAPE of the containing run
         # decides it — no vocabulary, no stop-word list.
         #
-        # CYCLE 2 CAUGHT THIS TEST BEING VACUOUS: its fixtures carried no `3061`
-        # at all, so it passed because NOTHING matched rather than because the
-        # guard fired. Every fixture below now contains the issue number strictly
-        # INTERIOR to a hex run, which is the only condition under which a green
-        # result can mean the guard worked.
+        # ⛔ THE GUARD MUST BE TESTED WHERE IT CAN MATTER. An earlier version put
+        # the digest in the PR BODY, where a number match is only a WEAK,
+        # non-blocking prose signal — so every assertion passed with
+        # `_inside_hex_digest` monkeypatched to `return False`. The test could
+        # not fail. The digest now sits in the TITLE, which is a STRONG path:
+        # delete the guard and the title match makes this a COLLISION. The body
+        # is asserted separately, so both paths are pinned.
         for digest in ("3f1a4889d6a3061b2e0c7f9a1d4b8e2c5a3f6d9b0e1c4a7f2b5d8e1a4c7f0",
                        "sig=deadbeef3061cafe",
                        "a3061bcd"):
             with self.subTest(digest=digest):
                 self.gh_fixtures(open_prs=[{
-                    "number": 9995, "title": "chore: re-attest the review",
-                    "body": f"{digest}", "headRefName": "chore/9995-attest",
+                    "number": 9995,
+                    "title": f"chore: re-attest the review {digest}",
+                    "body": f"attestation {digest}",
+                    "headRefName": "chore/9995-attest",
                     "state": "open",
                 }])
                 rc, out = self.run_tool()
                 self.assertEqual(rc, 0, f"digest={digest!r}\n{out}")
                 self.assertIn("VERDICT: CLEAN", out)
                 self.assertNotIn("do NOT dispatch", out)
-                # The guard FIRED: the number is present in the fixture, so a
-                # green run cannot be a fixture artefact.
+                # The guard FIRED on the STRONG path: the number IS present in
+                # the fixture, so a green run cannot be a fixture artefact.
                 self.assertNotIn("matched issue-number (3061)", out)
+                # ...and the body path is pinned too: the digest must not even
+                # produce a weak prose signal.
+                self.assertNotIn("prose mention of #3061", out)
 
     def test_number_after_a_non_hex_letter_still_matches(self):
         # The guard must not over-fire. `w3061` is a reference: `w` is not a hex
@@ -761,6 +1450,99 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("[remote branches]", out)
         self.assertIn("refs/remotes/origin/fix/3061-collision", out)
 
+    def test_merge_queue_hash_branch_is_not_a_claim(self):
+        # #3611 (escalation to a BLOCKING surface): `mergify/merge-queue/<hash>`
+        # is a GENERATED branch — created and deleted by the merge queue for
+        # each queued PR — so its name is a hash that can begin with the issue
+        # number. Measured instance: `mergify/merge-queue/6160bad001` made
+        # `collision_preflight 6160` report exit 1 with that queue branch as its
+        # ONLY hit, so an issue nobody held was reported as held and dropped
+        # from the queue.
+        #
+        # The number here LEADS the hex run, which the digest guard deliberately
+        # does NOT exclude (`3061cafe` must stay a live reference), so ORIGIN is
+        # the only thing that can separate these two cases — which is why the
+        # fix tests the namespace rather than loosening the number rule.
+        _git(self.repo, "update-ref",
+             "refs/remotes/origin/mergify/merge-queue/3061bad001", "HEAD")
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertNotIn("do NOT dispatch", out)
+        # The ref WAS present, so a green run is not a fixture artefact.
+        self.assertNotIn("mergify/merge-queue", out)
+
+    def test_lane_branch_leading_a_hex_run_still_collides(self):
+        # Control for the test above: excluding a GENERATED namespace must not
+        # exclude a lane's branch that merely LOOKS hex-ish. `3061cafe` is a
+        # name a lane can write, so it must remain a blocking hit — this pins
+        # the fix against being widened into "nothing hex-looking counts".
+        _git(self.repo, "update-ref",
+             "refs/remotes/origin/fix/3061cafe", "HEAD")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("refs/remotes/origin/fix/3061cafe", out)
+
+    def test_a_lane_branch_under_mergify_not_merge_queue_still_collides(self):
+        # ⛔ THE WIDTH OF THE FILTER IS A FAIL-CLOSED DECISION. A lane CAN create
+        # `mergify/<issue>-name` locally, and any namespace wider than
+        # `mergify/merge-queue/` renders that branch invisible on a BLOCKING
+        # surface: a false CLEAN, which for this tool is strictly worse than a
+        # false COLLISION. This pins the narrower namespace so the filter cannot
+        # be widened again without a decision.
+        for ref in (f"mergify/{ISSUE}-lane", f"mergify/{ISSUE}-lane-local"):
+            with self.subTest(ref=ref):
+                _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", "HEAD")
+                rc, out = self.run_tool()
+                self.assertNotEqual(rc, 0, f"ref={ref!r}\n{out}")
+                self.assertIn("VERDICT: COLLISION", out)
+                self.assertIn(f"refs/remotes/origin/{ref}", out)
+
+    def test_second_mergify_namespace_and_ci_bot_branch_are_not_claims(self):
+        # Two further generated namespaces exist in this repo's real refs.
+        # `mq/merge-queue/` is a second Mergify merge-queue namespace;
+        # `chore/ci-timing-refresh-` is minted by this repo's own workflow from
+        # `git rev-parse --short HEAD`, so a short SHA can LEAD with an issue
+        # number exactly like the hash this filter exists for.
+        for ref in (f"mq/merge-queue/{ISSUE}bad001",
+                    f"chore/ci-timing-refresh-{ISSUE}bad001"):
+            with self.subTest(ref=ref):
+                _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", "HEAD")
+                rc, out = self.run_tool()
+                self.assertEqual(rc, 0, f"ref={ref!r}\n{out}")
+                self.assertIn("VERDICT: CLEAN", out)
+                self.assertNotIn("do NOT dispatch", out)
+                self.assertNotIn(ref, out)
+
+    def test_worktree_on_a_generated_branch_is_still_found_by_its_path(self):
+        # ⛔ THE WORKTREE HALF IS THE LOAD-BEARING ONE. The filter skips only the
+        # BRANCH; the PATH must still be matched in full, or a real worktree on a
+        # generated branch becomes invisible on a BLOCKING surface.
+        self.add_worktree(f"{ISSUE}-queue-wt",
+                          branch=f"mergify/merge-queue/{ISSUE}bad001")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("[local worktrees]", out)
+        self.assertIn(f"{ISSUE}-queue-wt", out)
+
+    def test_ci_timing_branch_with_a_descriptive_tail_is_still_a_claim(self):
+        # `chore/ci-timing-refresh-` sits under the LANE-OWNED `chore/`
+        # namespace, so the bare prefix would be too wide — a lane could write a
+        # descriptive tail. The generator mints a lowercase short SHA, so the
+        # tail is anchored to lowercase hex; anything else stays a claim, because
+        # hiding one on a BLOCKING surface is worse than a false COLLISION.
+        for ref in (f"chore/ci-timing-refresh-{ISSUE}-manual",
+                    f"chore/ci-timing-refresh-{ISSUE}",
+                    f"chore/ci-timing-refresh-{ISSUE}BAd001"):
+            with self.subTest(ref=ref):
+                _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", "HEAD")
+                rc, out = self.run_tool()
+                self.assertNotEqual(rc, 0, f"ref={ref!r}\n{out}")
+                self.assertIn("VERDICT: COLLISION", out)
+                self.assertIn(ref, out)
+
     def test_local_branch_hit(self):
         _git(self.repo, "branch", "fix/3061-collision-preflight")
         rc, out = self.run_tool()
@@ -791,21 +1573,41 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("VERDICT: COLLISION", out)
         self.assertIn("[issue assignee/comments]", out)
         self.assertIn("assignee:other-agent", out)
-        self.assertIn("another account", out)
+        self.assertIn("a DIFFERENT account", out)
 
-    def test_assignee_shared_account_is_unattributable_but_still_a_hit(self):
-        # Every lane shares ONE account, so an assignee equal to our own login
-        # cannot be attributed to THIS lane — nor can it be ruled out as any
-        # other lane's. Suppressing it would blind the surface to every lane on
-        # the fleet (a false negative, the worse failure mode), so it stays a
-        # hit and the report says WHY (fail closed).
+    def test_owner_as_assignee_is_triage_not_contention(self):
+        # #3504 class 3, and its ruling is explicit: "the repo owner as assignee
+        # is triage". Measured on the live repo: the owner is assignee on 86 of
+        # 622 open issues, so treating that as a competing claim permanently
+        # blocks 86 issues that nothing is working on.
+        #
+        # NOTE THE POLARITY CHANGE, because the old test asserted the opposite.
+        # It argued "suppressing it blinds the surface to every lane on the
+        # fleet, so keep it blocking (fail closed)". That reasoning was sound
+        # about the ACCOUNT and wrong about the EVENT: assigning an issue is a
+        # triage ACT, and it cannot distinguish "a lane has started" from "the
+        # owner filed it" — the ambiguity is total, so the hit carries no
+        # information about contention. The live-lane catch is not lost: a lane
+        # that really started has a branch naming the issue number, and the
+        # BRANCH surface still blocks on that (see
+        # test_live_branch_blocks_dispatch below).
         self.gh_fixtures(issue=self.issue_payload(assignees=("test-agent",)))
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("assignee:test-agent", out)
+        self.assertIn("SHARED fleet account", out)
+        self.assertIn("(non-blocking)", out)
+
+    def test_issue_assignee_agent_account_still_blocks(self):
+        # The other half of #3504's class-3 ruling: "narrow the assignee class
+        # to AGENT accounts". A DIFFERENT login is attributable to a specific
+        # lane and keeps blocking.
+        self.gh_fixtures(issue=self.issue_payload(assignees=("other-agent",)))
         rc, out = self.run_tool()
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
-        self.assertIn("assignee:test-agent", out)
-        self.assertIn("shared account", out)
-        self.assertIn("fail closed", out)
+        self.assertIn("assignee:other-agent", out)
 
     def test_issue_claim_comment_hit(self):
         self.gh_fixtures(issue=self.issue_payload(comments=("I'm working on this now.",)))
@@ -817,21 +1619,17 @@ class CollisionPreflightTest(unittest.TestCase):
 
     # ── keyword matching ────────────────────────────────────────────────────
 
-    def test_keyword_hit_on_branch_without_number(self):
-        _git(self.repo, "branch", "fix/florfenicol-dosing")
-        rc, out = self.run_tool()
-        self.assertNotEqual(rc, 0, out)
-        self.assertIn("VERDICT: COLLISION (keyword-only)", out)
-        self.assertIn("[local branches]", out)
-        self.assertIn("keyword(s): florfenicol", out)
-
-    def test_generic_keyword_pair_does_not_collide_3325(self):
-        # LIVE REGRESSION (#3325): issue #3214's real title contains BOTH
-        # "graph" and "delete", so it cleared the >= 2 gate against the
-        # unrelated graphs-management PR #2704 and branch
-        # `feat/2701-graphs-rename-delete`, fabricating a COLLISION that
-        # blocked a legitimate dispatch. The gate counts DISTINCTIVE terms
-        # only, so a generic pair must not collide on a branch, worktree or PR.
+    def test_repo_generic_vocabulary_never_blocks(self):
+        # #3325 / #4375 / #3504 class 5, now STRUCTURAL rather than stoplist-
+        # driven. The old fix (a stoplist of "generic" terms, plus a >= 2
+        # distinctive-term gate) was proven unfalsifiable: `capture`, `verify`,
+        # `retrieval` and `temporal` are all absent from the stoplist and all
+        # >= 5 chars, so all were labelled "distinctive" — the test could never
+        # fail no matter which words were added.
+        #
+        # The lexical arm is DELETED, so this is no longer a property of a word
+        # list but of the absence of one: shared domain vocabulary is never
+        # consulted, in any quantity, at any threshold.
         title = ("fix(tests): unscoped wipe_server guard has a TOCTOU window "
                  "(peer graph minted between the protection snapshot and the delete)")
         self.gh_fixtures(
@@ -852,6 +1650,8 @@ class CollisionPreflightTest(unittest.TestCase):
         self.add_worktree("feat-2701-graphs-rename-delete",
                           branch="feat/2701-graphs-rename-delete")
         _git(self.repo, "branch", "fix/2961-graph-delete-race")
+        # ...and the DISTINCTIVE terms too, which USED to be enough to block.
+        _git(self.repo, "branch", "fix/toctou-window-guard")
         rc, out = self.run_tool(issue=3214)
         self.assertEqual(rc, 0, out)
         self.assertIn("VERDICT: CLEAN", out)
@@ -860,62 +1660,30 @@ class CollisionPreflightTest(unittest.TestCase):
         # substring check would read the RULES as a verdict.
         self.assertNotIn("VERDICT: COLLISION", out)
         self.assertNotIn("do NOT dispatch", out)
-        # Transparency: the excluded generic terms are named in the report, so
-        # a suppressed match is never silent.
-        self.assertIn("generic term(s) excluded from the gate", out)
-        self.assertIn("graph", out)
-        self.assertIn("delete", out)
 
-    def test_distinctive_terms_still_collide_for_the_same_title(self):
-        # SENSITIVITY GUARD for #3325: the SAME #3214 title still yields a
-        # COLLISION when a branch carries its DISTINCTIVE terms (toctou/window/
-        # guard) instead of the generic graph+delete pair. The keyword dial is
-        # not disabled — only the cross-cutting tier stops counting.
-        title = ("fix(tests): unscoped wipe_server guard has a TOCTOU window "
-                 "(peer graph minted between the protection snapshot and the delete)")
-        self.gh_fixtures(issue=self.issue_payload(title=title))
-        _git(self.repo, "branch", "fix/toctou-window-guard")
-        rc, out = self.run_tool(issue=3214)
-        self.assertNotEqual(rc, 0, out)
-        self.assertIn("VERDICT: COLLISION (keyword-only)", out)
-        self.assertIn("[local branches]", out)
-        self.assertIn("keyword(s):", out)
-
-    def test_generic_only_title_is_clean_not_incomplete(self):
-        # #3325 latent: a title whose every term is generic yields no keywords.
-        # That is an EVALUATED, empty keyword dimension — not an unqueryable
-        # surface — so it must read CLEAN, never INCOMPLETE. A wider stoplist
-        # made this reachable ("fix graph delete error"), and conflating it with
-        # a missing title would turn a clean run into exit 2. It is still BLIND
-        # for keyword matching and the verdict must say so (#3378 P2-1).
+    def test_generic_only_title_is_clean_and_a_number_still_blocks(self):
+        # #3325 latent, re-pointed at the new mechanism. A title made entirely
+        # of shared vocabulary used to be an EVALUATED-but-EMPTY keyword
+        # dimension, and conflating "no distinctive keyword" with "unqueryable
+        # surface" turned a clean run into exit 2.
+        #
+        # That whole failure mode is gone with the lexical arm: the title is no
+        # longer an input to any decision. It is still PRINTED, because naming
+        # the target in full is what makes a wrong-target read visible (#4027).
         self.gh_fixtures(issue=self.issue_payload(title="fix graph delete error"))
         rc, out = self.run_tool()
         self.assertEqual(rc, 0, out)
         self.assertIn("VERDICT: CLEAN", out)
         self.assertNotIn("INCOMPLETE", out)
-        self.assertIn("0 distinctive keyword(s)", out)
-        self.assertIn("excluded:", out)
-        self.assertIn("BLIND", out)
+        self.assertIn("fix graph delete error", out)
 
-        # ... and a NUMBER hit under that generic-only title is still a hit.
+        # ... and a NUMBER hit under that generic-only title is still a hit. The
+        # number is the reference; the prose is not.
         _git(self.repo, "branch", "fix/3061-generic-title")
         rc, out = self.run_tool()
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
         self.assertIn("matched issue-number (3061)", out)
-
-    def test_blind_keyword_surface_is_annotated_on_the_verdict(self):
-        # The historical claim "the run cannot be CLEAN without the title" was
-        # false: --keywords can complete the dimension, and a zero-distinctive
-        # title still reported a complete 7/7 scan. When no distinctive keyword
-        # exists the verdict must say BLIND instead of advertising completeness.
-        self.gh_fixtures(issue=self.issue_payload(title=None))
-        rc, out = self.run_tool(keywords=" ")
-        self.assertEqual(rc, 0, out)
-        self.assertIn("title: (unavailable", out)
-        self.assertIn("VERDICT: CLEAN", out)
-        self.assertIn("BLIND", out)
-        self.assertIn("keyword-only collision could be missed", out)
 
     def test_worktree_structural_token_is_not_a_collision(self):
         # Title contains "worktree"; the worktree lives under a `.worktrees/`
@@ -937,40 +1705,1045 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn("VERDICT: CLEAN", out)
 
-    def test_explicit_keywords_override_without_gh_title(self):
-        self.clear_fixtures()
-        self.gh_fixtures(issue=None)  # gh issue view fails -> keyword source gone
-        # Provide the keywords explicitly so the run is complete, and plant them.
-        _git(self.repo, "branch", "fix/florfenicol-dosing")
-        rc, out = self.run_tool(keywords="florfenicol,dosing")
+    def test_own_pushed_branch_is_not_a_claim(self):
+        # P2-2. A lane that pushes has its own work in TWO namespaces: the local
+        # `refs/heads/<branch>` it declared, and the remote-tracking
+        # `refs/remotes/origin/<branch>` the push created. Stripping only
+        # `refs/heads/` left the remote copy comparing unequal, so it still
+        # blocked STRONGLY and the lane refused its own dispatch — #3504 class 4
+        # surviving in the one namespace every lane actually populates.
+        ref = f"fix/{ISSUE}-pushed"
+        _git(self.repo, "branch", ref)
+        _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", "HEAD")
+
+        # (a) UNDECLARED: both namespaces are hits.
+        rc, out = self.run_tool()
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
-        self.assertIn("[local branches]", out)
-        # The issue surface is still INCOMPLETE even though a hit was found.
-        self.assertIn("ALSO INCOMPLETE", out)
+        self.assertIn("[remote branches]", out)
 
-    def test_single_keyword_does_not_collide_by_default(self):
-        # 'florfenicol' alone is not enough — the default gate is 2 distinct
-        # keywords, which is what keeps a common word ('remote') from matching
-        # hundreds of unrelated branches.
-        _git(self.repo, "branch", "fix/florfenicol-unrelated")
+        # (b) DECLARED by its SHORT name: BOTH namespaces must demote.
+        rc, out = self.run_tool(self_branches=(ref,))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("your own branch", out)
+
+        # (c) ...and a FULL ref declaration must match the short candidate too —
+        # the asymmetry the old docstring claimed away.
+        rc, out = self.run_tool(self_branches=(f"refs/heads/{ref}",))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+
+    def test_remote_branch_number_match_still_blocks(self):
+        # The remote-branch surface is number-matched ONLY, and that is now the
+        # only matching that exists anywhere. Two properties, both pinned:
+        # (a) a remote ref carrying the issue number DOES block, so the surface
+        #     is not inert; and
+        # (b) a remote ref carrying only shared vocabulary does NOT — the shape
+        #     that produced 878 false hits on a real run.
+        _git(self.repo, "update-ref",
+             "refs/remotes/origin/fix/florfenicol-dosing", "HEAD")
         rc, out = self.run_tool()
         self.assertEqual(rc, 0, out)
         self.assertIn("VERDICT: CLEAN", out)
 
-    def test_min_keywords_one_opts_into_single_keyword_hits(self):
-        _git(self.repo, "branch", "fix/florfenicol-unrelated")
-        rc, out = self.run_tool(extra_args=["--min-keywords", "1"])
+        _git(self.repo, "update-ref",
+             f"refs/remotes/origin/fix/{ISSUE}-remote-live", "HEAD")
+        rc, out = self.run_tool()
         self.assertNotEqual(rc, 0, out)
-        self.assertIn("VERDICT: COLLISION (keyword-only)", out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("[remote branches]", out)
 
-    def test_remote_branch_keyword_scan_is_disabled(self):
-        # Remote-tracking refs are number-matched only; a multi-keyword match
-        # there must NOT fabricate a hit (878 false hits on a real run).
-        _git(self.repo, "update-ref", "refs/remotes/origin/fix/florfenicol-dosing", "HEAD")
+    # ── self-identity: the caller's own work is not a competing claim ───────
+    #
+    # #3504 classes 1 and 4. The fix is an INPUT rather than a heuristic — the
+    # caller declares its own refs, because "is this mine?" is not a property of
+    # any string.
+    #
+    # EVERY guard below is pinned in BOTH directions, but not always inside one
+    # method — the pairing is structural, so it is stated once here rather than
+    # claimed per test:
+    #
+    #   · the two SELF-IDENTITY tests assert both halves in one method (they
+    #     call `run_tool` twice: undeclared must COLLIDE, declared must not);
+    #   · the terminal-predicate and closing-field guards are SENSITIVITY
+    #     PAIRS of sibling tests, each differing from its partner in exactly one
+    #     fixture field — merged vs merely closed, ancestor vs ahead, field
+    #     absent vs present-but-empty;
+    #   · the two verdict/count tests cover the class-2 axis from opposite
+    #     sides (only-weak must stay CLEAN; one-strong-plus-weak must count 1).
+    #
+    # An earlier version of this comment claimed "EVERY test below asserts BOTH
+    # halves". That was FALSE — eleven of them assert a single verdict and rely
+    # on a sibling for the opposite one — and a VERIFIER CAUGHT IT. The lesson
+    # generalises: a universal claim about a set is checkable, so it gets checked
+    # and it breaks; describe the structure instead of universalising over it.
+
+    def _defaults_seen_by_the_tool(self) -> set:
+        """What the tool's own refusal set computes for this repo.
+
+        Reaches into the module rather than re-deriving the rule in the test: a
+        test that re-implemented the parse could pass while the tool's parse was
+        broken — which is exactly the failure mode P1-A was.
+        """
+        return _tool_module()._default_branch_names("git", str(self.repo), 30)
+
+    def _git_out(self, *args: str) -> str:
+        return subprocess.run(["git", *args], cwd=self.repo, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def test_own_branch_declared_is_not_a_claim_but_undeclared_still_blocks(self):
+        _git(self.repo, "branch", f"fix/{ISSUE}-mine")
+        # (a) UNDECLARED — a branch naming the issue IS a competing claim.
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn(f"matched issue-number ({ISSUE})", out)
+
+        # (b) DECLARED — the same branch, named as ours, cannot block.
+        rc, out = self.run_tool(self_branches=(f"fix/{ISSUE}-mine",))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("your own branch", out)
+        # The strength marker on this line is `(weak)`; "(non-blocking)" is the
+        # WEAK SIGNALS heading's wording, not this line's.
+        self.assertIn("(weak)", out)
+        self.assertIn("not a competing claim", out)
+
+    def test_current_branch_is_declared_automatically(self):
+        # `--self-branch` is authoritative, but the checkout's own branch is
+        # added best-effort too: a lane that forgets the flag must still not
+        # collide with the branch it is standing on. Without the auto-detection
+        # this is a COLLISION — the guard is what makes it CLEAN.
+        _git(self.repo, "checkout", "-q", "-b", f"fix/{ISSUE}-auto")
+        # `cwd=self.repo`: auto-detection now requires that the process is
+        # STANDING IN the target checkout, so the test must actually run from it.
+        rc, out = self.run_tool(cwd=self.repo)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("your own branch", out)
+
+    def test_own_worktree_declared_is_not_a_claim_but_undeclared_still_blocks(self):
+        # ⛔ A DETACHED worktree, deliberately. `scan_worktree_surface` suppresses
+        # on `owns_worktree(path) OR owns_branch(branch)`, so a worktree on a
+        # branch would be suppressed by the BRANCH check even with
+        # `owns_worktree` disabled — the test would then pass while proving
+        # nothing about it. That is not hypothetical: it is exactly how an
+        # earlier version of this test survived its own mutation (M3). Detached
+        # means no branch ref exists anywhere, so the worktree PATH is the only
+        # match and `owns_worktree` is the only thing that can suppress it.
+        wt = self.add_worktree(f"fix-{ISSUE}-mine")
+        # (a) UNDECLARED.
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("[local worktrees]", out)
+        self.assertIn(f"matched issue-number ({ISSUE})", out)
+
+        # (b) DECLARED — and nothing else, so the suppression can only come
+        # from the worktree identity.
+        rc, out = self.run_tool(self_worktrees=(str(wt),))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("your own worktree", out)
+
+    def test_self_pr_is_decided_before_any_match_test(self):
+        # #4567's ordering root cause, SELF arm. The suppression used to sit
+        # after the keyword test, which `continue`d unconditionally, so it was
+        # DEAD CODE whenever both matched.
+        #
+        # ⛔ The head branch is DECLARED here. An earlier version of this test
+        # left it undeclared, so the self arm never fired and the PR was decided
+        # by the "PR *is* the issue" arm instead — the test passed while covering
+        # the wrong branch, and its comment ("the self message wins") was false.
+        # Found by review. The sibling test below pins the OTHER arm.
+        self.gh_fixtures(open_prs=[{
+            "number": 5150, "title": f"feat: do the thing (#{ISSUE})",
+            "body": f"Closes #{ISSUE}",
+            "headRefName": f"feat/{ISSUE}-self",
+            "state": "open",
+            "closingIssuesReferences": [{"number": ISSUE}],
+        }])
+        rc, out = self.run_tool(self_branches=(f"feat/{ISSUE}-self",))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("your own PR", out)
+        # ORDER IS OBSERVABLE: the self decision wins over the three match tests
+        # that would otherwise have fired (title number, head number, closing
+        # reference). A re-ordering mutant makes one of these appear.
+        hits_block = out.split("HITS", 1)[1].split("VERDICT", 1)[0]
+        self.assertNotIn("matched issue-number", hits_block)
+        self.assertNotIn("closingIssuesReferences", hits_block)
+
+    def test_pr_that_is_the_issue_is_decided_before_any_match_test(self):
+        # The OTHER ordering arm (#4567). A PR whose NUMBER is the issue is that
+        # issue's own PR, not separate in-flight work — and it must be decided
+        # before any match test, so an undeclared head branch does not turn it
+        # into a COLLISION.
+        self.gh_fixtures(open_prs=[{
+            "number": ISSUE, "title": f"feat: do the thing (#{ISSUE})",
+            "body": f"Closes #{ISSUE}",
+            "headRefName": f"feat/{ISSUE}-self",
+            "state": "open",
+            "closingIssuesReferences": [{"number": ISSUE}],
+        }])
         rc, out = self.run_tool()
         self.assertEqual(rc, 0, out)
         self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("*is* the issue", out)
+        hits_block = out.split("HITS", 1)[1].split("VERDICT", 1)[0]
+        self.assertNotIn("matched issue-number", hits_block)
+
+    def test_found_clone_is_not_the_callers_checkout(self):
+        # P1-2, and it is the FAIL-OPEN direction. With `--repo owner/name` and a
+        # cwd inside a DIFFERENT repo, `_resolve_target` SEARCHES for a clone of
+        # the requested slug instead of using the cwd. The checkout it finds is
+        # typically the canonical hub clone sitting on `main`, and its current
+        # branch is NOT the caller's. Auto-declaring that branch suppresses a PR
+        # whose head branch happens to be `main` — the ordinary shape for a fork
+        # PR — and reports CLEAN on real in-flight work.
+        #
+        # `other-repo` is a SIBLING of `self.repo` under the same temp root, so
+        # the search finds `self.repo` while the cwd's own slug is different.
+        # That is exactly the production mechanism, reproduced.
+        # ⛔ THE FOUND CLONE'S BRANCH MUST NOT BE THE DEFAULT, or this test
+        # cannot fail for the reason it names. A verifier proved it: the fixture
+        # used to leave `self.repo` on `main`, and `main` is refused
+        # INDEPENDENTLY by `_default_branch_names`/`_is_default_branch` — so
+        # breaking `_standing_in` (auto-declare any found clone) left the test
+        # PASSING, its assertion satisfied by the default-branch refusal rather
+        # than by the gate under test. Non-default, and deliberately WITHOUT the
+        # issue number, so the hit comes from `closingIssuesReferences` and only
+        # the self-identity gate can suppress it.
+        _git(self.repo, "checkout", "-q", "-b", "release/hub-work")
+        # ⛔ USE THE SHARED FIXTURE HELPER — do not hand-roll this repo. This
+        # block was an inline copy of `_sibling_repo` that had dropped its two
+        # identity lines (`git config user.email` / `git config user.name`),
+        # which the seed commit below needs. Going through the helper keeps that
+        # in one place, so a hand-rolled copy cannot drop it again.
+        other = self._sibling_repo("other-repo", "other-owner/other-repo")
+
+        self.gh_fixtures(open_prs=[{
+            "number": 5199, "title": "fix: land the thing",
+            "body": "", "headRefName": "release/hub-work", "state": "open",
+            "closingIssuesReferences": [{"number": ISSUE}],
+        }])
+        rc, out = self.run_tool(repo_arg="test-owner/test-repo", cwd=other)
+        # A PR on that branch that closes the issue is REAL work, and the found
+        # clone was never the caller's checkout, so it must not be suppressed.
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("your own PR", out)
+
+    def test_standing_in_the_checkout_still_auto_declares(self):
+        # The other half: the checkout the process is STANDING IN keeps the
+        # best-effort auto-detection. Without this, the fix could be "disable
+        # auto-detection entirely" and the suite would not notice.
+        _git(self.repo, "checkout", "-q", "-b", f"fix/{ISSUE}-mine")
+        rc, out = self.run_tool(cwd=self.repo)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("your own branch", out)
+
+    def test_another_lanes_worktree_named_with_repo_is_not_mine(self):
+        # P2-1, the fail-open it fixes: `--repo PATH` naming ANOTHER lane's
+        # worktree used to declare THAT lane's branch and worktree as the
+        # caller's own — reporting CLEAN on its live work. Naming a path says
+        # where to LOOK, not whose work lives there. The caller must say so
+        # explicitly with --self-branch/--self-worktree.
+        other = self.tmp / "other-lane"
+        other.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "worktree", "add", "-q", "-b", f"fix/{ISSUE}-theirs",
+                        str(other), "HEAD"], cwd=self.repo, check=True,
+                       capture_output=True, text=True)
+        (other / "wip.txt").write_text("wip\n")
+        _git(other, "add", "wip.txt")
+        _git(other, "commit", "-qm", "their live work")
+
+        self.gh_fixtures(closed_prs=[])
+        # (a) The caller is elsewhere (the pytest cwd), so this is NOT its
+        #     checkout and the branch must block.
+        rc, out = self.run_tool(repo_arg=str(other))
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("your own", out)
+
+        # (b) Standing IN it does make it the caller's, so the convenience
+        #     returns — proving the rule is about standing in, not a blanket
+        #     refusal.
+        rc, out = self.run_tool(repo_arg=str(other), cwd=other)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("your own branch", out)
+
+    def test_default_branch_is_never_auto_declared(self):
+        # ⛔ THE P0, AND IT IS THE *DEFAULT* INVOCATION. `setUp` leaves the
+        # fixture checkout on `main`, and `run_tool()` passes `--repo <path>` —
+        # the process stands in it. So auto-detection sees `main` and declares
+        # it, and because the self arm runs FIRST for EVERY PR, an open PR whose
+        # head branch is `main` (the ordinary shape for a fork PR) is demoted to
+        # weak before the closing-reference test is ever reached: COLLISION
+        # becomes CLEAN on real in-flight work.
+        #
+        # An earlier guard fixed only the SEARCHED-clone case
+        # and left this one open, which is why the rule is now "never the DEFAULT
+        # branch" rather than "only a caller's checkout".
+        self.assertEqual(self._git_out("rev-parse", "--abbrev-ref", "HEAD"), "main")
+        self.gh_fixtures(open_prs=[{
+            "number": 5199, "title": "fix: land the thing", "body": "",
+            "headRefName": "main", "state": "open",
+            "closingIssuesReferences": [{"number": ISSUE}],
+        }])
+        # `cwd=self.repo` is load-bearing: auto-detection only runs when the
+        # process stands in the checkout, so without it this test would pass
+        # because NO detection happened, not because the default was refused.
+        rc, out = self.run_tool(cwd=self.repo)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("your own", out)
+
+    def test_case_variant_default_branch_is_refused(self):
+        # ⛔ P1-A, the case half, driven at the UNIT level because the scenario
+        # is not constructible here: this box's filesystem is case-INSENSITIVE,
+        # so a repo holding both `main` and `Main` cannot exist, and
+        # `git branch -m Main` dies with 128 on the collision. The rule is a
+        # pure function of (name, defaults), so test it as one — and pin BOTH
+        # the widening AND the residual gap, so neither can drift unnoticed.
+        mod = _tool_module()
+        seeds = {"main", "master"}
+        for variant in ("Main", "MAIN", "mAiN", "Master", "MASTER"):
+            self.assertTrue(
+                mod._is_default_branch(variant, seeds),
+                f"{variant!r} must be refused as a default-branch spelling",
+            )
+        # The resolved `origin/HEAD` name is added to the same set, so a
+        # slash-bearing default is covered by the same comparison.
+        self.assertTrue(mod._is_default_branch("release/2024",
+                                               seeds | {"release/2024"}))
+        # THE HONEST HALF: a default branch outside the seed set is still
+        # auto-declared when `origin/HEAD` is unresolvable. This is a KNOWN,
+        # bounded gap (a normal clone resolves the symref, which covers every
+        # real default name); asserting it means the limitation is recorded
+        # rather than assumed away.
+        self.assertFalse(mod._is_default_branch("trunk", seeds),
+                         "if this ever becomes True, the seeds grew — update "
+                         "the docstring that documents the gap")
+
+    def test_default_branch_names_come_from_origin_head(self):
+        # The mechanism, not just the comparison: `origin/HEAD` must be READ
+        # (full ref, not `--short`) and the remote component dropped. Without
+        # this, the parser could regress to `rsplit("/", 1)[-1]` again and only
+        # the slash test would notice.
+        _git(self.repo, "update-ref", "refs/remotes/origin/release/2024", "HEAD")
+        _git(self.repo, "symbolic-ref", "refs/remotes/origin/HEAD",
+             "refs/remotes/origin/release/2024")
+        self.assertEqual(
+            self._defaults_seen_by_the_tool(),
+            {"main", "master", "release/2024"},
+        )
+
+    def test_default_branch_with_a_slash_is_never_auto_declared(self):
+        # ⛔ P1-A. The default branch is read from
+        # `git symbolic-ref --short refs/remotes/origin/HEAD`, which prints
+        # `origin/<branch>`. Parsing that with `rsplit("/", 1)[-1]` registered a
+        # default branch named `release/2024` as `2024` — so the REAL name was
+        # missing from the refusal set and `release/2024` was auto-declared,
+        # re-opening the P0 through a parse. Exactly one component (the remote)
+        # may be dropped.
+        _git(self.repo, "checkout", "-q", "-b", "release/2024")
+        _git(self.repo, "update-ref", "refs/remotes/origin/release/2024", "HEAD")
+        _git(self.repo, "symbolic-ref", "refs/remotes/origin/HEAD",
+             "refs/remotes/origin/release/2024")
+        # The FULL ref is what the tool reads; `_short_branch` (already tested)
+        # drops the one remote component. `--short` would print
+        # `origin/release/2024` and is deliberately NOT used, because
+        # `_short_branch` refuses to rewrite a bare `origin/x`.
+        self.assertEqual(
+            self._git_out("symbolic-ref", "refs/remotes/origin/HEAD"),
+            "refs/remotes/origin/release/2024",
+        )
+        self.gh_fixtures(open_prs=[{
+            "number": 5199, "title": "fix: land the thing", "body": "",
+            "headRefName": "release/2024", "state": "open",
+            "closingIssuesReferences": [{"number": ISSUE}],
+        }])
+        # `cwd=self.repo`: the process must be standing in the checkout for
+        # auto-detection to be attempted at all — otherwise this would pass for
+        # the wrong reason (no detection, rather than a correct refusal).
+        rc, out = self.run_tool(cwd=self.repo)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("your own", out)
+
+    def test_default_branch_is_still_honoured_when_declared_EXPLICITLY(self):
+        # The refusal applies to what the tool INFERS, never to what the caller
+        # ASSERTS. `--self-branch main` is a statement by the caller about its own
+        # work, and the tool has no business overriding it.
+        self.gh_fixtures(open_prs=[{
+            "number": 5199, "title": "fix: land the thing", "body": "",
+            "headRefName": "main", "state": "open",
+            "closingIssuesReferences": [{"number": ISSUE}],
+        }])
+        rc, out = self.run_tool(self_branches=("main",), cwd=self.repo)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("not a competing claim", out)
+
+    def test_a_non_default_branch_is_still_auto_declared(self):
+        # The sensitivity half: the fix must not be "stop auto-declaring". A
+        # lane branch (the fleet's normal shape) still gets the convenience.
+        _git(self.repo, "checkout", "-q", "-b", f"fix/{ISSUE}-lane")
+        rc, out = self.run_tool(cwd=self.repo)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("your own branch", out)
+
+    def test_remote_branch_note_does_not_report_a_terminal_test(self):
+        # P2-3. The `--merged` walk is meaningless for `refs/remotes`, so
+        # reporting its count claimed that N remote refs had been found merged
+        # and downgraded when the surface refused to judge a single one.
+        # ⛔ `origin/main` MUST exist for the negative assertion to mean
+        # anything. Without it the `--merged` walk fails, and the PRE-change tool
+        # emitted the "detection UNAVAILABLE" note — which ALSO lacks the count
+        # phrase, so `assertNotIn` passed for the wrong reason and the defect it
+        # names was uncatchable.
+        #
+        # Scope, stated exactly: the `assertIn` is the load-bearing half — the
+        # note text is what a regression to the pre-fix shape changes first. The
+        # `assertNotIn` now guards the COUNT path, which a single mutation cannot
+        # reach (the walk is skipped for `refs/remotes` AND the note branch is
+        # keyed on the namespace); it fires if both halves are reverted together,
+        # which is what reverting the P2-3 commit would do.
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        _git(self.repo, "update-ref", "refs/remotes/origin/fix/9999-x", "HEAD")
+        self.gh_fixtures(open_prs=[])
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        remote_row = next(ln for ln in out.splitlines() if ln.startswith("remote branches"))
+        self.assertIn("terminal tests are NOT applied here", remote_row)
+        self.assertNotIn("already merged into main", remote_row)
+
+    def test_remote_tracking_ref_is_not_judged_terminal(self):
+        # C2-5. A remote-tracking ref is a local CACHE of the last fetch, not the
+        # remote's state: a branch that was squash-merged and then REUSED for new
+        # work still reads as its old, merged sha until someone fetches. Demoting
+        # on that would be a false ACCEPT — a LIVE branch read as free — so the
+        # terminal predicates apply to LOCAL branches, and the remote-tracking
+        # copy keeps blocking.
+        #
+        # Note there is deliberately NO local branch of this name, so the only
+        # candidate is the remote ref.
+        ref = f"fix/{ISSUE}-reused"
+        _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", "HEAD")
+        sha = self._git_out("rev-parse", f"refs/remotes/origin/{ref}")
+        self.gh_fixtures(closed_prs=[{
+            "number": 4242, "title": "land it", "body": "", "state": "closed",
+            "headRefName": ref, "headSha": sha,
+            "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("[remote branches]", out)
+        self.assertNotIn("squash-merged", out)
+
+    def test_unreadable_closing_reference_element_is_incomplete_not_dropped(self):
+        # C2-2. The absent-field contract is applied PER ELEMENT too. A field
+        # that IS present and claims to close N must not lose N because the
+        # element is shaped differently than expected — that is the same
+        # fail-open drop as reading an absent field as empty. The body-regex
+        # union hides it for a body reference, but GitHub also derives closing
+        # references from the title and commit messages, where the body need not
+        # contain a closing keyword at all.
+        for bad in (["3061"], [{"number": "3061"}], [{"number": None}], ["x"],
+                    [{"number": True}]):
+            with self.subTest(element=bad[0]):
+                self.gh_fixtures(open_prs=[{
+                    "number": 5150, "title": "unrelated", "body": "",
+                    "headRefName": "feat/5150-other", "state": "open",
+                    "closingIssuesReferences": bad,
+                }])
+                rc, out = self.run_tool()
+                self.assertEqual(rc, 2, f"element={bad[0]!r}\n{out}")
+                self.assertIn("VERDICT: INCOMPLETE", out)
+                self.assertIn("closing-reference-source-unavailable", out)
+
+    def test_clean_note_does_not_call_every_weak_hit_prose(self):
+        # C2-3. The WEAK SIGNALS block was corrected to stop describing every
+        # weak hit as prose, but the CLEAN-path NOTE eight lines below it still
+        # said "weak prose signal(s)". A report contradicting its own contents is
+        # the unverifiable-verdict class this change removes (#3504 class 2).
+        self.gh_fixtures(issue=self.issue_payload(assignees=("test-agent",)))
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("weak, non-blocking signal(s)", out)
+        self.assertNotIn("weak prose signal(s)", out)
+
+    # ── a PR whose head branch the caller DECLARED is its own work ──────────
+
+    def test_declared_own_pr_branch_suppresses_the_pr(self):
+        # The PR-side half of self-identity: a hit on a PR whose head branch the
+        # caller owns is the caller's own PR. A DIFFERENT PR in the same list
+        # must still block, so this is not a blanket exemption.
+        self.gh_fixtures(open_prs=[
+            {"number": 5150, "title": "unrelated",
+             "body": "", "headRefName": f"feat/{ISSUE}-mine", "state": "open"},
+            {"number": 5151, "title": "fix: sibling cleanup",
+             "body": "no number here at all",
+             "headRefName": "feat/9999-other", "state": "open",
+             "closingIssuesReferences": [{"number": ISSUE}]},
+        ])
+        rc, out = self.run_tool(self_branches=(f"feat/{ISSUE}-mine",))
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("your own PR", out)
+        self.assertIn("closingIssuesReferences includes", out)
+
+    # ── terminal branches: squash-merge residue cannot block (#5186) ────────
+
+    def _merged_pr_fixture(self, ref: str) -> dict:
+        """A closed PR payload in the shape the tool ACTUALLY receives.
+
+        ⛔ `headSha`, not a nested `head.sha`. `_closed_pr_sample` runs the REST
+        response through a `gh api --jq` projection, and that filter is what
+        re-keys the payload — so the only shape the scanner can ever see is the
+        projected one. This fixture previously supplied `head: {ref, sha}`, a
+        nested object the projection never produces: the harvest read
+        `_pr.get("head")`, always got None, and `merged_head_shas` was ALWAYS
+        EMPTY IN PRODUCTION. #5186's primary predicate was therefore dead code,
+        and these tests passed anyway because the `gh` stub cats its fixture and
+        never executes `--jq`. A fixture must model the wire, not the wish.
+        """
+        return {
+            "number": 4242, "title": f"land {ref}",
+            "body": "", "state": "closed",
+            "headRefName": ref,
+            "headSha": self._git_out("rev-parse", ref),
+            "mergedAt": "2026-09-01T00:00:00Z",
+        }
+
+    def test_squash_merged_branch_is_terminal_and_cannot_block(self):
+        # #5186, the primary predicate. A squash merge means the branch tip is
+        # NEVER an ancestor of main (GitHub's own docs: the original SHAs are
+        # lost), so ancestry cannot detect it — the test is tip-SHA == a merged
+        # PR's `headRefOid`. D1 forbids patch-id (its whitespace modes produce
+        # a false ACCEPT, which is this issue's dangerous direction).
+        #
+        # ⛔ IT PINS THE "UNRESOLVED TIP STILL DEMOTES" HALF, deliberately:
+        # `refs/remotes/origin/main` is never set here, so `main_tip` is `None`.
+        # Predicate 1 is the EXACT arm (D4 / correction #2 — a merged-PR record
+        # names the branch head as GitHub computed it), so an unresolvable tip
+        # does not make the record less exact. Its partner,
+        # `test_fresh_branch_at_main_tip_matching_a_merged_pr_head_still_blocks`,
+        # covers the case where the tip IS known and equals the branch's.
+        ref = f"docs/research-{ISSUE}-4333"
+        _git(self.repo, "branch", ref)
+        self.gh_fixtures(closed_prs=[self._merged_pr_fixture(ref)])
+        rc, out = self.run_tool(issue=ISSUE)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("squash-merged", out)
+
+    def test_weak_advisory_hit_still_carries_the_advisory_marker(self):
+        # ⛔ The advisory marker was gated on `hit.strength != "weak"`, which
+        # excluded the case this surface USUALLY produces: a match on a CLOSED PR
+        # is `weak` whenever that PR is terminal (merged), i.e. nearly always. So
+        # the advisory row printed the bare `(weak)` tag — which is equally what a
+        # weak hit on a BLOCKING surface prints — and the comment's stated reason
+        # ("an untagged advisory hit is indistinguishable from the one that caused
+        # a refusal") was false for exactly the hits the surface produces. The
+        # exemption protected against nothing.
+        ref = f"docs/research-{ISSUE}-advisory"
+        _git(self.repo, "branch", ref)
+        self.gh_fixtures(closed_prs=[self._merged_pr_fixture(ref)])
+        rc, out = self.run_tool(issue=ISSUE)
+        self.assertEqual(rc, 0, out)
+        # `PR #` discriminates the HITS line from the ADVISORY SURFACES summary
+        # line, which also begins with the same surface label.
+        rows = [ln for ln in out.splitlines()
+                if ln.strip().startswith("[recently-closed PRs]") and "PR #" in ln]
+        self.assertTrue(rows, out)
+        for row in rows:
+            self.assertIn("(weak)", row)
+            self.assertIn("(advisory — cannot block)", row)
+
+    def test_fresh_branch_at_main_tip_matching_a_merged_pr_head_still_blocks(self):
+        # ⛔ THE P0 GUARD. The main-tip exclusion belongs on BOTH predicates.
+        # A branch created at `origin/main`'s tip with NO COMMITS OF ITS OWN has
+        # main's SHA — and when main's tip is itself a merged PR's `head.sha`
+        # (a fast-forward / rebase landing, or an empty-diff PR), the PRIMARY
+        # predicate matched it, called it "squash-merged", and returned CLEAN on
+        # a lane that had only just CLAIMED the issue by creating the branch.
+        # The two SHAs are indistinguishable, so the safe reading is to block.
+        ref = f"fix/{ISSUE}-fresh-ff"
+        _git(self.repo, "branch", ref)
+        # The tip IS known here, and equals the branch's — the whole point.
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        self.gh_fixtures(closed_prs=[self._merged_pr_fixture(ref)])
+        rc, out = self.run_tool(issue=ISSUE)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("squash-merged", out)
+
+    def test_same_branch_without_a_merge_record_still_blocks(self):
+        # SENSITIVITY GUARD for the test above, and the mutation it is built to
+        # catch: if the terminal predicate were `return True` (or ignored
+        # `merged_at`), the previous test would still pass. Here the ONLY
+        # difference is `merged_at: None` — an open PR carrying the same head
+        # sha — so a live branch must still block.
+        ref = f"docs/research-{ISSUE}-4333"
+        _git(self.repo, "branch", ref)
+        pr = self._merged_pr_fixture(ref)
+        # The PROJECTED key is `mergedAt` (camelCase) — that is what the jq
+        # filter emits and therefore all the harvest can ever read. Clearing the
+        # snake_case name instead left `mergedAt` set, so the fixture was still
+        # merged and the test asserted COLLISION on a CLEAN run.
+        pr["mergedAt"] = None
+        self.gh_fixtures(closed_prs=[pr])
+        rc, out = self.run_tool(issue=ISSUE)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("matched issue-number", out)
+
+    def test_branch_merged_into_origin_main_is_terminal(self):
+        # The second, independent arm: a branch whose work LANDED and which main
+        # has since advanced PAST is immutable history, not in-flight work.
+        #
+        # ⛔ THIS TEST USED TO PIN A FAIL-OPEN DEFECT. It created the branch AT
+        # main's tip with NO COMMITS and asserted CLEAN. That is not a landing —
+        # it is the ordinary state of a lane between `git worktree add` and its
+        # first commit, which is EXACTLY when a second lane is most likely to
+        # dispatch the same issue. Plain ancestry called it "merged into main"
+        # and demoted it. The arm is now STRICT (tip != main's tip), and this
+        # test builds a genuine landing: a commit on the branch, then main
+        # advanced past it by a merge.
+        ref = f"fix/{ISSUE}-ancestor-landed"
+        _git(self.repo, "checkout", "-q", "-b", ref)
+        (self.repo / "landed.txt").write_text("landed\n")
+        _git(self.repo, "add", "landed.txt")
+        _git(self.repo, "commit", "-qm", "the work")
+        _git(self.repo, "checkout", "-q", "main")
+        _git(self.repo, "merge", "--no-ff", "-q", "-m", "land it", ref)
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        self.gh_fixtures(closed_prs=[])
+        rc, out = self.run_tool(issue=ISSUE)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("merged into main", out)
+
+    def test_worktree_on_a_fresh_branch_still_blocks(self):
+        # ⛔ THE P1-B GUARD, worktree side. `add_worktree` is exactly the state
+        # between `git worktree add` and the first commit: the branch tip IS
+        # origin/main's tip, so plain ancestry calls it "merged into main".
+        #
+        # ⛔ THE ASSERTION IS ON THE `local worktrees` ROW, NOT THE VERDICT, and
+        # that is the whole point. `add_worktree` creates a BRANCH as well as a
+        # worktree, so the local-branches surface raises the same hit, and the
+        # verdict stays COLLISION even with the worktree surface broken entirely
+        # — a verifier PROVED it against the PREVIOUS revision of this test,
+        # which asserted only `VERDICT: COLLISION` and still passed with
+        # `scan_worktree_surface` disabled. An assertion the wrong code path can
+        # satisfy is the own-masking failure this file has already produced once
+        # (a worktree check masked by a branch check).
+        #
+        # What each assertion pins, stated exactly, because a later verifier
+        # checked this paragraph and found the stronger reading unsupported:
+        #   * the ROW assertion catches a DISABLED worktree surface, which the
+        #     verdict alone cannot (mutation-verified);
+        #   * the VERDICT assertion catches a broken terminal predicate, which
+        #     demotes BOTH surfaces and so needs no row-level assertion;
+        #   * NOTHING here proves the `main_tip` argument is threaded, and that is
+        #     not claimed: feeding the scanner `None` disables predicate 2 and can
+        #     only leave the row BLOCKING (fail-closed), and OMITTING the argument
+        #     is a `TypeError` now that the parameter is required.
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        self.add_worktree("fresh", f"fix/{ISSUE}-fresh-wt")
+        self.gh_fixtures(closed_prs=[])
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        wt_row = next(ln for ln in out.splitlines()
+                      if ln.startswith("local worktrees"))
+        self.assertIn("HIT", wt_row, wt_row)
+        self.assertNotIn("merged into origin/main", wt_row)
+
+    def test_unresolvable_main_tip_never_downgrades(self):
+        # ⛔ THE FAIL-CLOSED CORE, and the sensitivity partner of
+        # `test_branch_merged_into_origin_main_is_terminal`: the SAME repo state
+        # (a genuine landing, strictly behind main, so predicate 2 would fire)
+        # but with the tip lookup broken.
+        #
+        # Predicate 2 can only ever DOWNGRADE a hit, so an unknown tip makes
+        # "just created" and "landed behind main" indistinguishable, and the
+        # safe answer to "I cannot tell" is to leave the ref BLOCKING. Getting
+        # this backwards is a fail-OPEN: the tool reports CLEAN on a ref it did
+        # not manage to clear. A false COLLISION costs a re-check; a false CLEAN
+        # costs a duplicated dispatch.
+        ref = f"fix/{ISSUE}-landed-no-tip"
+        _git(self.repo, "checkout", "-q", "-b", ref)
+        (self.repo / "landed.txt").write_text("landed\n")
+        _git(self.repo, "add", "landed.txt")
+        _git(self.repo, "commit", "-qm", "the work")
+        _git(self.repo, "checkout", "-q", "main")
+        _git(self.repo, "merge", "--no-ff", "-q", "-m", "land it", ref)
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        # Precondition: the ancestor walk STILL SEES this branch, so predicate 2
+        # is genuinely in play and only the tip is missing.
+        merged = self._git_out("for-each-ref", "--format=%(refname)",
+                               "--merged=origin/main", "refs/heads")
+        self.assertIn(f"refs/heads/{ref}", merged)
+
+        self.gh_fixtures(closed_prs=[])
+        git_stub = _write_exec(self.tmp / "git-stub-no-tip", GIT_STUB_NO_MAIN_TIP)
+        rc, out = self.run_tool(git_bin=git_stub,
+                                env_extra={"REAL_GIT": shutil.which("git")})
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("merged into origin/main", out)
+
+    def test_fresh_branch_at_a_PREVIOUS_merged_head_still_blocks(self):
+        # ⛔ THE CYCLE-6 P0 GUARD, and it is the SAME defect cycle 5 fixed on
+        # predicate 2 — left behind on predicate 1. `sha != main_tip` is ONE COMMIT
+        # DEEP: it refuses to call a fresh branch landed only while its tip is
+        # exactly the CURRENT tip. As soon as main advances past a commit that is
+        # also a merged PR's `head.sha` (a fast-forward / rebase landing, or an
+        # empty-diff PR), a fresh branch sitting on that commit satisfies
+        # `sha != main_tip`, matches the merged-PR record, and is read as
+        # "squash-merged" — CLEAN on a lane that has already claimed the issue by
+        # creating the branch.
+        #
+        # The two states are indistinguishable from the SHAs alone, so the
+        # discriminator is the same one predicate 2 uses: a tip on main's own
+        # FIRST-PARENT chain is a commit main already contains (exactly what a
+        # fresh branch points at), NOT an absorbed branch head, which entered main
+        # as a MERGE parent.
+        ref = f"fix/{ISSUE}-prev-merged-head"
+        _git(self.repo, "branch", ref)                      # branch at H
+        head_sha = self._git_out("rev-parse", ref)
+        (self.repo / "later.txt").write_text("later\n")
+        _git(self.repo, "add", "later.txt")
+        _git(self.repo, "commit", "-qm", "main advances past the merged head")
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+        # Preconditions, so this cannot pass for the wrong reason: H is now
+        # STRICTLY BEHIND main's tip (so `sha != main_tip` is satisfied), and H IS
+        # on main's first-parent chain (so only the first-parent exclusion can
+        # refuse the demotion).
+        tip = self._git_out("rev-parse", "origin/main")
+        self.assertNotEqual(head_sha, tip)
+        self.assertIn(head_sha, self._git_out(
+            "rev-list", "--first-parent", "origin/main").splitlines())
+
+        self.gh_fixtures(closed_prs=[{
+            "number": 4242, "title": "the earlier landing", "body": "",
+            "state": "closed", "url": "https://example.invalid/4242",
+            "headRefName": "fix/earlier",
+            # H is the merged PR's head, so predicate 1 would fire on it.
+            "headSha": head_sha,
+            "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        rc, out = self.run_tool(issue=ISSUE)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("squash-merged", out)
+
+    def test_fresh_branch_left_behind_by_main_still_blocks(self):
+        # ⛔ THE CYCLE-5 P0 GUARD, and the defect it closes was the WIDE window,
+        # not an exotic edge. `sha != main_tip` protected a fresh branch only
+        # until `origin/main` advanced ONE commit; after that the branch was a
+        # STRICT ancestor of main and plain ancestry called it landed. The
+        # ordinary fleet flow hits this every time: `git worktree add -b
+        # fix/N-slug` (nothing committed yet), then some OTHER PR merges — and any
+        # lane running the pre-flight for N in that window got CLEAN on an issue
+        # another lane had already claimed by creating the branch. Not maskable by
+        # the remote surface, because the branch has not been pushed.
+        #
+        # The discriminator is membership of main's FIRST-PARENT chain: a fresh
+        # branch's tip IS a main-line commit however far main has moved, whereas
+        # an absorbed branch head entered main as a MERGE parent.
+        #
+        # BOTH surfaces are asserted as ROWS: `add_worktree` also creates a
+        # branch, so the branch surface would supply the verdict on its own and a
+        # verdict-level assertion could not tell whether the worktree path (and
+        # its `first_parent` threading) works at all.
+        branch = f"fix/{ISSUE}-fresh-behind"
+        self.add_worktree("behind", branch)
+        (self.repo / "later.txt").write_text("later\n")
+        _git(self.repo, "add", "later.txt")
+        _git(self.repo, "commit", "-qm", "another lane lands")
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+        # Preconditions, so this test cannot pass for the wrong reason:
+        # the ref IS an ancestor of main (the state plain ancestry misreads)...
+        tip = self._git_out("rev-parse", branch)
+        merged = self._git_out("for-each-ref", "--format=%(refname)",
+                               "--merged=origin/main", "refs/heads")
+        self.assertIn(f"refs/heads/{branch}", merged)
+        # ...and its tip IS on main's first-parent chain (the state that must
+        # make the exclusion fire, rather than the branch merely being unmerged).
+        self.assertIn(tip, self._git_out(
+            "rev-list", "--first-parent", "origin/main").splitlines())
+
+        self.gh_fixtures(closed_prs=[])
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        for row_prefix in ("local branches", "local worktrees"):
+            row = next(ln for ln in out.splitlines()
+                       if ln.startswith(row_prefix))
+            self.assertIn("HIT", row, row)
+        self.assertNotIn("merged into origin/main", out)
+
+    def test_branch_created_at_main_tip_with_no_commits_still_blocks(self):
+        # ⛔ THE P1-B GUARD, and the mutation the test above cannot catch: if the
+        # arm were non-strict (plain ancestry), this branch — created at
+        # origin/main's tip, no commits of its own — is trivially "an ancestor
+        # of main" and would be demoted. It must BLOCK, because a branch named
+        # after the issue IS the claim.
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        _git(self.repo, "branch", f"fix/{ISSUE}-fresh")
+        self.gh_fixtures(closed_prs=[])
+        rc, out = self.run_tool(issue=ISSUE)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("merged into origin/main", out)
+
+    def test_unresolvable_first_parent_never_downgrades(self):
+        # ⛔ THE `first_parent is not None` GUARD AND `_first_parent_shas`'s
+        # `return None`, both of which were unfalsifiable before this stub: no
+        # test could make `first_parent` None while `main_tip` was readable, so
+        # deleting the guard broke nothing. Deleting it yields
+        # `TypeError: argument of type 'NoneType' is not iterable` at
+        # `sha not in first_parent` — a traceback, exit 1, NO `VERDICT` line,
+        # which a caller reads as COLLISION.
+        #
+        # ⛔ Making `_first_parent_shas` return an empty SET instead of None is
+        # NOT the harmless half, and an earlier version of this comment said it
+        # was ("would do nothing"). A mutation disproved that: an empty set
+        # satisfies `first_parent is not None`, so predicate 2 FIRES, an absorbed
+        # branch is called landed ("merged into origin/main"), the hit is
+        # demoted, and the run ends CLEAN (exit 0) on work the caller owns. That
+        # is why this test fails on the mutation at `assertNotEqual(rc, 0)`,
+        # rather than merely reporting a read that could not be trusted.
+        #
+        # The branch is genuinely absorbed (a real `--no-ff` merge put it on main
+        # as a merge parent), and `closed_prs=[]` removes predicate 1, so
+        # predicate 2 is the ONLY arm that could downgrade — and it must decline.
+        ref = f"fix/{ISSUE}-absorbed"
+        _git(self.repo, "checkout", "-q", "-b", ref)
+        (self.repo / f"{ISSUE}.txt").write_text("work\n")
+        _git(self.repo, "add", f"{ISSUE}.txt")
+        _git(self.repo, "commit", "-q", "-m", f"work on {ISSUE}")
+        _git(self.repo, "checkout", "-q", "main")
+        _git(self.repo, "merge", "--no-ff", "-q", "-m", "land it", ref)
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+        self.gh_fixtures(closed_prs=[])
+        git_stub = _write_exec(self.tmp / "git-stub-no-fp",
+                               GIT_STUB_NO_FIRST_PARENT)
+        rc, out = self.run_tool(git_bin=git_stub, issue=ISSUE,
+                                env_extra={"REAL_GIT": shutil.which("git")})
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("merged into origin/main", out)
+        self.assertNotIn("Traceback", out)
+
+    def test_branch_at_main_tip_matching_a_merged_head_blocks_without_first_parent(self):
+        # ⛔ THE `sha != main_tip` GUARD ON PREDICATE 1, which the review found was
+        # called "the only guard left" in a comment and verified by nothing.
+        #
+        # With `first_parent` UNREADABLE the first-parent exclusion cannot fire,
+        # so predicate 1 falls back to the exact-tip comparison — and this is
+        # exactly the payload that needs it: a branch created at origin/main's tip
+        # (no commits) whose SHA happens to equal a merged PR's `head.sha`. Without
+        # `sha != main_tip` this is called "squash-merged", demoted, and the lane
+        # that owns the branch is told CLEAN on an issue it has already claimed.
+        #
+        # `test_fresh_branch_at_a_PREVIOUS_merged_head_still_blocks` cannot reach
+        # this: there `first_parent` IS readable, so the other exclusion covers it.
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        tip = self._git_out("rev-parse", "HEAD")
+        _git(self.repo, "branch", f"fix/{ISSUE}-fresh")
+        self.gh_fixtures(closed_prs=[{
+            "number": 4242, "title": "an unrelated landing",
+            "body": "", "state": "closed",
+            "headRefName": "feat/9999-other", "headSha": tip,
+            "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        git_stub = _write_exec(self.tmp / "git-stub-no-fp",
+                               GIT_STUB_NO_FIRST_PARENT)
+        rc, out = self.run_tool(git_bin=git_stub, issue=ISSUE,
+                                env_extra={"REAL_GIT": shutil.which("git")})
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("squash-merged", out)
+        self.assertNotIn("Traceback", out)
+
+    def test_fresh_branch_behind_main_at_a_merged_head_blocks_without_first_parent(self):
+        # ⛔ THE CROSS-PRODUCT CYCLE 7 LEFT OPEN. Its stub — `rev-list
+        # --first-parent` failing while `rev-parse` and the `--merged` walk both
+        # succeed — was the right instrument, but it was pointed only at the
+        # CURRENT-TIP variant, where `sha != main_tip` happens to refuse the
+        # demotion. One commit further back that guard is satisfied and the
+        # exclusion degrades to exactly the one-commit-deep test cycle 6
+        # replaced, so a branch created at main's tip and left behind by ONE
+        # commit was demoted to CLEAN on an issue it had already claimed.
+        #
+        # The fallback discriminator is the `--merged` walk: a ref merged into
+        # main has a tip main already contains, which is what a fresh branch
+        # points at, so it must NOT be called landed.
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        behind = self._git_out("rev-parse", "HEAD")
+        _git(self.repo, "branch", f"fix/{ISSUE}-behind")
+        # Advance main by ONE commit, so `sha != main_tip` no longer protects.
+        (self.repo / "advance.txt").write_text("later work\n")
+        _git(self.repo, "add", "advance.txt")
+        _git(self.repo, "commit", "-q", "-m", "unrelated later work")
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        self.assertNotEqual(
+            self._git_out("rev-parse", "HEAD"), behind,
+            "precondition: main must have MOVED, or this test collapses into "
+            "the current-tip variant it exists to go beyond",
+        )
+        self.gh_fixtures(closed_prs=[{
+            "number": 4242, "title": "an unrelated landing", "body": "",
+            "state": "closed", "headRefName": "feat/9999-other",
+            "headSha": behind, "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        git_stub = _write_exec(self.tmp / "git-stub-no-fp",
+                               GIT_STUB_NO_FIRST_PARENT)
+        rc, out = self.run_tool(git_bin=git_stub, issue=ISSUE,
+                                env_extra={"REAL_GIT": shutil.which("git")})
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("squash-merged", out)
+        self.assertNotIn("Traceback", out)
+
+    def test_unmerged_branch_off_main_still_blocks(self):
+        # ...and here the only difference is that the branch carries a commit
+        # `origin/main` does NOT have, so it is genuinely in flight.
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        ref = f"fix/{ISSUE}-ancestor-live"
+        _git(self.repo, "checkout", "-q", "-b", ref)
+        (self.repo / "live.txt").write_text("live\n")
+        _git(self.repo, "add", "live.txt")
+        _git(self.repo, "commit", "-qm", "work in progress")
+        # Back to main, so the branch is NOT the current branch — otherwise it
+        # would be auto-declared as self-identity and the test would pass for
+        # the wrong reason (the auto-declaration is pinned separately by
+        # test_current_branch_is_declared_automatically).
+        _git(self.repo, "checkout", "-q", "main")
+        self.gh_fixtures(closed_prs=[])
+        rc, out = self.run_tool(issue=ISSUE)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+
+    # ── the closed reference field is REQUIRED, never assumed empty ─────────
+
+    def test_missing_closing_reference_field_is_incomplete_not_clean(self):
+        # #3504. A payload without `closingIssuesReferences` is a payload whose
+        # closing references are UNKNOWN. Reading the absence as "this PR closes
+        # nothing" would DROP a blocking signal — the fail-OPEN direction — so
+        # the surface goes INCOMPLETE (exit 2) instead. The harness normalizes
+        # the field in, so the key is deleted here explicitly to reach this path.
+        self.gh_fixtures(open_prs=[{
+            "number": 5150, "title": "unrelated", "body": "",
+            "headRefName": "feat/5150-other", "state": "open",
+        }])
+        prs = json.loads((self.gh_dir / "open_prs.json").read_text())
+        del prs[0]["closingIssuesReferences"]
+        (self.gh_dir / "open_prs.json").write_text(json.dumps(prs))
+
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("closing-reference-source-unavailable", out)
+
+    def test_closing_field_present_but_empty_is_clean_not_incomplete(self):
+        # The other side of the same coin, and the mutation guard: a field that
+        # IS present and empty is a KNOWN "closes nothing" — an evaluated,
+        # empty dimension, not an unreadable one. If the check were `if not
+        # field: raise`, this CLEAN run would wrongly become exit 2.
+        self.gh_fixtures(open_prs=[{
+            "number": 5150, "title": "unrelated", "body": "",
+            "headRefName": "feat/5150-other", "state": "open",
+            "closingIssuesReferences": [],
+        }])
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+
+    # ── class 2: a hit the tool calls non-blocking must not block ───────────
+
+    def test_nonblocking_hits_do_not_set_the_verdict_but_are_reported(self):
+        # #3504 class 2 / #4224. Live bug: `VERDICT: COLLISION — 8 hit(s)` where
+        # six of the eight were labelled `(non-blocking) (weak)`. The verdict
+        # counts BLOCKING hits only; the weak ones are still listed and COUNTED
+        # in a separate line, so the demotion is never silent.
+        self.gh_fixtures(
+            issue=self.issue_payload(assignees=("test-agent",)),
+            open_prs=[{
+                "number": 5150, "title": "unrelated cleanup",
+                "body": f"prose mention of #{ISSUE} here", "headRefName":
+                "feat/5150-other", "state": "open",
+            }],
+        )
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertNotIn("VERDICT: COLLISION", out)
+        self.assertIn("non-blocking", out)
+        # The table still reports BOTH hits — the fix is about the VERDICT, not
+        # about hiding evidence. A mutant that suppressed the hits instead of
+        # demoting them would fail here.
+        self.assertIn("open PRs                 HIT", out)
+        self.assertIn("issue assignee/comments  HIT", out)
+        self.assertEqual(out.count("(non-blocking)"), 2, out)
+
+    def test_collision_count_names_only_blocking_hits(self):
+        # #3504 class 2, the COUNT half — and the half nothing pinned. The
+        # verdict line used to print `len(hits)`, so #2573 read
+        # `COLLISION — 8 hit(s)` while its actual blocking content was smaller:
+        # the labels said non-blocking and the count contradicted them. A
+        # refusal whose stated reason is not what caused it cannot be verified.
+        #
+        # ONE strong hit beside TWO weak ones: the count must be 1, and the
+        # remainder must be EXPLAINED rather than silently dropped.
+        self.gh_fixtures(
+            issue=self.issue_payload(assignees=("test-agent",)),   # weak
+            open_prs=[
+                {"number": 5150, "title": "unrelated",       # weak (prose)
+                 "body": f"prose mention of #{ISSUE}", "headRefName":
+                 "feat/5150-other", "state": "open"},
+                {"number": 5151, "title": "fix: sibling cleanup",   # STRONG
+                 "body": "", "headRefName": "feat/9999-other",
+                 "state": "open",
+                 "closingIssuesReferences": [{"number": ISSUE}]},
+            ],
+        )
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("1 blocking hit(s) across 1 surface(s)", out)
+        self.assertIn("2 further hit(s) were reported but are non-blocking", out)
+
+    # ── the deleted lexical arm is gone ON PURPOSE ─────────────────────────
+
+    def test_keyword_flags_are_gone_not_merely_ignored(self):
+        # #3504's Stage 0 deletes the lexical arm. A flag that still PARSED but
+        # did nothing would be worse than one that errors: a caller would keep
+        # passing it, believe the dimension was completed, and never learn the
+        # gate is no longer consulting vocabulary. So it must be a usage error.
+        for flag in ("--keywords", "--min-keywords"):
+            with self.subTest(flag=flag):
+                proc = subprocess.run(
+                    [PYTHON, str(TOOL), str(ISSUE), "--repo", str(self.repo),
+                     flag, "alpha,beta"], capture_output=True, text=True,
+                    check=False,
+                )
+                self.assertEqual(proc.returncode, 3, proc.stdout + proc.stderr)
+                self.assertIn("unrecognized arguments", proc.stderr)
+                self.assertIn("--self-branch", proc.stderr)
 
     # ── incomplete, never silently clean ────────────────────────────────────
 
@@ -997,14 +2770,22 @@ class CollisionPreflightTest(unittest.TestCase):
         # still enumerated (its note only appears on a successful scan).
         self.assertIn("1 worktree(s) enumerated (untruncated)", out)
 
-    def test_keyword_source_unavailable_is_incomplete(self):
+    def test_unavailable_title_is_no_longer_a_missing_dimension(self):
+        # The title used to feed the keyword arm, so a failed `gh issue view`
+        # left a keyword dimension INCOMPLETE. That dimension no longer exists:
+        # the title is decoration in the report, not an input to a decision.
+        #
+        # The run still exits 2 — but for the SURFACE that failed, not a
+        # dimension that no longer exists. That distinction is the point: an
+        # INCOMPLETE run says WHICH surface could not be read.
         self.clear_fixtures()
         self.gh_fixtures(issue=None)
         rc, out = self.run_tool()
         self.assertEqual(rc, 2, out)
         self.assertIn("VERDICT: INCOMPLETE", out)
-        self.assertIn("[issue keywords]", out)
-        self.assertIn("keyword-source-unavailable", out)
+        self.assertIn("[issue assignee/comments]", out)
+        self.assertNotIn("[issue keywords]", out)
+        self.assertNotIn("keyword-source-unavailable", out)
 
     # ── truncation: blocking -> INCOMPLETE; advisory sample -> reported ──────
 
@@ -1048,6 +2829,36 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("[recently-closed PRs]", out)
         self.assertIn("⚠ PARTIAL — advisory sample, cannot block", out)
         self.assertIn("sampled the most recent 2 of ~5 closed PR(s)", out)
+
+    def test_closed_pr_next_relation_beats_a_flattering_last(self):
+        # ⛔ THE TWO RELATIONS CAN DISAGREE, AND `last` MUST NOT WIN. The
+        # invariant stated in `_closed_pr_sample` is that a `Link` carrying
+        # `rel="next"` PROVES more pages exist and must never be reported as
+        # "this page is the complete list" — "even when the rel=last entry is
+        # absent or unparseable". The implementation only consulted `next` when
+        # `last` was ABSENT, so a disagreeing pair resolved in favour of the
+        # flattering one: a page whose own header proved a further page existed
+        # was labelled complete.
+        #
+        # Exit code is unaffected (the surface is ADVISORY); the human reading
+        # the report is the one misled — and "a partial list presented as
+        # everything" is the failure this tool exists to prevent.
+        #
+        # `last` says ONE page (so the old arithmetic concluded "complete"),
+        # while `next` proves page 2 exists.
+        self.gh_fixtures(closed_prs=[
+            {"number": 3, "title": "a", "body": "", "headRefName": "chore/a"},
+            {"number": 4, "title": "b", "body": "", "headRefName": "chore/b"},
+        ])
+        rc, out = self.run_tool(
+            extra_args=["--closed-pr-limit", "2"],
+            env_extra={"GH_STUB_CLOSED_PR_TOTAL_PAGES": "1",
+                       "GH_STUB_CLOSED_PR_FORCE_NEXT": "1"},
+        )
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("⚠ PARTIAL — advisory sample, cannot block", out)
+        self.assertNotIn("(this page is the complete list)", out)
 
     def test_complete_pr_list_reports_the_count_and_stays_clean(self):
         self.gh_fixtures(open_prs=[
@@ -1166,9 +2977,18 @@ class CollisionPreflightTest(unittest.TestCase):
         # single page is still found and reported. `--paginate` is asserted
         # absent from the argv and the stub's per-invocation call log must hold
         # exactly one line — a regressed pagination would append one per page.
+        # Written DIRECTLY rather than through `gh_fixtures`, because this test
+        # controls the `Link` header, so the normalizer does not supply `state` —
+        # and `state` is now REQUIRED. `"OPEN"` is the GraphQL casing `gh pr list
+        # --json state` returns and `_pr_terminal_state` does not read as
+        # terminal, so the hit keeps its non-terminal detail, which is what the
+        # assertion below is about. A missing `state` would be a REFUSAL, and the
+        # surface would report no hit at all.
         (self.gh_dir / "closed_prs.json").write_text(json.dumps([
-            {"number": 1, "title": "a", "body": "", "headRefName": "chore/a"},
-            {"number": 9998, "title": "b", "body": "", "headRefName": "fix/3061-page2"},
+            {"number": 1, "title": "a", "body": "", "headRefName": "chore/a",
+             "state": "OPEN", "mergedAt": None, "headSha": ""},
+            {"number": 9998, "title": "b", "body": "", "headRefName": "fix/3061-page2",
+             "state": "OPEN", "mergedAt": None, "headSha": ""},
         ]))
         rc, out = self.run_tool()
         self.assertEqual(rc, 0, out)  # advisory: reported, never blocking
@@ -1183,14 +3003,24 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertEqual(len(calls), 1, calls)
 
     def test_advisory_closed_pr_strong_shape_cannot_block_but_is_reported(self):
-        # #5251, the STRUCTURAL guarantee. A payload whose `state` is ABSENT is
-        # NOT terminal by `_pr_terminal_state`, so its branch match would be
-        # `strong` — the demotion must come from the SURFACE's authority, not
-        # from a payload field (#5129's data-dependent shape is exactly what
-        # that cannot give). It must be CLEAN (exit 0) with the match reported.
+        # #5251, the STRUCTURAL guarantee. A payload that is NOT terminal by
+        # `_pr_terminal_state` has a `strong`-shaped branch match, so the
+        # demotion must come from the SURFACE's authority and not from a payload
+        # field (#5129's data-dependent shape is exactly what that cannot give).
+        # It must be CLEAN (exit 0) with the match reported.
+        #
+        # ⛔ NON-TERMINAL IS NOW EXPRESSED BY A STATE, NOT BY ITS ABSENCE. This
+        # fixture used to omit `state` entirely, which got the non-terminal read
+        # by accident: a payload missing `state` is REFUSED now (it was the
+        # fail-open where a truthy `mergedAt` plus no `state` demoted a live
+        # open PR). `"OPEN"` is the GraphQL casing `gh pr list --json state`
+        # actually returns and `_pr_terminal_state` does not read as terminal, so
+        # this is both a real shape and a non-terminal one — the property the
+        # test needs, obtained deliberately rather than from malformation.
         self.gh_fixtures(closed_prs=[{
             "number": 9998, "title": "time-dependent ranking",
             "body": "", "headRefName": "fix/3061-fts-determinism",
+            "state": "OPEN",
         }])
         rc, out = self.run_tool()
         self.assertEqual(rc, 0, out)
@@ -1205,25 +3035,57 @@ class CollisionPreflightTest(unittest.TestCase):
     def test_clean_report_counts_only_surfaces_actually_queried(self):
         # Review cycle 2 (P2-7): the CLEAN line counts surfaces actually READ.
         # Before #5251 it was reachable only when every surface had been
-        # queried, so `7/7` was literally true; with an advisory surface it can
-        # now mean 6 of 7 were read. A silent revert of that count would
-        # otherwise pass the whole suite, because the pre-existing `7/7`
+        # queried, so a full count was literally true; with an advisory surface
+        # it can now mean 5 of 6 were read. A silent revert of that count would
+        # otherwise pass the whole suite, because the pre-existing full-count
         # assertion still matches a fully-queried run.
+        #
+        # (The totals moved 7 -> 6 when #3504 deleted the `issue keywords`
+        # row. Recomputing them here from SURFACE_ROWS instead of hardcoding
+        # them would have hidden the deletion, so they stay literal — and two
+        # literals now pin the count.)
         self.gh_fixtures(open_prs=[])
         # Fail ONLY the (advisory) closed-PR request: every blocking surface
         # stays clean, so the run must still reach CLEAN.
         rc, out = self.run_tool(env_extra={"GH_STUB_API_FAIL_AFTER_OUTPUT": "1"})
         self.assertEqual(rc, 0, out)
         self.assertIn("VERDICT: CLEAN", out)
-        # 6, not 7 — and the shortfall is NAMED, not hidden.
-        self.assertIn("6/7 surfaces queried", out)
-        self.assertNotIn("7/7 surfaces queried", out)
+        # 5, not 6 — and the shortfall is NAMED, not hidden.
+        self.assertIn("5/6 surfaces queried", out)
+        self.assertNotIn("6/6 surfaces queried", out)
         self.assertIn("advisory surface(s) partial or unqueried", out)
 
-    def test_advisory_demotion_is_scoped_to_the_advisory_surface(self):
-        # The OVERRIDE must not weaken the blocking surfaces. (a) An advisory
-        # failure alongside an OPEN-PR hit is still a COLLISION. (b) An advisory
-        # failure alongside an unqueryable BLOCKING surface is still INCOMPLETE.
+    def test_advisory_failure_coexists_with_a_collision_without_escalating(self):
+        # The #5251 OVERRIDE: a surface that can never produce a blocking hit has
+        # no ability to prevent a duplicate, so its failure must not escalate the
+        # run. This pins the COEXISTENCE — an ADVISORY surface can be unqueryable
+        # while a BLOCKING surface collides, the advisory failure is still
+        # REPORTED, and the verdict stays COLLISION (exit 1) rather than becoming
+        # INCOMPLETE (exit 2). The pre-#5251 behaviour escalated it.
+        #
+        # ⛔ THE PREVIOUS VERSION OF THIS TEST COULD NOT FAIL FOR THE PROPERTY IT
+        # NAMED. It asserted "COLLISION despite an advisory failure" (decided by
+        # the strong open-PR hit alone) and "INCOMPLETE despite an advisory
+        # failure" (decided by the unqueryable BLOCKING surface alone), so a
+        # verifier deleted the advisory/blocking split entirely
+        # (`ADVISORY_SURFACES = frozenset()`) and the test still PASSED. The
+        # distinguishing facts are that the advisory failure was PRESENT and did
+        # NOT escalate — so both are asserted here: the advisory surface IS named
+        # as failed, and the exit code is 1.
+        #
+        # ⛔ WHAT THIS TEST DOES *NOT* CATCH, stated because an earlier version of
+        # this comment claimed it did and a verifier disproved it by mutation: it
+        # does NOT catch a regression that puts advisory surfaces into the
+        # INCOMPLETE list (`for s in blocking` -> `for s in ordered`). Here the
+        # verdict is COLLISION, decided by `if strong:` BEFORE the incomplete list
+        # is consulted, so that regression cannot escalate this run. The test that
+        # catches it is
+        # `test_closed_pr_failure_is_reported_but_does_not_force_incomplete`,
+        # which has an advisory failure and nothing else.
+        #
+        # What THIS test is non-inert for is the advisory TIER itself: with
+        # `ADVISORY_SURFACES = frozenset()` the surface stops being labelled
+        # ADVISORY and the ADVISORY SURFACES section disappears (mutation-verified).
         self.gh_fixtures(open_prs=[{
             "number": 9999, "title": "fix: guard retrieval (#3061)",
             "body": "closes it", "headRefName": "fix/guard",
@@ -1233,8 +3095,27 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("VERDICT: COLLISION", out)
         self.assertIn("[open PRs]", out)
         self.assertIn("do NOT dispatch", out)
+        # (a) the advisory surface really WAS unqueryable in this run. The
+        # ADVISORY SURFACES section carries it AND the note that states the rule
+        # this test exists to pin — "partial or unqueryable is NOT an INCOMPLETE
+        # run". (The `advisory surface(s) partial or unqueried` phrasing lives on
+        # the CLEAN path's counted line, which a COLLISION run does not reach, so
+        # asserting it here would have been asserting a string the run cannot
+        # produce.)
+        self.assertIn("ADVISORY SURFACES", out)
+        self.assertIn(
+            "an advisory surface being partial or unqueryable is NOT an "
+            "INCOMPLETE run", out,
+        )
+        self.assertIn("gh-unavailable", out)
+        # (b) it did not escalate the verdict to INCOMPLETE.
+        self.assertNotIn("VERDICT: INCOMPLETE", out)
 
-        # Drop the (blocking) open-PR hit so INCOMPLETE can surface.
+    def test_blocking_surface_incomplete_coexists_with_a_collision(self):
+        # The complementary half, unchanged in intent: a BLOCKING surface that
+        # could not be queried is REPORTED alongside the COLLISION rather than
+        # suppressed by it. Drop the (blocking) open-PR hit so INCOMPLETE
+        # surfaces on its own.
         self.gh_fixtures(open_prs=[])
         rc, out = self.run_tool(env_extra={
             "GH_STUB_API_FAIL_AFTER_OUTPUT": "1",
@@ -1263,6 +3144,13 @@ class CollisionPreflightTest(unittest.TestCase):
         # both: REST reports `state: "closed"` for merged and unmerged PRs
         # alike, and `mergedAt` is the only field that names a merge.
         self.assertIn("mergedAt: .merged_at", argv)
+        # ⛔ AND THE HEAD SHA. #5186's squash-merge predicate compares a branch
+        # tip against a merged PR's head sha. The projection is the ONLY place
+        # that re-keys the REST payload, so dropping `.head.sha` from it makes
+        # the predicate silently inert — every other test stays green, because
+        # the stub never executes `--jq` and feeds its fixture straight to the
+        # scanner. It happened once; this assertion is what makes it loud.
+        self.assertIn("headSha: (.head.sha", argv)
 
     # ── target repo: never certify a scope you did not establish (#4027) ────
 
@@ -1276,7 +3164,11 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("title: florfenicol dosing audit", out)
         self.assertIn("for #3061 in test-owner/test-repo", out)
 
-        rc, out = self.run_tool(extra_args=["--keywords", "florfenicol,dosing"])
+        # The second half used to prove the header survives a `--keywords`
+        # override. That flag is gone; the equivalent repeatable input is
+        # `--self-branch`, and the property under test (the header names the
+        # repo and the FULL title on every path) is unchanged.
+        rc, out = self.run_tool(self_branches=("fix/3061-extra",))
         self.assertIn("repo: test-owner/test-repo", out)
         self.assertIn("title: florfenicol dosing audit", out)
 
@@ -1742,7 +3634,7 @@ class CollisionPreflightTest(unittest.TestCase):
     def test_every_surface_is_always_evaluated(self):
         _rc, out = self.run_tool()
         self.assert_all_surface_rows(out)
-        self.assertIn("7/7 surfaces queried", out)
+        self.assertIn("6/6 surfaces queried", out)
 
     def test_usage_error_on_bad_issue(self):
         proc = subprocess.run(
@@ -1875,6 +3767,47 @@ class CollisionPreflightTest(unittest.TestCase):
                 self.assertIn("JEV UNAVAILABLE", out)
                 self.assertIn("fail-closed", out)
 
+    def test_explicit_jev_env_file_does_not_fall_through_to_a_key_on_disk(self):
+        """An explicit JEV env-file override is AUTHORITATIVE (#5278).
+
+        The override used to be PREPENDED to the candidate list, with the
+        implicit ``<cwd>/.env`` still consulted afterwards. So a run that
+        declared a KEYLESS env file picked a key up anyway — and, on a machine
+        carrying one, made a real, billable JEV call while believing it had no
+        credential at all.
+
+        This is hermetic and needs no network: a decoy key is written exactly
+        where an implicit candidate looks (``<cwd>/.env`` — the harness's temp
+        repo), the override names a keyless file, and the tool must report that
+        no ``JEV_API_KEY`` was found. Through the old fall-through it found the
+        decoy and failed with a transport error instead, so this assertion is
+        what pins the invariant — the existing ``no-key`` subtest below does
+        NOT, because in a checkout without a ``.env`` (CI) both behaviours
+        return no key and it passes either way.
+        """
+        body = (
+            "Consolidated under #5063 (one binding from a written claim to the "
+            "system it describes)."
+        )
+        self.gh_fixtures(issue=self.issue_payload(comments=[("test-agent", body)]))
+        # A decoy key at a location the IMPLICIT candidate list would read.
+        (self.repo / ".env").write_text(
+            "JEV_API_KEY=implicit-candidate-decoy\n", encoding="utf-8",
+        )
+        keyless = self.tmp / "keyless.env"
+        keyless.write_text("# deliberately carries no JEV_API_KEY\n", encoding="utf-8")
+
+        rc, out = self.run_tool(env_extra={
+            "COLLISION_PREFLIGHT_JEV": "on",
+            "COLLISION_PREFLIGHT_JEV_ENV_FILE": str(keyless),
+        })
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("JEV UNAVAILABLE", out)
+        # THE DISCRIMINATOR: the run must have found NO key. Had it fallen
+        # through to the decoy it would have attempted a call and reported a
+        # transport failure instead of the missing-key reason.
+        self.assertIn("no JEV_API_KEY", out)
+
     def test_same_body_decides_identically_and_warm_cache_makes_no_call(self):
         self.jev_rules(default=0.03)  # CLEAN
         body = (
@@ -1972,6 +3905,13 @@ class CollisionPreflightTest(unittest.TestCase):
             ("JEV_STUB_EMPTY", "uncertain ownership"),
             ("JEV_STUB_NO_ANSWERS", "JEV UNAVAILABLE"),
             ("JEV_STUB_GARBAGE", "JEV UNAVAILABLE"),
+            # ⛔ VALID JSON, NOT AN OBJECT. `_jev_transport` refuses this, and
+            # that guard is the ONLY thing between it and an uncaught
+            # AttributeError in `_decide_chunk` — which escapes `classify`'s
+            # documented "never raises" as a traceback with no VERDICT line and
+            # exit 1, the code callers read as COLLISION. No other stub mode
+            # produced this shape, so the guard could not be failed by any test.
+            ("JEV_STUB_NON_OBJECT", "JEV UNAVAILABLE"),
         ):
             with self.subTest(flag=flag):
                 self.jev_rules(default=0.99)
