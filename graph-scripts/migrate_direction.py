@@ -9,9 +9,9 @@ Sets `direction` on every existing operator Point, preserving current semantics:
 Idempotent: skips operators that already have a `direction` property.
 
 Usage:
-  TORTOISE_DB_URI=docker://:@localhost:16379/tortoise python3 graph-scripts/migrate_direction.py
+  TORTOISE_DB_URI=docker://:@127.0.0.1:16379/tortoise python3 graph-scripts/migrate_direction.py
   # Or dry-run:
-  TORTOISE_DB_URI=docker://:@localhost:16379/tortoise python3 graph-scripts/migrate_direction.py --dry-run
+  TORTOISE_DB_URI=docker://:@127.0.0.1:16379/tortoise python3 graph-scripts/migrate_direction.py --dry-run
 """
 from __future__ import annotations
 

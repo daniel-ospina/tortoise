@@ -270,6 +270,12 @@ def _measured_calls(props: dict) -> int:
     (``usage_present``). When a lane has ANY usage-less call, only the calls
     that still reported a charge count — the calls with neither usage nor
     charge are the ones this measurement genuinely cannot see.
+
+    #5854: a call whose TOKEN count was malformed is NOT metered either — the
+    accumulator rejected the value instead of shaping it, so the lane carries
+    the rejection in ``calls_without_tokens``. Without this subtraction those
+    calls would be counted metered with 0 tokens, and a session whose only
+    measurement was garbage would read as a fully-priced $0.
     """
     total = 0
     by_stage = props.get("by_stage") or {}
@@ -284,8 +290,9 @@ def _measured_calls(props: dict) -> int:
             for bucket in models.values():
                 bucket = bucket if isinstance(bucket, dict) else {}
                 calls = _as_int(bucket.get("calls"))
+                rejected = _as_int(bucket.get("calls_without_tokens"))
                 if bucket.get("usage_present"):
-                    total += calls
+                    total += max(0, calls - rejected)
                     continue
                 # No usage block: only the calls that still reported a
                 # charge are measured.
@@ -339,7 +346,8 @@ def cost_per_session_distribution(rows: list[dict] | None) -> dict:
 
     Returns ``{n, n_rows, p50, p95, max, total_usd, provider_reported_usd,
     map_priced_usd, unpriced_sessions, priced_sessions, fully_priced,
-    calls_without_cost, calls_without_usage, deadline_aborts,
+    calls_without_cost, calls_without_usage, calls_without_tokens,
+    deadline_aborts,
     unattributed_calls, unattributed_captures, unmetered_attempts,
     excluded_no_calls, excluded_unmeasured, source, map_version,
     heaviest}``.
@@ -387,6 +395,7 @@ def cost_per_session_distribution(rows: list[dict] | None) -> dict:
     unpriced = 0
     without_cost_total = 0
     without_usage_total = 0
+    without_tokens_total = 0
     deadline_aborts = 0
     unattributed_total = 0
     unattributed_captures = 0
@@ -425,6 +434,7 @@ def cost_per_session_distribution(rows: list[dict] | None) -> dict:
             {"by_stage": props.get("by_stage") or {}})
         without = _as_int(props.get("calls_without_cost"))
         without_usage = _as_int(props.get("calls_without_usage"))
+        without_tokens = _as_int(props.get("calls_without_tokens"))
         deadline_aborts += _as_int(props.get("deadline_aborts"))
         # Reporting totals stay over EVERY row (the aggregate spend is real
         # even where a single row cannot be priced).
@@ -432,6 +442,7 @@ def cost_per_session_distribution(rows: list[dict] | None) -> dict:
         map_total += map_usd
         without_cost_total += without
         without_usage_total += without_usage
+        without_tokens_total += without_tokens
         measured = _measured_calls(props)
         # #3824: calls the writer disclosed as made-but-unrolled (F2 — the
         # row exists, the roll-up did not). They are ATTEMPTS with no
@@ -559,6 +570,7 @@ def cost_per_session_distribution(rows: list[dict] | None) -> dict:
         "unattributed_captures": unattributed_captures,
         "calls_without_cost": without_cost_total,
         "calls_without_usage": without_usage_total,
+        "calls_without_tokens": without_tokens_total,
         "deadline_aborts": deadline_aborts,
         "excluded_no_calls": excluded_no_calls,
         "excluded_unmeasured": excluded_unmeasured,
@@ -676,19 +688,39 @@ def cost_by_stage(rows: list[dict] | None) -> dict:
             "overlap": True}
 
 
+def _valid_number(v) -> bool:
+    """A real, finite, bounded number — a ``bool`` is NOT a number here.
+
+    #5854: the shared predicate behind ``_price_lane._tok`` and its
+    negative-token detection, so the two can never drift. ``abs(v) > 1e300``
+    runs BEFORE ``isfinite`` because ``math.isfinite`` on a huge
+    arbitrary-precision ``int`` raises ``OverflowError``.
+    """
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    if abs(v) > 1e300:
+        return False
+    return not (isinstance(v, float) and not math.isfinite(v))
+
+
 def _price_lane(stage: str, provider: str, model: str, bucket: dict,
                 entry: dict | None) -> dict:
     def _tok(key: str) -> int | float:
         """Bounded token read: poison in a tampered checkpoint bucket (non-
         finite / |v| > 1e300 / bool) is excluded, never converted — the lane
         degrades to unpriced instead of crashing report assembly (round-2
-        code-review P2, mirroring report._numeric)."""
+        code-review P2, mirroring report._numeric).
+
+        #5854: a NEGATIVE is excluded too. A token count cannot be negative,
+        and an accepted one feeds ``prompt * rate`` straight into the dollar
+        total, so a stored/replayed row written before the accumulator's
+        token normaliser landed would sign-flip a session cost negative while
+        the reader still reported the session ``fully_priced``. This is the
+        same poison-tolerance contract, extended to the one sign the reader
+        still let through.
+        """
         v = bucket.get(key, 0) or 0
-        if isinstance(v, bool) or not isinstance(v, (int, float)):
-            return 0
-        if abs(v) > 1e300:
-            return 0
-        if isinstance(v, float) and not math.isfinite(v):
+        if not _valid_number(v) or v < 0:
             return 0
         return v
 
@@ -696,6 +728,13 @@ def _price_lane(stage: str, provider: str, model: str, bucket: dict,
     completion = _tok("completion_tokens")
     hit = _tok(_CACHE_KEY)
     usage_present = bucket.get("usage_present", True)
+    # #5854: a negative token must not read as a silent $0 either. It is
+    # poison the accumulator would now reject, but a row stored before the
+    # fix still carries it, so the lane is marked UNPRICED (disclosed) rather
+    # than priced at 0 — a missing measurement can never read as a cheap one.
+    negative_token = any(
+        _valid_number(bucket.get(k)) and bucket.get(k, 0) < 0
+        for k in ("prompt_tokens", "completion_tokens", _CACHE_KEY))
     row: dict = {
         "stage": stage, "provider": provider, "model": model,
         "prompt_tokens": prompt, "completion_tokens": completion,
@@ -710,6 +749,13 @@ def _price_lane(stage: str, provider: str, model: str, bucket: dict,
           and not math.isfinite(calls_without_usage)):
         calls_without_usage = 0
     row["calls_without_usage"] = int(calls_without_usage)
+    calls_without_tokens = bucket.get("calls_without_tokens", 0) or 0
+    if isinstance(calls_without_tokens, bool) \
+            or not isinstance(calls_without_tokens, (int, float)) \
+            or abs(calls_without_tokens) > 1e300 or (isinstance(calls_without_tokens, float)
+          and not math.isfinite(calls_without_tokens)):
+        calls_without_tokens = 0
+    row["calls_without_tokens"] = int(calls_without_tokens)
     if entry is None:
         row.update(priced=False,
                    reason="unknown_model" if usage_present
@@ -717,6 +763,10 @@ def _price_lane(stage: str, provider: str, model: str, bucket: dict,
         return row
     if not usage_present:
         row.update(priced=False, reason="usage_present_false")
+        return row
+    if negative_token:
+        # #5854: disclosed, never priced — see the detection above.
+        row.update(priced=False, reason="negative_token")
         return row
     row["estimated"] = bool(entry.get("estimated"))
     rate_in = float(entry["prompt_per_1m"])

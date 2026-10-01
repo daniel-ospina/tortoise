@@ -15,7 +15,7 @@ Ingest a research finding into the epistemic graph.
 
 ## Which Tortoise are you on?
 
-- **Hosted (cloud):** your agent reaches the graph through the Tortoise MCP server (`tortoise_*` tools) — no local database or SDK needed. If you installed the skills via the onboarding wizard, the MCP server is already wired (`claude mcp add tortoise` pointing at `https://api.premiselabs.co/mcp/` with your API key, or the equivalent `.mcp.json` entry).
+- **Hosted (cloud):** your agent reaches the graph through the Tortoise MCP server (`tortoise_*` tools) — no local database or SDK needed. If you installed the skills via the onboarding wizard, the MCP server is already wired. Configuring it by hand? Use the equivalent project-scoped `.mcp.json` entry: `{"type": "http", "url": "https://api.premiselabs.co/mcp/", "headers": {"Authorization": "Bearer ${TORTOISE_API_KEY}"}}` — that file is **committable**, so it carries the env reference, never the key. A project-scope server stays **⏸ Pending approval** until you approve it once — start `claude` in the project and allow the prompt, or run `/mcp`.
 - **Self-hosted:** you run your own FalkorDB + local MCP server (or the Python SDK). The MCP tool names below are the same; SDK callers use `sdk.create_point(...)`, `sdk.query(...)`, `sdk.list_sources()`.
 
 The steps below use the MCP tools, which work for both audiences when an MCP server is configured.
