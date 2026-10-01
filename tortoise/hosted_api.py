@@ -39,7 +39,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse  # JSONResponse: billing webhook (#310)
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.routing import Mount, get_route_path
-from starlette.routing import Mount, get_route_path  # #4490: route-class derivation
 
 import tortoise
 
