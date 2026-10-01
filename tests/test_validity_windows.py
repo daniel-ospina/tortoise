@@ -237,9 +237,10 @@ def test_supersede_valid_from_cross_format_disagreement_refused(sdk):
     """A disagreement ACROSS formats (date-only kwarg vs offset-aware stored
     value) is still caught — the guard is not a raw string compare.
 
-    The two dates are a full day apart, deliberately: a date-only value parses
-    as LOCAL midnight, so a same-day pair would compare equal on a UTC host and
-    unequal elsewhere — a host-timezone-dependent assertion is not a test.
+    The two dates are a full day apart, deliberately, so the assertion measures
+    the cross-format DISAGREEMENT and not the day boundary. (A date-only value
+    now anchors to UTC midnight — #3982 — so the spacing no longer varies by
+    host; it is kept because the disagreement is the property under test.)
     """
     old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
     new = _make_point(sdk, content="claim v2",
@@ -254,8 +255,8 @@ def test_supersede_valid_from_same_day_instant_disagreement_refused(sdk):
     The two literals the GUARD COMPARES — the kwarg and the successor's stored
     ``validFrom`` — carry an explicit time and offset, so nothing depends on the
     host timezone. (The predecessors' date-only ``validFrom`` above is never
-    passed to the guard; date-only parses as LOCAL midnight, the #3982
-    behaviour, so it is deliberately kept out of the comparison.) Four
+    passed to the guard, so it is deliberately kept out of the comparison; it
+    anchors to UTC midnight under #3982.) Four
     properties:
 
       * same day, different instant → REFUSED. Without this, a guard weakened
@@ -1016,9 +1017,9 @@ def test_window_end_numeric_kwarg_resolved_before_measure():
     start exists (``(1, text)`` never equals ``(0, float)``).
 
     The self-check below is the discriminator and it is HOST-INDEPENDENT:
-    ``_created_sort_key`` parses a date-only string on a NAIVE datetime, so
-    ``'2026-06-10'`` keys as LOCAL midnight (+/- 14 h across real timezones).
-    The raw epoch is therefore asserted to precede it, rather than assumed."""
+    ``_created_sort_key`` anchors a date-only string to UTC midnight (#3982),
+    so ``'2026-06-10'`` keys as that instant on every host. The raw epoch is
+    therefore asserted to precede it, rather than assumed."""
     raw = 1780000000.0  # a fixed epoch comfortably before old_vf's instant
     assert _created_sort_key(raw) < _created_sort_key("2026-06-10"), (
         "the raw-vs-resolved discriminator needs a raw epoch strictly before "

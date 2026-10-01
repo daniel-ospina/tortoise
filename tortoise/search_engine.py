@@ -1719,10 +1719,14 @@ _DECORATION_TIMEOUT_MS = 200
 #: rather than let ``fromisoformat`` resolve in the reader's zone (#3982).
 #:
 #: The offset belongs INSIDE the anchored pattern. The pattern must match the
-#: WHOLE string (``$``), because an unanchored date alternative is free to match
-#: only its own extent: against ``"2026-W24-05:00"`` the week-with-day
-#: alternative matches ``"2026-W24-0"``, which would leave ``"5:00"`` — not an
-#: offset — and the value would go unanchored.
+#: WHOLE string (``\Z``, not ``$``), because an unanchored date alternative is
+#: free to match only its own extent: against ``"2026-W24-05:00"`` the
+#: week-with-day alternative matches ``"2026-W24-0"``, which would leave
+#: ``"5:00"`` — not an offset — and the value would go unanchored. ``\Z`` and
+#: not ``$``: ``$`` also matches immediately BEFORE a trailing newline, so
+#: ``"2026-06-10\n"`` would be accepted as a date-only value and anchored,
+#: laundering a malformed stored value into a valid instant where it used to
+#: fall through to the unparseable bucket.
 #:
 #: Reachability: the caller's gate is ``s[0].isdigit() and len(s) >= 10 and
 #: ("-" in s or "T" in s)``, so every DASHED date of 10+ characters arrives
@@ -1742,7 +1746,7 @@ _DATE_ONLY_RE = re.compile(
     r"|\d{8}"                # calendar date, compact
     r")"
     r"(?P<off>[+-][0-9]{2}(?::?[0-9]{2})?(?::?[0-9]{2})?)?"
-    r"$"
+    r"\Z"
 )
 
 

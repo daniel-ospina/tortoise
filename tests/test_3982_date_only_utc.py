@@ -305,6 +305,16 @@ def test_epoch_and_iso_still_compare_by_real_instant():
 
 
 def test_unparseable_values_still_bucket_last():
-    """Existing contract: junk sorts last, deterministically."""
+    """Existing contract: junk sorts last, deterministically.
+
+    Includes a trailing-newline spelling, because that is what separates the
+    ``\Z`` anchor from ``$``: ``$`` also matches immediately BEFORE a trailing
+    newline, so with ``$`` these values would match ``_DATE_ONLY_RE`` and be
+    anchored as a real instant — silently laundering a malformed stored value
+    into a valid one and moving it out of the unparseable bucket, which the
+    window and supersede guards treat differently.
+    """
     assert _created_sort_key("not-a-date") == (1, "not-a-date")
     assert _created_sort_key("not-a-date") > _created_sort_key(_DATE_ONLY)
+    for trailing in ("2026-06-10\n", "2026-W24-3\n", "2026-06-10+05:00\n"):
+        assert _created_sort_key(trailing) == (1, trailing), trailing
