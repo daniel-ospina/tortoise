@@ -159,17 +159,16 @@
 #      write yet — resolving would delete the dedup object on zero evidence)
 #  102. #3944: an unmeasurable/malformed block must NOT RESOLVE one either
 #  103. #3944: an exponent-notation age is NOT a measurement (truncation must
-#      not read as fresh) — it files on the stale uptime and never resolves
 #      not read as fresh) — changes NOTHING: no file, no resolve (R4: a
 #      present-but-unmeasurable age must not take the 'no delivery' arm)
-#  93. #3944: an ALL-DIGIT age beyond int64 must not resolve either (a failed
+#  104. #3944: an ALL-DIGIT age beyond int64 must not resolve either (a failed
 #      `[ -gt ]` is not freshness)
-#  94. #3944: the boundary is strict — age == threshold is HEALTHY (resolves)
-#  95. #3944: a NEGATIVE age must not be read as "no delivery since boot" (a
+#  105. #3944: the boundary is strict — age == threshold is HEALTHY (resolves)
+#  106. #3944: a NEGATIVE age must not be read as "no delivery since boot" (a
 #      present age proves a delivery; the pre-clamp app can publish one)
-#  96. #3944: the threshold is the BODY's `silent_threshold_s`, not a hardcoded
+#  107. #3944: the threshold is the BODY's `silent_threshold_s`, not a hardcoded
 #      900 (the period is never re-typed in bash)
-#  97. #3944: the 18-DIGIT bound is load-bearing in the int64-FITTING band — a
+#  108. #3944: the 18-DIGIT bound is load-bearing in the int64-FITTING band — a
 #      19-digit magnitude compares successfully, so without the bound it files
 #
 # Fixtures are simulated; the real driver defers nothing.
@@ -2105,7 +2104,6 @@ export STUB_PURGE_RC=7
 run_driver
 assert_eq "$RC" 1 "92. a transport_error purge is RED (1)"
 assert_contains "$(cat "$LOG")" "never reached a response (curl exit 7)" "92. transport_error names the curl exit"
-
 # ── 93. #3944: an ABSENT analytics block leaves the incident unchanged ─────
 # `unknown` is NOT `stale`. An older app during a rolling deploy carries no
 # `.analytics` block; filing on that would manufacture an outage, and resolving
@@ -2153,9 +2151,6 @@ export STUB_GH_SEARCH_BODY='{"items":[{"number":321,"title":"[DR] ANALYTICS_SINK
 export STUB_STATUS_BODY="$(analytics_status_body true true true 120 10000)"
 run_driver
 assert_eq "$RC" 0 "95. a fresh heartbeat stays green"
-assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*ANALYTICS_SINK_DEGRADED" \
-  "95. a fresh heartbeat files nothing"
-
 assert_contains "$(cat "$LOG")" \
   "GH PATCH https://api.github.com/repos/daniel-ospina/tortoise/issues/321" \
   "95. a fresh heartbeat self-heals the open incident"
@@ -2248,8 +2243,6 @@ run_driver
 assert_eq "$RC" 0 "101. a cold start with an open incident stays green"
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
   "101. a cold start does NOT resolve the open incident (no delivered write yet)"
-assert_contains "$OUT" "analytics heartbeat not yet established" \
-  "101. the log says the heartbeat is not yet established"
 assert_contains "$OUT" "analytics heartbeat not established" \
   "101. the log says the heartbeat is not established"
 
@@ -2268,10 +2261,10 @@ run_driver
 assert_eq "$RC" 0 "102. an unmeasurable heartbeat stays green"
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
   "102. an unmeasurable block does NOT resolve the open incident"
-assert_contains "$OUT" "analytics heartbeat not yet established" \
-  "102. the log reports the record as unestablished, not fresh"
-# ── 103. #3944: an exponent-notation age is NOT a measurement ───────────────
 assert_contains "$OUT" "analytics heartbeat not established" \
+  "102. the log reports the record as unestablished, not fresh"
+
+# ── 103. #3944: an exponent-notation age is NOT a measurement ───────────────
 # R2 (bug-scan P3): `${x%.*}` truncates, and jq prints 1.2e16 as `1.2E+16` —
 # whose integer part truncates to `1` and would compare UNDER any threshold,
 # RESOLVING an open incident on a grossly stale age. The operand shape is now
@@ -2285,12 +2278,6 @@ export STUB_SWEEP_BODY='{"status":"backed_up"}'
 export STUB_GH_SEARCH_BODY='{"items":[{"number":321,"title":"[DR] ANALYTICS_SINK_DEGRADED — no analytics write delivered"}]}'
 export STUB_STATUS_BODY="$(analytics_status_body true true true 1.2e16 10000)"
 run_driver
-assert_eq "$RC" 1 "103. an exponent-notation age reds the run (stale uptime)"
-# The open incident (#321) is adopted rather than re-filed, so assert the
-# DECISION from the log line, not a POST.
-assert_contains "$OUT" "analytics sink silent (age=1.2E+16s" \
-  "103. an uncomparable age is not read as fresh"
-assert_contains "$OUT" "analytics sink silent (age=" \
 assert_eq "$RC" 0 "103. an exponent-notation age changes nothing"
 # R4: a PRESENT but unmeasurable age must not fall through to the uptime arm —
 # a present age proves a delivery happened, so the arm's premise ("no delivery
@@ -2298,14 +2285,12 @@ assert_eq "$RC" 0 "103. an exponent-notation age changes nothing"
 # false FILE on a healthy sink). Unmeasurable changes nothing at all.
 assert_not_match "$OUT" "analytics sink silent" \
   "103. an uncomparable age is not read as stale (no FILE decision)"
-assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*ANALYTICS_SINK_DEGRADED" \
-  "103. an uncomparable age files nothing"
-
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
   "103. a truncated non-decimal age NEVER resolves the open incident"
-# ── 104. #3944: an ALL-DIGIT age that overflows bash int64 must not resolve ──
 assert_contains "$OUT" "leaving ANALYTICS_SINK_DEGRADED unchanged" \
   "103. an unmeasurable age leaves the kind untouched"
+
+# ── 104. #3944: an ALL-DIGIT age that overflows bash int64 must not resolve ──
 # R3 P1: `[ -gt ]` compares in signed 64-bit, so a longer all-digit operand
 # ERRORS (rc=2). With a single `if ... else FRESH`, that error read as
 # freshness and RESOLVED the open incident — the same fail-open class as case
@@ -2318,13 +2303,9 @@ export STUB_SWEEP_BODY='{"status":"backed_up"}'
 export STUB_GH_SEARCH_BODY='{"items":[{"number":321,"title":"[DR] ANALYTICS_SINK_DEGRADED — no analytics write delivered"}]}'
 export STUB_STATUS_BODY="$(analytics_status_body true true true 12000000000000000000000000 10000)"
 run_driver
-assert_eq "$RC" 1 "104. an int64-overflowing age reds the run (stale uptime)"
 assert_eq "$RC" 0 "104. an int64-overflowing age changes nothing"
 assert_not_match "$OUT" "analytics sink silent" \
   "104. an uncomparable magnitude is not read as stale (no FILE decision)"
-assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*ANALYTICS_SINK_DEGRADED" \
-  "104. an uncomparable magnitude files nothing"
-
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
   "104. an int64-overflowing age NEVER resolves the open incident"
 
@@ -2340,12 +2321,10 @@ export STUB_GH_SEARCH_BODY='{"items":[{"number":321,"title":"[DR] ANALYTICS_SINK
 export STUB_STATUS_BODY="$(analytics_status_body true true true 900 10000 "" 900)"
 run_driver
 assert_eq "$RC" 0 "105. age == threshold is treated as healthy"
-assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*ANALYTICS_SINK_DEGRADED" \
-  "105. age == threshold files nothing"
-
 assert_contains "$(cat "$LOG")" \
   "GH PATCH https://api.github.com/repos/daniel-ospina/tortoise/issues/321" \
   "105. age == threshold self-heals (strict >, not >=)"
+
 # ── 106. #3944: a NEGATIVE age must not be read as "no delivery since boot" ──
 # R4 P3: a negative age is shape-rejected, and admitting it into the uptime arm
 # FILED a false incident on a demonstrably healthy sink (age_s is only non-null
@@ -2362,9 +2341,6 @@ run_driver
 assert_eq "$RC" 0 "106. a negative age does not red the run"
 assert_not_match "$OUT" "analytics sink silent" \
   "106. a negative age must NOT file a false incident on a healthy sink"
-assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*ANALYTICS_SINK_DEGRADED" \
-  "106. a negative age posts nothing"
-
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
   "106. a negative age leaves an open incident untouched"
 
@@ -2382,6 +2358,7 @@ run_driver
 assert_eq "$RC" 1 "107. a non-default threshold from the body reds the run"
 assert_filed "$(cat "$LOG")" "ANALYTICS_SINK_DEGRADED" \
   "107. the driver uses the body's silent_threshold_s (not a hardcoded 900)"
+
 # ── 108. #3944: the 18-DIGIT bound is load-bearing in the int64-FITTING band ──
 # Case 93 does NOT pin the digit bound, and this is why. Its 26-digit operand
 # makes `[ -gt ]` itself ERROR (rc=2), so 93 stays unmeasurable even with the
@@ -2401,13 +2378,6 @@ run_driver
 assert_eq "$RC" 0 "108. a 19-digit int64-fitting age changes nothing"
 assert_not_match "$OUT" "analytics sink silent" \
   "108. the 18-digit bound keeps an over-long magnitude unmeasurable (no FILE)"
-assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*ANALYTICS_SINK_DEGRADED" \
-  "108. an over-long magnitude files nothing"
-# NB: no separate 'files nothing' assertion here. #321 is ALREADY open in
-# this fixture, so file_alert creates nothing and a `GH POST .../issues `
-# regex (or an /issues/321/comments one) can never match — it would pass
-# even on a mutant that decides SILENT, i.e. false assurance. The decision
-# itself is pinned by the two assertions above (RC, and no 'sink silent').
 # NB: no separate 'files nothing' assertion in ANY case whose fixture holds
 # an OPEN #321 (84, 92, 93, 94, 95, 97): `file_alert` adopts it and creates
 # nothing, so a `GH POST .../issues ` regex can never match and would pass
