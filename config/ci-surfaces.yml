@@ -796,6 +796,11 @@ surfaces:
   - test_canonical.py
   - test_capture_loop_responsiveness.py  # #3365: capture ADMISSION key vs the graph the data path opens (dual: api)
   - test_capture_session.py
+  # #3945: the primary capture create site must map the extractor's validated
+  # `when` onto `validFrom` (one slot, two spellings — docs/ONTOLOGY.md §4.7).
+  # Registered beside its sibling capture tests; `tortoise/sdk.py` is a
+  # SHARED_MODULE, so an sdk.py-only change already runs the full matrix.
+  - test_capture_validfrom_3945.py
   # #2006 (W11): onboarding funnel telemetry (seed/decide events gated on the
   # COMPLETED_STEP edge's new creation). Registered under `core` for the
   # `tortoise/analytics.py` seam, which matches no SOURCE_PATTERNS entry — and
@@ -983,6 +988,15 @@ surfaces:
   - test_entity_delete_rebuild.py   # #3299 journaled delete → rebuild_all survivor rule (last_recreate_seq)
   - test_entity_stage.py
   - test_enumeration_surfaces.py
+  # #5128: the class-level half of the interpreter-guard fix — every
+  # `tools/**/*.py` + `graph-scripts/*.py` entry point must refuse a <3.12
+  # interpreter inline, before its imports (the documented `python3 tools/x.py`
+  # invocation otherwise dies with an unattributed `INTERNAL ERROR` under an
+  # ambient 3.9, e.g. `tools/branch_reaper.py` ← `datetime.UTC`).
+  # `core` is the default/fallback surface; `graph-scripts/` already selects it,
+  # and a tools-only change is covered by the per-file `tools/ci_selection.py`
+  # carve-outs (the corpus-wide reach gap is declared in the test's docstring).
+  - test_entry_point_python_guard.py
   # #4097: the env-truthiness contract + the non-divergence guard. The guard scans
   # all of `tortoise/**` + `tests/_embedded.py` for a new ad-hoc vocabulary literal or a
   # new narrow `== "1"` read, so it is registered in EVERY surface that owns a scanned
@@ -1302,6 +1316,12 @@ surfaces:
   # + the `vet_enabled` fold in `extractor_v2.py`. Registered beside its
   # sibling `test_vet_gate_5005.py` because it guards the same seam.
   - test_value_gate_4899.py
+  # #5049: the verdict contract (`tests/_verdict.py`) — condition-vs-deadline
+  # waits, INCONCLUSIVE-on-expiry, the measured `Deadline`, the host-capability
+  # gate, and the per-test process-global reset. Registered here (core) AND its
+  # helper in SHARED_MODULES: the helper is imported by tests/conftest.py at
+  # module level, so a change to it runs the full matrix.
+  - test_verdict_contract.py
   # #5059 / G5 (the existing half): the report-only definite-description
   # backfill planner (`tortoise/definite_description_backfill.py`). Hermetic
   # (no DB, no network): the census is injected and the plan is a pure
@@ -1604,6 +1624,7 @@ surfaces:
   - test_ci_timing.py
   - test_ids.py
   - test_sdk_now_iso_single_definition.py   # #5375: sdk.py must declare exactly one module-level `_now_iso` (hermetic — ast.parse + the bound global)
+  - test_validity_window_contract_5374.py   # #5374: the shared `commit_schema.validate_validity_window` contract + read-path (`_covers`) agreement (docker-lane)
   - test_log.py
   - test_longmem_reader_aggregation.py
   - test_longmem_reader_pinning.py
@@ -2225,6 +2246,7 @@ durations:
   test_subjectadded_journal.py: 1.9
   test_turnstile_signup.py: 0.9
   test_validity_windows.py: 4.4
+  test_verdict_contract.py: 0.0  # unmeasured — new in #5049; the sweeper fills this from the run's junit
   test_5365_fail_open_visible.py: 21.2  # unmeasured — local single run (5 tests); refresh from CI junit
   bench/test_degradation_chain.py: 1.3
   longmem_eval/test_measure_temporal.py: 2.2
