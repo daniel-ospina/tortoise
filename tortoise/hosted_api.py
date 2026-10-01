@@ -246,7 +246,7 @@ def _dispose_capture_executor() -> None:
 # point); fall back to `atexit` where it is unavailable, which is strictly worse
 # (too late to cancel anything) but never crashes on import.
 if hasattr(threading, "_register_atexit"):
-    threading._register_atexit(_dispose_capture_executor)  # noqa: SLF001 — the hook the stdlib itself uses
+    threading._register_atexit(_dispose_capture_executor)  # the hook the stdlib itself uses
 else:  # pragma: no cover — Python < 3.9
     atexit.register(_dispose_capture_executor)
 
