@@ -57,8 +57,8 @@ def test_sdk_declares_exactly_one_module_level_now_iso():
 
     (1) Failing value: `len(defs) != 1` — the assertion compares against the literal 1.
     (2) Reachable in the fixture: the fixture IS `tortoise/sdk.py` as checked out. On the
-        unfixed source the parse of that file yields two defs, at lines 2316 and 22459,
-        so the failing value is present and this test reds before the fix.
+        unfixed source the parse of that file yields two defs, so the failing value is
+        present and this test reds before the fix.
     """
     defs = _module_level_now_iso_defs(SDK_SOURCE)
     assert len(defs) == 1, (
@@ -74,10 +74,11 @@ def test_sdk_now_iso_first_module_level_def_is_the_bound_global():
     (1) Failing value: `defs[0] != tortoise.sdk._now_iso.__code__.co_firstlineno`. The
         first declared def must be the one import actually binds; if a later def
         overwrites it, the first is dead code and the test's two line numbers diverge.
-    (2) Reachable in the fixture: yes — on the unfixed source `defs[0]` is 2316 while the
-        bound function is at 22459, so the values differ and this test reds before the
-        fix. A single-def file can still fail this (a def shadowed by a later import or
-        assignment), so it is not merely a restatement of the count test.
+    (2) Reachable in the fixture: yes — on the unfixed source `defs[0]` is the line of the
+        earlier def while the bound function comes from the later one, so the values
+        differ and this test reds before the fix. A single-def file can still fail this
+        (a def shadowed by a later import or assignment), so it is not merely a
+        restatement of the count test.
     """
     defs = _module_level_now_iso_defs(SDK_SOURCE)
     assert defs, "tortoise/sdk.py declares no module-level `_now_iso`"
