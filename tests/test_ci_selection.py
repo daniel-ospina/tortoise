@@ -4990,12 +4990,21 @@ def test_every_changed_set_diff_disables_rename_detection():
       `npx markdownlint-cli <nonexistent.md>` exits 0, and plain `.md` deletions
       already put nonexistent paths into this list.
     * Do NOT generalise this rule to `.github/scripts/check-migration-append-only`.
-      That script deliberately runs
-      `git diff --find-renames=20% ... --name-status` because its #1235
-      pure-prefix-rename repair exception is keyed on the `R*` status (recorded
-      at `docs/plans/2026-08-13-1095-migration-drift-gate.md:148`); `--no-renames`
-      there would emit `D`+`A` and break the gate. The rule in this pin is scoped
-      to changed-set *selection* diffs; that file is a deliberate exception.
+      That script deliberately runs `git diff --find-renames=20% ... --name-status`
+      (recorded at `docs/plans/2026-08-13-1095-migration-drift-gate.md:148`).
+      Its exempt arm IS keyed on the `R*` status: #2240 scoped the exemption to a
+      git-detected forward prefix rename whose destination version sorts strictly
+      AFTER the newest applied version, with BOTH endpoints absent from
+      `supabase_migrations.schema_migrations`. A bare `M`/`D` path carries no
+      destination version, so it has no content-independent ordering bound and is
+      NEVER admitted — it falls through to KEEP and is reported as a violation.
+      The old justification ("`--no-renames` would break the gate") therefore
+      holds again: `--find-renames=20%` is what lets a HIGH-SIMILARITY forward
+      renumber report as one `R<sim>` line and reach the exempt arm at all; a
+      re-land carrying a real content delta still degrades to `D`+`A` even with
+      the flag set, and that form is now reported rather than exempted.
+      The rule in this pin is scoped to changed-set
+      *selection* diffs; that file is a deliberate exception.
     """
     root = Path(__file__).resolve().parents[1]
     wf_dir = root / ".github" / "workflows"

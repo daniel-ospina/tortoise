@@ -1111,7 +1111,14 @@ def test_migration_adds_capture_token_columns_and_reissues_the_rpc(monkeypatch):
 
     migdir = (Path(__file__).resolve().parent.parent / "supabase"
               / "migrations")
-    mig = (migdir / "20260926000001_metering_capture_tokens.sql").read_text()
+    # Resolve by name, not by a hardcoded version prefix: the capture-tokens
+    # migration is renumbered by the re-land policy (#2240), and a literal
+    # prefix turns every renumber into a FileNotFoundError here.
+    cap_tokens = sorted(migdir.glob("*_metering_capture_tokens.sql"))
+    assert len(cap_tokens) == 1, (
+        f"expected exactly one capture-tokens migration, found {cap_tokens}"
+    )
+    mig = cap_tokens[0].read_text()
 
     # (a) the additive columns, NOT NULL DEFAULT 0 (load-bearing, per comment)
     assert ("ADD COLUMN IF NOT EXISTS capture_tokens_in  bigint NOT NULL "

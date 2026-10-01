@@ -537,6 +537,53 @@ def test_legacy_matcher_exempts_same_families():
     ) == [], "truncated -v line must not red via the filename's FalkorDB substring"
 
 
+def test_inconclusive_reason_needs_no_exemption(tmp_path):
+    """#5049: the contract's INCONCLUSIVE family names NO availability class.
+
+    A deadline-class skip therefore cannot trip the guard's FalkorDB/embedder
+    trips, and `tools/skip-guard.py` is UNCHANGED by #5049 — no exemption was
+    added for it. Pinned on BOTH matcher paths (the legacy line matcher and the
+    junitxml one), and the exemption list is pinned directly: an exemption here
+    would be invisible until a real availability regression happened to arrive
+    wrapped in the contract's wording — at which point the guard would silently
+    green it.
+    """
+    module = _load_skip_guard_module()
+    assert not any(
+        "INCONCLUSIVE" in prefix for prefix in module._EXEMPT_REASON_PREFIXES
+    ), "the INCONCLUSIVE family must not be added to the guard's exemption list"
+    # Build the reason from the REAL emitter, so this pin is coupled to what
+    # `tests/_verdict.py` actually emits — not to a hand-copied replica that
+    # would keep passing if `inconclusive()` began emitting a matched token.
+    import pytest
+
+    from tests import _verdict
+
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        _verdict.inconclusive(
+            "the fork counter (`INFO`) could not be read, so non-vacuity is "
+            "unproven (a PASS here would prove nothing)",
+            deadline_s=4.0,
+            diagnosis="last error 'Timeout reading from socket'",
+        )
+    reason = str(excinfo.value)
+    assert reason.startswith(_verdict.INCONCLUSIVE_PREFIX)
+    assert module.is_falkor_reason_violation(reason) is False
+    assert module.is_embedder_reason_violation(reason) is False
+    assert module.find_violations(
+        f"SKIPPED [1] tests/test_fork_safety_3845.py:430: {reason}\n"
+    ) == [], "an INCONCLUSIVE deadline skip must not trip the legacy matcher"
+    rc = run_guard_with_manifest(
+        str(tmp_path / "pytest.log"),
+        junit=_write(
+            tmp_path,
+            "junit.xml",
+            JUNIT_SKIPPED.replace("redislite unavailable", reason),
+        ),
+    )
+    assert rc == 0, "the junitxml matcher must not red an INCONCLUSIVE skip"
+
+
 # ── --emit-manifest: the coverage-manifest GENERATOR (epic #1647 Task 6) ──
 # Task 3 implemented the consumer (--manifest reconciliation against the
 # junitxml). Task 6 adds the producer: `pytest <files> --collect-only -q
