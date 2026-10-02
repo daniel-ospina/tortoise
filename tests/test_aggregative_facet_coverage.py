@@ -166,6 +166,25 @@ def _question() -> dict:
 
 # ── (b) facet coverage on the planted multi-facet fixture ─────────────────
 
+def test_terminal_object_anchor_still_resolves(seeded_sdk):
+    """#3301: the anchor census is a RESOLUTION path, never a surfaced
+    result, so a terminal Object must still resolve as an anchor. Without the
+    ``excluded_statuses=()`` opt-out the widened Object exclusion would make
+    the census return ``None`` here."""
+    from tortoise.aggregate import collect_anchor_census
+
+    proj = seeded_sdk._get_proj()
+    proj.g.query(
+        "MATCH (o:Object {name:$name}) SET o.status='superseded'",
+        params={"name": ENTITY_ANCHOR})
+    census = collect_anchor_census(proj, QUESTION)
+    assert census is not None, (
+        "a terminal Object must still resolve as an anchor "
+        "(the census is resolution, not a surfaced search)")
+    anchors, _points, _truncated = census
+    assert [a["name"] for a in anchors] == [ENTITY_ANCHOR]
+
+
 def test_partial_coverage_reports_missing_starved_session(seeded_sdk):
     """The #2513 partial-evidence miss class, measured e2e: the eval's
     ranked top-k window (``pool[:top_k]``) surfaces the two FTS-matching

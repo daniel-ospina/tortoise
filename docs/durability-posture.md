@@ -43,7 +43,9 @@ persistence plus an off-box copy of it.** Nothing else.
   changed fold logic, migrates engines, and audits beyond `:GraphEvent`'s 30-day
   window. **It is never the durability mechanism.** It is written outside the
   store's transaction, so it cannot be the authority, and it is not complete:
-  a lane with no `event_log_path` (the hosted write path, `tortoise/sdk.py:3416`)
+  a lane with no `event_log_path` (the hosted write path **when
+  `TORTOISE_EVENT_LOG_BASE_DIR` is unset** — `hosted_api._resolve_event_log_path`
+  returns None; the gate is `tortoise/sdk.py::TortoiseSDK._get_event_log`)
   journals nothing, pre-#2194/#2295 journals miss first-registration writes, and
   raw-Cypher paths have no event at all — so a wipe-and-replay rebuilds only what
   the log holds, not the graph (`tortoise/consistency.py::recover_from_log`
@@ -261,8 +263,7 @@ creation value on a rebuild, and the `embedding_verbatim` marker it sets is
 the vector unmarked would trade this declared marker gap for an undeclared
 byte-level vector divergence on the LATER, journaled `promote_point` re-emit);
 a stale `PointPromoted` predating a `delete → recreate` re-applies the dead
-incarnation's derived fields — the `#2884 A7` gate is belief-only by a recorded
-#785 decision (**#5068**).
+incarnation's derived fields — the `#2884 A7` gate is belief-only by a recorded #785 decision (**#5068**).
 
 | Deployment | Mechanism (where the data lives) | Honest loss window | Strongest verification actually performed |
 |---|---|---|---|
