@@ -862,6 +862,10 @@ surfaces:
   - test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan
   - test_session_attribution.py
   - test_ci_selection.py
+  # #6142: the last-failed fast-fail pre-phase's shape — that it never narrows
+  # the GATING run, is PR-only and fail-open, and keys its cache per
+  # (job, half, ref). Hermetic (reads the workflow YAML; no DB, no network).
+  - test_ci_last_failed.py
   # #6673: the docker-lane service ports are EPHEMERAL (a `services:` block's
   # fixed host ports collided across runners sharing one Docker daemon and made
   # the runner abort in `initialize_containers`). Hermetic — it pins
