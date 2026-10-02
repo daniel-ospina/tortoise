@@ -334,6 +334,32 @@ def test_heartbeat_emits_progress_line():
     assert "s3" in lines[-1]
 
 
+def test_heartbeat_line_reports_the_stage_that_just_finished():
+    """The emitted line must show how long the PREVIOUS stage ran.
+
+    `beat` resets the progress clock, so rendering after the reset printed
+    `idle=0.0s` on every line — the one number #2969 exists to surface was
+    always zero. This fails if the gap is captured after the reset (that
+    revert left every other case in this file green).
+    """
+    clock = _FakeClock()
+    lines: list[str] = []
+    hb = Heartbeat(label="q42", stall_timeout_s=100.0, emit_interval_s=0.0,
+                   clock=clock, emit=lines.append)
+    hb.beat("s0:phase-a")
+    assert "idle=0.0s" in lines[-1]  # first beat: nothing has run yet
+    clock.advance(50.0)
+    hb.beat("s0:phase-b")
+    assert "idle=50.0s" in lines[-1]
+    assert "total=50.0s" in lines[-1]
+    # The reading is a report, not an enforcement input: `check` must still see
+    # the budget as intact at 50s and blown past it.
+    hb.check()
+    clock.advance(101.0)  # past the 100s budget, measured from the last beat
+    with pytest.raises(IngestStallTimeout):
+        hb.check()
+
+
 def test_stall_budget_resolution(monkeypatch):
     monkeypatch.delenv(ENV_STALL_TIMEOUT, raising=False)
     assert resolve_stall_timeout_s() == DEFAULT_STALL_TIMEOUT_S
