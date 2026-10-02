@@ -6,14 +6,18 @@ a citation in the generated doc cannot be wrong. What it CAN still do is go
 and that is exactly the drift the generator's own docstring promises cannot
 happen. Nothing ran `--check`, so the promise was unenforced.
 
-This is the enforcement. It is deliberately a test rather than a workflow step:
-the generator imports cleanly with no database, no API key and no network, so it
-runs with the ordinary suite. It is registered in BOTH `api` and `core` in
+This is the enforcement, and since #4454 it is doubled: the ordinary suite runs
+it on any PR that selects `core` or `api`, and the required `docs` job runs
+`tools/bridge_table.py --check` on EVERY PR — including the docs-only edits this
+test cannot see. The generator imports cleanly with no database, no API key and
+no network, which is why it can run in both places. It is registered in BOTH `api` and `core` in
 `config/ci-surfaces.yml`, and `tools/bridge_table.py` is named in the `api`
 SOURCE_PATTERNS — because `tools/` and `docs/` are in NON_PYTHON_PREFIXES, an
 edit to the generator alone used to select NO surface, so the gate did not run on
-the PR that can break it. Residual: a change touching ONLY the docs skips the
-matrix by the repo's deliberate docs-PR policy (filed as tortoise #4454).
+the PR that can break it. A change touching ONLY the docs still skips the matrix
+by the repo's deliberate docs-PR policy; that direction is covered by the `docs`
+job's `--check` instead, which is why the step has to live there rather than here
+(#4454).
 """
 from __future__ import annotations
 
