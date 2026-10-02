@@ -4020,9 +4020,23 @@ def test_docs_job_guards_tracked_generated_artifacts_on_every_pr():
             "with a doctored image they pass vacuously and the drift step's own "
             "shape stays clean (#2656)"
         )
-    # A sibling step can also inject the shim, without touching the drift step at
-    # all: append a directory holding an `exit 0` stub named `python3` to
-    # `$GITHUB_PATH`. Measured GREEN before this assertion.
+    # A sibling step can also inject the shim without touching the drift step at
+    # all: appending a directory holding an `exit 0` stub named `python3` to
+    # `$GITHUB_PATH` leaves the drift step's own shape pristine.
+    #
+    # This scan catches that spelling. It is deliberately NOT claimed as a
+    # control over the whole family, because a substring test can only enumerate
+    # spellings and the family is open: measured GREEN, each leaving the drift
+    # step pristine — an obfuscated
+    # `>> "$(env | sed -n 's/^GITHUB_PA''TH=//p')"`, a stub interpreter written
+    # to /usr/local/bin/python3, and overwriting a generator under `tools/`.
+    #
+    # A deliberate `ci.yml` edit defeats every assertion in this file by
+    # construction (it can delete this step, or replace the job with `run: exit
+    # 0`), so bounding that arms race is not what these pins are for. What they
+    # pin is the plausible ACCIDENTAL silencer plus the exact invocation, i.e.
+    # that a well-meaning edit cannot leave the guard looking present while not
+    # running — which is #4454's actual outcome.
     _shim_writers = sorted(
         str(s.get("name") or s.get("uses") or "<unnamed>")
         for s in docs_job.get("steps") or []
@@ -4032,10 +4046,9 @@ def test_docs_job_guards_tracked_generated_artifacts_on_every_pr():
         )
     )
     assert not _shim_writers, (
-        f"no step besides the drift check may write `$GITHUB_PATH`/`$GITHUB_ENV` "
-        f"(found: {_shim_writers}) — appending a shim directory makes `python3` "
-        "resolve to a stub that exits 0, leaving the drift step's own shape "
-        "clean (#2656)"
+        f"a sibling step writes `$GITHUB_PATH`/`$GITHUB_ENV` (found: "
+        f"{_shim_writers}) — appending a shim directory makes `python3` resolve "
+        "to a stub that exits 0, leaving the drift step's own shape clean (#2656)"
     )
     # A job-level `continue-on-error` silences the whole job (and so the required
     # context); `needs:` is subtler and worse — an upstream failure SKIPS the job
