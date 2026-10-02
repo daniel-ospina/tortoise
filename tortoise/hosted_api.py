@@ -135,7 +135,9 @@ from tortoise.sdk import (
     _capture_turn_role_text,  # #4675: the inverse of the stored turn format
     _capture_turn_texts_with_redactions,  # #4911: the ONE stored-turn text definition + its redaction count
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
+    _derive_graph_name,  # #4240 F2: the ONE namespace/graph_name → graph derivation
     _emit_capture_observation,  # #2335 WI-1d: observation leg (hosted lane tag)
+    _journal_write_failure_warning,  # #4240 F1: the shared "a journal append failed" receipt warning
     _session_capture_event_id,  # W5 Phase F (#2104): deterministic sessionCaptured Event id
     _session_extraction_estimate,  # #1532 D4: v2-aware pre-write quota estimate
     _session_llm_transcript,  # P1 #1529: the shared empty/blank conversation gate
@@ -711,6 +713,75 @@ def _resolve_embedded_db_path() -> str:
     return db_path
 
 
+#: #4240 — base dir for the hosted lane's per-graph JSONL rebuild journal.
+#: Unset ⇒ **no journal** (byte-identical to pre-#4240: the lane journals
+#: nothing). Set ⇒ every hosted data SDK is built with an ``event_log_path``,
+#: so the JSONL-only reassembly records (``EntityLinked``, ``SessionRecorded``,
+#: ``ObjectRegistered``, ``PointAdded``, ``EntityMutated``) actually land and
+#: ``rebuild_all`` / ``rebuild`` / ``recover_from_log`` can reconstruct the
+#: capture — closing the #2296 live-only-edge hazard for this lane.
+#: ⚠️ The JSONL is a DOMAIN EVENT LOG, **never the durability mechanism**
+#: (``docs/durability-posture.md``): it makes the derived graph REBUILDABLE,
+#: it does not keep it alive.
+#: ⚠️ Records are fail-soft at the write site (a failed append is counted and
+#: logged, never raised — the graph mutation already succeeded). The deployed
+#: guard is ``entrypoint.sh``'s boot-time WRITABILITY probe (not just
+#: ``mkdir -p``): a base dir that exists but cannot be written fails the boot
+#: loudly for a NON-ROOT uid (mode bits), and for EROFS/ENOSPC on ANY uid
+#: (root cannot bypass those). It does NOT cover a mode-bit failure when the
+#: server runs as root — ``Dockerfile.hosted`` sets no ``USER``, so on Fly the
+#: process is uid 0 and the probe write succeeds on a mode-0500 dir. That case
+#: is covered by the runtime signal, not the boot: a failed append logs at
+#: ERROR, increments ``tortoise_journal_write_failures_total`` and is disclosed
+#: on the capture receipt (``TortoiseSDK._emit_event``). A journal that starts
+#: failing AFTER that probe (the foreseeable trigger is ENOSPC once the journal
+#: grows below the volume's free space) is recorded, not fatal — see #5612 and
+#: ``TortoiseSDK._emit_event``.
+_HOSTED_EVENT_LOG_ENV = "TORTOISE_EVENT_LOG_BASE_DIR"
+
+
+#: The graph-name charset ``TortoiseSDK.__init__`` enforces (namespace and
+#: graph_name alike). The journal key must satisfy it or it can escape base.
+_JOURNAL_KEY_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$")
+
+
+def _resolve_event_log_path(*, namespace: str | None,
+                            graph_name: str | None) -> str | None:
+    """Per-graph JSONL rebuild journal path for the hosted lane (#4240).
+
+    ONE file per graph under ``TORTOISE_EVENT_LOG_BASE_DIR``, so a rebuild of a
+    graph replays exactly its own journal and two orgs can never share one. The
+    key is the SDK's OWN derived graph name (``sdk._derive_graph_name``) — the
+    ONE derivation of namespace/graph_name → graph, so the journal can never
+    name a graph the SDK did not open. A local re-derivation is the divergence
+    class the #4240 review found: the branches are not obvious
+    (``namespace="test-foo"`` opens ``test_foo_tortoise``, NOT ``org_test-foo``).
+
+    Returns ``None`` when the base dir is unset — no journal (the pre-#4240
+    behaviour; embedded/dev/CI stay journal-less) — and for the registry
+    control plane / the unnamed default graph, which are not org data graphs
+    and are never rebuilt from this journal.
+
+    Charset: the key is validated against the SDK's OWN graph-name rule and a
+    violation RAISES. Sanitizing instead would silently key the journal to a
+    directory no graph uses — and the prior guard kept ``.``, so a ``..`` key
+    survived until ``TortoiseSDK.__init__`` rejected it, i.e. the stated
+    anti-traversal guard was dead.
+    """
+    base = os.environ.get(_HOSTED_EVENT_LOG_ENV)
+    if not base:
+        return None
+    if graph_name is None and (not namespace or namespace == "registry"):
+        return None
+    key = _derive_graph_name(namespace=namespace, graph_name=graph_name)
+    if not _JOURNAL_KEY_RE.match(key):
+        raise ValueError(
+            f"refusing to build a journal path for unsafe key {key!r} "
+            f"(namespace={namespace!r}, graph_name={graph_name!r}) — it is not "
+            "a valid graph name and could escape the journal base dir")
+    return os.path.join(base, key, "events.jsonl")
+
+
 def _make_sdk(*, namespace: str | None = None,
               graph_name: str | None = None) -> TortoiseSDK:
     """Build an SDK backed by TORTOISE_DB_URI, or embedded mode when unset.
@@ -720,6 +791,12 @@ def _make_sdk(*, namespace: str | None = None,
     graph-name seam — never a namespace (which would prepend ``org_``).
     Exactly one of namespace/graph_name is set by callers.
 
+    #4240: the SDK is built with the per-graph JSONL rebuild journal
+    (``_resolve_event_log_path``) whenever ``TORTOISE_EVENT_LOG_BASE_DIR`` is
+    set. Every hosted data write then lands in the journal, so the derived
+    graph is ``replay(journal)`` — the property the rebuild engines need. When
+    the base dir is unset the SDK is journal-less, byte-identical to pre-#4240.
+
     Embedded fallback: when no URI is configured (fly.toml default), the SDK
     previously received no path and FalkorProjection raised
     "Either path or host must be provided" — every /internal/provision call
@@ -727,8 +804,11 @@ def _make_sdk(*, namespace: str | None = None,
     until a production FalkorDB instance is provisioned (#7722).
     """
     key = graph_name if graph_name is not None else (namespace or "")
+    event_log_path = _resolve_event_log_path(
+        namespace=namespace, graph_name=graph_name)
     if os.environ.get("TORTOISE_DB_URI"):
-        return TortoiseSDK(namespace=namespace, graph_name=graph_name)
+        return TortoiseSDK(namespace=namespace, graph_name=graph_name,
+                           event_log_path=event_log_path)
     # The anchor AND the per-request SDK must agree on this path or the anchor
     # pins a stray server while requests close-on-GC the real one (the #1475
     # regression silently persists). _resolve_embedded_db_path is the single
@@ -766,7 +846,8 @@ def _make_sdk(*, namespace: str | None = None,
                 anchor = None
             if anchor is None:
                 anchor = TortoiseSDK(db_path=db_path, namespace=namespace,
-                                     graph_name=graph_name)
+                                     graph_name=graph_name,
+                                     event_log_path=event_log_path)
                 try:  # noqa: SIM105
                     anchor._get_proj()  # eager: hold the connection so the server survives
                 except Exception:
@@ -776,7 +857,8 @@ def _make_sdk(*, namespace: str | None = None,
                     pass
                 _FALLBACK_KEEPALIVE.setdefault(key, anchor)
     sdk = TortoiseSDK(db_path=db_path, namespace=namespace,
-                      graph_name=graph_name)
+                      graph_name=graph_name,
+                      event_log_path=event_log_path)
     return sdk
 
 
@@ -11007,6 +11089,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     now = datetime.now(UTC).isoformat()
     sdk, proj, session_row = await _capture_session_probe_off_loop(
         org, session_id)
+    # #5632: snapshot the LIFETIME journal-failure counter at the START of THIS
+    # capture so the hosted receipt below discloses only appends that failed
+    # DURING it — byte-parity with the SDK lane (``sdk.capture_session``).
+    _journal_failures_before = sdk._journal_write_failures
     # #1727 (review PR #1827) TOCTOU: two concurrent POSTs with the same
     # FRESH session_id can both observe session_existed=False and mint a
     # sessionCaptured Event (narrow race) — sequential retries converge
@@ -12281,6 +12367,23 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     if _capture_redactions:
         extraction_warnings.append(
             _capture_redaction_warning(_capture_redactions))
+    # #4240 review F1: a journal append that failed during THIS capture is
+    # disclosed on the HOSTED receipt too. The hosted lane builds its own
+    # receipt (it never calls ``sdk.capture_session``), so without this the
+    # customer could not see that the capture is live-only — only the operator
+    # counter/ERROR log showed it. Byte-parity with the SDK lane via the shared
+    # helper, and appended only when non-zero so an ordinary capture's warning
+    # list is unchanged. Deliberately INDEPENDENT of the capture outcome: the
+    # graph write persisted, so the envelope stays successful (``status``
+    # ``"ok"``; the hosted receipt carries no literal ``ok`` key) and the
+    # warning names the journal residue — flipping the outcome would trip the
+    # #2335 TRUE-retry gate over a persisted write. #5632: the count is THIS
+    # capture's DELTA (``_journal_failures_before``), not the lifetime counter.
+    _capture_journal_failures = (
+        sdk._journal_write_failures - _journal_failures_before)
+    if _capture_journal_failures > 0:
+        extraction_warnings.append(
+            _journal_write_failure_warning(_capture_journal_failures))
     resp = {"session_id": session_id, "turns": len(body.conversation),
             "extracted": len(extracted), "points": extracted,
             "surfaced": surfaced,
@@ -26411,13 +26514,14 @@ def _relink_sessions_after_index(org_id: str) -> None:
     """
     try:
         from .session_link import link_session_entities
-        # #3664: pass the SDK so the re-linked edges CAN be journaled — but on
-        # this lane _make_sdk/_data_sdk set no `event_log_path` and
-        # `EntityLinked` is JSONL-only (absent from _GRAPH_EVENT_TYPES), so
-        # `sdk._emit_event` is a no-op here (the same lane limit the turn
-        # record's note in _capture_session_impl documents). The re-linked
-        # edges are therefore live-only on the hosted lane; the JSONL-journal
-        # gap is filed as #4240. Do NOT read the `sdk=` argument as journaling.
+        # #3664/#4240: pass the SDK so the re-linked edges ARE journaled. The
+        # journal path comes from ``_make_sdk`` → ``_resolve_event_log_path``:
+        # when ``TORTOISE_EVENT_LOG_BASE_DIR`` is set the SDK carries an
+        # ``event_log_path`` and each new edge emits an ``EntityLinked`` record
+        # that the projection folds back on replay. When the base dir is unset
+        # the SDK is journal-less and ``sdk._emit_event`` is a no-op on
+        # ``EntityLinked`` (JSONL-only, absent from ``_GRAPH_EVENT_TYPES``), so
+        # the edges stay live-only — the documented unconfigured-lane bound.
         _link_sdk = _make_sdk(namespace=org_id)
         proj = _link_sdk._get_proj()
         rows = proj.g.query(

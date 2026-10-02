@@ -225,6 +225,26 @@ def _capture_redaction_warning(count: int) -> str:
         f"except for those spans"
     )
 
+
+def _journal_write_failure_warning(count: int) -> str:
+    """#4240 review F1: the additive warning a capture carries when a journal
+    append failed on a CONFIGURED journal.
+
+    One canonical string, shared with ``hosted_api._capture_session_impl``
+    (byte-parity: both lanes must describe the same event identically — the
+    hosted lane builds its OWN receipt and never calls ``capture_session``, so
+    without this the disclosure would exist only on the SDK lane), naming that
+    THIS capture's records never reached the journal and a later rebuild will
+    therefore lose them. Deliberately independent of the capture's ``ok`` flag:
+    the graph write persisted, and marking it failed would trip the #2335
+    TRUE-retry gate over a write that was in fact persisted.
+    """
+    return (
+        f"journal append failed {count}x — this capture is live-only and will "
+        f"not survive a rebuild (#4240)"
+    )
+
+
 #: #3892: a keyless session re-captured WITH a key while the deployment is on
 #: the NON-convergent M2 lane. The re-attempt is refused (re-running M2 could
 #: mint duplicate claims), so the re-capture replays — said OUT LOUD, because
@@ -1370,9 +1390,10 @@ def _write_capture_turns(
     # the CONTAINS link is a capture-write structural fact (ONTOLOGY §4.5),
     # restored by the projection's edge fold without inventing a node
     # property the live write never sets. Gated on a configured journal: on a
-    # lane with no `event_log_path` (`_make_sdk`/`_data_sdk` pass none) the
-    # JSONL half is a no-op and the `:GraphEvent` half is not a rebuild
-    # source — `ensure_event_schema` + `next_seq` + `append_event` per turn
+    # lane with no `event_log_path` (a hosted SDK when
+    # `TORTOISE_EVENT_LOG_BASE_DIR` is unset; #4240) the JSONL half is a
+    # no-op and the `:GraphEvent` half is not a rebuild source —
+    # `ensure_event_schema` + `next_seq` + `append_event` per turn
     # there buys no durability on the very lane #3086 measures.
     if sdk._get_event_log() is None:
         return redacted_total
@@ -2921,6 +2942,58 @@ HOLDS_ROLE_UNAVAILABLE = (
 )
 
 
+def _derive_graph_name(*, namespace: str | None,
+                       graph_name: str | None,
+                       uri_graph: str | None = None) -> str:
+    """The SDK's ONE namespace/graph_name → DB graph-name derivation.
+
+    Extracted from ``_get_proj`` (#4240 review F2) so a caller that must name
+    the graph OUTSIDE a projection derives it identically instead of
+    re-implementing the branches. The hosted lane's per-graph journal path is
+    exactly such a caller: a second derivation there would key the journal to a
+    graph the SDK never opens (a rebuild would replay the wrong file), and the
+    branches are not obvious — ``namespace="test-foo"`` opens
+    ``test_foo_tortoise``, NOT ``org_test-foo``.
+
+    Precedence is unchanged from ``_get_proj`` (in order): registry control
+    plane → explicit ``graph_name`` verbatim → namespace (test_*/
+    tortoise_test* → ``{ns}_tortoise``, hyphenated test-* → normalized to
+    ``test_<ns>_tortoise``, otherwise ``org_{ns}``) → the URI's own graph,
+    else ``tortoise``.
+    """
+    if namespace == "registry":
+        # Control-plane SDK: shared registry main graph.
+        return "registry_tortoise"
+    if graph_name is not None:
+        # C5 #2114 (D-C5-1): explicit graph-name override (a custom
+        # org_{tid}_{gid} graph). Never a namespace derivation — the name is
+        # used verbatim.
+        return graph_name
+    if namespace:
+        if namespace.startswith(("test_", "tortoise_test")):
+            # Test namespace: isolate on a test-prefixed graph so the
+            # _assert_test_graph guard still passes (#221). Matches the
+            # historical {ns}_tortoise naming.
+            return f"{namespace}_tortoise"
+        if namespace.startswith("test-"):
+            # Epic #1647 (T7, cycle-5 P1-5): the hyphenated test-* family
+            # (test-tiers, test-invites, test-hosted, test-e1, test-org-722,
+            # ...) is a TEST namespace too — normalize '-' → '_' so it maps to
+            # the guard-passing test_<ns>_tortoise graph (test-tiers →
+            # test_tiers_tortoise). Without the branch it falls into org_<ns>
+            # (org_test-tiers) — a NON-test graph that is invisible to
+            # `grep -v 'namespace="test_'` and fails _assert_test_graph on
+            # bulk wipe.
+            return f"{namespace.replace('-', '_')}_tortoise"
+        # Org SDK: isolated org graph (matches provision's org_{org_id}
+        # namespace creation, #7886).
+        return f"org_{namespace}"
+    # No namespace: honor the URI's own graph (the conftest session graph for
+    # tests). Fixes #7886 regression that hardcoded 'tortoise' and clobbered
+    # the test graph.
+    return uri_graph or "tortoise"
+
+
 def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
                           stored_vf, successor_created_at, now):
     """Resolve the predecessor's window END and refuse an inverted window (#4021).
@@ -3171,6 +3244,12 @@ class TortoiseSDK:
         self._graph_name = graph_name
         self._event_log_path = event_log_path
         self._event_log = None  # lazy-init EventLog (#548)
+        # #4240 review F1: count journal appends that failed on a CONFIGURED
+        # journal. A configured journal that cannot record makes the derived
+        # graph live-only, so a failure is a real degradation — it is counted
+        # (monitoring.record_journal_write_failure) and disclosed on the next
+        # capture receipt instead of being only a log line.
+        self._journal_write_failures = 0
         # Epic #900 §5.3 (cycle-21): cross-process embedded overlap probe —
         # fail-fast when another PROCESS holds this embedded store (redislite
         # pid-registry + liveness probe). Same-process threads reuse the daemon
@@ -3291,40 +3370,9 @@ class TortoiseSDK:
                 from urllib.parse import urlparse
                 uri_graph = urlparse(self._db_uri).path.lstrip('/') or "tortoise"
 
-            if self._namespace == "registry":
-                # Control-plane SDK: shared registry main graph.
-                graph_name = "registry_tortoise"
-            elif self._graph_name is not None:
-                # C5 #2114 (D-C5-1): explicit graph-name override (a custom
-                # org_{tid}_{gid} graph). Never a namespace derivation — the
-                # name is used verbatim.
-                graph_name = self._graph_name
-            elif self._namespace:
-                if self._namespace.startswith(("test_", "tortoise_test")):
-                    # Test namespace: isolate on a test-prefixed graph so the
-                    # _assert_test_graph guard still passes (#221). Matches the
-                    # historical {ns}_tortoise naming.
-                    graph_name = f"{self._namespace}_tortoise"
-                elif self._namespace.startswith("test-"):
-                    # Epic #1647 (T7, cycle-5 P1-5): the hyphenated test-*
-                    # family (test-tiers, test-invites, test-hosted, test-e1,
-                    # test-org-722, ...) is a TEST namespace too — normalize
-                    # '-' → '_' so it maps to the guard-passing
-                    # test_<ns>_tortoise graph (test-tiers →
-                    # test_tiers_tortoise). Without the branch it falls
-                    # into org_<ns> (org_test-tiers) — a NON-test graph that
-                    # is invisible to `grep -v 'namespace="test_'` and fails
-                    # _assert_test_graph on bulk wipe.
-                    graph_name = f"{self._namespace.replace('-', '_')}_tortoise"
-                else:
-                    # Org SDK: isolated org graph (matches provision's
-                    # org_{org_id} namespace creation, #7886).
-                    graph_name = f"org_{self._namespace}"
-            else:
-                # No namespace: honor the URI's own graph (the conftest
-                # session graph for tests). Fixes #7886 regression that
-                # hardcoded 'tortoise' and clobbered the test graph.
-                graph_name = uri_graph or "tortoise"
+            graph_name = _derive_graph_name(
+                namespace=self._namespace, graph_name=self._graph_name,
+                uri_graph=uri_graph)
             if self._db_uri is not None:
                 # Multi-tenant isolation (#7886): pass the namespaced graph
                 # name so tenants never share the URI's default graph.
@@ -3782,8 +3830,35 @@ class TortoiseSDK:
             # not crash the caller or pretend the write failed. Rebuild parity
             # is best-effort here: rebuild_all's graph snapshot catches any
             # point missing from the log on the next rebuild (#548).
-            _logger.warning(
-                "failed to append %s event to SDK log %s: %s",
+            #
+            # #4240 review F1: on a CONFIGURED journal that posture is the
+            # silent-live-only hazard the journal exists to close, so the
+            # failure must not be a bare WARNING. Never raise (the write
+            # succeeded, and raising would hand the caller a failure for it),
+            # but count it (`monitoring.record_journal_write_failure`, carried
+            # by ``monitoring.metrics()``) and return it to the caller through
+            # ``capture_session``'s receipt warning below.
+            # Residual (deliberate, recorded on #5612): a journal that starts
+            # failing AFTER the entrypoint's boot-time writability probe — the
+            # probe catches a NON-ROOT mode-bit failure and EROFS/ENOSPC on any
+            # uid, but NOT a mode-bit failure under root (the image has no USER,
+            # so on Fly the process is uid 0; F1 cycle 2) — is still fail-soft.
+            # The foreseeable trigger is ENOSPC once the journal has grown below
+            # the volume's free space. The record is lost
+            # from the journal, `rebuild_all` reconstructs only what the
+            # journal holds (so a later rebuild cannot restore that write), and
+            # the ONLY signals are this ERROR log, the failure counter and the
+            # capture-receipt warning. It is not fatal by design: the graph
+            # mutation stands, and failing the request would lose a write that
+            # actually persisted.
+            self._journal_write_failures += 1
+            try:  # noqa: SIM105 — counting must never mask the original error
+                monitoring.record_journal_write_failure()
+            except Exception:  # noqa: BLE001, RUF100
+                pass
+            _logger.error(
+                "failed to append %s event to SDK log %s: %s — the write is "
+                "LIVE-ONLY and will not survive a rebuild (#4240)",
                 type_, self._event_log_path, exc,
             )
 
@@ -4663,6 +4738,13 @@ class TortoiseSDK:
         proj = self._get_proj()
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
+        # #5632: snapshot the LIFETIME journal-failure counter at the START of
+        # THIS capture. The receipt below must disclose only appends that
+        # failed DURING it — a failure from an earlier, unrelated write on this
+        # SDK used to make every later capture falsely report itself
+        # live-only, forever. The counter itself stays lifetime (monitoring
+        # reads it; no other consumer changes).
+        _journal_failures_before = self._journal_write_failures
 
         if len(conversation) > max_turns:
             # #2335 WI-1c: the self-host turn-cap refusal is a structured
@@ -5385,6 +5467,22 @@ class TortoiseSDK:
         if _capture_redactions:
             extraction_warnings.append(
                 _capture_redaction_warning(_capture_redactions))
+        # #4240 review F1: a journal append that failed during this capture is
+        # disclosed on the receipt. ``ok`` stays True — the graph write
+        # succeeded, and flipping it would mark the capture failed, which the
+        # #2335 TRUE-retry gate would then RE-RUN (duplicating extraction) over
+        # a write that was in fact persisted. Additive and present only when
+        # non-zero, so an ordinary capture's warning list is unchanged. The same
+        # failure also increments ``tortoise_journal_write_failures_total``
+        # (monitoring) and logs at ERROR — a receipt alone is only seen by the
+        # caller of a capture that happened to fail. #5632: the count is THIS
+        # capture's DELTA (``_journal_failures_before``), not the lifetime
+        # counter — an earlier failed write is not this capture's residue.
+        _capture_journal_failures = (
+            self._journal_write_failures - _journal_failures_before)
+        if _capture_journal_failures > 0:
+            extraction_warnings.append(
+                _journal_write_failure_warning(_capture_journal_failures))
         resp = {
             "session_id": session_id,
             "turns": len(conversation),
@@ -5826,8 +5924,8 @@ class TortoiseSDK:
         # `event_log_path` (a journal-less SDK's `_emit_event` is a no-op).
         # The claim → Object edges below are routed through the shared
         # journaled writer, so they survive rebuild_all when such a journal is
-        # configured — without one they stay live-only (the hosted lane's
-        # `_make_sdk`/`_data_sdk` set no `event_log_path`). The SESSION-level
+        # configured — without one they stay live-only (a hosted SDK built with
+        # `TORTOISE_EVENT_LOG_BASE_DIR` unset has no journal; #4240). The SESSION-level
         # attachment is owned by the
         # conversation-reference link pass (session_link.link_session_entities,
         # WorkItem Objects) — deliberately NOT the extractor's per-claim
