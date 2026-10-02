@@ -263,8 +263,7 @@ creation value on a rebuild, and the `embedding_verbatim` marker it sets is
 the vector unmarked would trade this declared marker gap for an undeclared
 byte-level vector divergence on the LATER, journaled `promote_point` re-emit);
 a stale `PointPromoted` predating a `delete → recreate` re-applies the dead
-incarnation's derived fields — the `#2884 A7` gate is belief-only by a recorded
-#785 decision (**#5068**).
+incarnation's derived fields — the `#2884 A7` gate is belief-only by a recorded #785 decision (**#5068**).
 
 | Deployment | Mechanism (where the data lives) | Honest loss window | Strongest verification actually performed |
 |---|---|---|---|
