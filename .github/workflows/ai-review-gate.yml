@@ -54,7 +54,7 @@ name: ai-review-gate
 # signed marker text as an append-only PR COMMENT as well as into the body;
 # this gate unions the two channels, so a body edit cannot hide evidence that
 # still exists in a comment. The channel is empty until a producer writes to it
-# (see "Producer status" in docs/ai-review-gate.md), and the gate reads it the
+# (see the #1224 "Producer status" note in docs/ai-review-gate.md), and the gate reads it the
 # moment one does.
 #
 # ⛔ The CHANNEL is not a trust boundary and this changes NO security property.
@@ -78,7 +78,7 @@ name: ai-review-gate
 # Comment admission is AUTHOR-FILTERED by `PR_EVIDENCE_COMMENTS_JQ`, a jq
 # constant that must stay BYTE-IDENTICAL to the producer's copy once the producer
 # half of #1224 lands (record-review.sh, check-pipeline-compliance.sh,
-# atomic-land.sh — see "Producer status" in docs/ai-review-gate.md). On a public repo
+# atomic-land.sh — see the #1224 "Producer status" note in docs/ai-review-gate.md). On a public repo
 # every GitHub user with read access can comment, so admission is narrowed to
 # repo-affiliated authors (OWNER / MEMBER / COLLABORATOR). It is a NARROWING,
 # not parity with the body's writer set — its known over/under-admission
@@ -404,7 +404,7 @@ jobs:
           # WHAT IS ADMITTED: PR_EVIDENCE_COMMENTS_JQ, which must stay
           # BYTE-IDENTICAL to the producer's copy once the producer half lands
           # (record-review.sh, check-pipeline-compliance.sh, atomic-land.sh —
-          # see "Producer status" in docs/ai-review-gate.md). On a public
+          # see the #1224 "Producer status" note in docs/ai-review-gate.md). On a public
           # repo every user with read access can comment, so admission is
           # narrowed to repo-affiliated authors (OWNER / MEMBER /
           # COLLABORATOR). It is a NARROWING, not parity with the body's writer
@@ -604,9 +604,10 @@ jobs:
 
           # Which evidence channel a matched line came from (#1224). The
           # diagnostics below must say WHERE a rejected marker was found, or an
-          # operator cannot tell a stale comment copy from a stale body copy. A
+          # operator cannot tell a stale rejected marker that came from a comment
+          # from one that came from the body. A
           # line present in BOTH is reported as the PR body (its canonical
-          # channel); the two copies are byte-identical signed text.
+          # channel); such a line is byte-identical signed text in either channel.
           marker_channel() { # <line>
             if printf '%s\n' "$body" | grep -Fxq -- "$1"; then
               printf 'PR body'
@@ -618,8 +619,8 @@ jobs:
           # Union BOTH channels: PR body ∪ eligible PR comments (#1224). The
           # marker text is the same in either, so a body edit that removes the
           # body copy cannot hide evidence that still exists in the append-only
-          # comment. Channel membership never changes
-          # WHICH marker verifies — the loop below still HMAC-verifies and the
+          # comment. Channel membership never changes WHICH marker verifies —
+          # the loop below still HMAC-verifies and the
           # binding rules are untouched.
           body_markers="$(printf '%s\n' "$body" | grep -E "$marker_re" || true)"
           comment_markers="$(printf '%s\n' "$comments" | grep -E "$marker_re" || true)"

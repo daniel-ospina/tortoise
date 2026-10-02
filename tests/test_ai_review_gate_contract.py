@@ -603,11 +603,11 @@ def test_gate_body_path_unaffected_when_comment_fetch_fails(tmp_path: Path) -> N
 
 
 def test_gate_accepts_comment_marker_after_a_body_edit(tmp_path: Path) -> None:
-    """#1224 case 5 (THE DEFECT): body rewritten, comment still carries the marker.
+    """#1224 case 5 (THE DEFECT): a comment-carried marker is accepted after a body edit.
 
     This is the exact failure the issue is about: a legitimate edit rewrites the
-    body and removes the body copy of the marker, while the append-only comment
-    copy survives. The gate must pass on the comment alone.
+    body and removes the body copy of the marker. The gate must pass on the
+    comment alone, because it reads the comment channel too.
     """
     _require_jq()
     edited_body = (

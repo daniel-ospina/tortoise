@@ -47,7 +47,7 @@ entry condition closes that path.
 - The `code-review` skill runs its review gate on the PR.
 - When clean, the review is recorded and evidence is posted to the PR body by
   `record-review.sh`. The producer half of #1224 will ALSO post the same signed
-  marker to a PR comment (see "Producer status" below):
+  marker to a PR comment (see the #1224 "Producer status" note below):
 
   ```text
   review recorded: reviews/<PR>.json verdict=clean @ <full-sha> (<owner/repo>) sig=<hmac>
