@@ -1270,6 +1270,15 @@ _SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a 
     # stored verbatim; the writer marks it `embedding_verbatim` instead.
     "embedding_model", "embedding_revision", "embedding_text_hash",
     "embedding_verbatim", "embedding_preserved",
+    # #3998 (D30): the absent-raw state is server-managed — minted only by
+    # `_upsert_source`'s fixed clauses and validated by `validate_raw_state`.
+    # The SDK rejects these on a `:Source` through the generic entity route
+    # (`sdk._update_entity`); this is the fail-closed boundary in front of it,
+    # so the rejection happens before the write is attempted. Without it a
+    # tenant could `rawState=None` to CLEAR a recorded absence — silently
+    # resurrecting a raw the record says is gone — or persist an unvalidated
+    # `rawState='banana'`.
+    "rawState", "rawStateAt", "raw_state",
     # #5256: the `extractedFrom` READ-VERSION anchor and its Point node carrier
     # are server-derived (read from the :Source on the live path and carried in
     # the Point's journaled snapshot). A tenant setting either would forge

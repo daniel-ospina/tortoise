@@ -2383,10 +2383,12 @@ def test_5026_b6_update_entity_cannot_rewrite_retired_fields(sdk_factory):
     SURVIVED `rebuild_all`. The two declared B6 tests cover
     `_upsert_document` and `_upsert_source`, and neither can see this route.
 
-    The denial has to be TARGET-AWARE: `objectKind` is the canonical Object
-    kind (ONTOLOGY §5) and `content` is a legitimate Point key, so a blanket
-    `_sanitize_props` reject would break unrelated labels. It fires only on a
-    document `:Source` — the same predicate the `documents` meter uses.
+    The denial is TARGET-AWARE: `objectKind` is the canonical Object kind
+    (ONTOLOGY §5) and `content` is a legitimate Point key, so a blanket
+    `_sanitize_props` reject would break unrelated labels. It fires on ANY
+    `:Source` — ruling B on #3998, which dropped the `documentKind IS NOT NULL`
+    predicate and overturned #5026's pinned precondition that a non-document
+    `:Source` may carry these keys.
     """
     sdk = sdk_factory()
     doc = sdk.create_document("B6ThirdDoor", "report")
@@ -2397,7 +2399,7 @@ def test_5026_b6_update_entity_cannot_rewrite_retired_fields(sdk_factory):
                      ("docStatus", "captured"),
                      ("objectKind", "document"),
                      ("object_kind", "document")):
-        with pytest.raises(ValueError, match="retired document field"):
+        with pytest.raises(ValueError, match="retired field"):
             sdk.update_entity(did, **{key: val})
     rows = sdk._get_proj().g.query(
         "MATCH (s:Source {url:$u}) "
@@ -2415,7 +2417,7 @@ def test_5026_b6_update_entity_cannot_rewrite_retired_fields(sdk_factory):
     tdoc = sdk.create_document("B6ThirdDoorTranscript", "transcript")
     tid = tdoc["id"]
     assert tdoc["documentKind"] == "transcript"
-    with pytest.raises(ValueError, match="retired document field"):
+    with pytest.raises(ValueError, match="retired field"):
         sdk.update_entity(tid, content="SECRET BODY")
     trows = sdk._get_proj().g.query(
         "MATCH (s:Source {url:$u}) "
@@ -2434,24 +2436,30 @@ def test_5026_b6_update_entity_cannot_rewrite_retired_fields(sdk_factory):
 def test_5026_b6_promotion_scrubs_inherited_retired_fields(sdk_factory):
     """B6, the FOURTH DOOR (review round 3): the retired fields must be
     SCRUBBED when a node is PROMOTED to a document, not merely refused on
-    write. A non-document `:Source` may legitimately carry `content` or
-    `objectKind` — the target-aware `update_entity` guard above allows exactly
-    that — and a later document creator MERGEs onto that SAME node by `url`.
-    Without the scrub at the document MERGE, the inherited value survived both
-    live and on replay.
+    write. A PRE-RULING `:Source` can carry `content` or `objectKind` — the
+    write paths no longer produce one (ruling B on #3998 refuses them on EVERY
+    `:Source`, which is why the setup below seeds by Cypher) — and a later
+    document creator MERGEs onto that SAME node by `url`. Without the scrub at
+    the document MERGE, the inherited value survived both live and on replay.
 
     This is the complement of the third-door test: that one proves the write
-    is refused on a document, this one proves a value written while the node
-    was NOT a document does not become a retired field when it becomes one.
+    is refused, this one proves a value inherited by a node from before the
+    refusal does not become a retired field when the node becomes a document.
     """
     sdk = sdk_factory()
     sdk.create_source("doc/promo.md", "document")
-    sdk.update_entity("doc/promo.md", content="SECRET", objectKind="X")
     proj = sdk._get_proj()
+    # The inherited value is seeded with raw Cypher — the shape a pre-ruling
+    # deployment (or any direct graph writer) left behind. Ruling B on #3998
+    # makes `update_entity` refuse `content`/`objectKind` on EVERY `:Source`,
+    # so the old API setup can no longer produce this node.
+    proj.g.query(
+        "MATCH (s:Source {url:'doc/promo.md'}) "
+        "SET s.content='SECRET', s.objectKind='X'")
     assert proj.g.query(
         "MATCH (s:Source {url:'doc/promo.md'}) RETURN s.content"
     ).result_set[0][0] == "SECRET", \
-        "precondition: writable while the node is not a document"
+        "precondition: a pre-ruling node carries the retired field"
     proj.apply({"type": "DocumentCreated", "id": "doc/promo.md",
                 "title": "Promo", "document_kind": "report"})
     rows = proj.g.query(
