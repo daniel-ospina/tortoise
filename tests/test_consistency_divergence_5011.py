@@ -1103,6 +1103,32 @@ def test_a_later_creation_replaces_a_terminalized_incarnation(proj, tmp_path):
     assert entry["confidence"] == 0.7, entry
 
 
+@pytest.mark.parametrize("bad_id", [["x"], {"a": 1}], ids=["list", "dict"])
+@pytest.mark.parametrize("shape", ["flat", "spliced"], ids=["flat", "spliced"])
+def test_a_non_string_id_degrades_instead_of_raising(bad_id, shape):
+    """#5238 P3: a JSON-legal non-string `id` must degrade, not crash the fold.
+
+    `_apply_one` guards every id lookup with `_writable_id` (#331 review r4),
+    because `dict.get(unhashable)` raises `TypeError`. The #4208 vector-drop
+    added a lookup OUTSIDE that guard, so a corrupt journal line took the
+    whole durability diagnostic down: `tortoise check-consistency` printed
+    `Error: unhashable type: 'list'` (exit 1) instead of a verdict — exactly
+    when the journal is suspect and the check matters most. The pop's lookup
+    now uses the same `_writable_id` guard.
+
+    (1) Fails at the #5238 head: `TypeError` escapes for every parametrised
+    shape. (2) Reachable by construction: a `PointRevised` carrying a list/dict
+    `id`, both flat and spliced through a nested `point` dict (`_norm`).
+    """
+    from tortoise.consistency import _fold_journal
+    ev = {"type": "PointRevised", "new_content": "y"}
+    if shape == "flat":
+        ev["id"] = bad_id
+    else:
+        ev["point"] = {"id": bad_id}
+    assert _fold_journal([ev]) == {}
+
+
 def test_a_supersede_without_new_id_is_a_no_op_like_the_writer(proj, tmp_path):
     """`_fold_point_superseded` starts `if not oid or not new_id: return 0`, so a
     PointSuperseded without `new_id` changes nothing on the graph. The journal

@@ -315,6 +315,12 @@ surfaces:
   # REPLACES the `core` fallback, so a core-only registration would never run
   # on an api-only PR. Same #2938 dual-membership convention.
   - test_cohort_cost_cap.py
+  # #4490: hosted-API compute (machine time) per org. Dual-registered with `core`:
+  # the middleware + route-class derivation live in tortoise/hosted_api.py (`api`
+  # SOURCE_PATTERN) while the metric family/writer/reader live in
+  # tortoise/monitoring.py (`core`) — a change to either shared file must run it
+  # (same #2938 dual-membership convention as test_cohort_cost_cap.py above).
+  - test_compute_attribution.py
   # #4194: the turn-write embedding path. Dual-registered with `core` (the
   # SDK capture loop owns there) and `eval` (tortoise/embeddings.py selects
   # eval) because the hosted copy of the same loop lives in the api-owned
@@ -888,6 +894,13 @@ surfaces:
   # selecting `['eval']` with this guard never run (#1349 class) — same
   # rationale as `test_turn_embedding_write_path_4194.py` above.
   - test_journal_embedding_5004.py
+  # #4208: live `update_point(content=…)` must re-encode the DERIVED vector (or
+  # WIPE it when the embedder is unavailable) in the same write, so the node's
+  # vector can never describe text no longer on it. Pins `tortoise/sdk.py` (a
+  # SHARED_MODULE), the `tortoise/consistency.py` journal-fold reference the
+  # fix needs to stay green, and the `encode_for_store` seam.
+  # DUAL-REGISTERED with `eval`, which owns `tortoise/embeddings.py`.
+  - test_update_point_content_embedding_4208.py
   - test_onboarding_truth_surface.py  # #3670/#3671/#3681: dual-registered (api+core) — pins tortoise/hosted_api.py
   - test_restore_container_recovery.py
   - test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan
@@ -1196,6 +1209,10 @@ surfaces:
   # otherwise never run this file. Verified with tools/ci_selection.py:
   # select(["tortoise/monitoring.py"]) -> ["core"] (round-1 review, bug).
   - test_egress_bytes.py
+  # #4490: the per-org compute dimension's metric family/writer/reader live in
+  # tortoise/monitoring.py — a monitoring.py-only PR (which maps to `core`) must
+  # run this file. Dual-registered with `api` (the middleware is in hosted_api.py).
+  - test_compute_attribution.py
   - test_navigation.py
   # #5080: the D12/O4 never-across boundary. Both write-path fold sites — the
   # against-store classifier and the in-capture band — resolve it from one
@@ -1425,6 +1442,17 @@ surfaces:
   # then never run (the #1349/#3332 silent-drop class). Dual-registered with
   # `ep`, which owns `tortoise/dream.py`. See the note in the `ep` block.
   - test_2884_ep_state_journaled.py
+  # queue_resweep (#5215 merge-throughput work): guards `tools/queue_resweep.py`,
+  # the recoverable hand-pass that re-requests `@mergifyio queue` for PRs whose
+  # entry conditions are already met once the base gate opens. The tool lives
+  # under `tools/`, which is a flat `NON_PYTHON_PREFIXES` entry — so this
+  # registration alone does NOT make a tools-only change select `core` (measured:
+  # `select(["tools/queue_resweep.py"])` returned NO surface before the fix). The
+  # mechanism that runs this guard on the file it guards is the `CORE_ALSO` entry
+  # in `tools/ci_selection.py`, pinned by
+  # `tests/test_ci_selection.py::test_queue_resweep_tool_change_selects_core_not_tier1`.
+  # Hermetic: every GitHub surface is a fake (no `gh`, no network, no Mergify).
+  - test_queue_resweep.py
   ep:
   # #2884 D3: the EP/dream belief-state journal+replay guard. `tortoise/dream.py`
   # selects `ep`, so this registration is what runs the guard on a dream.py
@@ -1736,6 +1764,7 @@ surfaces:
   # `tortoise/embeddings.py` (stamp_journal_embedding / embedding_identity /
   # the normalization & width guards), which this surface owns.
   - test_journal_embedding_5004.py
+  - test_update_point_content_embedding_4208.py  # #4208: dual with `core` — the fix routes through `tortoise/embeddings.py`'s `encode_for_store`, which this surface owns
   - test_env_truthy.py
   - bench/test_bench_core.py
   - bench/test_degradation_chain.py
@@ -2802,7 +2831,12 @@ durations:
   test_source_inheritance_own.py: 45.7  # unmeasured
   test_embedding_model_required.py: 0.5  # unmeasured
   test_journal_embedding_5004.py: 24.0  # unmeasured
+  test_update_point_content_embedding_4208.py: 9.6  # #4208: 9 tests, docker FalkorDB; locally measured (junit testcase/@time sum, max of 4 runs)
   test_helpers.py: 0.0  # unmeasured
+  # #3400/#4221 convention: a new file enters at the flat 2.0s default and keeps
+  # the `# unmeasured` marker until a CI junit artifact carries a measured weight,
+  # so it cannot mis-balance the LPT pack.
+  test_queue_resweep.py: 2.0  # unmeasured
 
 # ── ON-DEMAND LANE: runs the pipeline, does not gate the merge ────────────
 # A file here is excluded from EVERY pre-merge leg (fast halves, slow, carve-
