@@ -609,12 +609,16 @@ def test_hosted_capture_after_a_failed_non_capture_write_reports_no_warning(
         sdk = real_make_sdk(*a, **kw)
         if armed["on"] and kw.get("namespace") == org_id:
             armed["on"] = False
-            opened.append(sdk)
             events.chmod(0o500)
             try:
                 sdk.create_object("test/repo#5632", objectKind="pm:issue")
             finally:
                 events.chmod(0o700)
+            # Bind the baseline HERE — AFTER the non-capture failure and
+            # BEFORE the capture runs. This is the counter the capture's own
+            # delta must be measured against; reading it after the capture
+            # would compare the attribute to itself (a tautology).
+            opened.append((sdk, sdk._journal_write_failures))
         return sdk
 
     monkeypatch.setattr(ha, "_make_sdk",
@@ -630,10 +634,10 @@ def test_hosted_capture_after_a_failed_non_capture_write_reports_no_warning(
         events.chmod(0o700)  # restore before teardown
     assert r.get("status") == "ok", r
     assert opened, "the wrapper never saw the capture's SDK open"
-    before = opened[0]._journal_write_failures
+    sdk, before = opened[0]
     assert before > 0, (
         "fixture precondition: the non-capture append must have failed")
-    assert opened[0]._journal_write_failures == before, (
+    assert sdk._journal_write_failures == before, (
         "the capture's own appends must have SUCCEEDED — otherwise this test "
         "would not exercise the false positive")
     assert not any("journal append failed" in w for w in r["warnings"]), (
