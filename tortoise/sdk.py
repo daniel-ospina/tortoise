@@ -1418,7 +1418,16 @@ def _write_capture_turns(
         # #3551: offset-aware. Only ids at or beyond the window this write just
         # MERGEd are stale; a non-zero ``turn_offset`` is an APPEND, and every
         # id BELOW it belongs to a prior window that must never be swept. At
-        # the capture lanes' offset 0 this is the #1920 rule exactly.
+        # the capture lanes' offset 0 the ``_first_live`` bound is a NO-OP for
+        # every id this writer MINTS (a decimal index below the window is in
+        # ``keep`` by construction), so for those ids the sweep is #1920's
+        # "everything not kept". It is NOT #1920 exactly: ``_capture_turn_ids``
+        # now guards with ``isdecimal()``, so a turn-shaped id whose suffix is
+        # not a decimal integer (``<sid>_t²``) — which #1920's ``isdigit()``
+        # guard admitted and swept — is deliberately left in place (see that
+        # function's docstring, and
+        # ``test_non_int_parseable_suffix_does_not_break_capture``, which pins
+        # the residue).
         _prefix = f"{session_id}_t"
         _first_live = turn_offset + len(turn_rows)
         # Every id ``_capture_turn_ids`` returns is ``int()``-parseable by
