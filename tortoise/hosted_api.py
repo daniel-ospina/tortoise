@@ -131,7 +131,9 @@ from tortoise.sdk import (
     _capture_turn_role_text,  # #4675: the inverse of the stored turn format
     _capture_turn_texts_with_redactions,  # #4911: the ONE stored-turn text definition + its redaction count
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
+    _derive_graph_name,  # #4240 F2: the ONE namespace/graph_name → graph derivation
     _emit_capture_observation,  # #2335 WI-1d: observation leg (hosted lane tag)
+    _journal_write_failure_warning,  # #4240 F1: the shared "a journal append failed" receipt warning
     _session_capture_event_id,  # W5 Phase F (#2104): deterministic sessionCaptured Event id
     _session_extraction_estimate,  # #1532 D4: v2-aware pre-write quota estimate
     _session_llm_transcript,  # P1 #1529: the shared empty/blank conversation gate
@@ -707,6 +709,75 @@ def _resolve_embedded_db_path() -> str:
     return db_path
 
 
+#: #4240 — base dir for the hosted lane's per-graph JSONL rebuild journal.
+#: Unset ⇒ **no journal** (byte-identical to pre-#4240: the lane journals
+#: nothing). Set ⇒ every hosted data SDK is built with an ``event_log_path``,
+#: so the JSONL-only reassembly records (``EntityLinked``, ``SessionRecorded``,
+#: ``ObjectRegistered``, ``PointAdded``, ``EntityMutated``) actually land and
+#: ``rebuild_all`` / ``rebuild`` / ``recover_from_log`` can reconstruct the
+#: capture — closing the #2296 live-only-edge hazard for this lane.
+#: ⚠️ The JSONL is a DOMAIN EVENT LOG, **never the durability mechanism**
+#: (``docs/durability-posture.md``): it makes the derived graph REBUILDABLE,
+#: it does not keep it alive.
+#: ⚠️ Records are fail-soft at the write site (a failed append is counted and
+#: logged, never raised — the graph mutation already succeeded). The deployed
+#: guard is ``entrypoint.sh``'s boot-time WRITABILITY probe (not just
+#: ``mkdir -p``): a base dir that exists but cannot be written fails the boot
+#: loudly for a NON-ROOT uid (mode bits), and for EROFS/ENOSPC on ANY uid
+#: (root cannot bypass those). It does NOT cover a mode-bit failure when the
+#: server runs as root — ``Dockerfile.hosted`` sets no ``USER``, so on Fly the
+#: process is uid 0 and the probe write succeeds on a mode-0500 dir. That case
+#: is covered by the runtime signal, not the boot: a failed append logs at
+#: ERROR, increments ``tortoise_journal_write_failures_total`` and is disclosed
+#: on the capture receipt (``TortoiseSDK._emit_event``). A journal that starts
+#: failing AFTER that probe (the foreseeable trigger is ENOSPC once the journal
+#: grows below the volume's free space) is recorded, not fatal — see #5612 and
+#: ``TortoiseSDK._emit_event``.
+_HOSTED_EVENT_LOG_ENV = "TORTOISE_EVENT_LOG_BASE_DIR"
+
+
+#: The graph-name charset ``TortoiseSDK.__init__`` enforces (namespace and
+#: graph_name alike). The journal key must satisfy it or it can escape base.
+_JOURNAL_KEY_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$")
+
+
+def _resolve_event_log_path(*, namespace: str | None,
+                            graph_name: str | None) -> str | None:
+    """Per-graph JSONL rebuild journal path for the hosted lane (#4240).
+
+    ONE file per graph under ``TORTOISE_EVENT_LOG_BASE_DIR``, so a rebuild of a
+    graph replays exactly its own journal and two orgs can never share one. The
+    key is the SDK's OWN derived graph name (``sdk._derive_graph_name``) — the
+    ONE derivation of namespace/graph_name → graph, so the journal can never
+    name a graph the SDK did not open. A local re-derivation is the divergence
+    class the #4240 review found: the branches are not obvious
+    (``namespace="test-foo"`` opens ``test_foo_tortoise``, NOT ``org_test-foo``).
+
+    Returns ``None`` when the base dir is unset — no journal (the pre-#4240
+    behaviour; embedded/dev/CI stay journal-less) — and for the registry
+    control plane / the unnamed default graph, which are not org data graphs
+    and are never rebuilt from this journal.
+
+    Charset: the key is validated against the SDK's OWN graph-name rule and a
+    violation RAISES. Sanitizing instead would silently key the journal to a
+    directory no graph uses — and the prior guard kept ``.``, so a ``..`` key
+    survived until ``TortoiseSDK.__init__`` rejected it, i.e. the stated
+    anti-traversal guard was dead.
+    """
+    base = os.environ.get(_HOSTED_EVENT_LOG_ENV)
+    if not base:
+        return None
+    if graph_name is None and (not namespace or namespace == "registry"):
+        return None
+    key = _derive_graph_name(namespace=namespace, graph_name=graph_name)
+    if not _JOURNAL_KEY_RE.match(key):
+        raise ValueError(
+            f"refusing to build a journal path for unsafe key {key!r} "
+            f"(namespace={namespace!r}, graph_name={graph_name!r}) — it is not "
+            "a valid graph name and could escape the journal base dir")
+    return os.path.join(base, key, "events.jsonl")
+
+
 def _make_sdk(*, namespace: str | None = None,
               graph_name: str | None = None) -> TortoiseSDK:
     """Build an SDK backed by TORTOISE_DB_URI, or embedded mode when unset.
@@ -716,6 +787,12 @@ def _make_sdk(*, namespace: str | None = None,
     graph-name seam — never a namespace (which would prepend ``org_``).
     Exactly one of namespace/graph_name is set by callers.
 
+    #4240: the SDK is built with the per-graph JSONL rebuild journal
+    (``_resolve_event_log_path``) whenever ``TORTOISE_EVENT_LOG_BASE_DIR`` is
+    set. Every hosted data write then lands in the journal, so the derived
+    graph is ``replay(journal)`` — the property the rebuild engines need. When
+    the base dir is unset the SDK is journal-less, byte-identical to pre-#4240.
+
     Embedded fallback: when no URI is configured (fly.toml default), the SDK
     previously received no path and FalkorProjection raised
     "Either path or host must be provided" — every /internal/provision call
@@ -723,8 +800,11 @@ def _make_sdk(*, namespace: str | None = None,
     until a production FalkorDB instance is provisioned (#7722).
     """
     key = graph_name if graph_name is not None else (namespace or "")
+    event_log_path = _resolve_event_log_path(
+        namespace=namespace, graph_name=graph_name)
     if os.environ.get("TORTOISE_DB_URI"):
-        return TortoiseSDK(namespace=namespace, graph_name=graph_name)
+        return TortoiseSDK(namespace=namespace, graph_name=graph_name,
+                           event_log_path=event_log_path)
     # The anchor AND the per-request SDK must agree on this path or the anchor
     # pins a stray server while requests close-on-GC the real one (the #1475
     # regression silently persists). _resolve_embedded_db_path is the single
@@ -762,7 +842,8 @@ def _make_sdk(*, namespace: str | None = None,
                 anchor = None
             if anchor is None:
                 anchor = TortoiseSDK(db_path=db_path, namespace=namespace,
-                                     graph_name=graph_name)
+                                     graph_name=graph_name,
+                                     event_log_path=event_log_path)
                 try:  # noqa: SIM105
                     anchor._get_proj()  # eager: hold the connection so the server survives
                 except Exception:
@@ -772,7 +853,8 @@ def _make_sdk(*, namespace: str | None = None,
                     pass
                 _FALLBACK_KEEPALIVE.setdefault(key, anchor)
     sdk = TortoiseSDK(db_path=db_path, namespace=namespace,
-                      graph_name=graph_name)
+                      graph_name=graph_name,
+                      event_log_path=event_log_path)
     return sdk
 
 
@@ -5994,8 +6076,10 @@ async def _check_ip_bucket_rate_limit(
 
     #1719 (Task 5): ``defer_charge=True`` prunes + 429-checks but does NOT
     append — the caller charges via _charge_ip_bucket at the TERMINAL
-    outcome (success/401/403), so a server fault (5xx) never consumes the
-    user's budget and cannot mask an incident with an hour-long 429.
+    outcome, so a server fault (5xx) never consumes the user's budget and
+    cannot mask an incident with an hour-long 429. (session_login charges
+    on success/401/403; the sensitive-op family #2051 charges on any
+    non-5xx terminal — success or a 4xx client error.)
     """
     if os.environ.get("RATE_LIMIT_DISABLED") == "1":
         return
@@ -6470,9 +6554,22 @@ def _sensitive_op_budget(op: str, bucket_key: Hashable) -> dict | None:
     }
 
 
-async def _check_sensitive_op_rate_limit(request: Request, op: str) -> None:
-    """Per-IP hourly budget for sensitive org ops (export / org_delete /
-    import / pack_manifest)."""
+async def _check_sensitive_op_rate_limit(
+    request: Request, op: str, *, defer_charge: bool = False,
+) -> tuple | None:
+    """Per-IP hourly budget for the sensitive org ops (export /
+    team_delete / import / pack_manifest).
+
+    #2051: the family is on the #1719 deferred-terminal doctrine. With
+    ``defer_charge=True`` this only prunes + 429-checks (no append) and
+    returns the ``(ip, op)`` charge key for
+    ``_charge_sensitive_op_rate_limit`` at the TERMINAL outcome; the default
+    ``False`` keeps the check-time append for any non-migrated caller.
+
+    The limit / window / refusal copy come from ``_sensitive_op_budget``
+    (main's #2050 seam, shared with the MCP per-team arm) so the two arms
+    cannot drift; ``defer_charge`` is the #2051 axis layered on top of it.
+    """
     # P1-FIX-1: composite (ip, op) key — export and delete keep independent
     # budgets (locked by test_export_rate_limited_independently).
     # P3-3 (phase-7): normalize IPv4-mapped IPv6 HERE (tuple bypasses the
@@ -6487,11 +6584,110 @@ async def _check_sensitive_op_rate_limit(request: Request, op: str) -> None:
     # review restored it); stated here as well so the invariant is explicit
     # at the one place this key is formed.
     if _ip is None:
-        return
+        return None
     kwargs = _sensitive_op_budget(op, (_ip, op))
     if kwargs is None:
+        return None
+    await _check_ip_bucket_rate_limit(
+        request, defer_charge=defer_charge, **kwargs)
+    if not defer_charge:
+        return None
+    return (_ip, op)
+
+
+async def _charge_sensitive_op_rate_limit(
+    key: tuple | None, op: str,
+) -> None:
+    """#2051: append ONE terminal charge to the sensitive-op bucket store.
+
+    The deferred counterpart of the #1719 session_login shape — called once
+    when the terminal outcome is non-5xx (success or a 4xx client error); a
+    5xx passes through uncharged. ``_charge_ip_bucket`` carries the #1738
+    burst bound, so the 429 boundary stays at the limiter's limit.
+    """
+    limit = _SENSITIVE_OP_LIMITS.get(op)
+    if key is None or limit is None or key[0] is None:
         return
-    await _check_ip_bucket_rate_limit(request, **kwargs)
+    await _charge_ip_bucket(
+        _SENSITIVE_BUCKETS, _SENSITIVE_LOCK, key,
+        limit=limit, window_s=3600)
+
+
+async def _terminal_charge(key: tuple | None, op: str) -> None:
+    """#2051: the ONE shielded terminal charge for the sensitive-op family.
+
+    #2051 (review P2): the charge runs under ``asyncio.shield`` so a
+    cancellation delivered while it waits on the contended
+    ``_SENSITIVE_LOCK`` — ONE global lock shared by all four ops and all
+    IPs, so an attacker can manufacture the contention — cannot DROP a
+    charge for an operation that ALREADY EXECUTED. Un-shielded, the
+    cancellation propagated out of the wrapper and the append never
+    happened: the same evasion class the ``CancelledError`` branch closes,
+    left open on the success and 4xx paths. ``shield`` keeps the charge in
+    its own task, so a second cancellation cannot drop it either. The
+    best-effort guard keeps a charge-side fault from masking the underlying
+    outcome (a charge is telemetry, never a failure path), and it does NOT
+    swallow ``CancelledError`` (a ``BaseException``), so the cancellation
+    still propagates after the charge is committed.
+
+    All three terminal branches — success, non-5xx ``HTTPException`` and
+    cancellation — charge through this helper so they cannot diverge again.
+    """
+    with contextlib.suppress(Exception):
+        await asyncio.shield(_charge_sensitive_op_rate_limit(key, op))
+
+
+def _deferred_sensitive_op(op: str):
+    """#2051: deferred-terminal charging for a sensitive-op endpoint.
+
+    Factors the exact #1719 (Task 5) sequence session_login established —
+    prune + 429-check on admission (``defer_charge=True``), then charge ONCE
+    at the TERMINAL outcome — over the whole sensitive-op family. Charge iff
+    the endpoint returned normally, raised a non-5xx ``HTTPException`` (a
+    client error is terminal), or was CANCELLED mid-flight (a disconnect /
+    shutdown is a terminal non-5xx outcome, and an uncharged one is an
+    evasion path — see the ``CancelledError`` branch); a 5xx — including an
+    unhandled exception the global handler renders as one — passes through
+    UNCHARGED, so a control-plane/graph fault cannot burn the caller's
+    hourly budget and mask the underlying 5xx with a stale 429 (#1719
+    Task 5). The admission check still runs BEFORE the body (cheapest
+    rejection), and a 429 raised by it is a refusal and charges nothing.
+    """
+    def decorator(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            request = kwargs.get("request")
+            if request is None:
+                request = next(
+                    (a for a in args if isinstance(a, Request)), None)
+            key = None
+            if request is not None:
+                key = await _check_sensitive_op_rate_limit(
+                    request, op, defer_charge=True)
+            try:
+                result = await fn(*args, **kwargs)
+            except HTTPException as exc:
+                if exc.status_code < 500:
+                    await _terminal_charge(key, op)
+                raise
+            except asyncio.CancelledError:
+                # #2051 (review P2): a request cancelled mid-flight (client
+                # disconnect, server shutdown) is a terminal NON-5xx
+                # outcome and MUST charge. Left uncharged, a client could
+                # disconnect before every response and obtain unlimited
+                # uncharged executions of the heavy ``import``/``export``
+                # ops; the pre-migration check-time behaviour charged this
+                # class, so charging here restores parity (it REMOVES a
+                # limits change, it is not one). ``_terminal_charge`` is
+                # shielded, so a SECOND cancellation cannot drop it while it
+                # waits on the bucket lock. The cancellation is re-raised
+                # below, so it still reaches the caller.
+                await _terminal_charge(key, op)
+                raise
+            await _terminal_charge(key, op)
+            return result
+        return wrapper
+    return decorator
 
 
 async def _check_sensitive_op_budget(op: str, scope_key: Hashable) -> None:
@@ -7832,6 +8028,7 @@ async def list_packs(org: dict = Depends(get_current_org_gated)):  # noqa: B008
 
 
 @app.post("/v1/packs/manifests", status_code=201)
+@_deferred_sensitive_op("pack_manifest")
 async def upload_pack_manifest(
     request: Request,
     org: dict = Depends(get_current_org_gated),  # noqa: B008
@@ -7847,10 +8044,11 @@ async def upload_pack_manifest(
     (``:PackManifest``) and activates it (``PackInstall`` source='custom',
     idempotent MERGE + per-(graph, namespace) lock #1307). Per-IP rate
     budget (429) — checked BEFORE the body is read (cheapest rejection,
-    mirrors import #1389/#1230). Check-time charging (the sensitive-op
-    family doctrine; #1719's deferred terminal charge is session-login
-    only) — a server fault (503) consumes budget; a family-wide
-    defer_charge migration is tracked separately. The MCP install tool
+    mirrors import #1389/#1230). #2051: the family is now on the #1719
+    deferred-terminal doctrine — the budget is charged once at the terminal
+    outcome (success / 4xx), and a server fault (5xx/503) passes through
+    uncharged, so an outage cannot mask itself with a stale 429. The MCP
+    install tool
     (tortoise_pack_install) calls upsert_tenant_manifest in-process and
     is NOT covered by this REST budget (tracked separately).
 
@@ -7865,7 +8063,6 @@ async def upload_pack_manifest(
     Cross-tenant isolation is structural (tenant graph namespace — no
     tenant selector exists on any surface).
     """
-    await _check_sensitive_op_rate_limit(request, "pack_manifest")
     _reject_graph_bound_org_surface(org, "pack catalog upload")
     # C5 #2114 (re-review P1): the upload MERGEs :PackManifest/:PackInstall
     # into the DEFAULT graph — REST twin of tortoise_pack_install (write).
@@ -8988,9 +9185,10 @@ def _mint_key(org_id: str, *, graph_id: str | None = None,
     # occupy a slot); the RPC never 402s.
     from tortoise.quota import _count_resource
     from tortoise.supabase_control import (
+        KeyCapRefusal,
         get_control_plane,
-        insert_api_key,
         is_supabase_enabled,
+        mint_provisioned_key,
     )
     max_keys = _org_node_sync_limits(org_id).get("max_api_keys")
     if max_keys is not None:
@@ -9038,23 +9236,34 @@ def _mint_key(org_id: str, *, graph_id: str | None = None,
         # created_by as user-UUID-or-"api" (first_api_call distinct_id,
         # the session-login exchange tree).
         created_by = session_user_id or "api"
-        insert_api_key(cp, {
-            "id": kid,
-            "org_id": org_id,
-            "lookup_hash": lookup_hash(api_key),
-            "key_prefix": key_prefix,
-            "created_via": created_via,
-            "created_by": created_by,
-            "created_at": now,
-            "revoked_at": None,
-            "expires_at": expires_at,
-            "name": name,
-            # C1 columns: graph scope + allowlist + mint lineage
-            "graph_id": graph_id,
-            "scopes": final_scopes,
-            "created_by_key_id": caller_key_id,
-            "delegation_depth": delegation_depth,
-        })
+        # #1879: the cap gate and the INSERT are ONE transaction inside the
+        # `provision_api_key` RPC, serialized on the org row — the pre-check
+        # above is fast-fail + defense-in-depth ONLY (it is a check-then-act
+        # across a separate PostgREST request, so two workers can both pass
+        # it). The RPC re-applies `count - cap_slot_credit >= max` (#4355)
+        # under the lock and is the AUTHORITATIVE refusal.
+        try:
+            mint_provisioned_key(cp, {
+                "id": kid,
+                "org_id": org_id,
+                "lookup_hash": lookup_hash(api_key),
+                "key_prefix": key_prefix,
+                "created_via": created_via,
+                "created_by": created_by,
+                "created_at": now,
+                "revoked_at": None,
+                "expires_at": expires_at,
+                "name": name,
+                # C1 columns: graph scope + allowlist + mint lineage
+                "graph_id": graph_id,
+                "scopes": final_scopes,
+                "created_by_key_id": caller_key_id,
+                "delegation_depth": delegation_depth,
+            }, max_keys=max_keys, cap_slot_credit=cap_slot_credit)
+        except KeyCapRefusal:
+            # Same class the caller's pre-check raises → the identical 402/409
+            # mapping, just decided inside the serialized transaction.
+            raise _KeyCapExceeded() from None
     else:
         sdk = _make_sdk(namespace="registry")
         # apikey_create generates its OWN id (ulid) AND plaintext for the
@@ -10874,6 +11083,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     now = datetime.now(UTC).isoformat()
     sdk, proj, session_row = await _capture_session_probe_off_loop(
         org, session_id)
+    # #5632: snapshot the LIFETIME journal-failure counter at the START of THIS
+    # capture so the hosted receipt below discloses only appends that failed
+    # DURING it — byte-parity with the SDK lane (``sdk.capture_session``).
+    _journal_failures_before = sdk._journal_write_failures
     # #1727 (review PR #1827) TOCTOU: two concurrent POSTs with the same
     # FRESH session_id can both observe session_existed=False and mint a
     # sessionCaptured Event (narrow race) — sequential retries converge
@@ -12148,6 +12361,23 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     if _capture_redactions:
         extraction_warnings.append(
             _capture_redaction_warning(_capture_redactions))
+    # #4240 review F1: a journal append that failed during THIS capture is
+    # disclosed on the HOSTED receipt too. The hosted lane builds its own
+    # receipt (it never calls ``sdk.capture_session``), so without this the
+    # customer could not see that the capture is live-only — only the operator
+    # counter/ERROR log showed it. Byte-parity with the SDK lane via the shared
+    # helper, and appended only when non-zero so an ordinary capture's warning
+    # list is unchanged. Deliberately INDEPENDENT of the capture outcome: the
+    # graph write persisted, so the envelope stays successful (``status``
+    # ``"ok"``; the hosted receipt carries no literal ``ok`` key) and the
+    # warning names the journal residue — flipping the outcome would trip the
+    # #2335 TRUE-retry gate over a persisted write. #5632: the count is THIS
+    # capture's DELTA (``_journal_failures_before``), not the lifetime counter.
+    _capture_journal_failures = (
+        sdk._journal_write_failures - _journal_failures_before)
+    if _capture_journal_failures > 0:
+        extraction_warnings.append(
+            _journal_write_failure_warning(_capture_journal_failures))
     resp = {"session_id": session_id, "turns": len(body.conversation),
             "extracted": len(extracted), "points": extracted,
             "surfaced": surfaced,
@@ -17870,6 +18100,7 @@ def _export_graph_snapshot(graph_name: str):
 
 
 @app.get("/v1/organizations/{org_id}/export")
+@_deferred_sensitive_op("export")
 async def export_org(org_id: str, request: Request,
                       user: dict = Depends(get_current_user)):  # noqa: B008
     """E2E-6-D — owner-only JSON export of the org graph + control plane.
@@ -17886,7 +18117,6 @@ async def export_org(org_id: str, request: Request,
     actor_user_id); idempotent by nature (GET). The graph read runs on a
     worker thread (never blocks the event loop).
     """
-    await _check_sensitive_op_rate_limit(request, "export")
     org_node = await _org_node(org_id)
     deleted_at = org_node.get("deleted_at") if org_node else None
     await _require_owner(user["user_id"], org_id, allow_removed=deleted_at)
@@ -18657,6 +18887,7 @@ def _rebuild_import_indexes(sdk, graph_name: str) -> None:
 
 
 @app.post("/v1/organizations/{org_id}/import")
+@_deferred_sensitive_op("import")
 async def import_org(org_id: str, request: Request,
                       user: dict = Depends(get_current_user)):  # noqa: B008
     """Ingest a ``tortoise-export-v1`` artifact into the org graph (#1230).
@@ -18678,7 +18909,6 @@ async def import_org(org_id: str, request: Request,
     retryable/rollback-able; a pack-application failure 422s AFTER the swap
     (the graph holds the restored dump, the vocabulary is not live).
     """
-    await _check_sensitive_op_rate_limit(request, "import")
     org_node = await _org_node(org_id)
     deleted_at = org_node.get("deleted_at") if org_node else None
     await _require_owner(user["user_id"], org_id, allow_removed=deleted_at)
@@ -19001,6 +19231,7 @@ def _soft_delete_registry_org(org_id: str, now: str, grace_hours: float) -> None
 
 
 @app.delete("/v1/organizations/{org_id}", status_code=202)
+@_deferred_sensitive_op("team_delete")
 async def delete_org(org_id: str, request: Request,
                       user: dict = Depends(get_current_user)):  # noqa: B008
     """E2E-6-D — owner-only org deletion (soft delete → TEAM_DELETE_GRACE_HOURS grace → hard delete).
@@ -19026,7 +19257,6 @@ async def delete_org(org_id: str, request: Request,
     a user can own multiple orgs (per-org deletion must not cascade to
     the account).
     """
-    await _check_sensitive_op_rate_limit(request, "team_delete")
     org_node = await _org_node(org_id)
     deleted_at = org_node.get("deleted_at") if org_node else None
     await _require_owner(user["user_id"], org_id, allow_removed=deleted_at)
@@ -20789,7 +21019,7 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-# ── #1855: per-org session-key mint lock ────────────────────────────────────
+# ── #1855/#1879: per-org session-key mint lock ─────────────────────────────────
 # The session-key mint critical section (cap read → revoke → recheck → insert)
 # is atomic in the DOCUMENTED single-worker deployment only because it is
 # all-sync (no await between control-plane calls). Under --workers > 1, two
@@ -20803,15 +21033,23 @@ def _now_iso() -> str:
 # guaranteed to reuse — neither serializes a multi-call critical section. The
 # durable multi-worker fix is a single SQL mint RPC that runs the whole
 # cap/revoke/recheck/insert in ONE transaction (the recover_team_key pattern,
-# migration 20260814000001 — SELECT ... FOR UPDATE); out of scope for this
-# micro fix and tracked in #1855.
+# migration 20260814000001 — SELECT ... FOR UPDATE).
+#
+# ⛔ #1879 LANDED: the SUPABASE lane now does exactly that —
+# `_session_key_supabase` runs the whole section inside `session_key_mint`
+# (migration 20261001000002), serialized on the `organizations` row, and
+# `_mint_key`'s Supabase branch runs inside `provision_api_key` under the same
+# lock. This in-process lock is retained as belt-and-braces for the Supabase
+# lane and is still the ONLY guard for the REGISTRY lane (embedded FalkorDB is
+# single-process by construction — #1879 scope item 4).
 #
 # threading.Lock (not asyncio.Lock): loop-agnostic (tests spin fresh asyncio
 # loops; asyncio.Lock caches its loop on first acquire) and the section is
 # all-sync, so acquire() never blocks the event loop in the current
 # architecture. ⛔ If an await is ever introduced INSIDE the section, switch to
-# an asyncio.Lock (same per-org keying) — or port the mint to the SQL RPC.
-# Cross-process (--workers > 1) serialization STILL requires the SQL RPC.
+# an asyncio.Lock (same per-org keying) — or route the lane through the SQL RPC,
+# as the Supabase lane now does. Cross-process (--workers > 1) serialization
+# requires that SQL RPC.
 _ORG_MINT_LOCKS: dict[str, threading.Lock] = {}
 _ORG_MINT_LOCKS_GUARD = threading.Lock()
 
@@ -20978,10 +21216,64 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
                     params={"tid": tid, "uid": user_id, "now": now},
                 ).result_set
                 if oldest:
-                    reg.query(
-                        "MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
+                    # #1879 P2: the revoke is a CLAIM, not a blind write —
+                    # `WHERE k.revoked_at IS NULL` makes it the Cypher twin of
+                    # `_claim_key_revocation`, so a concurrent revoke of the
+                    # SAME victim (rotate's claim-revoke, or any other
+                    # non-lock-holding writer) is never OVERWRITTEN. The
+                    # returned rows are what THIS call claimed; the
+                    # compensation below is gated on it — a lost claim wrote
+                    # nothing, so there is nothing to restore.
+                    claimed_revoke = bool(reg.query(
+                        "MATCH (k:APIKey {id:$id}) WHERE k.revoked_at IS NULL "
+                        "SET k.revoked_at = $now RETURN k.id",
                         params={"id": oldest[0][0], "now": now},
-                    )
+                    ).result_set)
+                    # #1879: FAIL-CLOSED RE-CHECK (parity with the rotation
+                    # branch below). The revoke above frees a slot ONLY if the
+                    # count did not move underneath it: this lane's lock is
+                    # per-PROCESS and the mint gate is not the only writer
+                    # (`_mint_key`'s callers — create_api_key, the per-graph
+                    # mint, rotate_api_key's create leg — take no
+                    # `_org_mint_lock`; recorded residual). A concurrent ADD
+                    # by any of those consumes the slot this revoke frees, so
+                    # the count can still be at the cap AFTER the revoke —
+                    # inserting then would take the org to cap+1. Same
+                    # invariant the rotation branch already enforces (P2-1):
+                    # a revoke that freed no counted slot must NOT mint.
+                    # (A concurrent REVOKE is harmless here: it lowers the
+                    # count this re-check then reads.)
+                    recheck_other = reg.query(
+                        "MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL "
+                        "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
+                        "AND (k.expires_at IS NULL OR k.expires_at > $now) RETURN count(k)",
+                        params={"tid": tid, "now": now},
+                    ).result_set[0][0]
+                    if max_keys is not None and recheck_other >= max_keys:
+                        # COMPENSATE before refusing: the revoke above is a
+                        # committed write in THIS lane (unlike the Supabase lane,
+                        # where the same re-check runs inside one transaction and
+                        # its RAISE ROLLS THE REVOKE BACK). Refusing without
+                        # undoing it would destroy another user's live key and
+                        # return no key at all — a refusal that loses data is
+                        # strictly worse than the overshoot it prevents.
+                        #
+                        # #1879 P2: gated on `claimed_revoke` — restoring is
+                        # only correct when THIS call's claim actually wrote
+                        # the row. A lost claim (another writer revoked the
+                        # victim first) freed no slot, so the revoke is left
+                        # exactly as that writer made it. The restore itself is
+                        # a compare-and-swap on the exact timestamp WE wrote,
+                        # so it can never resurrect a row another writer
+                        # deliberately revoked (`SET k.revoked_at = NULL` only
+                        # WHERE k.revoked_at = $now).
+                        if claimed_revoke:
+                            reg.query(
+                                "MATCH (k:APIKey {id:$id}) WHERE k.revoked_at = $now "
+                                "SET k.revoked_at = NULL",
+                                params={"id": oldest[0][0], "now": now},
+                            )
+                        raise HTTPException(status_code=402, detail=_key_limit_refusal())
                 else:
                     # #1828: at max_api_keys with no OTHER key to revoke, the
                     # recovery fallback dead-locks on the user's OWN persistent
@@ -21101,9 +21393,13 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     with reads/writes on org_memberships / orgs / api_keys. The minted key
     lands in api_keys with lookup_hash + created_via + expires_at, so
     get_current_org / MCP resolve it via the unique lookup_hash index, and
-    api_keys.revoked_at is the authoritative revoke. #1855: the whole
-    cap/revoke/recheck/insert section runs under the per-org in-process lock
-    (see _org_mint_lock above — same lock as the registry lane). #2380 (P1):
+    api_keys.revoked_at is the authoritative revoke. #1879: the whole
+    cap/revoke/recheck/insert section runs as ONE Postgres transaction inside
+    the `session_key_mint` RPC (migration 20261001000002), which serializes on
+    the `organizations` row (`FOR NO KEY UPDATE`) — so the cap holds ACROSS
+    worker processes, not just within this one. The per-org in-process lock
+    (see _org_mint_lock above) is retained as belt-and-braces: a second worker
+    has its own lock table, so it was never the guarantee. #2380 (P1):
     the registry-lane recovery role gate has its byte-parity twin here
     (owner/admin on the RESOLVED tid, after THIS lane's own suspension check
     — see the gate below); bootstrap stays member-open.
@@ -21114,12 +21410,11 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     from tortoise.auth import lookup_hash
     from tortoise.pricing import tier_limits
     from tortoise.supabase_control import (
-        active_api_keys,
+        SessionKeyMintRefusal,
         get_control_plane,
-        insert_api_key,
         membership_for_user_org,
+        mint_session_key,
         org_by_id,
-        revoke_api_key,
         user_memberships,
     )
 
@@ -21168,6 +21463,18 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     api_key = f"tt_{_uuid.uuid4().hex}"
     kid = _short_id()
     now = datetime.now(UTC).isoformat()
+    # #750.8: .get() so a pricing.json key drift never 500s the mint (pricing.py
+    # validates required keys at load; belt-and-braces). Hoisted ABOVE the lock:
+    # the #1879 RPC takes the cap as a caller-supplied param (pricing lives in
+    # app code, never SQL).
+    lim = tier_limits(tier)
+    max_keys = lim.get("max_api_keys")
+    # #1879: computed ONCE and used for BOTH the RPC argument and the response —
+    # a second `now()+24h` after the mint would advertise an `expires_at` a few
+    # milliseconds LATER than the row's (the row is authoritative; the response
+    # must not disagree with it).
+    expires_at = ((datetime.now(UTC) + timedelta(hours=24)).isoformat()
+                  if purpose == "bootstrap" else None)
     # #1828 review P3-2: True when the recovery fallback rotated a session
     # credential to make room — the dashboard shows a one-time banner.
     rotated = False
@@ -21176,132 +21483,46 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     rotated_key_prefix = None
 
     with _org_mint_lock(tid):
+        # #1879: the ENTIRE critical section (bootstrap 3-active check / cap
+        # count -> oldest-OTHER revoke -> fail-closed re-check -> 3-tier
+        # rotation -> fail-closed re-check -> INSERT) runs in ONE Postgres
+        # transaction via the `session_key_mint` RPC, which serializes on the
+        # `organizations` row (`FOR NO KEY UPDATE`). This in-process lock is now
+        # belt-and-braces ONLY: it cannot exclude a second worker process, and
+        # PostgREST gives each statement its own transaction, so no
+        # application-level lock can span the section.
+        try:
+            minted = mint_session_key(
+                cp,
+                org_id=tid,
+                user_id=user_id,
+                purpose=purpose,
+                key_id=kid,
+                lookup_hash=lookup_hash(api_key),
+                key_prefix=api_key[:10],
+                created_at=now,
+                expires_at=expires_at,
+                max_api_keys=max_keys,
+            )
+        except SessionKeyMintRefusal as e:
+            # Semantic refusal from the serialized transaction — the SAME
+            # status/details the pre-#1879 in-Python section raised.
+            if e.code == "bootstrap_cap":
+                raise HTTPException(
+                    status_code=429,
+                    detail="Too many active session keys — wait for expiry",
+                ) from None
+            raise HTTPException(
+                status_code=402, detail=_key_limit_refusal()) from None
+        rotated = bool(minted.get("rotated"))
+        rotated_key_prefix = minted.get("rotated_key_prefix")
 
-        if purpose == "bootstrap":
-            active_boot = active_api_keys(cp, tid, created_via="bootstrap", created_by=user_id)
-            if len(active_boot) >= 3:
-                raise HTTPException(status_code=429, detail="Too many active session keys — wait for expiry")
-            expires_at = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
-            created_via = "bootstrap"
-        else:
-            lim = tier_limits(tier)
-            # #750.8: .get() so a pricing.json key drift never 500s the mint.
-            max_keys = lim.get("max_api_keys")
-            # Legacy rows may have created_via NULL — NULL <> 'bootstrap' counts
-            # against the cap, matching the registry predicate.
-            active = [r for r in active_api_keys(cp, tid)
-                      if r.get("created_via") != "bootstrap"]
-            if max_keys is not None and len(active) >= max_keys:
-                # #750.10: never auto-revoke a key the current user created —
-                # recovery must not dead-end by killing the user's own key.
-                # #1859 P3-1 (lane parity): exclude LEGACY keys (created_by
-                # IS NULL) from the others list — the registry predicate is
-                # `created_by <> $uid`, whose Cypher NULL semantics EXCLUDE
-                # unowned rows, so a legacy key must fall to the rotation
-                # branch (rotated=True), not be revoked via the others branch
-                # (rotated=False). Python's `None != user_id` is True, which
-                # inverted the semantics for exactly the orgs where legacy
-                # keys exist (pre-created_by session credentials).
-                others = [r for r in active
-                          if r.get("created_by") is not None
-                          and r.get("created_by") != user_id]
-                others.sort(key=lambda r: r.get("created_at") or "")
-                if others:
-                    revoke_api_key(cp, others[0]["id"], now)
-                else:
-                    # #1828: at max_api_keys with no OTHER key to revoke, the
-                    # recovery fallback dead-locks on the user's OWN persistent
-                    # keys (#750.10 refuses to touch them). Rotate a session
-                    # credential instead, in 3 tiers (each frees a slot or is
-                    # re-checked fail-closed):
-                    #   1. a LEGACY org-scoped unowned key (created_by IS NULL
-                    #      — a pre-created_by session credential by construction;
-                    #      it COUNTS against the cap, so rotating it frees a real
-                    #      slot and is preferred),
-                    #   2. the user's own LEAST-RECENTLY-USED recovery key
-                    #      (#1830 — system-minted fallback credentials, NOT
-                    #      deliberate user-created keys (those are
-                    #      created_via='provisioned' via create_api_key); they
-                    #      count against max_api_keys, so rotating one frees a
-                    #      REAL persistent slot — this is the escape hatch that
-                    #      un-deadlocks an org whose own recovery keys fill the
-                    #      cap; #1854: ordered by last_used_at ASC with never-
-                    #      used (NULL) keys first, so a live persistent
-                    #      credential another agent/device uses is NOT the one
-                    #      rotated), then
-                    #   3. the user's own OLDEST bootstrap key (24h ephemeral,
-                    #      re-minted per login; Review P3: expired own bootstraps
-                    #      are rotatable too (the row scan below drops the expiry
-                    #      filter; #742 auth remains unaffected — expired keys
-                    #      still never authenticate).
-                    # Own PROVISIONED keys (deliberate user-created keys) are
-                    # NEVER rotation candidates (#750.10).
-                    # Review P2-1: RE-CHECK the persistent count after the
-                    # revoke — a rotated modern bootstrap was never in the count,
-                    # so a rotation that doesn't free a slot fails CLOSED (402)
-                    # instead of minting cap+1 persistent keys (unbounded growth
-                    # per login).
-                    cands = cp.query(
-                        "api_keys",
-                        select=["id", "key_prefix", "created_at", "created_by",
-                                "created_via", "last_used_at"],
-                        filters=[("org_id", "eq", tid), ("revoked_at", "is", None)],
-                    )
-                    legacy = [r for r in cands
-                              if r.get("created_by") is None
-                              and r.get("created_via") != "bootstrap"]
-                    own_recovery = [r for r in cands
-                                    if r.get("created_by") == user_id
-                                    and r.get("created_via") == "recovery"]
-                    own_boot = [r for r in cands
-                                if r.get("created_by") == user_id
-                                and r.get("created_via") == "bootstrap"]
-                    legacy.sort(key=lambda r: r.get("created_at") or "")
-                    # #1854: own_recovery is rotated least-recently-used FIRST.
-                    # Sort key: (last_used_at IS NULL, last_used_at, created_at).
-                    # NULL last_used_at = never used = an unused credential —
-                    # the SAFEST rotation target (nothing live depends on it),
-                    # so NULLs sort first; then least-recently-used; created_at
-                    # breaks ties so an all-NULL set keeps the pre-#1854
-                    # oldest-created behavior.
-                    own_recovery.sort(
-                        key=lambda r: (r.get("last_used_at") is not None,
-                                       r.get("last_used_at") or "",
-                                       r.get("created_at") or ""))
-                    own_boot.sort(key=lambda r: r.get("created_at") or "")
-                    rotatable = legacy if legacy else (own_recovery if own_recovery else own_boot)
-                    if rotatable:
-                        revoke_api_key(cp, rotatable[0]["id"], now)
-                        rotated_key_prefix = rotatable[0].get("key_prefix")
-                        # P2-1: only mint when a persistent slot actually opened
-                        # (legacy rotation frees one; a modern bootstrap never
-                        # counted against max_api_keys).
-                        recheck = [r for r in active_api_keys(cp, tid)
-                                   if r.get("created_via") != "bootstrap"]
-                        if max_keys is not None and len(recheck) >= max_keys:
-                            raise HTTPException(status_code=402, detail=_key_limit_refusal())
-                        rotated = True
-                    else:
-                        raise HTTPException(status_code=402, detail=_key_limit_refusal())
-            expires_at = None
-            created_via = "recovery"
-
-        insert_api_key(cp, {
-            "id": kid,
-            "org_id": tid,
-            "lookup_hash": lookup_hash(api_key),
-            "key_prefix": api_key[:10],
-            "created_via": created_via,
-            "created_by": user_id,
-            "created_at": now,
-            "revoked_at": None,
-            "expires_at": expires_at,
-        })
     await _async_audit(request, tid, "api_key_mint", resource_type="api_key", resource_id=kid)
     # #308 (R2): evaluate key-create velocity after a successful mint.
     await _abuse_evaluate_keys(tid)
 
-    return {"key": api_key, "key_prefix": api_key[:10], "expires_at": expires_at,
+    return {"key": api_key, "key_prefix": api_key[:10],
+            "expires_at": expires_at,
             "org_id": tid, "purpose": purpose, "rotated": rotated,
             "rotated_key_prefix": rotated_key_prefix}
 
@@ -26217,13 +26438,14 @@ def _relink_sessions_after_index(org_id: str) -> None:
     """
     try:
         from .session_link import link_session_entities
-        # #3664: pass the SDK so the re-linked edges CAN be journaled — but on
-        # this lane _make_sdk/_data_sdk set no `event_log_path` and
-        # `EntityLinked` is JSONL-only (absent from _GRAPH_EVENT_TYPES), so
-        # `sdk._emit_event` is a no-op here (the same lane limit the turn
-        # record's note in _capture_session_impl documents). The re-linked
-        # edges are therefore live-only on the hosted lane; the JSONL-journal
-        # gap is filed as #4240. Do NOT read the `sdk=` argument as journaling.
+        # #3664/#4240: pass the SDK so the re-linked edges ARE journaled. The
+        # journal path comes from ``_make_sdk`` → ``_resolve_event_log_path``:
+        # when ``TORTOISE_EVENT_LOG_BASE_DIR`` is set the SDK carries an
+        # ``event_log_path`` and each new edge emits an ``EntityLinked`` record
+        # that the projection folds back on replay. When the base dir is unset
+        # the SDK is journal-less and ``sdk._emit_event`` is a no-op on
+        # ``EntityLinked`` (JSONL-only, absent from ``_GRAPH_EVENT_TYPES``), so
+        # the edges stay live-only — the documented unconfigured-lane bound.
         _link_sdk = _make_sdk(namespace=org_id)
         proj = _link_sdk._get_proj()
         rows = proj.g.query(
