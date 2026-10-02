@@ -304,6 +304,42 @@ def test_manifest_empty_is_red(tmp_path):
     assert rc == 1
 
 
+def _run_guard_scoped(tmp_path, manifest_text: str, scope: str, *, with_manifest: bool = True):
+    """Run the guard with `--scope` (and `--manifest --manifest-only` unless disabled)."""
+    log = _write(tmp_path, "pytest.log", "")
+    junit = _write(tmp_path, "junit.xml", JUNIT_PASSED)
+    argv = [sys.executable, str(TOOL), log, "--junitxml", junit]
+    if with_manifest:
+        manifest = _write(tmp_path, "manifest.txt", manifest_text)
+        argv += ["--manifest", manifest, "--manifest-only"]
+    argv += ["--scope", scope]
+    return subprocess.run(argv, capture_output=True, text=True)
+
+
+def test_scope_reports_how_many_frozen_nodeids_it_filtered(tmp_path):
+    # W37: `--scope` narrows the frozen set, so the log must say what was
+    # filtered — a wrong scope whose file is absent from the frozen set and a
+    # shard that legitimately owns none of its nodeids both used to exit 0
+    # printing NOTHING, and were indistinguishable.
+    proc = _run_guard_scoped(
+        tmp_path, "tests/test_ep_directional.py::TestX::test_y\n",
+        "tests/test_ep_directional.py")
+    assert proc.returncode == 0, proc.stderr
+    assert "filtered out by --scope" in proc.stdout, proc.stdout
+    assert "0 of 1" in proc.stdout, proc.stdout
+
+
+def test_scope_without_manifest_fails_closed(tmp_path):
+    # `--scope` narrows the FROZEN set's required subset, so it is meaningless
+    # without `--manifest`. Accepting it and silently ignoring it is the same
+    # no-op class as `--manifest-only` without a manifest: the caller believes a
+    # scoped check ran when nothing was scoped.
+    proc = _run_guard_scoped(
+        tmp_path, "", "tests/test_ep_directional.py", with_manifest=False)
+    assert proc.returncode == 2, (proc.returncode, proc.stdout, proc.stderr)
+    assert "requires --manifest" in proc.stderr, proc.stderr
+
+
 def test_manifest_junit_without_file_attrs_is_red(tmp_path):
     # A junitxml written WITHOUT -o junit_family=xunit1 lacks file/line attrs —
     # nodeid reconstruction is impossible, so the guard must fail closed with

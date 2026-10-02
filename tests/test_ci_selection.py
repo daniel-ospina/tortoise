@@ -34,6 +34,16 @@ from tools import ci_selection as cs
 
 
 REPO = Path(__file__).resolve().parents[1]
+FROZEN_NODEIDS_DIR = REPO / "config" / "ci-expected-nodeids"
+
+
+def _frozen_nodeids(name: str) -> list[str]:
+    """The nodeids a frozen manifest declares (comments/directives ignored)."""
+    return [
+        line.strip()
+        for line in (FROZEN_NODEIDS_DIR / name).read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
 
 
 def _sel(changed, event="pull_request"):
@@ -2520,6 +2530,39 @@ def test_carve_out_matrix_partitions_the_leg():
         f"missing={sorted(expected - set(got))} extra={sorted(set(got) - expected)}")
 
 
+def test_the_platform_gated_frozen_files_are_owned_by_the_carve_out_leg():
+    """W37: every file the frozen platform-gated manifest names must run in a
+    carve-out shard.
+
+    The workflow passes the frozen manifest VERBATIM but narrows it with
+    `--scope` to the files THIS shard runs, so a frozen nodeid is required
+    EXACTLY by the shard that owns its file. If that file leaves `carve_out` (or
+    a nodeid is added for a file that was never in it), no shard's scope matches
+    it: every shard requires none of its nodeids and passes, and the
+    platform-gated manifest's own runtime enforcement stops silently. The
+    workflow comment claims the union over shards still requires the whole
+    frozen set; this pins the coverage that claim depends on.
+
+    Derive the leg from `push_legs` and the files from the MANIFEST, never from
+    a hardcoded shard name, so the pin follows the emitted matrix and the frozen
+    file rather than becoming a second copy of them.
+    """
+    frozen = {
+        Path(nid.split("::", 1)[0]).name.removesuffix(".py")
+        for nid in _frozen_nodeids("platform-gated.txt")
+    }
+    assert frozen, "platform-gated.txt declares no nodeids — nothing to own"
+    leg = set(push_legs(load_manifest())["carve_out"])
+    unowned = sorted(frozen - leg)
+    assert not unowned, (
+        f"these files are named by config/ci-expected-nodeids/platform-gated.txt "
+        f"but no carve-out shard runs them, so no shard's `--scope` ever requires "
+        f"their nodeids and the frozen set's runtime enforcement is silently "
+        f"gone: {unowned} — add them to `carve_out` in config/ci-surfaces.yml "
+        f"(the frozen manifest must keep an owner in the sharded lane)"
+    )
+
+
 def test_carve_out_matrix_keeps_the_bare_name():
     """W37: shard 0's job name must be EXACTLY `test-carve-out`.
 
@@ -2540,6 +2583,52 @@ def test_carve_out_matrix_keeps_the_bare_name():
     for s in suffixes[1:]:
         assert s.startswith(" (") and s.endswith(")"), (
             f"a non-first shard suffix must be ` (<label>)`, got {s!r}")
+
+
+def test_carve_out_artifact_name_consumes_a_distinct_per_leg_label():
+    """#6263/W37: the carve-out matrix must carry a `label` the upload step
+    actually consumes.
+
+    `test_a_matrix_job_never_uploads_a_fixed_name_artifact` cannot check this
+    job: its matrix comes from `fromJSON(needs.changes.outputs.carve_matrix)`,
+    an unresolvable string, so the name check degrades to "does it mention
+    `matrix.`" and never verifies the key EXISTS. GitHub renders an undefined
+    matrix key as the empty string, so renaming the emitted `label` field (or the
+    upload name's `matrix.label`) would restore the per-leg 409 collision with
+    the whole suite green — the #6263 class. Resolve the emitted matrix and pin
+    both halves: the key is present and distinct per shard, and the upload step's
+    `name:` is the templated string that consumes it.
+    """
+    entries = _carve_matrix()["include"]
+    labels = [e.get("label") for e in entries]
+    assert all(isinstance(lab, str) and lab for lab in labels), (
+        f"every carve shard must carry a non-empty `label` (the artifact-name "
+        f"tail), got {labels!r} — an undefined `matrix.label` renders as ''"
+    )
+    assert len(set(labels)) == len(labels), (
+        f"two carve shards would upload under the SAME artifact name: {labels} "
+        f"— upload-artifact@v4 409s and, because the step is continue-on-error, "
+        f"both legs' logs vanish silently (#6263)"
+    )
+    job = _load_python_ci()["jobs"]["test-carve-out"]
+    up = next(s for s in job["steps"]
+              if str(s.get("uses") or "").startswith("actions/upload-artifact"))
+    name = str((up.get("with") or {}).get("name") or "")
+    assert "${{ matrix.label }}" in name, (
+        f"the carve-out artifact name ({name!r}) must interpolate the emitted "
+        f"per-leg `label` — a fixed name, or any other matrix key, collides "
+        f"across shards (#6263)"
+    )
+    rendered = [
+        name.replace("${{ github.job }}", "test-carve-out")
+            .replace("${{ matrix.label }}", lab)
+        for lab in labels
+    ]
+    assert len(set(rendered)) == len(rendered), (
+        f"two carve shards would upload under the SAME artifact name: {rendered} "
+        f"— upload-artifact@v4 409s and the step's continue-on-error makes the "
+        f"loss silent (#6263)"
+    )
 
 
 def test_carve_shards_declaration_is_fail_closed():

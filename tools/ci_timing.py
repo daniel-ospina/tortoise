@@ -442,6 +442,7 @@ def integrity_problems(manifest_text: str) -> list[str]:
     problems = (cs.integrity(manifest)
                 + cs.slow_file_issues(manifest)
                 + cs.fast_shard_issues(manifest)
+                + cs.carve_shard_issues(manifest)
                 + cs.duration_issues(manifest)
                 + cs.leg_coverage_issues(manifest)
                 + cs.duration_coverage_issues(manifest))

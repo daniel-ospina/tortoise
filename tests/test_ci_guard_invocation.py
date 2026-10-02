@@ -742,12 +742,18 @@ EVALUATED_EXPRESSIONS = {
 
 
 def test_frozen_enforcement_is_not_hidden_in_an_unevaluable_step():
-    """Fail-closed for the one thing this harness cannot run.
+    """Fail-closed for expressions this harness cannot evaluate.
 
-    A `run:` block interpolating `${{ … }}` is not executable outside Actions, so
-    it must not be where the frozen-set enforcement lives — unverifiable here and
-    silently unverified is the state this file exists to end. (The emit-manifest
-    steps legitimately carry expressions; they do not pass `--manifest-only`.)
+    The harness runs each enforcing step's real shell under `bash -e`, substituting
+    the GitHub expressions in `EVALUATED_EXPRESSIONS` (`_relocated`). Enforcement
+    MAY therefore live in a step that interpolates one of those — the carve-out
+    step does exactly that with `${{ matrix.files }}`, `${{ needs.changes.outputs.full }}`
+    and `${{ needs.changes.outputs.slow_selected }}`. What must not happen is an
+    expression the harness cannot evaluate: an unresolved `${{ … }}` reaches the
+    shell as a `bad substitution` and kills the step before the guard runs, so the
+    frozen set would read as enforced by nothing. The assertion's job is to refuse
+    any expression NOT on that allowlist — the exemption is the allowlist, not
+    `--manifest-only`.
     """
     offenders = [
         f"{job}/{(step.get('name') or '?').strip()}"

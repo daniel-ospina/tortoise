@@ -8,7 +8,8 @@ a matching probe), the run must flip RED — the historical silent-green masked 
 #1382 EP regression class for days.
 
 Usage:
-  python3 tools/skip-guard.py <path-to-pytest.log> [--manifest <expected-nodeids.txt>] [--junitxml <path>]
+  python3 tools/skip-guard.py <path-to-pytest.log> [--manifest <expected-nodeids.txt>]
+                              [--scope "<space-joined files>"] [--junitxml <path>] [--manifest-only]
   python3 tools/skip-guard.py --emit-manifest "<space-joined $FILES>" [--marker <expr>] [--output <path>] [--ignore <path>]...
 
 Manifest GENERATION mode (epic #1647 Task 6 — the coverage-manifest
@@ -96,6 +97,21 @@ Coverage-manifest mode (epic #1647 Task 3 — the skip-guard inversion):
                                      e2e module. Use this where the property is
                                      "the frozen nodeid set is still COLLECTED
                                      (and the tests that must run, run)".
+  --scope "<space-joined files>"     restrict the frozen set to the nodeids whose
+                                     FILE is listed. The manifest is always
+                                     passed VERBATIM (never a grep-derived temp
+                                     file, which a tree could silently
+                                     redefine); only what THIS invocation must
+                                     observe shrinks — for a lane that runs one
+                                     SHARD of a repo-level frozen set. A scope
+                                     naming no frozen nodeid is a legitimate
+                                     empty requirement for a shard that owns
+                                     none, and the guard prints the filtered
+                                     count (and says so when the requirement is
+                                     empty) so a wrong scope is not silent.
+                                     Requires --manifest: with no frozen set
+                                     there is nothing to narrow, so the
+                                     combination fails closed (exit 2).
 
   Every expected nodeid must appear as a junitxml <testcase> — passed OR
   skipped-with-reason; a missing nodeid (deselected, file dropped from $FILES,
@@ -858,6 +874,20 @@ def main(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return 2
+    if scope is not None and manifest_path is None:
+        # `--scope` narrows the required subset of the FROZEN set, so it has no
+        # meaning without `--manifest`. Accepting it and then silently ignoring
+        # it is the same no-op class as `--manifest-only` with no manifest
+        # (cycle-5/cycle-7 findings): the caller believes a scoped check ran
+        # when nothing was scoped at all.
+        print(
+            f"❌ {argv[0]}: --scope requires --manifest <expected-nodeids.txt> "
+            "— the flag narrows which FROZEN nodeids this run must observe, and "
+            "with no manifest there is no frozen set to narrow; silently "
+            "dropping it would report a scoped check that never happened.",
+            file=sys.stderr,
+        )
+        return 2
     if log_path is None:
         print(
             f"usage: {argv[0]} <path-to-pytest.log> "
@@ -903,18 +933,25 @@ def main(argv: list[str]) -> int:
             # nodeid yields an empty required set — a shard that owns none of
             # the frozen tests — which is a legitimate pass, NOT the vacuous
             # green the check above forbids (that check ran on the frozen set).
-            #
-            # ⛔ But it must never be SILENT. Exiting 0 without a word makes a
-            # shard that required nothing indistinguishable in the CI log from
-            # one that required the whole set and passed — and that silence is
-            # what would hide a frozen nodeid whose file belongs to NO shard
-            # (every shard would happily require nothing, forever). The line
-            # below is deliberately on stderr and unconditional.
-            _before = len(expected)
+            # The frozen set must never lose its owner SILENTLY. Exiting 0
+            # without a word makes a shard that required nothing
+            # indistinguishable in the CI log from one that required the whole
+            # set and passed — and that silence is what would hide a frozen
+            # nodeid whose file belongs to NO shard (every shard would happily
+            # require nothing, forever). test_ci_selection.py pins that the
+            # shard scopes COVER the frozen files; the count line below names
+            # the scope and what it filtered, and the empty case is announced
+            # on stderr.
+            frozen_count = len(expected)
             expected = {n for n in expected
                         if n.split("::", 1)[0] in scope}
+            print(
+                f"scope: {frozen_count - len(expected)} of {frozen_count} frozen "
+                f"nodeid(s) filtered out by --scope={sorted(scope)}; "
+                f"{len(expected)} required of this run."
+            )
             if not expected:
-                print(f"ℹ skip-guard: --scope required none of the {_before} "
+                print(f"ℹ skip-guard: --scope required none of the {frozen_count} "
                       f"frozen nodeid(s) for this run (files: "
                       f"{sorted(scope)}). This shard owns none of "
                       f"{manifest_path!r} — nothing to require, asserting the "

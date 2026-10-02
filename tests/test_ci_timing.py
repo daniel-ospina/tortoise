@@ -854,6 +854,38 @@ def test_integrity_problems_agrees_with_the_integrity_cli(
                for p in ci_timing.integrity_problems(skewed))
 
 
+def test_integrity_problems_mirrors_the_carve_shard_validator() -> None:
+    """W37 MUTATION PROOF: the refresh's gate must include the PR's new
+    validator.
+
+    `refresh_durations` gates on :func:`integrity_problems`, so a validator
+    present in `ci_selection.py --integrity` and missing here lets the weekly
+    durations writer persist a manifest the gate of record rejects.
+    `integrity_problems`' docstring contracts "the same functions, in the same
+    order, as --integrity"; this pins that contract for `carve_shard_issues`
+    specifically, because a validator added to one composition and not the other
+    is exactly how the two diverge silently. Build the violation by MUTATION of
+    the real manifest, so the pin does not depend on a literal value and still
+    fires if `carve_shards` is later rolled back or renumbered.
+    """
+    import ci_selection as cs
+
+    real = cs.MANIFEST.read_text()
+    broken = yaml.safe_load(real)
+    broken["carve_shards"] = None
+    text = yaml.safe_dump(broken, sort_keys=False)
+    # The gate of record refuses it …
+    assert cs.carve_shard_issues(broken), (
+        "the carve_shards validator no longer rejects an explicit null")
+    # … and the refresh's gate must agree, naming the same problem rather than
+    # some unrelated one the re-serialization happened to introduce.
+    problems = ci_timing.integrity_problems(text)
+    assert any("carve_shards is explicitly null" in p for p in problems), (
+        f"integrity_problems does not surface the carve_shards validator the "
+        f"gate of record runs — the weekly refresh could write a manifest "
+        f"--integrity refuses: {problems}")
+
+
 def test_ci_timing_docstring_no_longer_claims_it_never_gates_ci() -> None:
     """Task 4b makes this tool the writer of the weights the balancer packs by,
     so the old unconditional 'never gates CI' invariant was false (#3395)."""
