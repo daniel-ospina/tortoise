@@ -75,8 +75,13 @@ DEFAULT_EVAL_SOCKET_CONNECT_TIMEOUT_S = 10.0
 #: Per-question no-progress budget (seconds). ~10-60x the measured
 #: per-session ingest cost (~15-90 s), so a healthy session never trips it.
 DEFAULT_STALL_TIMEOUT_S = 900.0
-#: Minimum seconds between emitted heartbeat lines (a 500-session question
-#: must not flood the log; a 4-minute silence must still be impossible).
+#: Minimum seconds between EMITTED heartbeat lines — a throttle, not a
+#: scheduler (a 500-session question must not flood the log). Lines are emitted
+#: when the ingest MARKS PROGRESS, so a stage that runs longer than this emits
+#: its line at the NEXT boundary rather than during it: the interval bounds the
+#: log volume, and the budget check at each boundary is what bounds the stall.
+#: It does NOT make a silent window longer than the interval impossible — a long
+#: stage with no interior boundary produces no lines until it ends.
 DEFAULT_HEARTBEAT_INTERVAL_S = 30.0
 
 ENV_SOCKET_TIMEOUT = "TORTOISE_DB_SOCKET_TIMEOUT"

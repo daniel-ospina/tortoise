@@ -700,9 +700,12 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
                        # is granted (P1-1).
                        ingest_write_retries: int = INGEST_WRITE_RETRIES,
                        write_marker_armed: bool = True,
-                       # #2969: liveness/stall guard. ``heartbeat`` lets the
-                       # caller (run.py) own/heartbeat-share the signal;
-                       # None → a fresh per-question heartbeat is created.
+                       # #2969: liveness/stall guard. ``heartbeat`` is an
+                       # injection SEAM — tests supply a clock-driven one, and
+                       # a caller may supply a shared one; None → a fresh
+                       # per-question heartbeat is created. No production
+                       # caller passes it today (`run_evaluation` has no such
+                       # parameter), so the seam is exercised by tests only.
                        # ``stall_timeout_s`` overrides the env/default
                        # no-progress budget (None → resolve from env).
                        heartbeat: Heartbeat | None = None,
@@ -806,8 +809,9 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
 
     # ── #2969: liveness/stall guard ──────────────────────────────────────
     # The heartbeat is the "is this run stalled or just slow?" signal the
-    # silent 4h/question grind lacked: a line every emit-interval, plus a
-    # no-progress budget enforced at every stage boundary. Blowing the
+    # silent 4h/question grind lacked: a line at each stage BOUNDARY once the
+    # emit interval has elapsed, plus a no-progress budget enforced at every
+    # boundary. Blowing the
     # budget raises IngestStallTimeout — a TimeoutError with ETIMEDOUT, so
     # the EXISTING machinery grades the failure entry
     # ``ingest:retries_exhausted`` (retryable) and ``--retry-failed``

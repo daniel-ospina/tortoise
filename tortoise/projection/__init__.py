@@ -59,11 +59,11 @@ _SOCKET_TIMEOUT_ENV = "TORTOISE_DB_SOCKET_TIMEOUT"
 _SOCKET_CONNECT_TIMEOUT_ENV = "TORTOISE_DB_SOCKET_CONNECT_TIMEOUT"
 _DEFAULT_SOCKET_TIMEOUT = 10.0
 _DEFAULT_SOCKET_CONNECT_TIMEOUT = 5.0
-# #4097: the "off" spellings are the DECLARED contract (`FALSY`), not a second
-# per-knob vocabulary — an operator learns one disable vocabulary, not one per
-# knob. `none` is this knob's own spelling (a timeout is absent, not false), and
-# `0.0`/`-1` are the numeric equivalents; keeping all three here means the whole
-# accepted set is readable in one place.
+# #4097: this knob's "off" spellings come from the DECLARED contract
+# (`FALSY`), so an operator who reaches for `false` is not meeting a second
+# vocabulary. `none` is this knob's own spelling (a timeout is absent, not
+# false), and the numeric equivalents `0.0`/`-1` are below — keeping all three
+# here means the whole accepted set is readable in one place.
 _SOCKET_TIMEOUT_UNBOUNDED = FALSY | {"none", "0.0", "-1"}
 
 
@@ -72,10 +72,11 @@ def _resolve_socket_timeout(name: str, default: float) -> float | None:
 
     Unset/blank → ``default``. ``none`` or any declared falsy spelling
     (``off``/``no``/``false``/``0``), or any number ≤ 0 (the numeric off forms
-    ``0.0``/``-1``) → ``None`` (unbounded — the explicit opt-out). A
-    non-numeric OR non-finite value raises ``ValueError``: a typo must fail
-    loud at connection time, never silently leave the client effectively
-    unbounded (``inf`` would).
+    ``0.0``/``-1``) → ``None`` (unbounded — the explicit opt-out). A value
+    below ``_DB_TIMEOUT_MIN_S`` falls back to ``default`` (see that constant).
+    A non-numeric, non-finite or above-``_DB_TIMEOUT_MAX_PER_LANE_S`` value
+    raises ``ValueError``: a typo must fail loud at connection time, never
+    silently leave the client effectively unbounded (``inf``/``1e30`` would).
     """
     raw = os.environ.get(name)
     if raw is None or not raw.strip():
@@ -94,6 +95,11 @@ def _resolve_socket_timeout(name: str, default: float) -> float | None:
             f"{name}={raw!r} is not a finite number of seconds (inf/nan "
             f"would leave the client unbounded; use 'none' to opt out "
             f"explicitly)")
+    if value > _DB_TIMEOUT_MAX_PER_LANE_S:
+        raise ValueError(
+            f"{name}={raw!r} exceeds the {_DB_TIMEOUT_MAX_PER_LANE_S:g}s "
+            f"ceiling for this knob — above it the value is a typo, not a "
+            f"request (see _DB_TIMEOUT_MAX_PER_LANE_S)")
     if value <= 0:
         return None
     if value < _DB_TIMEOUT_MIN_S:
@@ -169,6 +175,17 @@ _DB_TIMEOUT_MAX_S = 60.0
 #: (fail-closed, so not #2850, but the same "finite but absurd" class floored
 #: for the health-probe interval). Below the floor we fall back to the default.
 _DB_TIMEOUT_MIN_S = 0.05
+#: Ceiling on the #2969 PER-LANE knob (``TORTOISE_DB_SOCKET_TIMEOUT`` /
+#: ``TORTOISE_DB_SOCKET_CONNECT_TIMEOUT``). The PRODUCT knob clamps at
+#: ``_DB_TIMEOUT_MAX_S`` (60s), but this knob exists so the eval lane can ask
+#: for its ``DEFAULT_EVAL_SOCKET_TIMEOUT_S`` (120s) — so it needs HEADROOM
+#: above that, not no ceiling at all. Beyond this a read bound stops being a
+#: bound, and it is the same "finite but absurd" class as the floor:
+#: ``sock.settimeout(1e30)`` raises ``OverflowError``, which redis-py does NOT
+#: catch (``except OSError`` only), so the client can never connect AND the
+#: failure is not retryable. Fails loud rather than clamping, per this knob's
+#: own typo contract (a silent clamp would hide the typo that caused it).
+_DB_TIMEOUT_MAX_PER_LANE_S = 600.0
 
 #: #3350: explicit, bounded retry policy for the EMBEDDED client.
 #:
@@ -3495,9 +3512,9 @@ class FalkorProjection(
             from falkordb import FalkorDB  # ponytail: lazy import, only needed for Docker mode
             # Resolved at CONNECTION time so an env knob covers every CONSUMER
             # of this client (SDK sessions, ingest, hosted) — NOT every
-            # FalkorDB client in the repo: `session_indexer.py`, `backup.py`
-            # and the probe in `__main__.py` construct their own, and this
-            # knob does not reach them. ACTUAL
+            # FalkorDB client even in `tortoise/`: `session_indexer.py`,
+            # `backup.py` and the probe in `__main__.py` construct their own,
+            # and neither knob reaches them. ACTUAL
             # precedence: #2969's per-lane TORTOISE_DB_SOCKET_CONNECT_TIMEOUT /
             # TORTOISE_DB_SOCKET_TIMEOUT (fail-loud, explicit none/off/0
             # opt-out) WINS whenever it is set; #2850's product-wide

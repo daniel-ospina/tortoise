@@ -230,6 +230,19 @@ def test_socket_timeout_defaults_preserve_product_behaviour(monkeypatch):
         assert _resolve_socket_timeout(_SOCKET_TIMEOUT_ENV, 10.0) == 10.0
     monkeypatch.setenv(_SOCKET_TIMEOUT_ENV, "0.05")
     assert _resolve_socket_timeout(_SOCKET_TIMEOUT_ENV, 10.0) == 0.05
+    # …and a CEILING, for the same class. Above it the value is a typo, not a
+    # request, and it fails LOUD rather than clamping: `1e30` reaches
+    # `sock.settimeout`, which raises OverflowError — NOT caught by redis-py
+    # (`except OSError` only) — so the client could never connect and the
+    # failure was not retryable. The ceiling sits above the eval lane's
+    # deliberate 120s, so it does not re-impose the product knob's 60s.
+    for token in ("1e30", "1e308"):
+        monkeypatch.setenv(_SOCKET_TIMEOUT_ENV, token)
+        with pytest.raises(ValueError):
+            _resolve_socket_timeout(_SOCKET_TIMEOUT_ENV, 10.0)
+    for token in ("600", "120"):
+        monkeypatch.setenv(_SOCKET_TIMEOUT_ENV, token)
+        assert _resolve_socket_timeout(_SOCKET_TIMEOUT_ENV, 10.0) == float(token)
     # A typo fails loud — never silently unbounded.
     monkeypatch.setenv(_SOCKET_TIMEOUT_ENV, "abc")
     with pytest.raises(ValueError):
