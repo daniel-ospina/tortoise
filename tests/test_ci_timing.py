@@ -937,25 +937,29 @@ def test_integrity_problems_mirrors_the_spot_checked_validators() -> None:
 def test_integrity_problems_mirrors_the_whole_integrity_composition(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The docstring's "cannot disagree" contract, validator by validator.
+    """The parity contract `integrity_problems`' docstring claims, over the
+    validators listed below.
 
     The per-validator violation test above can only cover validators whose
-    violation is cheap to build. The docstring claims a stronger property —
-    "the same functions, in the same ORDER, as the --integrity entry point ... so
-    the two cannot disagree" — and that is pinned here directly: wrap each
-    validator in `validators` with a recorder that appends a unique sentinel to
-    the real result, run BOTH compositions over the same manifest, and require
-    the two to call the SAME functions in the SAME order and to surface the SAME
-    sentinels.
+    violation is cheap to build. `tools/ci_timing.py::integrity_problems`
+    claims a stronger property — "Composed by CALLING the same `ci_selection`
+    functions, in the same order, as the `--integrity` entry point — currently
+    term-for-term" — and the SAME docstring then warns "⛔ The list is
+    HAND-MAINTAINED, so it can drift out of that parity silently". This test
+    pins that claim over the validators listed below: wrap each with a recorder
+    that appends a unique sentinel to the real result, run BOTH compositions
+    over the same manifest, and require the two to call the SAME functions in
+    the SAME order and to surface the SAME sentinels.
 
-    ⛔ `validators` is a hand-maintained ALLOW-LIST, not a derivation of either
-    composition. A validator NOT listed there is never wrapped, so it never
-    reaches `calls`: its presence in one composition and absence from the other
-    is invisible here, and only a LISTED validator's removal or reordering reds.
-    Add each new validator to `validators` — the test cannot discover it.
-    `set(cli_calls) == set(validators)` additionally reds if a listed validator
-    stops being called by the gate of record at all, so the spy cannot pass by
-    finding nothing.
+    ⛔ The pin is BOUNDED BY the hand-maintained `validators` tuple below — it
+    equals both compositions today and must be extended when a validator is
+    added. `validators` is an ALLOW-LIST, not a derivation of either
+    composition: a validator NOT listed there is never wrapped, so it never
+    reaches `calls`, and its presence in one composition and absence from the
+    other is invisible here. Only a LISTED validator's removal or reordering
+    reds. `set(cli_calls) == set(validators)` additionally reds if a listed
+    validator stops being called by the gate of record at all, so the spy
+    cannot pass by finding nothing.
     """
     import ci_selection as cs
 

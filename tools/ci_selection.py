@@ -125,13 +125,14 @@ MAX_FAST_SHARDS = 26
 
 # W37: the CARVE-OUT pool's shard count (`config/ci-surfaces.yml::carve_shards`).
 #
-# WHY IT EXISTS. `test-carve-out` was ONE unsharded job and IS the CI critical
-# path: measured over 23 PR runs and 3 successful main runs (2026-09-30), its
-# work is min 16.0m / p50 16.9m against a median run wall of 18.6m — 91% of the
-# wall. Meanwhile the fast band is already split nine ways. So the wall was
-# `max(9 fast shards, 1 carve-out)`, and the carve-out was the pole in EVERY
-# run examined (`test (b)`, which the objective names, ends at +10.5m; it was
-# never the pole). Sharding it converts that `max` into a comparable term.
+# WHY IT EXISTS. `test-carve-out` was ONE unsharded job and WAS the CI critical
+# path until W37 sharded it: measured over 23 PR runs and 3 successful main runs
+# (2026-09-30), its work was min 16.0m / p50 16.9m against a median run wall of
+# 18.6m — 91% of the wall. Meanwhile the fast band is already split nine ways,
+# so the wall was `max(9 fast shards, 1 carve-out)`, and the carve-out was the
+# pole in EVERY run examined (`test (b)`, which the objective names, ends at
+# +10.5m; it was never the pole). Sharding it converts that `max` into a
+# comparable term.
 #
 # ABSENCE KEEPS THE CURRENT SHAPE, and this is the one place this key differs
 # from `fast_shards`. There, absence means the historical S=2; here the
@@ -1730,10 +1731,14 @@ def push_legs(manifest: dict) -> dict:
             "slow": strip(slow - carve_out),
             "env_broken": sorted(ENV_BROKEN_FILES),
             "carve_out": strip(carve_out),
-            # W37: the same set, packed. `carve_out` is KEPT above because it is
-            # the coverage contract `leg_coverage_issues` and several pins read,
-            # and because keeping it makes the union check below meaningful: the
-            # shards must partition `carve_out` exactly, never re-derive it.
+            # W37: the same set, packed. `carve_out` is KEPT above because the
+            # `changes` job publishes it as its `carve_out` output and several
+            # pins read this emitted key; `leg_coverage_issues` enforces the
+            # coverage contract over the same set, read from the manifest rather
+            # than from this leg. The partition itself — the shards must cover
+            # `carve_out` exactly, never re-derive it — is pinned by
+            # `tests/test_ci_selection.py::test_carve_out_matrix_partitions_the_leg`;
+            # no check in THIS module enforces it.
             "carve_shards": carve_shard_entries(manifest),
             # Not a push leg: emitted so leg_coverage_issues() can account for
             # the file. Nothing in python-ci.yml consumes this key — that is

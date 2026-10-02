@@ -833,8 +833,9 @@ def main(argv: list[str]) -> int:
     # `--scope` (#6804): restrict WHICH frozen nodeids this invocation must see.
     # Needed because the frozen manifest is REPO-LEVEL while this job runs ONE
     # shard of it — comparing the whole file against one shard's junitxml reds
-    # every shard that does not run its siblings (measured: shards (a)/(c)
-    # reddened on a run whose pytest was green).
+    # every shard that does not run its siblings (measured on the sharding PR:
+    # shards 0 and (b) reddened on a run whose pytest was green — the frozen
+    # file belongs to shard (c)).
     #
     # ⛔ The filter must NOT live in the manifest argument. A `--manifest` that is
     # a grep-derived TEMP file is a set the tree can silently redefine, which is

@@ -1092,8 +1092,8 @@ def test_full_selection_runs_both_legs_with_whole_slow_leg_set():
 def test_tier2_slow_run_scoped_to_matched_surfaces():
     """#2148: tier-2 PRs run only their matched surfaces' slow files. ep
     owns test_dream / test_ep_sources / test_source_inheritance_own — a
-    ranking.py-only PR selects exactly those (never the full 24-file leg
-    set), and the carve-out job skips (ep owns no carve-out file)."""
+    ranking.py-only PR selects exactly those (never the full committed slow-
+    leg set), and the carve-out job skips (ep owns no carve-out file)."""
     r = _sel(["tortoise/ranking.py"])
     assert r["full"] is False and r["surfaces"] == ["ep"]
     assert r["slow_run"] is True
@@ -2532,8 +2532,9 @@ def test_carve_out_job_uri_unset_with_carve_out_flag():
     """E2E-4 (Task 9 Step 5): the dedicated carve-out job runs the embedded
     set URI-UNSET (no TORTOISE_DB_URI — a URI would redirect the
     carve-out to the server lane) with TORTOISE_TEST_CARVE_OUT=1 (the P4
-    enforcement-prep escape), and consumes the changes job's carve_out
-    output as its file list."""
+    enforcement-prep escape), and takes its file list from the selector's
+    `carve_matrix` output — the `carve_out` leg packed into per-shard
+    `matrix.files`."""
     wf = _load_python_ci()
     job = wf["jobs"]["test-carve-out"]
     assert "TORTOISE_DB_URI" not in job.get("env", {}) or \
