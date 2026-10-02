@@ -63,6 +63,11 @@ from __future__ import annotations
 
 import os
 
+# #4097: the truthy vocabulary has ONE declared home — importing it here rather
+# than re-declaring the literal is what keeps the read-path flag consistent with
+# every other boolean env read in the tree.
+from .env_truthy import TRUTHY
+
 #: The recorded terms and the published term set, imported from their ONE
 #: home. ``READ_STATUSES`` is the home's ``CLIENT_STATUS_TERMS``: the read path
 #: reports the boundary's vocabulary, it does not own a copy of it.
@@ -74,11 +79,6 @@ from .status_vocabulary import (
     STATUS_UNCONFIGURED,
 )
 from .status_vocabulary import classify as classify_condition
-
-# #4097: the truthy vocabulary has ONE declared home — importing it here rather
-# than re-declaring the literal is what keeps the read-path flag consistent with
-# every other boolean env read in the tree.
-from .env_truthy import TRUTHY
 
 READ_STATUSES: tuple[str, ...] = CLIENT_STATUS_TERMS
 
