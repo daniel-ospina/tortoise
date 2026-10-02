@@ -51,7 +51,7 @@ Verification: restore the backup to a staging instance and confirm all Points ar
 Run the audit script to establish the baseline:
 
 ```bash
-TORTOISE_DB_URI=docker://:@localhost:16379/tortoise python3 graph-scripts/audit_ids.py
+TORTOISE_DB_URI=docker://:@localhost:16379/tortoise uv run python graph-scripts/audit_ids.py
 ```
 
 Save the full output as `docs/migrations/id-normalization-baseline-YYYYMMDD.txt`.
@@ -62,7 +62,7 @@ Use a copy of the graph or a staging instance. The same `TORTOISE_DB_URI` format
 
 ```bash
 # On staging DB (port 16380 or index 15 on same instance)
-TORTOISE_DB_URI=docker://:@localhost:16380/tortoise python3 graph-scripts/migrate_ids.py --dry-run
+TORTOISE_DB_URI=docker://:@localhost:16380/tortoise uv run python graph-scripts/migrate_ids.py --dry-run
 ```
 
 ---

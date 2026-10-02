@@ -4,7 +4,7 @@ fixture for the M6 evidence-marking recalibration (#1526, epic #1509).
 
 CLI::
 
-    python tools/longmem_eval/build_healthy52_fixture.py \
+    uv run python -m tools.longmem_eval.build_healthy52_fixture \
         --checkpoint /tmp/lme-v2-full.json \
         --dataset ~/.cache/tortoise-longmemeval/longmemeval_s_cleaned.json \
         --out tests/fixtures/lme_v2_healthy52.json
@@ -28,9 +28,19 @@ the old miscalibration (51/52 with ``evidence_points == 0``, total 1/12,085).
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/longmem_eval/build_healthy52_fixture.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python -m tools.longmem_eval.build_healthy52_fixture`"
+    )
+
 import argparse
 import json
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 

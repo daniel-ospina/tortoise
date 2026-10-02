@@ -348,3 +348,81 @@ class TestDe2e3ReviewFixes:
             "MATCH (op:Point {label:'alreadyDecided'}) RETURN count(op)"
         ).result_set
         assert rows[0][0] == 0, "no alreadyDecided operator for live priors"
+
+    def test_5316_a_rival_pair_is_flagged_but_not_wired(self, sdk, monkeypatch):
+        """#5316: a tier-2 embedding hit does not by itself license the
+        alreadyDecided IMPL. A pair differing only by a load-bearing
+        connective is a RIVAL claim (D12/O4 `substituted_content`), so it is
+        flagged for review and left unwired."""
+        prior_id = _decision(sdk, content=PRIOR_AND, status="draft")["id"]
+        cand_id = _decision(sdk, content=CAND_RIVAL, status="draft")["id"]
+        _force_tier2_hit(sdk, monkeypatch, prior_id, PRIOR_AND)
+        res = sdk._dedup_content_candidates([cand_id], sdk_for_wiring=sdk)
+        assert res["hits"] == 1, res
+        # Behavioural first: on the unfixed code this is where the defect
+        # shows — the rival pair IS wired — rather than on the new key.
+        assert res["wired_draft_to_draft"] == 0, res
+        assert _already_decided_links(sdk, cand_id, prior_id) == 0, (
+            "a rival pair must not be wired as one decision"
+        )
+        assert res["boundary_blocked"] == 1, res
+        # The refusal is not a silent drop — the review queue still sees it.
+        assert any(c["id"] == cand_id
+                   for c in sdk.list_dedup_candidates(candidate_type="content"))
+
+    def test_5316_an_equivalent_pair_is_still_wired(self, sdk, monkeypatch):
+        """Positive control: the same tier-2 hit DOES wire when the pair
+        crosses no distinguishing dimension. Without this arm the test above
+        would also pass on a guard that simply never wires anything."""
+        prior_id = _decision(sdk, content=PRIOR_AND, status="draft")["id"]
+        cand_id = _decision(sdk, content=PRIOR_REORDERED, status="draft")["id"]
+        _force_tier2_hit(sdk, monkeypatch, prior_id, PRIOR_AND)
+        res = sdk._dedup_content_candidates([cand_id], sdk_for_wiring=sdk)
+        assert res["hits"] == 1, res
+        assert res["wired_draft_to_draft"] == 1, res
+        assert res["boundary_blocked"] == 0, res
+        assert _already_decided_links(sdk, cand_id, prior_id) == 1
+
+    def test_5316_an_unreadable_pair_fails_closed(self, sdk, monkeypatch):
+        """Fail-closed toward KEEP: when a tier-2 hit cannot carry the prior's
+        body there is nothing to compare, so the wire is refused rather than
+        assumed equivalent (the same asymmetry `fold_allowed` itself uses)."""
+        prior_id = _decision(sdk, status="draft")["id"]
+        cand_id = _decision(
+            sdk, content="We decided to move the FalkorDB default port to 16380.",
+            status="draft")["id"]
+        _force_tier2_hit(sdk, monkeypatch, prior_id, None)
+        res = sdk._dedup_content_candidates([cand_id], sdk_for_wiring=sdk)
+        assert res["hits"] == 1, res
+        assert res["wired_draft_to_draft"] == 0, res
+        assert res["boundary_blocked"] == 1, res
+
+
+PRIOR_AND = "We decided to ship the parser and the indexer."
+PRIOR_REORDERED = "We decided to ship the indexer and the parser."
+CAND_RIVAL = "We decided to ship the parser or the indexer."
+
+
+def _force_tier2_hit(sdk, monkeypatch, prior_id, existing_content):
+    """Pin the embedding tier to one above-threshold hit on `prior_id`.
+
+    `existing_content=None` omits the prior body, standing in for a tier-2 hit
+    that cannot carry it (the fail-closed arm of #5316).
+    """
+    orig = sdk._semantic_dedup
+
+    def fake_sd(candidates, threshold, pointKind="checkpoint-item",
+                return_pairs=False, similarity_out=False, exclude_ids=None):
+        if return_pairs:
+            pair = {"candidate": candidates[0][0],
+                    "candidate_id": candidates[0][0].get("id"),
+                    "existing": prior_id,
+                    "similarity": 0.95}
+            if existing_content is not None:
+                pair["existing_content"] = existing_content
+            return [pair]
+        return orig(candidates, threshold, pointKind=pointKind,
+                    return_pairs=return_pairs, similarity_out=similarity_out,
+                    exclude_ids=exclude_ids)
+
+    monkeypatch.setattr(sdk, "_semantic_dedup", fake_sd)

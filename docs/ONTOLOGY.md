@@ -248,9 +248,11 @@ doc_status: live
 >   value the write **persists**, `str(valid_from)`, because a numeric epoch
 >   parses as an instant but its `str()` does not — a distinction that decides
 >   whether the predecessor's `validTo` is orderable by `_covers` at all.
->   A date-only value parses as **local** midnight, so the guard's verdict for a
->   date-only-vs-offset-aware pair follows `_covers`'s own host-dependence
->   (issue **#3982**, which owns the date-only semantics decision). The guard's
+>   A date-only value anchors to **UTC** midnight, so the guard's verdict for a
+>   date-only-vs-offset-aware pair no longer follows the reader's host — the
+>   host-dependence was the defect, not the contract (issue **#3982**, which owns
+>   the date-only semantics decision; now resolved, with a zone-less date-TIME
+>   still read locally). The guard's
 >   **presence** predicate is also the read path's (`stored_vf is not None`), not
 >   the resolution branch's truthiness: a falsey-but-present stored `validFrom`
 >   is a real window start to `_covers` (`0` keys as the parseable epoch-0

@@ -211,7 +211,7 @@ recovery ladder is the truncation pairing; no cap raise in #1746.
 provider for pennies:
 
 ```bash
-python tools/longmem_eval/probe_json_mode.py --n 10 \
+uv run python -m tools.longmem_eval.probe_json_mode --n 10 \
   [--model deepseek/deepseek-v4-flash] [--out /tmp/probe.json] [--dry-run]
 ```
 
