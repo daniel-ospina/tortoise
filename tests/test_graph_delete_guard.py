@@ -214,6 +214,33 @@ def test_lock_is_taken_before_absence_is_decided():
         "the lock is taken before presence is decided, and released after"
 
 
+def test_presence_read_happens_INSIDE_the_held_lock():
+    """Review P3: the lock's whole purpose is that the presence check and the
+    drop are ONE critical section. An acquire→release→read implementation
+    satisfies every OTHER assertion in this module while reinstating the #2961
+    check-then-act window, so pin the ORDER: the read must precede the
+    release."""
+    order: list[str] = []
+
+    class _Conn(_FakeConnection):
+        def execute_command(self, *args):
+            if args and args[0] == "EVAL":
+                order.append("release")
+            return super().execute_command(*args)
+
+    class _Db(_LockingDb):
+        def list_graphs(self):
+            order.append("read")
+            return super().list_graphs()
+
+    conn = _Conn()
+    db = _Db(graphs=["test_here"], connection=conn)
+    assert safe_graph_delete(db, "test_here", detach=False, drop=True) is True
+    assert "read" in order and "release" in order, order
+    assert order.index("read") < order.index("release"), (
+        f"the presence read must run while the lock is HELD — got {order}")
+
+
 # ── sweep call sites inherit the guard (#2961) ────────────────────────────
 
 class _VanishingDb(_FakeDb):

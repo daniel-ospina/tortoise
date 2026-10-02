@@ -51,9 +51,12 @@ shared-server cleanup sites in ``tests/test_wipe_server.py``. Other
 directly; routing those is tracked on #2961 rather than asserted here.
 
 The lock degrades **closed**. When a client that exposes a raw connection
-cannot take it (the server is unreachable, the command is rejected, or
-``wait_s`` elapses), :func:`safe_graph_delete` REFUSES: it transmits nothing
-and returns ``False``, leaving the graph for a later sweep. Proceeding
+cannot take it (the lock command is rejected, or ``wait_s`` elapses),
+:func:`safe_graph_delete` REFUSES: it transmits nothing and returns ``False``,
+leaving the graph for a later sweep. The one failure mode that does NOT refuse
+is a backend whose READS also fail (server unreachable, auth rejected): the
+presence read runs first and raises, so a real outage surfaces as an error
+rather than a quiet no-op. Proceeding
 unlocked would *be* the check-then-act window the lock exists to close, so a
 guard that cannot prove safety must not delete. A ``db`` exposing no
 ``connection`` **at all** (the unit-test fakes, which have no cross-process
