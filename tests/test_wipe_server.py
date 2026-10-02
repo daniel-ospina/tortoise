@@ -925,7 +925,10 @@ def test_sweep_preserves_non_owned_graphs(monkeypatch, tmp_path):
         "this pin must not depend on an ambient TORTOISE_DB_URI"
     journal = tmp_path / "session.graphs.jsonl"
     journal.write_text("test_ws_ours\nteam_acme\ntortoise\nx\n")
-    db = _FakeDb()
+    # #2961: the drop is presence-gated (GRAPH.LIST first), so the fake must
+    # model the names the server actually holds — including the two the
+    # sweep must PRESERVE, so "never detached" cannot pass vacuously.
+    db = _FakeDb(graphs=["test_ws_ours", "team_acme", "tortoise", "x"])
     res = _sweep_drop(_FakeProj(db), str(journal), drop=True)
     assert res["dropped"] == ["test_ws_ours", "team_acme"]
     assert res["preserved"] == ["tortoise", "x"]
@@ -948,7 +951,10 @@ def test_sweep_preserved_warning_reports_journal_kept(
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     journal = tmp_path / "session.graphs.jsonl"
     journal.write_text("test_ws_bad\ntortoise\n")
-    db = _FakeDb(fail_delete={"test_ws_bad"})
+    # #2961: an owned name is only ATTEMPTED when present in GRAPH.LIST, so
+    # the fake must list it for the injected failure to fire at all.
+    db = _FakeDb(fail_delete={"test_ws_bad"},
+                 graphs=["test_ws_bad", "tortoise"])
     with caplog.at_level(logging.WARNING):
         res = _sweep_drop(_FakeProj(db), str(journal), drop=True)
     assert res["preserved"] == ["tortoise"]
@@ -1016,7 +1022,11 @@ def test_sweep_owns_org_namespace_by_name(monkeypatch, tmp_path):
         "org_acme\n"
         "team_ws_journal_drop\n"
     )
-    db = _FakeDb()
+    # #2961: presence-gated drops — the fake must list the four journaled
+    # names or every drop is correctly skipped and `deleted` stays empty.
+    db = _FakeDb(graphs=[
+        "test_something_ours", "org_journalled", "org_acme",
+        "team_ws_journal_drop"])
     res = _sweep_drop(_FakeProj(db), str(journal), drop=True)
     assert res["dropped"] == [
         "test_something_ours", "org_journalled", "org_acme",
