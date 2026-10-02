@@ -94,11 +94,22 @@ Needs a running docker for ``probe`` only. ``--json`` is available on both.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import would fail first (D9 shape), and an UNATTRIBUTED failure is
+# the harm #5128 was filed for.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/edge_census.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/edge_census.py`"
+    )
+
 import argparse
 import json
 import os
 import subprocess
-import sys
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
