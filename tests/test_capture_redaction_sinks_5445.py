@@ -316,6 +316,44 @@ def test_capture_caps_the_role_it_scrubs():
     assert windowed[0]["content"] == "x"
 
 
+def test_capture_window_caps_a_non_string_role():
+    """A NON-STRING role takes the SAME cap — the guard was ``isinstance(role, str)``.
+
+    The hosted model types ``conversation: list[dict]`` with no inner validation
+    (``hosted_api.py`` ``SessionRequest``), so ``role`` can be any JSON type. The
+    window's role cap was guarded by ``if isinstance(t.get("role"), str)``, so a
+    non-string role skipped it ENTIRELY while the downstream
+    ``_redact_turn_contents`` normalized it with ``str()`` and scanned the WHOLE
+    value: a one-element list of a 1,000,000-char string stringifies to 1,000,004
+    chars and cost a measured ~0.7-3.8 s of scanning PER REQUEST, against ~0.002 s
+    for a same-length STRING role the cap did cut. ``_normalize_turn_role`` is the
+    normalization every consumer already applies, so coercing before the cap
+    changes no downstream output and makes the bound total.
+
+    REDs on reverting the window's role line to the ``isinstance`` guard: the role
+    stays a ``list`` of 1,000,000 chars and the length assertions fail.
+    """
+    from tortoise.sdk import _normalize_turn_role
+
+    role = ["a" * 1_000_000]
+    windowed = _capture_turn_window([{"role": role, "content": "x"}])
+    assert isinstance(windowed[0]["role"], str), (
+        f"a non-string role survived the window: {type(windowed[0]['role']).__name__}")
+    assert windowed[0]["role"] == str(role)[:_CAPTURE_TURN_CAP], (
+        "the non-string role was not coerced-then-capped like a string role")
+    # ...so the bound holds on what the downstream scan of the role sees.
+    assert len(_normalize_turn_role(windowed[0]["role"])) <= _CAPTURE_TURN_CAP
+
+    # Coercion uses the SHARED normalizer, so the window agrees with every other
+    # consumer (None -> "unknown", a scalar -> its string form) rather than
+    # inventing a second rule.
+    assert _capture_turn_window([{"role": 123, "content": "x"}])[0]["role"] == "123"
+    assert _capture_turn_window([{"role": None, "content": "x"}])[0]["role"] == "unknown"
+    # The same-length STRING role keeps the cap it already had (no widening).
+    assert _capture_turn_window([{"role": "a" * 1_000_000, "content": "x"}])\
+        [0]["role"] == "a" * _CAPTURE_TURN_CAP
+
+
 def test_summary_depth_guard_scrubs_a_deep_str_leaf():
     """A ``str`` leaf at exactly the bound is SCRUBBED, not merely collapsed.
 

@@ -642,7 +642,10 @@ def _capture_turn_window(
     loop and the extraction call so the LLM never sees a phrase with no home
     in any stored turn (stored-source parity, #721). Content coercion matches
     the store loop: None -> '', truthy non-strings -> str() (isinstance-first,
-    #721). Idempotent when the caller already truncated."""
+    #721). The ROLE is coerced with ``_normalize_turn_role`` and capped the same
+    way (#5445/#5775), so the scanned and the persisted role are the same bytes
+    and a non-string role cannot skip the bound. Idempotent when the caller
+    already truncated."""
     out: list[dict] = []
     for turn in conversation:
         t = dict(turn)
@@ -656,8 +659,20 @@ def _capture_turn_window(
         # 500,000-char role, and ``cap`` changed nothing), and the module's own
         # "``cap`` bounds the text scanned per turn" claim was false for it. Capping
         # at the window keeps the scanned and the persisted role the SAME bytes.
-        if isinstance(t.get("role"), str):
-            t["role"] = t["role"][:cap]
+        #
+        # ⛔ COERCE BEFORE THE CAP (#5775). The guard here was
+        # ``isinstance(t.get("role"), str)``, so a NON-STRING role skipped the cap
+        # ENTIRELY while the downstream ``_redact_turn_contents`` still normalized
+        # it with ``str()`` and scanned the whole thing. It is reachable from
+        # untrusted input: the hosted model types ``conversation: list[dict]`` with
+        # no inner validation, so ``role`` can be any JSON type. A one-element list
+        # of a 1,000,000-char string stringifies to 1,000,004 chars and cost a
+        # measured ~0.7-3.8 s of scanning PER REQUEST, against ~0.002 s for a
+        # same-length STRING role (which the cap did cut). ``_normalize_turn_role``
+        # is the SAME normalization every consumer already applies to this value
+        # (None -> "unknown", any non-str -> ``str()``), so coercing before the cap
+        # changes no downstream output and makes the bound total.
+        t["role"] = _normalize_turn_role(t.get("role"))[:cap]
         out.append(t)
     return out
 
