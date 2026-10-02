@@ -627,6 +627,12 @@ def _utf8_safe(label: str) -> str:
     in a label adds physical lines to a ``splitlines()`` reader, and the
     ``*_bucket`` lines carry the same label).
 
+    For the SERIES this translation is the ONLY protection:
+    ``prometheus_client`` (0.26.0, measured) escapes exactly ONE control code
+    point — LF — and only in the exposition text, never in the stored key. CR,
+    TAB, NUL, CSI, U+2028 and U+2029 are all passed through RAW, so replacing
+    them here is what keeps both the stored key and the exposition clean.
+
     A label that cannot be UTF-8 encoded is repaired. ``generate_latest()``
     encodes label values, so ONE lone surrogate would make the whole
     ``/metrics`` endpoint raise for the process lifetime, blinding every alert
@@ -863,42 +869,13 @@ _COMPUTE_ORGS: set[str] = set()
 _COMPUTE_PATHS: set[str] = set()
 _COMPUTE_LOCK = threading.Lock()
 
-#: Characters replaced in an admitted label: C0, DEL and the C1 range (U+0085 NEL
-#: and U+009B CSI are line-break / escape introducers to Unicode-aware readers),
-#: plus U+2028/U+2029 — the SAME CLASS ``mcp_auth._sanitize_for_log`` covers. That
-#: one ESCAPES for a log sink; this one REPLACES with ``?``, because a label is a
-#: series KEY and not splitting a line matters more than the value's readability.
-_COMPUTE_LABEL_TRANSLATE = str.maketrans({
-    **{c: "?" for c in (*range(0x20), 0x7F, *range(0x80, 0xA0))},
-    0x2028: "?",
-    0x2029: "?",
-})
-
-
-def _compute_safe_label(label: str) -> str:
-    """Make a label safe to EMIT (mirrors the class ``mcp_auth._sanitize_for_log``
-    covers, but replaces rather than escapes — a label is a series key).
-
-    Control characters are replaced so the label is a clean series KEY — the
-    stored key is what downstream consumers of this dimension read, and a key
-    carrying a line break breaks them. For the SERIES this translation is the ONLY
-    protection: ``prometheus_client`` (0.26.0, measured) escapes exactly ONE
-    control code point — LF — and only in the exposition text, never in the stored
-    key. CR, TAB, NUL, CSI, U+2028 and U+2029 are all passed through RAW, so
-    replacing them here is what keeps both the key and the exposition clean. A
-    label that cannot be UTF-8 encoded is repaired,
-    because ``generate_latest()`` encodes label values, so ONE lone surrogate would
-    make the whole ``/metrics`` endpoint raise for the process lifetime, blinding
-    every alert rather than this one dimension. Not reachable from the HTTP path
-    today (uvicorn replaces invalid bytes; org ids are charset-validated), and this
-    single writer is the only place that can enforce it.
-    """
-    label = label.translate(_COMPUTE_LABEL_TRANSLATE)
-    try:
-        label.encode("utf-8")
-    except UnicodeEncodeError:
-        return label.encode("utf-8", "replace").decode("utf-8")
-    return label
+# NO ``_compute_safe_label`` / ``_COMPUTE_LABEL_TRANSLATE`` HERE: the compute
+# dimension reuses the shared ``_utf8_safe`` label sanitizer above (#5420). A
+# private copy was added while the sibling egress lane (#5315) was believed
+# unmerged; that lane merged (merge ``a830abe2``) and the two bodies were
+# identical apart from the table reference (measured: the two translate tables
+# compare EQUAL, 67 keys each), so the copy was pure duplication of a
+# security-relevant filter — the class that drifts on a one-sided edit.
 
 
 def _admit_bounded_label(label: str, seen: set[str], cap: int,
@@ -960,9 +937,9 @@ def record_compute(org: str | None, path: str,
     and a negative increment would corrupt a monotonic counter.
     """
     org_label = _admit_bounded_label(
-        _compute_safe_label(org or ""), _COMPUTE_ORGS, COMPUTE_MAX_ORGS)
+        _utf8_safe(org or ""), _COMPUTE_ORGS, COMPUTE_MAX_ORGS)
     path_label = _admit_bounded_label(
-        _compute_safe_label(path or COMPUTE_UNROUTED), _COMPUTE_PATHS,
+        _utf8_safe(path or COMPUTE_UNROUTED), _COMPUTE_PATHS,
         COMPUTE_MAX_PATHS)
     wall = max(0.0, float(wall_s))
     cpu = max(0.0, float(cpu_s))
