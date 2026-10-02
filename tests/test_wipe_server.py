@@ -486,6 +486,48 @@ def test_wipe_server_refusal_is_collected():
     assert db.deleted == [], "a refused sweep must transmit no GRAPH.DELETE"
 
 
+def test_wipe_refusal_is_logged_not_silent(caplog):
+    """Report P3: wipe() stays best-effort, but a refusal must not be SILENT."""
+    class _OOMConn:
+        def execute_command(self, *a, **k):
+            if a and a[0] == "SET":
+                raise RuntimeError("OOM")
+            return None
+
+    db = _FakeDb(graphs=["test_ws_w"])
+    db.connection = _OOMConn()
+    proj = _FakeProj(db=db)
+    proj._is_embedded = True  # wipe() is embedded-only by contract
+    proj._graph_name = "test_ws_w"
+    with caplog.at_level("WARNING"):
+        wipe(proj)  # best-effort: must NOT raise
+    assert any("REFUSED" in r.message for r in caplog.records), \
+        "a refused wipe must say so — silent was the defect"
+
+
+def test_wipe_server_phase2_refusal_is_collected():
+    """Report P3: the DROP phase's refusal must also fail loud, not no-op."""
+    class _Conn:
+        def __init__(self):
+            self.sets = 0
+
+        def execute_command(self, *a, **k):
+            if a and a[0] == "SET":
+                self.sets += 1
+                if self.sets > 1:
+                    raise RuntimeError("OOM")
+                return True  # phase 1 acquires; phase 2 is refused
+            return None
+
+    db = _FakeDb(graphs=["test_ws_p2"])
+    db.connection = _Conn()
+    proj = _FakeProj(db=db)
+    with pytest.raises(RuntimeError, match=r"GRAPH\.DELETE failed"):
+        wipe_server(proj, scope={"test_ws_p2"}, drop=True)
+    assert db.detached == ["test_ws_p2"], "phase 1 detaches"
+    assert db.deleted == [], "a refused phase 2 must transmit no GRAPH.DELETE"
+
+
 def test_drop_delete_uses_command_vector(monkeypatch):
     # Cycle-6 P1-0 (FM-2): the drop loop must invoke GRAPH.DELETE as a
     # COMMAND, never as a Cypher query. The vendored client's Graph.query()

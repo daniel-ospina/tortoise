@@ -41,7 +41,7 @@ not currently present, and re-checks presence inside a cross-process
 critical section (:func:`graph_delete_lock`) so a concurrent deleter cannot
 slip between the check and the drop. The sweeps that drop graphs route
 through it: ``tests/_embedded.py`` (``_sweep_legacy_strays``, ``wipe``,
-``_drop_one_graph``, ``_sweep_team_strays``, ``wipe_server``),
+``_drop_one_graph``, ``_sweep_team_strays``, ``wipe_server``, ``_sweep_proj``),
 ``battery/testing/seeds.py``'s ``purge_owned_namespace``, and the two routed
 shared-server cleanup sites in ``tests/test_wipe_server.py``. Other
 ``finally:`` cleanups in this tree still issue ``DETACH``/``GRAPH.DELETE``
@@ -126,6 +126,14 @@ def graph_delete_lock(
     False-with-no-connection proceeds unlocked. The TTL (``ttl_ms``) reclaims
     the lock if the holder dies mid-critical-section, so a crash cannot wedge
     every later sweep.
+
+    **The TTL is NOT renewed, so the mutual exclusion is bounded by
+    ``ttl_ms``**: a critical section that holds the lock longer than the TTL
+    lets a second process enter. That is a deliberate trade — renewal needs a
+    background thread, and an unjoined renewal thread racing a teardown is a
+    failure mode this repo has already been reddened by (#4608), which is
+    worse than a window that requires a >10s DETACH on a graph a peer is
+    concurrently deleting. Renewal (or an adaptive TTL) is tracked on #2961.
     """
     conn = _raw_connection(db)
     if conn is None:

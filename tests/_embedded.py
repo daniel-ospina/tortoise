@@ -1185,10 +1185,19 @@ def _sweep_proj(uri: str):
         try:
             yield proj
         finally:
-            try:  # noqa: SIM105
+            try:
                 # #2961: presence-gated — never GRAPH.DELETE an absent graph.
-                safe_graph_delete(proj.db, proj.graph_name,
-                                  detach=False, drop=True)
+                # Review P3: best-effort, so a refusal must not raise — but it
+                # must not be SILENT either. This probe graph is never
+                # journaled, so no sweep retries it; only a later global wipe
+                # reclaims it.
+                if not safe_graph_delete(proj.db, proj.graph_name,
+                                         detach=False, drop=True) \
+                        and graph_exists(proj.db, proj.graph_name):
+                    logging.getLogger(__name__).warning(
+                        "sweep: the graph-delete guard REFUSED to drop the "
+                        "probe graph %r — it is not journaled, so only a "
+                        "global wipe will reclaim it", proj.graph_name)
             except Exception:
                 pass
             try:  # noqa: SIM105
