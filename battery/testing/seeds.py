@@ -116,9 +116,13 @@ def purge_owned_namespace(namespace: str | Path, scenario_id: str) -> None:
         if getattr(proj, "_is_embedded", True):
             return  # construction stayed embedded (defensive) — no purge
         from battery.runner.setup import scenario_namespace
-        proj.db.select_graph(scenario_namespace(scenario_id)).query(
-            "MATCH (n) DETACH DELETE n")
-        proj.db.select_graph(scenario_namespace(scenario_id)).delete()
+        from tortoise.graph_delete_guard import safe_graph_delete
+        # #2961: presence-gated + locked. The blind DETACH-then-GRAPH.DELETE
+        # pair is the phantom-creating sequence that poisons the shared AOF;
+        # safe_graph_delete re-checks presence inside the cross-process lock
+        # and refuses when it cannot hold it.
+        safe_graph_delete(
+            proj.db, scenario_namespace(scenario_id), detach=True, drop=True)
     finally:
         proj.close()
 

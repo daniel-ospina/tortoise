@@ -170,25 +170,32 @@ def test_lock_released_when_the_drop_raises():
         "the lock must be released even when the critical section raises"
 
 
-def test_lock_waits_then_degrades_without_failing_the_sweep(caplog):
-    """Another process holding the lock must never wedge or fail a sweep —
-    the guard proceeds unlocked (presence re-check still applies)."""
+def test_lock_contention_REFUSES_instead_of_deleting_unlocked(caplog):
+    """#2961 review P1: another process holding the lock must not make us
+    delete unlocked. The guard degrades CLOSED — it refuses, transmits
+    nothing, and leaves the graph for a later sweep.
+
+    Deleting without the lock *is* the check-then-act window that creates
+    the AOF-poisoning phantom, so proceeding here would be the defect, not
+    the behaviour."""
     conn = _FakeConnection(grants=False)  # SET NX never grants
     db = _LockingDb(graphs=["test_here"], connection=conn)
     with caplog.at_level("WARNING"):
-        assert safe_graph_delete(db, "test_here", detach=False, drop=True) is True
-    assert db.calls == [("delete", "test_here")]
+        assert safe_graph_delete(db, "test_here", detach=False, drop=True) is False
+    assert db.calls == [], "a guard that cannot prove safety must not drop"
     assert not [c for c in conn.commands if c[0] == "EVAL"], \
         "a lock we never acquired must never be released"
-    assert any("WITHOUT the cross-process lock" in r.message
-               for r in caplog.records), "the degraded path must be loud"
+    assert any("REFUSING" in r.message for r in caplog.records), \
+        "the refusal must be loud"
 
 
-def test_lock_command_failure_degrades():
+def test_lock_command_failure_ALSO_REFUSES():
+    """A lock COMMAND failure is the same hazard as contention: the presence
+    check is no longer atomic with the drop, so the guard refuses."""
     conn = _FakeConnection(fail_on="SET")
     db = _LockingDb(graphs=["test_here"], connection=conn)
-    assert safe_graph_delete(db, "test_here", detach=False, drop=True) is True
-    assert db.calls == [("delete", "test_here")]
+    assert safe_graph_delete(db, "test_here", detach=False, drop=True) is False
+    assert db.calls == []
 
 
 def test_lock_not_taken_when_the_graph_is_absent():

@@ -17,6 +17,7 @@ from tests._embedded import (
     wipe,
     wipe_server,
 )
+from tortoise.graph_delete_guard import safe_graph_delete
 
 
 def _docker_reachable(host: str | None = None,
@@ -1279,8 +1280,10 @@ def test_leftover_team_strays_refused_on_shared_docker(uri_env, monkeypatch):
         assert legacy_stray in remaining, "pre-rename product graph must survive"
     finally:
         for name in (stray, legacy_stray):
-            proj.db.select_graph(name).query("MATCH (n) DETACH DELETE n")
-            proj.db.select_graph(name).delete()
+            # #2961: presence-gated + locked. A blind DETACH followed by a
+            # GRAPH.DELETE is the phantom-creating sequence, and this cleanup
+            # runs against a SHARED server — the same shape the guard removes.
+            safe_graph_delete(proj.db, name, detach=True, drop=True)
         proj.close()
 
 
@@ -1319,8 +1322,8 @@ def test_leftover_team_strays_refused_on_test_matrix_uri(uri_env, monkeypatch):
             "eval question graphs (product-namespace) must survive a " \
             "concurrent session's sweep"
     finally:
-        proj.db.select_graph(stray).query("MATCH (n) DETACH DELETE n")
-        proj.db.select_graph(stray).delete()
+        # #2961: presence-gated + locked (shared server).
+        safe_graph_delete(proj.db, stray, detach=True, drop=True)
         proj.close()
 
 

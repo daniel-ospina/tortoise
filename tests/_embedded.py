@@ -466,7 +466,12 @@ def wipe(proj) -> None:
         graphs = [getattr(proj, "_graph_name", "test")]
     for g in graphs:
         try:  # noqa: SIM105
-            proj.db.select_graph(g).query("MATCH (n) DETACH DELETE n")
+            # #2961: presence-gated. A blind DETACH against a name a
+            # concurrent session just dropped RE-CREATES it as an
+            # AOF-invisible phantom; safe_graph_delete checks presence inside
+            # the cross-process lock. detach-only (drop=False) — wipe() clears
+            # contents, it does not drop the graph.
+            safe_graph_delete(proj.db, g, detach=True, drop=False)
         except Exception:
             pass
 
@@ -1488,9 +1493,12 @@ def _sweep_legacy_strays(proj, *, default_graph: str | None) -> list[str]:
         if not is_legacy_residue(g, default_graph=default_graph):
             continue
         try:
-            proj.db.select_graph(g).query("MATCH (n) DETACH DELETE n")
-            proj.db.select_graph(g).delete()
-            dropped.append(g)
+            # #2961: presence-gated + locked. A blind DETACH followed by a
+            # GRAPH.DELETE is the phantom-creating sequence that poisons the
+            # shared AOF; safe_graph_delete re-checks presence inside the
+            # cross-process lock, and refuses when it cannot hold it.
+            if safe_graph_delete(proj.db, g, detach=True, drop=True):
+                dropped.append(g)
         except Exception as e:
             logging.getLogger(__name__).warning(
                 "legacy residue drop failed for %r: %r", g, e)

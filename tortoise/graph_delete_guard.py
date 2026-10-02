@@ -39,14 +39,20 @@ Fix
 :func:`safe_graph_delete` never emits any graph command for a graph that is
 not currently present, and re-checks presence inside a cross-process
 critical section (:func:`graph_delete_lock`) so a concurrent deleter cannot
-slip between the check and the drop. The phantom-creating sequence can
-therefore not be produced by this codebase's sweeps.
+slip between the check and the drop. Every DETACH-then-DELETE on one name
+routes through this function — the sweeps in ``tests/_embedded.py``
+(``_sweep_legacy_strays``, ``wipe``), ``battery/testing/seeds.py``'s
+``purge_owned_namespace``, and the shared-server cleanups in
+``tests/test_wipe_server.py`` — so no sweep or teardown in this codebase can
+emit the phantom-creating sequence.
 
-The lock degrades gracefully: when the server cannot be reached, when the
-client exposes no raw connection (unit-test fakes), or when the command is
-rejected, the guard proceeds unlocked and logs a warning. The existence gate
-still applies — it just loses the atomicity guarantee against cooperating
-processes, never correctness.
+The lock degrades **closed**. When a real client cannot take it (the server is
+unreachable, the command is rejected, or ``wait_s`` elapses),
+:func:`safe_graph_delete` REFUSES: it transmits nothing and returns ``False``,
+leaving the graph for a later sweep. Proceeding unlocked would *be* the
+check-then-act window the lock exists to close, so a guard that cannot prove
+safety must not delete. A db with no raw connection at all (unit-test fakes,
+the embedded backend) has no cross-process peer to race and proceeds unlocked.
 
 Recovery
 --------
@@ -108,11 +114,14 @@ def graph_delete_lock(
     """Cross-process critical section for graph deletion (#2961).
 
     Yields True when the lock is held for the duration of the block, False
-    when the guard is running unlocked (no raw connection, the lock command
-    failed, or ``wait_s`` elapsed). Never raises for lock problems and never
-    fails the caller: a sweep must not die because the advisory lock is
-    unavailable. The TTL (``ttl_ms``) reclaims the lock if the holder dies
-    mid-critical-section, so a crash cannot wedge every later sweep.
+    otherwise (no raw connection, the lock command failed, or ``wait_s``
+    elapsed). Never raises for lock problems and never fails the caller: a
+    sweep must not die because the advisory lock is unavailable. **The caller
+    decides what False means**: :func:`safe_graph_delete` treats
+    False-with-a-real-connection as a refusal (it degrades closed), while
+    False-with-no-connection proceeds unlocked. The TTL (``ttl_ms``) reclaims
+    the lock if the holder dies mid-critical-section, so a crash cannot wedge
+    every later sweep.
     """
     conn = _raw_connection(db)
     if conn is None:
@@ -140,8 +149,9 @@ def graph_delete_lock(
 
     if degraded is not None:
         logger.warning(
-            "graph-delete guard: proceeding WITHOUT the cross-process lock "
-            "(%s); the presence re-check still applies (#2961)", degraded)
+            "graph-delete guard: the cross-process lock is UNAVAILABLE "
+            "(%s); a real client REFUSES rather than delete unlocked "
+            "(#2961)", degraded)
 
     try:
         yield acquired
@@ -177,15 +187,30 @@ def safe_graph_delete(
     the DETACH is what materialises the record-less phantom that poisons the
     AOF (module docstring).
 
-    Returns True when a graph command was issued (the graph was present),
-    False when the graph was already absent and nothing was sent. Both mean
-    the caller's drop-set entry is satisfied; the distinction exists only so
-    callers can report a genuine no-op.
+    Returns True when a graph command was issued (the graph was present).
+    Returns False when nothing was transmitted: either the graph was already
+    absent, or a real client could not take the cross-process lock (a
+    refusal — the graph is left for a later sweep, so a caller that records
+    its drop-set entry on False would be recording a drop that did not
+    happen).
 
     Raises on genuine errors (auth, dead connection) — the guard must not
     swallow real failures.
     """
-    with graph_delete_lock(db):
+    with graph_delete_lock(db) as acquired:
+        if not acquired and _raw_connection(db) is not None:
+            # #2961 (review P1): a REAL client that could not take the lock
+            # must not proceed. The lock exists so that the presence check and
+            # the drop are ONE critical section; deleting unlocked IS the
+            # check-then-act window that materialises the AOF-poisoning
+            # phantom. Refuse — leave the graph for a later sweep. A db with
+            # no raw connection (unit-test fakes, embedded) has no
+            # cross-process peer to race and falls through as before.
+            logger.warning(
+                "graph-delete guard: REFUSING to delete %r — the "
+                "cross-process lock is unavailable, and a guard that cannot "
+                "prove safety must not delete (#2961)", name)
+            return False
         if not graph_exists(db, name):
             # #2961: the fix. Skipping here is what keeps a stale
             # GRAPH.LIST name from creating an AOF-visible phantom.
