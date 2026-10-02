@@ -410,8 +410,17 @@ def test_stripe_billing_notify_queued_submission_still_runs(monkeypatch):
         "test-4456-queued",
         workers=monitoring.CONTROL_PLANE_TELEMETRY_WORKERS,
         max_backlog=monitoring.CONTROL_PLANE_TELEMETRY_BACKLOG)
+    # Saturate ONLY the pool the notify is submitted to: _cp_offload(best_effort=
+    # True) routes to "telemetry". Production keeps auth and telemetry in
+    # SEPARATE workers ("so telemetry can never park the auth slots"), so a
+    # blanket fake handing EVERY pool the saturated worker asserts a shape the
+    # system never has: since #4350 also routes the webhook's own org_tier /
+    # webhook_event_marker reads through _cp_offload(pool="auth"), such a fake
+    # 503s the webhook before the notify under test is ever reached (#4456).
+    _real_cp_worker = monitoring.control_plane_worker
     monkeypatch.setattr(monitoring, "control_plane_worker",
-                        lambda pool="auth": fresh)
+                        lambda pool="auth": fresh if pool == "telemetry"
+                        else _real_cp_worker(pool))
 
     blocker_started = [threading.Event()
                        for _ in range(monitoring.CONTROL_PLANE_TELEMETRY_WORKERS)]
@@ -485,8 +494,17 @@ def test_stripe_billing_notify_refusal_escalates_to_operator_alert(
     monkeypatch.setattr(nt, "notify_billing_event",
                         lambda kind, org, details=None: order.append("notify"))
 
+    _real_run_control_plane_call = ha.run_control_plane_call
+
     async def _refuse(fn, *, op, pool="auth", timeout=None,
                       cancel_on_timeout=True):
+        # Refuse ONLY the notify's own submission. webhooks_stripe also offloads
+        # its org_tier / webhook_event_marker reads (#4350); refusing those as
+        # well would 503 the webhook before the refusal under test is reached.
+        if op != "billing_notify":
+            return await _real_run_control_plane_call(
+                fn, op=op, pool=pool, timeout=timeout,
+                cancel_on_timeout=cancel_on_timeout)
         raise monitoring.ControlPlaneOffloadError(
             f"control-plane call {op!r} pool backlog full", refused=True)
 
@@ -553,8 +571,13 @@ def test_stripe_billing_notify_refused_through_the_real_seam(monkeypatch,
 
     fresh = monitoring._SingleSlotWorker("test-4456-real-refusal",
                                          workers=1, max_backlog=1)
+    # Refuse the NOTIFY's own pool only; the webhook's auth-pool reads must
+    # still run, or the refusal under test is never reached (see the queued-
+    # submission test for the full reasoning).
+    _real_cp_worker = monitoring.control_plane_worker
     monkeypatch.setattr(monitoring, "control_plane_worker",
-                        lambda pool="auth": fresh)
+                        lambda pool="auth": fresh if pool == "telemetry"
+                        else _real_cp_worker(pool))
 
     blocker_started = threading.Event()
     release = threading.Event()
@@ -669,11 +692,23 @@ def test_webhook_notify_direct_call_is_inside_the_offload_boundary():
                 if isinstance(n, ast.Call)
                 and isinstance(n.func, ast.Name)
                 and n.func.id == "_cp_offload"]
-    assert len(offloads) == 1, (
-        "webhooks_stripe must offload exactly one call — the blocking notify is "
-        f"otherwise back on the event loop (#4456): {len(offloads)} found"
+    # Select the notify's own offload by its ``op`` label instead of requiring
+    # it to be the handler's ONLY offload: since #4350 the webhook also offloads
+    # its control-plane reads (``op="org_tier"``, ``op="webhook_event_marker"``),
+    # so a bare count pins the pre-#4350 shape rather than the notify's.
+    def _is_billing_notify_offload(node: ast.Call) -> bool:
+        return any(
+            kw.arg == "op" and isinstance(kw.value, ast.Constant)
+            and kw.value.value == "billing_notify"
+            for kw in node.keywords)
+
+    notify_offloads = [n for n in offloads if _is_billing_notify_offload(n)]
+    assert len(notify_offloads) == 1, (
+        "webhooks_stripe must offload exactly ONE billing-notify call — the "
+        f"blocking notify is otherwise back on the event loop (#4456): "
+        f"{len(notify_offloads)} of {len(offloads)} offloads found"
     )
-    offload = offloads[0]
+    offload = notify_offloads[0]
     assert offload.args and isinstance(offload.args[0], ast.Lambda), (
         "the notify _cp_offload argument is not an offloaded callable (#4456)"
     )

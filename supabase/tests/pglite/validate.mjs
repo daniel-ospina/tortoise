@@ -359,6 +359,7 @@ const suites = [
   // branch adds its own entry to this same list, so the two will conflict
   // textually on merge; keep BOTH entries.)
   '20260926000001_metering_capture_tokens.sql',  // #5045
+  '20260927000001_api_key_mint_serialization.sql',  // #1879
   '20260927000001_metering_unmetered_increments.sql',  // #4779
   // #5331 — the graph-storage gauge, asserted against the REAL SQL function.
   // NOTE: this list is EXPLICIT, not a glob — a suite file that is not named

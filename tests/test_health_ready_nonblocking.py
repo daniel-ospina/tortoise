@@ -160,9 +160,10 @@ _ROUTED_SESSION_SEAMS = frozenset({
 #: dedupes into the same ``(function, callee)`` pair, so set membership alone
 #: would let it through; the line-range check is what stops it.
 _ORG_MINT_LOCK_RESIDUAL = frozenset({
-    ("_session_key_supabase", "active_api_keys"),
-    ("_session_key_supabase", "revoke_api_key"),
-    ("_session_key_supabase", "insert_api_key"),
+    # #1879 collapsed this lane's critical section into ONE `mint_session_key`
+    # RPC (the DB-side lock does the serialization), so the single on-loop call
+    # that remains is that RPC — see the module comment above _org_mint_lock.
+    ("_session_key_supabase", "mint_session_key"),
 })
 
 #: Callees that OFFLOAD their argument — a call nested inside one of these is
