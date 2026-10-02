@@ -587,15 +587,17 @@ SOURCE_PATTERNS = {
             # false`) and the gate never ran on precisely the PR that can break
             # it. Named here because a SOURCE_PATTERNS match beats the
             # non-python skip. A docs-only hand-edit of the generated file still
-            # skips the matrix by the repo's deliberate docs-PR policy — see
-            # tortoise #4454.
+            # skips THIS matrix by the repo's deliberate docs-PR policy; that
+            # direction is covered instead by the required `docs` job, which runs
+            # `tools/bridge_table.py --check` on every PR (#4454).
             "tools/bridge_table.py",
             # #4282 Phase 0.3: `tools/mcp_rename_table.py` GENERATES
             # `docs/product/mcp-rename-table.md` and `test_mcp_rename_table.py`
             # (registered in `api` + `core`) is the drift gate. Same shape as the
             # 0.1 entry directly above and the same reason: a generator-only edit
             # is swallowed by the flat `tools/` prefix and the gate never runs on
-            # the PR that can break it (#4454 covers a docs-only hand-edit).
+            # the PR that can break it (a docs-only hand-edit is covered by the
+            # required `docs` job's `--check` instead — #4454).
             "tools/mcp_rename_table.py",
             # #4282 Phase 0.3b: `tools/sdk_rename_table.py` GENERATES
             # `docs/product/sdk-rename-table.md`, and `test_sdk_rename_table.py`
@@ -612,8 +614,9 @@ SOURCE_PATTERNS = {
             # (registered in `api` AND `core`) is the drift gate. Same gap as the bridge
             # table above: `tools/` is in NON_PYTHON_PREFIXES, so a generator-only edit
             # selected NO surface and the gate never ran on the PR that can break it.
-            # A docs-only hand-edit of the generated doc still skips the matrix by the
-            # repo's deliberate docs-PR policy (tortoise #4454).
+            # A docs-only hand-edit of the generated doc still skips THIS matrix by the
+            # repo's deliberate docs-PR policy; the required `docs` job runs
+            # `tools/sdk_surface.py --check` on every PR instead (#4454).
             "tools/sdk_surface.py",
             # #5373: `tools/registry_integrity.py` is the fail-closed validator
             # paired with `merge=union` on the two config registries, and
