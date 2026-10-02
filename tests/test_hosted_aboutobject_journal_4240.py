@@ -32,6 +32,11 @@ They also pin the two review findings on the wiring:
   outcome is unchanged (the envelope's ``status`` is ``"ok"`` — the hosted
   receipt's success signal — independent of the ``_capture_ok_record`` written
   earlier).
+* **#5632** — the count disclosed on the receipt is THIS capture's DELTA, never
+  the SDK's LIFETIME counter: ``test_capture_after_a_failed_non_capture_write_
+  reports_no_journal_warning`` (SDK lane) and its hosted twin fail a
+  NON-capture append, then capture successfully, and assert NO journal warning.
+  A lifetime read brands every later capture live-only forever.
 
 Class-B doctrine — every test states (1) the value/state that makes it fail and
 (2) that the state is reachable in its fixture:
@@ -69,6 +74,16 @@ Class-B doctrine — every test states (1) the value/state that makes it fail an
   carried it); reachable: the hosted impl is driven directly against a mode-0500
   journal base dir, and the envelope's ``status`` is asserted unchanged
   (``"ok"`` — the hosted receipt's success signal) alongside it.
+* ``test_capture_after_a_failed_non_capture_write_reports_no_journal_warning``
+  — FAILS while the receipt reads the LIFETIME counter (the pre-#5632 state): a
+  failed ``create_object`` append precedes a fully successful capture, so the
+  warning must be absent; reachable: the journal base dir is 0500 for that
+  non-capture write and 0700 for the capture, and the counter is asserted to
+  move before the capture and NOT move during it.
+* ``test_hosted_capture_after_a_failed_non_capture_write_reports_no_warning``
+  — the hosted byte-parity twin (same mutation, same reachable fixture) — the
+  capture's fresh SDK is seeded with one real failed non-capture append at the
+  SDK-open seam, which is the state a polluted lifetime counter produces.
 
 The journal is a DOMAIN EVENT LOG, never the durability mechanism
 (``docs/durability-posture.md``): these tests assert the derived graph is
@@ -504,6 +519,126 @@ def test_hosted_receipt_discloses_a_failed_journal_append(tmp_path, monkeypatch)
     assert any("journal append failed" in w for w in r["warnings"]), (
         "the hosted receipt did not disclose the failed journal append — a "
         f"hosted client cannot see its capture is live-only: {r['warnings']}")
+    with contextlib.suppress(Exception):
+        _drop = ha._make_sdk(namespace=org_id)
+        _drop._get_proj().g.query("MATCH (n) DETACH DELETE n")
+        _drop.close()
+
+
+# ── #5632: the disclosed count is THIS capture's delta, not the lifetime one ──
+
+@pytest.mark.skipif(os.geteuid() == 0,
+                    reason="root bypasses directory mode bits")
+def test_capture_after_a_failed_non_capture_write_reports_no_journal_warning(
+        tmp_path, monkeypatch):
+    """#5632 (SDK lane): a failed NON-capture write must not brand every LATER
+    capture live-only.
+
+    ``_journal_write_failures`` is a LIFETIME counter on the SDK. The receipt
+    used to read it raw, so ONE failed append from an unrelated write (here:
+    ``create_object`` while the configured journal dir is mode 0500) made every
+    subsequent capture claim "this capture is live-only … will not survive a
+    rebuild" — and, because the counter never resets, the claim never cleared.
+    The receipt must disclose the DELTA over THIS capture.
+
+    Reachable: the journal base dir is unwritable for the non-capture write
+    (mode 0500 → ``EventLog.append``'s ``open`` raises PermissionError) and is
+    restored to 0700 before the capture, so the capture's own appends SUCCEED
+    and its delta is 0.
+
+    MUTATION: read the lifetime counter instead of the delta (the pre-#5632
+    state) → the warning appears on this capture's receipt → RED.
+    """
+    events = tmp_path / "events"
+    events.mkdir()
+    monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", str(events))
+    org = f"test-5632-{uuid.uuid4().hex[:10]}"
+    sdk = ha._make_sdk(namespace=org)
+    try:
+        events.chmod(0o500)
+        # A NON-capture write whose journal append fails — the counter moves.
+        sdk.create_object("test/repo#5632", objectKind="pm:issue")
+        events.chmod(0o700)
+        before = sdk._journal_write_failures
+        assert before > 0, (
+            "fixture precondition: the non-capture write's append must have "
+            "failed and incremented the LIFETIME counter")
+        r = sdk.capture_session(CONV, session_id="s-5632-delta-sdk")
+        assert r.get("ok") is True, r
+        assert sdk._journal_write_failures == before, (
+            "the capture's own appends must have SUCCEEDED — otherwise this "
+            "test would not exercise the false positive")
+        assert not any("journal append failed" in w for w in r["warnings"]), (
+            "a failure from an EARLIER non-capture write was reported as THIS "
+            "capture's residue — the lifetime counter leaked into the "
+            f"receipt: {r['warnings']}")
+    finally:
+        sdk.close()
+        events.chmod(0o700)  # restore before teardown
+
+
+@pytest.mark.skipif(os.geteuid() == 0,
+                    reason="root bypasses directory mode bits")
+def test_hosted_capture_after_a_failed_non_capture_write_reports_no_warning(
+        tmp_path, monkeypatch):
+    """#5632 (hosted lane): byte-parity with the SDK-lane delta test above.
+
+    The hosted impl reads the same LIFETIME counter. Its capture SDK is built
+    fresh at the SDK-open seam (``_capture_session_probe_off_loop``), so the
+    false positive needs a failed append on THAT instance before the capture
+    begins — the state a polluted lifetime counter produces. ``_make_sdk`` is
+    wrapped to perform one REAL failed non-capture append (``create_object``
+    against a mode-0500 journal dir), then disarms, so the capture's own
+    appends succeed and its delta is 0.
+
+    MUTATION: read the lifetime counter (the pre-#5632 state) → the hosted
+    receipt carries the warning → RED.
+    """
+    events = tmp_path / "events"
+    events.mkdir()
+    monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", str(events))
+    org_id = f"test-5632-{uuid.uuid4().hex[:10]}"
+    org = {"org_id": org_id, "graph_id": None, "key_id": None, "tier": "free",
+           "scopes": [], "legacy_full_access": True, "max_points": 100000,
+           "max_sessions": None}
+    real_make_sdk = ha._make_sdk
+    opened: list = []
+    armed = {"on": True}
+
+    def _opened_sdk_with_a_failed_non_capture_write(*a, **kw):
+        sdk = real_make_sdk(*a, **kw)
+        if armed["on"] and kw.get("namespace") == org_id:
+            armed["on"] = False
+            opened.append(sdk)
+            events.chmod(0o500)
+            try:
+                sdk.create_object("test/repo#5632", objectKind="pm:issue")
+            finally:
+                events.chmod(0o700)
+        return sdk
+
+    monkeypatch.setattr(ha, "_make_sdk",
+                        _opened_sdk_with_a_failed_non_capture_write)
+    body = ha.SessionRequest(conversation=CONV,
+                             session_id="s-5632-delta-hosted",
+                             harness="claude")
+    slot = ha._reserve_capture_slot(ha._capture_session_key(org, body.session_id))
+    try:
+        r = asyncio.run(ha._capture_session_impl(body, None, org, slot=slot))
+    finally:
+        slot.release()
+        events.chmod(0o700)  # restore before teardown
+    assert r.get("status") == "ok", r
+    assert opened, "the wrapper never saw the capture's SDK open"
+    before = opened[0]._journal_write_failures
+    assert before > 0, (
+        "fixture precondition: the non-capture append must have failed")
+    assert opened[0]._journal_write_failures == before, (
+        "the capture's own appends must have SUCCEEDED — otherwise this test "
+        "would not exercise the false positive")
+    assert not any("journal append failed" in w for w in r["warnings"]), (
+        "the hosted receipt reported an EARLIER non-capture failure as this "
+        f"capture's residue: {r['warnings']}")
     with contextlib.suppress(Exception):
         _drop = ha._make_sdk(namespace=org_id)
         _drop._get_proj().g.query("MATCH (n) DETACH DELETE n")

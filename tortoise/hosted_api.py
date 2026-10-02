@@ -10948,6 +10948,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     now = datetime.now(UTC).isoformat()
     sdk, proj, session_row = await _capture_session_probe_off_loop(
         org, session_id)
+    # #5632: snapshot the LIFETIME journal-failure counter at the START of THIS
+    # capture so the hosted receipt below discloses only appends that failed
+    # DURING it — byte-parity with the SDK lane (``sdk.capture_session``).
+    _journal_failures_before = sdk._journal_write_failures
     # #1727 (review PR #1827) TOCTOU: two concurrent POSTs with the same
     # FRESH session_id can both observe session_existed=False and mint a
     # sessionCaptured Event (narrow race) — sequential retries converge
@@ -12232,10 +12236,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # graph write persisted, so the envelope stays successful (``status``
     # ``"ok"``; the hosted receipt carries no literal ``ok`` key) and the
     # warning names the journal residue — flipping the outcome would trip the
-    # #2335 TRUE-retry gate over a persisted write.
-    if sdk._journal_write_failures:
+    # #2335 TRUE-retry gate over a persisted write. #5632: the count is THIS
+    # capture's DELTA (``_journal_failures_before``), not the lifetime counter.
+    _capture_journal_failures = (
+        sdk._journal_write_failures - _journal_failures_before)
+    if _capture_journal_failures > 0:
         extraction_warnings.append(
-            _journal_write_failure_warning(sdk._journal_write_failures))
+            _journal_write_failure_warning(_capture_journal_failures))
     resp = {"session_id": session_id, "turns": len(body.conversation),
             "extracted": len(extracted), "points": extracted,
             "surfaced": surfaced,

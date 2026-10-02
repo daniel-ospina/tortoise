@@ -4612,6 +4612,13 @@ class TortoiseSDK:
         proj = self._get_proj()
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
+        # #5632: snapshot the LIFETIME journal-failure counter at the START of
+        # THIS capture. The receipt below must disclose only appends that
+        # failed DURING it — a failure from an earlier, unrelated write on this
+        # SDK used to make every later capture falsely report itself
+        # live-only, forever. The counter itself stays lifetime (monitoring
+        # reads it; no other consumer changes).
+        _journal_failures_before = self._journal_write_failures
 
         if len(conversation) > max_turns:
             # #2335 WI-1c: the self-host turn-cap refusal is a structured
@@ -5342,10 +5349,14 @@ class TortoiseSDK:
         # non-zero, so an ordinary capture's warning list is unchanged. The same
         # failure also increments ``tortoise_journal_write_failures_total``
         # (monitoring) and logs at ERROR — a receipt alone is only seen by the
-        # caller of a capture that happened to fail.
-        if self._journal_write_failures:
+        # caller of a capture that happened to fail. #5632: the count is THIS
+        # capture's DELTA (``_journal_failures_before``), not the lifetime
+        # counter — an earlier failed write is not this capture's residue.
+        _capture_journal_failures = (
+            self._journal_write_failures - _journal_failures_before)
+        if _capture_journal_failures > 0:
             extraction_warnings.append(
-                _journal_write_failure_warning(self._journal_write_failures))
+                _journal_write_failure_warning(_capture_journal_failures))
         resp = {
             "session_id": session_id,
             "turns": len(conversation),
