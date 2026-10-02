@@ -230,23 +230,58 @@ def test_presence_read_happens_INSIDE_the_held_lock():
                 order.append("release")
             return super().execute_command(*args)
 
+    class _MarkedGraph:
+        """Records that the DROP ran, wherever it runs."""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def query(self, *a, **k):
+            order.append("drop")
+            return self._inner.query(*a, **k)
+
+        def delete(self):
+            order.append("drop")
+            return self._inner.delete()
+
     class _Db(_LockingDb):
         def list_graphs(self):
             order.append("read")
             return super().list_graphs()
 
+        def select_graph(self, name):
+            return _MarkedGraph(super().select_graph(name))
+
     conn = _Conn()
     db = _Db(graphs=["test_here"], connection=conn)
-    assert safe_graph_delete(db, "test_here", detach=False, drop=True) is True
-    # ALL THREE positions, not just read-before-release (review P2): asserting
-    # only `read < release` also passes a mutant that reads BEFORE acquiring —
-    # unlock-check → acquire → drop — which reinstates the same #2961 window
-    # from the other side. Mutants this catches: read-before-acquire and
-    # read-after-release.
-    for marker in ("acquire", "read", "release"):
+    assert safe_graph_delete(db, "test_here") is True
+    # ALL FOUR positions (review P2): asserting only `read < release` also
+    # passes a mutant that reads BEFORE acquiring — unlock-check → acquire →
+    # drop — and one that drops AFTER releasing — check → release → act. Both
+    # reinstate the #2961 check-then-act window, one from each side. Mutants
+    # this catches: read-before-acquire, read-after-release, drop-after-release.
+    for marker in ("acquire", "read", "drop", "release"):
         assert marker in order, f"{marker} never happened: {order}"
-    assert order.index("acquire") < order.index("read") < order.index("release"), (
-        f"the presence read must run INSIDE the held lock — got {order}")
+    assert order.index("acquire") < order.index("read") \
+        < order.index("drop") < order.index("release"), (
+            f"the read AND the drop must run INSIDE the held lock — got {order}")
+
+
+def test_read_failure_RAISES_even_when_the_lock_is_ALSO_unavailable():
+    """Review P3: the presence read runs BEFORE the refusal, so an outage
+    raises instead of being reported as a quiet refusal. The sibling read-failure
+    test uses a GRANTING connection, so it never reaches the refusal branch and
+    cannot observe this ordering."""
+    conn = _FakeConnection(grants=False)  # the lock is never granted
+
+    class _Db(_LockingDb):
+        def list_graphs(self):
+            raise RuntimeError("conn dead: GRAPH.LIST")
+
+    db = _Db(graphs=["test_here"], connection=conn)
+    with pytest.raises(RuntimeError, match=r"GRAPH\.LIST"):
+        safe_graph_delete(db, "test_here", detach=False, drop=True, wait_s=0.0)
+    assert db.calls == [], "no graph command may be transmitted"
 
 
 def test_read_failure_RAISES_and_releases_the_lock():

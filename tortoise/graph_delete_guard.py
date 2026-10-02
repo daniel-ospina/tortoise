@@ -207,12 +207,12 @@ def safe_graph_delete(
     the DETACH is what materialises the record-less phantom that poisons the
     AOF (module docstring).
 
-    Returns True when the graph was present (a command is issued unless BOTH
-    ``detach`` and ``drop`` are False, in which case nothing is transmitted and
-    the True only reports presence). Returns False when nothing was
-    transmitted: either the graph was already absent, or a client exposing a
-    raw connection could not take the cross-process lock (a refusal — the graph
-    is left for a later sweep).
+    Returns True when the graph was present AND the drop was performed (or the
+    call was a no-op because BOTH ``detach`` and ``drop`` were False — then the
+    True only reports presence). Returns False when nothing was transmitted:
+    either the graph was already absent, or a client exposing a raw connection
+    could not take the cross-process lock (a refusal — the graph is left for a
+    later sweep).
     **Those two are not distinguishable from the return value alone**, so a
     caller that records a drop-set entry must re-check presence before
     treating False as "satisfied" —
