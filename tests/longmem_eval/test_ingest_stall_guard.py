@@ -223,8 +223,9 @@ def test_socket_timeout_defaults_preserve_product_behaviour(monkeypatch):
     # The #3350 round-4 "finite but absurd" floor: `float()` accepts `1e-9`,
     # which turns every FalkorDB operation into an instant timeout — a
     # typo-induced total outage. Below the floor we fall back to the default,
-    # exactly as the product knob does. The missing CEILING is deliberate
-    # (the eval lane needs 120s); the missing floor was not.
+    # exactly as the product knob does. Both bounds are enforced below; the
+    # ceiling is set ABOVE the eval lane's 120s so the product's tighter 60s is
+    # not re-imposed here.
     for token in ("1e-9", "0.001"):
         monkeypatch.setenv(_SOCKET_TIMEOUT_ENV, token)
         assert _resolve_socket_timeout(_SOCKET_TIMEOUT_ENV, 10.0) == 10.0
