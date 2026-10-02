@@ -210,6 +210,26 @@ def test_socket_timeout_defaults_preserve_product_behaviour(monkeypatch):
     for token in ("none", "off", "0"):
         monkeypatch.setenv(_SOCKET_TIMEOUT_ENV, token)
         assert _resolve_socket_timeout(_SOCKET_TIMEOUT_ENV, 10.0) is None
+    # …and the DECLARED #4097 falsy spellings, on the same knob: before this,
+    # `false` raised ValueError while `no`/`off` disabled the bound — two
+    # disable vocabularies for one knob, which is what #4097 exists to prevent.
+    for token in ("no", "false", "  FALSE  ", "0.0", "-1"):
+        monkeypatch.setenv(_SOCKET_TIMEOUT_ENV, token)
+        assert _resolve_socket_timeout(_SOCKET_TIMEOUT_ENV, 10.0) is None
+    # ANY non-positive number is the numeric off form (`<= 0`, not just the two
+    # spellings above).
+    monkeypatch.setenv(_SOCKET_TIMEOUT_ENV, "-5")
+    assert _resolve_socket_timeout(_SOCKET_TIMEOUT_ENV, 10.0) is None
+    # The #3350 round-4 "finite but absurd" floor: `float()` accepts `1e-9`,
+    # which turns every FalkorDB operation into an instant timeout — a
+    # typo-induced total outage. Below the floor we fall back to the default,
+    # exactly as the product knob does. The missing CEILING is deliberate
+    # (the eval lane needs 120s); the missing floor was not.
+    for token in ("1e-9", "0.001"):
+        monkeypatch.setenv(_SOCKET_TIMEOUT_ENV, token)
+        assert _resolve_socket_timeout(_SOCKET_TIMEOUT_ENV, 10.0) == 10.0
+    monkeypatch.setenv(_SOCKET_TIMEOUT_ENV, "0.05")
+    assert _resolve_socket_timeout(_SOCKET_TIMEOUT_ENV, 10.0) == 0.05
     # A typo fails loud — never silently unbounded.
     monkeypatch.setenv(_SOCKET_TIMEOUT_ENV, "abc")
     with pytest.raises(ValueError):

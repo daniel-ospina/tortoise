@@ -38,9 +38,11 @@ logger = logging.getLogger(__name__)
 # a server-side stall (FalkorDB active-defrag loop / MERGE lock — #2969,
 # #2838) otherwise blocks the caller in ``recv()`` forever, and the run looks
 # alive (process present, 0% CPU) with no error, no log output and no way to
-# tell "stalled" from "slow". redis-py's own default is a 5s read timeout,
-# but ``falkordb.FalkorDB.__init__`` defaults ``socket_timeout=None`` and
-# passes it explicitly — which DISABLES redis-py's default on this path.
+# tell "stalled" from "slow". Nothing on this path sets a bound: measured on the
+# pinned `redis 7.4.1`, `Connection().socket_timeout` is ALREADY `None`
+# (unbounded — redis-py's historical 5s default is gone), and
+# ``falkordb.FalkorDB.__init__`` defaults ``socket_timeout=None`` and passes it
+# explicitly. So the client below is unbounded until THIS code bounds it.
 #
 # The defaults below preserve the pre-#2969 product behaviour exactly
 # (10s read / 5s connect). The longmem eval lane raises the read bound for
@@ -68,11 +70,12 @@ _SOCKET_TIMEOUT_UNBOUNDED = FALSY | {"none", "0.0", "-1"}
 def _resolve_socket_timeout(name: str, default: float) -> float | None:
     """Parse a seconds-valued socket-timeout knob (env > default).
 
-    Unset/blank → ``default``. ``none``, any declared falsy spelling
-    (``off``/``no``/``false``/``0``), or the numeric off forms ``0.0``/``-1``
-    → ``None`` (unbounded — the explicit opt-out). A non-numeric OR non-finite
-    value raises ``ValueError``: a typo must fail loud at connection time, never
-    silently leave the client effectively unbounded (``inf`` would).
+    Unset/blank → ``default``. ``none`` or any declared falsy spelling
+    (``off``/``no``/``false``/``0``), or any number ≤ 0 (the numeric off forms
+    ``0.0``/``-1``) → ``None`` (unbounded — the explicit opt-out). A
+    non-numeric OR non-finite value raises ``ValueError``: a typo must fail
+    loud at connection time, never silently leave the client effectively
+    unbounded (``inf`` would).
     """
     raw = os.environ.get(name)
     if raw is None or not raw.strip():
@@ -93,6 +96,14 @@ def _resolve_socket_timeout(name: str, default: float) -> float | None:
             f"explicitly)")
     if value <= 0:
         return None
+    if value < _DB_TIMEOUT_MIN_S:
+        # The same "finite but absurd" class the PRODUCT knob floors (#3350
+        # round-4): ``float()`` accepts ``1e-9``, which turns every FalkorDB
+        # operation into an instant timeout — a typo-induced total outage.
+        # Fall back to the default, exactly as ``_socket_timeouts()`` does.
+        # The absent CEILING on this knob is deliberate (the eval lane needs
+        # 120s); the absent FLOOR was not.
+        return default
     return value
 
 
@@ -3482,8 +3493,11 @@ class FalkorProjection(
         elif host is not None:
             # Docker FalkorDB
             from falkordb import FalkorDB  # ponytail: lazy import, only needed for Docker mode
-            # Resolved at CONNECTION time so an env knob covers every
-            # construction site (SDK sessions, ingest, hosted). ACTUAL
+            # Resolved at CONNECTION time so an env knob covers every CONSUMER
+            # of this client (SDK sessions, ingest, hosted) — NOT every
+            # FalkorDB client in the repo: `session_indexer.py`, `backup.py`
+            # and the probe in `__main__.py` construct their own, and this
+            # knob does not reach them. ACTUAL
             # precedence: #2969's per-lane TORTOISE_DB_SOCKET_CONNECT_TIMEOUT /
             # TORTOISE_DB_SOCKET_TIMEOUT (fail-loud, explicit none/off/0
             # opt-out) WINS whenever it is set; #2850's product-wide
