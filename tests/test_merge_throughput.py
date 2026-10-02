@@ -4031,12 +4031,12 @@ def test_docs_job_guards_tracked_generated_artifacts_on_every_pr():
     # `>> "$(env | sed -n 's/^GITHUB_PA''TH=//p')"`, a stub interpreter written
     # to /usr/local/bin/python3, and overwriting a generator under `tools/`.
     #
-    # A deliberate `ci.yml` edit defeats every assertion in this file by
-    # construction (it can delete this step, or replace the job with `run: exit
-    # 0`), so bounding that arms race is not what these pins are for. What they
-    # pin is the plausible ACCIDENTAL silencer plus the exact invocation, i.e.
-    # that a well-meaning edit cannot leave the guard looking present while not
-    # running — which is #4454's actual outcome.
+    # A sibling step can install the shim without touching the drift step:
+    # appending a directory holding an `exit 0` stub named `python3` to
+    # `$GITHUB_PATH` leaves the drift step's own shape pristine. This scan reds
+    # on that edit, and on any sibling `$GITHUB_PATH`/`$GITHUB_ENV` write. It
+    # does not detect an obfuscated token build, a stub interpreter written to
+    # /usr/local/bin, or a generator overwritten under `tools/` — measured GREEN.
     _shim_writers = sorted(
         str(s.get("name") or s.get("uses") or "<unnamed>")
         for s in docs_job.get("steps") or []
