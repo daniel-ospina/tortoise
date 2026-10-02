@@ -1676,6 +1676,15 @@ def test_capture_graph_name_mirrors_the_sdk_mapping(monkeypatch):
     `tenant_{ns}`) because none of its literals was ULID-shaped — exactly
     the "mirror that is nearly right" this guard exists to catch. See the
     corpus construction below.
+
+    The pinned set is a UNION over the TWO places the rule lives: the
+    namespace→graph-name derivation was extracted out of `_get_proj` into the
+    module-level `_derive_graph_name` (#4240 review F2), and `_get_proj` now
+    merely calls it. Scanning `_get_proj` ALONE pins an EMPTY set, so a
+    behaviour-preserving extraction reds this guard (it did). Both sources are
+    scanned and the union pinned: a pinned literal moved to a THIRD place
+    still shrinks the union and reds below, so the guard is NOT relaxed to a
+    subset check.
     """
     import ast
     import inspect
@@ -1715,9 +1724,10 @@ def test_capture_graph_name_mirrors_the_sdk_mapping(monkeypatch):
 
     # ── probe corpus ──────────────────────────────────────────────────────
     # (a) PREDICATE-DERIVED: every STRING CONSTANT under the CONDITION of
-    #     any conditional construct in `_get_proj`'s OWN source becomes a
-    #     probe, so a new literal-bearing branch is exercised — a mirror that
-    #     does not restate it then fails the parity loop below. Extraction is
+    #     any conditional construct in the SCANNED sources (`_get_proj` and
+    #     `_derive_graph_name`) becomes a probe, so a new literal-bearing
+    #     branch is exercised — a mirror that does not restate it then fails
+    #     the parity loop below. Extraction is
     #     AST-based, not a spelling regex: a constant is collected however
     #     the predicate is spelled — `== "..."`, a single-quoted literal, an
     #     `in` / `not in` test, a tuple/list of literals, an `endswith`, or a
@@ -1744,7 +1754,16 @@ def test_capture_graph_name_mirrors_the_sdk_mapping(monkeypatch):
     #     The only conditional construct NOT collected is `except`, whose
     #     "condition" is an exception TYPE — never a string-literal namespace
     #     predicate — so it can carry no literal this guard should pin.
-    src = inspect.getsource(sdk_mod.TortoiseSDK._get_proj)
+    # The rule lives in TWO places since #4240 review F2: `_get_proj` calls
+    # the module-level `_derive_graph_name` for the namespace→graph-name
+    # derivation, taking the predicate literals with it. Scan BOTH ASTs and
+    # pin the UNION — `_get_proj` alone pins an empty set (reding this guard
+    # on a behaviour-preserving extraction), and a literal moved to a THIRD
+    # place still shrinks the union and reds below.
+    srcs = (
+        inspect.getsource(sdk_mod.TortoiseSDK._get_proj),
+        inspect.getsource(sdk_mod._derive_graph_name),
+    )
 
     def _string_consts(node: ast.AST) -> set[str]:
         return {n.value for n in ast.walk(node)
@@ -1772,9 +1791,10 @@ def test_capture_graph_name_mirrors_the_sdk_mapping(monkeypatch):
         return ()
 
     predicate_lits: set[str] = set()
-    for _node in ast.walk(ast.parse(textwrap.dedent(src))):
-        for _cond in _condition_tests(_node):
-            predicate_lits |= _string_consts(_cond)
+    for _src in srcs:
+        for _node in ast.walk(ast.parse(textwrap.dedent(_src))):
+            for _cond in _condition_tests(_node):
+                predicate_lits |= _string_consts(_cond)
     # (b) REAL-CREDENTIAL SHAPES: a production `org_id` is a ULID
     #     ("01"-prefixed Crockford base32) — the shape the old spot-check
     #     lacked — plus the named shapes it carried and a seeded fuzz over the
@@ -1810,9 +1830,10 @@ def test_capture_graph_name_mirrors_the_sdk_mapping(monkeypatch):
             f"admission mirror resolves {mirrored!r} — the gate would bucket "
             f"the request by a graph it never opens (#3365)")
 
-    # Structural half: a NEW predicate in `_get_proj` must be a deliberate
-    # test edit, not silent corpus drift. This pins the string literals the
-    # TEST conditions carry, so a branch introducing a NEW literal reds HERE
+    # Structural half: a NEW predicate in either scanned source must be a
+    # deliberate test edit, not silent corpus drift. This pins the UNION of
+    # the string literals the TEST conditions carry across BOTH `_get_proj`
+    # and `_derive_graph_name`, so a branch introducing a NEW literal reds HERE
     # even when the parity loop cannot see it — e.g. a behaviour-preserving
     # `endswith("zzz")` returning the same `org_{ns}` the else branch would.
     # A branch REUSING an already-pinned literal in a non-prefix position
@@ -1820,24 +1841,24 @@ def test_capture_graph_name_mirrors_the_sdk_mapping(monkeypatch):
     # blind to it; the suffix/infix probes in the corpus exercise that
     # position and red parity instead.
     # (Residual, stated precisely — the ONE blind spot left, and it is NOT a
-    # spelling. `inspect.getsource` returns `_get_proj` alone, so a condition
-    # whose literal lives OUTSIDE that method cannot be seen: a predicate
+    # spelling. The scan covers `_get_proj` and `_derive_graph_name` only, so
+    # a condition whose literal lives OUTSIDE both cannot be seen: a predicate
     # delegating to a helper (`_is_ulid(ns)`) or comparing against a
     # module-level constant (`ns == _TEST_PREFIX`) contributes no string
     # constant here, and a literal-free predicate (`len(ns) == 7`) is the
     # degenerate case of the same thing. Such a branch adds nothing to pin;
     # if it changes the mapping, only the parity loop over the seeded fuzz
     # can catch it, and only when the fuzz names a matching shape. It cannot
-    # however move a pinned literal out of `_get_proj` unnoticed: the pinned
-    # set SHRINKS, and this assertion reds. The collector reads each
+    # however move a pinned literal out of BOTH scanned sources unnoticed: the
+    # pinned set SHRINKS, and this assertion reds. The collector reads each
     # construct's CONDITION — `if` / `while` / conditional-expression tests,
     # `match` patterns and guards, comprehension `if` clauses, `assert` tests
     # (see the corpus notes above) — so this is a blind spot of REACHABILITY
-    # from `_get_proj`'s AST, not an uncollected spelling.)
+    # from the scanned ASTs, not an uncollected spelling.)
     assert predicate_lits == {"registry", "test_", "tortoise_test", "test-"}, (
-        "_get_proj's namespace predicates changed (literals="
-        f"{sorted(predicate_lits)}): re-verify _graph_name_for_namespace and "
-        "extend this guard's corpus")
+        "_get_proj/_derive_graph_name's namespace predicates changed "
+        f"(literals={sorted(predicate_lits)}): re-verify "
+        "_graph_name_for_namespace and extend this guard's corpus")
     # explicit graph_name: verbatim, and it wins over the namespace family
     assert _opened(namespace="team-001", graph_name="org_x_g_1") \
         == ha_mod._graph_name_for_namespace("team-001", graph_name="org_x_g_1") \

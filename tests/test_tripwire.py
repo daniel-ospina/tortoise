@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 
+from tests import _live_utils
 from tortoise.projection import FalkorProjection
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -79,27 +80,26 @@ def test_session_target_probe():
     assert True
 
 
-def _docker_reachable(host: str = "localhost", port: int = 6379) -> bool:
-    """True when a live FalkorDB answers a TCP connect on host:port.
+def _docker_reachable(host: str | None = None,
+                     port: int | None = None) -> bool:
+    """True when the PROVISIONED docker-lane FalkorDB answers a TCP connect.
 
     The repo's skip-guard convention (#1436) — live-FalkorDB-required tests
-    SKIP with a FalkorDB-reason when the docker is absent, never error."""
-    import socket
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(1.0)
-    try:
-        s.connect((host, port))
-        return True
-    except OSError:
-        return False
-    finally:
-        s.close()
+    SKIP with a FalkorDB-reason when the docker is absent, never error.
+
+    #6673: the port used to be the 6379 literal; it is now the ephemeral host
+    port assigned by the provision step (docker `-p 0:6379`). `host=None`
+    resolves through `_live_utils.service_host()`, so a
+    `TORTOISE_TEST_DOCKER_HOST` override reaches the probe exactly as it reaches
+    the clients (the product's `FALKORDB_HOST` is not read — see the seam).
+    """
+    return _live_utils.tcp_reachable(port or _live_utils.docker_port(), host=host)
 
 
 @pytest.fixture
 def docker_up():
     if not _docker_reachable():
-        pytest.skip("live FalkorDB (localhost:6379) not reachable")
+        pytest.skip(f"live FalkorDB (localhost:{_live_utils.docker_port()}) not reachable")
     return True
 
 
@@ -146,7 +146,7 @@ def test_server_reachable_session_passes(docker_up):
     """URI set + reachable server → the tripwire passes and the child
     session runs green (rc 0, the target test passed) — the redirect is
     armed, so the probe went server-mode."""
-    res = _run_session({"TORTOISE_DB_URI": "docker://:falkordb@localhost:6379"})
+    res = _run_session({"TORTOISE_DB_URI": _live_utils.docker_base_uri()})
     assert res.returncode == 0, (
         "reachable-server session must pass\nstdout:\n" + res.stdout +
         "\nstderr:\n" + res.stderr)
@@ -227,7 +227,7 @@ def test_expect_uri_set_session_passes(docker_up):
     docker-half shape)."""
     res = _run_session({
         "TORTOISE_TEST_EXPECT_URI": "1",
-        "TORTOISE_DB_URI": "docker://:falkordb@localhost:6379"})
+        "TORTOISE_DB_URI": _live_utils.docker_base_uri()})
     assert res.returncode == 0, (
         "EXPECT_URI + reachable server session must pass\nstdout:\n" +
         res.stdout + "\nstderr:\n" + res.stderr)
@@ -240,7 +240,7 @@ def test_probe_flips_with_redirect_state(monkeypatch, docker_up):
     documented exemption knob set → embedded. Exercises the REAL inert path
     (the state the tripwire must detect) without monkeypatching the
     redirect's internals."""
-    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
+    monkeypatch.setenv("TORTOISE_DB_URI", _live_utils.docker_base_uri())
     monkeypatch.setenv("TORTOISE_TEST_MODE", "1")
     probe = _tripwire_probe()
     try:

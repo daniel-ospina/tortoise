@@ -52,11 +52,14 @@ from contextlib import suppress
 from datetime import datetime, timezone
 
 from .projection import (
+    _annotator_value_ok,
     _apply_one,
     _load_prewipe_snapshot,
     _norm,
     _promotion_point_with_operator,
+    _writable_id,
     journal_hard_delete_seqs,
+    plan_point_restamp_folds,
     prewipe_snapshot_path,
 )
 from .projection.entities import (
@@ -210,6 +213,19 @@ _ONE_SIDED_REASONS: dict[str, str] = {
 
 # Statically excluded + separately handled.
 _NOT_COMPARED: frozenset[str] = frozenset(_EXCLUSION_REASONS)
+
+# #5256: `sourceVersionTransit` (the `extractedFrom` read-version carrier —
+# the EDGE scalar `sourceVersion` is the model; this node prop is the replay
+# transit) is deliberately NOT added to `_EXCLUSION_REASONS`. It is a declared
+# node property that the live writer resolves from the :Source and carries in
+# the Point's own journaled snapshot (`get_point` → the `PointAdded` payload),
+# and pass 2 re-stamps the SAME value from that snapshot. Both sides therefore
+# carry it and it MUST be compared; excluding it would be a blind spot. It is
+# symmetric-absent for an un-sourced Point or one whose Source has no recorded
+# hash; a one-sided presence is reported as a **divergence** (the mismatch
+# channel names it: `_uncarried` skips it because it IS `_POINT_HANDLED`, and it
+# is not in `_ONE_SIDED_REASONS`) — never silenced here. (`_upsert_point_edges`
+# never reads the Source, so the replay can only reproduce what the payload states.)
 
 # #548: operators store NO `content`/`pointKind` as node properties (the live
 # writer creates the node without them). The journal SEAM synthesizes both
@@ -823,6 +839,19 @@ def _fold_journal(events: list[dict]) -> dict:
 
     The right long-term fix is the arms on `fold` itself and lives outside this
     lane's file family (#3692 covers the promotions).
+
+    #3305 KNOWN GAP: these terminalizer arms are NOT driven by
+    ``plan_point_restamp_folds``, the selection the replay engines obey, so this
+    reference fold can disagree with a correctly replayed graph. Measured on a
+    bare same-id ``PointAdded`` re-emit after an invalidate: the graph holds the
+    decayed belief (both engines keep it — a bare re-emit MERGEs live), while
+    this fold's ``_apply_one`` PointAdded arm REPLACES the entry and drops the
+    decay, so ``check_consistency`` reports ``divergence="content"`` on
+    ``confidence``/``posterior_alpha``/``posterior_beta`` for a healthy replay.
+    That disagreement with the ``rebuild_all`` graph predates #3305; the #3305
+    fix widened it to the apply() arm by making that arm agree with
+    ``rebuild_all``. Driving these arms from the plan is the durable fix and is
+    deliberately left to the consistency lane.
     """
     # `journal_hard_delete_seqs` normalises internally, and stays on the RAW
     # list (the anchor boundary is an envelope property).
@@ -897,6 +926,51 @@ def _fold_journal(events: list[dict]) -> dict:
                     entry["expiredAt"] = ev["expired_at"]
             continue
         _apply_one(by_id, ev)
+        # #4208: a content EDIT re-derives the vector. The live `update_point`
+        # and the replay's `_revise_point` both re-encode from the new content,
+        # so the journal states no vector for the edited point — yet the entry
+        # `_apply_one` just mutated still carries the CREATION vector, which the
+        # graph no longer holds. Dropping it keeps this reference honest: the
+        # comparison's own embedding arm already declares a graph-only vector
+        # faithful for the recompute path (see the `jvec_present and not
+        # gvec_present` note), while leaving the stale creation vector in made a
+        # healthy content edit read as a `content` divergence on EVERY update.
+        # Mirrors the static `content_hash` exclusion ("pure f(content) —
+        # RECOMPUTE"): the gate is `_apply_one`'s OWN content gate (normalize,
+        # then `new_content is not None and _annotator_value_ok`), read from the
+        # same projection function rather than re-spelled, so a content value
+        # the fold refused cannot drop a vector here.
+        #
+        # #5238 review P2: the drop is correct ONLY when the vector was
+        # DERIVED — i.e. the record owns no `embedding`. When a caller supplies
+        # BOTH `content` and `embedding` (a supported #5046 shape), the vector
+        # is caller-owned, NOT recomputed: the graph holds the caller's vector
+        # while `replay(journal)` re-encodes (the declared #5046 exemption), so
+        # live != rebuild. Popping here would delete the fold's only vector,
+        # the comparison would declare the caller-owned graph-only vector
+        # faithful for a recompute path it is not on, and the durability gate
+        # would go blind to a real divergence. Leaving the fold's existing
+        # (creation) vector in place is the honest signal the fold CAN give:
+        # it does not equal the caller-owned graph vector, so the divergence is
+        # reported. (Writing the record's claimed vector onto the fold instead
+        # would make both sides equal — but `replay` does NOT honour that
+        # vector, so the fold would lie about replay and hide the divergence
+        # for ever.) `"embedding" not in` is deliberate: an explicit
+        # `embedding: null` clear is a caller write too, and the same blindness
+        # applies.
+        if t == "PointRevised":
+            _nev = _norm(ev)
+            _nc = _nev.get("new_content")
+            if (_nc is not None and _annotator_value_ok(_nc)
+                    and "embedding" not in _nev):
+                # #5238 review P3: `_apply_one` guards every id lookup with
+                # `_writable_id` (#331 review r4); a JSON-legal non-string id
+                # (list/dict) must degrade to "no entry", not raise
+                # `TypeError: unhashable type` out of the durability fold.
+                _rid = _nev.get("id")
+                _entry = by_id.get(_rid) if _writable_id(_rid) else None
+                if isinstance(_entry, dict):
+                    _entry.pop("embedding", None)
     return by_id
 
 
@@ -1127,7 +1201,15 @@ def recover_from_log(events_dir: str, projection) -> dict:
         (#3316). Mid-file corruption is refused for the same reason
         (``EventLog.read_all`` raises there).
 
-    Returns {recovered, log_points, db_points, reason}.
+    Returns {recovered, log_points, db_points, reason} — plus `onboarding_gap`,
+    the trigger flag set whenever a completed replay left the graph's onboarding
+    state NOT confirmed intact (non-zero for a confirmed loss, an unverified
+    restore, OR a state-UNKNOWN rescue file), plus `onboarding_state_unknown`,
+    set ONLY for the rescue-file shape (#4641). `reason` carries an ADDITIVE
+    clause naming which of the three applies. `recovered` is still True in
+    every one of those cases: the rebuild did complete and refusing to open the
+    store would be strictly worse, so the signal is PROPAGATED for the caller
+    to branch on rather than swallowed into a success-shaped result.
     """
     import os
 
@@ -1212,11 +1294,61 @@ def recover_from_log(events_dir: str, projection) -> dict:
         # the #990 half (a quarantined :Batch with no Points), and reporting
         # that as `recovered: False` makes the caller (`_recover_or_raise`)
         # refuse to open a DB whose quarantine state was just restored.
-        return {"recovered": True,
-                "log_points": events,
-                "db_points": nodes,
-                "reason": ("rebuilt from the pending pre-wipe snapshot "
-                           f"(#2943): {nodes} nodes, {edges} edges")}
+        #
+        # `rebuild_all` CAN, however, complete with a gap it could not close
+        # (#4641): onboarding state/edges are raw writes no journal event
+        # carries, so a post-wipe raise would strand the store empty (#2943).
+        # Reporting `recovered: True` while swallowing that gap is the silent
+        # partial loss itself, so the counts are PROPAGATED — the new
+        # `onboarding_gap` key is additive, but note this is NOT a
+        # purely-value-preserving change: `reason` has a suffix APPENDED below
+        # for the gap case (in-repo callers only log it). `recovered` itself is
+        # unchanged, exactly as the sticky config-reset marker is.
+        # The projection returns the shapes as canonical counts — it owns the
+        # definitions. Summing the granular keys here double-counted a single
+        # destroyed org (it lands in BOTH `onboarding_restore_failures` and
+        # `onboarding_missing_orgs`) and let a transient restore failure read
+        # as loss. `onboarding_gap` is the trigger (non-zero for all three
+        # shapes) and `onboarding_missing_total` discriminates a real loss from
+        # an UNKNOWN/unverified one, so a caller that must not describe all
+        # three as loss reads the key it needs rather than re-deriving either
+        # from the granular keys (#4641 review rounds 6-7).
+        onboarding_gap = int(counts.get("onboarding_gap") or 0)
+        onboarding_missing_total = int(
+            counts.get("onboarding_missing_total") or 0)
+        onboarding_unknown = bool(counts.get("onboarding_state_unknown"))
+        result = {"recovered": True,
+                  "log_points": events,
+                  "db_points": nodes,
+                  "reason": ("rebuilt from the pending pre-wipe snapshot "
+                             f"(#2943): {nodes} nodes, {edges} edges")}
+        if onboarding_gap:
+            result["onboarding_gap"] = onboarding_gap
+            # Additive, not a chain: a confirmed partial loss and a
+            # pre-preservation UNKNOWN can coexist, and one must not suppress
+            # the other (#4641 review round 7).
+            if counts.get("onboarding_verified") is False:
+                result["reason"] += (
+                    "; WARNING: the onboarding post-restore verification "
+                    "COULD NOT RUN, so the rebuilt graph's onboarding state "
+                    "is UNVERIFIED (not confirmed intact, and not observed "
+                    "gone) — see #4641")
+            if onboarding_missing_total:
+                result["reason"] += (
+                    f"; WARNING: {onboarding_missing_total} onboarding "
+                    "state/edge restore gap(s) the replay could not close — "
+                    "see the rebuild ERROR log (#4641)")
+            if onboarding_unknown:
+                result["onboarding_state_unknown"] = True
+                result["reason"] += (
+                    "; WARNING: the pending pre-wipe snapshot does not "
+                    "carry a usable onboarding record — it either predates "
+                    "onboarding preservation, carries only one of the two "
+                    "onboarding sections, or inherits a state-UNKNOWN marker "
+                    "from an earlier interrupted rebuild — so this graph's "
+                    "onboarding state is UNKNOWN (not confirmed absent) — "
+                    "see #4641")
+        return result
 
     if not files:
         return {"recovered": False, "log_points": 0, "db_points": 0,
@@ -1289,15 +1421,45 @@ def recover_from_log(events_dir: str, projection) -> dict:
     applied = 0
     hard_delete_seqs = journal_hard_delete_seqs(events)
     entity_link_events: list[tuple[int, dict]] = []
+    # #3305: the Point lifecycle terminalizers are folded by the SHARED
+    # whole-journal plan, not by ``apply()``'s inline branch — that branch
+    # folds every terminalizer, while ``rebuild_all`` deliberately drops the
+    # pre-recreation ones and canonicalizes supersedes. Computing the plan
+    # here keeps this recovery engine on the same selection.
+    restamp_plan, _ = plan_point_restamp_folds(events)
+    # #3305: defer the terminalizers' CORRECTS edges — an endpoint created later
+    # in the journal cannot be merged chronologically (see
+    # ``fold_deferred_corrects_edges``), and ``rebuild_all``'s after-creations
+    # sweep resolves it, so the engines would disagree.
+    deferred_corrects: list[tuple[int, str, str]] = []
     for seq, ev in enumerate(events):
         if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
             entity_link_events.append((seq, ev))
             continue
         try:
-            projection.apply(ev)
+            # Keyed on the PLAN, not the raw envelope type — the plan selects
+            # by the NORMALIZED type (``_norm`` splices a nested payload), so a
+            # raw-type guard would let a ``type``-in-``point`` terminalizer fall
+            # through to ``apply()``'s inline branch and its unshared selection
+            # (#325/#3722's raw-vs-normalized class).
+            if seq in restamp_plan:
+                edge = projection.apply_journal_point_restamp(
+                    ev, seq, restamp_plan)
+                if edge is not None:
+                    deferred_corrects.append(edge)
+            else:
+                projection.apply(ev)
             applied += 1
         except Exception:
             torn += 1
+    if deferred_corrects:
+        try:
+            projection.fold_deferred_corrects_edges(
+                deferred_corrects, hard_delete_seqs)
+        except Exception:
+            logger.exception(
+                "recover_from_log: deferred CORRECTS fold failed; %d "
+                "edge(s) not replayed", len(deferred_corrects))
     if entity_link_events:
         try:
             applied += projection.fold_deferred_entity_links(

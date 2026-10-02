@@ -83,6 +83,27 @@ ABUSE_ENFORCEMENT_FAULT_KIND = "ABUSE_ENFORCEMENT_FAULT"
 #: the worker still completes the send), and this is the escalation path.
 BILLING_NOTIFY_REFUSED_KIND = "BILLING_NOTIFY_REFUSED"
 
+#: The incident KIND for a PROVIDER BILLING EXHAUSTION observed on a serving
+#: lane (#3873). The trigger is the provider's OWN refusal — an HTTP 402, or an
+#: OpenRouter 403 carrying a key-limit body signature
+#: (``model_adapters.is_billing_exhausted``) — so this kind carries NO
+#: threshold: it records an OBSERVED event, never a policy line. Before this
+#: existed, ``RotatingModel`` absorbed the refusal, cooled the lane, rotated,
+#: and told no operator: the beta's aggregate spend bound is the provider
+#: credit balance, so the exhaustion arrived as an outage (all lanes down)
+#: rather than as a warning, and the repo could not see it at all.
+#:
+#: Subject is the SERVING LEG's provider slug (``deepseek-direct`` /
+#: ``openrouter`` / ``venice``), NOT the platform sentinel and NOT an org: the
+#: alert must name the leg that ACTUALLY refused (a hop can reach a leg whose
+#: provider was not the configured primary), and per-leg dedup means a second
+#: lane exhausting is its own incident rather than being swallowed by the
+#: first's still-open one. Detail is a bounded, message-free vocabulary —
+#: ``provider``, ``error_type``, ``status``, ``has_alternative`` — because the
+#: incident body is durable and an exception MESSAGE is attacker-influenceable
+#: text.
+PROVIDER_BILLING_EXHAUSTED_KIND = "PROVIDER_BILLING_EXHAUSTED"
+
 #: Repeat-suppression windows (seconds). A recorded incident holds the long
 #: window; an attempt that recorded NOTHING re-arms on the short one, so a
 #: transient channel outage delays the first alert by at most a minute. The
@@ -263,6 +284,39 @@ def alert_billing_notify_refused(org_id: str | None,
         alert_operator(BILLING_NOTIFY_REFUSED_KIND, "",
                        {"op": "billing_notify", "event_type": event_type,
                         "org_id": org_id or "?"})
+
+
+def alert_provider_billing_exhausted(provider: str, error: BaseException, *,
+                                     status: int | None = None,
+                                     has_alternative: bool = False) -> None:
+    """Dispatch the ``PROVIDER_BILLING_EXHAUSTED`` incident. Never raises.
+
+    The post-hoc operator record for #3873: the provider refused on its OWN
+    budget/limit (402, or a key-limit 403 — ``is_billing_exhausted``), so the
+    lane that was in use can no longer serve. This is the EVENT record, not a
+    threshold watch: nothing here decides at what spend to warn, and a trip is
+    advisory only (it must never refuse a request — the refusal already
+    happened, and a second refusal path would be a spend-policy change).
+
+    Best-effort BY CONSTRUCTION, in two layers, because it is called from the
+    LLM rotation path (`RotatingModel.complete`): ``alert_operator`` is already
+    fire-and-forget, and the ``suppress`` below means an alert-plane failure
+    can never change the request's outcome or turn a rotation into a 500.
+
+    The SUBJECT is the serving leg's provider slug, so one incident is filed
+    per exhausted leg (see ``PROVIDER_BILLING_EXHAUSTED_KIND``).
+    ``has_alternative`` records whether ANOTHER lane was configured: ``False``
+    means this refusal was raised (no alternative — this call's cliff), ``True``
+    means the call continued on the rotation path. ``True`` does NOT mean the
+    call ultimately succeeded — a later lane can refuse too.
+    """
+    with contextlib.suppress(Exception):  # the alert must never raise
+        leg = provider or "unknown"
+        alert_operator(PROVIDER_BILLING_EXHAUSTED_KIND, leg,
+                       {"provider": leg,
+                        "error_type": type(error).__name__,
+                        "status": status,
+                        "has_alternative": bool(has_alternative)})
 
 
 def file_operator_incident(store, kind: str, org_id: str | None, detail: dict) -> bool:

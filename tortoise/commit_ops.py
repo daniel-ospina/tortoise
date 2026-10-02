@@ -22,17 +22,34 @@ from .live import is_terminal_status  # #2498 shared terminal vocabulary
 
 _logger = logging.getLogger(__name__)
 
-# Statuses excluded from recall_state's default OBJECT view (the #1350 fold
-# consumer). Mirrors the literal exclusion tuple in TortoiseSDK.recall_state
-# (sdk.py — "(o.get('status') or '') not in (superseded, deprecated,
-# archived, retracted)"). NOTE: this is NOT TortoiseSDK.STATE_EXCLUDED_STATUS
-# (a class attr missing 'archived' and used for the POINT pool) and NOT
-# search_engine.TERMINAL_EXCLUDED_STATUSES (adds 'outdated', which recall's
-# object view DOES surface). Keep in sync with the recall_state filter — a
+# ═════════════════════════════════════════════════════════════════════════
+# #3301 — THE canonical OBJECT terminal vocabulary for the SEARCH/RECALL
+# read surfaces. ONE declaration; nothing on those surfaces re-literals it
+# (``TortoiseSDK.recall_state`` and the four search legs both consume THIS
+# object). The OBJECT family is NOT the Point family: an Object
+# has no ``outdated`` concept (no writer sets ``outdated`` on an Object) and no
+# ``draft`` state, so this set is the recall/read-surface tuple and it is
+# deliberately narrower than ``live.TERMINAL_EXCLUDED_STATUSES`` (which adds
+# ``outdated``). A retracted/superseded/deprecated/archived Object is a dead
+# Object — no current state to report.
+#
+# DELIBERATELY NOT the whole story: the render-time successor-existence probe
+# in assembly.py keeps its OWN wider set (``assembly._RECALL_OBJECT_EXCLUDED_STATUSES``
+# — adds ``outdated``, i.e. it treats an ``outdated``-status Object as
+# recall-excluded for the render probe, which this fold does not). Do not
+# unify the two blindly: they answer different questions.
+#
+# This is NOT ``TortoiseSDK.STATE_EXCLUDED_STATUS`` (a class attr missing
+# 'archived' and used for the POINT pool).
+OBJECT_TERMINAL_STATUSES = frozenset(
+    {"superseded", "deprecated", "archived", "retracted"})
+
+# The recall view's name for the same set — an ALIAS, never a second literal
+# (``commit_ops.apply_supersessions`` and ``projection/entities.py`` consume
+# it; ``sdk.recall_state`` consumes ``OBJECT_TERMINAL_STATUSES`` itself). A
 # supersession fold is only valid when a successor VISIBLE to that view
 # remains.
-_RECALL_OBJECT_EXCLUDED_STATUS = frozenset(
-    {"superseded", "deprecated", "archived", "retracted"})
+_RECALL_OBJECT_EXCLUDED_STATUS = OBJECT_TERMINAL_STATUSES
 
 
 def _op_attr(op, name, default=None):
@@ -630,7 +647,8 @@ class _PerRecordWarnBudget:
         return max(0, self.total - self._limit)
 
 
-def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
+def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
+                        skipped=None):
     """Apply canonical supersession records — the ONE consumer-side
     discipline (producer side: extractor_v2._supersession_records).
     pt_ records → supersede() CORRECTS (terminal-probed, idempotent);
@@ -667,11 +685,12 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
     terminal ENTITY olds warn keep-first when the claimed successor
     diverges from the stored one. The entity terminal branch is
     REACHABLE, not out-of-band-only: the extractor's S3 search_graph
-    calls tortoise_fts_query(entity_type='object') directly, and that
-    surface does NOT exclude terminal Objects (the terminal-status
-    clause in search_engine applies to label == 'Point' only; recall's
-    #1350 object filter runs after retrieval inside recall_state
-    alone) — so overlapping capture (session 2 re-derives a
+    calls tortoise_fts_query(entity_type='object', include_terminal=True)
+    directly — #3301 made the four search legs exclude terminal Objects by
+    DEFAULT, and this prior/RESOLUTION leg opts back into the
+    terminal-inclusive view (a prior set is never a surfaced result; the
+    same reasoning as assembly's resolver) — so overlapping capture
+    (session 2 re-derives a
     supersession whose target session 1 already folded) routes a real
     entity record against a terminal target, and this branch is the
     idempotency mechanism (dedup same-successor / keep-first
@@ -687,10 +706,35 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
     producer; one terminal BEFORE the payload still skips (guard-(h)
     semantics). Returns the number of
     records applied.
+
+    ``skipped`` (#5365) is an OPTIONAL caller-supplied list. When given, one
+    ``{"ref", "successor", "reason"}`` dict is appended for every record the
+    function did NOT apply. The return stays an ``int`` so existing callers
+    are untouched, but a caller that passes ``skipped`` can tell a clean
+    batch from one that dropped records — which the callback warning alone
+    does not give it, because a caller that does not read logs sees only the
+    int. The fail-open posture is UNCHANGED and deliberate: a bad record
+    still never aborts the ingest; it just stops being invisible.
     """
     if warn is None:
         warn = _logger.warning
     applied = 0
+
+    def _skip(ref, successor, reason):
+        """Record a record that did NOT apply, in the caller's ``skipped``.
+
+        #5365: the fail-open gates below deliberately swallow a bad record
+        rather than abort the ingest, but before this channel existed the
+        ONLY trace was a callback warning — so a caller that did not read
+        logs (the hosted commit endpoint, eval ingest) could not distinguish
+        a fully-applied batch from one that silently dropped records. #4021
+        made this acute: a retroactive supersession that previously
+        SUCCEEDED (while writing an inverted predecessor window) now raises
+        into the catch below and became a silent unapplied record.
+        """
+        if skipped is not None:
+            skipped.append({"ref": ref, "successor": successor,
+                            "reason": reason})
     # #2249: same-payload chains fold in DEPENDENCY order (a silent stable
     # pre-pass — payloads with <2 entity records or any resolution doubt
     # fall through to payload order). The per-record gates below re-run
@@ -727,6 +771,7 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
         if not ref or not supersedes_by:
             warn(f"supersession record skipped (missing superseded or "
                  f"supersedes_by): {record!r}")
+            _skip(ref, supersedes_by, "missing superseded or supersedes_by")
             continue
         if ref == supersedes_by:
             # self-supersession — meaningless, would fold an Object to
@@ -738,6 +783,7 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
             # consumer-side guard is the defense-in-depth sink, placed
             # BEFORE the pt_/entity dispatch so it guards both lanes.
             warn(f"supersession record skipped (self-supersession): {record!r}")
+            _skip(ref, supersedes_by, "self-supersession")
             continue
         if ref.startswith("pt_"):
             # Point-level → the canonical supersede() CORRECTS (outdated +
@@ -754,6 +800,7 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
             if ref not in state_by_id:
                 warn(f"point supersession ref {ref!r} not found — "
                      f"skipped (fail-open)")
+                _skip(ref, supersedes_by, "ref not found")
                 continue
             # #2498: the SHARED terminal vocabulary (status set + the legacy
             # `outdated=true` flag) — the pre-#2498 3-status tuple let an
@@ -768,6 +815,12 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
                 applied += 1
             except Exception as exc:
                 warn(f"point supersede {ref!r} → {supersedes_by!r} failed: {exc}")
+                # #5365: the fail-open skip this issue is about. #4021 made
+                # an inverted successor RAISE where it previously succeeded
+                # (while writing the bad window), so this pre-existing,
+                # deliberate catch turned a REFUSAL into a silently
+                # unapplied record. Record it for the caller.
+                _skip(ref, supersedes_by, f"supersede refused: {exc}")
             continue
         # Entity-level — successor FIRST: supersedes_by must be visible
         # (payload entities were already written when capture calls this;
@@ -796,10 +849,12 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
                      f"{supersedes_by!r} is a :Subject (a declared §5 "
                      f"subject kind, #1370); entity supersession is "
                      f"Object-only")
+                _skip(ref, supersedes_by, "successor is a :Subject")
             else:
                 warn(f"entity supersession {ref!r} skipped — successor "
                      f"{supersedes_by!r} is not an Object in the payload "
                      f"entities or the graph (dangling successor)")
+                _skip(ref, supersedes_by, "dangling successor")
             continue
         # NB: >1 successor rows are NOT skipped here — the alias scan below
         # (post ref-side resolution) decides. Duplicate names are only
@@ -997,12 +1052,12 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
         #       rows before presenting results; a raw graph name probe
         #       returns an id-less node only as an id=None row (which the
         #       gate filters), never as a usable successor; and
-        #   (b) status not in recall's object exclusion tuple
-        #       {"superseded", "deprecated", "archived", "retracted"}
-        #       (verified live: a deprecated Object enters the FTS pool but
-        #       never the recall state view; "outdated" IS visible — it is
-        #       not in the object exclusion, only in the POINT-terminal
-        #       vocabulary set).
+        #   (b) status not in the canonical OBJECT vocabulary
+        #       (``OBJECT_TERMINAL_STATUSES`` — superseded, deprecated,
+        #       archived, retracted): after #3301 BOTH the four search legs
+        #       and the recall view exclude it; "outdated" IS visible — it is
+        #       not in the object vocabulary, only in the POINT-terminal
+        #       set).
         # Folding a live target onto a display name whose remaining carriers
         # are all id-less or recall-excluded leaves NO visible successor =
         # the exact dangling-successor harm this lane exists to prevent.
@@ -1023,6 +1078,7 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
                  f"{supersedes_by!r} resolves only to id-less, "
                  f"target-identical, or recall-excluded Objects (no "
                  f"visible successor under that name)")
+            _skip(ref, supersedes_by, "no visible successor")
             continue
         try:
             # id-style emission: id + ALL extra kwargs ride the JSONL line
@@ -1079,6 +1135,15 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
                 applied += 1
         except Exception as exc:
             warn(f"ObjectSuperseded emit/fold failed for {obj_name!r}: {exc}")
+            _skip(obj_name, supersedes_by, f"emit/fold failed: {exc}")
+    if skipped:
+        _raw_warn(
+            f"supersession batch of {len(records)} record(s): "
+            f"{applied} applied, {len(skipped)} SKIPPED (fail-open — the "
+            f"caller's `skipped` list carries each one). First: "
+            f"{skipped[0]['ref']!r} → {skipped[0]['successor']!r} "
+            f"({skipped[0]['reason']})"
+        )
     if warn.suppressed:
         _raw_warn(
             f"supersession batch of {len(records)} record(s): "

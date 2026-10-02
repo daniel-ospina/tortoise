@@ -227,14 +227,17 @@ def test_missing_prev_streak_starts_fresh(inputs):
 
 
 def _marker(tmp_path, **kw):
-    data = {"run_id": RUN, "half": "b", "event": "push", "full": "true"}
+    # #6135: the qualification is the `producer` ROLE, not a shard name — the
+    # producer is the last fast shard (`i` at S=9), so `half` is evidence only.
+    data = {"run_id": RUN, "half": "i", "producer": True,
+            "event": "push", "full": "true"}
     data.update(kw)
     return _write(tmp_path, "producer.json", json.dumps(data))
 
 
 def test_producer_marker_qualifies_green(inputs):
-    """The population gate's executable form: a valid full==true half-b
-    producer marker lets a green run increment."""
+    """The population gate's executable form: a valid full==true PRODUCER-SHARD
+    marker (any label — never a fixed `b`) lets a green run increment."""
     marker = _marker(inputs["junitxml"].rsplit("/", 1)[0])
     rec = classify(inputs["junitxml"], inputs["manifest"],
                    inputs["step_wall"], inputs["divergence_log"], None, RUN,
@@ -255,15 +258,34 @@ def test_producer_marker_missing_is_infra(inputs):
 
 
 def test_producer_marker_wrong_shape_is_infra(inputs):
-    """A producer marker proving a NON-qualifying leg (half a / full=false)
-    -> infra-flake reset (the run is not a valid canary population member)."""
-    for kw in ({"half": "a"}, {"full": "false"}):
+    """A producer marker proving a NON-qualifying leg (no producer role /
+    full=false) -> infra-flake reset (not a valid canary population member)."""
+    for kw in ({"producer": False}, {"producer": None}, {"full": "false"}):
         marker = _marker(inputs["junitxml"].rsplit("/", 1)[0], **kw)
         rec = classify(inputs["junitxml"], inputs["manifest"],
                        inputs["step_wall"], inputs["divergence_log"], None,
                        RUN, producer_marker=marker)
         assert rec["last"]["bucket"] == "infra-flake"
         assert rec["consecutive_green"] == 0
+
+
+def test_producer_marker_carries_the_per_shard_step_wall_gate(inputs):
+    """#6135: the step-wall gate follows the PRODUCER SHARD's watchdog, not the
+    retired global 55m — a 15m shard that rides to 25m must reset the streak.
+    """
+    base = inputs["junitxml"].rsplit("/", 1)[0]
+    marker = _marker(base, watchdog_minutes=15)
+    wall = _write(base, "wall.txt", "1500")  # 25 min: under 55m, over 15m
+    rec = classify(inputs["junitxml"], inputs["manifest"], wall,
+                   inputs["divergence_log"], None, RUN,
+                   producer_marker=marker)
+    assert rec["last"]["bucket"] == "step-wall-gate", rec["last"]
+    # the same wall with a marker that does not carry a budget falls back to
+    # the CLI gate — no marker value means no per-shard override
+    rec2 = classify(inputs["junitxml"], inputs["manifest"], wall,
+                    inputs["divergence_log"], None, RUN,
+                    producer_marker=_marker(base))
+    assert rec2["last"]["bucket"] == "green", rec2["last"]
 
 
 def test_empty_step_wall_is_infra(inputs):

@@ -38,6 +38,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 
+from tests import _live_utils  # noqa: E402
 from tests._embedded import _owned_survivors  # noqa: E402
 
 # ── The ownership predicate ────────────────────────────────────────────────
@@ -250,7 +251,7 @@ def _start_teardown(monkeypatch, tmp_path, *, own, live, journal,
 
     monkeypatch.setenv(
         "TORTOISE_DB_URI",
-        "docker://:falkordb@localhost:6379/tortoise_test_matrix")
+        _live_utils.docker_uri("tortoise_test_matrix"))
     monkeypatch.setenv("TORTOISE_TEST_SESSION", "0123456789ab")
     monkeypatch.setattr(conftest, "_ACTIVE_SUITES_DIR", str(tmp_path))
     monkeypatch.setattr(emb, "_JOURNAL_FILE", str(tmp_path / "journal.jsonl"))
