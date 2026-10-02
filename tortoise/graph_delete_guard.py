@@ -39,20 +39,24 @@ Fix
 :func:`safe_graph_delete` never emits any graph command for a graph that is
 not currently present, and re-checks presence inside a cross-process
 critical section (:func:`graph_delete_lock`) so a concurrent deleter cannot
-slip between the check and the drop. Every DETACH-then-DELETE on one name
-routes through this function — the sweeps in ``tests/_embedded.py``
-(``_sweep_legacy_strays``, ``wipe``), ``battery/testing/seeds.py``'s
-``purge_owned_namespace``, and the shared-server cleanups in
-``tests/test_wipe_server.py`` — so no sweep or teardown in this codebase can
-emit the phantom-creating sequence.
+slip between the check and the drop. The sweeps that drop graphs route
+through it: ``tests/_embedded.py`` (``_sweep_legacy_strays``, ``wipe``,
+``_drop_one_graph``, ``_sweep_team_strays``, ``wipe_server``),
+``battery/testing/seeds.py``'s ``purge_owned_namespace``, and the shared-server
+cleanups in ``tests/test_wipe_server.py``. Test-local ``finally:`` cleanups
+elsewhere still issue a blind DETACH; routing those is tracked on #2961 rather
+than asserted here.
 
-The lock degrades **closed**. When a real client cannot take it (the server is
-unreachable, the command is rejected, or ``wait_s`` elapses),
-:func:`safe_graph_delete` REFUSES: it transmits nothing and returns ``False``,
-leaving the graph for a later sweep. Proceeding unlocked would *be* the
-check-then-act window the lock exists to close, so a guard that cannot prove
-safety must not delete. A db with no raw connection at all (unit-test fakes,
-the embedded backend) has no cross-process peer to race and proceeds unlocked.
+The lock degrades **closed**. When a client that exposes a raw connection
+cannot take it (the server is unreachable, the command is rejected, or
+``wait_s`` elapses), :func:`safe_graph_delete` REFUSES: it transmits nothing
+and returns ``False``, leaving the graph for a later sweep. Proceeding
+unlocked would *be* the check-then-act window the lock exists to close, so a
+guard that cannot prove safety must not delete. A ``db`` exposing no
+``connection`` **at all** (the unit-test fakes, which have no cross-process
+peer to race) proceeds unlocked — this is about the ATTRIBUTE, not the
+backend: the embedded redislite client does expose ``connection``, so it takes
+the lock like any other client.
 
 Recovery
 --------
@@ -178,6 +182,7 @@ def graph_exists(db: Any, name: str) -> bool:
 
 def safe_graph_delete(
     db: Any, name: str, *, detach: bool = True, drop: bool = True,
+    wait_s: float = _GRAPH_DELETE_LOCK_WAIT_S,
 ) -> bool:
     """Delete ``name`` only if it is present, inside the delete lock (#2961).
 
@@ -189,31 +194,38 @@ def safe_graph_delete(
 
     Returns True when a graph command was issued (the graph was present).
     Returns False when nothing was transmitted: either the graph was already
-    absent, or a real client could not take the cross-process lock (a
-    refusal — the graph is left for a later sweep, so a caller that records
-    its drop-set entry on False would be recording a drop that did not
-    happen).
+    absent, or a client exposing a raw connection could not take the
+    cross-process lock (a refusal — the graph is left for a later sweep).
+    **Those two are not distinguishable from the return value alone**, so a
+    caller that records a drop-set entry must re-check presence before
+    treating False as "satisfied" —
+    ``tests/_embedded.py::_drop_one_graph`` does exactly that.
 
     Raises on genuine errors (auth, dead connection) — the guard must not
-    swallow real failures.
+    swallow real failures. The presence read below runs BEFORE the lock
+    refusal for that reason: a dead backend must raise, not be reported as a
+    refusal.
+
+    ``wait_s`` is the lock-acquisition budget; it is exposed so tests need not
+    sleep the production default.
     """
-    with graph_delete_lock(db) as acquired:
+    with graph_delete_lock(db, wait_s=wait_s) as acquired:
+        if not graph_exists(db, name):
+            # #2961: the fix. Skipping here is what keeps a stale
+            # GRAPH.LIST name from creating an AOF-visible phantom.
+            return False
         if not acquired and _raw_connection(db) is not None:
-            # #2961 (review P1): a REAL client that could not take the lock
-            # must not proceed. The lock exists so that the presence check and
-            # the drop are ONE critical section; deleting unlocked IS the
+            # #2961 (review P1): a client that could not take the lock must
+            # not proceed. The lock exists so that the presence check and the
+            # drop are ONE critical section; deleting unlocked IS the
             # check-then-act window that materialises the AOF-poisoning
-            # phantom. Refuse — leave the graph for a later sweep. A db with
-            # no raw connection (unit-test fakes, embedded) has no
+            # phantom. Refuse — leave the graph for a later sweep. A db that
+            # exposes no `connection` at all (the unit-test fakes) has no
             # cross-process peer to race and falls through as before.
             logger.warning(
                 "graph-delete guard: REFUSING to delete %r — the "
                 "cross-process lock is unavailable, and a guard that cannot "
                 "prove safety must not delete (#2961)", name)
-            return False
-        if not graph_exists(db, name):
-            # #2961: the fix. Skipping here is what keeps a stale
-            # GRAPH.LIST name from creating an AOF-visible phantom.
             return False
         graph = db.select_graph(name)
         if detach:

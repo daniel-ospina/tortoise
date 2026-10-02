@@ -28,7 +28,7 @@ import pytest
 
 from tortoise.config import is_db_uri
 from tortoise.env_truthy import is_truthy  # #4097: the declared truthy contract
-from tortoise.graph_delete_guard import safe_graph_delete
+from tortoise.graph_delete_guard import graph_exists, safe_graph_delete
 from tortoise.projection import FalkorProjection
 
 # ── #4439: no RDB snapshot storm from ephemeral harness fixtures ──────────
@@ -1193,7 +1193,18 @@ def _drop_one_graph(proj, g: str, *, drop: bool) -> bool:
     An already-absent graph still returns True: the journal entry is
     satisfied and must not be retried forever (keep-on-partial)."""
     try:
-        safe_graph_delete(proj.db, g, detach=True, drop=drop)
+        if safe_graph_delete(proj.db, g, detach=True, drop=drop):
+            return True
+        # False is ambiguous (#2961 review): "already absent" (the journal
+        # entry is satisfied and must not be retried forever — keep-on-partial)
+        # vs "the guard refused because it could not take the lock" (the graph
+        # is STILL THERE — recording a drop would leak it and drop the
+        # journal). Re-check presence to tell them apart.
+        if graph_exists(proj.db, g):
+            logging.getLogger(__name__).warning(
+                "session sweep: %r was NOT dropped (guard refused); "
+                "keeping the journal entry", g)
+            return False
         return True
     except Exception as e:
         logging.getLogger(__name__).warning(
@@ -1399,8 +1410,10 @@ def _sweep_team_strays(proj, uri: str) -> list[str]:
         try:
             # #2961: presence-gated + serialized — an already-absent graph
             # transmits NO command instead of the poisoning GRAPH.DELETE.
-            safe_graph_delete(proj.db, g, detach=True, drop=True)
-            dropped.append(g)
+            # Only a real drop is recorded: a lock refusal must not append a
+            # name whose graph still exists.
+            if safe_graph_delete(proj.db, g, detach=True, drop=True):
+                dropped.append(g)
         except Exception as e:
             logging.getLogger(__name__).warning(
                 "leftover product-namespace drop failed for %r: %r", g, e)

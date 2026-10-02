@@ -181,7 +181,10 @@ def test_lock_contention_REFUSES_instead_of_deleting_unlocked(caplog):
     conn = _FakeConnection(grants=False)  # SET NX never grants
     db = _LockingDb(graphs=["test_here"], connection=conn)
     with caplog.at_level("WARNING"):
-        assert safe_graph_delete(db, "test_here", detach=False, drop=True) is False
+        # wait_s=0 exercises the CONTENTION refusal without sleeping the
+        # production 10s deadline on every run (review P3).
+        assert safe_graph_delete(
+            db, "test_here", detach=False, drop=True, wait_s=0.0) is False
     assert db.calls == [], "a guard that cannot prove safety must not drop"
     assert not [c for c in conn.commands if c[0] == "EVAL"], \
         "a lock we never acquired must never be released"
