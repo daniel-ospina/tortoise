@@ -1938,31 +1938,30 @@ jobs:
             # every nodeid in the committed set EXACTLY ONCE, enforced by the
             # shard that actually runs the file. A shard owning none of them
             # has nothing to require — and says so rather than passing quietly.
-            OWNER_PATTERNS=""
-            for f in ${{ matrix.files }}; do OWNER_PATTERNS="$OWNER_PATTERNS -e tests/$f.py"; done
-            if [ -n "$OWNER_PATTERNS" ]; then
-              # `grep -F` (fixed strings): every -e is a literal file path.
-              # ⛔ NO `::` ANCHOR. This file has TWO kinds of line per file and
-              # the filter must keep both: the nodeid lines (`<file>::<test>`)
-              # AND that file's `# allow-skipped: <file>=<n>` directive, which
-              # carries the OUTCOME half — how many skips the file may absorb
-              # off darwin. Anchoring on `::` filtered only the nodeids, so the
-              # directive vanished, the guard turned strict, and shard (c)
-              # reddened on the two legitimate darwin skips it is ALLOWED to
-              # take (`test_fork_safety_3845.py=2`). Matching the bare path
-              # keeps the nodeids and the budget that governs them together.
-              # An unmatched file simply contributes nothing; rc=1 is the
-              # expected "no lines" case, not an error.
-              grep -F $OWNER_PATTERNS config/ci-expected-nodeids/platform-gated.txt \
-                > "${RUNNER_TEMP:-/tmp}/platform-gated-shard.txt" || true
+            # ⛔ THE MANIFEST IS PASSED VERBATIM — the shard filter is `--scope`,
+            # NOT a grep-derived temp file. A `--manifest` that is a DERIVED set is
+            # a frozen contract the tree can silently redefine (the #4207 defect),
+            # and tests/test_ci_guard_invocation.py asserts `--manifest` resolves to
+            # a COMMITTED frozen path — correctly, by EXECUTING this step and
+            # reading the argv it actually received, so a skipped invocation or a
+            # temp-file manifest reads as "this frozen set is enforced by nothing".
+            #
+            # `--scope` narrows which of the frozen nodeids THIS shard must
+            # observe. A shard owning none requires none and passes — which is the
+            # legitimate case the old `else "nothing to require here"` branch was
+            # papering over, while ALSO exiting 0 when the frozen file itself had
+            # been deleted. The guard's own empty-manifest check still fails closed
+            # on the frozen set, so deletion can no longer pass quietly.
+            if [ ! -r config/ci-expected-nodeids/platform-gated.txt ]; then
+              echo "::error::the frozen platform-gated manifest is missing or unreadable — refusing to certify an unaccounted-for empty requirement (a gate whose output can authorise a bypass fails CLOSED)"
+              exit 1
             fi
-            if [ -s "${RUNNER_TEMP:-/tmp}/platform-gated-shard.txt" ]; then
-              python3 tools/skip-guard.py /tmp/pytest.log \
-                --junitxml=/tmp/junit.xml \
-                --manifest "${RUNNER_TEMP:-/tmp}/platform-gated-shard.txt" --manifest-only || guard_rc=1
-            else
-              echo "no platform-gated nodeids belong to this shard — nothing to require here"
-            fi
+            SCOPE=""
+            for f in ${{ matrix.files }}; do SCOPE="$SCOPE tests/$f.py"; done
+            python3 tools/skip-guard.py /tmp/pytest.log \
+              --junitxml=/tmp/junit.xml \
+              --manifest config/ci-expected-nodeids/platform-gated.txt \
+              --scope "$SCOPE" --manifest-only || guard_rc=1
             exit $guard_rc
           else
             echo "pytest rc=$RC — skip guard skipped (job already red)"

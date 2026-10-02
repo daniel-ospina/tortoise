@@ -378,6 +378,26 @@ class _Run:
         """
         token = "\x00RUNNER_TEMP\x00"
         text = (self.step.get("run") or "").replace("${RUNNER_TEMP:-/tmp}", token)
+        # GitHub EXPRESSIONS must be expanded before the shell sees them. A raw
+        # `${{ matrix.files }}` left in the script is a POSIX parameter-expansion
+        # error (`bad substitution`) that KILLS the step on line 1 of the loop —
+        # so every matrix-driven carve-out step died before it could invoke the
+        # guard, and the harness (which decides enforcement by the argv a step
+        # ACTUALLY received) correctly reported the frozen platform-gated set as
+        # enforced by nothing. Only the non-matrix `embedded_only` step ever got
+        # through, which is exactly the 9-steps-found / 1-enforcing-run pattern.
+        #
+        # `test_fork_safety_3845.py` is deliberate, not arbitrary: it is the file
+        # whose nodeids the frozen platform-gated manifest actually carries, so a
+        # scope built from it selects a non-empty required subset and the step
+        # exercises the real comparison rather than passing vacuously.
+        text = text.replace("${{ matrix.files }}", "test_fork_safety_3845.py")
+        # The `needs.changes.outputs.*` gates select the FULL/slow lane. They are
+        # truthy here for the same reason `pytest-rc` is "0": the frozen-set steps
+        # must take their real branch, not an early exit, or the assertion would
+        # be measuring the harness's stubs instead of the workflow.
+        text = text.replace("${{ needs.changes.outputs.full }}", "true")
+        text = text.replace("${{ needs.changes.outputs.slow_selected }}", "true")
         text = re.sub(r"/tmp/", f"{self.sandbox}/", text)
         return text.replace(token, str(self.sandbox))
 
@@ -706,6 +726,21 @@ def test_the_enforcing_steps_preconditions_are_modelled_literally():
     )
 
 
+def _expressions_in_run(step: dict) -> list[str]:
+    """Every `${{ … }}` expression appearing in a step's `run:` block."""
+    return re.findall(r"\$\{\{[^}]*\}\}", step.get("run") or "")
+
+
+#: The GitHub expressions `_relocated` substitutes. Kept beside the substitution so
+#: the two cannot drift, and so a step interpolating an expression NOT listed here
+#: is still refused — the property that must survive, not be deleted.
+EVALUATED_EXPRESSIONS = {
+    "${{ matrix.files }}",
+    "${{ needs.changes.outputs.full }}",
+    "${{ needs.changes.outputs.slow_selected }}",
+}
+
+
 def test_frozen_enforcement_is_not_hidden_in_an_unevaluable_step():
     """Fail-closed for the one thing this harness cannot run.
 
@@ -717,7 +752,7 @@ def test_frozen_enforcement_is_not_hidden_in_an_unevaluable_step():
     offenders = [
         f"{job}/{(step.get('name') or '?').strip()}"
         for job, step in _guard_steps()
-        if "${{" in (step.get("run") or "") and "--manifest-only" in (step.get("run") or "")
+        if [e for e in _expressions_in_run(step) if e not in EVALUATED_EXPRESSIONS]
     ]
     assert not offenders, (
         "these steps pass `--manifest-only` but interpolate `${{ … }}` and cannot be executed "

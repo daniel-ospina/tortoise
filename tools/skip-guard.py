@@ -804,6 +804,42 @@ def main(argv: list[str]) -> int:
     manifest_only = "--manifest-only" in argv
     if manifest_only:
         argv = [a for a in argv if a != "--manifest-only"]
+    # `--scope` (#6804): restrict WHICH frozen nodeids this invocation must see.
+    # Needed because the frozen manifest is REPO-LEVEL while this job runs ONE
+    # shard of it — comparing the whole file against one shard's junitxml reds
+    # every shard that does not run its siblings (measured: shards (a)/(c)
+    # reddened on a run whose pytest was green).
+    #
+    # ⛔ The filter must NOT live in the manifest argument. A `--manifest` that is
+    # a grep-derived TEMP file is a set the tree can silently redefine, which is
+    # the #4207 defect this guard exists to kill; tests/test_ci_guard_invocation.py
+    # asserts `--manifest` resolves to a COMMITTED frozen path, and it is right to.
+    # So the frozen path is passed verbatim and the shard's subset is expressed
+    # here instead: `expected` stays the frozen set, and only the SUBSET required
+    # of this run shrinks. An empty scope result is legitimate (a shard owning no
+    # nodeid in the frozen set requires none) and must NOT be confused with an
+    # empty MANIFEST, which stays fail-closed below.
+    scope: set[str] | None = None
+    _stripped: list[str] = []
+    _i = 0
+    while _i < len(argv):
+        _a = argv[_i]
+        if _a.startswith("--scope="):
+            _v = _a.split("=", 1)[1]
+            _i += 1
+        elif _a == "--scope":
+            if _i + 1 >= len(argv):
+                print(f"❌ {argv[0]}: --scope requires a value", file=sys.stderr)
+                return 2
+            _v = argv[_i + 1]
+            _i += 2
+        else:
+            _stripped.append(_a)
+            _i += 1
+            continue
+        scope = {p for p in _v.split() if p}
+    if scope is not None:
+        argv = _stripped
     log_path, manifest_path, junit_path = _parse_args(argv)
     if manifest_only and manifest_path is None:
         # Fail CLOSED without a manifest: the flag's whole meaning is "assert the
@@ -861,6 +897,14 @@ def main(argv: list[str]) -> int:
                   "construction); the manifest generator emitted nothing.",
                   file=sys.stderr)
             return 1
+        if scope is not None:
+            # The frozen set is intact (checked non-empty above); this only
+            # narrows what THIS run must observe. A scope naming no frozen
+            # nodeid yields an empty required set — a shard that owns none of
+            # the frozen tests — which is a legitimate pass, NOT the vacuous
+            # green the check above forbids (that check ran on the frozen set).
+            expected = {n for n in expected
+                        if n.split("::", 1)[0] in scope}
         observed: set[str] = set()
         skipped_tests: set[str] = set()
         falkor_violations: list[str] = []
