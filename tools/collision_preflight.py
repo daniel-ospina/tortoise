@@ -259,11 +259,21 @@ import sys
 # #5128: refuse a <3.12 interpreter before the imports below — a module-level
 # 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
-    raise SystemExit(
-        f"tools/collision_preflight.py requires Python >= 3.12 (got "
+    # #4053: this is an ENVIRONMENT/USAGE failure, not a collision. `SystemExit(<str>)`
+    # exits 1, which is EXIT_COLLISION — so a check that never ran read as "another lane
+    # is on it", with no `VERDICT:` line to contradict it and nothing saying no surface
+    # was queried. That is the same defect class as
+    # `COLLISION_PREFLIGHT_TIMEOUT=abc` (#3619), which is now EXIT_USAGE. Emit the
+    # message on stderr and exit EXIT_USAGE. The constant is defined below; this guard
+    # necessarily runs before it (and before the imports, #5128), so the value is
+    # spelled out with the name in this comment rather than referenced.
+    print(
+        f"collision-preflight: requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        f"`uv run python tools/collision_preflight.py`"
+        f"`uv run python tools/collision_preflight.py`",
+        file=sys.stderr,
     )
+    raise SystemExit(3)  # EXIT_USAGE
 
 import argparse
 import contextlib

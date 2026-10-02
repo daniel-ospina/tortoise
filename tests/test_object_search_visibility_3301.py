@@ -31,6 +31,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from tests import _live_utils
 from tortoise.embeddings import EMBEDDING_DIM
 from tortoise.search_engine import (
     MECHANISM_INDEX,
@@ -82,10 +83,19 @@ def _probe(candidates):
     return False, None
 
 
+# #6902: the candidates are RESOLVED, never hardcoded. CI provisions FalkorDB on
+# EPHEMERAL host ports (#6673 — the fixed `6379:6379` / `16379:6379` host ports
+# are exactly what `.github/actions/falkordb-provision` documents it cannot use),
+# and the tier-2 PR shape withholds `TORTOISE_DB_URI` entirely (python-ci.yml's
+# "Tier-2 URI-less embedded shape"). Hardcoded ports therefore probed a service
+# that was not there, so every test below SKIPPED on a URI-less leg and the
+# fail-closed skip-guard (#1436) reddened that shard. `_live_utils` reads the
+# provision action's own port env and defaults to 6379/16379 locally, so the
+# probe reaches the real service in BOTH shapes and the tests actually RUN.
 FALKORDB_AVAILABLE, _WORKING_URI = _probe([
     os.environ.get("TORTOISE_DB_URI"),
-    "docker://:falkordb@localhost:6379/tortoise_test_3301",
-    "docker://:@localhost:16379/tortoise_test_3301",
+    _live_utils.docker_uri("tortoise_test_3301"),
+    _live_utils.legacy_uri("tortoise_test_3301"),
 ])
 
 _docker_only = pytest.mark.skipif(
@@ -95,7 +105,8 @@ _docker_only = pytest.mark.skipif(
 
 def _current_uri() -> str:
     return (os.environ.get("TORTOISE_DB_URI")
-            or (_WORKING_URI or "docker://localhost:6379/tortoise_test_3301"))
+            or (_WORKING_URI
+                or _live_utils.docker_uri("tortoise_test_3301", password=None)))
 
 
 @pytest.fixture()

@@ -1416,6 +1416,32 @@ def test_halves_imbalance_within_tolerance_clean():
     assert not any("imbalanced" in i for i in issues), issues
 
 
+def test_halves_ratio_decides_at_the_published_precision():
+    """#6145, same root as the watchdog gate: this check compared the EXACT
+    ratio and then rendered both operands at 2 dp, so a fire inside
+    (1.25, 1.255) printed "ratio 1.25x, tolerance 1.25x" — a diagnosis that
+    reads as compliant while the check refuses, the very contradiction the
+    #6145 change removes next door. The ratio is now decided at the precision it
+    publishes, so no message can print a value that reads as within tolerance.
+    """
+    from tools.ci_selection import HALF_DURATION_IMBALANCE_RATIO, workflow_halves_issues
+    halves = {"a": ["test_api"], "b": ["test_auth", "test_crypto"]}
+    # 1250.4 / 1000 = 1.2504 -> prints 1.25 -> INSIDE tolerance, so it must pass
+    # (under the old exact comparison this fired with a 1.25x-vs-1.25x message).
+    inside = _halves_manifest()
+    inside["durations"] = {"test_api.py": 1000.0, "test_auth.py": 1000.0,
+                           "test_crypto.py": 250.4}
+    assert not any("imbalanced" in i
+                   for i in workflow_halves_issues(inside, halves))
+    # 1256.0 / 1000 = 1.256 -> prints 1.26 -> still refused.
+    beyond = _halves_manifest()
+    beyond["durations"] = {"test_api.py": 1000.0, "test_auth.py": 1000.0,
+                           "test_crypto.py": 256.0}
+    assert any("imbalanced" in i
+               for i in workflow_halves_issues(beyond, halves))
+    assert HALF_DURATION_IMBALANCE_RATIO == 1.25
+
+
 def test_fast_files_absent_from_halves_reports_coverage_hole():
     from tools.ci_selection import fast_files_absent_from_halves
     halves = {"a": ["test_api"], "b": ["test_crypto"]}
@@ -1628,6 +1654,18 @@ def test_every_file_rides_exactly_one_shard_at_s_greater_than_two():
     assert len({e["half"] for e in inc}) == 5
     assert [e["half"] for e in inc] == ["a", "b", "c", "d", "e"]
     assert sum(len(e["files"].split()) for e in inc) == len(flat)
+    # #6145: the emitted headroom is this change's only new OUTPUT — the whole
+    # feature is "the margin a leg actually got is visible" — and it had NO
+    # assertion: deleting the key from `fast_matrix_include` left all 221 tests
+    # green (measured) while silently removing the feature. Pin it per entry
+    # against the shard value it reports, so the emitter and the shard dict
+    # cannot drift, and require it to be a real margin.
+    from tools.ci_selection import WATCHDOG_HEADROOM
+    for s, e in zip(legs["shards"], inc, strict=True):
+        assert "watchdog_headroom" in e, \
+            f"the emitted matrix must carry the headroom (#6145): {e['half']}"
+        assert e["watchdog_headroom"] == s["watchdog_headroom"], (e, s)
+        assert e["watchdog_headroom"] >= WATCHDOG_HEADROOM, (e, s)
 
 
 def test_shard_labels_are_a_superset_when_s_changes():
@@ -1681,6 +1719,158 @@ def test_watchdog_is_per_shard_and_scales_with_the_shard():
     # inside math.ceil
     for bad in (None, "nonsense", float("inf"), float("nan"), float("-inf"), -5):
         assert shard_watchdog_minutes(bad) == WATCHDOG_FLOOR_MIN, bad
+
+
+def test_a_shard_merely_slow_under_load_still_fits_its_budget():
+    """#6145 direction (a): a shard that runs SLOW under load must still fit.
+
+    The budget is built from `WATCHDOG_HEADROOM`, so the question this test asks
+    is whether that factor is still above the slowest width a healthy shard has
+    actually been observed to occupy. If it were not, the watchdog would kill a
+    shard that observed no defect — the whole defect #6145 names.
+
+    MEASURED — pytest-STEP duration of all nine fast shards, 76 SUCCESSFUL leg
+    samples drawn from main runs 2026-10-02T01:19Z-03:22Z, each over that shard's
+    declared 7.22-min estimate: min 0.47x, median 0.86x, MAX 1.33x.
+
+    ⛔ THE SAMPLE IS SUCCESS-ONLY, DELIBERATELY, AND ITS LIMIT IS NAMED. A killed
+    leg is excluded because a kill is not a "merely slow" observation — it is the
+    event this budget exists to bound, and it is not what this assertion is
+    about. For the record, the kills in that window and the day after were at
+    ~2.11x (legs SIGKILLed at the 15m floor with 0 failures), and the SAME shards
+    ran 0.9x-1.2x on another attempt of that run — a nondeterministic wedge
+    beyond this distribution, not a tail of it. So this bounds the SUCCESSFUL
+    distribution; it does NOT claim the budget survives every loaded leg, and
+    #6145 carries that half. The value
+    that must survive is the MAX (the median is what a healthy shard costs).
+    A job's WALL time is deliberately NOT the measurement: it carries ~6 min of
+    setup plus the off-watchdog collect-only pre-phase, so it overstates the
+    shard by roughly the setup constant — the pytest step is the only surface
+    the watchdog actually bounds, hence the only comparable one.
+    """
+    from tools.ci_selection import (
+        WATCHDOG_HEADROOM,
+        load_manifest,
+        push_legs,
+        watchdog_headroom_issues,
+    )
+    # The slowest healthy shard measured. A frozen literal is right HERE, unlike
+    # the derived floor below: this is an observation about runs that have
+    # already happened, not a property of the committed manifest, so there is
+    # nothing in-tree to re-derive it from. It is re-measured by hand when the
+    # pool changes materially (the durations map's own sweep is the trigger).
+    measured_max_healthy_shard_ratio = 1.33
+    assert measured_max_healthy_shard_ratio < WATCHDOG_HEADROOM, (
+        "the worst HEALTHY shard measured is already outside the factor the "
+        "budget is built from — the margin no longer covers even the "
+        "successful distribution, and the constant must be raised "
+        "DELIBERATELY (#6145)")
+    # The shipped gate's OWN verdict on the committed manifest is the primary
+    # assertion, so this test cannot disagree with the gate at either end of the
+    # reporting quantum (#6145). The loop below is a readable restatement for a
+    # non-empty leg, not a second, differently-precise gate.
+    committed = load_manifest()
+    assert watchdog_headroom_issues(committed) == [], watchdog_headroom_issues(committed)
+    for s in push_legs(committed)["shards"]:
+        headroom = s["watchdog_minutes"] * 60.0 / s["est_seconds"]
+        assert headroom >= measured_max_healthy_shard_ratio, (
+            f"shard {s['name']}: {headroom:.2f}x is below the slowest healthy "
+            f"shard measured ({measured_max_healthy_shard_ratio}x) — a merely "
+            f"slow shard would be killed")
+        # The shipped gate's own invariant, asserted on the value the matrix
+        # PUBLISHES (2 dp) rather than on a second, differently-precise
+        # recomputation: otherwise this test and the gate could disagree in the
+        # band where rounding decides — a manifest could pass `--integrity` and
+        # then red here (#6145).
+        assert s["watchdog_headroom"] >= WATCHDOG_HEADROOM, (
+            f"shard {s['name']}: emitted budget retains "
+            f"{s['watchdog_headroom']:.2f}x, below the {WATCHDOG_HEADROOM}x it "
+            f"is built from (#6145)")
+
+
+def test_a_shard_that_cannot_fit_its_budget_is_named_not_silently_killed():
+    """#6145 direction (b): the sizing contract — "a shard unable to fit is
+    flagged rather than silently killed". #4819 option 2 recorded this as the
+    thing nothing checked: "the watchdog value and the shard count — nothing
+    checks that [they are consistent]".
+
+    The CEILING is what makes a shard unable to fit: it clamps the built factor
+    (2.0x) DOWNWARD. Before this check the clamp was silent, so raising an
+    estimate produced a TIGHTER margin with no signal anywhere — the state in
+    which a shard that fits its own declared estimate is killed.
+    """
+    from tools.ci_selection import (
+        WATCHDOG_CEILING_MIN,
+        WATCHDOG_HEADROOM,
+        load_manifest,
+        push_legs,
+        shard_watchdog_minutes,
+        watchdog_headroom_issues,
+    )
+    # (a) the committed manifest is consistent: nothing named, and every leg's
+    #     emitted budget retains the factor it was built from.
+    committed = load_manifest()
+    assert watchdog_headroom_issues(committed) == []
+    for s in push_legs(committed)["shards"]:
+        assert s["watchdog_headroom"] >= WATCHDOG_HEADROOM, s
+    # (b) an estimate past the ceiling's reach is NAMED (fail-closed). 30.62 min
+    #     is the ceiling's OWN provenance exemplar ("55m for a ~30m shard",
+    #     factor 1.8 — the constants block): ceil(30.62*2)=62 -> clamped to 55 =
+    #     1.80x, BELOW the factor the budget was built from. (The real S=2 shape
+    #     is heavier still — the probe that lowered fast_shards to 2 measured
+    #     est=1951.0s = 32.52 min at 1.69x — so this exemplar is the gentler of
+    #     the two, not a best case.)
+    assert shard_watchdog_minutes(30.62 * 60) == WATCHDOG_CEILING_MIN == 55
+    m = _shard_manifest(2, heavy={"test_huge_a.py": 1837.2,
+                                  "test_huge_b.py": 1837.2})
+    issues = watchdog_headroom_issues(m)
+    assert issues, "a shard the ceiling clamps below the build factor must be NAMED"
+    assert any("its emitted budget retains" in i for i in issues), issues
+    assert any("ceiling clamped it" in i for i in issues), issues
+    # (d) the decision is taken at the PUBLISHED precision (2 dp — the same
+    #     rounding the emitters apply), so a manifest is never refused while the
+    #     row it would emit reads a compliant `2.0`, and the message never says
+    #     "2.00x, below the 2.0x". 1651.0s = 27.5167 min -> 55/27.5167 = 1.9988,
+    #     which ROUNDS to 2.0 and must therefore pass; 1660.0s = 27.6667 min ->
+    #     1.9880 -> 1.99 and must still be refused. `tiny=0` keeps the shard's
+    #     estimate exactly the heavy file's duration.
+    edge = _shard_manifest(1, heavy={"test_edge.py": 1651.0}, tiny=0)
+    assert watchdog_headroom_issues(edge) == [], watchdog_headroom_issues(edge)
+    past = _shard_manifest(1, heavy={"test_past.py": 1660.0}, tiny=0)
+    assert watchdog_headroom_issues(past), "1.99x must still be refused"
+    # (e) the OTHER end of the same quantum. A ratio below 0.005 rounds to 0.00,
+    #     which is also `watchdog_headroom`'s "no usable estimate" sentinel — so
+    #     a guard testing the ROUNDED value for truthiness FAILS OPEN here: it
+    #     skips the leg and publishes `0.00` on a row it passed. The sentinel is
+    #     therefore read from the UNROUNDED ratio, and a leg this far past the
+    #     ceiling is still NAMED. 844400.0s = 14073.3 min -> 55/14073.3 = 0.0039
+    #     -> rounds to 0.0.
+    collapsed = _shard_manifest(1, heavy={"test_collapsed.py": 844400.0},
+                               tiny=0)
+    assert watchdog_headroom_issues(collapsed), (
+        "a ratio that rounds to 0.00 is a mis-sized leg, not an absent estimate")
+    # and the sentinel itself is NOT a finding: a leg with no estimate has no
+    # ratio to judge (an empty leg is not over-tight).
+    empty = _shard_manifest(1, tiny=0)
+    assert watchdog_headroom_issues(empty) == [], watchdog_headroom_issues(empty)
+    # (c) a genuinely wedged leg is STILL KILLED. The check makes an over-tight
+    #     budget visible; it does not widen it and it does not disarm the kill —
+    #     the emitted budget is unchanged, and the workflow still applies it with
+    #     a SIGINT-then-SIGKILL escalation, so a leg that hangs past its budget
+    #     is still terminated (and the outer job cap still bounds the total).
+    #     Read the PARSED run step, never the file text: the identical string
+    #     also sits in heading COMMENTs (and with literal durations in other
+    #     steps), so a whole-file scan stays green if the real execution line is
+    #     deleted — an assertion that can pass on a comment does not guard what
+    #     its message claims.
+    for s in push_legs(m)["shards"]:
+        assert s["watchdog_minutes"] == WATCHDOG_CEILING_MIN, s
+    wf = _load_python_ci()
+    run = next(s for s in wf["jobs"]["test"]["steps"]
+               if s.get("name", "").startswith("Run fast test suite"))["run"]
+    assert "timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m" in run, (
+        "the per-shard kill must stay wired: without it a wedged leg runs to the "
+        "job's outer cap and the budget is advisory")
 
 
 def test_fast_shard_config_is_validated_not_silently_defaulted():
@@ -2335,8 +2525,8 @@ def test_carve_out_job_uri_unset_with_carve_out_flag():
 #     MISSING cap (test-track-b before #3239) leaves GitHub's 360m default:
 #     six hours of held slot instead of the 90m the issue reports.
 #   * PROPORTION: the cap clears the measured work with `WATCHDOG_HEADROOM`
-#     (#6135's validated 2.0x factor, reused rather than invented) and is not
-#     an order of magnitude above it.
+#     (#6135's 2.0x factor, reused rather than invented — the constants block
+#     owns its provenance) and is not an order of magnitude above it.
 #
 # The work is MEASURED, not asserted: Actions API on the 60 newest completed
 # python-ci.yml runs, `started_at`→`completed_at` on the pytest step
