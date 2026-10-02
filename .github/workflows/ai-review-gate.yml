@@ -75,10 +75,10 @@ name: ai-review-gate
 # and only after its HMAC verifies, so a network failure can never become a
 # pass.
 #
-# Comment admission is AUTHOR-FILTERED by `PR_EVIDENCE_COMMENTS_JQ`, the jq
-# constant that must stay BYTE-IDENTICAL to the copy the producer side carries
-# (record-review.sh, check-pipeline-compliance.sh, atomic-land.sh — the producer
-# half of #1224; see "Producer status" in docs/ai-review-gate.md). On a public repo
+# Comment admission is AUTHOR-FILTERED by `PR_EVIDENCE_COMMENTS_JQ`, a jq
+# constant that must stay BYTE-IDENTICAL to the producer's copy once the producer
+# half of #1224 lands (record-review.sh, check-pipeline-compliance.sh,
+# atomic-land.sh — see "Producer status" in docs/ai-review-gate.md). On a public repo
 # every GitHub user with read access can comment, so admission is narrowed to
 # repo-affiliated authors (OWNER / MEMBER / COLLABORATOR). It is a NARROWING,
 # not parity with the body's writer set — its known over/under-admission
@@ -393,18 +393,18 @@ jobs:
           }
 
           # ── Comment channel (#1224) ───────────────────────────────────
-          # record-review.sh posts the SAME signed marker as an append-only PR
-          # COMMENT as well as into the (mutable) PR body. Any body rewrite — a
-          # typo fix, a corrected issue ref, a mechanical edit — destroys a
-          # marker kept only there, reddening this check on a review that
-          # genuinely happened (see the #1224 header section). Unioning the two
+          # The body is a MUTABLE field: any later legitimate rewrite — a typo
+          # fix, a corrected issue ref, a mechanical edit — destroys a marker
+          # kept only there, reddening this check on a review that genuinely
+          # happened (see the #1224 header section). So the SAME signed marker
+          # is read from an append-only PR COMMENT as well. Unioning the two
           # channels restores AVAILABILITY; it changes no security property,
           # because the marker text is still HMAC-verified below.
           #
           # WHAT IS ADMITTED: PR_EVIDENCE_COMMENTS_JQ, which must stay
-          # BYTE-IDENTICAL to the producer's copy (record-review.sh,
-          # check-pipeline-compliance.sh, atomic-land.sh — the producer half of
-          # #1224; see "Producer status" in docs/ai-review-gate.md). On a public
+          # BYTE-IDENTICAL to the producer's copy once the producer half lands
+          # (record-review.sh, check-pipeline-compliance.sh, atomic-land.sh —
+          # see "Producer status" in docs/ai-review-gate.md). On a public
           # repo every user with read access can comment, so admission is
           # narrowed to repo-affiliated authors (OWNER / MEMBER /
           # COLLABORATOR). It is a NARROWING, not parity with the body's writer
@@ -616,8 +616,8 @@ jobs:
           }
 
           # Union BOTH channels: PR body ∪ eligible PR comments (#1224). Both
-          # carry the SAME signed marker text (the producer dual-posts), so a
-          # body edit that removes the body copy cannot hide evidence that still
+          # carry the SAME signed marker text, so a body edit that removes the
+          # body copy cannot hide evidence that still
           # exists in the append-only comment. Channel membership never changes
           # WHICH marker verifies — the loop below still HMAC-verifies and the
           # binding rules are untouched.

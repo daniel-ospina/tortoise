@@ -500,7 +500,7 @@ def test_gate_reports_no_evidence_at_all(tmp_path: Path) -> None:
 
 # ── #1224: the signed marker may be carried by a PR COMMENT ────────────────
 # The body is a mutable field the recording party routinely rewrites, so the
-# producer dual-posts the SAME signed text as an append-only PR comment. The
+# SAME signed text is also carried by an append-only PR comment. The
 # gate must accept it from EITHER channel — and must preserve EVERY security
 # property while doing so: the HMAC over the marker text is what makes a marker
 # unforgeable, and the head/diff binding rules are unchanged.
@@ -650,8 +650,9 @@ def test_gate_does_not_admit_a_non_affiliated_comment(tmp_path: Path) -> None:
     """#1224: comment admission is narrowed to repo-affiliated authors.
 
     On a public repo any user with read access can comment, so the gate applies
-    the SAME byte-identical ``PR_EVIDENCE_COMMENTS_JQ`` as agent-infra's three
-    readers — a drive-by author's comment is not admitted, and a reader must not
+    ``PR_EVIDENCE_COMMENTS_JQ`` — the filter the producer side and the other
+    readers must share — so a drive-by author's comment is not admitted, and a
+    reader must not
     act on a comment the others ignore. The marker HMAC is valid: this fails on
     AUTHORSHIP, not on the signature.
     """
@@ -847,14 +848,15 @@ def test_candidate_regex_accepts_the_diff_segment() -> None:
 
 
 def test_gate_applies_the_producer_comment_admission_filter() -> None:
-    """#1224: the gate applies the SAME comment-admission jq as the producer.
+    """#1224: the gate applies the comment-admission jq the producer shares.
 
-    ``PR_EVIDENCE_COMMENTS_JQ`` is byte-identical across agent-infra's
-    record-review.sh, check-pipeline-compliance.sh and atomic-land.sh — the
-    three readers must admit the SAME evidence or one of them acts on a comment
-    the others ignore. This pins that the tortoise reader carries the constant
-    AND passes it at its own fetch (the runtime cases prove the fetch applies
-    it; this pins the contract text so a rewrite is a visible diff).
+    ``PR_EVIDENCE_COMMENTS_JQ`` must stay byte-identical across the producer and
+    every reader (record-review.sh, check-pipeline-compliance.sh,
+    atomic-land.sh — agent-infra#1224): they must admit the SAME evidence, or
+    one of them acts on a comment the others refuse. This pins that the tortoise
+    reader carries the constant AND passes it at its own fetch (the runtime cases
+    prove the fetch applies it; this pins the contract text so a rewrite is a
+    visible diff).
     """
     block = _gate_run_block()
     constant = (
@@ -864,7 +866,7 @@ def test_gate_applies_the_producer_comment_admission_filter() -> None:
     assert constant in block, (
         "the gate must narrow comment admission to repo-affiliated authors "
         "(agent-infra#1224) — dropping the filter admits a drive-by comment "
-        "the other three readers ignore"
+        "that every other reader of this evidence refuses"
     )
     assert re.search(r"--jq \"\$PR_EVIDENCE_COMMENTS_JQ\"", block), (
         "the constant must be APPLIED at the comment fetch, not merely defined"
