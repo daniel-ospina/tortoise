@@ -96,42 +96,60 @@ def _fake_probe_db(sdk, setup_timeout=None) -> dict:
 
 @pytest.fixture
 def probe_state():
-    """Clean probe state for the two modules this file drives, before and after.
+    """Give this file a CLEAN probe state, then put foreign state back.
 
-    The leak asserts are on DELTAS, not on zero. ``_PROBE_SDK_EPISODES`` and
-    ``_PROBE_SDK_DEFERRED`` are module-level on ``tortoise.hosted_api`` and
-    ``tortoise.selfhost``, i.e. PROCESS-GLOBAL: any other test in the same pytest
-    process that drives a probe leaves its mark there, so asserting ``== 0``
-    asserted on state THIS FILE DOES NOT OWN and converted an unrelated test's
-    residue into this file's error (main red at ``3b6f236ee``, where #6938's
-    routing change re-partitioned the shards and put this file in a process with
-    another probe user: ``assert 9 == 0``).
+    ``_PROBE_SDK_EPISODES`` and ``_PROBE_SDK_DEFERRED`` are module-level on
+    ``tortoise.hosted_api`` and ``tortoise.selfhost`` — process-global state
+    shared by every test in the same pytest process. Asserting them after the
+    fact cannot work: ``_PROBE_SDK_DEFERRED`` is drained ONLY while
+    ``_PROBE_SDK_EPISODES == 0``, so a foreign episode left stuck by another
+    test blocks the deferred close for EVERYONE and this file reds on its own
+    teardown and on its production asserts (main red at ``3b6f236ee``, where
+    ci-surfaces' rebalance changed this shard's companions and exposed it:
+    ``assert 9 == 0``).
 
-    A delta is order-independent AND strictly stronger: it catches this file's
-    own leak even when the baseline is already non-zero, which ``== 0`` cannot
-    distinguish from foreign residue.
+    So this fixture OWNs the state for the duration of the test and RESTORES
+    the foreign values afterwards: it zeroes both globals, lets the file make
+    its real ``== 0`` claim against a process it fully controls, then puts the
+    foreign counters back so no other test is perturbed by this one.
     """
     for mod in (ha_mod, sh_mod):
         mod._HEALTH_PROBE.reset()
         mod._probe_sdk_reset()
     ha_mod._READY_PROBE.reset()
-    baseline = {
+    # Stash and clear FOREIGN residue so this file's asserts are meaningful.
+    # Mutate the deferred list IN PLACE: other objects may hold a reference.
+    saved = {
         mod: (
             getattr(mod, "_PROBE_SDK_EPISODES", 0),
-            len(getattr(mod, "_PROBE_SDK_DEFERRED", [])),
+            list(getattr(mod, "_PROBE_SDK_DEFERRED", [])),
         )
         for mod in (ha_mod, sh_mod)
     }
-    yield
     for mod in (ha_mod, sh_mod):
-        mod._HEALTH_PROBE.reset()
-        mod._probe_sdk_reset()
-        episodes_was, deferred_was = baseline[mod]
-        assert getattr(mod, "_PROBE_SDK_EPISODES", 0) <= episodes_was, (
-            "a probe episode leaked its count")
-        assert len(getattr(mod, "_PROBE_SDK_DEFERRED", [])) <= deferred_was, (
-            "a displaced handle was never closed")
-    ha_mod._READY_PROBE.reset()
+        mod._PROBE_SDK_EPISODES = 0
+        getattr(mod, "_PROBE_SDK_DEFERRED", [])[:] = []
+    try:
+        yield
+    finally:
+        # NESTED try/finally: the asserts below RAISE on the leak path, and the
+        # restore must run even then (pytest continues after a fixture-teardown
+        # failure, so skipping it would hand this file's leak to the next test
+        # as its "foreign" baseline). Restore first-order correctness, then
+        # re-raise whatever the asserts found.
+        try:
+            for mod in (ha_mod, sh_mod):
+                mod._HEALTH_PROBE.reset()
+                mod._probe_sdk_reset()
+                assert getattr(mod, "_PROBE_SDK_EPISODES", 0) == 0, (
+                    "a probe episode leaked its count")
+                assert getattr(mod, "_PROBE_SDK_DEFERRED", []) == [], (
+                    "a displaced handle was never closed")
+            ha_mod._READY_PROBE.reset()
+        finally:
+            for mod, (episodes_was, deferred_was) in saved.items():
+                mod._PROBE_SDK_EPISODES = episodes_was
+                getattr(mod, "_PROBE_SDK_DEFERRED", [])[:] = deferred_was
 
 
 def _start_probe(probe) -> tuple[threading.Thread, dict]:
