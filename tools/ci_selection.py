@@ -132,8 +132,16 @@ MAX_FAST_SHARDS = 26
 # budget was hit by a ~30m shard (factor ~1.0 too tight — #798), and 55m for a
 # ~30m shard (factor 1.8) has held since. 2.0 is that factor with a small
 # margin. The FLOOR is 2.9× the largest single fast file (`310.7 s`), so the
-# watchdog can never kill a shard below the #6133 floor; the CEILING keeps the
-# validated 55m if S is ever lowered back toward 2.
+# watchdog can never kill a shard below the #6133 floor.
+#
+# ⛔ 1.8 IS NO LONGER ACCEPTED (#6145). The CEILING can clamp a budget BELOW
+# `WATCHDOG_HEADROOM`, and `watchdog_headroom_issues` now REDS that state —
+# wired into `--integrity`, so the REQUIRED `manifest-integrity` check refuses
+# it. Lowering S back toward 2 is therefore an integrity FAILURE, not the
+# ceiling "keeping the validated 55m"; the remedy is a DELIBERATE ceiling raise
+# or a re-split (see the OVERRIDES line on #6145). The ceiling deliberately
+# stays 55m so the worst-case leg stays inside the job's outer
+# `timeout-minutes` — the invariant REFUSES rather than widening it.
 WATCHDOG_HEADROOM = 2.0
 WATCHDOG_FLOOR_MIN = 15
 WATCHDOG_CEILING_MIN = 55
@@ -1442,14 +1450,25 @@ def watchdog_headroom_issues(manifest: dict) -> list[str]:
     """#6145 / #4819 option 2: NAMED issues where a shard's emitted budget retains
     LESS headroom than the factor the budget is built from.
 
-    This closes the gap #4819 recorded and nobody checked — "the watchdog value
-    and the shard count: nothing checks that [they are consistent]". A budget
-    that silently drifts TIGHTER than the validated factor is the state in which
-    a shard that legally fits its own declared estimate is killed, and it is
-    reachable today: at a 30.62-minute estimate `ceil(30.62 * 2) = 62` is clamped
-    to the 55-minute ceiling — an EFFECTIVE 1.80x — which the ceiling's own
-    comment treats as "the validated budget" rather than as a breach, and which
-    the #6135 test above asserts without ever computing the margin.
+    This closes the CEILING half of the gap #4819 recorded and nobody checked —
+    "the watchdog value and the shard count: nothing checks that [they are
+    consistent]". A budget that silently drifts TIGHTER than the factor it is
+    built from is the state in which a shard that fits its own declared estimate
+    is killed, and it is reachable today: at a 30.62-minute estimate
+    `ceil(30.62 * 2) = 62` is clamped to the 55-minute ceiling — an EFFECTIVE
+    1.80x — which the ceiling's own comment treated as "the validated budget"
+    rather than as a breach, and which the #6135 test above asserts without ever
+    computing the margin.
+
+    ⛔ SCOPE — this is ONE direction, and it is not the direction the observed
+    kills came from. The test can only fire when the CEILING clamped, i.e. when
+    the estimate is OVERSTATED relative to the budget. An UNDERSTATED estimate
+    (a shard that runs far past its declared cost — the shape #6145 actually
+    measured, kills at ~2.11x) yields headroom >= 2.0 and passes here. So a
+    green `manifest-integrity` means "the emitted budgets are consistent with
+    their own factors", NOT "the watchdog sizing is sound". The floor direction
+    is intentionally not an issue: the floor binding is the normal, intended
+    case (it clears the #6133 single-file time), not a breach.
 
     Fail-closed and NAMED, so a shard that cannot fit its budget is flagged at
     SELECTION time instead of being killed at run time (#6145's sizing contract:
@@ -1487,8 +1506,10 @@ def push_legs(manifest: dict) -> dict:
     leg and emitted as their own leg (the URI-unset carve-out job's file list).
 
     Each shard entry carries its `est_seconds` (the LPT bin weight, the
-    declared test time) and the `watchdog_minutes` derived from it — the
-    per-leg budget is a property of the SHARD, not a workflow literal.
+    declared test time), the `watchdog_minutes` derived from it, and the
+    `watchdog_headroom` that budget actually retains relative to that estimate
+    (#6145) — the per-leg budget is a property of the SHARD, not a workflow
+    literal.
     """
     slow = set(manifest.get("slow_files", []))
     carve_out = carve_out_files(manifest)
@@ -1552,7 +1573,8 @@ def all_shard_files(legs: dict) -> list[str]:
 def build_shard_entries(files: list[str], durations: dict,
                         shards: int) -> list[dict]:
     """#6135: an LPT pack of `files` into `shards` labelled entries, each
-    carrying its packed estimate and the per-shard watchdog derived from it.
+    carrying its packed estimate, the per-shard watchdog derived from it, and
+    the headroom that budget retains (#6145).
 
     Used by the tier-2 `--split` path. `push_legs()` inlines the same pack (it
     must round-robin `push_extra` across the shards in the same pass), so the

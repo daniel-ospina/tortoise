@@ -1691,9 +1691,19 @@ def test_a_shard_merely_slow_under_load_still_fits_its_budget():
     actually been observed to occupy. If it were not, the watchdog would kill a
     shard that observed no defect — the whole defect #6145 names.
 
-    MEASURED — pytest-STEP duration of all nine fast shards, 76 successful leg
+    MEASURED — pytest-STEP duration of all nine fast shards, 76 SUCCESSFUL leg
     samples drawn from main runs 2026-10-02T01:19Z-03:22Z, each over that shard's
-    declared 7.22-min estimate: min 0.47x, median 0.86x, MAX 1.33x. The value
+    declared 7.22-min estimate: min 0.47x, median 0.86x, MAX 1.33x.
+
+    ⛔ THE SAMPLE IS SUCCESS-ONLY, DELIBERATELY, AND ITS LIMIT IS NAMED. A killed
+    leg is excluded because a kill is not a "merely slow" observation — it is the
+    event this budget exists to bound, and it is not what this assertion is
+    about. For the record, the kills in that window and the day after were at
+    ~2.11x (legs SIGKILLed at the 15m floor with 0 failures), and the SAME shards
+    had run 0.9x-1.2x on an earlier attempt — a nondeterministic wedge beyond
+    this distribution, not a tail of it. So this bounds the SUCCESSFUL
+    distribution; it does NOT claim the budget survives every loaded leg, and
+    #6145 carries that half. The value
     that must survive is the MAX (the median is what a healthy shard costs).
     A job's WALL time is deliberately NOT the measurement: it carries ~6 min of
     setup plus the off-watchdog collect-only pre-phase, so it overstates the
@@ -1708,9 +1718,10 @@ def test_a_shard_merely_slow_under_load_still_fits_its_budget():
     # pool changes materially (the durations map's own sweep is the trigger).
     measured_max_healthy_shard_ratio = 1.33
     assert measured_max_healthy_shard_ratio < WATCHDOG_HEADROOM, (
-        "the measured worst healthy shard is already outside the factor the "
-        "budget is built from — the margin has stopped surviving loaded "
-        "execution and the constant must be raised DELIBERATELY (#6145)")
+        "the worst HEALTHY shard measured is already outside the factor the "
+        "budget is built from — the margin no longer covers even the "
+        "successful distribution, and the constant must be raised "
+        "DELIBERATELY (#6145)")
     for s in push_legs(load_manifest())["shards"]:
         headroom = s["watchdog_minutes"] * 60.0 / s["est_seconds"]
         assert headroom >= measured_max_healthy_shard_ratio, (
@@ -1748,8 +1759,12 @@ def test_a_shard_that_cannot_fit_its_budget_is_named_not_silently_killed():
     for s in push_legs(committed)["shards"]:
         assert s["watchdog_headroom"] >= WATCHDOG_HEADROOM, s
     # (b) an estimate past the ceiling's reach is NAMED (fail-closed). 30.62 min
-    #     is the real S=2 shard: ceil(30.62*2)=62 -> clamped to 55 = 1.80x,
-    #     BELOW the factor the budget was built from.
+    #     is the ceiling's OWN provenance exemplar ("55m for a ~30m shard",
+    #     factor 1.8 — the constants block): ceil(30.62*2)=62 -> clamped to 55 =
+    #     1.80x, BELOW the factor the budget was built from. (The real S=2 shape
+    #     is heavier still — the probe that lowered fast_shards to 2 measured
+    #     est=1951.0s = 32.52 min at 1.69x — so this exemplar is the gentler of
+    #     the two, not a best case.)
     assert shard_watchdog_minutes(30.62 * 60) == WATCHDOG_CEILING_MIN == 55
     m = _shard_manifest(2, heavy={"test_huge_a.py": 1837.2,
                                   "test_huge_b.py": 1837.2})
