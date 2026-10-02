@@ -2444,8 +2444,8 @@ def test_carve_out_job_uri_unset_with_carve_out_flag():
 #     MISSING cap (test-track-b before #3239) leaves GitHub's 360m default:
 #     six hours of held slot instead of the 90m the issue reports.
 #   * PROPORTION: the cap clears the measured work with `WATCHDOG_HEADROOM`
-#     (#6135's validated 2.0x factor, reused rather than invented) and is not
-#     an order of magnitude above it.
+#     (#6135's 2.0x factor, reused rather than invented — the constants block
+#     owns its provenance) and is not an order of magnitude above it.
 #
 # The work is MEASURED, not asserted: Actions API on the 60 newest completed
 # python-ci.yml runs, `started_at`→`completed_at` on the pytest step

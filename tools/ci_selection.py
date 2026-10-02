@@ -1407,8 +1407,9 @@ def shard_watchdog_minutes(est_seconds: float) -> int:
 
     Correctness, not tuning: the watchdog is per-leg, so inheriting the old
     55m lets a hung ~7-minute shard hold the REQUIRED aggregate red for 55
-    minutes. `WATCHDOG_HEADROOM` is the factor the old 55m budget already
-    validated (55m for a ~30m shard), and the floor keeps a small shard above the
+    minutes. The factor behind the budget and both clamps are owned by the
+    constants block above (which carries their provenance and the #6145 rule) —
+    this function only applies them; the floor keeps a small shard above the
     #6133 floor (the largest single file).
 
     ⛔ The CEILING does NOT "keep the validated budget" (#6145): it deliberately
