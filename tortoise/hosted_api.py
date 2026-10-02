@@ -2660,8 +2660,9 @@ app.add_middleware(EgressBytesMiddleware)
 # in-flight gauge at index 1 is pinned by
 # `test_hosted_api.py::test_in_flight_gauge_is_wired_into_the_real_app`. Starlette's
 # `add_middleware` INSERTS at index 0, so registering here — after
-# `McpPathCanonicalizerMiddleware`, before `InFlightMiddleware` — lands this at
-# index 2, inside both.
+# `McpPathCanonicalizerMiddleware`, before `InFlightMiddleware` — places this
+# INSIDE both. A RELATIVE rule, never a fixed index: the compute wrapper (#4490)
+# registers later and now takes the index this comment used to name.
 #
 # SITTING INSIDE THE BOUND IS WHAT MAKES THE FIGURE TRUTHFUL, not merely polite.
 # On a breach the bound ABANDONS (never cancels) the handler and DROPS its late

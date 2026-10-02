@@ -714,10 +714,13 @@ def egress_bytes_by_org() -> dict[str, int]:
     """In-process snapshot of ``EGRESS_BYTES`` keyed by org (#4491 indicator 3).
 
     The readable form of the metric, for a person or a test — no dashboard, no
-    UI, no new endpoint. ``/metrics`` carries the same figure as Prometheus
-    text (``sum by (org) (tortoise_egress_bytes_total)``); this is the direct
-    read, mirroring ``analytics_outcome_counts()``. Derived from ``collect()``
-    rather than a second tally, so the snapshot cannot drift from the metric.
+    UI, no new endpoint. The counter is registered with ``prometheus_client``, but
+    nothing scrapes it in production today: the hosted app serves no ``/metrics``
+    route (measured: 404) and ``serve_health`` is not a ``fly.toml`` process — the
+    same limit ``analytics_outcome_counts()`` states. This direct read is therefore
+    the only queryable form the dimension has, mirroring that function. Derived
+    from ``collect()`` rather than a second tally, so the snapshot cannot drift
+    from the metric.
 
     The ``""`` key is the unattributed share and ``EGRESS_OVERFLOW`` the folded
     tail of the org/path caps; both are INCLUDED, so the snapshot always
@@ -791,13 +794,13 @@ def _reset_egress() -> None:
 # never add a path child. The ``COMPUTE_MAX_PATHS`` cap is a safety net for route
 # growth, not an attacker-reachable budget.
 #
-# WHY ``_admit_bounded_label`` IS GENERIC (#5045 convergence point): the parent's
-# recorded divergence is that every dimension brings its own cap, its own overflow
-# name and its own admission lifetime. This helper is the shared form — a
-# dimension supplies its own registry set and cap, and the semantics (persistent,
-# never-evicting, shared overflow child) are fixed in one place. Sibling PRs
-# #5315 (``_admit_egress_label``) and #5369 (``_bounded_org_labels``) carry
-# equivalents to fold in; recorded on #5045, not re-litigated here.
+# WHY ``_admit_bounded_label`` IS COMPUTE-BOUND, NOT GENERIC: the parent's recorded
+# divergence (#5045) is that every dimension brings its own cap, its own overflow
+# name and its own admission lifetime. This helper takes its registry set and cap
+# from the caller, but is hard-bound to ``_COMPUTE_LOCK`` — the egress twin
+# ``_admit_egress_label`` (#5315, already landed in this tree) admits under
+# ``_EGRESS_LOCK``. Folding both onto one lock-parameterised form is this lane's
+# proposal, pending #5045's admission-lifetime decision, not something #5045 records.
 COMPUTE_MAX_ORGS = 512
 #: Code-literal route labels. The live app carries ~130 templates, so 512 is
 #: headroom for new routes rather than a tight fit. NOT traffic-reachable.
@@ -924,8 +927,13 @@ def _admit_bounded_label(label: str, seen: set[str], cap: int,
     # short-circuit every request carrying a non-admitted label would acquire the
     # module-global lock on every request for the process lifetime — the exact
     # thing the "an already-admitted label never locks" contract promises away.
-    # Membership of ``overflow`` IS "the cap was reached and this label folded".
-    if overflow in seen:
+    # The test is the LOCKED branch's OWN condition (``len(seen) >= cap``), never
+    # ``overflow in seen``: a legitimate label that happens to EQUAL the sentinel
+    # (an org literally named ``__other__``, which no validated creation path
+    # produces but no CHECK forbids) would otherwise be read as "the cap was
+    # reached" and silently fold every later org — a worse outcome than the
+    # pre-short-circuit code, which merged only that org's own series.
+    if len(seen) >= cap:
         return overflow
     with _COMPUTE_LOCK:
         if label in seen:

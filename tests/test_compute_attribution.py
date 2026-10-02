@@ -148,6 +148,24 @@ class TestBoundedCardinality:
         # exactly `cap` real org children + the one shared overflow child
         assert len(snap) == cap + 1
 
+    def test_a_label_equal_to_the_overflow_sentinel_does_not_fold_the_axis(self):
+        """A label that EQUALS the sentinel must not read as "the cap was reached".
+
+        The lock-free short-circuit keeps an already-folded label off the lock, and
+        it must test the CAP CONDITION (``len(seen) >= cap``), never ``overflow in
+        seen``. An org literally named ``__other__`` is one service-role insert
+        away (the organizations table carries no format CHECK), and if its
+        admission were read as "the cap was reached", every LATER org would be
+        silently folded into the overflow child — worse than the name collision it
+        replaces, which merged only that one org's series.
+        """
+        monitoring.record_compute(monitoring.COMPUTE_OVERFLOW, "/v1/x", 0.1)
+        monitoring.record_compute("acme", "/v1/x", 0.2)
+        snap = monitoring.compute_by_org()
+        assert "acme" in snap, (
+            "an org admitted as a regular label must not fold every later org just "
+            f"because its name equals the overflow sentinel; got {sorted(snap)}")
+
     def test_path_axis_folds_past_cap_into_one_child(self):
         cap = monitoring.COMPUTE_MAX_PATHS
         for i in range(cap + 3):
