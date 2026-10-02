@@ -58,6 +58,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     )
 
 import errno
+import math
 import os
 import threading
 import time
@@ -146,6 +147,16 @@ def resolve_stall_timeout_s(explicit: float | None = None) -> float:
                 f"{ENV_STALL_TIMEOUT}={raw!r} is not a number of seconds "
                 f"(use e.g. '900', or 'none' to disable the stall budget)"
             ) from None
+    if not math.isfinite(value):
+        # The SAME non-finite hole the socket resolver in this PR closes with
+        # `math.isfinite`. Here it is worse than harmless: `inf` never fires
+        # the guard (silently disabling the whole point of #2969) and `nan`
+        # makes every budget comparison false. `float()` accepts 'inf',
+        # '1e309' and 'nan', so this is reachable from the env var alone.
+        raise ValueError(
+            f"stall timeout must be a FINITE number of seconds, got {value!r} "
+            f"(inf would never fire the guard and nan would never compare; "
+            f"use 'none' to disable the budget explicitly)")
     if value < 0:
         raise ValueError(
             f"stall timeout must be >= 0 seconds, got {value!r} "

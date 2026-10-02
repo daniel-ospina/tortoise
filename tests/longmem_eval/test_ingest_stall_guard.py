@@ -337,6 +337,19 @@ def test_stall_budget_resolution(monkeypatch):
     monkeypatch.setenv(ENV_STALL_TIMEOUT, "not-a-number")
     with pytest.raises(ValueError):
         resolve_stall_timeout_s()
+    # NON-FINITE values must fail loud too — the docstring promises a typo can
+    # never silently disable the guard, and `float()` accepts all three. `inf`
+    # never fires the guard (the whole point of #2969) and `nan` never compares.
+    # The socket resolver in this same PR closes exactly this hole, so leaving
+    # it open here was an internal inconsistency, not a judgement call.
+    for token in ("inf", "1e309", "nan", "-inf"):
+        monkeypatch.setenv(ENV_STALL_TIMEOUT, token)
+        with pytest.raises(ValueError):
+            resolve_stall_timeout_s()
+    # …and on the explicit path, which bypasses the env-token branch entirely.
+    for value in (float("inf"), float("nan"), float("-inf")):
+        with pytest.raises(ValueError):
+            resolve_stall_timeout_s(value)
     # Explicit wins over the env.
     assert resolve_stall_timeout_s(12.0) == 12.0
 
