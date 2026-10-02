@@ -559,6 +559,23 @@ def test_resolve_stall_budget_is_not_fingerprint_member():
     assert "SOCKET_TIMEOUT" not in src
 
 
+def test_ingest_bound_banner_marks_the_stall_budget_inert_off_the_v2_path():
+    """The default `--ingest-mode deterministic` path never constructs a
+    heartbeat, so printing a live-looking budget there advertises a guard that
+    cannot fire. The line must say so — the banner is the only place an
+    operator learns which bounds are actually armed for THIS run.
+    """
+    from tools.longmem_eval import run as runner
+
+    line = runner._ingest_bound_banner(900.0, db_uri="docker://h:6379/g",
+                                       ingest_mode="deterministic")
+    assert "INERT" in line and "deterministic" in line
+    # …and stays honest on the path that DOES arm it.
+    v2 = runner._ingest_bound_banner(900.0, db_uri="docker://h:6379/g",
+                                     ingest_mode="v2")
+    assert "INERT" not in v2 and "900s" in v2
+
+
 def test_ingest_bound_banner_is_well_formed(monkeypatch):
     """The #2969 run diagnostic must render cleanly in all four states
     (a mangled line is worse than no line — a verifier caught a stray unit

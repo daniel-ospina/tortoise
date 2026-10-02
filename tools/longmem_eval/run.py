@@ -683,7 +683,8 @@ def _resolved_graph_read_timeout() -> float | None:
 
 
 def _ingest_bound_banner(stall_timeout_s: float, *,
-                         db_uri: str | None) -> str:
+                         db_uri: str | None,
+                         ingest_mode: str = "v2") -> str:
     """#2969 diagnostic: the effective ingest bounds for THIS run.
 
     A stalled run is silent by nature; this line makes the socket bound and
@@ -693,15 +694,24 @@ def _ingest_bound_banner(stall_timeout_s: float, *,
     client uses — so on the HOST lane the reported value is exactly the
     client's, including the product-knob fallback.
 
-    The embedded lane reports n/a, and NOT because it has no graph socket: it
-    runs a Unix-domain-socket client that IS read-bounded by the product knob
-    (``socket_timeout=read_to`` in ``tortoise/projection``). It reports n/a
-    because :func:`_resolved_graph_read_timeout` resolves the PER-LANE var,
-    which the embedded branch never applies — so printing that number here
-    would name a bound the embedded client does not use. The embedded lane's
-    bound is ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S``.
+    The stall budget is armed by the **v2** ingest path only. The default
+    ``--ingest-mode deterministic`` path never constructs a heartbeat and
+    never reads this budget, so on that path the line says INERT rather than
+    printing a live-looking number for a guard that cannot fire.
+
+    The embedded lane reports n/a for the READ bound, and NOT because it has
+    no graph socket: it runs a Unix-domain-socket client that IS read-bounded
+    by the product knob (``socket_timeout=read_to`` in
+    ``tortoise/projection``). It reports n/a because
+    :func:`_resolved_graph_read_timeout` resolves the PER-LANE var, which the
+    embedded branch never applies — so printing that number here would name a
+    bound the embedded client does not use. The embedded lane's bound is
+    ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S``.
     """
     stall_txt = (f"{stall_timeout_s:g}s" if stall_timeout_s else "disabled")
+    if ingest_mode != "v2":
+        stall_txt = (f"{stall_txt} (INERT — --ingest-mode {ingest_mode} "
+                     f"does not use the heartbeat; set --ingest-mode v2)")
     if db_uri is None:
         read_txt = "n/a (embedded lane)"
     else:
@@ -6399,7 +6409,8 @@ def _run_main(parser: argparse.ArgumentParser, args,
         _resolved_graph_read_timeout()
     except ValueError as _e:
         raise SystemExit(str(_e)) from None
-    print(_ingest_bound_banner(ingest_stall_timeout_s, db_uri=db_uri),
+    print(_ingest_bound_banner(ingest_stall_timeout_s, db_uri=db_uri,
+                               ingest_mode=args.ingest_mode),
           file=sys.stderr)
     # C1 (#1745): reader-context item cap (env first, CLI overrides;
     # >= 1 validated). TR questions ignore it — tr_top_k is the pinned TR
