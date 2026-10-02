@@ -5995,3 +5995,176 @@ def test_a_lone_single_quote_inside_a_value_is_content_not_a_boundary() -> None:
     assert _mod.scrub(f"token:'{secret}'") == "token:'[REDACTED]'"
     assert _mod.scrub(f'{{"password": " it\'s {secret}"}}') == \
         '{"password": "[REDACTED]"}'
+
+
+# ── #5630 review — the credential barriers the artifact still missed ────────
+# Two live P1s at head `150899b6`: (a) the bare-token barrier covered only two
+# of the product's seven minted credential prefixes, so an `st_` signup token
+# or an `oat_`/`ort_`/`ct_`/`cs_` OAuth credential reached `observation.json`
+# verbatim; (b) a redaction REGRESSION against the pre-change tool — a remnant
+# starting on an apostrophe sat after our own marker (`?token=x#'SECRET` ->
+# `?token=[REDACTED]'SECRET`), where no later pass could rebind it.
+def test_every_product_minted_credential_prefix_is_redacted() -> None:
+    """The bare-token barrier recognised `tt_`/`tk_` plus JWT only, while the
+    product mints SEVEN families: `st_` (signup, `hosted_api.py`), `oat_`/
+    `ort_` (OAuth access/refresh) and `ct_`/`cs_` (OAuth client id/secret) in
+    `tortoise/oauth.py`. Every one reached the artifact the issue says is
+    "uploaded as a CI artifact and attached to reviews" (#5630 review, P1).
+    The shapes come from the repo's central table now, so this test also pins
+    the seam that prevents the two lists drifting again."""
+    import json
+    import secrets
+
+    minted = {
+        "signup": "st_" + secrets.token_hex(32),
+        "oauth_access": "oat_" + secrets.token_urlsafe(32),
+        "oauth_refresh": "ort_" + secrets.token_urlsafe(32),
+        "oauth_client_id": "ct_" + secrets.token_urlsafe(32),
+        "oauth_client_secret": "cs_" + secrets.token_urlsafe(32),
+    }
+    for kind, token in minted.items():
+        # a bare token, and the same token in prose (a step `detail` or a
+        # recorded page body is where it actually appears)
+        assert token not in _mod._scrub_text(token), kind
+        assert token not in _mod._scrub_text(f"Access token issued: {token}"), kind
+        assert token not in _mod.scrub(f"landed after signup: {token}"), kind
+        # ...and idempotent, because a settled walk writes the record twice
+        once = _mod._scrub_text(f"landed after signup: {token}")
+        assert _mod._scrub_text(once) == once, kind
+    # The guarantee is the SERIALIZER, not one call site: read the artifact the
+    # walk actually writes back as JSON and assert the credentials are gone.
+    record = _mod._scrub_record({
+        "detail": "landed after signup: " + minted["signup"],
+        "extra": {"body": "access " + minted["oauth_access"]},
+        "nested": {"refresh": minted["oauth_refresh"],
+                   "client_id": minted["oauth_client_id"],
+                   "client_secret": minted["oauth_client_secret"]},
+    })
+    blob = json.dumps(record)
+    assert json.loads(blob) is not None, blob
+    for kind, token in minted.items():
+        assert token not in blob, (kind, blob)
+
+
+def test_the_central_credential_table_is_reused_not_reimplemented() -> None:
+    """The tool kept a SECOND, narrower shape list instead of the repo's one
+    central table (`tortoise/security.py`), and the two diverged in both
+    directions: `ghp_`/`AKIA`/`sk-ant-`/`xoxb-`/`sk_live_`/`npm_`/`glpat-` were
+    covered centrally and NOT by the tool, so a vendor token (or an
+    `Authorization: Bearer` value) in a recorded body or exception message
+    landed verbatim (#5630 review, P2). Applying the central table is the fix;
+    this pins the vendor shapes it brings."""
+    samples = {
+        "github": "ghp_" + "A" * 36,
+        "aws": "AKIA" + "A" * 16,
+        "anthropic": "sk-ant-" + "A" * 24,
+        "gitlab": "glpat-" + "A" * 24,
+        "npm": "npm_" + "A" * 36,
+        "slack": "xoxb-" + "A" * 24,
+    }
+    for kind, token in samples.items():
+        assert token not in _mod._scrub_text(token), kind
+        assert token not in _mod.scrub(f"token={token}"), kind
+    # the header form the review named explicitly
+    assert _mod._scrub_text("Authorization: Bearer " + "A" * 40) == \
+        "Authorization: Bearer [REDACTED]"
+    # ...while the LOCAL rule is still kept, because it is BROADER for the
+    # product's own short keys than the central table's 32+ hex floor
+    assert "tt_abcdef0123456789" not in _mod._scrub_text("key: tt_abcdef0123456789")
+
+
+def test_an_apostrophe_led_remnant_after_the_marker_is_collapsed() -> None:
+    """The redaction REGRESSION the first review found (P1): the tail collapse
+    had an UNTERMINATED DOUBLE-quote unit but no single-quote twin, so a
+    URL-less query reference whose value carried an apostrophe between the
+    separator and the credential lost only the prefix — the credential sat
+    AFTER our own marker, outside every key/value pair:
+        scrub("callback rejected: ?token=x#'S3CANARY") -> "…?token=[REDACTED]'S3CANARY"
+    The pre-change tool redacted it whole. In a recorded body the same shape
+    leaked too, and the document still has to parse."""
+    import json
+
+    secret = "S3CANARY31b"
+    for shape in (f"?token=x#'{secret}",
+                  f"?access_token=x#'{secret}",
+                  f"?code=#'{secret}",
+                  f"?session=x#'{secret}",
+                  f"?key=1#'{secret}",
+                  f"https://h/cb?token=x#'{secret}"):
+        got = _mod.scrub(shape)
+        assert secret not in got, (shape, got)
+        assert _mod.scrub(got) == got, (shape, got)
+    # inside a recorded body — the query pass stops at the `#`, and the JSON
+    # string's own close must survive the collapse
+    for body in (json.dumps({"detail": f"...?token=x#'{secret}"}),
+                 json.dumps({"note": f"?code=#'{secret}", "n": 1}),
+                 json.dumps({"url": f"https://h/cb?token=x#'{secret}",
+                             "status": 302})):
+        got = _mod.scrub(body)
+        assert secret not in got, (body, got)
+        assert json.loads(got) is not None, (body, got)
+        assert _mod.scrub(got) == got, (body, got)
+    # the double-quote twin still collapses, and a `&` still starts the NEXT
+    # parameter — the fix widens the tail, it does not eat following names
+    assert _mod.scrub(f'?token=x#"{secret}"') == "?token=[REDACTED]"
+    assert _mod.scrub("?code=&next=/x") == "?code=[REDACTED]&next=/x"
+
+
+def test_an_escaped_quote_remnant_in_a_json_body_is_collapsed() -> None:
+    """The other half of the same regression, and the LARGER one (#5630
+    review). In a recorded JSON body a value cut just after an ESCAPED quote —
+    `{"detail": "api_key=x\\"SECRET"}`, the shape a `detail` recorded as a JSON
+    string and serialized once more produces — left the credential AFTER our
+    own marker, where the pre-change tool redacted it whole. The escaped
+    double-quote run must sit BEFORE the `(?:\\+|[)])` run: that one absorbs an
+    ODD-length backslash run and strands the quote. Measured against
+    `origin/main`: 504 of 4 590 fuzzed JSON shapes regressed at the unfixed
+    head, 0 after; and no VALID input's output stopped parsing (1 860 documents
+    the pre-change tool had broken now parse)."""
+    import json
+
+    secret = "S3CANARY31c"
+    shapes = [
+        r'{"detail": "api_key=x\"' + secret + '"}',
+        r'{"detail": "api_key=x\\\"' + secret + '"}',
+        r'{"note": "redirected to ?token=x\"' + secret + '"}',
+        r'{"note": "redirected to ?token=x#\\\"' + secret + '", "n": 1}',
+        r'{"url": "https://h/cb?code=x\\\"' + secret + '", "status": 302}',
+    ]
+    for body in shapes:
+        assert json.loads(body) is not None, body   # the INPUT is valid JSON
+        got = _mod.scrub(body)
+        assert secret not in got, (body, got)
+        assert json.loads(got) is not None, (body, got)
+        assert _mod.scrub(got) == got, (body, got)
+    # ...and a following pair AFTER the collapsed remnant is still not eaten
+    got = _mod.scrub(r'{"d": "cb ?token=x#\\\"' + secret + r'", "keep": 1}')
+    assert json.loads(got)["keep"] == 1, got
+
+
+def test_a_recorded_header_dict_is_redacted_by_construction(tmp_path) -> None:
+    """The header/cookie carriers the #5630 review found covered by NOTHING: a
+    recorded header dict (`{"Authorization": …}`, `{"Cookie": …}`,
+    `{"X-Api-Key": …}`) and a URL matrix parameter (`;jsessionid=…`). The header
+    names are honoured for a STRUCTURED dict entry ONLY — a free-text
+    `Authorization: Basic <base64>` is deliberately NOT a free-text key name,
+    because the free-text pass redacts only the FIRST whitespace-delimited
+    token and would leave the credential AFTER our own marker while looking
+    redacted (the exact false-confidence shape this PR exists to remove)."""
+    import json
+
+    secret = "S3CANARY31d"
+    obs = _mod.Observation(started_at="x", target={})
+    obs.add(name="probe", detail=f"GET /x;jsessionid={secret} HTTP/1.1",
+            extra={"headers": {"Authorization": "Basic " + secret,
+                               "Cookie": "session=" + secret,
+                               "X-Api-Key": secret}})
+    written = json.loads(_mod._write_observation(obs, tmp_path).read_text())
+    blob = json.dumps(written)
+    assert secret not in blob, blob
+    headers = written["steps"][0]["extra"]["headers"]
+    assert headers["Authorization"] == "[REDACTED]", headers
+    assert headers["Cookie"] == "[REDACTED]", headers
+    assert headers["X-Api-Key"] == "[REDACTED]", headers
+    # the matrix parameter is single-token, so it goes in FREE text too
+    assert "[REDACTED]" in written["steps"][0]["detail"], written["steps"][0]

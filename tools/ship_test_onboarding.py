@@ -148,6 +148,18 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+# The repo's ONE central credential-shape table (#5630 review). The tool's own
+# ``_SECRET_TOKEN_RE`` below is BROADER for the product's ``tt_``/``tk_`` keys
+# (8+ alnum against the central table's 32+ hex) and narrower everywhere else:
+# it predated the table and hardcoded two of the product's seven minted
+# prefixes, which is how an ``st_`` signup token, an ``oat_``/``ort_`` OAuth
+# access/refresh token and a ``ct_``/``cs_`` OAuth client id/secret reached
+# ``observation.json`` verbatim. Applying the table as a second pass makes the
+# two lists one — vendor shapes (``ghp_``/``AKIA``/``sk-ant-``/``glpat-``), the
+# ``Authorization: Bearer`` header, and every product prefix come from the
+# single registry rather than a second hand-kept list that drifts.
+from tortoise.security import redact_secrets as _redact_secrets_central
+
 # ── the connection vocabulary ───────────────────────────────────────────────
 # One vocabulary, shared by the probe, the tests, and the recorded observation.
 # A screen is in exactly one of these states; anything unclassifiable is ABSENT
@@ -750,9 +762,22 @@ _QUERY_SECRET_PARAMS = (
     "token", "session", "secret", "code", "sig", "key",
 )
 
+# The structural vocabulary: a dict KEY (or a free-text `name=`/`name:`) whose
+# VALUE is a credential. `x-api-key` and `jsessionid` (#5630 review) are
+# single-token values, so they are safe as free-text key names too.
 _SECRET_KEY_NAMES = ("password", "passwd", "secret", "access_token", "refresh_token",
                      "session_token", "id_token", "signature",
-                     "api_key", "apikey", "token")
+                     "api_key", "apikey", "token",
+                     "x-api-key", "jsessionid")
+# Header/cookie-shaped CARRIERS the #5630 review found covered by NOTHING. They
+# are honoured for a STRUCTURED dict entry (`{"Authorization": …}`,
+# `{"Cookie": …}`), where the WHOLE value is replaced, but deliberately NOT as
+# a free-text key name: a header value is MULTI-TOKEN (`Authorization: Basic
+# <base64>`, `Cookie: a=1; b=2`), and the free-text pass redacts only the first
+# whitespace-delimited token — which would leave the credential AFTER our own
+# marker while looking redacted. `Authorization: Bearer <token>` is covered in
+# free text by the central table's bearer rule.
+_SECRET_HEADER_NAMES = ("authorization", "cookie", "x-api-key")
 _QUERY_ONLY_NAMES = tuple(
     n for n in _QUERY_SECRET_PARAMS if n not in _SECRET_KEY_NAMES)
 
@@ -844,9 +869,10 @@ _SECRET_KEY_RE = re.compile(
 )
 # The same vocabulary as a WHOLE key name, for a structured dict entry: a value
 # under `{"access_token": …}` is a credential even though no `=`/`:` sits
-# between them in any single string.
+# between them in any single string. The header carriers are added HERE only
+# (see `_SECRET_HEADER_NAMES`): a structured entry replaces the whole value.
 _SECRET_KEY_NAME_RE = re.compile(
-    r"^(?:" + "|".join(_SECRET_KEY_NAMES) + r")$", re.I)
+    r"^(?:" + "|".join(_SECRET_KEY_NAMES + _SECRET_HEADER_NAMES) + r")$", re.I)
 
 
 def _is_secret_key(key) -> bool:
@@ -855,11 +881,19 @@ def _is_secret_key(key) -> bool:
             and bool(_SECRET_KEY_NAME_RE.match(key.strip().strip("\"'"))))
 # A bare credential by shape (no accompanying key): a pasted tt_/tk_ key or JWT.
 # tk_ is a REAL minted prefix (tortoise/auth.py::API_KEY_PREFIXES) — redacting
-# only tt_ left scoped/graph keys in the artifact.
+# only tt_ left scoped/graph keys in the artifact. This LOCAL rule stays FIRST
+# because it is BROADER for tt_/tk_ than the central table (8+ alnum vs 32+
+# hex); everything else the product mints is the central table's job
+# (``_redact_tokens``).
 _SECRET_TOKEN_RE = re.compile(
     r"(?:tt|tk)_[A-Za-z0-9_]{8,}"
     r"|ey[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}(?:\.[A-Za-z0-9_\-]+)?"
 )
+# The central table names the credential KIND (`[REDACTED:signup_token]`). The
+# tool's contract is a UNIFORM marker — it prints no counts, lengths or
+# prefixes (a review verified that), and its fixed-point logic recognises
+# exactly `_URL_REDACTED` — so the kind is normalised away here.
+_CENTRAL_MARKER_RE = re.compile(r"\[REDACTED:[a-z_]+\]")
 # A JSON SCALAR — a number, `null`, `true`, `false`. An unquoted value under a
 # sensitive key may be one of these inside a recorded JSON BODY, where the
 # replacement must still be a valid JSON value for that body to re-parse.
@@ -1012,8 +1046,19 @@ def _redact_secret_value(match: re.Match) -> str:
 
 
 def _redact_tokens(text: str) -> str:
-    """The shape-only pass: a bare ``tt_``/``tk_`` key or JWT redacted."""
-    return _SECRET_TOKEN_RE.sub("[REDACTED]", text)
+    """The shape-only pass: a bare product key, JWT, or vendor token redacted.
+
+    Two tables, narrow-to-broad. The LOCAL rule runs first because it is wider
+    for the product's ``tt_``/``tk_`` keys; the repo's CENTRAL table
+    (``tortoise.security``) then covers every product-minted prefix
+    (``st_``/``oat_``/``ort_``/``ct_``/``cs_``) and the vendor shapes — from ONE
+    rule set, so the two cannot drift (#5630 review). The central marker's kind
+    is normalised to the tool's uniform ``[REDACTED]`` so the fixed-point logic
+    below still recognises its own output.
+    """
+    text = _SECRET_TOKEN_RE.sub("[REDACTED]", text)
+    central, _counts = _redact_secrets_central(text)
+    return _CENTRAL_MARKER_RE.sub("[REDACTED]", central)
 
 
 # Our own settled output for a query value, seen from OUTSIDE as a quoted value
@@ -1054,6 +1099,19 @@ _TAIL_JSON_UNIT = (
     r'|\[[^\[\]"\\]*\]'
     r'|\{[^{}"\\]*\}'
     r'|[\[{][^&#\s"\'\\{}\[\]]*'
+    # ...or an UNTERMINATED ESCAPED double-quote run — a value cut just after an
+    # escaped quote (`…?token=x\"SECRET`, which is what a `detail` recorded as a
+    # JSON STRING and serialized once more produces). It stops before the
+    # string's own RAW `"` close and before a `\` (another escape), and the
+    # collapse gate re-checks that the document still parses. It MUST precede
+    # the `(?:\\+|[)])` run below: that one absorbs an ODD-length backslash run
+    # and would strand the quote, leaving the credential after our marker
+    # (#5630 review — measured 504 of 4 590 fuzzed JSON shapes, 0 after).
+    r'|\\{1,32}"[^"\\]+'
+    # ...or the SINGLE-QUOTE twin. Inside a recorded JSON body `'` is ordinary
+    # CONTENT, so only the string's own raw `"` — or a `\` escape — ends the
+    # run; the collapse gate keeps the document parseable.
+    r"|\\{0,32}'[^\"\\]+"
     r'|(?:\\+|[)])[^\s"\']+'
     r'|[^\s,;:)\]}&?"\'\\|=\[{]+)'
 )
@@ -1065,6 +1123,15 @@ _TAIL_TEXT_UNIT = (
     # ...or an UNTERMINATED quote run (a value cut mid-quote) — the shape a
     # bounded field leaves behind, still a value (review cycle 24).
     r'|\\{0,32}"[^\s,;:)\]}&?#\\|=\[{"\']+'
+    # ...and its SINGLE-QUOTE TWIN. The double-quote run existed and the `'`
+    # one did not, so a remnant starting on an apostrophe (`?token=x#'SECRET`:
+    # the query pass's value run ends at the `#`, and the tail collapse then
+    # stopped at the quote) sat AFTER our own marker, where no later pass could
+    # rebind it — a redaction REGRESSION against the pre-change tool, which
+    # redacted it whole (#5630 review; 62 of 2 255 fuzzed free-text shapes, 0
+    # after). Same position as its twin, so the alternation cannot prefer a
+    # broader run first.
+    r"|\\{0,32}'[^\s,;:)\]}&?#\\|=\[{\"']+"
     r'|[\[{][^&#\s"\'\\{}\[\]]*'
     r'|(?:\\+|[)])[^\s"\']+'
     r'|[^\s,;:)\]}&?"\'\\|=\[{]+)'
@@ -3242,8 +3309,13 @@ def _print_summary(obs: Observation, path: Path, *,
     print(f"[ship-test] assertions: {scrub(repr(_scrub_record(obs.assertions)))}")
     print(f"[ship-test] session: "
           f"{scrub(repr(_scrub_record(obs.session))) if obs.session else '(not reached)'}")
-    print(f"[ship-test] deployed sha: {obs.deploy_sha or '(unreadable)'}  "
-          f"bundle: {obs.bundle or '(unreadable)'}  instrument: {obs.sha or '(unknown)'}")
+    # Every field below goes through the redaction pass, like the file write
+    # (#5630 review, P3): the runbook promises the stdout summary "redacts each
+    # field/structured value independently of the write", and these three were
+    # printed raw while `_scrub_record` scrubbed them on disk.
+    print(f"[ship-test] deployed sha: {scrub(obs.deploy_sha) or '(unreadable)'}  "
+          f"bundle: {scrub(obs.bundle) or '(unreadable)'}  "
+          f"instrument: {scrub(obs.sha) or '(unknown)'}")
     if obs.teardown:
         print(f"[ship-test] teardown: {scrub(repr(_scrub_record(obs.teardown)))}")
     if artifact_written:
