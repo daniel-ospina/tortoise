@@ -62,6 +62,12 @@ hosted capture runs its extraction on a worker thread with
 the *same* counter object, so mutations made in the worker are visible to the
 caller when the worker returns. We therefore never rebind the ContextVar
 inside a capture — we only mutate the object it points at.
+
+A capture also issues graph ops off-thread on its own: the retrieval legs run
+in ``search_engine.degradation_chain``'s ``ThreadPoolExecutor``. ContextVars do
+not cross a thread boundary, so those workers are bound to the caller's
+metering context explicitly with :func:`bind_metering_context` — otherwise the
+``extraction`` reads the module promises to count are silently missing.
 """
 from __future__ import annotations
 
@@ -78,6 +84,7 @@ from contextvars import ContextVar
 __all__ = [
     "PHASES",
     "GraphOpsCounter",
+    "bind_metering_context",
     "capture_graph_ops_distribution",
     "capture_phase",
     "classify_op",
@@ -232,6 +239,50 @@ def record_graph_op(cypher: str) -> None:
             "it was measuring proceeds unmeasured",
             exc_info=True,
         )
+
+
+def bind_metering_context(fn):
+    """Wrap ``fn`` so a WORKER THREAD runs it under this thread's metering
+    context.
+
+    ContextVars do not propagate to a new thread in CPython (repo precedent
+    ``quota.py:739``; the same reason ``hosted_api._submit_off_loop`` and
+    ``extractor_v2`` copy the context), and the capture path issues graph ops
+    off-thread: ``search_engine.degradation_chain`` runs its retrieval legs in
+    a ``ThreadPoolExecutor``. Those workers therefore saw ``_ACTIVE`` unset
+    and their reads were invisible to the capture's counter — the
+    ``extraction`` phase this module documents ("S3 search, dedup, supersede
+    resolution") silently under-counted by every leg that ran off-thread
+    (measured 4 ops per capture here, 12 in CI, i.e. the shortfall moved with
+    the environment). A counter that quietly misses work is exactly the
+    failure this instrumentation exists to prevent.
+
+    Only the two metering ContextVars are installed in the worker — never the
+    caller's whole context, because the retrieval legs' behaviour must not
+    start depending on unrelated caller contextvars. The counter is a mutable
+    OBJECT shared by reference, so the worker's increments land in the
+    caller's counter (the same property ``count_graph_ops`` relies on for the
+    hosted worker thread).
+
+    On the non-capture path (the overwhelmingly common one) ``_ACTIVE`` is
+    unset and ``fn`` is returned UNWRAPPED, so nothing changes.
+    """
+    counter = _ACTIVE.get()
+    if counter is None:
+        return fn
+    phase = _PHASE.get()
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        active_token = _ACTIVE.set(counter)
+        phase_token = _PHASE.set(phase)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _PHASE.reset(phase_token)
+            _ACTIVE.reset(active_token)
+
+    return wrapper
 
 
 @contextmanager

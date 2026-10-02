@@ -196,13 +196,16 @@ def test_capture_reports_nonzero_phase_attributed_ops(tmp_path, monkeypatch):
         issued["n"] = 0  # measure ONLY the capture below
         res = sdk.capture_session(CONV, session_id="gops_000")
         # Snapshot HERE, before ``close()`` — the close is teardown, not
-        # capture. It issues guarded queries (12 in the docker lane, 0 in the
-        # embedded one) and they are NOT metered, because no capture phase is
-        # active: ``record_graph_op`` returns early on an inactive phase. Read
-        # after the close instead and the oracle compares a capture-sized
-        # numerator against a capture-plus-teardown denominator — which is how
-        # this test first went red in CI (65 recorded for 77 issued) while
-        # passing locally, i.e. it asserted an accident of the embedded lane.
+        # capture, so it must not enter the oracle's denominator.
+        #
+        # The residual gap this oracle catches lives in the RETRIEVAL LEGS:
+        # ``degradation_chain`` runs them in a ThreadPoolExecutor, and a fresh
+        # context leaves ``_ACTIVE`` unset in the worker, so their reads are
+        # issued, counted by this oracle, and never metered — unless
+        # ``graph_ops.bind_metering_context`` binds the worker to the caller's
+        # metering context. The shortfall was 4 ops here and 12 in CI, i.e. it
+        # moved with the environment, so it read as "an accident of the embedded
+        # lane" if you only ever ran this file on this machine.
         measured = issued["n"]
     finally:
         sdk.close()
@@ -249,6 +252,43 @@ def test_capture_reports_nonzero_phase_attributed_ops(tmp_path, monkeypatch):
         f"{ops['total']} ops recorded for {measured} guarded queries issued "
         "during the capture — a double count at the choke point shows exactly "
         "here (2x), and a dropped record shows as an under-count")
+
+
+def test_metering_context_reaches_a_worker_thread():
+    """ContextVars do NOT propagate to a new thread (#3359).
+
+    A capture issues graph ops off-thread — the retrieval legs run in
+    ``degradation_chain``'s ThreadPoolExecutor — so without
+    ``bind_metering_context`` the worker sees no active capture, issues its
+    read, and records nothing: the ``extraction`` reads this module promises to
+    count are then silently missing from every capture (4 ops here, 12 in CI).
+    The first submit below is that bug, kept as the control: it must NOT count.
+    """
+    import concurrent.futures
+
+    from tortoise.graph_ops import bind_metering_context
+
+    counter = GraphOpsCounter()
+    with count_graph_ops(counter), capture_phase("extract"), \
+            concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(record_graph_op, "MATCH (n) RETURN n").result()
+        assert counter.total == 0, "an unbound worker must not be metered"
+        pool.submit(bind_metering_context(record_graph_op),
+                    "MATCH (n) RETURN n").result()
+    # the worker's increment landed in THIS counter, under THIS phase
+    assert counter.by_phase["extraction"]["read"] == 1
+    assert counter.total == 1
+
+
+def test_bind_metering_context_is_a_passthrough_without_a_capture():
+    """The non-capture path (every search that is not a capture) must stay
+    unchanged: no wrapper is installed when no counter is active."""
+    from tortoise.graph_ops import bind_metering_context
+
+    def fn():
+        return "ok"
+
+    assert bind_metering_context(fn) is fn
 
 
 def test_record_graph_op_is_fail_soft_on_an_unknown_phase():
