@@ -1106,3 +1106,83 @@ class TestGuardAcceptsDeliberateOptionalDependencySkips:
             _skip_guard._COLLECTION_SKIP_MESSAGE)
         assert not _skip_guard.is_embedder_reason_violation(
             _skip_guard._COLLECTION_SKIP_MESSAGE)
+
+
+def _run_guard_scope(log_path, manifest, scope, junit=None):
+    """Run skip-guard.py with --manifest + --scope; returns (rc, stderr)."""
+    argv = [sys.executable, str(TOOL), log_path,
+            "--manifest", manifest, "--scope", scope, "--manifest-only"]
+    if junit is not None:
+        argv += ["--junitxml", junit]
+    p = subprocess.run(argv, capture_output=True, text=True)
+    return p.returncode, p.stderr
+
+
+def test_scope_narrows_which_frozen_nodeids_are_required(tmp_path):
+    """#6804: `--scope` restricts what THIS run must observe — and is LOUD when
+    it requires nothing.
+
+    The carve-out job runs ONE shard of a repo-level frozen manifest, so the
+    shard's subset is expressed as a scope rather than by grepping the manifest
+    into a temp file (a derived `--manifest` is the #4207 defect: a frozen set
+    the tree can silently redefine).
+
+    A surviving mutation that makes `--scope` a no-op is exactly what this pins
+    (review of #6804 found the feature had NO test anywhere in the tree).
+    """
+    p = tmp_path / "m.txt"
+    p.write_text(
+        "# frozen\n"
+        "tests/test_alpha.py::test_one\n"
+        "tests/test_beta.py::test_two\n",
+        encoding="utf-8",
+    )
+    log = tmp_path / "pytest.log"
+    log.write_text("", encoding="utf-8")
+    junit = tmp_path / "j.xml"
+    # Only the ALPHA nodeid is observed.
+    junit.write_text(
+        '<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite tests="1">'
+        '<testcase classname="tests.test_alpha" name="test_one" '
+        'file="tests/test_alpha.py" line="1" time="0.001" />'
+        "</testsuite></testsuites>",
+        encoding="utf-8",
+    )
+
+    # 1. No scope: BOTH frozen nodeids required -> beta is missing -> RED.
+    whole = subprocess.run(
+        [sys.executable, str(TOOL), str(log), "--manifest", str(p),
+         "--junitxml", str(junit), "--manifest-only"],
+        capture_output=True, text=True,
+    )
+    assert whole.returncode == 1, (
+        "the whole frozen set must red on a missing beta nodeid (baseline)")
+    assert "test_beta" in whole.stderr + whole.stdout
+
+    # 2. Scope = alpha only: beta is out of scope, alpha is observed -> PASS.
+    rc_alpha, _ = _run_guard_scope(
+        str(log), str(p), "tests/test_alpha.py", str(junit))
+    assert rc_alpha == 0, "a scoped run must not require a sibling shard's nodeid"
+
+    # 3. Scope = gamma (a file in NO shard): requires NOTHING -> passes, but must
+    #    SAY SO. Silence here is what would hide a frozen nodeid whose file
+    #    belongs to no shard: every shard would require nothing, forever.
+    rc_gamma, err_gamma = _run_guard_scope(
+        str(log), str(p), "tests/test_gamma.py", str(junit))
+    assert rc_gamma == 0
+    assert "--scope required none" in err_gamma, (
+        "an empty required set must be announced, not silent: "
+        f"stderr={err_gamma!r}")
+
+    # 4. Fail-closed is preserved: a MISSING manifest reds even WITH a scope.
+    rc_missing, _ = _run_guard_scope(
+        str(log), str(tmp_path / "nope.txt"), "tests/test_alpha.py", str(junit))
+    assert rc_missing == 1, \
+        "a missing frozen manifest must fail closed regardless of scope"
+
+    # 5. A comment-only manifest reds even WITH a scope (not a vacuous green).
+    empty = tmp_path / "e.txt"
+    empty.write_text("# only comments\n", encoding="utf-8")
+    rc_empty, _ = _run_guard_scope(
+        str(log), str(empty), "tests/test_alpha.py", str(junit))
+    assert rc_empty == 1, "a comment-only frozen set must fail closed"

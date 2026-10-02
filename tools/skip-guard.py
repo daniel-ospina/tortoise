@@ -903,8 +903,23 @@ def main(argv: list[str]) -> int:
             # nodeid yields an empty required set — a shard that owns none of
             # the frozen tests — which is a legitimate pass, NOT the vacuous
             # green the check above forbids (that check ran on the frozen set).
+            #
+            # ⛔ But it must never be SILENT. Exiting 0 without a word makes a
+            # shard that required nothing indistinguishable in the CI log from
+            # one that required the whole set and passed — and that silence is
+            # what would hide a frozen nodeid whose file belongs to NO shard
+            # (every shard would happily require nothing, forever). The line
+            # below is deliberately on stderr and unconditional.
+            _before = len(expected)
             expected = {n for n in expected
                         if n.split("::", 1)[0] in scope}
+            if not expected:
+                print(f"ℹ skip-guard: --scope required none of the {_before} "
+                      f"frozen nodeid(s) for this run (files: "
+                      f"{sorted(scope)}). This shard owns none of "
+                      f"{manifest_path!r} — nothing to require, asserting the "
+                      f"frozen set is unchanged is still checked above.",
+                      file=sys.stderr)
         observed: set[str] = set()
         skipped_tests: set[str] = set()
         falkor_violations: list[str] = []
