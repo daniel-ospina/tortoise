@@ -58,11 +58,12 @@ def _pi_seam_name() -> str:
 def _session_verify_accepts_pi_harness() -> bool:
     """The pi-aware read-only query is one that ACCEPTS `--harness pi`.
 
-    Doctor's collision hint names a replacement command, and the obvious
-    `tortoise hooks status` is layout-keyed — it exits 1 with "unknown harness
-    'pi'", so naming it would swap one refusal for another.  This asserts the
-    command actually named accepts the harness.  Its exit code may still be
-    non-zero for a missing config, which is not a refusal of the REQUEST.
+    Doctor's collision hint names a replacement command, and in that state the
+    installer-shaped commands are exactly the ones a user must not be sent to:
+    `tortoise install pi` refuses on the collision, and so does
+    `hooks upgrade --harness pi` (it calls the same installer).  This asserts
+    the command actually named accepts the harness.  Its exit code may still
+    be non-zero for a missing config, which is not a refusal of the REQUEST.
     """
     proc = subprocess.run(
         [sys.executable, "-m", "tortoise", "session", "verify",
@@ -738,10 +739,16 @@ class TestDoctorPreInit:
         assert "Capture hooks" in out, out
         assert "tortoise install pi" not in out, (
             "the hint recommends a command that refuses in this state")
+        # Neither of the installer-shaped repairs may be named: in this state
+        # `tortoise install pi` AND `hooks upgrade --harness pi` both call the
+        # same installer and both refuse.
+        assert "hooks upgrade" not in out, (
+            "the hint recommends an upgrade that refuses in this state")
         assert _ci.PI_DISABLED_DIRNAME in out, out
-        # A replacement command must itself accept `--harness pi`: the obvious
-        # `tortoise hooks status` is layout-keyed and exits 1 there.
-        assert "hooks status --harness pi" not in out, out
+        # The replacement the hint names must itself accept `--harness pi`.
+        # It does NOT pin WHICH read-only surface is named: `hooks status
+        # --harness pi` also accepts the harness since #5351, so the only
+        # invariant left here is that the hint is not a refusal.
         assert _session_verify_accepts_pi_harness()
 
     def test_a_symlinked_legacy_entry_is_not_treated_as_a_collision(
@@ -1258,6 +1265,12 @@ class TestDoctorPiSeamFreshness:
         assert "run `tortoise install pi`" not in row, (
             "the installer refuses a symlinked install root, so recommending "
             "it is wrong")
+        # The withholding covers the finding's OWN detail too, whose phrasing
+        # is "reinstall with `tortoise install pi`" — a needle on the HINT's
+        # "run `...`" wording passes straight over it, which is how this
+        # refusal survived the first pass (#5351 round 3).
+        assert "reinstall with" not in row, (
+            "the detail embeds the same refusing command as the hint")
 
     def test_doctor_never_recommends_the_installer_for_an_out_of_home_symlink(
             self, clear_db_env, tmp_path, monkeypatch, capsys):
@@ -1282,3 +1295,161 @@ class TestDoctorPiSeamFreshness:
         assert "❌" in row, row
         assert "needs a manual fix" in row, row
         assert "run `tortoise install pi`" not in row, row
+        assert "reinstall with" not in row, (
+            "a manual kind with no legacy collision must withhold the detail's "
+            "unconditional `reinstall with `tortoise install pi`` too")
+
+    def test_doctor_names_the_collision_beside_a_manual_kind(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """A MANUAL step does not clear the legacy collision, so naming only the
+        manual obstacle promises a repair that still refuses.
+
+        `foreign-artifact` is BOTH the first blocking finding and a manual kind
+        (it is in `MANUAL_FIX_KINDS`), so the manual arm selects the hint and
+        the `elif` dropped the collision from the row entirely.  The row must
+        therefore name BOTH obstacles; and because the manual kind's detail is
+        a CONDITIONAL two-step whose first step is the instruction the user
+        needs, the detail stays — the collision sentence ahead of it is the
+        counter-signal for its second step.  (Withholding it was tried and
+        reverted: it deletes "move it aside", and `session verify` refuses
+        before printing any finding when no API key resolves.)
+
+        Mutation: restore the `elif` (drop the collision append) — the
+        collision name disappears and this REDs.
+        """
+        from tortoise import capture_install as _ci
+        from tortoise.hook_install import detect_artifact_install
+        home = tmp_path / "home"
+        self._seam(home, "// some other product's extension\n")
+        kinds = {f.kind for f in detect_artifact_install(
+            home / ".pi" / "agent" / "extensions", "pi")}
+        assert kinds == {"foreign-artifact"}, (
+            "the fixture must read as FOREIGN (a manual kind) and nothing "
+            f"else, or this test is about a different state: {kinds}")
+        root = home / ".pi" / "agent" / "extensions"
+        (root / _ci.LEGACY_PI_DIRNAME).mkdir()
+        (root / _ci.PI_DISABLED_DIRNAME).mkdir()
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert "❌" in row, row
+        assert "foreign-artifact" in row, row
+        assert _ci.PI_DISABLED_DIRNAME in row, (
+            "the collision outlives any manual step, so it must be named: "
+            + row)
+        assert "move it aside, then re-run `tortoise install pi`" in row, (
+            "a MANUAL kind's detail is the instruction, not a bare command, "
+            "so the row keeps it: " + row)
+
+    def test_doctor_keeps_an_instruction_the_installer_is_not_part_of(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """The withholding must key on the DETAIL naming the installer, not on
+        the existence of a collision.
+
+        `not-readable` is a manual kind whose detail is `chmod it so the seam
+        can load` — the collision has nothing to do with it, and the installer
+        is not the remedy.  A collision-arm rule (tried in review round 5)
+        withheld it and left the row with a pointer that does not always
+        recover the text.
+
+        Mutation: withhold on the collision alone (`_withhold = layout is None
+        and bool(_legacy_obstacle) …`) — `chmod it` disappears and this REDs.
+        """
+        from tortoise import capture_install as _ci
+        home = tmp_path / "home"
+        seam = self._seam(home, "// tortoise-hook-version: 0\n// tortoise session\n")
+        seam.chmod(0o000)
+        root = home / ".pi" / "agent" / "extensions"
+        (root / _ci.LEGACY_PI_DIRNAME).mkdir()
+        (root / _ci.PI_DISABLED_DIRNAME).mkdir()
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert _ci.PI_DISABLED_DIRNAME in row, row
+        assert "chmod it so the seam can load" in row, (
+            "the collision does not make `chmod` refuse, so the instruction "
+            "must survive: " + row)
+
+    def test_doctor_keeps_a_non_manual_detail_that_names_no_command(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """A BLOCKING, non-manual kind whose detail carries no command must
+        keep its detail: it names no repair the installer could refuse.
+
+        `modified-artifact` is exactly that ("marker matches … but its bytes
+        differ from the shipped seam"), and the manual-kind exemption does not
+        cover it, so only the content half of the predicate saves it.  The
+        collision is present, so the seam IS unrepairable — the case a
+        kind-and-state rule withholds.
+
+        Mutation: drop the content guard from `_artifact_detail_would_refuse`
+        (keep the `unrepairable`/`blocking`/non-manual tests) — `bytes differ`
+        disappears and this REDs.
+        """
+        from tortoise import capture_install as _ci
+        from tortoise.hook_install import detect_artifact_install
+        home = tmp_path / "home"
+        (home / ".pi" / "agent").mkdir(parents=True)
+        res = _ci.install_capture("pi", home=home)
+        assert res.ok, res.error
+        root = home / ".pi" / "agent" / "extensions"
+        seam = root / _pi_seam_name()
+        seam.write_bytes(seam.read_bytes() + b"\n// local edit\n")
+        kinds = {f.kind for f in detect_artifact_install(root, "pi")}
+        assert kinds == {"modified-artifact"}, (
+            "the fixture must report exactly `modified-artifact` (blocking, "
+            f"non-manual, command-free), or this is another state: {kinds}")
+        (root / _ci.LEGACY_PI_DIRNAME).mkdir()
+        (root / _ci.PI_DISABLED_DIRNAME).mkdir()
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert _ci.PI_DISABLED_DIRNAME in row, row
+        assert "bytes differ" in row, (
+            "no installer command is embedded, so nothing refuses — the "
+            "detail must survive: " + row)
+
+    def test_doctor_keeps_a_command_free_detail_when_the_path_looks_like_a_command(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """The predicate matches a CLAUSE, not the bare command token.
+
+        Every artifact detail interpolates the install PATH, and backticks are
+        legal filename characters — so a $HOME containing the literal
+        `` `tortoise install pi` `` makes the token appear in a detail that
+        names no command at all.  A caller testing for the token alone withholds
+        `bytes differ from the shipped seam` there and leaves the pointer in its
+        place; the clause the detector actually writes does not occur in a path
+        (`hook_install.ARTIFACT_INSTALLER_CLAUSES`).
+
+        Mutation: match the bare token (`f"`tortoise install {harness}`" in
+        detail`) — this REDs.
+        """
+        from tortoise import capture_install as _ci
+        from tortoise.hook_install import detect_artifact_install
+        home = tmp_path / "`tortoise install pi`" / "home"
+        (home / ".pi" / "agent").mkdir(parents=True)
+        res = _ci.install_capture("pi", home=home)
+        assert res.ok, res.error
+        root = home / ".pi" / "agent" / "extensions"
+        seam = root / _pi_seam_name()
+        seam.write_bytes(seam.read_bytes() + b"\n// local edit\n")
+        kinds = {f.kind for f in detect_artifact_install(root, "pi")}
+        assert kinds == {"modified-artifact"}, kinds
+        assert "`tortoise install pi`" in str(seam), (
+            "the fixture's PATH must carry the bare token, or the mutation "
+            "this test pins is not exercised")
+        (root / _ci.LEGACY_PI_DIRNAME).mkdir()
+        (root / _ci.PI_DISABLED_DIRNAME).mkdir()
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert "bytes differ" in row, (
+            "the path merely LOOKS like a command; the detail names none, so "
+            "it must survive: " + row)

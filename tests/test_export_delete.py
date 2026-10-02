@@ -1287,3 +1287,275 @@ class TestSensitiveRateLimit:
         assert tc.get("/v1/organizations/nope/export").status_code == 403  # budget 2
         assert tc.get("/v1/organizations/nope/export").status_code == 429  # exhausted
         ha_mod._SENSITIVE_BUCKETS.clear()
+
+    def test_deferred_terminal_charging_three_cases(self, sb_client, as_user,
+                                                    monkeypatch):
+        """#2051: the sensitive-op budget is charged EXACTLY ONCE, at the
+        TERMINAL outcome.
+
+        success → 1 charge; a mid-flight 5xx → 0 charges (an outage must not
+        burn the hourly budget, nor mask itself with a stale 429 that
+        outlives recovery); a refusal (429) → no charge. RED before the
+        #1719 migration (check-time charging consumed the budget on 5xx).
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        monkeypatch.setitem(ha_mod._SENSITIVE_OP_LIMITS, "export", 3)
+        ha_mod._SENSITIVE_BUCKETS.clear()
+        tc, fake, db_path = sb_client
+        _seed_supabase_team(fake)
+        seed_sdk = _seed_graph(db_path)  # noqa: F841
+        as_user()
+
+        def _entries():
+            return sum(len(v) for v in ha_mod._SENSITIVE_BUCKETS.values())
+
+        # (a) SUCCESS → charged exactly once, at the terminal point.
+        assert tc.get(f"/v1/organizations/{ORG_ID}/export").status_code == 200
+        assert _entries() == 1
+
+        # (b) MID-FLIGHT 5xx → charges NOTHING.
+        real_snapshot = ha_mod._export_graph_snapshot
+        monkeypatch.setattr(
+            ha_mod, "_export_graph_snapshot",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("graph down")))
+        for _ in range(2):
+            r = tc.get(f"/v1/organizations/{ORG_ID}/export")
+            assert r.status_code == 500, r.text
+        assert _entries() == 1, "a 5xx must not consume the sensitive-op budget"
+
+        # Recovery must not yield a spurious 429 (pre-#2051 the two 5xx had
+        # consumed the budget and this read 429).
+        monkeypatch.setattr(ha_mod, "_export_graph_snapshot", real_snapshot)
+        assert tc.get(f"/v1/organizations/{ORG_ID}/export").status_code == 200
+        assert _entries() == 2
+
+        # (c) REFUSAL (429) → nothing charged; the bucket stays at the limit.
+        assert tc.get(f"/v1/organizations/{ORG_ID}/export").status_code == 200
+        assert _entries() == 3  # at limit
+        r = tc.get(f"/v1/organizations/{ORG_ID}/export")
+        assert r.status_code == 429
+        assert "Retry-After" in r.headers
+        assert _entries() == 3, "a refusal must not charge"
+        ha_mod._SENSITIVE_BUCKETS.clear()
+
+    def test_client_error_still_charges(self, sb_client, as_user, monkeypatch):
+        """#2051 boundary: a 4xx client error IS terminal — it charges once.
+        Abusive callers keep the unchanged 429 boundary; only 5xx passes
+        through uncharged."""
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        ha_mod._SENSITIVE_BUCKETS.clear()
+        tc, _, _ = sb_client
+        as_user()
+        # unknown team → 403 from the owner gate (a terminal client error)
+        assert tc.get("/v1/organizations/nope/export").status_code == 403
+        assert sum(len(v) for v in ha_mod._SENSITIVE_BUCKETS.values()) == 1
+        ha_mod._SENSITIVE_BUCKETS.clear()
+
+
+class TestDeferredSensitiveOpCharging:
+    """#2051: `_deferred_sensitive_op` is the shared terminal-charge
+    mechanism for the whole family — lock its outcome table directly:
+    success and 4xx charge once; 5xx and a raw exception (rendered as 5xx by
+    the global handler) charge nothing."""
+
+    @staticmethod
+    def _request():
+        from starlette.requests import Request as _Request
+        return _Request({"type": "http", "method": "GET", "path": "/x",
+                         "headers": [], "query_string": b"",
+                         "client": ("203.0.113.5", 1234)})
+
+    def test_charge_outcome_table(self, monkeypatch):
+        import asyncio
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        monkeypatch.setitem(ha_mod._SENSITIVE_OP_LIMITS, "export", 10)
+        ha_mod._SENSITIVE_BUCKETS.clear()
+
+        def _entries():
+            return sum(len(v) for v in ha_mod._SENSITIVE_BUCKETS.values())
+
+        @ha_mod._deferred_sensitive_op("export")
+        async def endpoint(request, mode):
+            if mode == "ok":
+                return {"ok": True}
+            if mode == "client":
+                raise ha_mod.HTTPException(status_code=403, detail="nope")
+            if mode == "server":
+                raise ha_mod.HTTPException(status_code=503, detail="down")
+            raise RuntimeError("boom")
+
+        req = self._request()
+
+        async def _call(mode):
+            try:
+                return await endpoint(request=req, mode=mode)
+            except Exception as exc:
+                return exc
+
+        async def _scenario():
+            # success → exactly one terminal charge
+            assert await _call("ok") == {"ok": True}
+            assert _entries() == 1
+            # 4xx client error → terminal → one more charge
+            assert isinstance(await _call("client"), ha_mod.HTTPException)
+            assert _entries() == 2
+            # 5xx server fault → UNCHARGED
+            assert isinstance(await _call("server"), ha_mod.HTTPException)
+            assert _entries() == 2
+            # raw exception (rendered 5xx by the global handler) → UNCHARGED
+            assert isinstance(await _call("raw"), RuntimeError)
+            assert _entries() == 2
+
+        # ONE loop for the whole table: a single asyncio.run keeps the
+        # module-global _SENSITIVE_LOCK bound to one loop (repeated
+        # asyncio.run calls would only pass while the lock stays
+        # uncontended — the acquire fast path skips _get_loop).
+        try:
+            asyncio.run(_scenario())
+        finally:
+            ha_mod._SENSITIVE_BUCKETS.clear()
+
+    def test_cancelled_mid_flight_charges(self, monkeypatch):
+        """#2051 review P2: a request cancelled mid-flight (client
+        disconnect / server shutdown) raises ``asyncio.CancelledError`` — a
+        ``BaseException``, so it never reached the ``HTTPException`` branch
+        and charged 0. That is an evasion path: a client can disconnect
+        before every response and run the heavy ``import``/``export``
+        uncharged without bound, and the pre-migration check-time behaviour
+        charged this class. It MUST charge exactly once (delta 0 or 1 — no
+        double-charge), and the cancellation must still propagate."""
+        import asyncio
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        monkeypatch.setitem(ha_mod._SENSITIVE_OP_LIMITS, "export", 10)
+        ha_mod._SENSITIVE_BUCKETS.clear()
+
+        def _entries():
+            return sum(len(v) for v in ha_mod._SENSITIVE_BUCKETS.values())
+
+        @ha_mod._deferred_sensitive_op("export")
+        async def endpoint(request, mode):
+            if mode == "cancel_raise":
+                # the cancellation boundary a disconnect/shutdown delivers
+                raise asyncio.CancelledError()
+            # a genuinely in-flight body, cancelled at its own await
+            await asyncio.Event().wait()
+            return {"ok": True}
+
+        req = self._request()
+
+        async def _scenario():
+            # (a) CancelledError raised from the endpoint body → 1 charge.
+            try:
+                await endpoint(request=req, mode="cancel_raise")
+            except asyncio.CancelledError:
+                pass
+            else:  # pragma: no cover
+                raise AssertionError("cancellation must propagate")
+            assert _entries() == 1, (
+                "a mid-flight cancellation must charge exactly once")
+
+            # (b) a REAL task.cancel() while the endpoint hangs at its
+            # await → still exactly one charge, delivered despite the
+            # cancellation (shielded), and the task stays cancelled.
+            task = asyncio.ensure_future(endpoint(request=req, mode="hang"))
+            await asyncio.sleep(0)  # let it reach the hang await
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            else:  # pragma: no cover
+                raise AssertionError("the task must end cancelled")
+            assert _entries() == 2, (
+                "a cancelled task must charge exactly once")
+
+        try:
+            asyncio.run(_scenario())
+        finally:
+            ha_mod._SENSITIVE_BUCKETS.clear()
+
+    def test_cancel_during_terminal_charge_is_not_dropped(self, monkeypatch):
+        """#2051 review P2: a cancellation delivered WHILE the terminal
+        charge waits on the contended ``_SENSITIVE_LOCK`` must not drop the
+        charge on ANY exit branch.
+
+        ``_SENSITIVE_LOCK`` is ONE global lock shared by all four sensitive
+        ops and all IPs, so an attacker can manufacture the contention the
+        way this test does: the endpoint body takes the (task-agnostic)
+        lock and holds it, so the terminal charge blocks on it; the request
+        task is then cancelled. Un-shielded, the ``await`` on the charge
+        raises ``CancelledError`` out of the wrapper and the append never
+        happens — for an operation that ALREADY EXECUTED (success and 4xx
+        branches). ``_terminal_charge`` shields it, so the charge lands once
+        the lock is released, while the cancellation still propagates.
+
+        MUTATION: restore the un-shielded
+        ``await _charge_sensitive_op_rate_limit(key, op)`` in any branch
+        (drop the ``_terminal_charge`` helper) and the success / 4xx
+        assertions fail with ``entries_after_lock_released == 0``.
+        """
+        import asyncio
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        monkeypatch.setitem(ha_mod._SENSITIVE_OP_LIMITS, "export", 10)
+        ha_mod._SENSITIVE_BUCKETS.clear()
+
+        def _entries():
+            return sum(len(v) for v in ha_mod._SENSITIVE_BUCKETS.values())
+
+        async def _attack(mode, *, double_cancel=False):
+            acquired = asyncio.Event()
+
+            @ha_mod._deferred_sensitive_op("export")
+            async def ep(request):
+                # Hold the shared lock across the terminal charge: the body
+                # acquires it (asyncio.Lock is not owner-bound), signals,
+                # then unwinds into the charge, which blocks on the lock
+                # this same task holds.
+                await ha_mod._SENSITIVE_LOCK.acquire()
+                acquired.set()
+                if mode == "ok":
+                    return {"ok": True}
+                if mode == "client":
+                    raise ha_mod.HTTPException(status_code=403, detail="nope")
+                raise asyncio.CancelledError()
+
+            task = asyncio.ensure_future(ep(request=self._request()))
+            await acquired.wait()
+            # let the body unwind into the terminal charge, which must now
+            # be blocked on the held lock
+            for _ in range(5):
+                await asyncio.sleep(0)
+            await asyncio.sleep(0.02)
+            assert not task.done(), "the terminal charge must be blocked"
+            assert _entries() == 0, "nothing may charge while the lock is held"
+            task.cancel()
+            if double_cancel:
+                await asyncio.sleep(0)
+                task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, ha_mod.HTTPException):
+                pass
+            else:  # pragma: no cover
+                raise AssertionError("the cancellation must propagate")
+            assert _entries() == 0, "the charge is still waiting on the lock"
+            ha_mod._SENSITIVE_LOCK.release()
+            await asyncio.sleep(0.05)
+            assert _entries() == 1, (
+                f"a cancellation during the terminal charge DROPPED the "
+                f"charge for mode={mode!r} (double_cancel={double_cancel})")
+            # drain the shieldee before the next branch reuses the loop
+            await asyncio.sleep(0)
+
+        async def _scenario():
+            for mode in ("ok", "client", "cancel"):
+                ha_mod._SENSITIVE_BUCKETS.clear()
+                await _attack(mode)
+                ha_mod._SENSITIVE_BUCKETS.clear()
+                await _attack(mode, double_cancel=True)
+                ha_mod._SENSITIVE_BUCKETS.clear()
+
+        try:
+            asyncio.run(_scenario())
+        finally:
+            ha_mod._SENSITIVE_BUCKETS.clear()

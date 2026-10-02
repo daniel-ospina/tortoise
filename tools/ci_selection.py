@@ -383,6 +383,14 @@ SOURCE_PATTERNS = {
                    # (tests/test_ci_selection.py) the moment this branch merged main.
                    "website/404.html",
                    "website/apps/dashboard/public/invite-accept.html",
+                   # The design-partner one-pager. `noindex`, so it is out of the
+                   # #3950 blog guard's scope — but NOT out of the element-id
+                   # uniqueness guard, whose scope is every served document: a
+                   # noindex page is still a page whose own script runs, and
+                   # duplicate ids are invalid in it. Without this entry a PR
+                   # touching only this page selects no surface and the id guard
+                   # never executes on it.
+                   "website/design-partners-intro.html",
                    # The shared href extractor both blog-guard layers call
                    # (tests/test_website_docs_consistency.py here, and
                    # tests/e2e/test_legal_pages.py in the separate `legal-e2e`
