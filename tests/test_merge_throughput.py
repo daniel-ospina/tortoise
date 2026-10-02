@@ -3922,8 +3922,16 @@ def test_docs_job_guards_tracked_generated_artifacts_on_every_pr():
     assert "docs" in recorded["required_contexts"], (
         "the docs job must be a REQUIRED context for this gate to block a merge"
     )
-    pr_trigger = _on_block(workflow).get("pull_request")
-    assert pr_trigger is None or "paths" not in pr_trigger, (
+    # The trigger must be PRESENT and UNFILTERED. `.get("pull_request")` returns
+    # None both for `pull_request: {}` (the real config) and for the trigger
+    # being absent entirely, so `is None or "paths" not in ...` passes when the
+    # workflow has no PR trigger at all — pinning nothing (found in review).
+    on_block = _on_block(workflow)
+    assert "pull_request" in on_block, (
+        "ci.yml must retain a pull_request trigger, or the docs job reports "
+        "nothing and this required context blocks every merge"
+    )
+    assert not (on_block["pull_request"] or {}).get("paths"), (
         "the docs job must run on EVERY pull_request, or this check inherits "
         "the docs-PR skip it exists to close"
     )
@@ -3944,7 +3952,11 @@ def test_docs_job_guards_tracked_generated_artifacts_on_every_pr():
     # `--check` verifies and exits non-zero on drift. A bare invocation would
     # REWRITE the artifact and always pass — the check would look present and
     # never fire, which is worse than absent.
-    for tool in ("bridge_table", "mcp_rename_table"):
+    # Every LISTED artifact is a TRACKED generated file whose `--check` re-renders
+    # and exits non-zero on drift. Verified against a positive control per tool:
+    # injecting a line into the artifact it owns makes that tool exit 1, and
+    # `sdk_surface.py` additionally owns the tracked `config/sdk-surface.json`.
+    for tool in ("bridge_table", "mcp_rename_table", "sdk_surface"):
         assert f"tools/{tool}.py --check" in step["run"], (
             f"{tool} writes a TRACKED generated artifact and must be verified"
         )

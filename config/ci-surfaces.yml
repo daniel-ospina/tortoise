@@ -694,9 +694,11 @@ surfaces:
   # plus the GENERATED `config/sdk-surface.json` and
   # `docs/product/sdk-surface-declaration.md`. Editing those selected NO surface, so the drift
   # gate never ran on precisely the PRs that can break it. `core` is the docs/default surface.
-  # NOTE: a docs-only change is in NON_PYTHON_PREFIXES, so editing the GENERATED declaration
-  # doc alone still selects NO surface and is UNGUARDED BY DESIGN (#4454), exactly as the
-  # sibling bridge-table registration documents for its own generated document.
+  # NOTE: a docs-only change is in NON_PYTHON_PREFIXES, so editing the GENERATED
+  # declaration doc alone still selects NO surface here. That direction is now
+  # closed by the required `docs` job, which runs `tools/sdk_surface.py --check`
+  # on every PR (#4454). This registration keeps its own direction: a PR that
+  # edits `tools/sdk_surface.py` itself must still select this surface.
   - test_sdk_surface.py
   - test_capture_cost_measurement.py
   - test_eval_reinjection_cap_resume.py
