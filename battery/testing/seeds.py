@@ -116,13 +116,19 @@ def purge_owned_namespace(namespace: str | Path, scenario_id: str) -> None:
         if getattr(proj, "_is_embedded", True):
             return  # construction stayed embedded (defensive) — no purge
         from battery.runner.setup import scenario_namespace
-        from tortoise.graph_delete_guard import safe_graph_delete
+        from tortoise.graph_delete_guard import graph_exists, safe_graph_delete
         # #2961: presence-gated + locked. The blind DETACH-then-GRAPH.DELETE
         # pair is the phantom-creating sequence that poisons the shared AOF;
         # safe_graph_delete re-checks presence inside the cross-process lock
         # and refuses when it cannot hold it.
-        safe_graph_delete(
-            proj.db, scenario_namespace(scenario_id), detach=True, drop=True)
+        name = scenario_namespace(scenario_id)
+        if not safe_graph_delete(proj.db, name, detach=True, drop=True) \
+                and graph_exists(proj.db, name):
+            # Review P2: a refusal must fail loud — the alternative is seeding
+            # a scenario into a namespace that still holds the previous run.
+            raise RuntimeError(
+                "purge_owned_namespace: the graph-delete guard refused to "
+                f"purge {name!r} — the cross-process lock is unavailable")
     finally:
         proj.close()
 

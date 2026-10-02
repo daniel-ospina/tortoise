@@ -465,13 +465,20 @@ def wipe(proj) -> None:
         # leak loudly.
         graphs = [getattr(proj, "_graph_name", "test")]
     for g in graphs:
-        try:  # noqa: SIM105
+        try:
             # #2961: presence-gated. A blind DETACH against a name a
             # concurrent session just dropped RE-CREATES it as an
             # AOF-invisible phantom; safe_graph_delete checks presence inside
             # the cross-process lock. detach-only (drop=False) — wipe() clears
             # contents, it does not drop the graph.
-            safe_graph_delete(proj.db, g, detach=True, drop=False)
+            # Review P2: wipe() is deliberately best-effort (it swallows
+            # errors) so a refusal must NOT raise — but it must not be SILENT
+            # either, or stale contents leak into the next test unnoticed.
+            if not safe_graph_delete(proj.db, g, detach=True, drop=False) \
+                    and graph_exists(proj.db, g):
+                logging.getLogger(__name__).warning(
+                    "wipe(): the graph-delete guard REFUSED to clear %r — the "
+                    "cross-process lock is unavailable; contents survive", g)
         except Exception:
             pass
 
@@ -1037,12 +1044,21 @@ def wipe_server(proj, scope: set[str] | None = None, drop: bool = False) -> None
         # just dropped RE-CREATES it as an AOF-invisible phantom, and the
         # GRAPH.DELETE below then poisons the shared append-only file.
         try:
-            safe_graph_delete(proj.db, g, detach=True, drop=False)
+            if safe_graph_delete(proj.db, g, detach=True, drop=False):
+                if drop:
+                    dropped.append(g)
+            elif graph_exists(proj.db, g):
+                # #2961 review P2: False is "already absent" (fine — nothing
+                # to detach) OR "the guard refused". A silent no-op here loses
+                # this test's isolation, and _wipe_or() would still advance
+                # the wiped cursor as if the wipe had happened. Collect it.
+                failures.append((g, RuntimeError(
+                    "graph-delete guard REFUSED to detach: the cross-process "
+                    "lock is unavailable")))
+            elif drop:
+                dropped.append(g)
         except Exception as e:  # P2-7: collect + re-raise, never pass silently
             failures.append((g, e))
-        else:
-            if drop:
-                dropped.append(g)
     if failures:
         raise RuntimeError(
             "wipe_server() failed on graph(s): " +
@@ -1057,7 +1073,13 @@ def wipe_server(proj, scope: set[str] | None = None, drop: bool = False) -> None
             # concurrent suite (last-suite-standing) or an earlier stale
             # sweep is a SUCCESS that transmits NO command — the poisoning
             # GRAPH.DELETE is never sent.
-            safe_graph_delete(proj.db, g, detach=False, drop=True)
+            if not safe_graph_delete(proj.db, g, detach=False, drop=True) \
+                    and graph_exists(proj.db, g):
+                # #2961 review P2: the delete did not happen and the graph is
+                # still there — a refusal, not an idempotent no-op.
+                failures.append((g, RuntimeError(
+                    "graph-delete guard REFUSED GRAPH.DELETE: the "
+                    "cross-process lock is unavailable")))
         except Exception as e:
             # Cycle-5 P2-3: only genuine command errors collect.
             failures.append((g, e))

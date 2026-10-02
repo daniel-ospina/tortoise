@@ -42,10 +42,10 @@ critical section (:func:`graph_delete_lock`) so a concurrent deleter cannot
 slip between the check and the drop. The sweeps that drop graphs route
 through it: ``tests/_embedded.py`` (``_sweep_legacy_strays``, ``wipe``,
 ``_drop_one_graph``, ``_sweep_team_strays``, ``wipe_server``),
-``battery/testing/seeds.py``'s ``purge_owned_namespace``, and the shared-server
-cleanups in ``tests/test_wipe_server.py``. Test-local ``finally:`` cleanups
-elsewhere still issue a blind DETACH; routing those is tracked on #2961 rather
-than asserted here.
+``battery/testing/seeds.py``'s ``purge_owned_namespace``, and the two routed
+shared-server cleanup sites in ``tests/test_wipe_server.py``. Other
+``finally:`` cleanups in this tree still issue ``DETACH``/``GRAPH.DELETE``
+directly; routing those is tracked on #2961 rather than asserted here.
 
 The lock degrades **closed**. When a client that exposes a raw connection
 cannot take it (the server is unreachable, the command is rejected, or

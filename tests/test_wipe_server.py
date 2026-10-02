@@ -459,6 +459,33 @@ def test_wipe_server_failure_is_collected(server_proj, monkeypatch):
         wipe_server(server_proj, scope={"test_ws_wipe_target"})
 
 
+def test_wipe_server_refusal_is_collected():
+    """#2961 review P2: a lock refusal must fail loud, never no-op.
+
+    ``safe_graph_delete`` returns False for BOTH "already absent" (fine —
+    nothing to detach) and "the guard refused because it could not take the
+    cross-process lock" (the wipe did NOT happen). A silent no-op here loses
+    the test's isolation, and ``_wipe_or`` still advances the wiped cursor as
+    if the wipe had happened. Reachable shape: a server at ``maxmemory`` with
+    ``noeviction`` rejects SET (OOM) while GRAPH.LIST still succeeds.
+    """
+
+    class _OOMConn:
+        def execute_command(self, *a, **k):
+            if a and a[0] == "SET":
+                raise RuntimeError(
+                    "OOM command not allowed when used memory > 'maxmemory'")
+            return None
+
+    db = _FakeDb(graphs=["test_ws_refused"])
+    db.connection = _OOMConn()
+    proj = _FakeProj(db=db)
+    with pytest.raises(RuntimeError, match="REFUSED"):
+        wipe_server(proj, scope={"test_ws_refused"})
+    assert db.detached == [], "a refused sweep must transmit no DETACH"
+    assert db.deleted == [], "a refused sweep must transmit no GRAPH.DELETE"
+
+
 def test_drop_delete_uses_command_vector(monkeypatch):
     # Cycle-6 P1-0 (FM-2): the drop loop must invoke GRAPH.DELETE as a
     # COMMAND, never as a Cypher query. The vendored client's Graph.query()
