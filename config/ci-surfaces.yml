@@ -88,6 +88,14 @@ surfaces:
   # the same reason: the file it guards is tortoise/hosted_api.py, which
   # selects the `api` surface.
   - test_graph_write_loop_responsiveness.py
+  # #3892 (B6): the read-path status contract. Dual-registered with `core` for
+  # the same reason as the three guards above: one half of the suite pins the
+  # `status` field on the shipped GET /v1/search response, and the file that
+  # serves it is tortoise/hosted_api.py, which selects the `api` surface. A PR
+  # that dropped the field from that route alone would otherwise never run the
+  # guard written for it. The `core` half is the primary arm — it pins
+  # tortoise/read_status.py (no SOURCE_PATTERN) and tortoise/sdk.py.
+  - test_read_status.py
   - test_hosted_aboutobject_journal_4240.py
   # #3718 (read half): the REST graph-READ handlers must not run synchronous
   # FalkorDB I/O on the event loop. Same dual registration as the three guards
@@ -643,6 +651,7 @@ surfaces:
   - test_4542_retract_fold_decay.py
   - test_4716_capture_operator_ref_remap.py
   - test_6131_operator_mutation_vocabulary.py
+  - test_comove_dispatch_3627.py
   # #4971: the `(op_type, src, dst)` idempotency guard hoisted into
   # `commit_ops.apply_payload_operators` — the helper is core engine code, and
   # the re-key regression drives the real embedded capture commit, so this is
@@ -687,6 +696,11 @@ surfaces:
   # test_queue_window_observe.py.
   - test_queue_conflict_census.py
   - test_registry_integrity.py
+  # NOTE (rebase): this PR also registered `test_pack_extraction_slots_v31.py`
+  # here. main has since registered it in `core` (see the `test_pack_cli.py`
+  # block) with its #1026/#5647 comment, so the PR's bare entry is dropped —
+  # keeping both would be a same-surface DUPLICATE, which `--integrity`
+  # reports (`duplicate_entries`, #2913) and which `merge=union` can emit.
   - test_rotate_key.py
   # #3981: dual-registered with `api` (the arm that fires on a tortoise/hosted_api.py-only
   # change); this `core` entry is the fallback arm, since core is only added when nothing
@@ -1347,6 +1361,7 @@ surfaces:
   - test_slack_connector.py
   - test_sparse.py
   - test_status_projection.py
+  - test_read_status.py  # #3892 (B6): the read-path status contract — the recorded four terms on search/recall (tortoise/read_status.py + tortoise/sdk.py; dual-registered with `api` for the hosted /v1/search field)
   - test_stop_writes.py
   - test_structural_leg_r4.py
   - test_subjectadded_journal.py        # #2295 SubjectAdded journaling (docker lane)
@@ -1729,6 +1744,7 @@ surfaces:
   - test_postmerge_dedup.py
   - test_product_rerank.py  # #2976: ask-lane (eval-only) rerank seam — tri-state gate, budget guard, one-impl de-fork guard (hermetic)
   - test_ci_timing.py
+  - test_ci_manifest.py  # #5050: the measured durations map validator (READ-ONLY; `ci_timing.py --refresh-durations` is the sole writer)
   - test_ids.py
   - test_sdk_now_iso_single_definition.py   # #5375: sdk.py must declare exactly one module-level `_now_iso` (hermetic — ast.parse + the bound global)
   - test_validity_window_contract_5374.py   # #5374: the shared `commit_schema.validate_validity_window` contract + read-path (`_covers`) agreement (docker-lane)
@@ -1817,6 +1833,7 @@ surfaces:
   - longmem_eval/test_context_assembly_leakage.py  # #3011: gold-leakage hard stop — static reference assertion + gold-field perturbation (hermetic)
   - longmem_eval/test_ep_activation.py  # #3011/#2598: EP activation — promote drafts, run EP, never fabricate a 0.5 (hermetic)
   - longmem_eval/test_gold_evidence_claims.py  # #3011 §9.5: gold-evidence claim artifact builder — frozen tokenizer, MIN_GOLD_TOKENS, non-emptiness (hermetic)
+  - longmem_eval/test_ingest_stall_guard.py  # #2969: bounded graph socket read (socket_timeout env knobs) + ingest heartbeat/no-progress budget → retryable `ingest:retries_exhausted` (hermetic: fake hung/pong TCP servers + injected clock)
   - eval/write_path/test_write_path_corpus.py
   - eval/write_path/test_write_path_grading.py
   - eval/write_path/test_write_path_runner.py
@@ -2124,6 +2141,14 @@ durations:
 # and is not a measurement).
   test_fly_secret_drift.py: 8.5
   test_embedded_evidence.py: 17.2
+  # #3892 (B6): new file in this pool — it has no CI junit measurement yet (a file that
+  # never ran cannot appear in an artifact), so it takes the flat 2.0s default under the
+  # #3400 policy above, same as `test_embedded_evidence.py` (#3827) and the #4221 group.
+  # Required, not cosmetic: main sits exactly on the 90% coverage floor (541/601 = 90.02%),
+  # so this file entering the pool without a weight would drop it to 541/602 = 89.87% and
+  # red `test_duration_coverage_guard_boundary_and_realistic` (the #4348 one-file trap).
+  # Refresh from the first post-merge main run that includes it.
+  test_read_status.py: 2.0
   test_shared_state_concurrency.py: 0.2
   test_shared_state_events.py: 0.2
   test_shared_state_events_claim.py: 0.1
@@ -2521,6 +2546,17 @@ durations:
   eval/harness/test_harness_corpus.py: 0.1
   eval/write_path/test_write_path_grading.py: 0.1
   longmem_eval/test_context_assembly_arms.py: 0.2
+  # #2969: new file in this pool, never sampled by a CI run, so it takes the
+  # flat 2.0s default under the #3400/#4221 convention (a local timing is not
+  # the input). The "second reason" this entry was originally justified by —
+  # that omitting it dropped the fast pool to 541/602 (89.87%) and so failed
+  # the `manifest-integrity` gate — is NO LONGER TRUE, measured 2026-10-02:
+  # the pool has grown well past the 90% `DURATION_COVERAGE_MIN` floor, and
+  # removing this entry leaves `ci_selection.py --integrity` at exit 0 with
+  # `duration_coverage_issues()` empty. The entry stays because it is the
+  # file's declared cost, not because the gate requires it. Refresh from the
+  # first post-merge main run.
+  longmem_eval/test_ingest_stall_guard.py: 2.0
   longmem_eval/test_gold_evidence_claims.py: 0.1
   mini_beir/test_mini_beir.py: 0.1
   test_3926_error_prop_guard.py: 0.3
@@ -2615,6 +2651,7 @@ durations:
   test_crash_recovery_e2e.py: 0.1
   test_crypto.py: 0.1
   test_dataset_audit.py: 0.1
+  test_comove_dispatch_3627.py: 1.5
   test_deploy_workflow.py: 0.4
   test_deployment.py: 0.1
   test_embedder_probe.py: 0.1
