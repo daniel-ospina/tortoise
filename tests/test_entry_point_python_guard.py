@@ -350,7 +350,15 @@ def _floor_in_test(node: ast.If) -> tuple[int, int] | None:
 
 
 def _raise_message(node: ast.Raise) -> ast.expr | None:
-    """The argument of a `raise SystemExit(<one arg>)`, else None."""
+    """The MESSAGE argument of a `raise SystemExit(<one message>)`, else None.
+
+    An int argument is an exit CODE, not a message: `SystemExit(3)` carries no
+    text, so a guard that raised only a code would tell the operator nothing
+    about the floor, the interpreter they got, or the invocation that works —
+    the unattributed failure #5128 was filed for. Only a string-yielding
+    expression counts (an f-string is a `JoinedStr`, not a `Constant`); a bare
+    name is accepted because it cannot be resolved statically.
+    """
     exc = node.exc
     if not (
         isinstance(exc, ast.Call)
@@ -360,7 +368,10 @@ def _raise_message(node: ast.Raise) -> ast.expr | None:
         and not exc.keywords
     ):
         return None
-    return exc.args[0]
+    message = exc.args[0]
+    if isinstance(message, ast.Constant) and not isinstance(message.value, str):
+        return None
+    return message
 
 
 def _system_exit_message(node: ast.If) -> ast.expr | None:
@@ -634,6 +645,23 @@ def test_detector_rejects_a_print_with_no_message():
         "import sys\n"
         "if sys.version_info < (3, 12):  # noqa: UP036\n"
         "    print(file=sys.stderr)\n"
+        "    raise SystemExit(3)\n"
+    )
+    assert _system_exit_message(body[1]) is None
+
+
+def test_detector_rejects_a_bare_exit_code_as_the_refusal():
+    """`raise SystemExit(3)` alone is an exit CODE, not an attributable refusal.
+
+    The single-statement shape must carry a MESSAGE. `SystemExit(<int>)`
+    carries none, so a guard raising only the code tells the operator nothing
+    about the floor, the interpreter they got, or the invocation that works —
+    the unattributed failure #5128 exists to prevent. The behavioural test also
+    catches this case, but the structural detector must not accept it either.
+    """
+    body = _body_of(
+        "import sys\n"
+        "if sys.version_info < (3, 12):  # noqa: UP036\n"
         "    raise SystemExit(3)\n"
     )
     assert _system_exit_message(body[1]) is None
