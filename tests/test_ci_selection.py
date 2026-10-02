@@ -1700,8 +1700,8 @@ def test_a_shard_merely_slow_under_load_still_fits_its_budget():
     event this budget exists to bound, and it is not what this assertion is
     about. For the record, the kills in that window and the day after were at
     ~2.11x (legs SIGKILLed at the 15m floor with 0 failures), and the SAME shards
-    had run 0.9x-1.2x on an earlier attempt — a nondeterministic wedge beyond
-    this distribution, not a tail of it. So this bounds the SUCCESSFUL
+    ran 0.9x-1.2x on another attempt of that run — a nondeterministic wedge
+    beyond this distribution, not a tail of it. So this bounds the SUCCESSFUL
     distribution; it does NOT claim the budget survives every loaded leg, and
     #6145 carries that half. The value
     that must survive is the MAX (the median is what a healthy shard costs).

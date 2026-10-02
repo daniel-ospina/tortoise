@@ -1408,9 +1408,14 @@ def shard_watchdog_minutes(est_seconds: float) -> int:
     Correctness, not tuning: the watchdog is per-leg, so inheriting the old
     55m lets a hung ~7-minute shard hold the REQUIRED aggregate red for 55
     minutes. `WATCHDOG_HEADROOM` is the factor the old 55m budget already
-    validated (55m for a ~30m shard), the floor keeps a small shard above the
-    #6133 floor (the largest single file), and the ceiling keeps the validated
-    budget if S is lowered again.
+    validated (55m for a ~30m shard), and the floor keeps a small shard above the
+    #6133 floor (the largest single file).
+
+    ⛔ The CEILING does NOT "keep the validated budget" (#6145): it deliberately
+    stays 55m so the worst-case leg fits the job's outer `timeout-minutes`, and a
+    clamp that drops the budget below `WATCHDOG_HEADROOM` is an integrity FAILURE
+    (`watchdog_headroom_issues`), not a retained one. The remedy is a deliberate
+    ceiling raise or a re-split — see the OVERRIDES record on #6145.
     """
     try:
         minutes = float(est_seconds) / 60.0
@@ -1460,15 +1465,25 @@ def watchdog_headroom_issues(manifest: dict) -> list[str]:
     rather than as a breach, and which the #6135 test above asserts without ever
     computing the margin.
 
-    ⛔ SCOPE — this is ONE direction, and it is not the direction the observed
-    kills came from. The test can only fire when the CEILING clamped, i.e. when
-    the estimate is OVERSTATED relative to the budget. An UNDERSTATED estimate
-    (a shard that runs far past its declared cost — the shape #6145 actually
-    measured, kills at ~2.11x) yields headroom >= 2.0 and passes here. So a
-    green `manifest-integrity` means "the emitted budgets are consistent with
-    their own factors", NOT "the watchdog sizing is sound". The floor direction
-    is intentionally not an issue: the floor binding is the normal, intended
-    case (it clears the #6133 single-file time), not a breach.
+    ⛔ SCOPE — ONE direction, and it is not the direction the observed kills came
+    from. The two axes are independent and only ONE is visible here:
+
+    - What the check sees: the DECLARED `est_seconds` and the emitted budget. It
+      fires IFF the ceiling clamped, i.e. iff the declared estimate is past the
+      ceiling's 2x reach (est > 27.5 min). A shard whose DECLARED estimate
+      exceeds that is flagged even when the estimate is perfectly accurate, and
+      one whose declared estimate stays within it passes even when the estimate
+      is far too low.
+    - What it cannot see: the ACTUAL runtime. The observed kills are the other
+      axis — a shard that ran ~2.11x its declared cost (the shape #6145
+      measured) — and a shard like that passes if its DECLARED value is in
+      range. So a green `manifest-integrity` means "the emitted budgets are
+      consistent with their own declared factors", NOT "the watchdog sizing is
+      sound", and this change covers neither the kills nor the runner-pool
+      capacity deficit behind them (#5215 / #6792).
+
+    The floor direction is intentionally not an issue: the floor binding is the
+    normal, intended case (it clears the #6133 single-file time), not a breach.
 
     Fail-closed and NAMED, so a shard that cannot fit its budget is flagged at
     SELECTION time instead of being killed at run time (#6145's sizing contract:
