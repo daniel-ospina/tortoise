@@ -480,6 +480,18 @@ ANALYTICS_OUTCOME_COUNT = Counter(
     "Analytics writes by terminal outcome (#3820)",
     ["outcome"],
 )
+# #4240 review F1: a configured JSONL rebuild journal whose append failed. The
+# append swallow is deliberate (the graph mutation stands, and raising would
+# fail a write that persisted), so this counter is what makes the failure
+# observable instead of a log line nothing watches: a journal that cannot
+# record makes the derived graph LIVE-ONLY, and the next `rebuild_all`
+# reconstructs only what the journal holds. The single writer is
+# `record_journal_write_failure` (called from `TortoiseSDK._emit_event`), so
+# the counter is never touched directly (the #501/#3677 house shape).
+JOURNAL_WRITE_FAILURE_COUNT = Counter(
+    "tortoise_journal_write_failures_total",
+    "JSONL rebuild-journal append failures on a configured journal (#4240)",
+)
 # #3498 item 1: event-loop LAG = how late each heartbeat tick actually fired
 # relative to its requested interval. The heartbeat (below) already proves the
 # loop is SCHEDULING; this histogram records HOW FAR off schedule it is, so a
@@ -627,6 +639,12 @@ def _utf8_safe(label: str) -> str:
     in a label adds physical lines to a ``splitlines()`` reader, and the
     ``*_bucket`` lines carry the same label).
 
+    For the SERIES this translation is the ONLY protection:
+    ``prometheus_client`` (0.26.0, measured) escapes exactly ONE control code
+    point — LF — and only in the exposition text, never in the stored key. CR,
+    TAB, NUL, CSI, U+2028 and U+2029 are all passed through RAW, so replacing
+    them here is what keeps both the stored key and the exposition clean.
+
     A label that cannot be UTF-8 encoded is repaired. ``generate_latest()``
     encodes label values, so ONE lone surrogate would make the whole
     ``/metrics`` endpoint raise for the process lifetime, blinding every alert
@@ -714,10 +732,13 @@ def egress_bytes_by_org() -> dict[str, int]:
     """In-process snapshot of ``EGRESS_BYTES`` keyed by org (#4491 indicator 3).
 
     The readable form of the metric, for a person or a test — no dashboard, no
-    UI, no new endpoint. ``/metrics`` carries the same figure as Prometheus
-    text (``sum by (org) (tortoise_egress_bytes_total)``); this is the direct
-    read, mirroring ``analytics_outcome_counts()``. Derived from ``collect()``
-    rather than a second tally, so the snapshot cannot drift from the metric.
+    UI, no new endpoint. The counter is registered with ``prometheus_client``, but
+    nothing scrapes it in production today: the hosted app serves no ``/metrics``
+    route (measured: 404) and ``serve_health`` is not a ``fly.toml`` process — the
+    same limit ``analytics_outcome_counts()`` states. This direct read is therefore
+    the only queryable form the dimension has, mirroring that function. Derived
+    from ``collect()`` rather than a second tally, so the snapshot cannot drift
+    from the metric.
 
     The ``""`` key is the unattributed share and ``EGRESS_OVERFLOW`` the folded
     tail of the org/path caps; both are INCLUDED, so the snapshot always
@@ -760,6 +781,255 @@ def _reset_egress() -> None:
     EGRESS_RESPONSE_BYTES.clear()
 
 
+# ── #4490: HOSTED-API COMPUTE (machine time) per org — the request-time dimension ──
+#
+# #4490: Fly machine time is a flat shared cost with NO per-org driver. Nothing
+# recorded the server-side wall time or CPU time an org's traffic caused, and the
+# only request metrics (``REQUEST_COUNT``/``REQUEST_LATENCY`` above) have their
+# sole call site inside the monitoring server's own handler, so they measure the
+# health/monitoring HTTP server, not product traffic. This adds the missing
+# dimension: per-org wall seconds, CPU seconds and request count on the product
+# surface.
+#
+# SHAPE — constrained by the #5045 consolidation comment, which asks for each cost
+# dimension to be a DECLARED dimension of one metering substrate rather than "a
+# sixth separate counter": ONE writer (``record_compute``) owns the unit (seconds,
+# count), the attribution key (org) and the route class, so a dimension registry
+# can enumerate it later without a call-site sweep, and no caller touches a metric
+# object directly (the #501/#3677 house shape). No endpoint, no quota, no cap, no
+# price — this measures; it does not price.
+#
+# BOUNDED CARDINALITY: both labels are capped and everything past the cap folds
+# into ONE shared child (``__other__``). Without the cap, unknown traffic — or a
+# fleet of orgs — grows the Prometheus child set without bound, which is a
+# scrape-cost bug, not a measurement.
+#
+# THE PATH AXIS IS ENTIRELY CODE-LITERAL. The caller (``hosted_api``) passes a
+# FastAPI route TEMPLATE (``/v1/points/{pid}``) or the single constant
+# ``COMPUTE_UNROUTED``; NO substring of the request path is ever admitted as a
+# label. That is a STRICTER bound than the sibling egress dimension's two-axis
+# split (#5315): there is no request-derived axis here at all, so traffic can
+# never add a path child. The ``COMPUTE_MAX_PATHS`` cap is a safety net for route
+# growth, not an attacker-reachable budget.
+#
+# WHY ``_admit_bounded_label`` IS COMPUTE-BOUND, NOT GENERIC: it takes its registry
+# set and cap from the caller, but is hard-bound to ``_COMPUTE_LOCK``. The egress
+# twin ``_admit_egress_label`` (#5315) admits under ``_EGRESS_LOCK`` and has no
+# folded-label short-circuit, so the two are NOT drop-in equivalents.
+COMPUTE_MAX_ORGS = 512
+#: Code-literal route labels. The live app carries ~130 templates, so 512 is
+#: headroom for new routes rather than a tight fit. NOT traffic-reachable.
+COMPUTE_MAX_PATHS = 512
+COMPUTE_OVERFLOW = "__other__"
+#: The one label for a request that matched no route. Deliberately NOT a path (a
+#: path always starts with ``/``), so a client cannot request a value that
+#: collides with this child and make routine folding indistinguishable from a
+#: real route class.
+COMPUTE_UNROUTED = "__unrouted__"
+# PAIR SPACE: the two caps multiply — the emitted children are
+# ``labels(org=…, path=…)``, so the worst case is ``COMPUTE_MAX_ORGS`` x
+# (declared paths + ``COMPUTE_MAX_PATHS`` + 2 sentinels) children per counter. The
+# ORG axis is generously sized because org attribution IS the measurement #4490
+# asks for, and it is NOT traffic-reachable: every unauthenticated request shares
+# the ``""`` child, and a new org label costs a real, auth-resolved org id. The
+# PATH axis is code-literal, so its real cardinality is the app's route table
+# (measured: 135 routes / 121 distinct paths), not the 512 safety cap. Stated so
+# the bound is the PAIR, not either axis alone.
+
+#: Request count per org and route class — the denominator for wall/CPU seconds.
+COMPUTE_REQUESTS = Counter(
+    "tortoise_compute_requests",
+    "Hosted-API requests by org and route class (#4490)",
+    ["org", "path"],
+)
+#: Server-side wall seconds occupied by an org's requests, by route class. A
+#: Counter of seconds (not a Histogram) so the ORG axis and the bucket axis never
+#: multiply: the per-org figure is ``wall_seconds_total / requests_total``, and
+#: the org-free histogram below carries the distribution.
+COMPUTE_WALL_SECONDS = Counter(
+    "tortoise_compute_wall_seconds",
+    "Server-side wall seconds per request, by org and route class (#4490)",
+    ["org", "path"],
+)
+#: Server-side CPU seconds, by org and route class. Read via ``time.thread_time``
+#: at the middleware (see ``hosted_api.ComputeAttributionMiddleware``): exact when
+#: a request runs alone, an UPPER bound under async concurrency (co-scheduled
+#: requests share the loop thread's CPU for the same window), and a LOWER bound
+#: where work is offloaded to a thread pool (invisible to this layer). A cost
+#: signal, not a billing harness.
+COMPUTE_CPU_SECONDS = Counter(
+    "tortoise_compute_cpu_seconds",
+    "Server-side CPU seconds per request, by org and route class (#4490)",
+    ["org", "path"],
+)
+#: The request-duration DISTRIBUTION by route class ONLY — no org label, so the
+#: org axis and the bucket axis never multiply (mirrors the sibling egress
+#: dimension's org-free histogram). Explicit buckets past the default 10 s tail:
+#: the hosted surface carries multi-second handlers and the transport wait bound
+#: is on that order, so the interesting tail must not collapse into ``+Inf``.
+COMPUTE_REQUEST_SECONDS = Histogram(
+    "tortoise_compute_request_seconds",
+    "Server-side wall seconds distribution by route class (#4490)",
+    ["path"],
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 30.0),
+)
+
+#: Labels admitted so far, per axis. Membership IS the cap registry, so a warm
+#: label costs one set lookup with NO lock (the hot path); the lock is taken only
+#: while ADMITTING a new label.
+_COMPUTE_ORGS: set[str] = set()
+_COMPUTE_PATHS: set[str] = set()
+_COMPUTE_LOCK = threading.Lock()
+
+# NO ``_compute_safe_label`` / ``_COMPUTE_LABEL_TRANSLATE`` HERE: the compute
+# dimension reuses the shared ``_utf8_safe`` label sanitizer above (#5420). A
+# private copy was added while the sibling egress lane (#5315) was believed
+# unmerged; that lane merged (merge ``a830abe2``) and the two bodies were
+# identical apart from the table reference (measured: the two translate tables
+# compare EQUAL, 67 keys each), so the copy was pure duplication of a
+# security-relevant filter — the class that drifts on a one-sided edit.
+
+
+def _admit_bounded_label(label: str, seen: set[str], cap: int,
+                        overflow: str = COMPUTE_OVERFLOW) -> str:
+    """Admit ``label`` as a metric child, folding past ``cap`` into overflow.
+
+    The bounded-admission form for the COMPUTE dimension (#4490), hard-bound to
+    ``_COMPUTE_LOCK`` — NOT the shared helper its name suggests: the egress twin
+    (``_admit_egress_label``) admits under ``_EGRESS_LOCK`` and has no
+    folded-label short-circuit. Additive by construction: an already-admitted
+    label never locks (and never changes); a new label past the cap becomes
+    ``overflow`` so the metric stays bounded rather
+    than raising or dropping the whole record. Admission is first-come and an
+    admitted label is never evicted — eviction either drops accumulated cost or
+    grows the child set without bound, and choosing between those is the metering
+    substrate's decision (#5045), not this counter's.
+    """
+    if label in seen:
+        return label
+    # A label that was ALREADY FOLDED must never take the lock again: the folded
+    # branch inserts only ``overflow``, never the label, so without this
+    # short-circuit every request carrying a non-admitted label would acquire the
+    # module-global lock on every request for the process lifetime — the exact
+    # thing the "an already-admitted label never locks" contract promises away.
+    # The test is the LOCKED branch's OWN condition (``len(seen) >= cap``), never
+    # ``overflow in seen``: a legitimate label that happens to EQUAL the sentinel
+    # (an org literally named ``__other__``, which no validated creation path
+    # produces but no CHECK forbids) would otherwise be read as "the cap was
+    # reached" and silently fold every later org — a worse outcome than the
+    # pre-short-circuit code, which merged only that org's own series.
+    if len(seen) >= cap:
+        return overflow
+    with _COMPUTE_LOCK:
+        if label in seen:
+            return label
+        if len(seen) >= cap:
+            seen.add(overflow)
+            return overflow
+        seen.add(label)
+        return label
+
+
+def record_compute(org: str | None, path: str,
+                   wall_s: float, cpu_s: float = 0.0) -> None:
+    """Record one hosted request's server-side compute for ``org`` on ``path``.
+
+    THE single writer for the compute dimension (#4490): the caller
+    (``hosted_api.ComputeAttributionMiddleware``) supplies what it measured — the
+    org, the route class (a code literal), the wall seconds and the CPU seconds —
+    and never touches a metric object, so the unit and the attribution key stay in
+    one place.
+
+    ``org`` may be ``None``/empty: a request that never resolved an org (an
+    unauthenticated 401, a health probe, a session-JWT or MCP call whose org this
+    ASGI layer cannot see) is attributed to the empty label — an honest
+    "unattributed" child rather than an invented org id.
+
+    ``wall_s``/``cpu_s`` are clamped at 0: a negative duration is impossible data,
+    and a negative increment would corrupt a monotonic counter.
+    """
+    org_label = _admit_bounded_label(
+        _utf8_safe(org or ""), _COMPUTE_ORGS, COMPUTE_MAX_ORGS)
+    path_label = _admit_bounded_label(
+        _utf8_safe(path or COMPUTE_UNROUTED), _COMPUTE_PATHS,
+        COMPUTE_MAX_PATHS)
+    wall = max(0.0, float(wall_s))
+    cpu = max(0.0, float(cpu_s))
+    COMPUTE_REQUESTS.labels(org=org_label, path=path_label).inc()
+    COMPUTE_WALL_SECONDS.labels(org=org_label, path=path_label).inc(wall)
+    COMPUTE_CPU_SECONDS.labels(org=org_label, path=path_label).inc(cpu)
+    COMPUTE_REQUEST_SECONDS.labels(path=path_label).observe(wall)
+
+
+def _sum_compute_by_org(metric) -> dict[str, float]:
+    """Sum one org-labelled compute counter's samples, keyed by org.
+
+    Derived from ``collect()`` rather than a second tally, so a snapshot cannot
+    drift from the metric. The ``_created`` series is skipped so a creation
+    TIMESTAMP can never be summed as a duration/count.
+    """
+    totals: dict[str, float] = {}
+    for family in metric.collect():
+        for sample in family.samples:
+            if (not sample.name.endswith("_total")
+                    or sample.name.endswith("_created_total")):
+                continue
+            org = sample.labels.get("org")
+            if org is None:
+                continue
+            totals[org] = totals.get(org, 0.0) + float(sample.value)
+    return totals
+
+
+def compute_by_org() -> dict[str, dict[str, float]]:
+    """In-process snapshot of the compute dimension keyed by org (#4490 indicator 3).
+
+    The readable form of the metric, for a person or a test — no dashboard, no UI.
+    The counters are registered with ``prometheus_client``, but nothing scrapes
+    them in production today: the hosted app serves no ``/metrics`` route
+    (measured: 404), and ``serve_health`` is not a ``fly.toml`` process — the same
+    limit ``analytics_outcome_counts()`` states (#3820's audit). This direct read
+    is therefore the only queryable form the dimension has; a scrape surface is
+    deferred with that audit, not implied here. The ``""`` key is the unattributed
+    share and ``__other__`` the folded tail of the org cap; both are INCLUDED, so
+    the snapshot always reconciles to the whole measurement.
+    """
+    requests = _sum_compute_by_org(COMPUTE_REQUESTS)
+    wall = _sum_compute_by_org(COMPUTE_WALL_SECONDS)
+    cpu = _sum_compute_by_org(COMPUTE_CPU_SECONDS)
+    return {
+        org: {
+            "requests": requests.get(org, 0.0),
+            "wall_seconds": wall.get(org, 0.0),
+            "cpu_seconds": cpu.get(org, 0.0),
+        }
+        for org in sorted(set(requests) | set(wall) | set(cpu))
+    }
+
+
+def _reset_compute() -> None:
+    """Test seam: forget every admitted label and this process's series.
+
+    Clears the cap registries as well as the children — leaving the registries
+    behind would make a following test see labels "already admitted" that no
+    longer exist in the metric, which is exactly the drift the cap must not have.
+
+    Scope of the guarantee: the clears are atomic with respect to ADMISSION (they
+    hold ``_COMPUTE_LOCK``), NOT with respect to recording —
+    ``record_compute``'s ``.labels(...).inc()`` runs after admission, outside the
+    lock, so a thread interleaving between admission and ``.inc()`` can recreate a
+    child. This is a test seam, not a production path; the promise is limited to
+    what the lock covers.
+    """
+    with _COMPUTE_LOCK:
+        _COMPUTE_ORGS.clear()
+        _COMPUTE_PATHS.clear()
+        COMPUTE_REQUESTS.clear()
+        COMPUTE_WALL_SECONDS.clear()
+        COMPUTE_CPU_SECONDS.clear()
+        COMPUTE_REQUEST_SECONDS.clear()
+
+
 def register(sdk) -> None:
     """Wire SDK so /health can check FalkorDB connectivity + graph size."""
     global _sdk
@@ -773,6 +1043,26 @@ def record_ingest() -> None:
 
 def record_error() -> None:
     ERROR_COUNT.inc()
+
+
+def record_journal_write_failure() -> None:
+    """Count one failed append to a CONFIGURED rebuild journal (#4240).
+
+    Called by ``TortoiseSDK._emit_event`` when ``log.append`` raises. The append
+    is fail-soft on purpose (the graph mutation already succeeded), so this is
+    the observable degradation signal: the record is absent from the journal and
+    a later rebuild cannot restore it.
+    """
+    JOURNAL_WRITE_FAILURE_COUNT.inc()
+
+
+def journal_write_failure_count() -> int:
+    """In-process snapshot of ``JOURNAL_WRITE_FAILURE_COUNT`` (#4240).
+
+    ``/metrics`` carries the Prometheus text form; this is the readable form,
+    used by ``metrics()`` and by tests (mirrors ``analytics_outcome_counts``).
+    """
+    return _counter_val(JOURNAL_WRITE_FAILURE_COUNT)
 
 
 def record_cost(team: str, cents: int) -> None:
@@ -1199,8 +1489,60 @@ def graph_offload_timeout_s() -> float:
 #: per-request deadline.
 CONTROL_PLANE_OFFLOAD_TIMEOUT_S = 10.0
 
-#: Bounded per-call ``(op, duration_s)`` record for the offload seam.
-_CP_OFFLOAD_RECORDS: deque[tuple[str, float]] = deque(maxlen=512)
+#: #5840: the CLOSED terminal-state vocabulary of an offload. The single writer
+#: (``record_control_plane_offload``) is the only producer, so the metric's
+#: child set is bounded by this tuple — the #501/#3677 house shape (one writer
+#: owns the label vocabulary; no caller touches a metric object directly).
+CONTROL_PLANE_OFFLOAD_OUTCOMES = (
+    "completed",           # the callable returned
+    "bound_miss_refused",  # the bound fired and the callable will never run
+    "bound_miss_running",  # the bound abandoned the AWAIT; the callable still runs
+    "domain_error",        # fn failed, or the seam itself failed (catch-all)
+                           # — not a saturation event. The two are NOT
+                           # separately labelled: `future.exception() is exc`
+                           # does attribute the common path, but it is not
+                           # RELIABLY separable — on the bare-`raise` path a
+                           # concurrently-completing fn TimeoutError is not
+                           # distinguishable from the bound's — and a
+                           # mostly-right `internal_error` child that mislabels
+                           # is worse than one documented catch-all. Residual.
+    "cancelled",           # the AWAITING task was cancelled
+)
+
+#: Bounded per-call ``(op, duration_s, outcome, pool)`` record for the offload
+#: seam. #5840: the outcome and the pool are part of the record because a
+#: SUCCESS-ONLY record made a bound miss — a genuine telemetry DROP — and a
+#: saturated pool indistinguishable from "nothing happened": the #3677 loss
+#: class reachable through the observability channel.
+_CP_OFFLOAD_RECORDS: deque[tuple[str, float, str, str]] = deque(maxlen=512)
+
+# ── #5840: offload saturation becomes MEASURABLE ──────────────────────────
+#
+# #4462 could not be decided because its precondition — "the pool's real
+# saturation rate, and the 10s bound's contribution to request latency under
+# load" — had no data source: ``control_plane_offload_records()`` was read
+# nowhere outside tests, and it recorded only SUCCESSES, so the events in
+# question (backlog refusals, missed wait bounds) left no trace at all.
+#
+# THE TWO QUESTIONS NEED DIFFERENT SHAPES. The COUNTER answers "is the pool
+# saturated" (rate by pool+outcome). The HISTOGRAM answers "how much latency
+# does the bound contribute" (duration by pool+outcome), with the bound itself
+# as a bucket edge so a bound miss is a visible pile-up at the last edge.
+#
+# DEFINED HERE rather than with the counters above because the bucket set needs
+# ``CONTROL_PLANE_OFFLOAD_TIMEOUT_S``, defined just above.
+CONTROL_PLANE_OFFLOAD_COUNT = Counter(
+    "tortoise_control_plane_offload_total",
+    "Control-plane offloads by pool and terminal outcome (#5840)",
+    ["pool", "outcome"],
+)
+CONTROL_PLANE_OFFLOAD_LATENCY = Histogram(
+    "tortoise_control_plane_offload_seconds",
+    "Control-plane offload duration by pool and outcome (#5840)",
+    ["pool", "outcome"],
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
+             CONTROL_PLANE_OFFLOAD_TIMEOUT_S, 30.0),
+)
 #: Bounded per-call ``(duration_s, thread_name)`` record for the CONTROL-PLANE
 #: CLIENT itself (#3498 item 2 — the falsifier). Recorded at the httpx choke
 #: point in ``supabase_control.SupabaseControlPlane``, so a call that ran on
@@ -1270,14 +1612,47 @@ def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
     raise ValueError(f"unknown control-plane pool {pool!r}")
 
 
-def record_control_plane_offload(op: str, duration_s: float) -> None:
-    """Record ONE offloaded control-plane resolution ``(op, duration)``."""
+def record_control_plane_offload(
+    op: str, duration_s: float, *, outcome: str, pool: str
+) -> None:
+    """Record ONE offload's TERMINAL state — the single writer (#5840).
+
+    Called on EVERY terminal path, not only success. ``bound_miss_refused``
+    and ``bound_miss_running`` ARE the saturation events, and recording only
+    ``completed`` is precisely what made them unobservable.
+
+    ``outcome`` is clamped to ``CONTROL_PLANE_OFFLOAD_OUTCOMES`` so a future
+    caller cannot grow the metric's child set without bound (the doctrine at
+    the metric definitions above).
+    """
+    if outcome not in CONTROL_PLANE_OFFLOAD_OUTCOMES:
+        # NOT silent. A caller-side typo (`"complete"` for `"completed"`) would
+        # otherwise land in an unremarkable `unknown` child, and a BROKEN
+        # measurement would read as a clean one — precisely the failure this
+        # metric exists to expose. A warning (not a raise) is required because
+        # this runs inside a `finally`: raising here would replace the caller's
+        # real exception with a bookkeeping error.
+        logger.warning(
+            "control-plane offload: unknown outcome %r clamped to 'unknown' "
+            "(op=%r pool=%r) — the metric will UNDER-COUNT this terminal state",
+            outcome, op, pool,
+        )
+        outcome = "unknown"
     with _CP_RECORDS_LOCK:
-        _CP_OFFLOAD_RECORDS.append((op, duration_s))
+        _CP_OFFLOAD_RECORDS.append((op, duration_s, outcome, pool))
+    CONTROL_PLANE_OFFLOAD_COUNT.labels(pool=pool, outcome=outcome).inc()
+    CONTROL_PLANE_OFFLOAD_LATENCY.labels(pool=pool, outcome=outcome).observe(
+        duration_s
+    )
 
 
-def control_plane_offload_records() -> list[tuple[str, float]]:
-    """Snapshot of the bounded offload records (oldest first)."""
+def control_plane_offload_records() -> list[tuple[str, float, str, str]]:
+    """Snapshot of the bounded offload records (oldest first).
+
+    Each entry is ``(op, duration_s, outcome, pool)``;
+    ``CONTROL_PLANE_OFFLOAD_OUTCOMES`` names every terminal state, so a
+    caller can tell a completed call from a saturated one.
+    """
     with _CP_RECORDS_LOCK:
         return list(_CP_OFFLOAD_RECORDS)
 
@@ -1363,36 +1738,52 @@ async def run_control_plane_call(fn, *, op: str,
     bound = CONTROL_PLANE_OFFLOAD_TIMEOUT_S if timeout is None else timeout
     future = control_plane_worker(pool).submit(fn)
     started = time.monotonic()
+    # #5840: exactly ONE record per terminal state, on EVERY path. ``outcome``
+    # is assigned before each exit and read by the ``finally``, so a future
+    # early return or raise cannot silently reopen the success-only hole this
+    # closes. The initial value is the catch-all for an unexpected failure.
+    outcome = "domain_error"
     try:
-        result = await _await_future(future, timeout=bound,
-                                     cancel_on_timeout=cancel_on_timeout)
-    except TimeoutError as exc:
-        # Distinguish the three sources of TimeoutError that meet here:
-        #   1. `fn` raised it              -> a domain error, propagate
-        #   2. the pool refused the submit -> `_WorkerBacklogFull`, fail closed
-        #   3. `wait_for`'s bound expired  -> fail closed
-        future_exc = (future.exception()
-                      if future.done() and not future.cancelled() else None)
-        if future_exc is not None and not isinstance(future_exc, _WorkerBacklogFull):
-            raise
-        reason = ("pool backlog full" if isinstance(future_exc, _WorkerBacklogFull)
-                  else f"exceeded its {bound}s bound")
-        if not future.done():
-            # The callable is still QUEUED or RUNNING: the bound abandoned the
-            # AWAIT, not the work. Attribute whatever it eventually does at the
-            # op level instead of leaving it to a bare asyncio warning (#4456).
-            future.add_done_callback(_log_abandoned_outcome(op))
-        # ``refused`` is the DELIVERY discriminator (#4456): True when the
-        # callable did not and will not run (backlog-full refusal, or a queued
-        # submission cancelled by the bound); False when a bound miss left it
-        # running (or, on a non-cancellable lane, still queued).
-        raise ControlPlaneOffloadError(
-            f"control-plane call {op!r} {reason}",
-            refused=(isinstance(future_exc, _WorkerBacklogFull)
-                     or future.cancelled()),
-        ) from exc
-    record_control_plane_offload(op, time.monotonic() - started)
-    return result
+        try:
+            result = await _await_future(future, timeout=bound,
+                                         cancel_on_timeout=cancel_on_timeout)
+        except TimeoutError as exc:
+            # Distinguish the three sources of TimeoutError that meet here:
+            #   1. `fn` raised it              -> a domain error, propagate
+            #   2. the pool refused the submit -> `_WorkerBacklogFull`, fail closed
+            #   3. `wait_for`'s bound expired  -> fail closed
+            future_exc = (future.exception()
+                          if future.done() and not future.cancelled() else None)
+            if future_exc is not None and not isinstance(future_exc, _WorkerBacklogFull):
+                raise
+            reason = ("pool backlog full" if isinstance(future_exc, _WorkerBacklogFull)
+                      else f"exceeded its {bound}s bound")
+            if not future.done():
+                # The callable is still QUEUED or RUNNING: the bound abandoned the
+                # AWAIT, not the work. Attribute whatever it eventually does at the
+                # op level instead of leaving it to a bare asyncio warning (#4456).
+                future.add_done_callback(_log_abandoned_outcome(op))
+            # ``refused`` is the DELIVERY discriminator (#4456): True when the
+            # callable did not and will not run (backlog-full refusal, or a queued
+            # submission cancelled by the bound); False when a bound miss left it
+            # running (or, on a non-cancellable lane, still queued).
+            refused = (isinstance(future_exc, _WorkerBacklogFull)
+                       or future.cancelled())
+            outcome = "bound_miss_refused" if refused else "bound_miss_running"
+            raise ControlPlaneOffloadError(
+                f"control-plane call {op!r} {reason}",
+                refused=refused,
+            ) from exc
+        outcome = "completed"
+        return result
+    except asyncio.CancelledError:
+        # The AWAITING task was cancelled — neither success nor a pool failure.
+        outcome = "cancelled"
+        raise
+    finally:
+        record_control_plane_offload(
+            op, time.monotonic() - started, outcome=outcome, pool=pool
+        )
 
 
 def _probe_once(sdk, timeout=None,
@@ -3179,6 +3570,10 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
         "graph_size_error": graph_size_error,
         "last_ingest": _last_ingest,
         "errors": _counter_val(ERROR_COUNT),
+        # #4240 review F1: a configured rebuild journal that cannot record is a
+        # real degradation (the derived graph becomes live-only), so it rides
+        # the health/metrics surface rather than a log line nothing watches.
+        "journal_write_failures": _counter_val(JOURNAL_WRITE_FAILURE_COUNT),
         "uptime": round(time.monotonic() - _start, 2),
     }
 

@@ -209,6 +209,15 @@ export SENTENCE_TRANSFORMERS_HOME="${SENTENCE_TRANSFORMERS_HOME:-/app/model}"
 # refuses to run without this set.
 export TORTOISE_INGEST_BASE_DIR="${TORTOISE_INGEST_BASE_DIR:-/data/ingest}"
 
+# #4240: the hosted lane's per-graph JSONL REBUILD journal. Off-box durability
+# is unchanged (docs/durability-posture.md — the JSONL is a domain event log,
+# never the durability mechanism); this makes the derived graph
+# `replay(journal)` so `rebuild_all` can reconstruct the capture instead of
+# silently losing its live-only aboutObject edges. /data is the persistent Fly
+# volume (fly.toml mounts), one file per graph under
+# {TORTOISE_EVENT_LOG_BASE_DIR}/{graph}/events.jsonl.
+export TORTOISE_EVENT_LOG_BASE_DIR="${TORTOISE_EVENT_LOG_BASE_DIR:-/data/events}"
+
 # Fast-fail if the pre-downloaded model cache is missing (code-review P3, #160)
 # — the build-time bake in Dockerfile.hosted is the ONLY source; a missing
 # cache means a broken image, not a retryable condition. #1349: the bake is
@@ -248,6 +257,30 @@ if [ "$_IS_SERVER" = "1" ]; then
     # at startup if the persistent volume is missing/unwritable). Only in
     # server mode — the release/guard invocations never mount /data.
     mkdir -p "$TORTOISE_INGEST_BASE_DIR"
+    # #4240: pre-create the journal base dir beside the ingest sandbox — it is
+    # on the same persistent volume and a missing/unwritable volume is a
+    # misconfigured machine, not a retryable condition. #4240 review F1: the
+    # check must be WRITABILITY, not creation — `mkdir -p` succeeds on a dir
+    # that already exists but is not writable. What this probe covers, stated
+    # exactly (F1 cycle 2 — the earlier comment overclaimed):
+    #   * a NON-ROOT mode-bit failure: the dir exists at mode 500 and the probe
+    #     write is refused for every uid that is not root;
+    #   * EROFS/ENOSPC on ANY uid, root included — root cannot bypass those.
+    # It does NOT cover a mode-bit failure when the process is root, and the
+    # image sets NO USER (Dockerfile.hosted), so on Fly the server is uid 0 and
+    # `: > .write-probe` SUCCEEDS on a mode-0500 dir. That residual is NOT
+    # silent, it is just not a boot-time signal: a failed append logs at ERROR,
+    # increments tortoise_journal_write_failures_total and is disclosed on the
+    # capture receipt (sdk.py::TortoiseSDK._emit_event). A per-record append
+    # failure is fail-soft by design (the graph mutation stands), so this boot
+    # probe is the only place a boot-time VOLUME misconfig can fail LOUD.
+    mkdir -p "$TORTOISE_EVENT_LOG_BASE_DIR"
+    if ! : > "$TORTOISE_EVENT_LOG_BASE_DIR/.write-probe" 2>/dev/null; then
+        echo "tortoise: FATAL — TORTOISE_EVENT_LOG_BASE_DIR is not writable: $TORTOISE_EVENT_LOG_BASE_DIR" >&2
+        echo "tortoise: the hosted lane's journal cannot record — its aboutObject edges would be live-only and a rebuild would lose them." >&2
+        exit 1
+    fi
+    rm -f "$TORTOISE_EVENT_LOG_BASE_DIR/.write-probe"
     echo "tortoise: uvicorn server — embedding pre-warm runs in-app (non-blocking, degraded-but-alive)"
 else
     echo "tortoise: skipping embedding pre-warm (non-server command: release check)"

@@ -24,6 +24,25 @@ The check's two arms are independent:
     revert, so it fails REGARDLESS of the commit count, and it reports the
     reverted paths and line counts.
 
+WHY THE PR HEAD IS MEASURED, NOT HEAD (#4396). On `pull_request`,
+`actions/checkout@v4` checks out the synthetic merge ref `refs/pull/N/merge`
+= merge(base, pr_head) — a commit that CONTAINS the base's tip as its first
+parent. `HEAD..base` is therefore ~0 however stale the PR's own base is, so
+the gate was blind precisely for the mergeable-but-stale PRs it exists to
+catch (measured: PR #4020 was reported `drift-guard pass` while 210 commits
+behind). When the checkout IS that merge ref, the ref whose drift matters is
+the PR head `HEAD^2`, and the gate measures that instead. `ahead` follows the
+same ref, so the report names what it measured (`measured`) and the human
+line says `(via HEAD^2, the PR head)`. Every other checkout still measures
+`HEAD` exactly as before.
+
+The checkout is identified by HEAD *being* the ref `actions/checkout` created
+for the merge ref (`refs/remotes/pull/N/merge`), not by the event ref alone
+and not by the 2-parent merge shape alone: `GITHUB_REF` reports the event
+only (an explicit `ref:` on a `pull_request` event leaves it at
+`refs/pull/N/merge` while HEAD is the named ref), and a local branch that
+merged a stale sibling has the identical commit graph.
+
 Honors `# noqa: drift-guard` inline annotations? No — this is a
 remote-state gate, not a file-content scan. It runs on CI for every PR and
 on demand via workflow_dispatch; local runs use the same code path.
@@ -45,11 +64,21 @@ Exit codes:
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/drift-guard.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/drift-guard.py`"
+    )
+
 import argparse
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 DEFAULT_MAX_BEHIND = 20
@@ -299,10 +328,59 @@ def main() -> int:
 
     base_sha = base_ok.stdout.strip()
 
+    # ── what to MEASURE: HEAD, or the PR head on a merge-ref checkout (#4396) ─
+    # On `pull_request`, actions/checkout@v4 checks out the synthetic merge ref
+    # `refs/pull/N/merge` = merge(base, pr_head) — a commit that CONTAINS the
+    # base's tip as `HEAD^1`. `HEAD..base` is therefore ~0 however stale the
+    # PR's own base is, so the gate was blind precisely for the
+    # mergeable-but-stale PRs it exists to catch. When HEAD is that merge
+    # commit, the ref whose drift matters is the PR head, `HEAD^2`; counting
+    # `HEAD^2..base` is equivalent to counting from merge-base(HEAD^2, base) on
+    # a normal branch and keeps the revision-expression shape of the branch
+    # path, so the two cannot diverge in meaning. `ahead` follows the same ref
+    # so the report is internally consistent — it names what it measured.
+    #
+    # EXACTLY 2 parents AND the checkout literally BEING the merge ref together
+    # are load-bearing. Neither the commit shape alone nor the EVENT alone is
+    # sufficient:
+    #   - `HEAD != base`, and `HEAD^1 == base`, each also match a LOCAL branch
+    #     (one that merged a stale sibling, and one BASED ON main that then
+    #     merged a stale sibling). Those have the same graph as a merge ref but
+    #     `HEAD^2` there is a sibling, not a head under test: measuring it turns
+    #     a true drift of 0 into a false red. The graph cannot tell them apart.
+    #   - `GITHUB_REF` alone does not identify the CHECKOUT. It reports the
+    #     event, and `actions/checkout` with an explicit `ref:` on a
+    #     `pull_request` event leaves `GITHUB_REF` at `refs/pull/N/merge` while
+    #     HEAD is the named ref.
+    # What identifies the checkout exactly is that HEAD IS the ref checkout
+    # created for the merge ref — the job log shows
+    # `git checkout --progress --force refs/remotes/pull/4020/merge`. So: the
+    # event supplies N, and HEAD must equal that ref. Plus the 2-parent sanity
+    # condition (so `HEAD^2` is the merged head, not a parent of an octopus).
+    # Anything else — including an explicit non-HEAD `--head` — falls back to
+    # `HEAD`, unchanged.
+    measured_head = args.head
+    if args.head == "HEAD":
+        parents = _git(root, "rev-list", "--parents", "-n1", "HEAD")
+        head_sha = _git(root, "rev-parse", "HEAD").stdout.strip()
+        event_ref = os.environ.get("GITHUB_REF", "")
+        if (event_ref.startswith("refs/pull/") and event_ref.endswith("/merge")
+                and parents.returncode == 0
+                and len(parents.stdout.split()) == 3):
+            # The remote-tracking ref actions/checkout creates for the merge
+            # ref: `refs/remotes/` + the event ref with its leading `refs/`
+            # stripped, i.e. `refs/remotes/pull/N/merge`.
+            ref_sha = _git(
+                root, "rev-parse", "--verify", "--quiet",
+                f"refs/remotes/{event_ref.removeprefix('refs/')}^{{commit}}",
+            ).stdout.strip()
+            if head_sha and ref_sha and head_sha == ref_sha:
+                measured_head = "HEAD^2"
+
     ahead = _git(root, "rev-list", "--count",
-                 f"{measured_base}..{args.head}").stdout.strip()
+                 f"{measured_base}..{measured_head}").stdout.strip()
     behind = _git(root, "rev-list", "--count",
-                  f"{args.head}..{measured_base}").stdout.strip()
+                  f"{measured_head}..{measured_base}").stdout.strip()
     try:
         ahead_n, behind_n = int(ahead), int(behind)
     except ValueError:  # pragma: no cover — git always prints ints
@@ -315,11 +393,11 @@ def main() -> int:
     # every path main moved since the common ancestor is present in head and
     # the revert set is provably empty. With `behind_n > 0` the arm MUST run —
     # an unreadable merge base is "could not measure", which is not a pass.
-    mb_proc = _git(root, "merge-base", measured_base, args.head)
+    mb_proc = _git(root, "merge-base", measured_base, measured_head)
     mb = mb_proc.stdout.strip()
     if behind_n > 0 and (mb_proc.returncode != 0 or not mb):
         detail = (mb_proc.stderr or "").strip().splitlines()
-        msg = (f"drift-guard: cannot find the merge base of '{args.head}' and "
+        msg = (f"drift-guard: cannot find the merge base of '{measured_head}' and "
                f"'{args.base}' while behind by {behind_n} — the silent-revert "
                f"arm cannot be measured, and an unmeasured arm is not a pass "
                f"({detail[0] if detail else 'no common ancestor'})")
@@ -328,7 +406,7 @@ def main() -> int:
                     [f"ERROR {msg}"], 2)
     if mb and behind_n > 0:
         try:
-            reverts = silent_reverts(root, mb, measured_base, args.head)
+            reverts = silent_reverts(root, mb, measured_base, measured_head)
         except MeasurementError as exc:
             msg = (f"drift-guard: the silent-revert arm could not be measured "
                    f"(merge-base {mb[:12]}): {exc}")
@@ -360,11 +438,19 @@ def main() -> int:
         "revert_files": len(reverts),
         "revert_lines": revert_lines,
     }
+    # Only the merge-ref path grows a field: a non-merge checkout's JSON must
+    # stay byte-for-byte what it was.
+    if measured_head != args.head:
+        report["measured"] = measured_head
+    # Empty on the non-merge path, so those text lines stay byte-for-byte
+    # unchanged there.
+    where = (f" (via {measured_head}, the PR head)"
+             if measured_head != args.head else "")
 
     if status == "ok":
         return emit(
             report,
-            [f"OK  {branch}: {behind_n} behind {base_label} "
+            [f"OK  {branch}: {behind_n} behind {base_label}{where} "
              f"(<= {max_behind}), {ahead_n} ahead (base {freshness}) — gate green"],
             0,
         )
@@ -372,7 +458,7 @@ def main() -> int:
     lines: list[str] = []
     if drifted:
         lines.append(
-            f"FAIL {branch}: {behind_n} behind {base_label} "
+            f"FAIL {branch}: {behind_n} behind {base_label}{where} "
             f"(> {max_behind} max) — branch drifted; fetch and reconcile onto "
             f"{args.base} before this lands (epic #1509 P3: every "
             f"real-backend E2E gates on 'worktree == origin/main')")
