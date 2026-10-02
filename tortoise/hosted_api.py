@@ -2514,7 +2514,9 @@ app.add_middleware(McpPathCanonicalizerMiddleware)
 #     `test_hosted_api.py::test_in_flight_gauge_is_wired_into_the_real_app`) —
 #     an accounting wrapper must not take that seat. Starlette's `add_middleware`
 #     INSERTS at index 0, so this registration is placed BEFORE
-#     `InFlightMiddleware`'s to land at index 2.
+#     `InFlightMiddleware`'s registration to land INSIDE both of them — a
+#     RELATIVE rule, never a fixed index: the compute wrapper (#4490) registers
+#     after this one and legitimately takes the index this comment used to name.
 #   * Sitting INSIDE the bound is what makes the count truthful, not merely
 #     polite: on a breach the bound ABANDONS the handler and DROPS its response
 #     (`_guarded_send`), so bytes that never left must not be credited to the
@@ -2773,6 +2775,168 @@ class EgressBytesMiddleware:
 
 
 app.add_middleware(EgressBytesMiddleware)
+
+
+# ── #4490: HOSTED-API COMPUTE (machine time) per org ─────────────────────
+#
+# #4490: Fly machine time is a flat shared cost with NO per-org driver. Nothing
+# recorded the server-side wall time or CPU time an org's traffic caused, and the
+# product's only request metrics have their sole call site inside the monitoring
+# server's own handler. This wrapper supplies the missing dimension for EVERY
+# route, REST and the mounted MCP app alike (a FastAPI mount is an ordinary
+# route, so this middleware sees it): a new endpoint cannot be born unmeasured and
+# no handler needs editing.
+#
+# WHERE IT SITS — inside `InFlightMiddleware` and `WaitBoundMiddleware`, NOT
+# outermost: `WaitBoundMiddleware` must stay outermost (#3834, pinned by
+# `test_transport_wait_bound.py::test_middleware_is_installed_outermost`) and the
+# in-flight gauge at index 1 is pinned by
+# `test_hosted_api.py::test_in_flight_gauge_is_wired_into_the_real_app`. Starlette's
+# `add_middleware` INSERTS at index 0, so registering here — after
+# `McpPathCanonicalizerMiddleware`, before `InFlightMiddleware` — places this
+# INSIDE both. (A relative rule, never a fixed index.)
+#
+# SITTING INSIDE THE BOUND IS WHAT MAKES THE FIGURE TRUTHFUL, not merely polite.
+# On a breach the bound ABANDONS (never cancels) the handler and DROPS its late
+# response; the work still happened. Being inside means this measures the work
+# the org actually caused, including a request whose response was dropped. That is
+# deliberately the OPPOSITE of the sibling egress dimension (#4491), which must
+# NOT credit bytes that never left: compute is the CPU that WAS burned, egress is
+# the bytes that were SENT.
+#
+# THE ORG COMES FROM `scope["state"]["org_id"]` — the SAME dict the auth
+# dependency writes into (already read at `WaitBoundMiddleware` below) — never a
+# client-supplied header or query param, so it cannot be spoofed. WHICH lanes
+# resolve one is a real limit, stated rather than implied: the API-KEY data-plane
+# lanes publish the org (`get_current_org`, `_get_current_org_supabase`); the
+# SESSION-JWT lane resolves one but deliberately does not publish it (publishing
+# would also change analytics — `AnalyticsMiddleware` reads it), and an MCP call's
+# org lives in a ContextVar this ASGI layer does not own. Those lanes are
+# attributed to `""` (honest unattributed), the same documented limit #5315
+# accepted. Cited by SYMBOL, not line number: the numbers this comment used to
+# carry had already gone stale by the PR's own +172 lines, and a reader checking
+# a wrong number reaches the opposite conclusion about the coverage it bounds.
+
+#: Mount prefixes the app serves through a ``Mount`` — CODE LITERALS, so a
+#: request under one is admitted on the code-literal axis rather than falling to
+#: ``__unrouted__``. Boundary-aware matching (not a bare prefix test), so
+#: ``/mcpfoo`` is NOT attributed to the real ``/mcp`` class.
+_COMPUTE_DECLARED_PREFIXES = ("/mcp",)
+#: Exact paths of the app's PLAIN Starlette routes — CODE LITERALS that FastAPI
+#: does not stamp onto the scope (``APIRoute.matches`` sets ``scope["route"]``,
+#: plain ``Route.matches`` does not), so they would otherwise be ``__unrouted__``.
+_COMPUTE_DECLARED_PATHS = ("/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc")
+
+
+# NO SECOND ``_route_describes`` HERE: this dimension reuses the definition above
+# (#5420). A duplicate ``def`` executes later in the module body and silently
+# becomes the live binding for BOTH dimensions, leaving the earlier one as dead
+# code that a future edit could change with no effect — the same defect class as
+# the duplicate ``_now_iso`` in ``tortoise/sdk.py`` (#5375). Pinned by
+# ``tests/test_compute_attribution.py::test_only_one_module_level_route_describes``.
+
+
+def _compute_route_class(scope, entry_path: str) -> str:
+    """The CODE-LITERAL route class a response is attributed to (#4490).
+
+    ``entry_path`` is ``starlette.routing.get_route_path(scope)`` taken BEFORE the
+    app runs — the request path minus ``root_path``, which is what a route's
+    ``path_regex`` is matched against. Reading ``scope["path"]`` instead would
+    break template matching under a server ``--root-path`` AND pick up a
+    ``Mount``'s prefix once the sub-app has run (``root_path`` is mutated as it
+    descends), collapsing the whole path dimension to ``__unrouted__``.
+
+    The label is ALWAYS a code literal (a matched route template, a declared
+    mount prefix, or a declared plain path) or the single constant
+    ``COMPUTE_UNROUTED``. NO substring of the request path is ever emitted, so
+    traffic can never add a path child — a stricter bound than the two-axis
+    request-derived split the sibling egress dimension needs.
+
+    A ``Mount`` is NEVER the serving template: its pattern is relative to the mount
+    and matches everything beneath it, so it would stand in for the whole
+    undeclared surface. The declared-prefix rule is the only route from a mount to
+    a label — enforced by the ``_routed_inside_a_mount`` guard below, so this does
+    not rest on the declared-prefix list being complete.
+    """
+    path = entry_path or ""
+    if path in _COMPUTE_DECLARED_PATHS:
+        return path
+    for prefix in _COMPUTE_DECLARED_PREFIXES:
+        # Boundary-aware, and NO dot-gate: ``/mcpfoo`` is not the ``/mcp`` class
+        # (the boundary check handles that), while a DOTTED sub-path
+        # (``/mcp/tools.json``) stays ``/mcp`` rather than silently folding to
+        # ``__unrouted__``. A traversal shape (``/mcp/../x``) also lands on the
+        # ``/mcp`` literal, which is bounded and not request-derived — an
+        # acceptable price for not losing a legitimate dotted sub-route.
+        if path == prefix or path.startswith(prefix + "/"):
+            return prefix
+    route = scope.get("route")
+    template = getattr(route, "path", None)
+    if (isinstance(template, str) and template
+            and not isinstance(route, Mount)
+            and not _routed_inside_a_mount(scope, path)
+            and _route_describes(route, path)):
+        return template
+    return _monitoring.COMPUTE_UNROUTED
+
+
+class ComputeAttributionMiddleware:
+    """Account server-side compute per org and route class (#4490).
+
+    Pure ASGI and cheap: two clock reads at entry, two at exit, one record per
+    response. No request/response objects, no buffering, no change to what is
+    sent, no I/O.
+
+    Primitives (bounds stated, not assumed):
+      * wall = ``time.perf_counter()`` — exact per-request seconds;
+      * CPU = ``time.thread_time()`` — the calling (event-loop) thread's user+sys
+        CPU. Exact for a request that ran alone; an UPPER bound under async
+        concurrency, where co-scheduled requests share the loop thread's CPU for
+        the same window; a LOWER bound where work is offloaded to a thread pool
+        (``asyncio.to_thread`` / sync endpoints), which this layer cannot see. A
+        cost signal, not a billing harness.
+
+    MEASUREMENT MUST NEVER BE A NEW FAILURE MODE: the whole record — including the
+    label derivation — is wrapped, and a fault is a DEBUG log, never a raised
+    request (the same fail-soft discipline as ``AnalyticsMiddleware`` and the
+    sibling egress wrapper).
+
+    WHAT IT DOES NOT COUNT, stated rather than assumed: work done outside the ASGI
+    stack (background tasks, the isolated offload pool); and it reads
+    ``scope["state"]["org_id"]`` AFTER the app returns, so an org resolved
+    mid-request is still attributed.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":  # lifespan/websocket are not requests
+            await self.app(scope, receive, send)
+            return
+        # ``get_route_path`` (path minus ``root_path``) taken BEFORE the app runs:
+        # a ``Mount`` mutates ``root_path`` as it descends, so the same call at
+        # response time would no longer name the arrival path.
+        entry_path = get_route_path(scope)
+        wall0 = time.perf_counter()
+        cpu0 = time.thread_time()
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            wall_s = time.perf_counter() - wall0
+            cpu_s = time.thread_time() - cpu0
+            state = scope.get("state")
+            org_id = state.get("org_id") if isinstance(state, dict) else None
+            try:
+                # Call-time attribute read (`_monitoring`), so the writer can be
+                # substituted; the record is never a new failure mode.
+                path_label = _compute_route_class(scope, entry_path)
+                _monitoring.record_compute(org_id, path_label, wall_s, cpu_s)
+            except Exception:
+                _logger.debug("compute attribution failed", exc_info=True)
+
+
+app.add_middleware(ComputeAttributionMiddleware)
 
 
 class InFlightMiddleware:
@@ -7203,8 +7367,14 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
             if body.about_object:
                 # #1643: ID-based edge (never the name-resolution path, which
                 # mints Subject stubs on miss — #334 class).
+                # #3586: `about_object` is an Object handle, so scope the
+                # resolution to the Object label — the label-agnostic union
+                # (id OR eventId across EVERY label) let a client-supplied
+                # value that is a Subject/Event id silently produce
+                # ``(Point)-[:aboutObject]->(Subject)`` (a wrong-label steal).
                 sdk._get_proj().create_about_edge(
-                    out["id"], body.about_object, "aboutObject")
+                    out["id"], body.about_object, "aboutObject",
+                    target_label="Object")
             return out
 
         result = await asyncio.to_thread(_write_point)

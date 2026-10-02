@@ -132,8 +132,16 @@ MAX_FAST_SHARDS = 26
 # budget was hit by a ~30m shard (factor ~1.0 too tight — #798), and 55m for a
 # ~30m shard (factor 1.8) has held since. 2.0 is that factor with a small
 # margin. The FLOOR is 2.9× the largest single fast file (`310.7 s`), so the
-# watchdog can never kill a shard below the #6133 floor; the CEILING keeps the
-# validated 55m if S is ever lowered back toward 2.
+# watchdog can never kill a shard below the #6133 floor.
+#
+# ⛔ 1.8 IS NO LONGER ACCEPTED (#6145). The CEILING can clamp a budget BELOW
+# `WATCHDOG_HEADROOM`, and `watchdog_headroom_issues` now REDS that state —
+# wired into `--integrity`, so the REQUIRED `manifest-integrity` check refuses
+# it. Lowering S back toward 2 is therefore an integrity FAILURE, not the
+# ceiling "keeping the validated 55m"; the remedy is a DELIBERATE ceiling raise
+# or a re-split (see the OVERRIDES line on #6145). The ceiling deliberately
+# stays 55m so the worst-case leg stays inside the job's outer
+# `timeout-minutes` — the invariant REFUSES rather than widening it.
 WATCHDOG_HEADROOM = 2.0
 WATCHDOG_FLOOR_MIN = 15
 WATCHDOG_CEILING_MIN = 55
@@ -677,6 +685,17 @@ SOURCE_PATTERNS = {
 CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.py",
              "tortoise/projection/edges.py",
              "tools/tmpdir_sweep.py",
+             # queue_resweep: `tools/` is in NON_PYTHON_PREFIXES, so a
+             # tools/queue_resweep.py-only change was filtered out BEFORE the
+             # "not matched -> core" fallback and took the docs-only early return —
+             # `select(["tools/queue_resweep.py"])` yielded NO surface, so the guard
+             # registered under `core` never ran on the file it guards (the
+             # #1349/#3332/#3616 silent-drop class, and exactly the false "the core
+             # fallback covers it" claim #3261 removed from this file). The CORE_ALSO
+             # entry makes `_selection_relevant()` keep the path, so `core` (and this
+             # tool's own guard) is selected. Pinned by
+             # tests/test_ci_selection.py::test_queue_resweep_tool_change_selects_core_not_tier1.
+             "tools/queue_resweep.py",
              # #6138 review P1: the queue-conflict census owns
              # tests/test_queue_conflict_census.py, which is `core`-registered,
              # but `tools/` is swallowed by NON_PYTHON_PREFIXES and no
@@ -832,6 +851,15 @@ TOOL_CARVEOUTS = (
     # SOURCE_PATTERNS entry matches it, so it lands in the unknown-path branch
     # -> FULL matrix (fail closed) — the safe default for a destructive-ref tool.
     "tools/branch_reaper.py",
+    # #6868: the wedged-CI-run reaper (tools/run_reaper.py) owns
+    # tests/test_run_reaper.py. Exact same silent-drop class as the
+    # branch-reaper carve-out above: the flat "tools/" prefix in
+    # NON_PYTHON_PREFIXES would swallow a reaper-only change, `changed` comes
+    # back empty, select() takes the docs-only path, and the run-reaper's
+    # mutation tests never run on the PR that changes it. No SOURCE_PATTERNS
+    # entry matches it, so it lands in the unknown-path branch -> FULL matrix
+    # (fail closed) — the safe default for a tool that CANCELS CI runs.
+    "tools/run_reaper.py",
     # #2573: the CI embedder gate (tools/embedder_provision.py) owns
     # tests/test_embedder_provision.py. Same silent-drop class as the
     # preflight carve-out above: no SOURCE_PATTERNS entry matches it, so a
@@ -1399,10 +1427,16 @@ def shard_watchdog_minutes(est_seconds: float) -> int:
 
     Correctness, not tuning: the watchdog is per-leg, so inheriting the old
     55m lets a hung ~7-minute shard hold the REQUIRED aggregate red for 55
-    minutes. `WATCHDOG_HEADROOM` is the factor the old 55m budget already
-    validated (55m for a ~30m shard), the floor keeps a small shard above the
-    #6133 floor (the largest single file), and the ceiling keeps the validated
-    budget if S is lowered again.
+    minutes. The factor behind the budget and both clamps are owned by the
+    constants block above (which carries their provenance and the #6145 rule) —
+    this function only applies them; the floor keeps a small shard above the
+    #6133 floor (the largest single file).
+
+    ⛔ The CEILING does NOT "keep the validated budget" (#6145): it deliberately
+    stays 55m so the worst-case leg fits the job's outer `timeout-minutes`, and a
+    clamp that drops the budget below `WATCHDOG_HEADROOM` is an integrity FAILURE
+    (`watchdog_headroom_issues`), not a retained one. The remedy is a deliberate
+    ceiling raise or a re-split — see the OVERRIDES record on #6145.
     """
     try:
         minutes = float(est_seconds) / 60.0
@@ -1418,6 +1452,107 @@ def shard_watchdog_minutes(est_seconds: float) -> int:
     return int(min(max(raw, WATCHDOG_FLOOR_MIN), WATCHDOG_CEILING_MIN))
 
 
+def watchdog_headroom(est_seconds: float, watchdog_minutes: int) -> float:
+    """#6145: the headroom the EMITTED budget actually retains (`budget / est`).
+
+    `shard_watchdog_minutes()` builds the budget from `WATCHDOG_HEADROOM`, but the
+    FLOOR and CEILING clamps can deliver a different multiple than the one it was
+    built from: upward at the floor (intended — the floor exists to clear the
+    #6133 single-file time) and DOWNWARD at the ceiling, which is the hazard.
+
+    Returns 0.0 for an unusable estimate: the budget is then the floor, and
+    "headroom over an unknown estimate" is not a number anyone should act on.
+    """
+    try:
+        minutes = float(est_seconds) / 60.0
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(minutes) or minutes <= 0:
+        return 0.0
+    return float(watchdog_minutes) / minutes
+
+
+def watchdog_headroom_issues(manifest: dict) -> list[str]:
+    """#6145 / #4819 option 2: NAMED issues where a shard's emitted budget retains
+    LESS headroom than the factor the budget is built from.
+
+    This closes the CEILING half of the gap #4819 recorded and nobody checked —
+    "the watchdog value and the shard count: nothing checks that [they are
+    consistent]". A budget that silently drifts TIGHTER than the factor it is
+    built from is the state in which a shard that fits its own declared estimate
+    is killed, and it is reachable today: at a 30.62-minute estimate
+    `ceil(30.62 * 2) = 62` is clamped to the 55-minute ceiling — an EFFECTIVE
+    1.80x — which the ceiling's own comment treated as "the validated budget"
+    rather than as a breach, and which
+    `tests/test_ci_selection.py::test_watchdog_is_per_shard_and_scales_with_the_shard`
+    asserts without ever computing the margin.
+
+    ⛔ SCOPE — ONE direction, and it is not the direction the observed kills came
+    from. The two axes are independent and only ONE is visible here:
+
+    - What the check sees: the DECLARED `est_seconds` and the emitted budget. It
+      fires iff the ceiling clamped the budget below that factor AT THE
+      PUBLISHED PRECISION — `round(budget / est_min, 2) < 2.0`, i.e. a declared
+      estimate above ~27.57 min. A shard whose DECLARED estimate exceeds that is
+      flagged even when the estimate is perfectly accurate, and one whose
+      declared estimate stays within it passes even when the estimate is far too
+      low. A clamp inside the 2-dp quantum (est in ~(27.500, 27.569] min) passes
+      by design, because the value the matrix publishes reads a compliant 2.0.
+    - What it cannot see: the ACTUAL runtime. The observed kills are the other
+      axis — a shard that ran ~2.11x its declared cost (the shape #6145
+      measured) — and a shard like that passes if its DECLARED value is in
+      range. So a green `manifest-integrity` means "the emitted budgets are
+      consistent with their own declared factors", NOT "the watchdog sizing is
+      sound", and this change covers neither the kills nor the runner-pool
+      capacity deficit behind them (#5215 / #6792).
+
+    The floor direction is intentionally not an issue: the floor binding is the
+    normal, intended case (it clears the #6133 single-file time), not a breach.
+
+    Fail-closed and NAMED, so a shard that cannot fit its budget is flagged at
+    SELECTION time instead of being killed at run time (#6145's sizing contract:
+    "a shard unable to fit is flagged rather than silently killed"). The estimate
+    and the budget therefore move together: raising an estimate (or lowering the
+    shard count) past the ceiling's reach REDS this check, and the remedy is a
+    deliberate ceiling raise or a re-split — never a silent kill. "Fail-closed"
+    includes the extreme: an estimate so large that the ratio rounds to `0.00`
+    still fires, because the SENTINEL is read from the UNROUNDED value. A `0.00`
+    on a PASSING row therefore means one thing only — that the leg has no usable
+    estimate (an empty leg) — and never that its margin was too small to report.
+    """
+    issues = []
+    for s in push_legs(manifest)["shards"]:
+        budget = s["watchdog_minutes"]
+        est = s["est_seconds"]
+        # #6145: decide on the SAME value the matrix PUBLISHES (2 dp, the same
+        # rounding the emitters apply). A gate comparing an exact ratio while
+        # emitting a rounded one would refuse a manifest whose own emitted row
+        # read a compliant 2.0 — and its message would say "2.00x, below the
+        # 2.0x", contradicting itself at exactly the boundary this check exists
+        # to police. Decision, message and emission are therefore ONE value; the
+        # cost is that a sub-0.005 excursion is inside the reporting quantum.
+        #
+        # The SENTINEL test reads the UNROUNDED value. `raw == 0.0` is
+        # `watchdog_headroom`'s "no usable estimate" answer (est <= 0, or a
+        # non-finite one), and it is NOT the same thing as a genuine ratio small
+        # enough to round to 0.00: testing the ROUNDED value for truthiness would
+        # FAIL OPEN on an estimate large enough to collapse the ratio onto the
+        # sentinel — the guard would skip the very leg it exists to name, and
+        # would publish `0.00` on a row it passed.
+        raw = watchdog_headroom(est, budget)
+        headroom = round(raw, 2)
+        if raw and headroom < WATCHDOG_HEADROOM:
+            issues.append(
+                f"shard {s['name']}: its emitted budget retains "
+                f"{headroom:.2f}x, below the {WATCHDOG_HEADROOM:.1f}x it is built "
+                f"from — the shard may still fit the {budget}m wall, but the "
+                f"budget no longer holds that factor (est={est:.1f}s = "
+                f"{est / 60.0:.2f} min; the {WATCHDOG_CEILING_MIN}m ceiling "
+                f"clamped it). Raise the ceiling deliberately or re-split the "
+                f"shards (#6145/#4819)")
+    return issues
+
+
 def push_legs(manifest: dict) -> dict:
     """#1472/#6135: partition every manifest-classified file into exactly one
     push leg (fast shards / slow / env_broken / carve_out), duration-balanced
@@ -1431,8 +1566,10 @@ def push_legs(manifest: dict) -> dict:
     leg and emitted as their own leg (the URI-unset carve-out job's file list).
 
     Each shard entry carries its `est_seconds` (the LPT bin weight, the
-    declared test time) and the `watchdog_minutes` derived from it — the
-    per-leg budget is a property of the SHARD, not a workflow literal.
+    declared test time), the `watchdog_minutes` derived from it, and the
+    `watchdog_headroom` that budget actually retains relative to that estimate
+    (#6145) — the per-leg budget is a property of the SHARD, not a workflow
+    literal.
     """
     slow = set(manifest.get("slow_files", []))
     carve_out = carve_out_files(manifest)
@@ -1460,9 +1597,18 @@ def push_legs(manifest: dict) -> dict:
         names = [f[len("tests/"):].replace(".py", "") for f in bin_files]
         names += extras[i::len(labels)]
         est = sum(_duration_weight(durations.get(f + ".py")) for f in names)
+        # #6145: derive the budget from the ROUNDED estimate — the value the
+        # matrix publishes — so the estimate, the budget and the emitted
+        # headroom are mutually consistent. The builder and the integrity check
+        # must not read the same quantity at two different precisions; that
+        # mismatch is how a boundary value slips through the gate, and the
+        # ceiling boundary is exactly what the gate polices.
+        est = round(est, 1)
+        budget = shard_watchdog_minutes(est)
         shards.append({"name": label, "files": sorted(names),
-                       "est_seconds": round(est, 1),
-                       "watchdog_minutes": shard_watchdog_minutes(est)})
+                       "est_seconds": est,
+                       "watchdog_minutes": budget,
+                       "watchdog_headroom": round(watchdog_headroom(est, budget), 2)})
     strip = lambda xs: sorted(x.replace(".py", "") for x in xs)  # noqa: E731
     return {"shards": shards,
             # Epic #1647 Task 9: slow carve-out files (test_reaper et al.)
@@ -1487,7 +1633,8 @@ def all_shard_files(legs: dict) -> list[str]:
 def build_shard_entries(files: list[str], durations: dict,
                         shards: int) -> list[dict]:
     """#6135: an LPT pack of `files` into `shards` labelled entries, each
-    carrying its packed estimate and the per-shard watchdog derived from it.
+    carrying its packed estimate, the per-shard watchdog derived from it, and
+    the headroom that budget retains (#6145).
 
     Used by the tier-2 `--split` path. `push_legs()` inlines the same pack (it
     must round-robin `push_extra` across the shards in the same pass), so the
@@ -1503,9 +1650,12 @@ def build_shard_entries(files: list[str], durations: dict,
         names = sorted((f[len("tests/"):] if f.startswith("tests/") else f)
                        .replace(".py", "") for f in bin_files)
         est = sum(_duration_weight(durations.get(n + ".py")) for n in names)
+        est = round(est, 1)  # #6145: the budget follows the published estimate
+        budget = shard_watchdog_minutes(est)
         entries.append({"name": label, "files": names,
-                        "est_seconds": round(est, 1),
-                        "watchdog_minutes": shard_watchdog_minutes(est)})
+                        "est_seconds": est,
+                        "watchdog_minutes": budget,
+                        "watchdog_headroom": round(watchdog_headroom(est, budget), 2)})
     return entries
 
 
@@ -1520,10 +1670,19 @@ def fast_matrix_include(shards: list[dict]) -> dict:
     """
     include = []
     for i, s in enumerate(shards):
+        # #6145: carry the headroom alongside the budget so the margin a leg was
+        # actually given is VISIBLE in the matrix — the ceiling can silently
+        # deliver less than the factor the budget was built from, and an
+        # implicit margin cannot be audited.
+        headroom = s.get("watchdog_headroom")
+        if headroom is None:
+            headroom = watchdog_headroom(s.get("est_seconds", 0.0),
+                                         s["watchdog_minutes"])
         include.append({
             "half": s["name"],
             "files": " ".join(s["files"]),
             "watchdog_minutes": s["watchdog_minutes"],
+            "watchdog_headroom": round(float(headroom), 2),
             "canary_producer": i == len(shards) - 1,
         })
     return {"include": include}
@@ -1760,7 +1919,13 @@ def workflow_halves_issues(manifest: dict, halves: dict[str, list[str]],
         # measured map) and this is the only check that catches it —
         # `leg_coverage_issues()` and `fast_files_absent_from_halves()` both
         # pass when one half is empty.
-        ratio = float("inf") if lo <= 0 else hi / lo
+        # #6145, same root as `watchdog_headroom_issues`: decide at the
+        # precision the message PRINTS. Comparing the exact ratio and then
+        # rendering both operands at 2 dp let a fire inside (1.25, 1.255) print
+        # "ratio 1.25x, tolerance 1.25x" — a diagnosis that reads as compliant
+        # while the gate refuses. Decision and message are one value; the cost
+        # is that a sub-0.005 excursion is inside the reporting quantum.
+        ratio = float("inf") if lo <= 0 else round(hi / lo, 2)
         if lo <= 0 or ratio > HALF_DURATION_IMBALANCE_RATIO:
             issues.append(
                 f"matrix halves duration-imbalanced: "
@@ -2773,6 +2938,7 @@ def main() -> int:
         problems = missing + slow_file_issues(manifest) \
             + fast_shard_issues(manifest) \
             + duration_issues(manifest) + leg_coverage_issues(manifest) \
+            + watchdog_headroom_issues(manifest) \
             + duration_coverage_issues(manifest) + duplicate_entries(manifest)
         # #1472: the matrix must come from the selector derivation — when it
         # does, the #1266 halves-parse tie check is
