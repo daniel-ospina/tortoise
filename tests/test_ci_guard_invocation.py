@@ -834,16 +834,19 @@ def test_frozen_enforcement_is_not_hidden_in_an_unevaluable_step():
 
     The harness runs each enforcing step's real shell under `bash -e`, substituting
     the GitHub expressions in `EVALUATED_EXPRESSIONS` (`_relocated`). Enforcement
-    MAY therefore live in a step that interpolates one of those. The carve-out
-    guard step does exactly that with `${{ matrix.files }}`; the test-slow
-    emit-manifest step uses `${{ needs.changes.outputs.full }}` and
-    `${{ needs.changes.outputs.slow_selected }}` (no single step carries all
-    three). What must not happen is an
-    expression the harness cannot evaluate: an unresolved `${{ … }}` reaches the
-    shell as a `bad substitution` and kills the step before the guard runs, so the
-    frozen set would read as enforced by nothing. The assertion's job is to refuse
-    any expression NOT on that allowlist — the exemption is the allowlist, not
-    `--manifest-only`.
+    MAY therefore live in a step that interpolates one of those. Of the two
+    ENFORCING steps — the ones that actually pass `--manifest-only` — the
+    carve-out guard step relies on `${{ matrix.files }}` and the test-d14
+    embedded-marker step uses none. The test-slow emit-manifest step carries
+    `${{ needs.changes.outputs.full }}`, `${{ matrix.files }}` AND
+    `${{ needs.changes.outputs.slow_selected }}` in one step, but it does NOT
+    pass `--manifest-only`, so it is not an enforcing step. What must not happen
+    is an expression the harness cannot evaluate: an unresolved `${{ … }}`
+    reaches the shell as a `bad substitution` and kills the step before the guard
+    runs, so the frozen set would read as enforced by nothing. The assertion's
+    job is to refuse any expression NOT on that allowlist, over EVERY
+    guard-invoking step — `--manifest-only` or `--emit-manifest` — because both
+    are executed here: the exemption is the allowlist, not `--manifest-only`.
     """
     offenders = [
         f"{job}/{(step.get('name') or '?').strip()}"
@@ -851,9 +854,10 @@ def test_frozen_enforcement_is_not_hidden_in_an_unevaluable_step():
         if [e for e in _expressions_in_run(step) if e not in EVALUATED_EXPRESSIONS]
     ]
     assert not offenders, (
-        "these steps pass `--manifest-only` but interpolate `${{ … }}` and cannot be executed "
-        f"here: {offenders}. Move the enforcement into an executable step, or extend this harness "
-        "to evaluate the expression"
+        "these guard-invoking steps (matched by the guard path, whether they pass "
+        "`--manifest-only` or `--emit-manifest`) interpolate `${{ … }}` not on this harness's "
+        f"evaluated allowlist and cannot be executed here: {offenders}. Move the invocation into "
+        "a step whose expressions are evaluable, or extend this harness to evaluate the expression"
     )
 
 

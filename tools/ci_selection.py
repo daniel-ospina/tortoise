@@ -1755,11 +1755,13 @@ def build_shard_entries(files: list[str], durations: dict,
     carrying its packed estimate, the per-shard watchdog derived from it, and
     the headroom that budget retains (#6145).
 
-    Used by the tier-2 `--split` path. `push_legs()` inlines the same pack (it
-    must round-robin `push_extra` across the shards in the same pass), so the
-    shared seam that keeps the two lanes' shard budgets in agreement is
-    `shard_watchdog_minutes()`, NOT this function — editing the packing here
-    changes only the tier-2 lane.
+    Used by the tier-2 `--split` path AND by `carve_shard_entries()` (the W37
+    carve-out lane, which `push_legs()` routes through). `push_legs()` itself
+    inlines the same pack for the fast shards (it must round-robin `push_extra`
+    across the shards in the same pass), so the shared seam that keeps every
+    lane's shard budgets in agreement is `shard_watchdog_minutes()`, NOT this
+    function — but editing the packing here DOES change both the tier-2 `--split`
+    lane and the carve-out lane, not the fast shards.
     """
     bins = split_fast_gate(files, durations, shards=shards)
     labels = shard_labels(len(bins))

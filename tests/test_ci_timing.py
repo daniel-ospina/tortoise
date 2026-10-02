@@ -883,23 +883,22 @@ def test_integrity_problems_agrees_with_the_integrity_cli(
         "(#6145) — otherwise the refresh writes what `--integrity` rejects")
 
 
-def test_integrity_problems_mirrors_every_integrity_validator() -> None:
-    """W37/#5373 MUTATION PROOF: the refresh's gate must include EVERY validator
-    the gate of record runs.
+def test_integrity_problems_mirrors_the_spot_checked_validators() -> None:
+    """W37/#5373 MUTATION PROOF: the refresh's gate must surface the same REAL
+    violations as the gate of record.
 
     `refresh_durations` gates on :func:`integrity_problems`, so a validator
     present in `ci_selection.py --integrity` and missing here lets the weekly
-    durations writer persist a manifest the gate of record rejects.
-    `integrity_problems`' docstring contracts "the same functions, in the same
-    order, as --integrity"; a validator added to one composition and not the
-    other is exactly how the two diverge silently. This exercises one real
-    violation per validator the composition carries a fixture for — a
-    `carve_shards` explicit null (W37) and a same-surface duplicate (#5373, a
-    GATE FAILURE under the manifest's `merge=union`) — each built by MUTATION of
-    the real manifest so the pin does not depend on a literal value and still
-    fires if `carve_shards` is later rolled back or a surface is renamed. The
-    composition-parity test below covers the remaining validators whose
-    violation is not cheap to construct in isolation.
+    durations writer persist a manifest the gate of record rejects. This test
+    builds a real violation for the two validators whose violation is cheap to
+    construct in isolation — a `carve_shards` explicit null (W37) and a
+    same-surface duplicate (#5373, a GATE FAILURE under the manifest's
+    `merge=union`) — each by MUTATION of the real manifest, so the pin does not
+    depend on a literal value and still fires if `carve_shards` is later rolled
+    back or a surface is renamed. It is NOT a per-validator sweep of the whole
+    composition: the composition-parity test below covers the remaining
+    validators, pinning their call ORDER and requiring each one's problems to be
+    surfaced, rather than building a real violation for each.
     """
     import ci_selection as cs
 
@@ -943,18 +942,30 @@ def test_integrity_problems_mirrors_the_whole_integrity_composition(
     The per-validator violation test above can only cover validators whose
     violation is cheap to build. The docstring claims a stronger property —
     "the same functions, in the same ORDER, as the --integrity entry point ... so
-    the two cannot disagree" — and that is pinned here directly: wrap EVERY
-    validator the composition is supposed to call with a recorder that appends
-    a unique sentinel to the real result, run BOTH compositions over the same
-    manifest (a manifest that therefore violates every validator at once), and
-    require the two to call the SAME functions in the SAME order and to surface
-    the SAME sentinels. A validator added to one composition alone, removed from
-    one, or moved changes the recorded sequence and reds here; `set(cli_calls)
-    == set(validators)` additionally reds if a validator stops being called by
-    the gate of record at all, so the spy cannot pass by finding nothing.
+    the two cannot disagree" — and that is pinned here directly: wrap each
+    validator in `validators` with a recorder that appends a unique sentinel to
+    the real result, run BOTH compositions over the same manifest, and require
+    the two to call the SAME functions in the SAME order and to surface the SAME
+    sentinels.
+
+    ⛔ `validators` is a hand-maintained ALLOW-LIST, not a derivation of either
+    composition. A validator NOT listed there is never wrapped, so it never
+    reaches `calls`: its presence in one composition and absence from the other
+    is invisible here, and only a LISTED validator's removal or reordering reds.
+    Add each new validator to `validators` — the test cannot discover it.
+    `set(cli_calls) == set(validators)` additionally reds if a listed validator
+    stops being called by the gate of record at all, so the spy cannot pass by
+    finding nothing.
     """
     import ci_selection as cs
 
+    # ⛔ HAND-MAINTAINED ALLOW-LIST, NOT A DERIVATION — see the docstring. A
+    # validator absent from this tuple is never wrapped, so a composition that
+    # gains it on ONE side alone is invisible to the parity assertions below.
+    # Kept in the `--integrity` composition's order. Deriving the set would mean
+    # introspecting an inline `main()` block or guessing which list-returning
+    # helpers are validators; a wrong guess would inject sentinels into a
+    # filename list and corrupt the run.
     validators = (
         "integrity",
         "slow_file_issues",
@@ -962,6 +973,7 @@ def test_integrity_problems_mirrors_the_whole_integrity_composition(
         "carve_shard_issues",
         "duration_issues",
         "leg_coverage_issues",
+        "watchdog_headroom_issues",
         "duration_coverage_issues",
         "duplicate_entries",
         "workflow_matrix_issues",
