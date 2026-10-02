@@ -1,4 +1,9 @@
--- Migration 20260927000001: durable multi-worker mint serialization (#1879)
+-- Migration 20261001000002: durable multi-worker mint serialization (#1879)
+--
+-- RENUMBERED FORWARD from 20260927000001. That prefix collides with main's
+-- 20260927000001_metering_unmetered_increments.sql (#4779), which prod has
+-- ALREADY applied: the Supabase CLI keys migrations by prefix, so a duplicate
+-- prefix aborts `db push` (enforced by .github/scripts/check-migration-append-only).
 --
 -- WHY. The per-org `max_api_keys` cap is a check-then-act that every writer of
 -- `api_keys` performs independently: the Supabase session mint
