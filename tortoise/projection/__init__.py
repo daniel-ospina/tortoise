@@ -3534,8 +3534,11 @@ class FalkorProjection(
             # `tools/longmem_eval/run.py::run_main` UNCONDITIONALLY presets the
             # per-lane var to `DEFAULT_EVAL_SOCKET_TIMEOUT_S` (120s) when the
             # operator has not set it, so the per-lane var is always set
-            # there. That 120s is deliberate (#2969: the eval's
-            # multi-hundred-KB MERGE writes must not be cut off) and is NOT
+            # there. That 120s is deliberate headroom for a loaded/defragging
+            # server, NOT a size-derived bound (#2969) — measured on the pinned
+            # default split, the largest single graph write is ~76 KB, so the
+            # eval's DATA fits the product 10s; the point is that a healthy
+            # long write must not be cut off. It is NOT
             # clamped by `_DB_TIMEOUT_MAX_S` (60s) — the per-lane parser has its
             # OWN ceiling, `_DB_TIMEOUT_MAX_PER_LANE_S` (600s), deliberately set
             # above the eval's 120s so the product's tighter bound is not

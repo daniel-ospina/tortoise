@@ -66,9 +66,14 @@ from typing import Any
 
 #: Graph socket READ bound the eval lane applies (seconds). Generous on
 #: purpose: it must never trip a healthy long ingest write on a loaded /
-#: defragging FalkorDB, only a real stall. The product default (10s, see
-#: ``tortoise/projection/__init__.py``) is too tight for the eval's
-#: multi-hundred-KB MERGE writes, so the eval RAISES it here.
+#: defragging FalkorDB, only a real stall. It is NOT sized to the payload —
+#: measured on the pinned default split (``longmemeval_s``: 500 questions,
+#: 23,867 sessions, 124,345 chunks) the largest single chunk write payload is
+#: 78,135 B (76 KB) and the median is 1,947 B, so the product default (10s, see
+#: ``tortoise/projection/__init__.py``) is not too tight for the DATA; 120s is
+#: the deliberate headroom for a loaded/defragging server. A prior revision of
+#: this comment called the writes "multi-hundred-KB", which overstated the
+#: measured maximum by 2.6x. The eval RAISES the bound here.
 DEFAULT_EVAL_SOCKET_TIMEOUT_S = 120.0
 #: Graph socket CONNECT bound the eval lane applies (seconds).
 DEFAULT_EVAL_SOCKET_CONNECT_TIMEOUT_S = 10.0
