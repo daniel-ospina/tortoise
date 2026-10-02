@@ -290,8 +290,12 @@ text and inside a recorded body (where the run stops at the string's own raw
 `{"detail": "api_key=x\"SECRET"}` — the single-quote twin and the escaped
 double-quote run were missing, which left those credentials AFTER our own
 marker while the pre-change tool redacted them whole (review cycle 32; the
-#5630 review re-measured the family: 0 of 9 430 fuzzed shapes regress against
-`origin/main`, and no valid input's output stopped parsing). The
+#5630 review re-measured the FAMILY and found a DIFFERENT one still leaking: a
+value CUT at `;`/`:`/`]` left a tail no unit could start on — 264 of 21 070
+free-text and 129 of 13 230 JSON-body generated shapes regressed against
+`origin/main`. The cut-delimiter remnant unit consumes it: 0 under-redactions
+over 72 455 generated shapes, 0 idempotence failures, and no valid input's
+output stopped parsing). The
 idempotency tests cover the shapes the record can carry, and a
 quote-and-backslash soup can still reach a second fixed point on a pathological
 free-text input (a drop, never a re-exposure; canary-free in 200 000 targeted

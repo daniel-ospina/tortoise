@@ -741,14 +741,18 @@ def _git_sha() -> str:
 # an `Observation` FIELD (the session record), so a structural `session` key is
 # the record itself, not a credential — its query carrier is still covered by
 # the whole-query drop and by `_QUERY_SECRET_PARAMS`.
-# STATED BOUNDARY: a value ends at whitespace, a `,`/`&`/`}` delimiter, a
-# quote, a backslash, or a STRUCTURED value's `{`/`[` (handled by the
-# structural pass, not by swallowing the value as text). A credential
-# containing one of those raw characters
-# (invalid in a URL query anyway) is therefore only PARTIALLY dropped. The
-# alternative — consuming them — is what eats the JSON structure these values
-# are embedded in, which is worse: it is caught by the "structure survives"
-# tests, and the tolerated residue differs only in the value's tail.
+# STATED BOUNDARY: the keyed value pass ends an unquoted value at whitespace, a
+# `,`/`&`/`}` delimiter, a `;`/`:`/`]`, a quote, a backslash, or a STRUCTURED
+# value's `{`/`[` (handled by the structural pass, not by swallowing the value
+# as text). `;`/`:`/`]` are NOT structural, so a value CUT at one of them leaves
+# the credential's TAIL after our own marker; `_collapse_keyed_marker_tail` then
+# consumes that tail at a KEYED marker only (the `_REMNANT_LEAD` unit below),
+# gated on the body still parsing in JSON. A credential containing a raw
+# character that neither the value pass nor that collapse covers is therefore
+# only PARTIALLY dropped. Consuming such a character INLINE is what eats the
+# JSON structure these values are embedded in, which is worse: it is caught by
+# the "structure survives" tests, and the tolerated residue differs only in the
+# value's tail.
 # The issue's query-parameter names that are NOT also free-text key names: a
 # `?code=`/`&key=`/`#session=` names a credential carrier, while the same word
 # inside a recorded body may be diagnostic (`{"code": …}` — JSON-RPC) or a
@@ -1094,6 +1098,34 @@ _QUERY_MARKER_TAIL_RE = re.compile(
 _TAIL_KEY_GUARD = (r'(?!(?:[?&#]?)(?:\\{0,32}["\'])?(?:'
                    + "|".join(_SECRET_KEY_NAMES + _QUERY_ONLY_NAMES)
                    + r')(?:\\{0,32}["\'])?\s*[:=])')
+# The CUT delimiters. `_SECRET_KEY_RE` ends an unquoted value at `;`/`:`/`]`/
+# `=`/`|`/`)` (none of them is a JSON separator, which is why they sit in the
+# same "value continuation" class as `,`), so a value cut at one of them leaves
+# the credential's TAIL AFTER our own marker (`{"password": "[REDACTED];ssw0rd`).
+# No unit above STARTS on one of them, so that tail was unreachable and the
+# credential reached the artifact (#5630 review — 264/21 070 free-text and
+# 129/13 230 JSON-body generated shapes). `?` is a lead too: a `#`-led remnant
+# (`?token=x#?SECRET`) ends its first unit AT the `?`, stranding the rest. The
+# tail is consumed ONLY at a keyed marker (the `_TAIL_HEAD` anchor), and every
+# character re-applies the key guard, so a FOLLOWING pair's name (`;token=…`)
+# is never eaten. Bounded: one character class (plus a backslash-escape UNIT)
+# under a flat `*` — no nested quantifier, no catastrophic backtracking.
+_REMNANT_LEAD = r"[;:\]?=|)]"
+# In a JSON BODY the marker sits INSIDE a string, so only the string's own RAW
+# `"` ends the run — whitespace, `,` and `}` are CONTENT there. A `\`-escape is
+# a unit, so an escaped quote cannot strand the rest.
+_TAIL_REMNANT_JSON_UNIT = (
+    _REMNANT_LEAD + r"(?:" + _TAIL_KEY_GUARD + r'(?:[^"\\]|\\.))*')
+# In FREE TEXT the run ends at the same value boundary the pass already uses
+# (whitespace, `,`/`}`/`&`, a quote or a backslash), and a QUOTE-led remnant
+# (`?token=x";CAN`) is covered as well — but only when it is NOT the value's own
+# CLOSING quote (the `openq` group `_TAIL_HEAD` captured) and it leads at least
+# one value character, so a SETTLED quoted form (`token:"[REDACTED]"`) stays a
+# fixed point.
+_TAIL_REMNANT_TEXT_UNIT = (
+    r"(?:" + _REMNANT_LEAD + r"|(?!(?P=openq))\\{0,32}[\"\']+(?=(?:\\.|[^\s,}&\"\'\\])))"
+    + r"(?:" + _TAIL_KEY_GUARD
+    + r"""(?:\\.|[^\s,}&\"\'\\]))*""")
 _TAIL_JSON_UNIT = (
     r'(?:\\{1,32}"(?:[^"\\]|\\.)*\\{1,32}"'
     r'|\[[^\[\]"\\]*\]'
@@ -1113,7 +1145,8 @@ _TAIL_JSON_UNIT = (
     # run; the collapse gate keeps the document parseable.
     r"|\\{0,32}'[^\"\\]+"
     r'|(?:\\+|[)])[^\s"\']+'
-    r'|[^\s,;:)\]}&?"\'\\|=\[{]+)'
+    r'|[^\s,;:)\]}&?"\'\\|=\[{]+'
+    r"|" + _TAIL_REMNANT_JSON_UNIT + r')'
 )
 _TAIL_TEXT_UNIT = (
     r'(?:\\{0,32}"(?:[^"\\]|\\.)*\\{0,32}"'
@@ -1134,7 +1167,8 @@ _TAIL_TEXT_UNIT = (
     r"|\\{0,32}'[^\s,;:)\]}&?#\\|=\[{\"']+"
     r'|[\[{][^&#\s"\'\\{}\[\]]*'
     r'|(?:\\+|[)])[^\s"\']+'
-    r'|[^\s,;:)\]}&?"\'\\|=\[{]+)'
+    r'|[^\s,;:)\]}&?"\'\\|=\[{]+'
+    r"|" + _TAIL_REMNANT_TEXT_UNIT + r')'
 )
 _TAIL_HEAD = (
     r"(?P<lead>[?&#]?)"
@@ -1147,7 +1181,7 @@ _TAIL_HEAD = (
     # (`password:'[REDACTED]\[SECRET`): the free-text pass keeps that quote,
     # so the anchor has to see it or the remnant after the marker is
     # stranded (review cycles 25/26).
-    r"(?:\\{0,32}[\"'])?"
+    r"(?P<openq>\\{0,32}[\"'])?"
     + re.escape(_URL_REDACTED)
 )
 _KEYED_MARKER_TAIL_JSON_RE = re.compile(

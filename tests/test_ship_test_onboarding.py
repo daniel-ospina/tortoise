@@ -514,6 +514,54 @@ def test_scrub_redacts_the_shapes_the_first_pass_missed() -> None:
             assert "Hunter2" not in out, (trailer, quote, out)
 
 
+def test_scrub_closes_the_cut_delimiter_remnant_class() -> None:
+    """A value CUT at `;`/`:`/`]` — none of which is a JSON separator — leaves
+    the credential's TAIL after our own marker, and no tail unit could START on
+    one of them (#5630 review: 264 of 21 070 free-text and 129 of 13 230
+    JSON-body generated shapes under-redacted against `origin/main`; 0 after).
+    The remnant is consumed at a KEYED marker only, one character at a time, so
+    a FOLLOWING pair's name is not eaten with it."""
+    canary = "CANARY7f3a91d2"
+    # the four shapes the review reported, verbatim
+    for raw, leaked in (
+        ('{"password": "p;ssw0rd', ";ssw0rd"),
+        ('{"password": "p:ssw0rd', ":ssw0rd"),
+        ('{"password": "p]ssw0rd', "]ssw0rd"),
+        ('body: {"token": "abc;xyz', ";xyz"),
+    ):
+        out = scrub(raw)
+        assert leaked not in out, (raw, out)
+    # a `#`-led tail ends its first unit AT the `?`; the rest is still a value
+    assert scrub("?token=x#?SECRET") == "?token=[REDACTED]"
+    # the whole family: a CUT-delimiter remnant followed by every punctuator
+    # that is NOT a stated value terminator (`,`/`}`/`&`), in free text, an
+    # unterminated JSON body, a terminated JSON body and a query — plus the
+    # `[`/`{`/`#[`-led JSON-body forms. None may survive, and every output must
+    # be its own fixed point.
+    puncts = ";:][{#?|\\/-_.<>()*+=~^%$@!`'\""
+    for cut in ";:]":
+        for p in puncts:
+            for raw in (
+                f'{{"password": "p{cut}A{p}{canary}',
+                f'{{"password": "p{cut}A{p}{canary}"}}',
+                f'password: "p{cut}A{p}{canary}',
+                f"?token=x#{cut}{p}{canary}",
+                f"?token=x#{cut}{canary}",
+                f'{{"token": "p{cut}[{canary}',
+                f'{{"token": "p{cut}#[{canary}',
+            ):
+                out = scrub(raw)
+                assert canary not in out, (raw, out)
+                assert scrub(out) == out, (raw, out, scrub(out))
+    # KEY-GUARDED: a following pair's NAME (whose value the named pass already
+    # replaced) is not eaten by the remnant run
+    guarded = scrub('token: "[REDACTED];password=abc"')
+    assert "password" in guarded and "abc" not in guarded, guarded
+    # ...and the two quote/backslash remnants an earlier cycle closed stay closed
+    assert "SECRET" not in scrub("?token=x#'SECRET")
+    assert "SECRET" not in scrub('{"detail": "api_key=x\\"SECRET"}')
+
+
 # ── #5002 — a recorded URL is a credential carrier ──────────────────────────
 # A redirect lands the signup flow on `…?code=<oauth code>` (or
 # `…#access_token=…`) and the observation is uploaded as a CI artifact and
