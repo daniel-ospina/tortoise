@@ -12,10 +12,12 @@ Coverage:
   * one stubbed/real HIT per hit-capable surface -> exit != 0, surface named
   * UNTRUNCATED worktree scan: a hit that a `tail -8` window would hide is found
   * #6622 a RECORD is not a WORKER: a registered worktree whose directory is
-    gone, or which has no index, is reported with its basis (`exists=` /
-    `index=` / `age=`) and CANNOT block; a `refs/remotes/<name>/…` ref whose
-    `<name>` is not a CONFIGURED remote is a fetch-cache KEY, not a holder,
-    while a ref under a configured remote (`origin`) still blocks
+    gone, or whose `.git` marker is gone, is reported with its basis (`exists=`
+    / `gitdir=` / `age=`) and CANNOT block; a `refs/remotes/<x>/…` ref that NO
+    configured remote's fetch REFSPEC targets (a one-shot fetch cache key, with
+    or without a trailing segment — `pr/6592` and `pr6592` alike) is
+    non-blocking, while a ref inside a namespace a configured remote actually
+    fetches into still blocks
   * number boundary: `3061` does NOT match `30610` (no fabricated collision)
   * PR-body PROSE is not a collision: a closed PR body that merely
     cross-references `#N` (the live #2926/#2754 shapes) is WEAK/non-blocking ->
@@ -1575,27 +1577,42 @@ class CollisionPreflightTest(unittest.TestCase):
 
     def test_unconfigured_remote_namespace_is_a_fetch_cache_not_a_holder(self):
         # #6622 case 3. `git fetch <url> refs/pull/N/head:refs/remotes/pr/N`
-        # writes a ref whose name is the CACHE KEY, and `pr` is not a configured
-        # remote in this fixture (only `origin` is), so `refs/remotes/pr/3061`
-        # records that the PR head was FETCHED — not that a lane holds the work.
-        # Measured on the real repo: `refs/remotes/pr/*` holds 2,810 refs named
-        # `pr/1 … pr/2810`, every one a PR number. This was a STRONG blocking
-        # hit even though the surface's own note says a remote-tracking ref "is
-        # a local fetch cache" and `_branch_terminal_state` refuses to judge one.
-        _git(self.repo, "update-ref", f"refs/remotes/pr/{ISSUE}", "HEAD")
-        rc, out = self.run_tool()
-        self.assertEqual(rc, 0, out)
-        self.assertIn("VERDICT: CLEAN", out)
-        self.assertNotIn("do NOT dispatch", out)
-        # The ref WAS present, so the green verdict is not a fixture artefact.
-        self.assertIn(f"refs/remotes/pr/{ISSUE}", out)
-        self.assertIn("fetch-cache ref", out)
-        self.assertIn("not a configured remote", out)
+        # writes a ref whose name is the CACHE KEY, and NO configured remote's
+        # refspec targets `pr`, so the ref records that the PR head was FETCHED
+        # — not that a lane holds the work. Measured on the real repo:
+        # `refs/remotes/pr/*` holds 2,810 refs named `pr/1 … pr/2810`, every one
+        # a PR number. This was a STRONG blocking hit even though the surface's
+        # own note says a remote-tracking ref "is a local fetch cache" and
+        # `_branch_terminal_state` refuses to judge one.
+        #
+        # ⛔ BOTH SHAPES ARE PINNED. `pr/3061` has a namespace segment and a
+        # tail; `pr3061` (ten of which exist on the real repo — `pr2996` …
+        # `pr5343`) is a SINGLE segment. A namespace+tail split demotes only the
+        # first, which left the #6622 class half-closed for #2996/#5327/#5343.
+        for ref in (f"refs/remotes/pr/{ISSUE}", f"refs/remotes/pr{ISSUE}"):
+            with self.subTest(ref=ref):
+                _git(self.repo, "update-ref", ref, "HEAD")
+                rc, out = self.run_tool()
+                self.assertEqual(rc, 0, out)
+                self.assertIn("VERDICT: CLEAN", out)
+                self.assertNotIn("do NOT dispatch", out)
+                # The ref WAS present, so the green verdict is not a fixture
+                # artefact: it is reported, at weak strength, with its basis.
+                self.assertIn(ref, out)
+                self.assertIn("fetch-cache ref", out)
+                self.assertIn("fetch refspec targets", out)
+                # …and the weak summary must NAME this category, not describe it
+                # as "your own work" / "a terminal branch" — a report that
+                # misdescribes what it measured is the class this fix removes.
+                self.assertIn(
+                    "a fetch-cache ref under a namespace no configured remote",
+                    out,
+                )
 
     def test_a_configured_remotes_branch_still_blocks(self):
         # CONTROL for the test above, and the guard rail the issue says NOT to
-        # delete: `origin` IS a configured remote
-        # (`+refs/heads/*:refs/remotes/origin/*`), so a ref there is a real
+        # delete: `origin`'s refspec is
+        # `+refs/heads/*:refs/remotes/origin/*`, so a ref there IS a real
         # remote-tracking BRANCH and must keep blocking. Widening the fix to
         # "any refs/remotes/* ref is a cache" would be a fail-OPEN on a blocking
         # surface — the dangerous direction.
@@ -1606,22 +1623,123 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("VERDICT: COLLISION", out)
         self.assertIn(f"refs/remotes/origin/fix/{ISSUE}-configured-control", out)
 
-    def test_an_unreadable_remote_list_leaves_a_fetch_cache_ref_blocking(self):
-        # FAIL-CLOSED unit pin. `_configured_remotes` answers None when `git
-        # remote` cannot be read, and `_fetch_cache_remote` must then answer None
-        # — the BLOCKING answer. A change that read an unreadable list as "no
-        # configured remotes, so every ref is a cache" would convert every remote
-        # hit into a false CLEAN.
+    def test_a_namespace_a_non_standard_refspec_fetches_into_still_blocks(self):
+        # ⛔ THE REFSPEC IS THE DISCRIMINATOR, NOT THE REMOTE'S NAME. This pins
+        # the gap a name-comparison leaves open: `origin` is configured, but its
+        # refspec writes `refs/remotes/upstream/*`, so `upstream` IS a live
+        # remote-tracking namespace even though no remote is NAMED `upstream`.
+        # Comparing the path segment to `git remote` would demote a genuine
+        # branch here — a false CLEAN on a blocking surface.
+        _git(self.repo, "config", "remote.origin.fetch",
+             "+refs/heads/*:refs/remotes/upstream/*")
+        _git(self.repo, "update-ref",
+             f"refs/remotes/upstream/fix/{ISSUE}-refspec", "HEAD")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn(f"refs/remotes/upstream/fix/{ISSUE}-refspec", out)
+
+    def test_a_non_glob_refspec_namespace_still_blocks(self):
+        # ⛔ THE NON-GLOB TRAP, pinned. `git remote set-branches origin main`
+        # writes `+refs/heads/main:refs/remotes/origin/main` — a destination with
+        # NO `*`. A parser that skipped the non-glob form left the namespace set
+        # EMPTY, and an empty set demoted EVERY `refs/remotes/…` ref, so this
+        # genuine remote-tracking branch came back CLEAN — a fail-open on a
+        # blocking surface. Taking the PARENT of the destination fixes it, and it
+        # errs WIDE, which on this surface is the safe direction.
+        _git(self.repo, "config", "remote.origin.fetch",
+             "+refs/heads/main:refs/remotes/origin/main")
+        _git(self.repo, "update-ref",
+             f"refs/remotes/origin/fix/{ISSUE}-nonglob", "HEAD")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn(f"refs/remotes/origin/fix/{ISSUE}-nonglob", out)
+
+    def test_a_glob_refspec_whose_star_is_not_last_still_blocks(self):
+        # ⛔ A `*` IS NOT ALWAYS THE LAST SEGMENT OF A DESTINATION.
+        # `+refs/heads/*:refs/remotes/x/*/y` is accepted by git and creates real
+        # tracking refs like `refs/remotes/x/fix/3061-mine/y`. A prefix taken as
+        # the PARENT of that destination keeps the literal `*`
+        # (`refs/remotes/x/*/`), which prefixes NO real ref, so the branch was
+        # demoted to a "fetch-cache ref" — a false CLEAN, and the dangerous
+        # direction. The prefix must stop at the FIRST `*`.
+        _git(self.repo, "config", "remote.origin.fetch",
+             "+refs/heads/*:refs/remotes/x/*/y")
+        _git(self.repo, "update-ref",
+             f"refs/remotes/x/fix/{ISSUE}-midstar/y", "HEAD")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn(f"refs/remotes/x/fix/{ISSUE}-midstar/y", out)
+
+    def test_an_empty_namespace_set_blocks_rather_than_demoting(self):
+        # ⛔ AN EMPTY SET IS NOT "EVERYTHING IS A CACHE" — it is an INABILITY TO
+        # TELL, and it FAILS CLOSED. This is a UNIT pin rather than a CLI one
+        # because the fixture configures `origin`, so the CLI cannot reach the
+        # empty set at all — and that is exactly why the rule needs its own pin.
+        # The empty set arises in a repo configuring NO remote, where a
+        # `refs/remotes/origin/…` ref is indistinguishable between a leftover of
+        # an earlier configuration and a deliberately created ref. Reading the
+        # empty set as a cache demoted all of them — a fail-open on a blocking
+        # surface, and the dangerous direction.
         mod = _tool_module()
+        self.assertIsNone(
+            mod._fetch_cache_remote(f"refs/remotes/pr/{ISSUE}", set()))
+        self.assertIsNone(
+            mod._fetch_cache_remote(f"refs/remotes/origin/fix/{ISSUE}", set()))
+        self.assertIsNone(
+            mod._fetch_cache_remote(f"refs/remotes/pr{ISSUE}", set()))
+        # ...while a NON-empty set still demotes a namespace OUTSIDE it, so the
+        # fail-closed arm is a floor and not a blanket refusal to demote at all.
+        self.assertEqual(
+            mod._fetch_cache_remote(f"refs/remotes/pr/{ISSUE}",
+                                    {"refs/remotes/origin/"}), "pr")
+
+    def test_an_unreadable_refspec_list_leaves_a_fetch_cache_ref_blocking(self):
+        # FAIL-CLOSED unit pin. `_remote_tracking_namespaces` answers None when
+        # the refspec list cannot be read, and `_fetch_cache_remote` must then
+        # answer None — the BLOCKING answer. Reading an unreadable list as "no
+        # namespaces, so every ref is a cache" would convert every remote hit
+        # into a false CLEAN.
+        mod = _tool_module()
+        live = {"refs/remotes/origin/"}
         self.assertIsNone(
             mod._fetch_cache_remote(f"refs/remotes/pr/{ISSUE}", None))
         self.assertEqual(
-            mod._fetch_cache_remote(f"refs/remotes/pr/{ISSUE}", {"origin"}), "pr")
+            mod._fetch_cache_remote(f"refs/remotes/pr/{ISSUE}", live), "pr")
+        self.assertEqual(
+            mod._fetch_cache_remote(f"refs/remotes/pr{ISSUE}", live), f"pr{ISSUE}")
+        # A ref INSIDE a live namespace, and a LOCAL branch, are not fetch caches.
         self.assertIsNone(mod._fetch_cache_remote(
-            f"refs/remotes/origin/fix/{ISSUE}", {"origin"}))
-        # A LOCAL branch is not remote-tracking-shaped at all.
+            f"refs/remotes/origin/fix/{ISSUE}", live))
         self.assertIsNone(
-            mod._fetch_cache_remote(f"refs/heads/fix/{ISSUE}", {"origin"}))
+            mod._fetch_cache_remote(f"refs/heads/fix/{ISSUE}", live))
+
+    def test_the_entry_point_keeps_a_fetch_cache_ref_blocking_when_git_config_fails(self):
+        # ENTRY-POINT fail-closed coverage. The unit pin above feeds `None`
+        # straight to `_fetch_cache_remote`; this one makes the real
+        # `_remote_tracking_namespaces` call FAIL, so a changed failure return is
+        # caught by the COMPOSITION the tool actually performs rather than by a
+        # test that never reaches it.
+        _git(self.repo, "update-ref", f"refs/remotes/pr/{ISSUE}", "HEAD")
+        stub = _write_exec(self.tmp / "git-stub-no-refspec", (
+            "#!/usr/bin/env bash\n"
+            "set -u\n"
+            'if [ "${1:-}" = "config" ] && [ "${2:-}" = "--get-regexp" ]; then\n'
+            '  echo "git-stub: refusing config --get-regexp" >&2\n'
+            "  exit 128\n"
+            "fi\n"
+            'exec "${REAL_GIT:?REAL_GIT unset}" "$@"\n'
+        ))
+        rc, out = self.run_tool(git_bin=stub,
+                                env_extra={"REAL_GIT": shutil.which("git")})
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn(f"refs/remotes/pr/{ISSUE}", out)
+        # …and the surface says the read failed, rather than presenting a strict
+        # answer as a measured one.
+        self.assertIn("NO fetch-cache ref was demoted", out)
 
     def test_a_registered_worktree_whose_directory_is_gone_does_not_block(self):
         # #6622 case 1. `git worktree add` registers the record; removing the
@@ -1643,16 +1761,32 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("exists=no", out)
         self.assertIn("cannot be live work", out)
 
-    def test_a_worktree_without_an_index_does_not_block(self):
-        # #6622 case 2: `.worktrees/review-6269` existed but had no index, so it
-        # was a leftover record rather than a worker.
-        path = self.add_worktree(f"{ISSUE}-no-index")
+    def test_a_worktree_whose_git_marker_is_gone_does_not_block(self):
+        # #6622 case 2: `.worktrees/review-6269` existed but was not a usable
+        # worktree, so it was a leftover record rather than a worker.
+        path = self.add_worktree(f"{ISSUE}-no-gitdir")
         (path / ".git").unlink()
         rc, out = self.run_tool()
         self.assertEqual(rc, 0, out)
         self.assertIn("VERDICT: CLEAN", out)
-        self.assertIn("index=no", out)
+        self.assertIn("gitdir=no", out)
         self.assertIn("cannot be live work", out)
+
+    def test_an_unreadable_worktree_is_not_demoted(self):
+        # ⛔ UNREADABLE IS NOT ABSENT. `os.path.isdir` answers False for EACCES
+        # and ESTALE as well as for a missing directory, so a demotion keyed on
+        # it would turn a live-but-unreadable worktree into a false CLEAN on a
+        # BLOCKING surface. Pinned here because the shape cannot be reproduced
+        # as the directory's own owner.
+        mod = _tool_module()
+        with mock.patch("os.stat", side_effect=PermissionError("EACCES")):
+            live, basis = mod._worktree_liveness("/some/worktree/3061-x")
+        self.assertTrue(live, basis)
+        self.assertIn("unreadable", basis)
+        # A genuinely ABSENT path is still demoted — the two are distinguished.
+        live, basis = mod._worktree_liveness(str(self.tmp / "does-not-exist-3061"))
+        self.assertFalse(live)
+        self.assertIn("exists=no", basis)
 
     def test_a_live_worktree_still_blocks_and_reports_its_basis(self):
         # The guard rail: a LIVE worktree is a real competing claim and must
@@ -1663,7 +1797,7 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
         self.assertIn("[local worktrees]", out)
-        self.assertIn("exists=yes index=yes age=", out)
+        self.assertIn("exists=yes gitdir=yes age=", out)
 
     def test_issue_assignee_hit(self):
         self.gh_fixtures(issue=self.issue_payload(assignees=("other-agent",)))

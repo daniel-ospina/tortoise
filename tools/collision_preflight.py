@@ -1559,84 +1559,197 @@ def closing_reference(text: str, issue: int) -> bool:
 # dangerous one.
 
 
-def _remote_tracking_remote(refname: str) -> str | None:
-    """The `<remote>` of `refs/remotes/<remote>/…`, else None (e.g. `origin`).
+def _remote_tracking_namespaces(
+    git_bin: str, repo: str, timeout: float,
+) -> set[str] | None:
+    """The `refs/remotes/…` PREFIXES the configured remotes actually fetch into.
 
-    A ref outside `refs/remotes/` is not remote-tracking-shaped at all.
-    """
-    prefix = "refs/remotes/"
-    if not refname.startswith(prefix):
-        return None
-    rest = refname[len(prefix):]
-    remote, sep, _tail = rest.partition("/")
-    return remote if sep and remote else None
+    ⛔ THE REFSPEC IS THE DISCRIMINATOR, NOT THE REMOTE'S NAME (#6622). A
+    `refs/remotes/<x>/…` ref is a remote-tracking BRANCH only when some
+    configured remote's FETCH REFSPEC targets that namespace. Any other
+    namespace is a one-shot fetch TARGET: `git fetch <url>
+    refs/pull/N/head:refs/remotes/pr/N` writes a ref that names the CACHE KEY.
 
+    READING THE NAME INSTEAD GOT THIS WRONG IN THREE WAYS, and all three are in
+    the FAIL-OPEN direction on a blocking surface:
+      * a remote whose name contains a slash (`git remote add foo/bar <url>`)
+        fetches into `refs/remotes/foo/bar/*`, so comparing the FIRST path
+        segment against the full name set never matched;
+      * a non-standard refspec (`remote.origin.fetch
+        +refs/heads/*:refs/remotes/upstream/*`) declares a namespace that is not
+        the remote's name at all;
+      * a SINGLE-SEGMENT cache key (`refs/remotes/pr5343`) has no third segment,
+        so a "namespace + tail" split missed it and the false COLLISION this
+        issue is about survived for it;
+      * a NON-GLOB destination is not exotic — `git remote set-branches origin
+        main` writes `+refs/heads/main:refs/remotes/origin/main` with no `*` at
+        all. Skipping the non-glob form leaves the set EMPTY, and an empty set
+        demoted every `refs/remotes/…` ref. The PARENT of each destination is
+        taken instead, which covers both forms (`refs/remotes/origin/*` and
+        `refs/remotes/origin/main` both yield `refs/remotes/origin/`) and errs
+        WIDE — the safe direction on a blocking surface.
 
-def _configured_remotes(git_bin: str, repo: str, timeout: float) -> set[str] | None:
-    """Names from `git remote`, or None when the list could not be read.
+    ⛔ AND THE CONFIGURED REMOTES' NAMES ARE ADDED, NOT SUBSTITUTED. A remote can
+    be configured with NO fetch refspec at all, in which case the refspec arm
+    contributes nothing for it; `refs/remotes/<name>/` can only make MORE refs
+    block, so this arm cannot reopen the hole the refspec arm closes. The two are
+    combined rather than chosen between.
 
-    ⛔ THIS IS THE DISCRIMINATOR BETWEEN A BRANCH AND A CACHE KEY (#6622). A
-    `refs/remotes/<name>/…` ref is a remote-tracking BRANCH only when `<name>`
-    is a CONFIGURED remote — one whose refspec actually populates that
-    namespace. Any other namespace is a one-shot fetch TARGET:
-    `git fetch <url> refs/pull/N/head:refs/remotes/pr/N` writes a ref whose name
-    is the CACHE KEY. Measured on this repo (2026-10-02): `origin` is the only
-    configured remote (`+refs/heads/*:refs/remotes/origin/*`), while
-    `refs/remotes/pr/*` holds 2,810 refs named `pr/1 … pr/2810` — every one a PR
-    number and not one of them a branch name. `refs/remotes/pr/3354` was
-    reported as a blocking holder for #3354.
+    Measured on this repo (2026-10-02): the only refspec is
+    `+refs/heads/*:refs/remotes/origin/*`, so the only live namespace is
+    `refs/remotes/origin/`, while `refs/remotes/pr/*` alone holds 2,810 refs
+    named `pr/1 … pr/2810` and `refs/remotes/pr5343` … `refs/remotes/pr2996`
+    hold ten more, every one a PR number.
 
-    None is fail-CLOSED: an unreadable remote list leaves every ref blocking,
+    None is fail-CLOSED: an unreadable refspec list leaves every ref blocking,
     exactly as before this change.
     """
     try:
-        rc, out, _err, timed_out = _run([git_bin, "remote"], repo, timeout)
+        rc, out, _err, timed_out = _run(
+            [git_bin, "config", "--get-regexp", r"^remote\..*\.fetch$"],
+            repo, timeout,
+        )
     except Exception:  # pragma: no cover - _run raises only on programmer error
         return None
-    if rc != 0 or timed_out:
+    # ⛔ `git config --get-regexp` exits 1 when there is NO MATCH, which is a
+    # SUCCESSFUL read of an empty configuration — not a read failure. Collapsing
+    # the two would leave every ref blocking forever in a repo with no configured
+    # remote, while a real error (128, 127) must still answer None. Both
+    # directions are pinned by tests.
+    if timed_out or rc not in (0, 1):
         return None
-    return {line.strip() for line in out.splitlines() if line.strip()}
+    namespaces: set[str] = set()
+    for line in out.splitlines():
+        _key, _sep, value = line.partition(" ")
+        _src, colon, dest = value.strip().partition(":")
+        if not colon:
+            continue
+        dest = dest.strip().lstrip("+")
+        if not dest.startswith("refs/remotes/"):
+            continue
+        # ⛔ NON-GLOB DESTINATIONS AND MID-PATH `*` ARE THE TWO TRAPS, AND
+        # NEITHER IS EXOTIC.
+        #
+        # (i) NON-GLOB. `git remote set-branches origin main` writes
+        # `+refs/heads/main:refs/remotes/origin/main` — no `*` at all. Skipping
+        # the non-glob form (the first cut of this fix did exactly that) yields
+        # an EMPTY namespace set, and an empty set demotes EVERY `refs/remotes/…`
+        # ref — so a configured remote's genuine remote-tracking branch became a
+        # false CLEAN. Taking the PARENT errs WIDE (it also covers siblings that
+        # refspec does not fetch), and on this surface wide is SAFE.
+        #
+        # (ii) A `*` IS NOT ALWAYS THE LAST SEGMENT. Git accepts
+        # `+refs/heads/*:refs/remotes/x/*/y` and creates real tracking refs like
+        # `refs/remotes/x/<branch>/y`. A prefix taken as the PARENT of that
+        # destination keeps the literal `*` (`refs/remotes/x/*/`), which prefixes
+        # NO real ref, so the branch was demoted — a fail-open, and the reason the
+        # rule is not simply "parent of the destination".
+        #
+        # The rule that covers both: stop at the FIRST `*` when there is one,
+        # else take the parent of the exact target. The two agree on the common
+        # forms (`refs/remotes/origin/*` and `refs/remotes/origin/main` both yield
+        # `refs/remotes/origin/`) and both err WIDE.
+        star = dest.find("*")
+        prefix = dest[:star] if star != -1 else dest.rsplit("/", 1)[0] + "/"
+        if prefix.startswith("refs/remotes/"):
+            namespaces.add(prefix)
+    # ⛔ THE REMOTE NAMES ARE A FAIL-CLOSED ADDITION, NOT A REPLACEMENT. A remote
+    # can be configured with NO fetch refspec at all, and its namespace would
+    # then never appear above. Adding `refs/remotes/<name>/` can only make MORE
+    # refs block, so this arm can never open the fail-open hole the refspec arm
+    # exists to close — which is why the two are combined rather than chosen
+    # between. (It is also what a slash-named remote needs: `git remote add
+    # foo/bar <url>` fetches into `refs/remotes/foo/bar/*`, covered by both.)
+    try:
+        rc_remotes, out_remotes, _err2, timed_out2 = _run(
+            [git_bin, "remote"], repo, timeout,
+        )
+    except Exception:  # pragma: no cover - _run raises only on programmer error
+        return None
+    if rc_remotes != 0 or timed_out2:
+        return None
+    for name in out_remotes.splitlines():
+        name = name.strip()
+        if name:
+            namespaces.add(f"refs/remotes/{name}/")
+    return namespaces
 
 
 def _fetch_cache_remote(
-    refname: str, configured_remotes: set[str] | None,
+    refname: str, remote_namespaces: set[str] | None,
 ) -> str | None:
-    """The non-configured remote namespace of a fetch-cache ref, else None.
+    """The namespace segment of a fetch-cache ref, else None (the BLOCKING answer).
 
-    Returns the namespace only when the ref IS remote-tracking-shaped and its
-    remote is NOT configured. None (the blocking answer) is returned when the
-    ref is a local branch, when its remote IS configured, and when the remote
-    list was unreadable — so every uncertain case stays exactly as strict as it
-    was.
+    Returns a segment only when the ref is under `refs/remotes/` and NO
+    configured remote's refspec targets it. None — the blocking answer — is
+    returned for a local branch, for a ref inside a live namespace, and whenever
+    the namespace set is UNREADABLE ***or EMPTY***, so every uncertain case stays
+    exactly as strict as it was.
+
+    ⛔ AN EMPTY SET IS NOT "EVERYTHING IS A CACHE" — it is an INABILITY TO TELL,
+    AND IT FAILS CLOSED. The set is empty when the repo configures no remote (and
+    no fetch refspec) at all. A `refs/remotes/origin/…` ref can then be a
+    leftover of an earlier configuration or a deliberately created one, and the
+    tool can affirm neither. Reading an empty set as a cache demoted EVERY remote
+    ref in such a repo — the fail-open direction on a blocking surface, and the
+    shape this suite's own fixture (which configures no remote) would have hit.
     """
-    if configured_remotes is None:
+    if not remote_namespaces:
         return None
-    remote = _remote_tracking_remote(refname)
-    if remote is None or remote in configured_remotes:
+    if not refname.startswith("refs/remotes/"):
         return None
-    return remote
+    if any(refname.startswith(ns) for ns in remote_namespaces):
+        return None
+    rest = refname[len("refs/remotes/"):]
+    return rest.split("/", 1)[0] or None
 
 
 def _worktree_liveness(path: str) -> tuple[bool, str]:
     """(can this registered record still hold work?, the basis, rendered).
 
-    `exists=no` and `index=no` are EVIDENCE, not heuristics: a directory that is
-    not on disk cannot contain a worker, and a directory with no `.git` has no
-    index, so no lane can be mid-task in it. The age is always reported, so a
-    false hold is visible at a glance instead of having to be re-derived by hand.
+    `exists=no` and `gitdir=no` are EVIDENCE, not heuristics: a directory that is
+    not on disk cannot contain a worker, and a directory whose `.git` marker is
+    gone is not a usable worktree. The age is always reported, so a false hold is
+    visible at a glance instead of having to be re-derived by hand.
+
+    ⛔ UNREADABLE IS NOT ABSENT. `os.path.isdir` answers False for EACCES and
+    ESTALE as well as for a missing directory, so demoting on it would turn a
+    live-but-unreadable worktree (a stale mount, a directory owned by another
+    user) into a false CLEAN on a BLOCKING surface — the dangerous direction.
+    The probes therefore separate the two and FAIL CLOSED on everything except
+    FileNotFoundError, the same polarity `age` already uses.
+
+    ⛔ `gitdir=` IS DELIBERATELY NOT AN INDEX TEST, and the label says what is
+    MEASURED rather than what was hoped for. For a LINKED worktree `<path>/.git`
+    is a one-time gitdir POINTER; the index lives in the main repo's
+    `.git/worktrees/<name>/index` — and a worktree created with `--no-checkout`
+    has no index BY DESIGN while still being a worktree a lane holds, which is
+    exactly the shape this repo's own test fixtures create. An `index=` label
+    there asserted `index=yes` about a tree with no index: the opposite of the
+    evidence this fix exists to surface.
     """
     if not path:
         return False, "exists=no (record carries no path)"
-    if not os.path.isdir(path):
+    try:
+        os.stat(path)
+    except FileNotFoundError:
         return False, "exists=no (registered directory is not on disk)"
+    except OSError as exc:
+        return True, f"exists=unreadable ({exc.__class__.__name__}) — not demoted"
+    if not os.path.isdir(path):
+        return False, "exists=no (registered path is not a directory)"
     marker = os.path.join(path, ".git")
-    if not os.path.exists(marker):
-        return False, "index=no (no .git: the worktree has no index)"
+    try:
+        os.stat(marker)
+    except FileNotFoundError:
+        return False, "gitdir=no (no .git marker: not a usable worktree)"
+    except OSError as exc:
+        return True, f"exists=yes gitdir=unreadable ({exc.__class__.__name__})"
     try:
         age_hours = max(0.0, (time.time() - os.path.getmtime(marker)) / 3600.0)
     except OSError:
-        return True, "exists=yes index=yes age=unreadable"
-    return True, f"exists=yes index=yes age={age_hours:.1f}h"
+        return True, "exists=yes gitdir=yes age=unreadable"
+    return True, f"exists=yes gitdir=yes age={age_hours:.1f}h"
 
 
 def _git_refs(
@@ -1944,7 +2057,7 @@ def scan_branch_surface(
     identity: Identity, merged_head_shas: set[str],
     ancestor_merged: set[str] | None, main_tip: str | None,
     first_parent: set[str] | None,
-    configured_remotes: set[str] | None = None,
+    remote_namespaces: set[str] | None = None,
 ) -> None:
     """NUMBER matching only — the lexical arm is gone (#3504).
 
@@ -1988,20 +2101,19 @@ def scan_branch_surface(
             )
             continue
         # #6622: a fetch-cache ref names a CACHE KEY, not a holder. A
-        # `refs/remotes/<name>/…` ref whose `<name>` is not a configured remote
-        # was written by a one-shot `git fetch <url> …:refs/remotes/<name>/N`.
-        # This is the tool's OWN stated model of that surface — its note says a
+        # `refs/remotes/…` ref that NO configured remote's refspec targets was
+        # written by a one-shot `git fetch <url> <spec>:refs/remotes/<x>/N`. This
+        # is the tool's OWN stated model of that surface — its note says a
         # remote-tracking ref "is a local fetch cache", and
         # `_branch_terminal_state` already refuses to judge one — so counting it
         # as a strong holder contradicted the model the surface documents.
-        cache_remote = _fetch_cache_remote(ref, configured_remotes)
+        cache_remote = _fetch_cache_remote(ref, remote_namespaces)
         if cache_remote is not None:
             surface.add(
                 ref,
-                f"fetch-cache ref (refs/remotes/{cache_remote}/…, and "
-                f"'{cache_remote}' is not a configured remote) — a cache KEY "
-                "written by a one-shot git fetch, not a branch a lane holds "
-                "(non-blocking)",
+                f"fetch-cache ref ('{cache_remote}' under refs/remotes/, which no "
+                "configured remote's fetch refspec targets) — a cache KEY written "
+                "by a one-shot git fetch, not a branch a lane holds (non-blocking)",
                 "weak",
             )
             continue
@@ -3352,12 +3464,13 @@ def run_preflight(
     first_parent: set[str] | None = None
     if target.path is not None:
         first_parent = _first_parent_shas(git_bin, cwd, timeout)
-    # #6622: read the CONFIGURED remotes once (ONE `git remote` call). Only a
-    # configured remote can own a remote-tracking BRANCH; every other
-    # `refs/remotes/<name>/…` namespace is a one-shot fetch TARGET, so its refs
-    # are cache keys rather than holders. None (unreadable) leaves all refs
-    # blocking, which is the pre-existing behaviour.
-    configured_remotes = _configured_remotes(git_bin, cwd, timeout)
+    # #6622: read the remote-tracking NAMESPACES once (ONE `git config` call).
+    # ONLY a namespace some configured remote's fetch refspec actually populates
+    # can hold a remote-tracking BRANCH; every other `refs/remotes/…` ref is a
+    # one-shot fetch TARGET, so its name is a cache key rather than a holder.
+    # None (unreadable) leaves all refs blocking, which is the pre-existing
+    # behaviour.
+    remote_namespaces = _remote_tracking_namespaces(git_bin, cwd, timeout)
     for surface_name, namespace in (
         (SURFACE_LOCAL_BRANCHES, "refs/heads"),
         (SURFACE_REMOTE_BRANCHES, "refs/remotes"),
@@ -3394,7 +3507,7 @@ def run_preflight(
             scan_branch_surface(
                 surface, refs, issue, identity, merged_head_shas,
                 ancestor_merged, main_tip, first_parent,
-                configured_remotes=configured_remotes,
+                remote_namespaces=remote_namespaces,
             )
             surface.note = f"{len(refs)} ref(s) enumerated"
             if namespace != "refs/heads":
@@ -3403,6 +3516,16 @@ def run_preflight(
                     "is a local fetch cache, so judging it terminal could call a "
                     "reused live branch merged)"
                 )
+                if remote_namespaces is None:
+                    # #6622: report the INABILITY rather than presenting a strict
+                    # answer as a measured one. Nothing was demoted, so this row
+                    # is exactly as strict as it was before the change — but a
+                    # reader cannot tell that from the rows alone.
+                    surface.note += (
+                        "; ⚠ the configured remotes' fetch refspecs could not be "
+                        "read, so NO fetch-cache ref was demoted — every ref here "
+                        "blocks (fail-closed)"
+                    )
             elif ancestor_merged is None:
                 surface.note += (
                     "; ⚠ 'merged into main' detection UNAVAILABLE (for-each-ref "
@@ -3646,8 +3769,11 @@ def format_report(
         rest = len(weak) - len(prose_only)
         if rest:
             lines.append(
-                f"  {rest} further non-blocking hit(s) that are NOT prose — your "
-                "own work, a terminal branch/PR, or the shared fleet account."
+                f"  {rest} further non-blocking hit(s) that are NOT prose — "
+                "your own work, a terminal branch/PR, the shared fleet account, "
+                "a fetch-cache ref under a namespace no configured remote "
+                "fetches into, or a worktree RECORD that cannot be live work "
+                "(#6622)."
             )
         lines.append("  These do NOT block a dispatch.")
     if incomplete:
