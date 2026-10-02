@@ -2621,5 +2621,8 @@ def test_hosted_capture_emits_that_session_s_graph_op_row(
     by_phase = props["graph_ops_by_phase"]
     assert set(by_phase) == {"session_store", "extraction", "commit", "belief"}
     assert by_phase["session_store"]["total"] > 0
-    # no op is double-counted across phases
-    assert sum(p["total"] for p in by_phase.values()) == props["graph_ops_total"]
+    # The "no op is double-counted" question is NOT checkable from this row: the emitted
+    # ``graph_ops_total`` IS ``sum(by_phase[...])`` (graph_ops.GraphOpsCounter.total), so
+    # comparing the two is true by construction and can never fail. The independent oracle
+    # is tests/test_capture_graph_ops.py::test_capture_reports_nonzero_phase_attributed_ops,
+    # which counts the graph queries actually issued and compares THAT to the emitted total.
