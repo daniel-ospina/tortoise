@@ -29,8 +29,8 @@ stub then answers the REST body fetch (``body=rest-live``) while still failing t
 fetch. Both paths are hermetic and fast.
 
 
-#1224 adds the COMMENT channel: ``record-review.sh`` posts the same signed
-marker as a PR comment as well, because the body is a mutable field any later
+#1224 adds the COMMENT channel: the gate reads the same signed marker from an
+append-only PR comment as well, because the body is a mutable field any later
 legitimate edit rewrites. The gate must therefore accept a marker from EITHER
 channel, while every security property is preserved — the HMAC over the marker
 text is what makes it unforgeable (a forged comment FAILS), and the binding
@@ -152,8 +152,8 @@ def _stale_marker(key: str = _FIXTURE_KEY) -> str:
 def _comment(body: str, association: str = "MEMBER") -> dict[str, str]:
     """A GitHub issue-comment object as the REST API returns it.
 
-    ``MEMBER`` is the affiliation the recording machine posts with; the
-    affiliation filter the gate applies is ``PR_EVIDENCE_COMMENTS_JQ``.
+    ``MEMBER`` is the affiliation the filter admits; the affiliation filter the
+    gate applies is ``PR_EVIDENCE_COMMENTS_JQ``.
     """
     return {"body": body, "author_association": association}
 
@@ -500,7 +500,7 @@ def test_gate_reports_no_evidence_at_all(tmp_path: Path) -> None:
 
 # ── #1224: the signed marker may be carried by a PR COMMENT ────────────────
 # The body is a mutable field the recording party routinely rewrites, so the
-# SAME signed text is also carried by an append-only PR comment. The
+# gate also reads the SAME signed text from an append-only PR comment. The
 # gate must accept it from EITHER channel — and must preserve EVERY security
 # property while doing so: the HMAC over the marker text is what makes a marker
 # unforgeable, and the head/diff binding rules are unchanged.
@@ -652,9 +652,8 @@ def test_gate_does_not_admit_a_non_affiliated_comment(tmp_path: Path) -> None:
     On a public repo any user with read access can comment, so the gate applies
     ``PR_EVIDENCE_COMMENTS_JQ`` — the filter the producer side and the other
     readers must share — so a drive-by author's comment is not admitted, and a
-    reader must not
-    act on a comment the others ignore. The marker HMAC is valid: this fails on
-    AUTHORSHIP, not on the signature.
+    reader must not act on a comment the others refuse. The marker HMAC is valid:
+    this fails on AUTHORSHIP, not on the signature.
     """
     _require_jq()
     proc = _run_gate(
@@ -848,7 +847,7 @@ def test_candidate_regex_accepts_the_diff_segment() -> None:
 
 
 def test_gate_applies_the_producer_comment_admission_filter() -> None:
-    """#1224: the gate applies the comment-admission jq the producer shares.
+    """#1224: the gate applies the comment-admission jq the producer must share.
 
     ``PR_EVIDENCE_COMMENTS_JQ`` must stay byte-identical across the producer and
     every reader (record-review.sh, check-pipeline-compliance.sh,

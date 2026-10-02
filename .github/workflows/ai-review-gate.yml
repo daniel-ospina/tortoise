@@ -615,10 +615,10 @@ jobs:
             fi
           }
 
-          # Union BOTH channels: PR body ∪ eligible PR comments (#1224). Both
-          # carry the SAME signed marker text, so a body edit that removes the
-          # body copy cannot hide evidence that still
-          # exists in the append-only comment. Channel membership never changes
+          # Union BOTH channels: PR body ∪ eligible PR comments (#1224). The
+          # marker text is the same in either, so a body edit that removes the
+          # body copy cannot hide evidence that still exists in the append-only
+          # comment. Channel membership never changes
           # WHICH marker verifies — the loop below still HMAC-verifies and the
           # binding rules are untouched.
           body_markers="$(printf '%s\n' "$body" | grep -E "$marker_re" || true)"
