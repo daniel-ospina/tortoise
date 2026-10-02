@@ -366,6 +366,70 @@ def validate_span(span_start: object, span_end: object) -> None:
         )
 
 
+def validate_validity_window(valid_from: object, valid_to: object) -> None:
+    """#5374: a Point's validity window must be well-formed when it is ordered.
+
+    THE ONE HOME for the rule. It is the validity-window analogue of
+    :func:`validate_span`: the span guard covers the integer character-offset
+    axis, this one covers the temporal interval.
+
+    The predicate is the read path's own. ``restore_point_at``'s ``_covers``
+    orders the two bounds with ``tortoise.search_engine._created_sort_key``
+    and gates presence with ``is not None``; this guard uses the SAME measure
+    and the SAME presence predicate, so its boundary IS the read path's. A
+    persisted inverted window (``valid_to < valid_from``) then covers no
+    instant and the point silently disappears from every temporal query.
+
+    Absent bounds are legal — a window may be open-ended — so only a present,
+    orderable pair can be inverted. A bound that ``_created_sort_key`` cannot
+    order (it buckets as ``(1, <text>)``) is deliberately not refused here;
+    unparseable bounds are a separate concern with their own guard (#5360).
+    Such a window can still hide a point from a temporal query, but that hiding
+    is attributable to the unparseable bound rather than to this guard, and
+    refusing it here would be a behaviour change outside this issue. Equality
+    is well-formed: a zero-length ``[t, t]`` window is legal.
+
+    Scope note: this checks the pair it is GIVEN. It does not merge a caller's
+    bound with a stored opposite bound, so a writer that updates one edge of an
+    existing window is not covered by this call alone (#5359).
+
+    Who calls it: ``invalidate_point``, through
+    ``TortoiseSDK._assert_window_start_not_inverted``. That site already
+    refused the same inversion (#5358), so pointing it here re-homes the
+    comparison without adding a refusal. The remaining live Point writers that
+    persist a window are wired by their own issues: ``supersede_point`` by
+    #4021 (and its ``_preview_supersede`` parity by #5506), and
+    ``create_point`` / ``update_point`` caller props plus
+    ``mining._temporal_wire`` by #5359. The projection fold/replay writers
+    deliberately do NOT call it: a rebuild must REPLAY windows that already
+    exist, including ones that were inverted before a guard existed, so a fold
+    that refused would turn a legacy corruption into a FAILED RESTORE — before
+    the repair path exists. Detecting and repairing such windows is the read
+    path's and audit's concern (#5361). This declaration therefore states the
+    contract; it does not by itself cover every writer.
+
+    Raises ValueError — callers that want a 422/ValueError boundary get one.
+    """
+    if valid_from is None or valid_to is None:
+        return
+    # Imported locally: this module sits on the Layer-1 commit path and needs
+    # only its own models and validators there, so the heavyweight
+    # ``search_engine`` import stays off that path.
+    from .search_engine import _created_sort_key
+    k_from = _created_sort_key(valid_from)
+    k_to = _created_sort_key(valid_to)
+    if k_from[0] != 0 or k_to[0] != 0:
+        # Unparseable/unorderable bound — a separate concern (#5360). Both
+        # sides must be parseable instants before an inversion is decidable.
+        return
+    if k_from[1] > k_to[1]:
+        raise ValueError(
+            f"validFrom ({valid_from!r}) is after validTo ({valid_to!r}) — an "
+            "inverted validity window covers no instant and the point is "
+            "unreachable from every temporal query"
+        )
+
+
 class Point(BaseModel):
     """A single extracted point — content-addressed id, closed kind vocab."""
 
