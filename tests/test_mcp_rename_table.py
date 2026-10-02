@@ -1009,11 +1009,17 @@ def test_docs_only_edit_of_the_generated_doc_is_guarded_by_the_docs_job() -> Non
     assert "docs" in required["required_contexts"], (
         "the docs job must be a REQUIRED context, or a skipped check blocks nothing"
     )
-    step = next(
+    matching = [
         s
         for s in docs_job["steps"]
         if "mcp_rename_table.py --check" in _code(str(s.get("run", "")))
+    ]
+    assert len(matching) == 1, (
+        f"exactly one step may run the drift checks; found {len(matching)} — a "
+        "second step carrying the same command can hide a disabled real step, and "
+        "a bare `next(...)` lookup would accept the decoy"
     )
+    step = matching[0]
     assert "if" not in step, (
         "the drift step must be unconditional — a step-level `if` is the #4454 "
         "hole in a new shape"
@@ -1021,6 +1027,43 @@ def test_docs_only_edit_of_the_generated_doc_is_guarded_by_the_docs_job() -> Non
     assert not step.get("continue-on-error"), (
         "the drift step must not be continue-on-error: a failed check would "
         "report success and this required context would go green (#2656)"
+    )
+    assert not step.get("shell"), (
+        "the drift step must not override `shell:` — that can swallow the exit code"
+    )
+    assert not step.get("working-directory"), (
+        "the drift step must not set `working-directory:` — a stub tools/ tree "
+        "under another directory would let the `--check`s pass vacuously"
+    )
+    # THE INVOCATION IS EXACT, as the ci.yml pin asserts and as the sibling
+    # required gates already enforce (tests/test_ci_selection.py:3055 —
+    # `run.strip() == expected`). Substring matching alone is not enough, and the
+    # masking scan used below is not either: `echo "python3 tools/x.py --check"`
+    # contains the command text with NO shell operator at all, so it satisfies
+    # both while the real check never runs (measured: this exact edit left this
+    # pin GREEN). Exactness is what closes the family — `|| true`, `; true`, an
+    # `echo` decoy, and a commented-out command alike, since `_code` has already
+    # filtered comments.
+    expected = (
+        "pip install -e . --quiet\n"
+        "python3 tools/bridge_table.py --check\n"
+        "python3 tools/mcp_rename_table.py --check\n"
+        "python3 tools/sdk_surface.py --check"
+    )
+    assert _code(str(step.get("run", ""))).strip() == expected, (
+        "the drift step must invoke EXACTLY the installer plus the three "
+        "`--check` commands — no shell operator, no `echo` decoy, no wrapper, no "
+        f"trailing anything, or a real failure reports green (#2656); got "
+        f"{_code(str(step.get('run', '')))!r}"
+    )
+    assert not docs_job.get("continue-on-error"), (
+        "a job-level continue-on-error on `docs` would let a failing drift check "
+        "report success (#2656)"
+    )
+    _needs = docs_job.get("needs") or []
+    assert not (_needs if isinstance(_needs, list) else [_needs]), (
+        "the `docs` job must have no `needs:` — an upstream failure would SKIP "
+        "the guard instead of failing it (#2656)"
     )
 
     note = (ROOT / "config" / "ci-surfaces.yml").read_text(encoding="utf-8")

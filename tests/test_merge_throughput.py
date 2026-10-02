@@ -3953,12 +3953,41 @@ def test_docs_job_guards_tracked_generated_artifacts_on_every_pr():
         if str(s.get("name", "")).startswith("Generated-artifact drift check")
     )
     code = _code(step)
+    # EXACTLY ONE step may carry the invocations. A `next(...)` lookup happily
+    # accepts a decoy step with the right name while the real one is disabled.
+    matching = [s for s in steps if "tools/bridge_table.py --check" in _code(s)]
+    assert len(matching) == 1, (
+        f"exactly one step may run the drift checks; found {len(matching)} — a "
+        "second step carrying the same command can hide a disabled real step, "
+        "and a bare `next(...)` lookup would accept the decoy"
+    )
+    # THE INVOCATION IS EXACT, not a membership test. This is the sibling idiom
+    # already enforced for the other required gates (tests/test_ci_selection.py
+    # asserts `run.strip() == expected`): a trailing `|| true`, `; true`,
+    # `2>/dev/null || :`, `| true`, `&`, a `set +e` wrapper, or an `echo`
+    # containing the command all satisfy a MEMBERSHIP test while making a REAL
+    # failure report green — the #2656/#5373 silencing idiom, and the exact class
+    # this PR exists to close. Measured before this assertion: `|| true` and
+    # `echo "...--check"` both left BOTH pins GREEN. Filtering comments first
+    # (above) means exactness also rules out a commented-out command.
+    expected = (
+        "pip install -e . --quiet\n"
+        "python3 tools/bridge_table.py --check\n"
+        "python3 tools/mcp_rename_table.py --check\n"
+        "python3 tools/sdk_surface.py --check"
+    )
+    assert code.strip() == expected, (
+        "the drift step must invoke EXACTLY the installer plus the three "
+        "`--check` commands — no shell operator, no wrapper, no trailing "
+        f"anything, or a real failure reports green (#2656); got {code!r}"
+    )
     # Unconditional and UNSILENCEABLE, like the #2656 gate in python-ci.yml. A
     # step-level `if:` skips the guard entirely; `continue-on-error` lets a
     # FAILING check report success, so this required context goes green with the
     # artifact stale — the #4454 outcome with the step still present. Both are
     # checked for the #2656 gate at tests/test_ci_selection.py:3022; the shape is
-    # the same, so the rule is too.
+    # the same, so the rule is too. `shell`/`working-directory` are the same
+    # family: either can swallow the exit code or run a stub copy of the tools.
     assert "if" not in step, (
         "the drift step must be unconditional — a step-level `if` would make the "
         "guard skippable"
@@ -3967,11 +3996,31 @@ def test_docs_job_guards_tracked_generated_artifacts_on_every_pr():
         "the drift step must not be continue-on-error: a failed check would "
         "report success and this required context would go green (#2656)"
     )
+    assert not step.get("shell"), (
+        "the drift step must not override `shell:` — that can swallow the exit code"
+    )
+    assert not step.get("working-directory"), (
+        "the drift step must not set `working-directory:` — a stub tools/ tree "
+        "under another directory would let the `--check`s pass vacuously"
+    )
     for scope, label in ((workflow, "ci.yml"), (workflow["jobs"]["docs"], "the docs job")):
         assert not ((scope.get("defaults") or {}).get("run") or {}).get("shell"), (
             f"a `defaults.run.shell` on {label} can swallow the drift check's "
             "exit code (#2656)"
         )
+    # A job-level `continue-on-error` silences the whole job (and so the required
+    # context); `needs:` is subtler and worse — an upstream failure SKIPS the job
+    # rather than failing it, so the guard never runs and the required context is
+    # never reported (#2656).
+    assert not workflow["jobs"]["docs"].get("continue-on-error"), (
+        "a job-level continue-on-error on `docs` would let a failing drift check "
+        "report success (#2656)"
+    )
+    _needs = workflow["jobs"]["docs"].get("needs") or []
+    assert not (_needs if isinstance(_needs, list) else [_needs]), (
+        "the `docs` job must have no `needs:` — an upstream failure would SKIP "
+        "the guard instead of failing it (#2656)"
+    )
     # The generators import `tortoise.sdk`, which pulls the full declared
     # dependency set (numpy, prometheus_client, fastmcp). Without the package
     # install both commands abort at IMPORT time and the step exits 1 on EVERY
@@ -3983,7 +4032,9 @@ def test_docs_job_guards_tracked_generated_artifacts_on_every_pr():
     )
     # `--check` verifies and exits non-zero on drift. A bare invocation would
     # REWRITE the artifact and always pass — the check would look present and
-    # never fire, which is worse than absent.
+    # never fire, which is worse than absent. Exactness above already forces the
+    # `--check` form, so these are the artifact-identity assertions.
+    #
     # Every LISTED artifact is a TRACKED generated file whose `--check` re-renders
     # and exits non-zero on drift. Verified against a positive control per tool:
     # injecting a line into the artifact it owns makes that tool exit 1, and
