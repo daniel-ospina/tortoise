@@ -12,8 +12,18 @@ in B (no loss); B may find more. Cost = measured tokens both paths.
 """
 from __future__ import annotations
 
-import json
 import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/experiments/extractor-v2/run_parity.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/experiments/extractor-v2/run_parity.py`"
+    )
+
+import json
 import time
 from pathlib import Path
 

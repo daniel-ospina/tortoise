@@ -2,7 +2,7 @@ name: Main health (nightly)
 # #5215 D13 / Task 8 — the post-merge main signal for the five required
 # contexts that had none.
 #
-# Five of the six branch-protection required contexts — pricing-artifact,
+# Five of the seven branch-protection required contexts — pricing-artifact,
 # docs, test-isolation, license-surface, legal-e2e — are emitted by ci.yml,
 # which was `on: pull_request:` only. A required context that never runs on
 # `main` can sit red there with nothing reporting it. (The #5583 class is NOT
