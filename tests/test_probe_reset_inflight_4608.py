@@ -22,6 +22,7 @@ timing assumptions (this repo has a history of load-sensitive flakes here).
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 
@@ -94,17 +95,51 @@ def _fake_probe_db(sdk, setup_timeout=None) -> dict:
     return {"ok": True, "latency_ms": 0.1, "error": None}
 
 
+def _await_probe_quiescence(mod, timeout: float = 10.0) -> None:
+    """Wait for an ABANDONED probe episode to finish before asserting on it.
+
+    ``HealthProbe.reset()`` deliberately does NOT join the running worker — its
+    own docstring says the previous worker "is abandoned as a daemon thread —
+    never joined" — so a probe started before this fixture ran can still be
+    inside ``_probe_db`` when the teardown asserts. The two counters are
+    therefore racy against a worker nobody can join:
+
+      * ``_PROBE_SDK_EPISODES`` is incremented for the whole probe and
+        decremented in its ``finally``;
+      * ``_PROBE_SDK_DEFERRED`` is drained by the LAST episode to finish.
+
+    The asserts below are LEAK detectors, not SCHEDULING detectors: waiting lets
+    a legitimately in-flight episode drain, so they fire only on an episode that
+    never finishes. The wait is bounded, so a real leak still fails — after the
+    timeout — instead of hanging the suite.
+
+    Measured on main (`3b6f236ee`, shard ``f``): this file red with 2 FAILED
+    ("the displaced handle was never closed") + 3 ERROR ("a probe episode
+    leaked its count") — yet it passes in isolation, i.e. the failure is
+    ORDER-dependent, decided by which tests precede it in the shard. #6938's
+    manifest addition shifted that packing (this shard went 85 -> 79 files).
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not getattr(mod, "_PROBE_SDK_EPISODES", 0) and not getattr(
+                mod, "_PROBE_SDK_DEFERRED", []):
+            return
+        time.sleep(0.02)
+
+
 @pytest.fixture
 def probe_state():
     """Clean probe state for the two modules this file drives, before and after."""
     for mod in (ha_mod, sh_mod):
         mod._HEALTH_PROBE.reset()
         mod._probe_sdk_reset()
+        _await_probe_quiescence(mod)
     ha_mod._READY_PROBE.reset()
     yield
     for mod in (ha_mod, sh_mod):
         mod._HEALTH_PROBE.reset()
         mod._probe_sdk_reset()
+        _await_probe_quiescence(mod)
         assert getattr(mod, "_PROBE_SDK_EPISODES", 0) == 0, (
             "a probe episode leaked its count")
         assert getattr(mod, "_PROBE_SDK_DEFERRED", []) == [], (
