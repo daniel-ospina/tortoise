@@ -38,8 +38,11 @@ Fix
 ---
 :func:`safe_graph_delete` never emits any graph command for a graph that is
 not currently present, and re-checks presence inside a cross-process
-critical section (:func:`graph_delete_lock`) so a concurrent deleter cannot
-slip between the check and the drop. The sweeps that drop graphs route
+critical section (:func:`graph_delete_lock`) so a concurrent **guarded**
+deleter cannot slip between the check and the drop. An UNGUARDED peer that
+issues ``GRAPH.DELETE`` directly can still interleave with it — which is
+precisely why routing every caller through here is the point, rather than a
+property this function can establish on its own. The sweeps that drop graphs route
 through it: ``tests/_embedded.py`` (``_sweep_legacy_strays``, ``wipe``,
 ``_drop_one_graph``, ``_sweep_team_strays``, ``wipe_server``, ``_sweep_proj``),
 ``battery/testing/seeds.py``'s ``purge_owned_namespace``, and the two routed

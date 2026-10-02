@@ -201,12 +201,17 @@ def test_lock_command_failure_ALSO_REFUSES():
     assert db.calls == []
 
 
-def test_lock_not_taken_when_the_graph_is_absent():
-    """Absence is decided before any command — including the lock."""
+def test_lock_is_taken_before_absence_is_decided():
+    """The lock is acquired BEFORE the presence read — deliberately, so a
+    genuine backend failure raises from ``graph_exists`` instead of being
+    reported as a refusal (review P2). Absence then transmits no *graph*
+    command (the lock commands are the only traffic)."""
     conn = _FakeConnection()
     db = _LockingDb(graphs=[], connection=conn)
     assert safe_graph_delete(db, "test_absent") is False
     assert db.calls == []
+    assert [c[0] for c in conn.commands] == ["SET", "EVAL"], \
+        "the lock is taken before presence is decided, and released after"
 
 
 # ── sweep call sites inherit the guard (#2961) ────────────────────────────

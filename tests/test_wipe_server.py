@@ -1,6 +1,7 @@
 # tests/test_wipe_server.py
 """Unit surface: server-mode wipe_server() + session journal + sweeps
 (epic #1647 Task 2, D-4 — the hermeticity core)."""
+import logging
 import os
 import subprocess
 import sys
@@ -17,7 +18,7 @@ from tests._embedded import (
     wipe,
     wipe_server,
 )
-from tortoise.graph_delete_guard import safe_graph_delete
+from tortoise.graph_delete_guard import graph_exists, safe_graph_delete
 
 
 def _docker_reachable(host: str | None = None,
@@ -501,7 +502,7 @@ def test_wipe_refusal_is_logged_not_silent(caplog):
     proj._graph_name = "test_ws_w"
     with caplog.at_level("WARNING"):
         wipe(proj)  # best-effort: must NOT raise
-    assert any("REFUSED" in r.message for r in caplog.records), \
+    assert any("REFUSED to clear" in r.message for r in caplog.records), \
         "a refused wipe must say so — silent was the defect"
 
 
@@ -1352,7 +1353,15 @@ def test_leftover_team_strays_refused_on_shared_docker(uri_env, monkeypatch):
             # #2961: presence-gated + locked. A blind DETACH followed by a
             # GRAPH.DELETE is the phantom-creating sequence, and this cleanup
             # runs against a SHARED server — the same shape the guard removes.
-            safe_graph_delete(proj.db, name, detach=True, drop=True)
+            # Review P3: a refusal must not be SILENT. These are journal-blind
+            # org_*/team_* strays, and _sweep_team_strays refuses product
+            # namespaces on a shared URI without the opt-in, so nothing retries
+            # them.
+            if not safe_graph_delete(proj.db, name, detach=True, drop=True) \
+                    and graph_exists(proj.db, name):
+                logging.getLogger(__name__).warning(
+                    "cleanup: the graph-delete guard REFUSED to drop %r — no "
+                    "sweep retries it", name)
         proj.close()
 
 
@@ -1391,8 +1400,13 @@ def test_leftover_team_strays_refused_on_test_matrix_uri(uri_env, monkeypatch):
             "eval question graphs (product-namespace) must survive a " \
             "concurrent session's sweep"
     finally:
-        # #2961: presence-gated + locked (shared server).
-        safe_graph_delete(proj.db, stray, detach=True, drop=True)
+        # #2961: presence-gated + locked (shared server). Review P3: a refusal
+        # must not be silent — see the note on the sibling cleanup above.
+        if not safe_graph_delete(proj.db, stray, detach=True, drop=True) \
+                and graph_exists(proj.db, stray):
+            logging.getLogger(__name__).warning(
+                "cleanup: the graph-delete guard REFUSED to drop %r — no "
+                "sweep retries it", stray)
         proj.close()
 
 

@@ -2129,10 +2129,11 @@ durations:
   # 544/605 = 89.9% and reddened `manifest-integrity` (tools/ci_selection.py
   # --integrity) and `test (b)`
   # (test_ci_selection.py::test_duration_coverage_guard_boundary_and_realistic)
-  # from that single condition. Measured 23 tests / 13.12s local (10.0s of it the
-  # deliberate lock-deadline sleep, so it is load-insensitive); the base has no
-  # junit for a file it introduces. Supersede from the first post-merge main run
-  # that includes it (#4817/#4729).
+  # from that single condition. Measured 23 tests / 13.12s local (the 10.0s
+  # lock-deadline sleep this note used to name was removed in #2961 — the
+  # contention test now passes wait_s=0.0, so the figure is conftest setup);
+  # the base has no junit for a file it introduces. Supersede from the first
+  # post-merge main run that includes it (#4817/#4729).
   test_graph_delete_guard.py: 13.1
   test_github_indexer.py: 50.2
   test_doctor.py: 7.1
