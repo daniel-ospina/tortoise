@@ -26067,13 +26067,20 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
     try:
         org_sdk = _make_sdk(namespace=org_id)
 
-        # #1844: the index job is OBJECT-ONLY — it writes zero non-episodic
-        # :Point nodes (the "points" quota resource counts ONLY
-        # `MATCH (n:Point) WHERE n.is_episodic IS NULL OR false`), so no
-        # points-quota preflight or per-batch re-check is needed. A org at
-        # its points cap must still be able to index issues. The #1843
-        # statement-write resurrection (point/statement mints) would re-add
-        # the points gate.
+        # #1844: the index job writes zero non-episodic :Point nodes, so it never
+        # trips the POINT arm of the "points" resource.
+        #
+        # #1975: that is no longer the whole count. Since #1911 the points resource
+        # ALSO counts Object/Subject nodes unconditionally (quota.py), and this job
+        # MINTS objects. So the gate decision below is unchanged but its reason is
+        # NOT "this job mints nothing countable". The job is deliberately left
+        # UNGATED, and the accepted consequence is that an indexing-heavy org CAN be
+        # pushed past max_points by the objects it mints, after which its
+        # points-gated writes 402 until an upgrade. That is a recorded DECISION, not
+        # an oversight: an org at its points cap must still be able to index issues.
+        # Adding a preflight here would gate the index job itself; the #1843
+        # statement-write resurrection (point/statement mints) would re-add the
+        # points gate.
         indexer = GitHubIndexer(token)
 
         # ── One-time legacy `-closed` backfill (T1-P1 + T2-P3). Gated on the
