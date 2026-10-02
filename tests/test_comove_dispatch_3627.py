@@ -109,13 +109,17 @@ def _run_step(
     *,
     gh_stdout: str = "",
     gh_rc: int = 0,
+    watch_rc: int = 0,
     env_extra: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Execute the named step's run block with a stubbed ``gh`` on PATH.
 
     The stub logs its argv to ``tmp_path/gh-argv.log`` (so a test can assert the
-    request the step actually makes, not the one its comments claim) and prints
-    ``gh_stdout`` with exit status ``gh_rc``.
+    request the step actually makes, not the one its comments claim).
+
+    ``watch_rc`` is the exit status of ``gh run watch`` specifically, so a test
+    can hold the dispatch SUCCEEDING while the flip FAILS — the #3627 P0 state,
+    where the POST is accepted and the run is cancelled before the app flips.
     """
     bindir = tmp_path / "bin"
     bindir.mkdir(parents=True, exist_ok=True)
@@ -123,8 +127,11 @@ def _run_step(
     gh = bindir / "gh"
     gh.write_text(
         "#!/usr/bin/env bash\n"
-        f"printf '%s\\n' {shlex.quote(gh_stdout)}\n"
         f"printf '%s\\n' \"$@\" >> {shlex.quote(str(argv_log))}\n"
+        'if [ "$1" = "run" ]; then\n'
+        f"  exit {watch_rc}\n"
+        "fi\n"
+        f"printf '%s\\n' {shlex.quote(gh_stdout)}\n"
         f"exit {gh_rc}\n",
         encoding="utf-8",
     )
@@ -327,24 +334,24 @@ def test_dispatch_fails_closed_when_the_api_refuses(tmp_path: Path) -> None:
     )
 
 
-def test_dispatch_accepts_a_204_no_content_response(tmp_path: Path) -> None:
-    """State that fails it: `gh` exits 0 with an EMPTY body — the documented
-    ``204 No Content`` answer, whose existence is why the run id cannot be
-    required. Reachable: GitHub has returned 204 for this endpoint (and
-    community reports describe it reverting to 204 after returning 200), and
-    the stub's empty stdout IS that state.
+def test_an_unobserved_run_is_refused_even_when_the_post_was_accepted(
+    tmp_path: Path,
+) -> None:
+    """State that fails it: `gh` exits 0 with an EMPTY body.
 
-    A RED here is not fail-closed, it is broken: the API accepted the dispatch
-    and the app is flipping, so the job would report an open window, and the
-    error text would send the operator to re-dispatch a deploy already in
-    flight.
+    With `return_run_details=true` requested, an empty body means the API
+    accepted the dispatch and did NOT name the run — so the flip cannot be
+    observed. Accepting it (the PREVIOUS contract, which this test used to
+    assert) is exactly the #3627 P0: the co-move reported a closed window on a
+    POST alone, while the dispatched run may have been cancelled by a
+    concurrent push to main and the app never flipped.
     """
     proc = _run_step(_DISPATCH_STEP, tmp_path, gh_stdout="", gh_rc=0)
-    assert proc.returncode == 0, (
-        "a 204 No Content dispatch (gh exit 0, empty body) was reported as a "
-        f"failure — every successful co-move run would be red (#3627)\n{proc.stdout}"
+    assert proc.returncode != 0, (
+        "an accepted dispatch with no run id exited 0 — the window is reported "
+        f"closed while the flip is unobserved (#3627)\n{proc.stdout}"
     )
-    assert "deploy-hosted dispatched" in proc.stdout, proc.stdout
+    assert "UNOBSERVED" in proc.stdout, proc.stdout
 
 
 def test_dispatch_fails_closed_on_a_body_without_a_run_id(tmp_path: Path) -> None:
@@ -366,7 +373,46 @@ def test_dispatch_fails_closed_on_a_body_without_a_run_id(tmp_path: Path) -> Non
         )
         # `not-json-at-all` is the unreadable sub-case: jq fails, so the step
         # must translate that into its own operator-facing error, not jq's.
-        assert "UNCONFIRMED" in proc.stdout, proc.stdout
+        assert "UNOBSERVED" in proc.stdout or "UNCONFIRMED" in proc.stdout, proc.stdout
+
+
+def test_a_dispatch_whose_flip_fails_is_refused(tmp_path: Path) -> None:
+    """The #3627 P0, in the direction the old contract could not see.
+
+    State that fails it: the POST is ACCEPTED (`gh` exits 0 with a run id in the
+    body) but the dispatched run does not reach success. That is reachable, not
+    hypothetical — `deploy-hosted.yml` triggers on `push: branches: [main]` for
+    `tortoise/**` with `concurrency.cancel-in-progress: true`, so an ordinary
+    merge cancels an in-flight co-move flip. Without the watch the step reported
+    a closed window on an accepted POST, leaving the schema applied and the app
+    stale.
+    """
+    proc = _run_step(
+        _DISPATCH_STEP, tmp_path,
+        gh_stdout='{"workflow_run_id": 4242}', gh_rc=0, watch_rc=1,
+    )
+    assert proc.returncode != 0, (
+        "a dispatch whose run never succeeded exited 0 — the schema is applied "
+        f"and the app is stale while the window reads closed (#3627)\n{proc.stdout}"
+    )
+    assert "did NOT flip" in proc.stdout, proc.stdout
+
+
+def test_the_flip_is_awaited_and_the_request_asks_for_the_run_id(
+    tmp_path: Path,
+) -> None:
+    """Asserted on the argv the step ACTUALLY ran, not on its comments.
+
+    State that fails it: the POST omits `return_run_details=true` (so the run id
+    can never be learned, and the response is always the empty 204) or the run
+    is never watched (so an accepted POST is again the whole acceptance signal).
+    """
+    _run_step(_DISPATCH_STEP, tmp_path, gh_stdout='{"workflow_run_id": 7}', gh_rc=0)
+    argv = _argv(tmp_path)
+    assert "return_run_details=true" in argv, argv
+    assert "watch" in argv, argv
+    assert "7" in argv, argv
+    assert "--exit-status" in argv, argv
 
 
 def test_dispatch_succeeds_and_names_the_created_run(tmp_path: Path) -> None:

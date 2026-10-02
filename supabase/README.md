@@ -131,9 +131,13 @@ Migrations + functions deploy via `.github/workflows/supabase-deploy.yml`.
 > dispatches `deploy-hosted.yml` — the app flip is NOT a second operator
 > action, because the tenancy rename (#3543) is a hard cut at the wire level
 > and the app and schema must land in one window. The step runs only after
-> every apply succeeded, and it fails closed: if it cannot dispatch, the run
-> goes RED rather than reporting a closed window. Dispatch FROM `main` — a
-> non-main run is refused before any migration is applied.
+> every apply succeeded, and it fails closed on BOTH halves: if it cannot
+> dispatch, the run goes RED; and having dispatched, it WATCHES that run and
+> goes RED if it does not reach success — an ordinary merge to `main` touching
+> `tortoise/**` starts a run in `deploy-hosted`'s `cancel-in-progress`
+> concurrency group, so the flip can be cancelled after the dispatch was
+> accepted. Dispatch FROM `main` — a non-main run is refused before any
+> migration is applied.
 
 **Migration drift gate (#1095):** `deploy-hosted.yml` runs
 `.github/scripts/check-migration-drift` before shipping app code — a fail-closed
@@ -151,13 +155,17 @@ forward migration, or `migration repair --linked --status applied <version>`
 when the migration is provably already in prod — because the apply pushes the
 whole pending set in filename order.
 
-Manual fallback (equivalent):
+Manual fallback — for when the automated co-move has already FAILED. The run
+says which way: a dispatch error, or `run <id> did not reach success`. Do not
+run the last line alongside a healthy co-move — `deploy-hosted.yml` is
+`cancel-in-progress: true`, so a manual dispatch CANCELS the in-flight
+automated flip and turns that run red.
 
 ```bash
 supabase db push --project-ref ybetwichurajbfswfeqa
 supabase functions deploy waitlist-subscribe \
   --project-ref ybetwichurajbfswfeqa --no-verify-jwt
-gh workflow run deploy-hosted.yml --ref main   # the app flip (#3627 — one window)
+gh workflow run deploy-hosted.yml --ref main   # the app flip, after a FAILED co-move
 ```
 
 ## Post-deploy smoke checklist (#373)
