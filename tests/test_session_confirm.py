@@ -250,8 +250,8 @@ def test_the_turn_id_matches_the_servers_own_writer_format():
     text. The previous version grepped `tortoise/sdk.py` for the literal
     ``f"{session_id}_t{i}"``, which that module now carries only inside
     DOCSTRINGS — so it passed on prose and could not red when the derivation
-    changed. The AST half below strips every docstring before matching, so only
-    executable text can satisfy it.
+    changed. The AST half below strips the matched function's own leading
+    docstring before matching, so only its executable text can satisfy it.
     """
     import ast
     import pathlib

@@ -1421,13 +1421,17 @@ def _write_capture_turns(
         # the capture lanes' offset 0 the ``_first_live`` bound is a NO-OP for
         # every id this writer MINTS (a decimal index below the window is in
         # ``keep`` by construction), so for those ids the sweep is #1920's
-        # "everything not kept". It is NOT #1920 exactly: ``_capture_turn_ids``
-        # now guards with ``isdecimal()``, so a turn-shaped id whose suffix is
-        # not a decimal integer (``<sid>_t²``) — which #1920's ``isdigit()``
-        # guard admitted and swept — is deliberately left in place (see that
-        # function's docstring, and
+        # "everything not kept". It is NOT #1920 exactly, on two counts:
+        # (i) ``_capture_turn_ids`` now guards with ``isdecimal()``, so a
+        # turn-shaped id whose suffix is not a decimal integer (``<sid>_t²``)
+        # — which #1920's ``isdigit()`` guard admitted and swept — is
+        # deliberately left in place (see that function's docstring, and
         # ``test_non_int_parseable_suffix_does_not_break_capture``, which pins
-        # the residue).
+        # the residue); and (ii) the ``_first_live`` bound retains a
+        # non-canonical DECIMAL suffix (``<sid>_t01``) whose value is
+        # numerically below the window, which #1920's sweep would have deleted.
+        # (ii) is the bound, not the guard: it is present even with
+        # ``isdigit()`` restored.
         _prefix = f"{session_id}_t"
         _first_live = turn_offset + len(turn_rows)
         # Every id ``_capture_turn_ids`` returns is ``int()``-parseable by
