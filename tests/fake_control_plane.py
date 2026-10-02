@@ -110,6 +110,7 @@ TIMESTAMPTZ_COLUMNS: set[tuple[str, str]] = {
     ("link_intents", "consumed_at"),
     ("link_intents", "created_at"),
     ("link_intents", "expires_at"),
+    ("metering_records", "graph_storage_measured_at"),
     ("metering_records", "period_end"),
     ("metering_records", "period_start"),
     ("metering_records", "updated_at"),
