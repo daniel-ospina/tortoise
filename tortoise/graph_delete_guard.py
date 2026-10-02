@@ -123,10 +123,11 @@ def graph_delete_lock(
 ) -> Iterator[bool]:
     """Cross-process critical section for graph deletion (#2961).
 
-    Yields True when the lock is held for the duration of the block, False
-    otherwise (no raw connection, the lock command failed, or ``wait_s``
-    elapsed). Never raises for lock problems and never fails the caller: a
-    sweep must not die because the advisory lock is unavailable. **The caller
+    Yields True when the lock was acquired (held until released, or until
+    ``ttl_ms`` reclaims it — see the renewal caveat below), False otherwise (no
+    raw connection, the lock command failed, or ``wait_s`` elapsed). Never
+    raises for lock problems and never fails the caller: a sweep must not die
+    because the advisory lock is unavailable. **The caller
     decides what False means**: :func:`safe_graph_delete` treats
     False-with-a-real-connection as a refusal (it degrades closed), while
     False-with-no-connection proceeds unlocked. The TTL (``ttl_ms``) reclaims
@@ -206,10 +207,12 @@ def safe_graph_delete(
     the DETACH is what materialises the record-less phantom that poisons the
     AOF (module docstring).
 
-    Returns True when a graph command was issued (the graph was present).
-    Returns False when nothing was transmitted: either the graph was already
-    absent, or a client exposing a raw connection could not take the
-    cross-process lock (a refusal — the graph is left for a later sweep).
+    Returns True when the graph was present (a command is issued unless BOTH
+    ``detach`` and ``drop`` are False, in which case nothing is transmitted and
+    the True only reports presence). Returns False when nothing was
+    transmitted: either the graph was already absent, or a client exposing a
+    raw connection could not take the cross-process lock (a refusal — the graph
+    is left for a later sweep).
     **Those two are not distinguishable from the return value alone**, so a
     caller that records a drop-set entry must re-check presence before
     treating False as "satisfied" —

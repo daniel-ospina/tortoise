@@ -224,7 +224,9 @@ def test_presence_read_happens_INSIDE_the_held_lock():
 
     class _Conn(_FakeConnection):
         def execute_command(self, *args):
-            if args and args[0] == "EVAL":
+            if args and args[0] == "SET":
+                order.append("acquire")
+            elif args and args[0] == "EVAL":
                 order.append("release")
             return super().execute_command(*args)
 
@@ -236,9 +238,33 @@ def test_presence_read_happens_INSIDE_the_held_lock():
     conn = _Conn()
     db = _Db(graphs=["test_here"], connection=conn)
     assert safe_graph_delete(db, "test_here", detach=False, drop=True) is True
-    assert "read" in order and "release" in order, order
-    assert order.index("read") < order.index("release"), (
-        f"the presence read must run while the lock is HELD — got {order}")
+    # ALL THREE positions, not just read-before-release (review P2): asserting
+    # only `read < release` also passes a mutant that reads BEFORE acquiring —
+    # unlock-check → acquire → drop — which reinstates the same #2961 window
+    # from the other side. Mutants this catches: read-before-acquire and
+    # read-after-release.
+    for marker in ("acquire", "read", "release"):
+        assert marker in order, f"{marker} never happened: {order}"
+    assert order.index("acquire") < order.index("read") < order.index("release"), (
+        f"the presence read must run INSIDE the held lock — got {order}")
+
+
+def test_read_failure_RAISES_and_releases_the_lock():
+    """Review P3: a backend whose READS fail must RAISE, not be reported as a
+    refusal — the module docstring states it, and nothing pinned it.
+    `test_real_failure_still_propagates` raises from `select_graph` (the drop),
+    not from the presence read, so this path was uncovered."""
+    conn = _FakeConnection()
+
+    class _Db(_LockingDb):
+        def list_graphs(self):
+            raise RuntimeError("conn dead: GRAPH.LIST")
+
+    db = _Db(graphs=["test_here"], connection=conn)
+    with pytest.raises(RuntimeError, match=r"GRAPH\.LIST"):
+        safe_graph_delete(db, "test_here", detach=False, drop=True)
+    assert "EVAL" in [c[0] for c in conn.commands], \
+        "the lock must be released even when the presence read raises"
 
 
 # ── sweep call sites inherit the guard (#2961) ────────────────────────────
