@@ -69,6 +69,7 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # resolves. Same class as test_quota/test_commit_endpoint.
     "test_cohort_cost_cap.py": {"registry": "prod-coupled"},
     "test_cross_tenant_read_isolation.py": {"registry": "prod-coupled"},  # #3663 — registry control-plane seeding for the cross-tenant read proof
+    "test_graph_storage.py": {"registry": "prod-coupled"},  # #5331 — the byte-meter fixture seeds an org through the registry namespace (the literal is the namespace PROD resolves; same class as test_cross_tenant_read_isolation)
     "test_3926_error_prop_guard.py": {"registry": "prod-coupled"},  # #3926 — the literal IS the canonical namespace PROD code resolves
     "test_index_docs_api.py": {"registry": "index-docs"},
     "test_session_extraction_modes.py": {"registry": "session-extraction"},
