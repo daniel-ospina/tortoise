@@ -968,7 +968,20 @@ def test_docs_only_edit_of_the_generated_doc_is_guarded_by_the_docs_job() -> Non
 
     workflows = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
     assert workflows, "no workflows found — the standalone `--check` claim cannot be checked"
-    runners = [w.name for w in workflows if "mcp_rename_table.py --check" in w.read_text()]
+
+    def _code(text: str) -> str:
+        # Comments are not invocations: a `#`-prefixed command still contains the
+        # substring, so matching raw text reports a guard that would never run.
+        # Same intent as `_code` in tests/test_ci_selection.py.
+        return "\n".join(
+            ln for ln in text.splitlines() if not ln.strip().startswith("#")
+        )
+
+    runners = [
+        w.name
+        for w in workflows
+        if "mcp_rename_table.py --check" in _code(w.read_text())
+    ]
     assert runners == ["ci.yml"], (
         "the standalone check must run, from ci.yml and nowhere else — a second "
         f"home means the guard has drifted, and none means #4454 is open again: {runners}"
@@ -999,11 +1012,15 @@ def test_docs_only_edit_of_the_generated_doc_is_guarded_by_the_docs_job() -> Non
     step = next(
         s
         for s in docs_job["steps"]
-        if "mcp_rename_table.py --check" in str(s.get("run", ""))
+        if "mcp_rename_table.py --check" in _code(str(s.get("run", "")))
     )
     assert "if" not in step, (
         "the drift step must be unconditional — a step-level `if` is the #4454 "
         "hole in a new shape"
+    )
+    assert not step.get("continue-on-error"), (
+        "the drift step must not be continue-on-error: a failed check would "
+        "report success and this required context would go green (#2656)"
     )
 
     note = (ROOT / "config" / "ci-surfaces.yml").read_text(encoding="utf-8")

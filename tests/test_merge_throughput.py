@@ -3936,26 +3936,48 @@ def test_docs_job_guards_tracked_generated_artifacts_on_every_pr():
         "the docs-PR skip it exists to close"
     )
     steps = workflow["jobs"]["docs"]["steps"]
+
+    def _code(spec: dict) -> str:
+        # Comments are not invocations: a `#`-prefixed command still contains the
+        # substring, so a bare substring assertion passes on a COMMENTED-OUT
+        # check and the pin reports a guard that does not run. Same intent as
+        # `_code` in tests/test_ci_selection.py.
+        return "\n".join(
+            line
+            for line in (spec.get("run") or "").splitlines()
+            if not line.strip().startswith("#")
+        )
+
     step = next(
         s for s in steps
         if str(s.get("name", "")).startswith("Generated-artifact drift check")
     )
-    # Unconditional, like the job. The `docs` job also serves the scheduled
-    # main-health call with step-level `if:` guards on its markdown/link steps; a
-    # step-level `if` here would make the drift guard skippable, which is the
-    # #4454 hole in a new shape. The sibling pin in test_mcp_rename_table.py
-    # already checks this; asserting it here too means a `ci.yml`-only edit is
-    # caught by both the mcp test and this one.
+    code = _code(step)
+    # Unconditional and UNSILENCEABLE, like the #2656 gate in python-ci.yml. A
+    # step-level `if:` skips the guard entirely; `continue-on-error` lets a
+    # FAILING check report success, so this required context goes green with the
+    # artifact stale — the #4454 outcome with the step still present. Both are
+    # checked for the #2656 gate at tests/test_ci_selection.py:3022; the shape is
+    # the same, so the rule is too.
     assert "if" not in step, (
         "the drift step must be unconditional — a step-level `if` would make the "
         "guard skippable"
     )
+    assert not step.get("continue-on-error"), (
+        "the drift step must not be continue-on-error: a failed check would "
+        "report success and this required context would go green (#2656)"
+    )
+    for scope, label in ((workflow, "ci.yml"), (workflow["jobs"]["docs"], "the docs job")):
+        assert not ((scope.get("defaults") or {}).get("run") or {}).get("shell"), (
+            f"a `defaults.run.shell` on {label} can swallow the drift check's "
+            "exit code (#2656)"
+        )
     # The generators import `tortoise.sdk`, which pulls the full declared
     # dependency set (numpy, prometheus_client, fastmcp). Without the package
     # install both commands abort at IMPORT time and the step exits 1 on EVERY
     # PR — a fail-always gate that reds this required context and blocks all
     # merges. Installing only the obvious `pyyaml` is the mistake this pins.
-    assert "pip install -e ." in step["run"], (
+    assert "pip install -e ." in code, (
         "the step must install the package; the generators import tortoise.sdk "
         "and abort on missing runtime deps otherwise"
     )
@@ -3967,7 +3989,7 @@ def test_docs_job_guards_tracked_generated_artifacts_on_every_pr():
     # injecting a line into the artifact it owns makes that tool exit 1, and
     # `sdk_surface.py` additionally owns the tracked `config/sdk-surface.json`.
     for tool in ("bridge_table", "mcp_rename_table", "sdk_surface"):
-        assert f"tools/{tool}.py --check" in step["run"], (
+        assert f"tools/{tool}.py --check" in code, (
             f"{tool} writes a TRACKED generated artifact and must be verified"
         )
     # Both generators carry the #5128 >=3.12 runtime guard, so the step must
@@ -3984,7 +4006,7 @@ def test_docs_job_guards_tracked_generated_artifacts_on_every_pr():
     # EVERY run — a fail-always gate, not a drift gate (measured: with that output
     # absent, the command exits 1). Its tracked-input validation is reachable only
     # via `--out` to a rendered copy, which `tests/test_sdk_rename_table.py` does.
-    assert "sdk_rename_table" not in step["run"]
+    assert "sdk_rename_table" not in code
 
 
 def test_docs_job_pr_path_never_interpolates_filenames():

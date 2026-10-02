@@ -622,13 +622,13 @@ jobs:
           # EXIT_USAGE rather than silently running on an older interpreter.
           python-version: '3.12'
       - name: Generated-artifact drift check (#4454)
-        # #4454: a PR that edits ONLY a generated artifact never runs the
-        # matrix — `docs/` and `tools/` are in NON_PYTHON_PREFIXES, so a
-        # docs-only change selects `surfaces: []` and the guard test is skipped
-        # by the deliberate docs-PR policy. PR #4177 closed the generator-only
-        # direction (a SOURCE_PATTERNS match beats the skip); the generated
-        # OUTPUT was the direction left open, so a hand-edit of a rendered
-        # document could pass CI with stale numbers.
+        # #4454: a PR that edits ONLY a generated DOCUMENT under `docs/` never
+        # runs the matrix — `docs/` is in NON_PYTHON_PREFIXES and no
+        # SOURCE_PATTERNS entry claims a `.md` path, so a docs-only change
+        # selects `surfaces: []` and the guard test is skipped by the deliberate
+        # docs-PR policy. (A `tools/`-only edit is NOT skipped: PR #4177 named
+        # the generators in SOURCE_PATTERNS, which beats the non-python prefix.
+        # `config/sdk-surface.json` also selects `core`.)
         #
         # It lives here, and runs unconditionally, because `docs` is a REQUIRED
         # context with no `paths:` filter (only the non-required jobs in this
