@@ -668,7 +668,7 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # fallback covers it" claim #3261 removed from this file). The CORE_ALSO
              # entry makes `_selection_relevant()` keep the path, so `core` (and this
              # tool's own guard) is selected. Pinned by
-             # tests/test_ci_selection.py::test_queue_resweep_tool_change_selects_core.
+             # tests/test_ci_selection.py::test_queue_resweep_tool_change_selects_core_not_tier1.
              "tools/queue_resweep.py",
              # #6138 review P1: the queue-conflict census owns
              # tests/test_queue_conflict_census.py, which is `core`-registered,
