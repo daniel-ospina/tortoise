@@ -107,9 +107,10 @@ UNMEASURED_SENTINEL = 0.0
 
 CAPTURED_AT_KEY = "durations_captured_at"
 
-# `dt.UTC` is 3.11+ only; the 3.9 system interpreter has no such attribute, so
-# every map (red or not) reported UNKNOWN instead of a verdict. Alias it once.
-UTC = getattr(dt, "UTC", dt.UTC)
+# `dt.UTC` is a 3.11+ attribute, and the interpreter guard above refuses anything
+# below 3.12, so it is always present by the time this line runs. Aliased once so
+# the several call sites read alike.
+UTC = dt.UTC
 
 
 def _module_is(path: Path, mod: object) -> bool:
