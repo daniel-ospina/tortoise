@@ -755,7 +755,7 @@ assert_rc 1 "(n) gate fails"
 # previous assertion pinned `latest recorded ${STALE} — expected ${HEAD}`, a label that
 # overclaimed (it is the LAST sha-bearing line, not the newest record) and that a reader
 # could not re-check once the PR moved on.
-assert_contains "(n) reports the real cause" "NO marker in this PR's body or its comments is bound to ${HEAD}"
+assert_contains "(n) reports the real cause" "NO marker in this PR's body or its admitted comments is bound to ${HEAD}"
 assert_contains "(n) says which bytes it judged" "comments=read"
 assert_contains "(n) lists the candidate marker it did see" "bound to: ${STALE:0:12}"
 assert_contains "(n) keeps the head in the verdict" "head expected: ${HEAD}"
@@ -1001,9 +1001,11 @@ assert_rc 1 "(r3) mergify[bot] on an ordinary branch is still evaluated (fails w
 echo "── (s) the comment channel (#1224) ────────────────────────────"
 # The marker may be carried by a repo-affiliated PR COMMENT instead of the body:
 # the body is a mutable field any later legitimate edit rewrites, so a body-only
-# copy reddens this check on a review that genuinely happened. This pins both the
-# call shape (an unrecognised gh call lands in $T/gh-unrecognised and fails (a))
-# and the fail-closed arm when that fetch breaks.
+# copy reddens this check on a review that genuinely happened. This pins that the
+# gate PASSES on comment evidence when the body holds none, and that a comment
+# fetch failure still fails closed. (A call-shape drift is caught by case (a)'s
+# $T/gh-unrecognised check, which every case feeds, because the comment fetch is
+# unconditional.)
 printf 'edited body — the marker was removed by the last rewrite\n' > "$T/body-s"
 legacy_marker "$HEAD" > "$T/comments-s"
 STUB_DIFF_FILE="$DIFF_FILE" STUB_COMMENTS_FILE="$T/comments-s" run_gate "$T/body-s"

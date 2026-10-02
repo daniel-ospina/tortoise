@@ -559,7 +559,7 @@ def test_gate_rejects_stale_marker_in_a_comment(tmp_path: Path) -> None:
     )
     assert proc.returncode == 1, proc.stdout
     # The comment channel WAS read here, so the verdict names both channels.
-    assert f"NO marker in this PR's body or its comments is bound to {_HEAD}" in proc.stdout, proc.stdout
+    assert f"NO marker in this PR's body or its admitted comments is bound to {_HEAD}" in proc.stdout, proc.stdout
     assert "found in PR comment" in proc.stdout, proc.stdout
     assert "comments=read sha256=" in proc.stdout, proc.stdout
 

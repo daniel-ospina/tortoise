@@ -50,10 +50,12 @@ name: ai-review-gate
 # that genuinely happened — two measured instances on 2026-09-18
 # (agent-infra#1209, premise-labs#3788), and 11 of the 25 red runs in the
 # 2026-09-30 gate-red sample were NO_MARKER, the population this would land in.
-# record-review.sh (the producer half, agent-infra#1224) therefore posts the
-# SAME signed marker text as an append-only PR COMMENT as well as into the
-# body; this gate unions the two channels, so a body edit cannot hide evidence
-# that still exists in a comment.
+# The producer half (record-review.sh, agent-infra#1224) is to post the SAME
+# signed marker text as an append-only PR COMMENT as well as into the body;
+# this gate unions the two channels, so a body edit cannot hide evidence that
+# still exists in a comment. The channel is empty until a producer writes to it
+# (see "Producer status" in docs/ai-review-gate.md), and the gate reads it the
+# moment one does.
 #
 # ⛔ The CHANNEL is not a trust boundary and this changes NO security property.
 # A comment is exactly as attacker-writable as the body, so the marker text is
@@ -73,9 +75,10 @@ name: ai-review-gate
 # and only after its HMAC verifies, so a network failure can never become a
 # pass.
 #
-# Comment admission is AUTHOR-FILTERED by `PR_EVIDENCE_COMMENTS_JQ`, the
-# BYTE-IDENTICAL jq constant shared with agent-infra's record-review.sh,
-# check-pipeline-compliance.sh and atomic-land.sh (#1224). On a public repo
+# Comment admission is AUTHOR-FILTERED by `PR_EVIDENCE_COMMENTS_JQ`, the jq
+# constant that must stay BYTE-IDENTICAL to the copy the producer side carries
+# (record-review.sh, check-pipeline-compliance.sh, atomic-land.sh — the producer
+# half of #1224; see "Producer status" in docs/ai-review-gate.md). On a public repo
 # every GitHub user with read access can comment, so admission is narrowed to
 # repo-affiliated authors (OWNER / MEMBER / COLLABORATOR). It is a NARROWING,
 # not parity with the body's writer set — its known over/under-admission
@@ -398,9 +401,10 @@ jobs:
           # channels restores AVAILABILITY; it changes no security property,
           # because the marker text is still HMAC-verified below.
           #
-          # WHAT IS ADMITTED: PR_EVIDENCE_COMMENTS_JQ, BYTE-IDENTICAL to the
-          # constant in agent-infra's record-review.sh,
-          # check-pipeline-compliance.sh and atomic-land.sh (#1224). On a public
+          # WHAT IS ADMITTED: PR_EVIDENCE_COMMENTS_JQ, which must stay
+          # BYTE-IDENTICAL to the producer's copy (record-review.sh,
+          # check-pipeline-compliance.sh, atomic-land.sh — the producer half of
+          # #1224; see "Producer status" in docs/ai-review-gate.md). On a public
           # repo every user with read access can comment, so admission is
           # narrowed to repo-affiliated authors (OWNER / MEMBER /
           # COLLABORATOR). It is a NARROWING, not parity with the body's writer
@@ -714,8 +718,13 @@ jobs:
               | sed '/^$/d' | awk '!seen[$0]++')"
 
             if [ -z "$all_lines" ]; then
-              echo "::error::No AI review evidence found in PR #${PR_NUMBER} body or comments."
-              if [ "$comments_read" -ne 1 ]; then
+              # Name the scope ACTUALLY searched, exactly as the stale verdict
+              # below does: with the comment read failed, "body or comments"
+              # would assert an inspection that never happened (#1224).
+              if [ "$comments_read" -eq 1 ]; then
+                echo "::error::No AI review evidence found in PR #${PR_NUMBER} body or comments."
+              else
+                echo "::error::No AI review evidence found in PR #${PR_NUMBER} body."
                 echo "::error::NOTE: the PR comment fetch failed in this run, so comment-carried evidence could not be examined — re-run this job once the API is reachable before concluding the evidence is absent."
               fi
               report_body_provenance
@@ -860,7 +869,7 @@ jobs:
             # inspection that never happened (#1224). The provenance line says
             # `comments=NOT-READ` in that case.
             if [ "$comments_read" -eq 1 ]; then
-              echo "::error::AI review evidence is stale: NO marker in this PR's body or its comments is bound to ${expected} (the last candidate it read was found in ${latest_cand_chan})."
+              echo "::error::AI review evidence is stale: NO marker in this PR's body or its admitted comments is bound to ${expected} (the last candidate it read was found in ${latest_cand_chan})."
             else
               echo "::error::AI review evidence is stale: NO marker in this PR's body is bound to ${expected} (the last candidate it read was found in ${latest_cand_chan})."
               echo "::error::NOTE: the PR comment fetch failed in this run, so comment-carried evidence could not be examined — re-run this job once the API is reachable before concluding no record exists."

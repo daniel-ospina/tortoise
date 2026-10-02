@@ -103,6 +103,14 @@ entry condition closes that path.
   reports `comments=NOT-READ` so a reader can see the comment side was never
   examined.
 
+  > **Producer status.** The producer half (agent-infra#1224) is **not deployed**:
+  > measured on 2026-10-02, the installed `~/.pi/agent/scripts/record-review.sh`
+  > contains no comment-posting code and agent-infra `main` carries no
+  > `PR_EVIDENCE_COMMENTS_JQ`, so **no PR comment carries a marker yet** and this
+  > channel changes nothing on its own. The gate is the *consumer* half; it reads
+  > the channel the moment a producer starts writing to it, which is why the two
+  > halves can ship in either order.
+
 ## Why the diff, not just the head sha (#2982)
 
 Branch protection on `main` has `strict: false` (verified 2026-09-29), so a PR branch is
@@ -282,14 +290,14 @@ is unambiguous:
 
 | Message says | Cause | Fix |
 |---|---|---|
-| `No AI review evidence found` | no marker in the PR body or in its comments | run `record-review.sh` |
+| `No AI review evidence found` | no admitted marker in the PR body or in its comments; when the comment read FAILED the message ends `body.` and a `NOTE` says the comment side was not examined | run `record-review.sh` |
 | `is UNSIGNED` | marker has no ` sig=<hmac>` segment at all | re-record with a key configured |
 | `was recorded for '<other>', not …` | marker is bound to a different repo | re-record for this repo |
 | `was found for <other>, not for <repo>` | marker is STALE **and** bound to a different repo | re-record for this repo |
 | `normalises to an empty value` | the configured secret is whitespace-only, so the HMAC key would be the empty (public) string | set a real `AI_REVIEW_GATE_KEY` |
 | `HMAC mismatch` | key or signed text differs; prints `sha256` prefixes of the text it checked | compare the prefix with the recording machine, then re-record |
 | `is stale` | marker is for another head sha, and its `diff=` is absent, could not be hashed live, or matches neither the normalized nor the raw digest | re-run the review, re-record at the new head |
-| `NO marker in this PR's body[ or its comments] is bound to <head>` | the stale verdict, stated as what it examined: `or its comments` appears only when the comment channel was actually read. It prints `candidate marker(s): N` (with their shas), the channel the last candidate came from, the head it expected, and the provenance of BOTH sources (`body=<rest-live\|event-snapshot>`, `comments=<read\|NOT-READ>`) | if `body=event-snapshot` the run judged a body frozen at the event, so re-run the check before acting — a record posted afterwards is invisible to it; if `comments=NOT-READ` the comment side was never examined; otherwise re-record at the head |
+| `NO marker in this PR's body[ or its admitted comments] is bound to <head>` | the stale verdict, stated as what it examined: `or its comments` appears only when the comment channel was actually read. It prints `candidate marker(s): N` (with their shas), the channel the last candidate came from, the head it expected, and the provenance of BOTH sources (`body=<rest-live\|event-snapshot>`, `comments=<read\|NOT-READ>`) | if `body=event-snapshot` the run judged a body frozen at the event, so re-run the check before acting — a record posted afterwards is invisible to it; if `comments=NOT-READ` the comment side was never examined; otherwise re-record at the head |
 | `the LIVE body could not be used (…)` | the run fell back to the event payload: the REST read failed, or it succeeded and returned an empty body | re-run the check before acting on the verdict; the evidence may still be valid |
 | `live diff hash could not be computed` | the REST diff fetch failed; a `diff=` marker fails closed rather than carrying forward | re-run the job once the API is reachable — the evidence may still be valid |
 | `carries no well-formed 40-hex recorded sha` | marker's `@` field is not a full sha | re-record with a full 40-char head sha |
