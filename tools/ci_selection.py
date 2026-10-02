@@ -871,6 +871,15 @@ TOOL_CARVEOUTS = (
     # Pinned by
     # test_ci_selection.test_run_with_eval_keys_tool_change_fails_closed_to_full.
     "tools/run-with-eval-keys.sh",
+    # #4256: the "who is on #N?" verb (tools/who_is_on.py + its wrapper
+    # tools/who-is-on.sh) owns tests/test_who_is_on.py. Same silent-drop class
+    # as the collision_preflight carve-out above: no SOURCE_PATTERNS entry
+    # matches `tools/who_is_on.py`, so a change to the tool alone would be
+    # swallowed by the flat "tools/" prefix, classify as docs-only, and its own
+    # guard test would never run on the PR that changes it. Fail-closed (FULL
+    # matrix) is the safe default for a tool whose answer drives dispatch.
+    "tools/who_is_on.py",
+    "tools/who-is-on.sh",
 )
 
 

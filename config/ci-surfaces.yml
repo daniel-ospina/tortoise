@@ -770,6 +770,7 @@ surfaces:
   - test_finding_provenance.py
   - test_health_client_effect.py  # #3811: /health client-visible effect over a real port (dual: api)
   - test_branch_reaper.py   # #4408: local-branch reaper — PR-state classification + safety guards
+  - test_who_is_on.py  # #4256: "who is on #N?" verb — local-only branches/worktrees included
   - test_health_ready_nonblocking.py  # #2988: /health/ready off-loop + bounded probes
   - test_selfhost_health_probe_executor.py  # #3287/#2988/#3243: selfhost health probes (dual-registered)
   - test_server_hygiene_gate.py
@@ -2218,6 +2219,58 @@ durations:
   test_epic903_observability.py: 3.1
   test_lme_m6_evidence.py: 2.4
   test_supersede_edges.py: 2.7
+  test_epic903_lifecycle.py: 5.0
+  test_pointsuperseded_rebuild.py: 4.7
+  test_session_key_http.py: 4.7
+  test_write_consolidation.py: 4.7
+  test_value_extractor.py: 4.6
+  test_pack_state.py: 4.5
+  test_skip_guard.py: 4.4
+  test_admin_return_to.py: 4.3
+  test_admin_origin_redirect.py: 8.0
+  test_longmem_usage_e2e.py: 4.3
+  test_init_apikey_validation.py: 4.2
+  test_orient_direct_consolidation.py: 4.2
+  test_oauth_mcp.py: 4.1
+  test_mcp_server.py: 4.0
+  test_dashboard_login.py: 3.8
+  test_capture_phase_d_dedup.py: 3.7
+  test_ci_selection.py: 3.7
+  test_epic903_freshness.py: 3.7
+  test_onboarding_integration.py: 3.5
+  test_pack_cli.py: 3.4
+  test_capabilities_endpoint.py: 3.3
+  test_longmem_reader_pinning.py: 3.3
+  test_recall_state.py: 3.3
+  test_battery_corpus_v11.py: 3.2
+  test_tenancy_spine.py: 3.2
+  test_collision_preflight.py: 3.0
+  test_who_is_on.py: 6.0  # #4256: analogue estimate (same subprocess harness as test_collision_preflight.py); refresh from the first post-merge junit artifact
+  test_free_team_entitlement.py: 3.0
+  test_integration_search.py: 3.0
+  test_kind_classifier.py: 3.0
+  test_longmem_preflight.py: 3.0
+  test_battery_ep_outcome.py: 2.9
+  test_battery_write_channel.py: 2.9
+  test_ep_draft_filter.py: 2.9
+  test_integrity_gate_docker.py: 2.9
+  test_pack_manifest_store.py: 2.9
+  test_tortoise_search.py: 2.9
+  test_2199_decide_calibration.py: 2.8
+  test_battery_determinism.py: 2.8
+  test_oauth_token_fault.py: 2.8  # #3400: CI-measured (junit 34725816431). Supersedes the hand-entered 100.0 (#2863 local fault-matrix + real-seam HTTPServer); the file is 46 mocked tests with no skip markers and ran in 2.8s in CI.
+  test_pointinvalidated_rebuild.py: 2.8
+  test_invite_fusion_docker.py: 2.7
+  test_domain_validators.py: 2.6
+  test_email_notify.py: 2.6
+  test_mining.py: 2.6
+  test_wipe_server.py: 2.6
+  test_boot_regressions.py: 2.5
+  test_de2e1_entity_extraction.py: 2.5
+  test_epic903_staleness.py: 2.5
+  test_epic903_observability.py: 2.3
+  test_lme_m6_evidence.py: 2.3
+  test_supersede_edges.py: 2.3
   test_directional_impl_fix.py: 2.2
   test_github_connector.py: 2.6
   test_recall_gaps_subgraph.py: 3.6
