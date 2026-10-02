@@ -101,6 +101,7 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # graphs per test):
     "test_battery_lane_matrix.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # hermetic env-strip test (fixture-param monkeypatch — auto-undo)
     "test_body_cap_sweep.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # #2032: embedded lane via delenv (the test_billing pattern — registry-lane determinism for register/agent mints)
+    "test_graph_storage.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # #5331: embedded lane via delenv (the test_billing pattern — the fixture pins TORTOISE_DB_PATH to a tmp_path db, so the construction never rides the URI)
     "test_bridge_mcp.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],
     "test_selfhost_health_probe_executor.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],  # #3331: the probe-lane behavioural tests force the EMBEDDED lane (setenv "" IS the point — the selfhost health handlers are driven without a live server; the fixture-param monkeypatch auto-restores, no lane leak)
     "test_chain_enforcer.py": [r'monkeypatch\.delenv\("TORTOISE_DB_URI"'],

@@ -2461,10 +2461,10 @@ def test_apply_supersessions_divergent_successor_keeps_first(sdk):
     is now the ONE discipline; the helper-routed keep-first is the one
     consumer discipline
     that never blind-overwrites; a capture CAN trip it — the extractor's
-    S3 search_graph calls tortoise_fts_query(entity_type='object'),
-    which does NOT exclude terminal Objects (the terminal clause is
-    point-label-only; recall's #1350 object filter runs inside
-    recall_state alone), so overlapping capture re-derives a
+    S3 search_graph calls tortoise_fts_query(entity_type='object',
+    include_terminal=True), which keeps terminal Objects visible to that
+    PRIOR/resolution leg (#3301 widened the default exclusion on the four
+    search legs; this leg opts back in), so overlapping capture re-derives a
     supersession against a target session 1 already folded — this
     keep-first branch is the idempotency mechanism for that path."""
     from tortoise.commit_ops import apply_supersessions
