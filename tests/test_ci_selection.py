@@ -1778,9 +1778,10 @@ def test_a_shard_that_cannot_fit_its_budget_is_named_not_silently_killed():
     #     a SIGINT-then-SIGKILL escalation, so a leg that hangs past its budget
     #     is still terminated (and the outer job cap still bounds the total).
     #     Read the PARSED run step, never the file text: the identical string
-    #     sits in a heading COMMENT (`python-ci.yml:442`), so a whole-file scan
-    #     stays green if the real execution line is deleted — an assertion that
-    #     can pass on a comment does not guard what its message claims.
+    #     also sits in heading COMMENTs (and with literal durations in other
+    #     steps), so a whole-file scan stays green if the real execution line is
+    #     deleted — an assertion that can pass on a comment does not guard what
+    #     its message claims.
     for s in push_legs(m)["shards"]:
         assert s["watchdog_minutes"] == WATCHDOG_CEILING_MIN, s
     wf = _load_python_ci()
