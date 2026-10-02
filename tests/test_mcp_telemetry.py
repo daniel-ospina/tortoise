@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -350,3 +351,51 @@ class TestOverhead:
         durations.sort()
         p95 = durations[int(len(durations) * 0.95) - 1]
         assert p95 < 5.0, f"p95 latency {p95:.3f}ms exceeded the 5ms budget"
+
+
+class TestSchedulingGuardFailSafe:
+    """#4023: the *scheduling* guards — executor submit and thread start.
+
+    ``TestFailSafe`` above covers the emitter raising and the *writer* raising.
+    Neither covers the two SCHEDULING branches of
+    ``_emit_mcp_tool_call_telemetry`` — and that is exactly where #4020's real
+    incident lived: on the (unmerged) ask emitter a ``Thread.start()`` failure
+    escaped a function documented never to raise and turned a pinned 504 into a
+    500. The mcp_server site carries the same guards; these tests pin that both
+    branches are load-bearing rather than merely present.
+    """
+
+    @pytest.mark.asyncio
+    async def test_executor_scheduling_failure_is_swallowed(self, monkeypatch):
+        """``loop.run_in_executor`` raising must not escape the emitter."""
+        from tortoise import mcp_server
+
+        class _Loop:
+            def is_closed(self) -> bool:
+                return False
+
+            def run_in_executor(self, *a, **k):
+                raise RuntimeError("executor submit exploded")
+
+        monkeypatch.setattr(asyncio, "get_running_loop", lambda: _Loop())
+        # Documented never to raise — a scheduling failure must be swallowed.
+        mcp_server._emit_mcp_tool_call_telemetry(
+            "t1", "tortoise_status", "ok", 3, None)
+
+    def test_thread_start_failure_is_swallowed(self, monkeypatch):
+        """``Thread.start()`` raising must not escape the emitter (#4020 shape)."""
+        from tortoise import mcp_server
+
+        def _no_loop():
+            raise RuntimeError("no running event loop")
+
+        # Force the daemon-thread branch: no event loop is running.
+        monkeypatch.setattr(asyncio, "get_running_loop", _no_loop)
+
+        def _raising_start(self):
+            raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(threading.Thread, "start", _raising_start)
+        # Documented never to raise — a Thread.start() failure must not escape.
+        mcp_server._emit_mcp_tool_call_telemetry(
+            "t1", "tortoise_status", "ok", 3, None)
