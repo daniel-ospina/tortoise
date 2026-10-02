@@ -376,13 +376,16 @@ jobs:
             body_stale_hint="the LIVE body could not be used (${body_fallback_reason}), so this run judged the body captured when it was queued — a record posted since is invisible to it. Re-run this check before acting on this verdict."
           fi
 
-          # EVERY body-derived verdict must say WHICH BYTES it judged (#4776): the
-          # same evidence can read present or absent depending on which body was
-          # fetched, so a verdict that omits the provenance cannot be falsified — and
-          # an unfalsifiable verdict is indistinguishable from a wrong one. One helper
-          # so the guarantee cannot drift branch by branch.
+          # EVERY verdict must say WHICH BYTES it judged (#4776): the same evidence
+          # can read present or absent depending on which body was fetched, so a
+          # verdict that omits the provenance cannot be falsified — and an
+          # unfalsifiable verdict is indistinguishable from a wrong one. One helper
+          # so the guarantee cannot drift branch by branch. Both channels are
+          # reported: since #1224 a verdict can be driven by comment text, so
+          # certifying only the body would leave the deciding bytes unnameable.
           report_body_provenance() {
             echo "::error::  ${body_provenance}"
+            echo "::error::  ${comments_provenance}"
             if [ -n "$body_stale_hint" ]; then echo "::error::  ${body_stale_hint}"; fi
           }
 
@@ -424,6 +427,15 @@ jobs:
             comments_read=1
           else
             echo "::warning::PR comment fetch via the REST API failed — evidence carried ONLY in a comment is unavailable for this run. The PR-body path is unaffected and no unverified comment text is used."
+          fi
+          # Provenance for the comment side of the union, so a verdict driven by a
+          # comment is as falsifiable as a body-driven one (#4776 x #1224).
+          comments_bytes="$(printf '%s' "$comments" | wc -c | tr -d ' ')"
+          comments_digest="$(printf '%s' "$comments" | openssl dgst -sha256 | awk '{print $NF}')"
+          if [ "$comments_read" -eq 1 ]; then
+            comments_provenance="comments=read sha256=${comments_digest:0:12} bytes=${comments_bytes}"
+          else
+            comments_provenance="comments=NOT-READ (the REST comment read failed, so only the body could be judged)"
           fi
 
           # A marker is acceptable when it names THIS repo, carries a valid
@@ -721,11 +733,17 @@ jobs:
             latest_sha=""
             latest_raw=""
             latest_chan=""
-            # EVERY candidate marker's binding, in body order (#4776). `latest_sha` is the
-            # LAST sha-bearing line, which is not the newest RECORD — reporting it as
-            # "latest recorded" was the misleading label. The full list is what lets the next
-            # reader see that no candidate is bound to the head, instead of inferring that a
-            # record was lost.
+            # `latest_cand_raw`/`latest_cand_chan` are the LAST CANDIDATE — a line carrying
+            # a well-formed sha. `latest_raw`/`latest_chan` are the last line READ, which may
+            # be a sha-less one: naming THAT line's channel in the stale verdict would point
+            # at the wrong channel and hide the diff= explanation below (#1224 x #4776).
+            latest_cand_raw=""
+            latest_cand_chan=""
+            # EVERY candidate marker's binding, in body-then-comment order (#4776; #1224
+            # unions the two channels). `latest_sha` is the LAST sha-bearing line, which is
+            # not the newest RECORD — reporting it as "latest recorded" was the misleading
+            # label. The full list is what lets the next reader see that no candidate is bound
+            # to the head, instead of inferring that a record was lost.
             candidate_shas=""
             candidate_n=0
             candidate_nosha=0
@@ -741,6 +759,8 @@ jobs:
               if [[ "$line" =~ @\ ([0-9a-f]{40}) ]]; then line_sha="${BASH_REMATCH[1]}"; fi
               if [ -n "$line_sha" ]; then
                 latest_sha="$line_sha"
+                latest_cand_raw="$line"
+                latest_cand_chan="$(marker_channel "$line")"
                 candidate_n=$((candidate_n + 1))
                 candidate_shas="${candidate_shas:+$candidate_shas }${line_sha:0:12}"
               else
@@ -829,13 +849,13 @@ jobs:
               latest_repo="${BASH_REMATCH[3]}"
             fi
             if [ -n "$latest_repo" ] && [ "$latest_repo" != "$REPO_NAME" ]; then
-              echo "::error::AI review evidence was found for ${latest_repo}, not for ${REPO_NAME} (this PR's repo) — evidence is bound to the repo it was recorded for and cannot be accepted here."
+              echo "::error::AI review evidence was found for ${latest_repo}, not for ${REPO_NAME} (this PR's repo) — evidence is bound to the repo it was recorded for and cannot be accepted here (found in ${latest_cand_chan})."
               report_body_provenance
               echo "::error::Re-record for this repo:"
               echo "::error::  record-review.sh ${PR_NUMBER} ${HEAD_SHA} clean ${REPO_NAME}"
               exit 1
             fi
-            echo "::error::AI review evidence is stale: NO marker in this PR's body is bound to ${expected} (the last candidate it read was found in ${latest_chan})."
+            echo "::error::AI review evidence is stale: NO marker in this PR's body or its comments is bound to ${expected} (the last candidate it read was found in ${latest_cand_chan})."
             if [ "$candidate_nosha" -gt 0 ]; then
               candidate_nosha_note="; ${candidate_nosha} with no 40-hex sha"
             fi
@@ -846,7 +866,9 @@ jobs:
             # acceptable: say exactly why — this is the #2982 diff-match path
             # failing. A diff= marker is NEVER accepted without a live hash to
             # match (an API blip must not become a bypass).
-            latest_diff="$(printf '%s' "$latest_raw" | sed -nE 's/^.* diff=([0-9a-f]{64}) \(.*$/\1/p')"
+            # From the last CANDIDATE, not the last line read: a trailing sha-less
+            # line would otherwise suppress this explanation entirely (#1224 x #4776).
+            latest_diff="$(printf '%s' "$latest_cand_raw" | sed -nE 's/^.* diff=([0-9a-f]{64}) \(.*$/\1/p')"
             if [ -n "$latest_diff" ]; then
               if [ -z "$live_diff_hash_norm$live_diff_hash_raw" ]; then
                 echo "::error::The stale marker carries diff=${latest_diff}, but the live diff hash could not be computed for this PR — failing closed. A diff= marker is never accepted without a live hash to match (an API blip must not become a bypass)."

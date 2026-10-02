@@ -1,7 +1,8 @@
 """ai-review-gate ↔ record-review.sh signing-contract guard (#3076).
 
 The ``ai-review-gate`` check (``.github/workflows/ai-review-gate.yml``)
-accepts a PR only when the body carries a signed evidence marker whose HMAC
+accepts a PR only when the body — or, since #1224, a repo-affiliated PR
+comment — carries a signed evidence marker whose HMAC
 verifies against the ``AI_REVIEW_GATE_KEY`` secret::
 
     review recorded: reviews/<PR>.json verdict=clean @ <40-hex-sha>[ diff=<64-hex>] (<owner/repo>) sig=<64-hex>
@@ -366,7 +367,7 @@ def test_gate_reports_stale_marker(tmp_path: Path) -> None:
     )
     proc = _run_gate(body, tmp_path)
     assert proc.returncode == 1
-    assert f"NO marker in this PR's body is bound to {_HEAD}" in proc.stdout, proc.stdout
+    assert f"NO marker in this PR's body or its comments is bound to {_HEAD}" in proc.stdout, proc.stdout
     assert other[:12] in proc.stdout, "the candidate list must name the marker that IS there"
     assert f"head expected: {_HEAD}" in proc.stdout, proc.stdout
     assert "candidate marker(s): 1" in proc.stdout, proc.stdout
@@ -554,7 +555,7 @@ def test_gate_rejects_stale_marker_in_a_comment(tmp_path: Path) -> None:
         comments=[_comment(_stale_marker())],
     )
     assert proc.returncode == 1, proc.stdout
-    assert f"NO marker in this PR's body is bound to {_HEAD}" in proc.stdout, proc.stdout
+    assert f"NO marker in this PR's body or its comments is bound to {_HEAD}" in proc.stdout, proc.stdout
     assert "found in PR comment" in proc.stdout, proc.stdout
 
 
