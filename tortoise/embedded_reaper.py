@@ -187,11 +187,33 @@ EPHEMERAL_PREFIXES = (
     "lme-",
 )
 
+def _host_coordination_tmpdir() -> str:
+    """Temp dir holding HOST-GLOBAL coordination state (suite markers).
+
+    Defaults to the system temp dir, read the same way ``_real_gettempdir``
+    reads it (inlined here because this resolver runs at import, before that
+    helper is defined).
+
+    ``TORTOISE_HOST_TMPDIR`` overrides it for a harness that redirects
+    ``$TMPDIR`` to a private per-session scratch root (#3752 — see
+    ``tests/_tmpdir_hygiene.py``). The suite's *scratch* space is private by
+    design; the *coordination* surface must not follow it, or a production/cron
+    sweep (``--only-safe``) would read an empty marker dir and lose the
+    active-suite signal that defers its kills while a suite is mid-run.
+    Scratch is per-session; coordination is per-host.
+    """
+    override = os.environ.get("TORTOISE_HOST_TMPDIR")
+    if override:
+        return os.path.realpath(override)
+    return os.path.realpath(tempfile.gettempdir())
+
+
 # Marker dir for active pytest suites (conftest writes/removes one file per
 # suite session; the reaper consults it so a sweep never kills a concurrent
-# suite's between-tests idle server — issue #1005 P1).
+# suite's between-tests idle server — issue #1005 P1). HOST-scoped, not
+# tempdir-scoped: see _host_coordination_tmpdir (#3752).
 ACTIVE_SUITES_DIR = os.path.join(
-    os.path.realpath(tempfile.gettempdir()), ".tortoise", "active_suites")
+    _host_coordination_tmpdir(), ".tortoise", "active_suites")
 
 # Default kill pacing (seconds between serial SIGTERMs) — synchronized
 # shutdown bursts ARE the bgsave storm this module exists to prevent.
@@ -2595,9 +2617,13 @@ _LOCK_PATH = os.path.join(
     # target is tempfile.gettempdir() (machine-global on Linux) — a per-HOME
     # lock means two sweepers with different $HOME (parallel agents/users/
     # containers on a shared box) each flock a DIFFERENT inode and both run
-    # overlapping sweeps, reaping each other's live sockets. Same tempdir root
-    # as ACTIVE_SUITES_DIR above; see the #4098 note below for why the lock DIR
-    # diverges from that sibling's `<tempdir>/.tortoise`.
+    # overlapping sweeps, reaping each other's live sockets. The lock follows
+    # the SWEEP TARGET (`tempfile.gettempdir()`), not ACTIVE_SUITES_DIR's
+    # `_host_coordination_tmpdir()`: under a harness that redirects $TMPDIR to a
+    # private scratch root (#3752) the two deliberately diverge — coordination
+    # is per-host, the sweep domain is the redirected temp dir. See the #4098
+    # note below for why the lock DIR diverges from the sibling's
+    # `<tempdir>/.tortoise`.
     #
     # #4098: the lock DIR is uid-scoped (`.tortoise-reaper-<euid>`). On a
     # shared `/tmp` any local uid can pre-create a fixed name, and the
