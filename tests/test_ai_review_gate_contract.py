@@ -367,7 +367,10 @@ def test_gate_reports_stale_marker(tmp_path: Path) -> None:
     )
     proc = _run_gate(body, tmp_path)
     assert proc.returncode == 1
-    assert f"NO marker in this PR's body or its comments is bound to {_HEAD}" in proc.stdout, proc.stdout
+    # This run's comment fetch FAILED (the stub fails every call), so the verdict
+    # names only the body: it must not assert an inspection that never happened.
+    assert f"NO marker in this PR's body is bound to {_HEAD}" in proc.stdout, proc.stdout
+    assert "comments=NOT-READ" in proc.stdout, proc.stdout
     assert other[:12] in proc.stdout, "the candidate list must name the marker that IS there"
     assert f"head expected: {_HEAD}" in proc.stdout, proc.stdout
     assert "candidate marker(s): 1" in proc.stdout, proc.stdout
@@ -555,8 +558,10 @@ def test_gate_rejects_stale_marker_in_a_comment(tmp_path: Path) -> None:
         comments=[_comment(_stale_marker())],
     )
     assert proc.returncode == 1, proc.stdout
+    # The comment channel WAS read here, so the verdict names both channels.
     assert f"NO marker in this PR's body or its comments is bound to {_HEAD}" in proc.stdout, proc.stdout
     assert "found in PR comment" in proc.stdout, proc.stdout
+    assert "comments=read sha256=" in proc.stdout, proc.stdout
 
 
 def test_gate_classifies_an_unsigned_comment_marker_as_unsigned(tmp_path: Path) -> None:
@@ -636,6 +641,9 @@ def test_gate_fails_closed_when_failed_comment_fetch_prints_marker_text(
     assert proc.returncode == 1, proc.stdout
     assert "No AI review evidence found" in proc.stdout, proc.stdout
     assert "comment-carried evidence could not be examined" in proc.stdout, proc.stdout
+    # The provenance must say WHICH BYTES were judged, and that the comment side
+    # was NOT among them — distinct from a successful read that found nothing.
+    assert "comments=NOT-READ" in proc.stdout, proc.stdout
 
 
 def test_gate_does_not_admit_a_non_affiliated_comment(tmp_path: Path) -> None:

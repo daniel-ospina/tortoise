@@ -855,7 +855,16 @@ jobs:
               echo "::error::  record-review.sh ${PR_NUMBER} ${HEAD_SHA} clean ${REPO_NAME}"
               exit 1
             fi
-            echo "::error::AI review evidence is stale: NO marker in this PR's body or its comments is bound to ${expected} (the last candidate it read was found in ${latest_cand_chan})."
+            # Name the scope ACTUALLY searched: with the comment read failed,
+            # claiming the comments carry no bound marker would assert an
+            # inspection that never happened (#1224). The provenance line says
+            # `comments=NOT-READ` in that case.
+            if [ "$comments_read" -eq 1 ]; then
+              echo "::error::AI review evidence is stale: NO marker in this PR's body or its comments is bound to ${expected} (the last candidate it read was found in ${latest_cand_chan})."
+            else
+              echo "::error::AI review evidence is stale: NO marker in this PR's body is bound to ${expected} (the last candidate it read was found in ${latest_cand_chan})."
+              echo "::error::NOTE: the PR comment fetch failed in this run, so comment-carried evidence could not be examined — re-run this job once the API is reachable before concluding no record exists."
+            fi
             if [ "$candidate_nosha" -gt 0 ]; then
               candidate_nosha_note="; ${candidate_nosha} with no 40-hex sha"
             fi
