@@ -290,6 +290,69 @@ class TestRecoveryMint:
         assert by_id["other-new"] is None       # newest other survives
         assert _count_active_keys(reg, "team-a") == 2  # revoke + mint = 2
 
+    def test_lost_revoke_claim_never_resurrects_a_concurrently_revoked_victim(
+            self, client, reg, monkeypatch):
+        """#1879 P2: the registry lane's at-cap revoke is a CLAIM and the
+        compensation is gated on it.
+
+        Reachable interleave: a non-lock-holding writer (rotate's claim-revoke)
+        revokes the SAME oldest-other victim between our SELECT and our SET, and
+        a concurrent ADD consumes the freed slot so the fail-closed re-check
+        still reads cap. Under the pre-fix UNCONDITIONAL revoke, our SET
+        OVERWRITES the other writer's timestamp with `$now`; the compensation
+        CAS (`WHERE k.revoked_at = $now`) then matches and sets NULL — UNDOING
+        their deliberate revoke. With the claim the WHERE matches nothing,
+        `claimed_revoke` is False, and no compensation runs.
+        """
+        tid = "team-a"
+        _seed_team(reg, tid)
+        _seed_membership(reg, tid, _U1, "owner")
+        # free tier max_api_keys == 2 — two OTHER live keys fill the cap.
+        _seed_api_key(reg, tid, "other-old", created_by=_U2,
+                      created_via="recovery", created_at=_hours_ago(10))
+        _seed_api_key(reg, tid, "other-new", created_by=_U2,
+                      created_via="recovery", created_at=_hours_ago(1))
+        assert _count_active_keys(reg, tid) == 2
+
+        other_now = "2026-08-01T00:00:00+00:00"
+        injected = {"done": False}
+        # The production mint builds its OWN registry handle, so patching the
+        # test's instance would not be seen — patch the shared graph CLASS
+        # (both handles are instances of it). The spy injects only on the
+        # revoke of `other-old`, so every other query passes through untouched.
+        graph_cls = type(reg)
+        orig_query = graph_cls.query
+
+        def _spy(self, cypher, params=None, **kwargs):
+            p = params or {}
+            if (not injected["done"] and "SET k.revoked_at" in cypher
+                    and p.get("id") == "other-old"):
+                injected["done"] = True
+                # the concurrent writer's revoke lands FIRST, with ITS stamp…
+                orig_query(self,
+                           "MATCH (k:APIKey {id:$id}) SET k.revoked_at = $r",
+                           params={"id": "other-old", "r": other_now})
+                # …and a concurrent ADD consumes the slot it freed, so our
+                # fail-closed re-check still sees the org at cap.
+                _seed_api_key(reg, tid, "concurrent-add", created_by=_U2,
+                              created_via="recovery", created_at=_hours_ago(0.5))
+            return (orig_query(self, cypher, params=params, **kwargs)
+                    if params is not None else orig_query(self, cypher, **kwargs))
+
+        monkeypatch.setattr(graph_cls, "query", _spy)
+        r = client.post("/v1/session/key", json={"purpose": "recovery"})
+        assert r.status_code == 402, r.text
+
+        assert injected["done"], "the spy never saw the at-cap revoke"
+        rows = orig_query(
+            reg,
+            "MATCH (k:APIKey {id:'other-old'}) RETURN k.revoked_at",
+        ).result_set
+        assert rows[0][0] is not None, (
+            "the revoke compensation RESURRECTED a row another writer "
+            "deliberately revoked — a lost claim wrote nothing, so there is "
+            "nothing to restore")
+
     def test_at_cap_keeps_own_keys_and_402s_when_nothing_else_to_revoke(
             self, client, reg):
         """#750.10 + #1828 fail-closed: recovery never dead-ends by killing
@@ -742,3 +805,103 @@ class TestSessionKeyMintConcurrency:
         assert all(r.status_code == 200 for r in results), \
             [r.text for r in results]
         assert _count_persistent_keys(reg, tid) <= 2
+
+
+class TestOthersBranchFailClosedRecheck1879:
+    """#1879 — the REGISTRY `others` branch re-checks the cap count AFTER its
+    revoke and refuses (402) when the revoke freed no COUNTED slot.
+
+    Why the window exists: this lane's `_org_mint_lock` is per-PROCESS and the
+    session mint is not the only key writer — `_mint_key`'s callers
+    (create_api_key, the per-graph mint, rotate_api_key's create leg) take no
+    `_org_mint_lock` (recorded residual). A concurrent ADD from any of them
+    between the cap count and the revoke consumes the slot the revoke frees,
+    so the count is still at the cap afterwards; inserting then overshoots
+    max_api_keys. The rotation branch already re-checked (P2-1); this closes
+    the same hole on the others branch.
+
+    The test models that concurrent writer deterministically at the revoke
+    seam (a real two-thread race here would be timing-dependent, and a
+    sequential double-call would prove nothing). Mutation: delete the
+    re-check → the mint returns 200 and the org ends at cap+1.
+    """
+
+    def test_revoke_that_frees_no_slot_refuses_instead_of_overshooting(
+            self, client, reg, monkeypatch):
+        import tortoise.hosted_api as ha
+
+        tid = "team-a"
+        _seed_team(reg, tid)
+        _seed_membership(reg, tid, _U1, "owner")
+        # free tier max_api_keys=2: one OTHER live key (the revoke target)
+        # plus the caller's own provisioned key (never a rotation candidate).
+        _seed_api_key(reg, tid, "other-old", created_by=_U2,
+                      created_via="recovery", created_at=_hours_ago(48))
+        _seed_api_key(reg, tid, "own-provisioned", created_by=_U1,
+                      created_via="provisioned", created_at=_hours_ago(1))
+        assert _count_persistent_keys(reg, tid) == 2
+
+        added: list[str] = []
+
+        def _concurrent_add():
+            _seed_api_key(reg, tid, "concurrent-add", created_by=_U2,
+                          created_via="recovery", created_at=_hours_ago(0.5))
+            added.append("concurrent-add")
+
+        class _Spy:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+            def query(self, cypher, **kw):
+                if "SET k.revoked_at" in cypher and not added:
+                    # the non-lock-holding writer consumes the slot this
+                    # revoke is about to free
+                    _concurrent_add()
+                return self._inner.query(cypher, **kw)
+
+        spy = _Spy(reg)
+
+        class _StubSDK:
+            def _get_registry(self):
+                return spy
+
+        orig_make_sdk = ha._make_sdk
+
+        def _make_sdk_spy(*a, **kw):
+            ns = kw.get("namespace") or (a[0] if a else None)
+            return _StubSDK() if ns == "registry" else orig_make_sdk(*a, **kw)
+
+        monkeypatch.setattr(ha, "_make_sdk", _make_sdk_spy)
+
+        r = client.post("/v1/session/key", json={"purpose": "recovery"})
+        assert added, (
+            "the modelled concurrent add never fired — the revoke seam moved "
+            "and this test no longer exercises the re-check window")
+        assert r.status_code == 402, r.text
+        assert r.json()["detail"]["code"] == "quota_exceeded", r.json()
+        # and the mint really did NOT create the key it would have created
+        own_recovery = reg.query(
+            "MATCH (k:APIKey) WHERE k.created_via = 'recovery' "
+            "AND k.created_by = $u RETURN count(k)",
+            params={"u": _U1},
+        ).result_set[0][0]
+        assert own_recovery == 0, "the refused mint still inserted a key"
+        # COMPENSATION (review P2): a refusal must not cost the caller's team a
+        # key. The revoke this lane already committed is undone by a CAS on the
+        # exact timestamp we wrote — unlike the Supabase lane, where the same
+        # re-check runs inside the transaction and its RAISE rolls the revoke
+        # back. `other-old` is live again, and the surviving count is the two
+        # pre-existing keys PLUS the concurrent writer's add: this lane's mint
+        # contributed nothing.
+        revoked = reg.query(
+            "MATCH (k:APIKey {id:'other-old'}) RETURN k.revoked_at",
+        ).result_set
+        assert revoked and revoked[0][0] is None, (
+            f"the refused mint left its revoke committed (collateral key loss): "
+            f"other-old.revoked_at={revoked!r}")
+        assert _count_persistent_keys(reg, tid) == 3, (
+            "2 pre-existing + the concurrent add; THIS mint must contribute 0 "
+            f"— got {_count_persistent_keys(reg, tid)}")

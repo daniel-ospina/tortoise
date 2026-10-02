@@ -36,6 +36,22 @@ SIX = [
 ]
 CHEAP_FIVE = [c for c in SIX if c != "python-ci-gate"]
 
+# The REAL tree's required set, written as a LITERAL on purpose. A test that derived the
+# expectation from the config (or from the record it is checking) would agree with any
+# drift in either, so it could not catch the record losing a name — the failure I1's
+# agreement clause exists for. #5433 added `ai-review-gate` here and to the queue's entry
+# conditions in the same change; the two are one decision, which is why the record and
+# `.mergify.yml` cannot be landed apart.
+LIVE_SEVEN = [
+    "ai-review-gate",
+    "docs",
+    "legal-e2e",
+    "license-surface",
+    "pricing-artifact",
+    "python-ci-gate",
+    "test-isolation",
+]
+
 DEFAULT_SETTINGS = """\
 repository:
   branch-protection:
@@ -62,7 +78,11 @@ def _write(path: Path, text: str) -> None:
 
 
 def merge_config(**overrides: object) -> dict:
-    """The LIVE post-#5384 shape: `merge` injection, five cheap entry checks."""
+    """The #5384-era shape: `merge` injection, the fixture's cheap checks at entry.
+
+    The fixture set is `CHEAP_FIVE`; the live entry set is not fixed by this file (it
+    gained `ai-review-gate` in #5433), which is why the shape is named, not counted.
+    """
     rule: dict = {
         "name": "main",
         "queue_conditions": [
@@ -208,14 +228,14 @@ def test_real_tree_record_matches_head_digest() -> None:
     record = mcg._load_record(ROOT)
     assert record is not None, f"{mcg.RECORD_REL} must exist"
     assert record["gate_digest"] == mcg.gate_digest(ROOT)
-    assert sorted(record["required_contexts"]) == sorted(SIX)
+    assert sorted(record["required_contexts"]) == sorted(LIVE_SEVEN)
 
 
 def test_real_tree_i1_live_read_was_recorded() -> None:
-    """I1's record is provenance: it must name the live six and its source sha."""
+    """I1's record is provenance: it must name the live required set and its source sha."""
     record = mcg._load_record(ROOT)
     assert record is not None
-    assert sorted(record.get("live_observed_contexts") or []) == sorted(SIX)
+    assert sorted(record.get("live_observed_contexts") or []) == sorted(LIVE_SEVEN)
     assert record.get("live_result") == "SATISFIED"
 
 
@@ -314,11 +334,60 @@ def test_clause_vi_check_named_in_no_pull_request_job(tmp_path: Path) -> None:
     assert clause(root, "vi") == 1
 
 
+def test_trigger_predicates_answer_different_questions() -> None:
+    """`_has_pull_request` (is it emitted on a PR?) ≠ `_has_pull_request_strict` (does it see the PR?).
+
+    The failure this pins: collapsing clause (vi)'s widened emission test onto clause (vii)'s
+    "runs against the PR's tree" test. `pull_request_target` loads the workflow from the BASE
+    revision, so a validator hosted there never validates the PR — and an
+    `if: github.event_name == 'pull_request'` guard inside it is FALSE (the step is skipped while
+    a static reader counts it as running). Sharing the widened predicate certified a union
+    validator that cannot see the union; clause (vii) is inert today, so this is the cheap place
+    to hold the distinction.
+    """
+    assert mcg._has_pull_request("pull_request") is True
+    assert mcg._has_pull_request("pull_request_target") is True
+    assert mcg._has_pull_request_strict("pull_request") is True
+    assert mcg._has_pull_request_strict("pull_request_target") is False
+    assert mcg._has_pull_request_strict({"pull_request_target": {"types": ["opened"]}}) is False
+    assert mcg._has_pull_request_strict(["pull_request_target"]) is False
+    assert mcg._has_pull_request_strict(None) is False
+
+
 def test_clause_vi_push_only_workflow_does_not_emit(tmp_path: Path) -> None:
     workflows = default_workflows()
     workflows["ci.yml"]["on"] = "push"
     root = make_tree(tmp_path, merge_config(), workflows=workflows)
     assert clause(root, "vi") == 1
+
+
+def test_clause_vi_pull_request_target_emitter_counts(tmp_path: Path) -> None:
+    """A `pull_request_target` workflow counts as PR-emitting; `workflow_run` does not.
+
+    This pins the PREDICATE, on the fixture tree: the same `ci.yml` job is accepted when
+    its trigger is `pull_request_target` (it reports against the PR head, so it can satisfy
+    a `check-success` at entry) and refused when it is `workflow_run`-only. The real-tree
+    consequence — this repo's `ai-review-gate` is `pull_request_target`-only and was refused
+    as "no PR-triggered workflow job", removing the enforcement point #5433 adds — is pinned
+    by `test_real_tree_clauses_i_to_vii_pass`, which runs clause (vi) over the committed
+    `.mergify.yml`.
+    """
+    workflows = default_workflows()
+    workflows["ci.yml"]["on"] = {"pull_request_target": {"types": ["opened"]}}
+    root = make_tree(tmp_path, merge_config(), workflows=workflows)
+    assert clause(root, "vi") == 0
+
+    workflows["ci.yml"]["on"] = {"workflow_run": {"workflows": ["CI"]}}
+    root = make_tree(tmp_path, merge_config(), workflows=workflows)
+    assert clause(root, "vi") == 1
+
+
+def test_clause_vi_string_pull_request_target_counts(tmp_path: Path) -> None:
+    """The bare-string trigger form is recognised too, not just the mapping form."""
+    workflows = default_workflows()
+    workflows["ci.yml"]["on"] = "pull_request_target"
+    root = make_tree(tmp_path, merge_config(), workflows=workflows)
+    assert clause(root, "vi") == 0
 
 
 # --- clause (vii): the TH4 union validator ---------------------------------
@@ -391,6 +460,34 @@ def test_clause_vii_no_union_no_validator_required(tmp_path: Path) -> None:
 def test_clause_vii_union_without_invocation_is_red(tmp_path: Path) -> None:
     root, _ = union_tree(tmp_path, "true")
     assert clause(root, "vii") == 1
+
+
+def test_clause_vii_pull_request_target_host_is_not_a_validator(tmp_path: Path) -> None:
+    """A union validator must run against the PR'S TREE; `pull_request_target` cannot.
+
+    The failure this pins (and that the predicate unit test above cannot): clause (vii) must
+    USE the strict predicate, not clause (vi)'s widened one. A `pull_request_target`-only
+    required workflow loads the BASE revision, so the validator it hosts never sees the PR's
+    union — certifying it would report a fail-closed validator over a tree it cannot read.
+    Reverting the caller to the widened predicate left every other test green, so this fixture
+    is the only thing holding the decision.
+    """
+    root, _ = union_tree(tmp_path, "python3 tools/registry_integrity.py")
+    wf = root / ".github" / "workflows" / "python-ci.yml"
+    doc = yaml.safe_load(wf.read_text(encoding="utf-8"))
+    doc["on"] = {"pull_request_target": {"types": ["opened"]}}
+    wf.write_text(yaml.safe_dump(doc), encoding="utf-8")
+    assert clause(root, "vii") == 1
+
+
+def test_clause_vii_pull_request_host_still_validates(tmp_path: Path) -> None:
+    """Control for the test above: the same tree with `pull_request` is accepted."""
+    root, _ = union_tree(tmp_path, "python3 tools/registry_integrity.py")
+    wf = root / ".github" / "workflows" / "python-ci.yml"
+    doc = yaml.safe_load(wf.read_text(encoding="utf-8"))
+    doc["on"] = ["push", "pull_request"]
+    wf.write_text(yaml.safe_dump(doc), encoding="utf-8")
+    assert clause(root, "vii") == 0
 
 
 def test_clause_vii_help_only_is_red(tmp_path: Path) -> None:
