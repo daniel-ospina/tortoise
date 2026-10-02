@@ -1741,36 +1741,84 @@ class CollisionPreflightTest(unittest.TestCase):
         # answer as a measured one.
         self.assertIn("NO fetch-cache ref was demoted", out)
 
-    def test_a_registered_worktree_whose_directory_is_gone_does_not_block(self):
-        # #6622 case 1. `git worktree add` registers the record; removing the
-        # directory does NOT deregister it (a `git worktree list --porcelain` on
-        # the real repo still prints a path that is not on disk). A directory
-        # that is not on disk cannot contain a lane that is mid-task, so the
-        # record must not block — otherwise the item is dropped from the queue
-        # for nobody, which is the whole defect.
-        path = self.add_worktree(f"{ISSUE}-dead-record")
-        rc, out = self.run_tool()          # control: while ALIVE it must block
-        self.assertNotEqual(rc, 0, out)
-        self.assertIn("VERDICT: COLLISION", out)
-        self.assertIn(f"{ISSUE}-dead-record", out)
+    def test_a_dead_record_is_demoted_only_on_gits_own_lock(self):
+        # #6622 case 1, REVISED after a fresh review found a false CLEAN.
+        #
+        # `git worktree add` registers the record; removing the directory does
+        # NOT deregister it. But a directory that is not on disk is NOT proof the
+        # record is dead: `mv <worktree> <elsewhere>` leaves a fully working
+        # worktree (a linked worktree's `.git` holds an ABSOLUTE `gitdir:`), so
+        # git keeps working from the new path while this listing still reports
+        # the OLD one. Demoting on absence alone therefore reported a LIVE lane as
+        # non-blocking and let the gate exit 0 — the duplicate-ownership
+        # direction this gate exists to prevent.
+        #
+        # The real dead shape, MEASURED in this repo, is an aborted
+        # `git worktree add` left as `locked initializing`. That lock is git's own
+        # "this registration cannot hold work" signal, and it is what demotes.
+        mod = _tool_module()
+        absent = str(self.tmp / "does-not-exist-3061")
+        live, basis = mod._worktree_liveness(absent, "initializing")
+        self.assertFalse(live, basis)
+        self.assertIn("locked=initializing", basis)
+        self.assertIn("cannot hold work", basis)
+        # ⛔ A LOCK-FREE `prunable` RECORD IS THE MOVED WORKTREE AND MUST BLOCK.
+        live, basis = mod._worktree_liveness(
+            absent, None, "gitdir file points to non-existent location")
+        self.assertTrue(live, basis)
+        self.assertIn("prunable=", basis)
+        self.assertIn("NOT demoted", basis)
+        # ⛔ AND A BARE ABSENCE FAILS CLOSED TOO — no lock, no demotion.
+        live, basis = mod._worktree_liveness(absent)
+        self.assertTrue(live, basis)
+        self.assertIn("no lock, NOT demoted", basis)
+
+    def test_a_moved_live_worktree_still_blocks(self):
+        # ⛔ THE FALSE-CLEAN REGRESSION PIN (fresh review, P1). `mv` a worktree and
+        # it KEEPS WORKING — git resolves it from the new path — while
+        # `git worktree list --porcelain` goes on reporting the OLD path and tags
+        # the record `prunable`. The lane is alive; the gate must say COLLISION.
+        path = self.add_worktree(f"{ISSUE}-moved")
+        moved = path.parent / f"{ISSUE}-moved-elsewhere"
+        path.rename(moved)
+        mod = _tool_module()
+        live, basis = mod._worktree_liveness(str(path))
+        self.assertTrue(live, basis)
+        self.assertIn("NOT demoted", basis)
+        # A plain `mv` leaves a WORKING worktree: its `.git` pointer survives and
+        # still names an absolute gitdir, which is why git keeps working from the
+        # new path while `git worktree list` reports the old one.
+        marker = moved / ".git"
+        self.assertTrue(marker.exists(), "moved worktree lost its marker")
+        self.assertIn("gitdir:", marker.read_text())
+
+    def test_the_entry_point_does_not_demote_an_unlocked_absent_record(self):
+        # ENTRY-POINT polarity: an `rm -rf`'d record that git does NOT report as
+        # locked is NOT demoted, so the pre-dispatch gate still refuses. This is
+        # the direction that must fail CLOSED.
+        path = self.add_worktree(f"{ISSUE}-absent-unlocked")
         shutil.rmtree(path)
         rc, out = self.run_tool()
-        self.assertEqual(rc, 0, out)
-        self.assertIn("VERDICT: CLEAN", out)
-        self.assertIn(f"{ISSUE}-dead-record", out)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
         self.assertIn("exists=no", out)
-        self.assertIn("cannot be live work", out)
+        self.assertIn("NOT demoted", out)
 
-    def test_a_worktree_whose_git_marker_is_gone_does_not_block(self):
-        # #6622 case 2: `.worktrees/review-6269` existed but was not a usable
-        # worktree, so it was a leftover record rather than a worker.
+    def test_a_worktree_whose_git_marker_is_gone_blocks_without_a_lock(self):
+        # #6622 case 2, REVISED: a `.git` marker that is gone is evidence the
+        # record is not a usable worktree — but it is NOT a lock, so it does not
+        # by itself license a demotion. Same polarity as the moved case.
         path = self.add_worktree(f"{ISSUE}-no-gitdir")
         (path / ".git").unlink()
+        mod = _tool_module()
+        live, basis = mod._worktree_liveness(str(path))
+        self.assertTrue(live, basis)
+        self.assertIn("gitdir=no", basis)
+        self.assertIn("NOT demoted", basis)
         rc, out = self.run_tool()
-        self.assertEqual(rc, 0, out)
-        self.assertIn("VERDICT: CLEAN", out)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
         self.assertIn("gitdir=no", out)
-        self.assertIn("cannot be live work", out)
 
     def test_an_unreadable_worktree_is_not_demoted(self):
         # ⛔ UNREADABLE IS NOT ABSENT. `os.path.isdir` answers False for EACCES
@@ -1783,10 +1831,12 @@ class CollisionPreflightTest(unittest.TestCase):
             live, basis = mod._worktree_liveness("/some/worktree/3061-x")
         self.assertTrue(live, basis)
         self.assertIn("unreadable", basis)
-        # A genuinely ABSENT path is still demoted — the two are distinguished.
-        live, basis = mod._worktree_liveness(str(self.tmp / "does-not-exist-3061"))
+        # A genuinely ABSENT path is only demoted when git reports it LOCKED.
+        live, basis = mod._worktree_liveness(
+            str(self.tmp / "does-not-exist-3061"), "initializing")
         self.assertFalse(live)
         self.assertIn("exists=no", basis)
+        self.assertIn("locked=initializing", basis)
 
     def test_a_live_worktree_still_blocks_and_reports_its_basis(self):
         # The guard rail: a LIVE worktree is a real competing claim and must

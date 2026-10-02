@@ -1704,13 +1704,33 @@ def _fetch_cache_remote(
     return rest.split("/", 1)[0] or None
 
 
-def _worktree_liveness(path: str) -> tuple[bool, str]:
+def _worktree_liveness(
+    path: str, locked: str | None = None, prunable: str | None = None,
+) -> tuple[bool, str]:
     """(can this registered record still hold work?, the basis, rendered).
 
-    `exists=no` and `gitdir=no` are EVIDENCE, not heuristics: a directory that is
-    not on disk cannot contain a worker, and a directory whose `.git` marker is
-    gone is not a usable worktree. The age is always reported, so a false hold is
-    visible at a glance instead of having to be re-derived by hand.
+    ⛔ PATH-ABSENCE ALONE IS NOT EVIDENCE OF DEATH — it is evidence of a
+    REGISTRATION git no longer matches, and those come apart in the direction
+    that matters. `mv <worktree> <elsewhere>` leaves a fully working worktree:
+    a linked worktree's `.git` is a pointer holding an ABSOLUTE `gitdir:`, so
+    git keeps working from the new location — while `git worktree list` goes on
+    reporting the OLD path and tags the record `prunable gitdir file points to
+    non-existent location`. Demoting on `exists=no` alone therefore reported a
+    LIVE lane as `non-blocking` and let this gate exit 0, which is the exact
+    false-CLEAN the pre-dispatch check exists to prevent (the duplicate-ownership
+    defect #3061 was filed for).
+
+    The discriminator is git's OWN signal, which this parser already read and
+    threw away: an ABORTED `git worktree add` leaves `locked initializing` — a
+    registration that can never acquire work, the shape MEASURED for both dead
+    records in this repo — whereas a MOVED worktree is `prunable` WITHOUT a lock.
+    So a record is demoted only when git itself says it is locked; everything
+    else, including a lock-free `prunable` and a bare absence, FAILS CLOSED and
+    keeps blocking.
+
+    `exists=no` and `gitdir=no` remain EVIDENCE and are always reported, so a
+    false hold is visible at a glance instead of having to be re-derived by hand.
+    The age is reported for the same reason.
 
     ⛔ UNREADABLE IS NOT ABSENT. `os.path.isdir` answers False for EACCES and
     ESTALE as well as for a missing directory, so demoting on it would turn a
@@ -1728,21 +1748,34 @@ def _worktree_liveness(path: str) -> tuple[bool, str]:
     there asserted `index=yes` about a tree with no index: the opposite of the
     evidence this fix exists to surface.
     """
+    def _shape(basis: str) -> tuple[bool, str]:
+        """Demote ONLY on git's own lock; otherwise FAIL CLOSED."""
+        lock = f"locked={locked}" if locked else "locked=no"
+        if locked:
+            return False, f"{basis} {lock} — git says this record cannot hold work"
+        if prunable:
+            return True, (
+                f"{basis} {lock} prunable={prunable} — a prunable record with NO "
+                "lock can still hold work (a MOVED worktree keeps working from "
+                "its new path) — NOT demoted"
+            )
+        return True, f"{basis} {lock} — no lock, NOT demoted (fail-closed)"
+
     if not path:
-        return False, "exists=no (record carries no path)"
+        return _shape("exists=no (record carries no path)")
     try:
         os.stat(path)
     except FileNotFoundError:
-        return False, "exists=no (registered directory is not on disk)"
+        return _shape("exists=no (registered directory is not on disk)")
     except OSError as exc:
         return True, f"exists=unreadable ({exc.__class__.__name__}) — not demoted"
     if not os.path.isdir(path):
-        return False, "exists=no (registered path is not a directory)"
+        return _shape("exists=no (registered path is not a directory)")
     marker = os.path.join(path, ".git")
     try:
         os.stat(marker)
     except FileNotFoundError:
-        return False, "gitdir=no (no .git marker: not a usable worktree)"
+        return _shape("gitdir=no (no .git marker: not a usable worktree)")
     except OSError as exc:
         return True, f"exists=yes gitdir=unreadable ({exc.__class__.__name__})"
     try:
@@ -2159,7 +2192,24 @@ def _worktree_blocks(porcelain: str) -> list[dict]:
         elif line == "bare":
             cur["bare"] = True
         elif line.startswith("locked") or line.startswith("prunable"):
-            pass
+            # #6622: CAPTURE git's OWN signal that a registration cannot be used.
+            # Dropping these (a bare `pass`) left the liveness decision with
+            # path-absence ALONE — which is a FALSE CLEAN for a worktree that was
+            # MOVED: `mv` leaves a fully working worktree behind (its `.git`
+            # holds an absolute `gitdir:`), while `git worktree list` keeps
+            # reporting the OLD path and marks it `prunable`. A lane can be live
+            # in the moved directory and the gate would exit 0. See
+            # `_worktree_liveness`.
+            #
+            # The VALUE is kept, not a bool: `locked initializing` names the
+            # aborted `git worktree add` that produced it and `prunable gitdir
+            # file points to non-existent location` names the moved record, and
+            # both ride into the reported basis so a reader can tell the two
+            # apart without re-deriving them by hand.
+            if line.startswith("locked"):
+                cur["locked"] = line[len("locked"):].strip() or "yes"
+            else:
+                cur["prunable"] = line[len("prunable"):].strip() or "yes"
         elif line.startswith("HEAD "):
             # The worktree's checked-out commit, carried free by --porcelain.
             #
@@ -2269,12 +2319,16 @@ def scan_worktree_surface(
                 "weak",
             )
             continue
-        # #6622: a RECORD is not a WORKER. A registered worktree whose directory
-        # is gone, or which has no index, cannot contain a lane that is
-        # mid-task — so it is reported with its EVIDENCE and cannot block. The
-        # branch was checked first (above), so a live BRANCH that names this
-        # issue still blocks even when the worktree record is dead (#3611).
-        live, basis = _worktree_liveness(path)
+        # #6622: a RECORD is not a WORKER — but a missing DIRECTORY is not proof
+        # that the record is dead, because `mv` moves a worktree that keeps
+        # working (its `.git` holds an absolute `gitdir:`) while this listing goes
+        # on reporting the old path. Only git's own `locked` signal demotes; a
+        # lock-free `prunable` and a bare absence keep blocking. The branch was
+        # checked first (above), so a live BRANCH that names this issue still
+        # blocks even when the worktree record is dead (#3611).
+        live, basis = _worktree_liveness(
+            path, block.get("locked"), block.get("prunable"),
+        )
         if not live:
             surface.add(
                 label,
