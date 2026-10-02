@@ -34,6 +34,11 @@ public aviso-privacidad.html
 public blog
 public consent.js
 public contact.html
+# The design-partner one-pager. Served on the tortoise host only (its two
+# paths are in the middleware's TORTOISE_ONLY set), reached by outreach link
+# rather than the site nav — but it IS a public top-level asset, so it must be
+# classified or the deploy's checker fails closed.
+public design-partners-intro.html
 public docs.html
 public dpa.html
 public faq.html
