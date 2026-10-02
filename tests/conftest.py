@@ -160,11 +160,29 @@ os.environ.setdefault("TORTOISE_TEST_NO_REDIRECT", ",".join(TEST_NO_REDIRECT_STE
 # guards). The overwrite is paired with a 12-hex shape guard: os.urandom(6)
 # always yields 12 hex chars, so the assert can only fire on a broken
 # platform — fail loudly rather than export a malformed nonce.
+#
+# #6323: the re-roll is scoped to a NEW PROCESS, so re-executing this body in
+# the SAME process is idempotent. pytest loads this file as the top-level
+# `conftest`, so `import tests.conftest` is a SECOND module whose body re-runs
+# mid-session; an unconditional re-roll re-points the journal and makes the
+# session read its OWN pre-import journal as a live peer, so
+# `wipe_server(scope=None)` spares graphs the session minted. The owner-pid
+# marker keeps the decision above intact in every other case: an externally
+# pre-set value carries no marker and is still overwritten, and a forked child
+# (marker pid != its own) still mints a fresh nonce exactly as before.
 import re as _re  # noqa: I001, E402
-_SESSION_NONCE = os.urandom(6).hex()
-assert _re.fullmatch(r"[0-9a-f]{12}", _SESSION_NONCE), \
-    f"TORTOISE_TEST_SESSION must be 12 hex (48 bits), got {_SESSION_NONCE!r}"
-os.environ["TORTOISE_TEST_SESSION"] = _SESSION_NONCE
+_SESSION_OWNER_PID = str(os.getpid())
+_prior_nonce = os.environ.get("TORTOISE_TEST_SESSION")
+if (os.environ.get("TORTOISE_TEST_SESSION_OWNER_PID") == _SESSION_OWNER_PID
+        and _prior_nonce
+        and _re.fullmatch(r"[0-9a-f]{12}", _prior_nonce)):
+    _SESSION_NONCE = _prior_nonce
+else:
+    _SESSION_NONCE = os.urandom(6).hex()
+    assert _re.fullmatch(r"[0-9a-f]{12}", _SESSION_NONCE), \
+        f"TORTOISE_TEST_SESSION must be 12 hex (48 bits), got {_SESSION_NONCE!r}"
+    os.environ["TORTOISE_TEST_SESSION"] = _SESSION_NONCE
+    os.environ["TORTOISE_TEST_SESSION_OWNER_PID"] = _SESSION_OWNER_PID
 
 # ── Epic #1647 Task 2 Step 7: the session created-graph journal ───────────
 # The journal path is resolved at CONFTEST IMPORT (cycle-4 P2-9) — product-
