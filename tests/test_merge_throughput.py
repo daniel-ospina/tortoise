@@ -3981,29 +3981,61 @@ def test_docs_job_guards_tracked_generated_artifacts_on_every_pr():
         "`--check` commands — no shell operator, no wrapper, no trailing "
         f"anything, or a real failure reports green (#2656); got {code!r}"
     )
-    # The step may carry ONLY `name` and `run`. Enumerating the silencing keys
-    # one by one leaves the next one open: `if:`/`continue-on-error:` skip a real
-    # failure, `shell:` swallows its exit code, `working-directory:` can point at
-    # a stub `tools/` tree, and `env:` (e.g. a PATH shim) shadows `python3` so the
-    # real `--check` never runs. A key-set assertion closes the family instead of
-    # the instance — measured GREEN on the enumerated form: a step-level
-    # `env: {PATH: ...}` shim, and a job-level `defaults.run.working-directory`.
-    assert set(step) == {"name", "run"}, (
-        f"the drift step may carry only `name` and `run`; found {sorted(step)}. "
-        "Any other key is a silencing vector (#2656)"
+    # The step may carry only the keys that cannot silence it. Enumerating the
+    # silencing keys one at a time is what left the next one open, so the rule is
+    # an ALLOW-list instead: `if:`/`continue-on-error:` skip a real failure,
+    # `shell:` swallows its exit code, `working-directory:` can point at a stub
+    # `tools/` tree, and `env:` (a PATH shim) shadows `python3` so the real
+    # `--check` never runs. `id:` and `timeout-minutes:` are allowed because they
+    # neither skip nor mask the step (the sibling gate at
+    # tests/test_ci_selection.py:3022 is the enumerated-but-`if`-allowed form;
+    # measured GREEN on the enumerated form here for a step-level
+    # `env: {PATH: ...}` shim and a job-level `defaults.run.working-directory`).
+    _allowed_step_keys = {"name", "run", "id", "timeout-minutes"}
+    _extra_keys = sorted(set(step) - _allowed_step_keys)
+    assert not _extra_keys, (
+        f"the drift step may carry only {sorted(_allowed_step_keys)}; found "
+        f"{_extra_keys}. Any other Actions step key is a silencing vector (#2656)"
     )
-    for scope, label in ((workflow, "ci.yml"), (workflow["jobs"]["docs"], "the docs job")):
+    docs_job = workflow["jobs"]["docs"]
+    for scope, label in ((workflow, "ci.yml"), (docs_job, "the docs job")):
         _run_defaults = (scope.get("defaults") or {}).get("run") or {}
         for key in ("shell", "working-directory"):
             assert not _run_defaults.get(key), (
                 f"a `defaults.run.{key}` on {label} can swallow the drift check's "
                 "exit code or run it against a stub tree (#2656)"
             )
-    # A job-level `env:` is not covered by the step's key set, and a PATH shim
-    # there shadows `python3` just as effectively.
-    assert not workflow["jobs"]["docs"].get("env"), (
-        "the `docs` job must not carry `env:` — a PATH shim would shadow the "
-        "interpreter and the `--check`s would never run (#2656)"
+        # Neither of these is a key ON the drift step, so the allow-list above
+        # cannot see them, and each shims `python3` for the whole scope beneath it.
+        assert "if" not in scope, (
+            f"an `if:` on {label} can skip the guard entirely — the `docs` job is a "
+            "REQUIRED context and a skipped job never runs the `--check`s (#2656)"
+        )
+        assert not scope.get("env"), (
+            f"an `env:` on {label} can shim PATH for every step beneath it — "
+            "including the drift check (#2656)"
+        )
+        assert "container" not in scope, (
+            f"a `container:` on {label} replaces the image the `--check`s run in; "
+            "with a doctored image they pass vacuously and the drift step's own "
+            "shape stays clean (#2656)"
+        )
+    # A sibling step can also inject the shim, without touching the drift step at
+    # all: append a directory holding an `exit 0` stub named `python3` to
+    # `$GITHUB_PATH`. Measured GREEN before this assertion.
+    _shim_writers = sorted(
+        str(s.get("name") or s.get("uses") or "<unnamed>")
+        for s in docs_job.get("steps") or []
+        if s is not step
+        and (
+            "GITHUB_PATH" in _code(s) or "GITHUB_ENV" in _code(s)
+        )
+    )
+    assert not _shim_writers, (
+        f"no step besides the drift check may write `$GITHUB_PATH`/`$GITHUB_ENV` "
+        f"(found: {_shim_writers}) — appending a shim directory makes `python3` "
+        "resolve to a stub that exits 0, leaving the drift step's own shape "
+        "clean (#2656)"
     )
     # A job-level `continue-on-error` silences the whole job (and so the required
     # context); `needs:` is subtler and worse — an upstream failure SKIPS the job
