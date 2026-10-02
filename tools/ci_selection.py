@@ -1498,7 +1498,14 @@ def watchdog_headroom_issues(manifest: dict) -> list[str]:
     for s in push_legs(manifest)["shards"]:
         budget = s["watchdog_minutes"]
         est = s["est_seconds"]
-        headroom = watchdog_headroom(est, budget)
+        # #6145: decide on the SAME value the matrix PUBLISHES (2 dp, the same
+        # rounding the emitters apply). A gate comparing an exact ratio while
+        # emitting a rounded one would refuse a manifest whose own emitted row
+        # read a compliant 2.0 — and its message would say "2.00x, below the
+        # 2.0x", contradicting itself at exactly the boundary this check exists
+        # to police. Decision, message and emission are therefore ONE value; the
+        # cost is that a sub-0.005 excursion is inside the reporting quantum.
+        headroom = round(watchdog_headroom(est, budget), 2)
         if headroom and headroom < WATCHDOG_HEADROOM:
             issues.append(
                 f"shard {s['name']} cannot fit its watchdog budget: est="
@@ -1876,7 +1883,13 @@ def workflow_halves_issues(manifest: dict, halves: dict[str, list[str]],
         # measured map) and this is the only check that catches it —
         # `leg_coverage_issues()` and `fast_files_absent_from_halves()` both
         # pass when one half is empty.
-        ratio = float("inf") if lo <= 0 else hi / lo
+        # #6145, same root as `watchdog_headroom_issues`: decide at the
+        # precision the message PRINTS. Comparing the exact ratio and then
+        # rendering both operands at 2 dp let a fire inside (1.25, 1.255) print
+        # "ratio 1.25x, tolerance 1.25x" — a diagnosis that reads as compliant
+        # while the gate refuses. Decision and message are one value; the cost
+        # is that a sub-0.005 excursion is inside the reporting quantum.
+        ratio = float("inf") if lo <= 0 else round(hi / lo, 2)
         if lo <= 0 or ratio > HALF_DURATION_IMBALANCE_RATIO:
             issues.append(
                 f"matrix halves duration-imbalanced: "

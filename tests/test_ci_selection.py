@@ -1416,6 +1416,32 @@ def test_halves_imbalance_within_tolerance_clean():
     assert not any("imbalanced" in i for i in issues), issues
 
 
+def test_halves_ratio_decides_at_the_published_precision():
+    """#6145, same root as the watchdog gate: this check compared the EXACT
+    ratio and then rendered both operands at 2 dp, so a fire inside
+    (1.25, 1.255) printed "ratio 1.25x, tolerance 1.25x" — a diagnosis that
+    reads as compliant while the check refuses, the very contradiction the
+    #6145 change removes next door. The ratio is now decided at the precision it
+    publishes, so no message can print a value that reads as within tolerance.
+    """
+    from tools.ci_selection import HALF_DURATION_IMBALANCE_RATIO, workflow_halves_issues
+    halves = {"a": ["test_api"], "b": ["test_auth", "test_crypto"]}
+    # 1250.4 / 1000 = 1.2504 -> prints 1.25 -> INSIDE tolerance, so it must pass
+    # (under the old exact comparison this fired with a 1.25x-vs-1.25x message).
+    inside = _halves_manifest()
+    inside["durations"] = {"test_api.py": 1000.0, "test_auth.py": 1000.0,
+                           "test_crypto.py": 250.4}
+    assert not any("imbalanced" in i
+                   for i in workflow_halves_issues(inside, halves))
+    # 1256.0 / 1000 = 1.256 -> prints 1.26 -> still refused.
+    beyond = _halves_manifest()
+    beyond["durations"] = {"test_api.py": 1000.0, "test_auth.py": 1000.0,
+                           "test_crypto.py": 256.0}
+    assert any("imbalanced" in i
+               for i in workflow_halves_issues(beyond, halves))
+    assert HALF_DURATION_IMBALANCE_RATIO == 1.25
+
+
 def test_fast_files_absent_from_halves_reports_coverage_hole():
     from tools.ci_selection import fast_files_absent_from_halves
     halves = {"a": ["test_api"], "b": ["test_crypto"]}
@@ -1784,6 +1810,17 @@ def test_a_shard_that_cannot_fit_its_budget_is_named_not_silently_killed():
     assert issues, "a shard the ceiling clamps below the build factor must be NAMED"
     assert any("cannot fit its watchdog budget" in i for i in issues), issues
     assert any("ceiling clamped it" in i for i in issues), issues
+    # (d) the decision is taken at the PUBLISHED precision (2 dp — the same
+    #     rounding the emitters apply), so a manifest is never refused while the
+    #     row it would emit reads a compliant `2.0`, and the message never says
+    #     "2.00x, below the 2.0x". 1651.0s = 27.5167 min -> 55/27.5167 = 1.9988,
+    #     which ROUNDS to 2.0 and must therefore pass; 1660.0s = 27.6667 min ->
+    #     1.9880 -> 1.99 and must still be refused. `tiny=0` keeps the shard's
+    #     estimate exactly the heavy file's duration.
+    edge = _shard_manifest(1, heavy={"test_edge.py": 1651.0}, tiny=0)
+    assert watchdog_headroom_issues(edge) == [], watchdog_headroom_issues(edge)
+    past = _shard_manifest(1, heavy={"test_past.py": 1660.0}, tiny=0)
+    assert watchdog_headroom_issues(past), "1.99x must still be refused"
     # (c) a genuinely wedged leg is STILL KILLED. The check makes an over-tight
     #     budget visible; it does not widen it and it does not disarm the kill —
     #     the emitted budget is unchanged, and the workflow still applies it with
