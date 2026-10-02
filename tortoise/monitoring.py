@@ -905,8 +905,12 @@ def _admit_bounded_label(label: str, seen: set[str], cap: int,
                         overflow: str = COMPUTE_OVERFLOW) -> str:
     """Admit ``label`` as a metric child, folding past ``cap`` into overflow.
 
-    The shared bounded-admission form for every per-org dimension (#5045). Additive
-    by construction: an already-admitted label never locks (and never changes); a
+    The bounded-admission form for the COMPUTE dimension (#4490), hard-bound to
+    ``_COMPUTE_LOCK`` — NOT the shared helper its name suggests: the egress twin
+    (``_admit_egress_label``) admits under ``_EGRESS_LOCK``, so the #5045
+    convergence is to fold both onto one lock-parameterised form. Recorded on
+    #5045, not claimed here. Additive by construction: an already-admitted label
+    never locks (and never changes); a
     new label past the cap becomes ``overflow`` so the metric stays bounded rather
     than raising or dropping the whole record. Admission is first-come and an
     admitted label is never evicted — eviction either drops accumulated cost or
@@ -915,6 +919,14 @@ def _admit_bounded_label(label: str, seen: set[str], cap: int,
     """
     if label in seen:
         return label
+    # A label that was ALREADY FOLDED must never take the lock again: the folded
+    # branch inserts only ``overflow``, never the label, so without this
+    # short-circuit every request carrying a non-admitted label would acquire the
+    # module-global lock on every request for the process lifetime — the exact
+    # thing the "an already-admitted label never locks" contract promises away.
+    # Membership of ``overflow`` IS "the cap was reached and this label folded".
+    if overflow in seen:
+        return overflow
     with _COMPUTE_LOCK:
         if label in seen:
             return label
@@ -980,11 +992,14 @@ def compute_by_org() -> dict[str, dict[str, float]]:
     """In-process snapshot of the compute dimension keyed by org (#4490 indicator 3).
 
     The readable form of the metric, for a person or a test — no dashboard, no UI.
-    ``/metrics`` carries the same figure as Prometheus text (e.g.
-    ``sum by (org) (rate(tortoise_compute_wall_seconds_total[5m]))``); this is the
-    direct read. The ``""`` key is the unattributed share and ``__other__`` the
-    folded tail of the org cap; both are INCLUDED, so the snapshot always
-    reconciles to the whole measurement.
+    The counters are registered with ``prometheus_client``, but nothing scrapes
+    them in production today: the hosted app serves no ``/metrics`` route
+    (measured: 404), and ``serve_health`` is not a ``fly.toml`` process — the same
+    limit ``analytics_outcome_counts()`` states (#3820's audit). This direct read
+    is therefore the only queryable form the dimension has; a scrape surface is
+    deferred with that audit, not implied here. The ``""`` key is the unattributed
+    share and ``__other__`` the folded tail of the org cap; both are INCLUDED, so
+    the snapshot always reconciles to the whole measurement.
     """
     requests = _sum_compute_by_org(COMPUTE_REQUESTS)
     wall = _sum_compute_by_org(COMPUTE_WALL_SECONDS)

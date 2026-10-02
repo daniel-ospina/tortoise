@@ -12,8 +12,11 @@ cardinality probe pushes past the cap and asserts the child set stays bounded.
 """
 from __future__ import annotations
 
+import ast
 import asyncio
+import pathlib
 import re
+import time
 
 import pytest
 from fastapi import Depends, Request
@@ -294,6 +297,19 @@ class TestMiddleware:
         got = _compute_route_class(_scope("/weird/x", route=mount), "/weird/x")
         assert got == monitoring.COMPUTE_UNROUTED
 
+    def test_a_match_inside_a_mount_does_not_borrow_the_mounts_template(self):
+        """The declared-prefix rule is the ONLY route from a mount to a label.
+
+        An inner route's pattern is relative to its mount, so a catch-all inner
+        route describes the prefixed arrival path too. A request that descended
+        into an undeclared ``Mount`` (``root_path`` mutated after entry) must not
+        be labelled with the inner template — the guard mirrors the egress
+        dimension's (``_routed_inside_a_mount``).
+        """
+        inner = Route("/{rest:path}", endpoint=lambda: None)
+        scope = _scope("/weird/x", route=inner, root_path="/weird")
+        assert _compute_route_class(scope, "/weird/x") == monitoring.COMPUTE_UNROUTED
+
     def test_a_route_whose_pattern_does_not_describe_the_path_is_not_stamped(self):
         route = Route("/export", endpoint=lambda: None)  # e.g. a mount's inner route
         got = _compute_route_class(_scope("/other/export", route=route), "/other/export")
@@ -354,6 +370,31 @@ class TestMiddleware:
         assert snap["requests"] == 1.0
         assert snap["wall_seconds"] > 0.0, "the burned wall time must be recorded"
 
+    def test_a_middleware_request_records_measurable_cpu_seconds(self):
+        """The CPU axis must be measured THROUGH the middleware, not only injected.
+
+        Every other cpu assertion in this file drives ``monitoring.record_compute``
+        directly, and the one middleware-level measurement test asserts only
+        ``wall_seconds`` — so a middleware that passed ``cpu_s=0.0`` (or dropped the
+        ``thread_time`` read) would keep the whole suite green. The probe burns CPU
+        on THIS thread, which is the one ``time.thread_time()`` measures.
+        """
+        spins = 0
+
+        async def inner(_scope, _receive, _send):
+            nonlocal spins
+            deadline = time.perf_counter() + 0.05
+            while time.perf_counter() < deadline:
+                spins += 1
+            await _send({"type": "http.response.start", "status": 200, "headers": []})
+            await _send({"type": "http.response.body", "body": b""})
+
+        asyncio.run(_drive(ComputeAttributionMiddleware,
+                           _scope("/v1/x", org="org-a"), inner=inner))
+        assert spins > 0, "the probe must actually burn CPU on the loop thread"
+        assert monitoring.compute_by_org()["org-a"]["cpu_seconds"] > 0.0, (
+            "the middleware recorded no measurable CPU for a CPU-burning request")
+
     def test_a_client_header_or_query_cannot_set_the_org(self):
         """Attribution is auth-only: a header/query must never become the org key."""
         scope = _scope("/v1/x")
@@ -379,6 +420,31 @@ class TestMiddleware:
 
 
 class TestProductionWiring:
+    def test_declared_mount_prefixes_match_the_apps_real_mounts(self):
+        """The declared list is a code literal — pin it against the real mounts.
+
+        A mount that is not declared falls back to ``__unrouted__``, so the
+        declaration must not drift from ``app.mount(...)``.
+        """
+        import tortoise.hosted_api as ha
+        mounted = {route.path for route in ha.app.routes if isinstance(route, Mount)}
+        assert set(ha._COMPUTE_DECLARED_PREFIXES) == mounted, (
+            "the compute declared-prefix list drifted from the app's mounts: "
+            f"declared={ha._COMPUTE_DECLARED_PREFIXES!r} mounted={sorted(mounted)!r}")
+
+    def test_declared_paths_match_the_apps_plain_routes(self):
+        """Pin the declared plain-Route paths against the real app.
+
+        FastAPI stamps ``APIRoute`` but not plain ``Route``, so a plain route that
+        is NOT declared folds to ``__unrouted__``. A new plain route must be
+        declared.
+        """
+        import tortoise.hosted_api as ha
+        plain = {route.path for route in ha.app.routes if type(route) is Route}
+        assert set(ha._COMPUTE_DECLARED_PATHS) == plain, (
+            "the compute declared-path list drifted from the app's plain routes: "
+            f"declared={ha._COMPUTE_DECLARED_PATHS!r} plain={sorted(plain)!r}")
+
     def test_middleware_is_installed_inside_the_bound_and_the_gauge(self):
         import tortoise.hosted_api as ha
         classes = [m.cls for m in ha.app.user_middleware]
@@ -477,3 +543,79 @@ class TestProductionWiring:
                 f"{lane.__name__} no longer publishes the resolved org to "
                 "request.state — every request it authenticates would be "
                 "attributed to the '' child")
+
+
+# ── module structure (the #5375 duplicate-def class) ─────────────────────
+
+
+_IMPORT_TIME_COMPOUND = (ast.If, ast.Try, ast.With, ast.For, ast.While)
+
+
+def _module_level_route_describes_defs(source: str) -> list[int]:
+    """Line numbers of module-level ``_route_describes`` defs that bind at import.
+
+    Descends into import-time compound statements (``if``/``try``/``with``/
+    ``for``/``while``), because a def inside one of those still executes at import
+    and rebinds the module global — the hazard is binding ORDER, not indentation.
+    """
+    found: list[int] = []
+
+    def walk(statements) -> None:
+        for node in statements:
+            if isinstance(node, ast.FunctionDef):
+                if node.name == "_route_describes":
+                    found.append(node.lineno)
+            elif isinstance(node, ast.ClassDef):
+                continue  # a method is not a module-global binding
+            elif isinstance(node, _IMPORT_TIME_COMPOUND):
+                walk(node.body)
+                walk(getattr(node, "orelse", []))
+                walk(getattr(node, "finalbody", []))
+                for handler in getattr(node, "handlers", []):
+                    walk(handler.body)
+
+    walk(ast.parse(source).body)
+    return found
+
+
+class TestModuleStructure:
+    def test_only_one_module_level_route_describes(self):
+        """Falsifier: a second module-level ``def _route_describes`` (#5420).
+
+        The predicate is shared by the egress and compute dimensions. A duplicate
+        later in the module body wins at import, so an edit to the earlier one is
+        dead while the later silently changes BOTH routes' labels — dormant only
+        while the bodies happen to agree.
+        """
+        import tortoise.hosted_api as ha
+        path = pathlib.Path(ha.__file__).resolve()
+        defs = _module_level_route_describes_defs(path.read_text(encoding="utf-8"))
+        assert len(defs) == 1, (
+            f"{path.name} has {len(defs)} module-level `_route_describes` defs at "
+            f"lines {defs}; the later def shadows the earlier at import, making the "
+            "earlier dead code and letting a one-sided edit silently change both "
+            "the egress and compute dimensions")
+        bound = ha._route_describes.__code__.co_firstlineno
+        assert defs[0] == bound, (
+            f"the first module-level `_route_describes` (line {defs[0]}) is not the "
+            f"one bound at import (line {bound}); the earlier definition is dead code")
+
+    def test_record_compute_is_the_only_writer_of_the_metric_families(self):
+        """The #501/#3677 house shape: callers never touch the metric directly.
+
+        A second writer would fork the unit, the attribution key and the
+        cardinality cap — the exact drift #4490's shape note forbids.
+        """
+        root = pathlib.Path(monitoring.__file__).resolve().parent
+        families = ("COMPUTE_REQUESTS", "COMPUTE_WALL_SECONDS",
+                    "COMPUTE_CPU_SECONDS", "COMPUTE_REQUEST_SECONDS")
+        offenders = []
+        for source in sorted(root.rglob("*.py")):
+            if source.name == "monitoring.py":
+                continue
+            text = source.read_text(encoding="utf-8")
+            if any(name in text for name in families):
+                offenders.append(source.name)
+        assert not offenders, (
+            "compute metrics must be written only through monitoring.record_compute; "
+            f"direct references found in {offenders}")

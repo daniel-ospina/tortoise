@@ -2381,7 +2381,9 @@ app.add_middleware(McpPathCanonicalizerMiddleware)
 #     `test_hosted_api.py::test_in_flight_gauge_is_wired_into_the_real_app`) —
 #     an accounting wrapper must not take that seat. Starlette's `add_middleware`
 #     INSERTS at index 0, so this registration is placed BEFORE
-#     `InFlightMiddleware`'s to land at index 2.
+#     `InFlightMiddleware`'s registration to land INSIDE both of them — a
+#     RELATIVE rule, never a fixed index: the compute wrapper (#4490) registers
+#     after this one and legitimately takes the index this comment used to name.
 #   * Sitting INSIDE the bound is what makes the count truthful, not merely
 #     polite: on a breach the bound ABANDONS the handler and DROPS its response
 #     (`_guarded_send`), so bytes that never left must not be credited to the
@@ -2693,26 +2695,12 @@ _COMPUTE_DECLARED_PREFIXES = ("/mcp",)
 _COMPUTE_DECLARED_PATHS = ("/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc")
 
 
-def _route_describes(route, path: str) -> bool:
-    """Whether ``route`` is the route that served ``path``.
-
-    The route's OWN pattern is the arbiter, so path params still resolve to the
-    template (``/v1/points/{pid}`` describes ``/v1/points/abc``). ``re.match``, not
-    ``fullmatch``: the router matches with ``match`` against ``^…$``
-    (``starlette.routing.compile_path``), and Python's ``$`` also matches just
-    before a TRAILING NEWLINE, so ``fullmatch`` would put a matched route's request
-    on the fallback axis.
-
-    TOTAL: any failure to answer is ``False`` (fall back to ``__unrouted__``),
-    never an exception a caller could turn into a failed request.
-    """
-    regex = getattr(route, "path_regex", None)
-    if regex is None:
-        return getattr(route, "path", None) == path
-    try:
-        return regex.match(path) is not None
-    except Exception:  # noqa: BLE001, RUF100 - a label is never worth a 500
-        return False
+# NO SECOND ``_route_describes`` HERE: this dimension reuses the definition above
+# (#5420). A duplicate ``def`` executes later in the module body and silently
+# becomes the live binding for BOTH dimensions, leaving the earlier one as dead
+# code that a future edit could change with no effect — the same defect class as
+# the duplicate ``_now_iso`` in ``tortoise/sdk.py`` (#5375). Pinned by
+# ``tests/test_compute_attribution.py::test_only_one_module_level_route_describes``.
 
 
 def _compute_route_class(scope, entry_path: str) -> str:
@@ -2734,7 +2722,8 @@ def _compute_route_class(scope, entry_path: str) -> str:
     A ``Mount`` is NEVER the serving template: its pattern is relative to the mount
     and matches everything beneath it, so it would stand in for the whole
     undeclared surface. The declared-prefix rule is the only route from a mount to
-    a label.
+    a label — enforced by the ``_routed_inside_a_mount`` guard below, so this does
+    not rest on the declared-prefix list being complete.
     """
     path = entry_path or ""
     if path in _COMPUTE_DECLARED_PATHS:
@@ -2752,6 +2741,7 @@ def _compute_route_class(scope, entry_path: str) -> str:
     template = getattr(route, "path", None)
     if (isinstance(template, str) and template
             and not isinstance(route, Mount)
+            and not _routed_inside_a_mount(scope, path)
             and _route_describes(route, path)):
         return template
     return _monitoring.COMPUTE_UNROUTED
