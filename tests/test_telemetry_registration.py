@@ -700,7 +700,12 @@ class _Collector(ast.NodeVisitor):
                                     keys if resolved else None))
         elif node.args and _callee_name(node.args[0]) == "_track_analytics_event":
             # Partial application: `asyncio.to_thread(_track_analytics_event,
-            # org, event, props)` — the capture_cost emit site.
+            # org, event, props)`. #4468 removed the last such site (the
+            # capture_cost emit now goes through ``_emit_analytics_off_loop``),
+            # so this branch is retained as the REGRESSION GUARD: reintroduce
+            # the ``to_thread`` shape and the site is recorded — failing both
+            # the count pin and the explicit "no to_thread emit" pin below —
+            # instead of silently vanishing from the inventory.
             event_arg = node.args[2] if len(node.args) >= 3 else None
             props_arg = node.args[3] if len(node.args) >= 4 else None
             self._record(node, "_track_analytics_event(to_thread)",
@@ -735,8 +740,13 @@ def test_every_emitted_prop_key_is_allowlisted():
     # #4015: routing the five analytics sites through ``_emit_analytics_off_loop``
     # does NOT change the count — the collector resolves that helper's args
     # exactly like the direct calls it replaced. main's #3773 added a sixth
-    # emitter, hence 12 here (11 before it).
-    assert len(calls) == 12, (
+    # emitter, hence 12 here (11 before it). #3944 adds a thirteenth: the
+    # absence canary emits `_sink_canary` through ``_emit_analytics_off_loop``
+    # with NO props, so it resolves to ``keys=None`` and is deliberately
+    # excluded from the subset check below (there is no new prop key to
+    # register — the allowlist is props-only, and the canary ships an empty
+    # dict).
+    assert len(calls) == 13, (
         f"emit-site inventory changed — {len(calls)} calls found: {calls}")
     resolved = [c for c in calls if c.keys]
     assert len(resolved) >= 10, (
@@ -749,9 +759,17 @@ def test_every_emitted_prop_key_is_allowlisted():
     assert {"plan", "tier"} <= all_keys
     # Pin the two sites whose props are NOT a bare literal dict, so a future
     # refactor that makes either unresolvable FAILS here instead of silently
-    # dropping it from the guard.
-    assert any(c.func == "_track_analytics_event(to_thread)" and c.keys
-               for c in calls), "capture_cost emit site did not resolve"
+    # dropping it from the guard. #4468 moved the capture_cost site off the
+    # ``to_thread`` partial onto the shared off-loop entry point, so it is
+    # pinned by its event name; the ``to_thread`` shape is banned outright.
+    assert any(c.func == "_emit_analytics_off_loop"
+               and c.event == "capture_cost" and c.keys for c in calls), \
+        "capture_cost emit site did not resolve"
+    assert not any(c.func == "_track_analytics_event(to_thread)"
+                   for c in calls), (
+        "an analytics emit still uses asyncio.to_thread — every hosted funnel "
+        "emit must go through the shared off-loop entry point on the telemetry "
+        "pool (#4015 / #4468)")
     assert any(c.path.name == "mcp_server.py" and c.keys
                for c in calls), "mcp_tool_call emit site did not resolve"
 

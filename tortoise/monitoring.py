@@ -252,12 +252,16 @@ PROBE_RETRY_DELAY = 0.1
 #: that reached (and failed at) the query: only the latter's error may replace
 #: the FIRST attempt's real error (#3143 review).
 #:
-#: ⚠️ This is a distinct error STRING, NOT a distinct status. A setup timeout
-#: still returns ``ok=False`` from ``probe_db``, and ``metrics()`` maps
-#: ``db["ok"] is False`` to ``status="degraded"`` + ``graph_size=0`` — #3143's
-#: symptom SHAPE, with only the ``error`` text changed. Do not read the
-#: separate spelling as "no verdict reported": to a caller the report is
-#: indistinguishable from a real unreachability except for that string.
+#: ⚠️ The spelling is a PHASE marker, not the verdict (#3683). A setup timeout
+#: still returns ``ok=False`` from ``probe_db``, but ``probe_db`` ALSO returns
+#: ``observed`` (``_probe_once``'s 4th value) and ``metrics()`` routes on THAT:
+#: a budget-exhausted setup timeout is an unobserved probe and reports the
+#: documented ``status="unknown"`` (+ ``graph_size=0``, the setup error kept),
+#: NOT ``degraded`` — "degraded" is reserved for an OBSERVED failure. So the
+#: separate spelling no longer implies a verdict the caller cannot tell apart
+#: from a real unreachability; the machine-readable discriminator is
+#: ``db["observed"]``. (A callable that RAISED keeps ``observed=True`` even
+#: though its error may be spelled with this same synthesized prefix.)
 _PROBE_SETUP_TIMEOUT_MSG = "probe setup timeout after "
 
 #: A LOOSE outer-alignment bound for :func:`probe_db`'s PLATFORM liveness
@@ -848,9 +852,15 @@ class _SingleSlotWorker:
     calls → +10 live ``ThreadPoolExecutor-N_0`` threads) plus the DB
     connection that abandoned call was holding.
 
-    One long-lived worker bounds the thread count to exactly one per process
-    no matter how many times a probe hangs. Callers keep their own hard
-    timeout through the returned ``Future`` (``future.result(timeout=…)``).
+    What bounds the thread count is the SHAPE, not the number 1 (#3683): ONE
+    process-lifetime pool per name, all ``workers`` threads created EAGERLY and
+    ONCE in ``__init__``, a BOUNDED backlog (``MAX_BACKLOG``), a never-dying
+    loop, and the daemon flag — so the count is exactly ``workers`` no matter
+    how many times a probe hangs. The ``workers=1`` default is therefore an
+    implementation choice, not the leak guard: production already runs this
+    same class at width 8 twice (``CONTROL_PLANE_WORKERS`` and the selfhost
+    readiness probe). Callers keep their own hard timeout through the returned
+    ``Future`` (``future.result(timeout=…)``).
 
     Daemon, NOT ``ThreadPoolExecutor`` (whose workers are non-daemon): a
     wedged probe must never block interpreter/uvicorn shutdown — Fly SIGTERMs
@@ -1189,8 +1199,60 @@ def graph_offload_timeout_s() -> float:
 #: per-request deadline.
 CONTROL_PLANE_OFFLOAD_TIMEOUT_S = 10.0
 
-#: Bounded per-call ``(op, duration_s)`` record for the offload seam.
-_CP_OFFLOAD_RECORDS: deque[tuple[str, float]] = deque(maxlen=512)
+#: #5840: the CLOSED terminal-state vocabulary of an offload. The single writer
+#: (``record_control_plane_offload``) is the only producer, so the metric's
+#: child set is bounded by this tuple — the #501/#3677 house shape (one writer
+#: owns the label vocabulary; no caller touches a metric object directly).
+CONTROL_PLANE_OFFLOAD_OUTCOMES = (
+    "completed",           # the callable returned
+    "bound_miss_refused",  # the bound fired and the callable will never run
+    "bound_miss_running",  # the bound abandoned the AWAIT; the callable still runs
+    "domain_error",        # fn failed, or the seam itself failed (catch-all)
+                           # — not a saturation event. The two are NOT
+                           # separately labelled: `future.exception() is exc`
+                           # does attribute the common path, but it is not
+                           # RELIABLY separable — on the bare-`raise` path a
+                           # concurrently-completing fn TimeoutError is not
+                           # distinguishable from the bound's — and a
+                           # mostly-right `internal_error` child that mislabels
+                           # is worse than one documented catch-all. Residual.
+    "cancelled",           # the AWAITING task was cancelled
+)
+
+#: Bounded per-call ``(op, duration_s, outcome, pool)`` record for the offload
+#: seam. #5840: the outcome and the pool are part of the record because a
+#: SUCCESS-ONLY record made a bound miss — a genuine telemetry DROP — and a
+#: saturated pool indistinguishable from "nothing happened": the #3677 loss
+#: class reachable through the observability channel.
+_CP_OFFLOAD_RECORDS: deque[tuple[str, float, str, str]] = deque(maxlen=512)
+
+# ── #5840: offload saturation becomes MEASURABLE ──────────────────────────
+#
+# #4462 could not be decided because its precondition — "the pool's real
+# saturation rate, and the 10s bound's contribution to request latency under
+# load" — had no data source: ``control_plane_offload_records()`` was read
+# nowhere outside tests, and it recorded only SUCCESSES, so the events in
+# question (backlog refusals, missed wait bounds) left no trace at all.
+#
+# THE TWO QUESTIONS NEED DIFFERENT SHAPES. The COUNTER answers "is the pool
+# saturated" (rate by pool+outcome). The HISTOGRAM answers "how much latency
+# does the bound contribute" (duration by pool+outcome), with the bound itself
+# as a bucket edge so a bound miss is a visible pile-up at the last edge.
+#
+# DEFINED HERE rather than with the counters above because the bucket set needs
+# ``CONTROL_PLANE_OFFLOAD_TIMEOUT_S``, defined just above.
+CONTROL_PLANE_OFFLOAD_COUNT = Counter(
+    "tortoise_control_plane_offload_total",
+    "Control-plane offloads by pool and terminal outcome (#5840)",
+    ["pool", "outcome"],
+)
+CONTROL_PLANE_OFFLOAD_LATENCY = Histogram(
+    "tortoise_control_plane_offload_seconds",
+    "Control-plane offload duration by pool and outcome (#5840)",
+    ["pool", "outcome"],
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
+             CONTROL_PLANE_OFFLOAD_TIMEOUT_S, 30.0),
+)
 #: Bounded per-call ``(duration_s, thread_name)`` record for the CONTROL-PLANE
 #: CLIENT itself (#3498 item 2 — the falsifier). Recorded at the httpx choke
 #: point in ``supabase_control.SupabaseControlPlane``, so a call that ran on
@@ -1260,14 +1322,47 @@ def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
     raise ValueError(f"unknown control-plane pool {pool!r}")
 
 
-def record_control_plane_offload(op: str, duration_s: float) -> None:
-    """Record ONE offloaded control-plane resolution ``(op, duration)``."""
+def record_control_plane_offload(
+    op: str, duration_s: float, *, outcome: str, pool: str
+) -> None:
+    """Record ONE offload's TERMINAL state — the single writer (#5840).
+
+    Called on EVERY terminal path, not only success. ``bound_miss_refused``
+    and ``bound_miss_running`` ARE the saturation events, and recording only
+    ``completed`` is precisely what made them unobservable.
+
+    ``outcome`` is clamped to ``CONTROL_PLANE_OFFLOAD_OUTCOMES`` so a future
+    caller cannot grow the metric's child set without bound (the doctrine at
+    the metric definitions above).
+    """
+    if outcome not in CONTROL_PLANE_OFFLOAD_OUTCOMES:
+        # NOT silent. A caller-side typo (`"complete"` for `"completed"`) would
+        # otherwise land in an unremarkable `unknown` child, and a BROKEN
+        # measurement would read as a clean one — precisely the failure this
+        # metric exists to expose. A warning (not a raise) is required because
+        # this runs inside a `finally`: raising here would replace the caller's
+        # real exception with a bookkeeping error.
+        logger.warning(
+            "control-plane offload: unknown outcome %r clamped to 'unknown' "
+            "(op=%r pool=%r) — the metric will UNDER-COUNT this terminal state",
+            outcome, op, pool,
+        )
+        outcome = "unknown"
     with _CP_RECORDS_LOCK:
-        _CP_OFFLOAD_RECORDS.append((op, duration_s))
+        _CP_OFFLOAD_RECORDS.append((op, duration_s, outcome, pool))
+    CONTROL_PLANE_OFFLOAD_COUNT.labels(pool=pool, outcome=outcome).inc()
+    CONTROL_PLANE_OFFLOAD_LATENCY.labels(pool=pool, outcome=outcome).observe(
+        duration_s
+    )
 
 
-def control_plane_offload_records() -> list[tuple[str, float]]:
-    """Snapshot of the bounded offload records (oldest first)."""
+def control_plane_offload_records() -> list[tuple[str, float, str, str]]:
+    """Snapshot of the bounded offload records (oldest first).
+
+    Each entry is ``(op, duration_s, outcome, pool)``;
+    ``CONTROL_PLANE_OFFLOAD_OUTCOMES`` names every terminal state, so a
+    caller can tell a completed call from a saturated one.
+    """
     with _CP_RECORDS_LOCK:
         return list(_CP_OFFLOAD_RECORDS)
 
@@ -1353,45 +1448,70 @@ async def run_control_plane_call(fn, *, op: str,
     bound = CONTROL_PLANE_OFFLOAD_TIMEOUT_S if timeout is None else timeout
     future = control_plane_worker(pool).submit(fn)
     started = time.monotonic()
+    # #5840: exactly ONE record per terminal state, on EVERY path. ``outcome``
+    # is assigned before each exit and read by the ``finally``, so a future
+    # early return or raise cannot silently reopen the success-only hole this
+    # closes. The initial value is the catch-all for an unexpected failure.
+    outcome = "domain_error"
     try:
-        result = await _await_future(future, timeout=bound,
-                                     cancel_on_timeout=cancel_on_timeout)
-    except TimeoutError as exc:
-        # Distinguish the three sources of TimeoutError that meet here:
-        #   1. `fn` raised it              -> a domain error, propagate
-        #   2. the pool refused the submit -> `_WorkerBacklogFull`, fail closed
-        #   3. `wait_for`'s bound expired  -> fail closed
-        future_exc = (future.exception()
-                      if future.done() and not future.cancelled() else None)
-        if future_exc is not None and not isinstance(future_exc, _WorkerBacklogFull):
-            raise
-        reason = ("pool backlog full" if isinstance(future_exc, _WorkerBacklogFull)
-                  else f"exceeded its {bound}s bound")
-        if not future.done():
-            # The callable is still QUEUED or RUNNING: the bound abandoned the
-            # AWAIT, not the work. Attribute whatever it eventually does at the
-            # op level instead of leaving it to a bare asyncio warning (#4456).
-            future.add_done_callback(_log_abandoned_outcome(op))
-        # ``refused`` is the DELIVERY discriminator (#4456): True when the
-        # callable did not and will not run (backlog-full refusal, or a queued
-        # submission cancelled by the bound); False when a bound miss left it
-        # running (or, on a non-cancellable lane, still queued).
-        raise ControlPlaneOffloadError(
-            f"control-plane call {op!r} {reason}",
-            refused=(isinstance(future_exc, _WorkerBacklogFull)
-                     or future.cancelled()),
-        ) from exc
-    record_control_plane_offload(op, time.monotonic() - started)
-    return result
+        try:
+            result = await _await_future(future, timeout=bound,
+                                         cancel_on_timeout=cancel_on_timeout)
+        except TimeoutError as exc:
+            # Distinguish the three sources of TimeoutError that meet here:
+            #   1. `fn` raised it              -> a domain error, propagate
+            #   2. the pool refused the submit -> `_WorkerBacklogFull`, fail closed
+            #   3. `wait_for`'s bound expired  -> fail closed
+            future_exc = (future.exception()
+                          if future.done() and not future.cancelled() else None)
+            if future_exc is not None and not isinstance(future_exc, _WorkerBacklogFull):
+                raise
+            reason = ("pool backlog full" if isinstance(future_exc, _WorkerBacklogFull)
+                      else f"exceeded its {bound}s bound")
+            if not future.done():
+                # The callable is still QUEUED or RUNNING: the bound abandoned the
+                # AWAIT, not the work. Attribute whatever it eventually does at the
+                # op level instead of leaving it to a bare asyncio warning (#4456).
+                future.add_done_callback(_log_abandoned_outcome(op))
+            # ``refused`` is the DELIVERY discriminator (#4456): True when the
+            # callable did not and will not run (backlog-full refusal, or a queued
+            # submission cancelled by the bound); False when a bound miss left it
+            # running (or, on a non-cancellable lane, still queued).
+            refused = (isinstance(future_exc, _WorkerBacklogFull)
+                       or future.cancelled())
+            outcome = "bound_miss_refused" if refused else "bound_miss_running"
+            raise ControlPlaneOffloadError(
+                f"control-plane call {op!r} {reason}",
+                refused=refused,
+            ) from exc
+        outcome = "completed"
+        return result
+    except asyncio.CancelledError:
+        # The AWAITING task was cancelled — neither success nor a pool failure.
+        outcome = "cancelled"
+        raise
+    finally:
+        record_control_plane_offload(
+            op, time.monotonic() - started, outcome=outcome, pool=pool
+        )
 
 
 def _probe_once(sdk, timeout=None,
-                setup_timeout=None) -> tuple[bool, str | None, bool]:
+                setup_timeout=None) -> tuple[bool, str | None, bool, bool]:
     """Execute ONE bounded probe on the shared probe worker.
 
-    Returns ``(ok, error, transient)`` — ``transient`` is True only when the
-    failure was a connection-level error that a single retry could clear,
-    never a timeout (a hung DB stays hung).
+    Returns ``(ok, error, transient, observed)`` — ``transient`` is True only
+    when the failure was a connection-level error that a single retry could
+    clear, never a timeout (a hung DB stays hung). ``observed`` (#3683) is
+    whether the probe produced a VERDICT about the DB: True whenever a callable
+    RAISED (the projection cold-start or the query failed and said why) or the
+    reachability query actually ran; False only when the probe exhausted a
+    budget (or was refused/abandoned) WITHOUT getting an answer. That is the
+    case ``metrics()`` reports as the documented ``unknown`` instead of
+    claiming an observed failure. It is a PHASE fact, never a restatement of
+    the error text: a callable that raised keeps ``observed=True`` even though
+    the query never ran — including when the raised ``TimeoutError`` carried no
+    message and the error is spelled with the synthesized setup wording.
 
     #3143: the two phases are bounded separately. ``setup_timeout`` bounds the
     projection cold-start (``sdk._get_proj()`` — connect + ``_ensure_indexes()``,
@@ -1454,13 +1574,22 @@ def _probe_once(sdk, timeout=None,
         #       Fall back to the synthesized setup message rather than
         #       returning ``error=""``.
         msg = str(e)[:200] or f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s"
+        if isinstance(e, _WorkerBacklogFull):
+            # (a) the worker REFUSED the submission (saturated #2850 backlog):
+            # ``_setup`` never ran, so the DB was never contacted — not an
+            # observation (mirrors the query-phase refusal branch below).
+            return False, msg, False, False
         if setup.done():
-            return False, msg, _is_transient_connect_error(e)
+            # (b) the CALLABLE raised. A bare ``TimeoutError()`` gets the
+            # synthesized setup spelling, but the cold-start still FAILED and
+            # said so — an observation whatever the message says.
+            return False, msg, _is_transient_connect_error(e), True
         # Not done: the cold-start genuinely overran its allowance (the worker
-        # is abandoned, never cancelled — #2850).
-        return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False
+        # is abandoned, never cancelled — #2850). Budget exhausted with NO
+        # answer ⟹ not an observation.
+        return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False, False
     except Exception as e:  # noqa: BLE001, RUF100
-        return False, str(e)[:200], _is_transient_connect_error(e)
+        return False, str(e)[:200], _is_transient_connect_error(e), True
 
     if combined:
         # Platform-liveness shape (#1384): the query may spend only what the
@@ -1475,7 +1604,7 @@ def _probe_once(sdk, timeout=None,
             # ONE spelling per phase, and ``probe_db``'s retry uses this prefix
             # to keep the first attempt's real error when its own remainder was
             # eaten by the cold-start (#3143 review P2).
-            return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False
+            return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False, False
         slot_wait_budget = None
     else:
         # Explicit-allowance shape (#3143, the MCP health tool): ``timeout``
@@ -1513,21 +1642,22 @@ def _probe_once(sdk, timeout=None,
     if (slot_wait_budget and not query.done()
             and not query_started.wait(slot_wait_budget)):
         # The worker never BEGAN the query inside the leftover allowance, so the
-        # query never ran. That is a distinct error STRING, NOT a distinct
-        # status: ``ok=False`` still flows out to ``metrics()`` as
-        # ``status="degraded"`` + ``graph_size=0`` — #3143's shape with only
-        # the text changed (see ``_PROBE_SETUP_TIMEOUT_MSG``). Same setup
-        # spelling as a cold-start overrun (one spelling per phase). The
+        # query never ran. It is reported with the SETUP spelling — one spelling
+        # per phase — and ``observed=False`` (#3683), which is what sends the
+        # report to the documented ``unknown`` ("could not tell") instead of
+        # falsely claiming an OBSERVED failure ("degraded" means a real
+        # component failing). Same setup spelling as a cold-start overrun. The
         # abandoned submission holds no extra thread (#2850).
-        return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False
+        return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False, False
     try:
         query.result(timeout=query_budget)
-        return True, None, False
+        return True, None, False, True
     except concurrent.futures.TimeoutError as e:
         if query.done() and not query_started.is_set():
             # The worker refused/aborted the submission (saturated backlog) —
-            # its own message, never a synthesized phase timeout.
-            return False, str(e)[:200], _is_transient_connect_error(e)
+            # its own message, never a synthesized phase timeout. The query
+            # was never picked up ⟹ not an observation.
+            return False, str(e)[:200], _is_transient_connect_error(e), False
         if not query_started.is_set():
             # The submission was QUEUED and never RAN (the worker was busy for
             # the whole reachability budget), so the phase at fault is the
@@ -1535,12 +1665,13 @@ def _probe_once(sdk, timeout=None,
             # spelling, the same "one spelling per phase" rule the guard above
             # follows. Only a query that actually STARTED may claim
             # ``probe timeout after …``. Reuses the EXISTING ``query_started``
-            # event; no new machinery.
-            return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False
-        # NOT retried — a slow/hung DB would just hang again.
-        return False, f"probe timeout after {timeout}s", False
+            # event; no new machinery. Never started ⟹ not an observation.
+            return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False, False
+        # NOT retried — a slow/hung DB would just hang again. The query RAN and
+        # overran, so the DB was contacted: an observation.
+        return False, f"probe timeout after {timeout}s", False, True
     except Exception as e:  # noqa: BLE001, RUF100
-        return False, str(e)[:200], _is_transient_connect_error(e)
+        return False, str(e)[:200], _is_transient_connect_error(e), True
 
 
 def probe_db(sdk, setup_timeout=None) -> dict:
@@ -1587,9 +1718,14 @@ def probe_db(sdk, setup_timeout=None) -> dict:
     # degraded within the same sub-second window; a hung black-hole DB is a
     # worker TIMEOUT and is NEVER retried.
 
-    Returns ``{"ok": bool, "latency_ms": float, "error": str|None}`` —
-    NEVER raises, so /health can report ``status: degraded`` instead of
-    crashing the process.
+    Returns ``{"ok": bool, "observed": bool, "latency_ms": float,
+    "error": str|None}`` — NEVER raises, so /health can report
+    ``status: degraded`` instead of crashing the process. ``observed``
+    (#3683) is False when the probe never got a verdict — it exhausted its
+    budget (or was refused/abandoned) without reaching the reachability query —
+    so a caller can tell "never got to ask" from "asked and it failed"
+    WITHOUT parsing the error prose. It is reported by ``_probe_once`` as a
+    phase fact, never re-derived from the error string.
 
     #3143: ``setup_timeout`` is the projection-cold-start allowance (see
     ``_probe_once``). When it is not given, the cold-start and the query SHARE
@@ -1615,28 +1751,30 @@ def probe_db(sdk, setup_timeout=None) -> dict:
     attempt_timeout = PROBE_TIMEOUT
     total_budget = (attempt_timeout if setup_timeout is None
                     else setup_timeout + attempt_timeout)
-    ok, error, transient = _probe_once(sdk, setup_timeout=setup_timeout)
+    ok, error, transient, observed = _probe_once(sdk, setup_timeout=setup_timeout)
     if not ok and transient:
         remaining = total_budget - (time.monotonic() - start) - PROBE_RETRY_DELAY
         if remaining > 0:
             time.sleep(PROBE_RETRY_DELAY)
             # Combined shape on purpose: the retry gets what the deadline has
             # LEFT, split across both phases — not a second allowance.
-            retry_ok, retry_error, _ = _probe_once(
+            retry_ok, retry_error, _, retry_observed = _probe_once(
                 sdk, timeout=remaining, setup_timeout=None)
             if retry_ok:
-                ok, error = True, None
+                ok, error, observed = True, None, True
             elif not (retry_error or "").startswith(_PROBE_SETUP_TIMEOUT_MSG):
                 # The retry reached (and failed at) the query — a genuine
-                # verdict; take it.
-                ok, error = retry_ok, retry_error
+                # verdict; take it (and its observation bit).
+                ok, error, observed = retry_ok, retry_error, retry_observed
             # else: the remainder was too small to REDO the cold-start, so the
             # retry never observed the DB. Keep the FIRST attempt's real error
-            # instead of letting the clock artifact ("probe setup timeout
-            # after 0.01s") mask it — the `remaining > 0` guard alone does not
-            # cover the 0 < remaining < cold-start window (#3143 review).
+            # AND its ``observed`` instead of letting the clock artifact
+            # ("probe setup timeout after 0.01s") mask it — the
+            # `remaining > 0` guard alone does not cover the
+            # 0 < remaining < cold-start window (#3143 review).
     return {
         "ok": ok,
+        "observed": observed,
         "latency_ms": round((time.monotonic() - start) * 1000, 1),
         "error": error,
     }
@@ -3050,6 +3188,20 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
     component failing); an absent registration is an unverified handle, not
     a broken DB, so reporting degraded there is the lie #2202 removes.
 
+    #3683 (health-truthful): the SAME rule covers a probe that never reached
+    the reachability query — its shared probe slot was held for the whole
+    cold-start allowance, so interleaving A (slot taken before setup began)
+    and interleaving B (setup finished, slot taken before reachability was
+    asked) never contacted the DB. ``probe_db`` reports that as
+    ``observed=False`` and it maps to ``unknown`` here (``db.ok=None``, with
+    the setup-timeout ``error`` preserved), so "never got to ask" is
+    distinguishable in the RESULT from an observed failure instead of only in
+    prose a caller must parse. Every OTHER failure that produced a verdict — a
+    raised connect error, a query that RAN and overran — carries
+    ``observed=True`` and keeps ``degraded`` reserved for real component
+    failures. A submission REFUSED by a saturated worker backlog was never
+    asked either, so it is unobserved too (``observed=False``).
+
     ``graph_size`` is counted ONLY on a successful probe (review fix, #2202):
     a dead/hung DB must degrade fast (the bounded RETURN-1 probe — ONE
     ``PROBE_TIMEOUT`` deadline in the default shape, or ``setup_timeout +
@@ -3082,9 +3234,21 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
     """
     target = sdk if sdk is not None else _sdk
     if target is None:
-        db = {"ok": None, "latency_ms": 0.0, "error": "no_sdk_registered"}
+        db = {"ok": None, "observed": False, "latency_ms": 0.0,
+              "error": "no_sdk_registered"}
     else:
         db = probe_db(target, setup_timeout=setup_timeout)
+    # #3683: ``observed`` is the status discriminator. ``probe_db`` reports
+    # ``ok=False`` for TWO different things — a DB that was ASKED and failed,
+    # and a probe that never reached the reachability query — and only the
+    # first is an observed failure. Normalising the unobserved case to
+    # ``ok=None`` keeps the documented ``unknown ⟺ db.ok is None`` shape and
+    # leaves the three-way mapping below untouched. This affects only THIS
+    # report (the MCP tool and the standalone serve_health /health, which
+    # always answers HTTP 200); the platform liveness gates read
+    # ``probe_db``'s own ``ok`` and are deliberately unchanged.
+    if db["ok"] is False and not db.get("observed", True):
+        db = {**db, "ok": None}
     if db["ok"] is True:
         status = "ok"
     elif db["ok"] is False:

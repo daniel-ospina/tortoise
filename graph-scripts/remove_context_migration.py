@@ -29,17 +29,26 @@ Gate summary
 
 Post-migration: verifies ``MATCH (n:Point) WHERE n.context IS NOT NULL`` returns 0.
 """
-from __future__ import annotations  # noqa: I001
+from __future__ import annotations
+
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"graph-scripts/remove_context_migration.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python graph-scripts/remove_context_migration.py`"
+    )
 
 import argparse
 import ast
 import json  # noqa: F401
 import os
-import sys
 import time
 from datetime import datetime, timezone  # noqa: F401
 from pathlib import Path
-
 
 # ── Path helpers ──────────────────────────────────────────────────────────
 _REPO_ROOT = Path(__file__).resolve().parent.parent
