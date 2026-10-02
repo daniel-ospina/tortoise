@@ -205,6 +205,12 @@ surfaces:
   # is named in SOURCE_PATTERNS["api"], so a VALIDATOR-only edit selects `api` and runs
   # this proof; `core` is the docs/default surface for the registries it guards.
   - test_registry_integrity.py
+  # #3875: the tenant REST surface is a THIRD surface — #3863's approval rule never
+  # reached it, because hosted_api.py imports neither TOOL_REGISTRY nor HTTP_ALLOWED.
+  # Both API modules it enumerates select `api`. It fails closed BOTH ways: a live
+  # route absent from config/rest-surface-inventory.yml, and a declared route with no
+  # live route. Measured while writing it: 7 routes were added while #3875 sat open.
+  - test_rest_surface_inventory.py
   - test_cimd_ssrf.py  # #2847: CIMD SSRF control set (URL/host validation, DNS-rebinding pin, redirects, caps, cache, rate limit)
   - test_claim_endpoints.py
   - test_user_identity_authority.py
@@ -309,6 +315,12 @@ surfaces:
   # REPLACES the `core` fallback, so a core-only registration would never run
   # on an api-only PR. Same #2938 dual-membership convention.
   - test_cohort_cost_cap.py
+  # #4490: hosted-API compute (machine time) per org. Dual-registered with `core`:
+  # the middleware + route-class derivation live in tortoise/hosted_api.py (`api`
+  # SOURCE_PATTERN) while the metric family/writer/reader live in
+  # tortoise/monitoring.py (`core`) — a change to either shared file must run it
+  # (same #2938 dual-membership convention as test_cohort_cost_cap.py above).
+  - test_compute_attribution.py
   # #4194: the turn-write embedding path. Dual-registered with `core` (the
   # SDK capture loop owns there) and `eval` (tortoise/embeddings.py selects
   # eval) because the hosted copy of the same loop lives in the api-owned
@@ -770,6 +782,10 @@ surfaces:
   - test_finding_provenance.py
   - test_health_client_effect.py  # #3811: /health client-visible effect over a real port (dual: api)
   - test_branch_reaper.py   # #4408: local-branch reaper — PR-state classification + safety guards
+  # #6868: the wedged-CI-run reaper. Hermetic (stub gh; no network), so it pins
+  # no api/engine surface: `core` runs it on engine-wide changes. Its carve-out
+  # below keeps a tools/run_reaper.py-only diff out of the tier-1 smoke fallback.
+  - test_run_reaper.py
   - test_health_ready_nonblocking.py  # #2988: /health/ready off-loop + bounded probes
   - test_selfhost_health_probe_executor.py  # #3287/#2988/#3243: selfhost health probes (dual-registered)
   - test_server_hygiene_gate.py
@@ -791,6 +807,14 @@ surfaces:
   # it. Same reason as `test_boot_regressions.py` above. Hermetic (embedded DB per
   # test, no URI).
   - test_source_version_references_5199.py
+  # #3875: DUAL-REGISTERED with `api`, for the SAME reason as the #3154/#4367
+  # precedents above. The check enumerates `@app.*` from tortoise/hosted_api.py
+  # and tortoise/selfhost_api.py (both select `api`), but the declaration it
+  # reads is `config/rest-surface-inventory.yml` — and `config/*` falls through to
+  # `core`, NOT to `api`. Registered in `api` ALONE, an inventory-only edit would
+  # select `core` and run no guard at all on the file whose whole purpose is
+  # being checked. That is the #3154 silent-drop shape exactly.
+  - test_rest_surface_inventory.py
   # #5199 read half: the note is actually READABLE — the SDK provenance reader
   # (`get_provenance_chain`) reports it per link. `tortoise/search_engine.py`
   # selects this surface too, so the wiring's guard runs with the code it guards.
@@ -870,6 +894,13 @@ surfaces:
   # selecting `['eval']` with this guard never run (#1349 class) — same
   # rationale as `test_turn_embedding_write_path_4194.py` above.
   - test_journal_embedding_5004.py
+  # #4208: live `update_point(content=…)` must re-encode the DERIVED vector (or
+  # WIPE it when the embedder is unavailable) in the same write, so the node's
+  # vector can never describe text no longer on it. Pins `tortoise/sdk.py` (a
+  # SHARED_MODULE), the `tortoise/consistency.py` journal-fold reference the
+  # fix needs to stay green, and the `encode_for_store` seam.
+  # DUAL-REGISTERED with `eval`, which owns `tortoise/embeddings.py`.
+  - test_update_point_content_embedding_4208.py
   - test_onboarding_truth_surface.py  # #3670/#3671/#3681: dual-registered (api+core) — pins tortoise/hosted_api.py
   - test_restore_container_recovery.py
   - test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan
@@ -1178,6 +1209,10 @@ surfaces:
   # otherwise never run this file. Verified with tools/ci_selection.py:
   # select(["tortoise/monitoring.py"]) -> ["core"] (round-1 review, bug).
   - test_egress_bytes.py
+  # #4490: the per-org compute dimension's metric family/writer/reader live in
+  # tortoise/monitoring.py — a monitoring.py-only PR (which maps to `core`) must
+  # run this file. Dual-registered with `api` (the middleware is in hosted_api.py).
+  - test_compute_attribution.py
   - test_navigation.py
   # #5080: the D12/O4 never-across boundary. Both write-path fold sites — the
   # against-store classifier and the in-capture band — resolve it from one
@@ -1407,6 +1442,17 @@ surfaces:
   # then never run (the #1349/#3332 silent-drop class). Dual-registered with
   # `ep`, which owns `tortoise/dream.py`. See the note in the `ep` block.
   - test_2884_ep_state_journaled.py
+  # queue_resweep (#5215 merge-throughput work): guards `tools/queue_resweep.py`,
+  # the recoverable hand-pass that re-requests `@mergifyio queue` for PRs whose
+  # entry conditions are already met once the base gate opens. The tool lives
+  # under `tools/`, which is a flat `NON_PYTHON_PREFIXES` entry — so this
+  # registration alone does NOT make a tools-only change select `core` (measured:
+  # `select(["tools/queue_resweep.py"])` returned NO surface before the fix). The
+  # mechanism that runs this guard on the file it guards is the `CORE_ALSO` entry
+  # in `tools/ci_selection.py`, pinned by
+  # `tests/test_ci_selection.py::test_queue_resweep_tool_change_selects_core_not_tier1`.
+  # Hermetic: every GitHub surface is a fake (no `gh`, no network, no Mergify).
+  - test_queue_resweep.py
   ep:
   # #2884 D3: the EP/dream belief-state journal+replay guard. `tortoise/dream.py`
   # selects `ep`, so this registration is what runs the guard on a dream.py
@@ -1718,6 +1764,7 @@ surfaces:
   # `tortoise/embeddings.py` (stamp_journal_embedding / embedding_identity /
   # the normalization & width guards), which this surface owns.
   - test_journal_embedding_5004.py
+  - test_update_point_content_embedding_4208.py  # #4208: dual with `core` — the fix routes through `tortoise/embeddings.py`'s `encode_for_store`, which this surface owns
   - test_env_truthy.py
   - bench/test_bench_core.py
   - bench/test_degradation_chain.py
@@ -2191,6 +2238,7 @@ durations:
   test_transport_wait_bound.py: 5.8
   test_collision_preflight.py: 13.1
   test_branch_reaper.py: 2.0  # unmeasured — no measurement in the four source runs; flat default
+  test_run_reaper.py: 2.0  # unmeasured — new file (#6868); no CI junit yet, flat default
   test_control_plane_offload_3498.py: 1.4
   test_analytics_offloop_4015.py: 0.6
   test_free_team_entitlement.py: 4.8
@@ -2775,6 +2823,7 @@ durations:
   test_reaper.py: 195.9  # unmeasured
   test_reaper_orphan.py: 0.1  # unmeasured
   test_redis_guard.py: 0.5  # unmeasured
+  test_rest_surface_inventory.py: 4.8  # unmeasured (new file, #3875 — no CI junit yet)
   test_resume_gate_parity.py: 0.1  # unmeasured
   test_sdk.py: 7.9  # unmeasured
   test_sdk_group3.py: 2.7  # unmeasured
@@ -2782,7 +2831,12 @@ durations:
   test_source_inheritance_own.py: 45.7  # unmeasured
   test_embedding_model_required.py: 0.5  # unmeasured
   test_journal_embedding_5004.py: 24.0  # unmeasured
+  test_update_point_content_embedding_4208.py: 9.6  # #4208: 9 tests, docker FalkorDB; locally measured (junit testcase/@time sum, max of 4 runs)
   test_helpers.py: 0.0  # unmeasured
+  # #3400/#4221 convention: a new file enters at the flat 2.0s default and keeps
+  # the `# unmeasured` marker until a CI junit artifact carries a measured weight,
+  # so it cannot mis-balance the LPT pack.
+  test_queue_resweep.py: 2.0  # unmeasured
 
 # ── ON-DEMAND LANE: runs the pipeline, does not gate the merge ────────────
 # A file here is excluded from EVERY pre-merge leg (fast halves, slow, carve-

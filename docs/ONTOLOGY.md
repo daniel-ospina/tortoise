@@ -634,7 +634,7 @@ Connector entities (GitHub/Linear/Slack) get Source nodes at the projection chok
 
 > **#531 — canonical Event→Point pattern (`humanApproval`):** a human approval of a planning artifact is recorded as an Event (`eventKind: humanApproval`) + a decision Point (`pointKind: humanApproval`). The Event carries occurrence provenance (approver `performs`, artifact `uses`, claim `aboutPoint`, decision `produces`); the decision Point is a live epistemic claim that seeds the grounding a-vector and receives an EP evidence prior `Beta(10,1)` so dependent claims strengthen. Fan-out is `-[:IMPL {direction: "unidirectional", label: "approvedBy"}]->` per approved claim — deliberately unidirectional so claim weakness never back-propagates into the approval. No stored `approved` status on Objects — approval is derived from the event stream at query time. Worked example (`file_human_approval`, #531):
 >
-> ```text
+> ```cypher
 > (:Subject "Daniel")-[:performs]->(:Event {eventKind:"humanApproval", startedAt:T})
 >   (:Event)-[:uses]->(:Object "Customer Profile CP-001")
 >   (:Event)-[:aboutPoint]->(:Point "CP-001 targets SMB segment")
