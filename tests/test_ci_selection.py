@@ -1628,6 +1628,18 @@ def test_every_file_rides_exactly_one_shard_at_s_greater_than_two():
     assert len({e["half"] for e in inc}) == 5
     assert [e["half"] for e in inc] == ["a", "b", "c", "d", "e"]
     assert sum(len(e["files"].split()) for e in inc) == len(flat)
+    # #6145: the emitted headroom is this change's only new OUTPUT — the whole
+    # feature is "the margin a leg actually got is visible" — and it had NO
+    # assertion: deleting the key from `fast_matrix_include` left all 221 tests
+    # green (measured) while silently removing the feature. Pin it per entry
+    # against the shard value it reports, so the emitter and the shard dict
+    # cannot drift, and require it to be a real margin.
+    from tools.ci_selection import WATCHDOG_HEADROOM
+    for s, e in zip(legs["shards"], inc, strict=True):
+        assert "watchdog_headroom" in e, \
+            f"the emitted matrix must carry the headroom (#6145): {e['half']}"
+        assert e["watchdog_headroom"] == s["watchdog_headroom"], (e, s)
+        assert e["watchdog_headroom"] >= WATCHDOG_HEADROOM, (e, s)
 
 
 def test_shard_labels_are_a_superset_when_s_changes():

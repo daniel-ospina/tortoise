@@ -1463,8 +1463,9 @@ def watchdog_headroom_issues(manifest: dict) -> list[str]:
     is killed, and it is reachable today: at a 30.62-minute estimate
     `ceil(30.62 * 2) = 62` is clamped to the 55-minute ceiling — an EFFECTIVE
     1.80x — which the ceiling's own comment treated as "the validated budget"
-    rather than as a breach, and which the #6135 test above asserts without ever
-    computing the margin.
+    rather than as a breach, and which
+    `tests/test_ci_selection.py::test_watchdog_is_per_shard_and_scales_with_the_shard`
+    asserts without ever computing the margin.
 
     ⛔ SCOPE — ONE direction, and it is not the direction the observed kills came
     from. The two axes are independent and only ONE is visible here:
@@ -1555,10 +1556,10 @@ def push_legs(manifest: dict) -> dict:
         est = sum(_duration_weight(durations.get(f + ".py")) for f in names)
         # #6145: derive the budget from the ROUNDED estimate — the value the
         # matrix publishes — so the estimate, the budget and the emitted
-        # headroom are mutually consistent and the integrity check measures
-        # exactly the input the budget was built from (a check recomputing
-        # from a different precision carries a ~1 ms false negative exactly at
-        # the ceiling boundary, the boundary the check exists to police).
+        # headroom are mutually consistent. The builder and the integrity check
+        # must not read the same quantity at two different precisions; that
+        # mismatch is how a boundary value slips through the gate, and the
+        # ceiling boundary is exactly what the gate polices.
         est = round(est, 1)
         budget = shard_watchdog_minutes(est)
         shards.append({"name": label, "files": sorted(names),
