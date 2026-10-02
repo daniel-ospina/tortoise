@@ -616,6 +616,54 @@ jobs:
             exit 1
           fi
           echo "no conflict markers"
+      - uses: actions/setup-python@v5
+        with:
+          # The generators carry the #5128 `>=3.12` runtime guard, which exits
+          # EXIT_USAGE rather than silently running on an older interpreter.
+          python-version: '3.12'
+      - name: Generated-artifact drift check (#4454)
+        # #4454: a PR that edits ONLY a generated artifact never runs
+        # `tests/test_bridge_table.py` — `docs/` and `tools/` are in
+        # NON_PYTHON_PREFIXES, so a docs-only change selects `surfaces: []` and
+        # the matrix is skipped by the deliberate docs-PR policy. PR #4177
+        # closed the generator-only direction (a SOURCE_PATTERNS match beats
+        # the skip); the generated OUTPUT was the direction left open.
+        #
+        # This is deliberately NOT the matrix. It needs no test selection, so
+        # the docs-PR skip is irrelevant to it, and it runs unconditionally on
+        # every PR because this job is a REQUIRED context with no `paths:`
+        # filter (only the non-required jobs here are path-gated, #2149). So a
+        # hand-edit of a tracked generated document now reds a required check
+        # instead of passing CI with stale numbers.
+        #
+        # Note the alternative was NOT taken: narrowing NON_PYTHON_PREFIXES
+        # would change selection for every docs path and silently reverse a
+        # recorded policy decision. Adding a targeted check closes the hole
+        # without touching that policy.
+        #
+        # `--check` is verify-only: it compares the committed file against a
+        # fresh render and exits non-zero on drift. Both generators below are
+        # TRACKED artifacts; docs/product/sdk-rename-table.md is gitignored and
+        # therefore cannot drift in a PR, so it is correctly not listed here.
+        #
+        # The install is required, not incidental. The generators import
+        # `tortoise.sdk`, which pulls the full declared dependency set (numpy via
+        # cross_lens, prometheus_client via monitoring, fastmcp via
+        # tool_registry). Installing only `pyyaml` aborts both commands at IMPORT
+        # time with a traceback — exit 1 on EVERY PR, which would red this
+        # required context and block all merges: a fail-always gate, the exact
+        # opposite of fail-on-drift. This mirrors the sibling required artifact
+        # job `pricing-artifact`, which runs `pip install -e .` for the same
+        # reason (its parity check imports `tortoise.pricing`).
+        #
+        # Positive control must be run in THIS environment, not a developer's
+        # venv: injecting a line into docs/product/{bridge,mcp-rename}-table.md
+        # -> exit 1 naming the file; restoring -> exit 0. Verified in a clean venv
+        # created from the workflow's own steps.
+        run: |
+          pip install -e . --quiet
+          python3 tools/bridge_table.py --check
+          python3 tools/mcp_rename_table.py --check
       - uses: actions/setup-node@v4
         with:
           node-version: '22'

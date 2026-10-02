@@ -3895,6 +3895,73 @@ def test_docs_job_main_health_uses_a_safe_post_merge_gate():
     assert link["with"].get("failIfEmpty") is False
 
 
+def test_docs_job_guards_tracked_generated_artifacts_on_every_pr():
+    """#4454: a docs-only PR never runs the matrix, so a TRACKED generated
+    artifact was unguarded from the one direction that can stale it.
+
+    ``docs/`` and ``tools/`` are in NON_PYTHON_PREFIXES, so editing only
+    ``docs/product/bridge-table.md`` selects ``surfaces: []`` and
+    ``tests/test_bridge_table.py`` never runs. PR #4177 closed the generator-only
+    direction; the generated OUTPUT was left open.
+
+    The step must live in the ``docs`` job specifically. That job is a REQUIRED
+    context and carries no ``paths:`` filter, so it is the one place the check
+    cannot inherit the very skip it is closing. A path-gated home would reproduce
+    the #2802 shape, where a repo-wide gate was invisible to every gate and
+    shipped to main twice.
+    """
+    workflow = _load_workflow("ci.yml")
+    # Preconditions, read from the RECORDED source rather than a literal in this
+    # file: if the host job stops being required, or gains a paths: filter, the
+    # step below silently stops blocking anything. Asserting membership of a
+    # constant defined a few lines up would be self-satisfying and would say
+    # nothing about branch protection.
+    recorded = _json.loads(
+        (ROOT / "docs" / "ci" / "required-contexts.json").read_text()
+    )
+    assert "docs" in recorded["required_contexts"], (
+        "the docs job must be a REQUIRED context for this gate to block a merge"
+    )
+    pr_trigger = _on_block(workflow).get("pull_request")
+    assert pr_trigger is None or "paths" not in pr_trigger, (
+        "the docs job must run on EVERY pull_request, or this check inherits "
+        "the docs-PR skip it exists to close"
+    )
+    steps = workflow["jobs"]["docs"]["steps"]
+    step = next(
+        s for s in steps
+        if str(s.get("name", "")).startswith("Generated-artifact drift check")
+    )
+    # The generators import `tortoise.sdk`, which pulls the full declared
+    # dependency set (numpy, prometheus_client, fastmcp). Without the package
+    # install both commands abort at IMPORT time and the step exits 1 on EVERY
+    # PR — a fail-always gate that reds this required context and blocks all
+    # merges. Installing only the obvious `pyyaml` is the mistake this pins.
+    assert "pip install -e ." in step["run"], (
+        "the step must install the package; the generators import tortoise.sdk "
+        "and abort on missing runtime deps otherwise"
+    )
+    # `--check` verifies and exits non-zero on drift. A bare invocation would
+    # REWRITE the artifact and always pass — the check would look present and
+    # never fire, which is worse than absent.
+    for tool in ("bridge_table", "mcp_rename_table"):
+        assert f"tools/{tool}.py --check" in step["run"], (
+            f"{tool} writes a TRACKED generated artifact and must be verified"
+        )
+    # Both generators carry the #5128 >=3.12 runtime guard, so the step must
+    # bring its own interpreter rather than inherit the runner default — on an
+    # older default the guard exits EXIT_USAGE and reds the job for a reason
+    # that has nothing to do with the artifact.
+    setup = next(
+        s for s in steps if str(s.get("uses", "")).startswith("actions/setup-python")
+    )
+    assert setup["with"]["python-version"] == "3.12"
+    # Negative control: docs/product/sdk-rename-table.md is gitignored and
+    # untracked (.gitignore:112), so it cannot drift in a PR. Listing it here
+    # would be a check that can never fire.
+    assert "sdk_rename_table" not in step["run"]
+
+
 def test_docs_job_pr_path_never_interpolates_filenames():
     """#4449: the PR path's changed-markdown list is DATA, never shell text.
 
