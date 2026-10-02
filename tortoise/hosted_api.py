@@ -1180,6 +1180,11 @@ _LIVENESS_TASK_ATTRS = (
     "_boot_sweep_task",
     "_event_retention_task",
     "_first_contact_task",
+    # #3944: the analytics canary heartbeat. It belongs here because it is a
+    # process-lifetime periodic task whose LOSS is the failure it exists to
+    # detect — a re-entry or shutdown that left it orphaned (or a second copy
+    # alive) would corrupt the very signal the external alarm reads.
+    "_analytics_canary_task",
 )
 
 
@@ -1213,6 +1218,9 @@ def _start_liveness(app) -> None:
             prev.cancel()
     heartbeat_record()
     app.state._loop_heartbeat_task = loop.create_task(loop_heartbeat_task())
+    # #3944: the analytics canary heartbeat. Armed with the liveness block
+    # (cheap, synchronous, no I/O at arm time — the coroutine sleeps first).
+    app.state._analytics_canary_task = loop.create_task(_analytics_canary_loop())
     app.state._healthz_server = start_health_listener()
     app.state._loop_watchdog_stop = threading.Event()
     # DISABLED BY DEFAULT (#2850 review P0): with TORTOISE_LOOP_STALL_EXIT_S
@@ -5986,8 +5994,10 @@ async def _check_ip_bucket_rate_limit(
 
     #1719 (Task 5): ``defer_charge=True`` prunes + 429-checks but does NOT
     append — the caller charges via _charge_ip_bucket at the TERMINAL
-    outcome (success/401/403), so a server fault (5xx) never consumes the
-    user's budget and cannot mask an incident with an hour-long 429.
+    outcome, so a server fault (5xx) never consumes the user's budget and
+    cannot mask an incident with an hour-long 429. (session_login charges
+    on success/401/403; the sensitive-op family #2051 charges on any
+    non-5xx terminal — success or a 4xx client error.)
     """
     if os.environ.get("RATE_LIMIT_DISABLED") == "1":
         return
@@ -6462,9 +6472,22 @@ def _sensitive_op_budget(op: str, bucket_key: Hashable) -> dict | None:
     }
 
 
-async def _check_sensitive_op_rate_limit(request: Request, op: str) -> None:
-    """Per-IP hourly budget for sensitive org ops (export / org_delete /
-    import / pack_manifest)."""
+async def _check_sensitive_op_rate_limit(
+    request: Request, op: str, *, defer_charge: bool = False,
+) -> tuple | None:
+    """Per-IP hourly budget for the sensitive org ops (export /
+    team_delete / import / pack_manifest).
+
+    #2051: the family is on the #1719 deferred-terminal doctrine. With
+    ``defer_charge=True`` this only prunes + 429-checks (no append) and
+    returns the ``(ip, op)`` charge key for
+    ``_charge_sensitive_op_rate_limit`` at the TERMINAL outcome; the default
+    ``False`` keeps the check-time append for any non-migrated caller.
+
+    The limit / window / refusal copy come from ``_sensitive_op_budget``
+    (main's #2050 seam, shared with the MCP per-team arm) so the two arms
+    cannot drift; ``defer_charge`` is the #2051 axis layered on top of it.
+    """
     # P1-FIX-1: composite (ip, op) key — export and delete keep independent
     # budgets (locked by test_export_rate_limited_independently).
     # P3-3 (phase-7): normalize IPv4-mapped IPv6 HERE (tuple bypasses the
@@ -6479,11 +6502,110 @@ async def _check_sensitive_op_rate_limit(request: Request, op: str) -> None:
     # review restored it); stated here as well so the invariant is explicit
     # at the one place this key is formed.
     if _ip is None:
-        return
+        return None
     kwargs = _sensitive_op_budget(op, (_ip, op))
     if kwargs is None:
+        return None
+    await _check_ip_bucket_rate_limit(
+        request, defer_charge=defer_charge, **kwargs)
+    if not defer_charge:
+        return None
+    return (_ip, op)
+
+
+async def _charge_sensitive_op_rate_limit(
+    key: tuple | None, op: str,
+) -> None:
+    """#2051: append ONE terminal charge to the sensitive-op bucket store.
+
+    The deferred counterpart of the #1719 session_login shape — called once
+    when the terminal outcome is non-5xx (success or a 4xx client error); a
+    5xx passes through uncharged. ``_charge_ip_bucket`` carries the #1738
+    burst bound, so the 429 boundary stays at the limiter's limit.
+    """
+    limit = _SENSITIVE_OP_LIMITS.get(op)
+    if key is None or limit is None or key[0] is None:
         return
-    await _check_ip_bucket_rate_limit(request, **kwargs)
+    await _charge_ip_bucket(
+        _SENSITIVE_BUCKETS, _SENSITIVE_LOCK, key,
+        limit=limit, window_s=3600)
+
+
+async def _terminal_charge(key: tuple | None, op: str) -> None:
+    """#2051: the ONE shielded terminal charge for the sensitive-op family.
+
+    #2051 (review P2): the charge runs under ``asyncio.shield`` so a
+    cancellation delivered while it waits on the contended
+    ``_SENSITIVE_LOCK`` — ONE global lock shared by all four ops and all
+    IPs, so an attacker can manufacture the contention — cannot DROP a
+    charge for an operation that ALREADY EXECUTED. Un-shielded, the
+    cancellation propagated out of the wrapper and the append never
+    happened: the same evasion class the ``CancelledError`` branch closes,
+    left open on the success and 4xx paths. ``shield`` keeps the charge in
+    its own task, so a second cancellation cannot drop it either. The
+    best-effort guard keeps a charge-side fault from masking the underlying
+    outcome (a charge is telemetry, never a failure path), and it does NOT
+    swallow ``CancelledError`` (a ``BaseException``), so the cancellation
+    still propagates after the charge is committed.
+
+    All three terminal branches — success, non-5xx ``HTTPException`` and
+    cancellation — charge through this helper so they cannot diverge again.
+    """
+    with contextlib.suppress(Exception):
+        await asyncio.shield(_charge_sensitive_op_rate_limit(key, op))
+
+
+def _deferred_sensitive_op(op: str):
+    """#2051: deferred-terminal charging for a sensitive-op endpoint.
+
+    Factors the exact #1719 (Task 5) sequence session_login established —
+    prune + 429-check on admission (``defer_charge=True``), then charge ONCE
+    at the TERMINAL outcome — over the whole sensitive-op family. Charge iff
+    the endpoint returned normally, raised a non-5xx ``HTTPException`` (a
+    client error is terminal), or was CANCELLED mid-flight (a disconnect /
+    shutdown is a terminal non-5xx outcome, and an uncharged one is an
+    evasion path — see the ``CancelledError`` branch); a 5xx — including an
+    unhandled exception the global handler renders as one — passes through
+    UNCHARGED, so a control-plane/graph fault cannot burn the caller's
+    hourly budget and mask the underlying 5xx with a stale 429 (#1719
+    Task 5). The admission check still runs BEFORE the body (cheapest
+    rejection), and a 429 raised by it is a refusal and charges nothing.
+    """
+    def decorator(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            request = kwargs.get("request")
+            if request is None:
+                request = next(
+                    (a for a in args if isinstance(a, Request)), None)
+            key = None
+            if request is not None:
+                key = await _check_sensitive_op_rate_limit(
+                    request, op, defer_charge=True)
+            try:
+                result = await fn(*args, **kwargs)
+            except HTTPException as exc:
+                if exc.status_code < 500:
+                    await _terminal_charge(key, op)
+                raise
+            except asyncio.CancelledError:
+                # #2051 (review P2): a request cancelled mid-flight (client
+                # disconnect, server shutdown) is a terminal NON-5xx
+                # outcome and MUST charge. Left uncharged, a client could
+                # disconnect before every response and obtain unlimited
+                # uncharged executions of the heavy ``import``/``export``
+                # ops; the pre-migration check-time behaviour charged this
+                # class, so charging here restores parity (it REMOVES a
+                # limits change, it is not one). ``_terminal_charge`` is
+                # shielded, so a SECOND cancellation cannot drop it while it
+                # waits on the bucket lock. The cancellation is re-raised
+                # below, so it still reaches the caller.
+                await _terminal_charge(key, op)
+                raise
+            await _terminal_charge(key, op)
+            return result
+        return wrapper
+    return decorator
 
 
 async def _check_sensitive_op_budget(op: str, scope_key: Hashable) -> None:
@@ -7824,6 +7946,7 @@ async def list_packs(org: dict = Depends(get_current_org_gated)):  # noqa: B008
 
 
 @app.post("/v1/packs/manifests", status_code=201)
+@_deferred_sensitive_op("pack_manifest")
 async def upload_pack_manifest(
     request: Request,
     org: dict = Depends(get_current_org_gated),  # noqa: B008
@@ -7839,10 +7962,11 @@ async def upload_pack_manifest(
     (``:PackManifest``) and activates it (``PackInstall`` source='custom',
     idempotent MERGE + per-(graph, namespace) lock #1307). Per-IP rate
     budget (429) — checked BEFORE the body is read (cheapest rejection,
-    mirrors import #1389/#1230). Check-time charging (the sensitive-op
-    family doctrine; #1719's deferred terminal charge is session-login
-    only) — a server fault (503) consumes budget; a family-wide
-    defer_charge migration is tracked separately. The MCP install tool
+    mirrors import #1389/#1230). #2051: the family is now on the #1719
+    deferred-terminal doctrine — the budget is charged once at the terminal
+    outcome (success / 4xx), and a server fault (5xx/503) passes through
+    uncharged, so an outage cannot mask itself with a stale 429. The MCP
+    install tool
     (tortoise_pack_install) calls upsert_tenant_manifest in-process and
     is NOT covered by this REST budget (tracked separately).
 
@@ -7857,7 +7981,6 @@ async def upload_pack_manifest(
     Cross-tenant isolation is structural (tenant graph namespace — no
     tenant selector exists on any surface).
     """
-    await _check_sensitive_op_rate_limit(request, "pack_manifest")
     _reject_graph_bound_org_surface(org, "pack catalog upload")
     # C5 #2114 (re-review P1): the upload MERGEs :PackManifest/:PackInstall
     # into the DEFAULT graph — REST twin of tortoise_pack_install (write).
@@ -8980,9 +9103,10 @@ def _mint_key(org_id: str, *, graph_id: str | None = None,
     # occupy a slot); the RPC never 402s.
     from tortoise.quota import _count_resource
     from tortoise.supabase_control import (
+        KeyCapRefusal,
         get_control_plane,
-        insert_api_key,
         is_supabase_enabled,
+        mint_provisioned_key,
     )
     max_keys = _org_node_sync_limits(org_id).get("max_api_keys")
     if max_keys is not None:
@@ -9030,23 +9154,34 @@ def _mint_key(org_id: str, *, graph_id: str | None = None,
         # created_by as user-UUID-or-"api" (first_api_call distinct_id,
         # the session-login exchange tree).
         created_by = session_user_id or "api"
-        insert_api_key(cp, {
-            "id": kid,
-            "org_id": org_id,
-            "lookup_hash": lookup_hash(api_key),
-            "key_prefix": key_prefix,
-            "created_via": created_via,
-            "created_by": created_by,
-            "created_at": now,
-            "revoked_at": None,
-            "expires_at": expires_at,
-            "name": name,
-            # C1 columns: graph scope + allowlist + mint lineage
-            "graph_id": graph_id,
-            "scopes": final_scopes,
-            "created_by_key_id": caller_key_id,
-            "delegation_depth": delegation_depth,
-        })
+        # #1879: the cap gate and the INSERT are ONE transaction inside the
+        # `provision_api_key` RPC, serialized on the org row — the pre-check
+        # above is fast-fail + defense-in-depth ONLY (it is a check-then-act
+        # across a separate PostgREST request, so two workers can both pass
+        # it). The RPC re-applies `count - cap_slot_credit >= max` (#4355)
+        # under the lock and is the AUTHORITATIVE refusal.
+        try:
+            mint_provisioned_key(cp, {
+                "id": kid,
+                "org_id": org_id,
+                "lookup_hash": lookup_hash(api_key),
+                "key_prefix": key_prefix,
+                "created_via": created_via,
+                "created_by": created_by,
+                "created_at": now,
+                "revoked_at": None,
+                "expires_at": expires_at,
+                "name": name,
+                # C1 columns: graph scope + allowlist + mint lineage
+                "graph_id": graph_id,
+                "scopes": final_scopes,
+                "created_by_key_id": caller_key_id,
+                "delegation_depth": delegation_depth,
+            }, max_keys=max_keys, cap_slot_credit=cap_slot_credit)
+        except KeyCapRefusal:
+            # Same class the caller's pre-check raises → the identical 402/409
+            # mapping, just decided inside the serialized transaction.
+            raise _KeyCapExceeded() from None
     else:
         sdk = _make_sdk(namespace="registry")
         # apikey_create generates its OWN id (ulid) AND plaintext for the
@@ -17862,6 +17997,7 @@ def _export_graph_snapshot(graph_name: str):
 
 
 @app.get("/v1/organizations/{org_id}/export")
+@_deferred_sensitive_op("export")
 async def export_org(org_id: str, request: Request,
                       user: dict = Depends(get_current_user)):  # noqa: B008
     """E2E-6-D — owner-only JSON export of the org graph + control plane.
@@ -17878,7 +18014,6 @@ async def export_org(org_id: str, request: Request,
     actor_user_id); idempotent by nature (GET). The graph read runs on a
     worker thread (never blocks the event loop).
     """
-    await _check_sensitive_op_rate_limit(request, "export")
     org_node = await _org_node(org_id)
     deleted_at = org_node.get("deleted_at") if org_node else None
     await _require_owner(user["user_id"], org_id, allow_removed=deleted_at)
@@ -18649,6 +18784,7 @@ def _rebuild_import_indexes(sdk, graph_name: str) -> None:
 
 
 @app.post("/v1/organizations/{org_id}/import")
+@_deferred_sensitive_op("import")
 async def import_org(org_id: str, request: Request,
                       user: dict = Depends(get_current_user)):  # noqa: B008
     """Ingest a ``tortoise-export-v1`` artifact into the org graph (#1230).
@@ -18670,7 +18806,6 @@ async def import_org(org_id: str, request: Request,
     retryable/rollback-able; a pack-application failure 422s AFTER the swap
     (the graph holds the restored dump, the vocabulary is not live).
     """
-    await _check_sensitive_op_rate_limit(request, "import")
     org_node = await _org_node(org_id)
     deleted_at = org_node.get("deleted_at") if org_node else None
     await _require_owner(user["user_id"], org_id, allow_removed=deleted_at)
@@ -18993,6 +19128,7 @@ def _soft_delete_registry_org(org_id: str, now: str, grace_hours: float) -> None
 
 
 @app.delete("/v1/organizations/{org_id}", status_code=202)
+@_deferred_sensitive_op("team_delete")
 async def delete_org(org_id: str, request: Request,
                       user: dict = Depends(get_current_user)):  # noqa: B008
     """E2E-6-D — owner-only org deletion (soft delete → TEAM_DELETE_GRACE_HOURS grace → hard delete).
@@ -19018,7 +19154,6 @@ async def delete_org(org_id: str, request: Request,
     a user can own multiple orgs (per-org deletion must not cascade to
     the account).
     """
-    await _check_sensitive_op_rate_limit(request, "team_delete")
     org_node = await _org_node(org_id)
     deleted_at = org_node.get("deleted_at") if org_node else None
     await _require_owner(user["user_id"], org_id, allow_removed=deleted_at)
@@ -20781,7 +20916,7 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-# ── #1855: per-org session-key mint lock ────────────────────────────────────
+# ── #1855/#1879: per-org session-key mint lock ─────────────────────────────────
 # The session-key mint critical section (cap read → revoke → recheck → insert)
 # is atomic in the DOCUMENTED single-worker deployment only because it is
 # all-sync (no await between control-plane calls). Under --workers > 1, two
@@ -20795,15 +20930,23 @@ def _now_iso() -> str:
 # guaranteed to reuse — neither serializes a multi-call critical section. The
 # durable multi-worker fix is a single SQL mint RPC that runs the whole
 # cap/revoke/recheck/insert in ONE transaction (the recover_team_key pattern,
-# migration 20260814000001 — SELECT ... FOR UPDATE); out of scope for this
-# micro fix and tracked in #1855.
+# migration 20260814000001 — SELECT ... FOR UPDATE).
+#
+# ⛔ #1879 LANDED: the SUPABASE lane now does exactly that —
+# `_session_key_supabase` runs the whole section inside `session_key_mint`
+# (migration 20261001000002), serialized on the `organizations` row, and
+# `_mint_key`'s Supabase branch runs inside `provision_api_key` under the same
+# lock. This in-process lock is retained as belt-and-braces for the Supabase
+# lane and is still the ONLY guard for the REGISTRY lane (embedded FalkorDB is
+# single-process by construction — #1879 scope item 4).
 #
 # threading.Lock (not asyncio.Lock): loop-agnostic (tests spin fresh asyncio
 # loops; asyncio.Lock caches its loop on first acquire) and the section is
 # all-sync, so acquire() never blocks the event loop in the current
 # architecture. ⛔ If an await is ever introduced INSIDE the section, switch to
-# an asyncio.Lock (same per-org keying) — or port the mint to the SQL RPC.
-# Cross-process (--workers > 1) serialization STILL requires the SQL RPC.
+# an asyncio.Lock (same per-org keying) — or route the lane through the SQL RPC,
+# as the Supabase lane now does. Cross-process (--workers > 1) serialization
+# requires that SQL RPC.
 _ORG_MINT_LOCKS: dict[str, threading.Lock] = {}
 _ORG_MINT_LOCKS_GUARD = threading.Lock()
 
@@ -20970,10 +21113,64 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
                     params={"tid": tid, "uid": user_id, "now": now},
                 ).result_set
                 if oldest:
-                    reg.query(
-                        "MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
+                    # #1879 P2: the revoke is a CLAIM, not a blind write —
+                    # `WHERE k.revoked_at IS NULL` makes it the Cypher twin of
+                    # `_claim_key_revocation`, so a concurrent revoke of the
+                    # SAME victim (rotate's claim-revoke, or any other
+                    # non-lock-holding writer) is never OVERWRITTEN. The
+                    # returned rows are what THIS call claimed; the
+                    # compensation below is gated on it — a lost claim wrote
+                    # nothing, so there is nothing to restore.
+                    claimed_revoke = bool(reg.query(
+                        "MATCH (k:APIKey {id:$id}) WHERE k.revoked_at IS NULL "
+                        "SET k.revoked_at = $now RETURN k.id",
                         params={"id": oldest[0][0], "now": now},
-                    )
+                    ).result_set)
+                    # #1879: FAIL-CLOSED RE-CHECK (parity with the rotation
+                    # branch below). The revoke above frees a slot ONLY if the
+                    # count did not move underneath it: this lane's lock is
+                    # per-PROCESS and the mint gate is not the only writer
+                    # (`_mint_key`'s callers — create_api_key, the per-graph
+                    # mint, rotate_api_key's create leg — take no
+                    # `_org_mint_lock`; recorded residual). A concurrent ADD
+                    # by any of those consumes the slot this revoke frees, so
+                    # the count can still be at the cap AFTER the revoke —
+                    # inserting then would take the org to cap+1. Same
+                    # invariant the rotation branch already enforces (P2-1):
+                    # a revoke that freed no counted slot must NOT mint.
+                    # (A concurrent REVOKE is harmless here: it lowers the
+                    # count this re-check then reads.)
+                    recheck_other = reg.query(
+                        "MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL "
+                        "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
+                        "AND (k.expires_at IS NULL OR k.expires_at > $now) RETURN count(k)",
+                        params={"tid": tid, "now": now},
+                    ).result_set[0][0]
+                    if max_keys is not None and recheck_other >= max_keys:
+                        # COMPENSATE before refusing: the revoke above is a
+                        # committed write in THIS lane (unlike the Supabase lane,
+                        # where the same re-check runs inside one transaction and
+                        # its RAISE ROLLS THE REVOKE BACK). Refusing without
+                        # undoing it would destroy another user's live key and
+                        # return no key at all — a refusal that loses data is
+                        # strictly worse than the overshoot it prevents.
+                        #
+                        # #1879 P2: gated on `claimed_revoke` — restoring is
+                        # only correct when THIS call's claim actually wrote
+                        # the row. A lost claim (another writer revoked the
+                        # victim first) freed no slot, so the revoke is left
+                        # exactly as that writer made it. The restore itself is
+                        # a compare-and-swap on the exact timestamp WE wrote,
+                        # so it can never resurrect a row another writer
+                        # deliberately revoked (`SET k.revoked_at = NULL` only
+                        # WHERE k.revoked_at = $now).
+                        if claimed_revoke:
+                            reg.query(
+                                "MATCH (k:APIKey {id:$id}) WHERE k.revoked_at = $now "
+                                "SET k.revoked_at = NULL",
+                                params={"id": oldest[0][0], "now": now},
+                            )
+                        raise HTTPException(status_code=402, detail=_key_limit_refusal())
                 else:
                     # #1828: at max_api_keys with no OTHER key to revoke, the
                     # recovery fallback dead-locks on the user's OWN persistent
@@ -21093,9 +21290,13 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     with reads/writes on org_memberships / orgs / api_keys. The minted key
     lands in api_keys with lookup_hash + created_via + expires_at, so
     get_current_org / MCP resolve it via the unique lookup_hash index, and
-    api_keys.revoked_at is the authoritative revoke. #1855: the whole
-    cap/revoke/recheck/insert section runs under the per-org in-process lock
-    (see _org_mint_lock above — same lock as the registry lane). #2380 (P1):
+    api_keys.revoked_at is the authoritative revoke. #1879: the whole
+    cap/revoke/recheck/insert section runs as ONE Postgres transaction inside
+    the `session_key_mint` RPC (migration 20261001000002), which serializes on
+    the `organizations` row (`FOR NO KEY UPDATE`) — so the cap holds ACROSS
+    worker processes, not just within this one. The per-org in-process lock
+    (see _org_mint_lock above) is retained as belt-and-braces: a second worker
+    has its own lock table, so it was never the guarantee. #2380 (P1):
     the registry-lane recovery role gate has its byte-parity twin here
     (owner/admin on the RESOLVED tid, after THIS lane's own suspension check
     — see the gate below); bootstrap stays member-open.
@@ -21106,12 +21307,11 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     from tortoise.auth import lookup_hash
     from tortoise.pricing import tier_limits
     from tortoise.supabase_control import (
-        active_api_keys,
+        SessionKeyMintRefusal,
         get_control_plane,
-        insert_api_key,
         membership_for_user_org,
+        mint_session_key,
         org_by_id,
-        revoke_api_key,
         user_memberships,
     )
 
@@ -21160,6 +21360,18 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     api_key = f"tt_{_uuid.uuid4().hex}"
     kid = _short_id()
     now = datetime.now(UTC).isoformat()
+    # #750.8: .get() so a pricing.json key drift never 500s the mint (pricing.py
+    # validates required keys at load; belt-and-braces). Hoisted ABOVE the lock:
+    # the #1879 RPC takes the cap as a caller-supplied param (pricing lives in
+    # app code, never SQL).
+    lim = tier_limits(tier)
+    max_keys = lim.get("max_api_keys")
+    # #1879: computed ONCE and used for BOTH the RPC argument and the response —
+    # a second `now()+24h` after the mint would advertise an `expires_at` a few
+    # milliseconds LATER than the row's (the row is authoritative; the response
+    # must not disagree with it).
+    expires_at = ((datetime.now(UTC) + timedelta(hours=24)).isoformat()
+                  if purpose == "bootstrap" else None)
     # #1828 review P3-2: True when the recovery fallback rotated a session
     # credential to make room — the dashboard shows a one-time banner.
     rotated = False
@@ -21168,132 +21380,46 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     rotated_key_prefix = None
 
     with _org_mint_lock(tid):
+        # #1879: the ENTIRE critical section (bootstrap 3-active check / cap
+        # count -> oldest-OTHER revoke -> fail-closed re-check -> 3-tier
+        # rotation -> fail-closed re-check -> INSERT) runs in ONE Postgres
+        # transaction via the `session_key_mint` RPC, which serializes on the
+        # `organizations` row (`FOR NO KEY UPDATE`). This in-process lock is now
+        # belt-and-braces ONLY: it cannot exclude a second worker process, and
+        # PostgREST gives each statement its own transaction, so no
+        # application-level lock can span the section.
+        try:
+            minted = mint_session_key(
+                cp,
+                org_id=tid,
+                user_id=user_id,
+                purpose=purpose,
+                key_id=kid,
+                lookup_hash=lookup_hash(api_key),
+                key_prefix=api_key[:10],
+                created_at=now,
+                expires_at=expires_at,
+                max_api_keys=max_keys,
+            )
+        except SessionKeyMintRefusal as e:
+            # Semantic refusal from the serialized transaction — the SAME
+            # status/details the pre-#1879 in-Python section raised.
+            if e.code == "bootstrap_cap":
+                raise HTTPException(
+                    status_code=429,
+                    detail="Too many active session keys — wait for expiry",
+                ) from None
+            raise HTTPException(
+                status_code=402, detail=_key_limit_refusal()) from None
+        rotated = bool(minted.get("rotated"))
+        rotated_key_prefix = minted.get("rotated_key_prefix")
 
-        if purpose == "bootstrap":
-            active_boot = active_api_keys(cp, tid, created_via="bootstrap", created_by=user_id)
-            if len(active_boot) >= 3:
-                raise HTTPException(status_code=429, detail="Too many active session keys — wait for expiry")
-            expires_at = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
-            created_via = "bootstrap"
-        else:
-            lim = tier_limits(tier)
-            # #750.8: .get() so a pricing.json key drift never 500s the mint.
-            max_keys = lim.get("max_api_keys")
-            # Legacy rows may have created_via NULL — NULL <> 'bootstrap' counts
-            # against the cap, matching the registry predicate.
-            active = [r for r in active_api_keys(cp, tid)
-                      if r.get("created_via") != "bootstrap"]
-            if max_keys is not None and len(active) >= max_keys:
-                # #750.10: never auto-revoke a key the current user created —
-                # recovery must not dead-end by killing the user's own key.
-                # #1859 P3-1 (lane parity): exclude LEGACY keys (created_by
-                # IS NULL) from the others list — the registry predicate is
-                # `created_by <> $uid`, whose Cypher NULL semantics EXCLUDE
-                # unowned rows, so a legacy key must fall to the rotation
-                # branch (rotated=True), not be revoked via the others branch
-                # (rotated=False). Python's `None != user_id` is True, which
-                # inverted the semantics for exactly the orgs where legacy
-                # keys exist (pre-created_by session credentials).
-                others = [r for r in active
-                          if r.get("created_by") is not None
-                          and r.get("created_by") != user_id]
-                others.sort(key=lambda r: r.get("created_at") or "")
-                if others:
-                    revoke_api_key(cp, others[0]["id"], now)
-                else:
-                    # #1828: at max_api_keys with no OTHER key to revoke, the
-                    # recovery fallback dead-locks on the user's OWN persistent
-                    # keys (#750.10 refuses to touch them). Rotate a session
-                    # credential instead, in 3 tiers (each frees a slot or is
-                    # re-checked fail-closed):
-                    #   1. a LEGACY org-scoped unowned key (created_by IS NULL
-                    #      — a pre-created_by session credential by construction;
-                    #      it COUNTS against the cap, so rotating it frees a real
-                    #      slot and is preferred),
-                    #   2. the user's own LEAST-RECENTLY-USED recovery key
-                    #      (#1830 — system-minted fallback credentials, NOT
-                    #      deliberate user-created keys (those are
-                    #      created_via='provisioned' via create_api_key); they
-                    #      count against max_api_keys, so rotating one frees a
-                    #      REAL persistent slot — this is the escape hatch that
-                    #      un-deadlocks an org whose own recovery keys fill the
-                    #      cap; #1854: ordered by last_used_at ASC with never-
-                    #      used (NULL) keys first, so a live persistent
-                    #      credential another agent/device uses is NOT the one
-                    #      rotated), then
-                    #   3. the user's own OLDEST bootstrap key (24h ephemeral,
-                    #      re-minted per login; Review P3: expired own bootstraps
-                    #      are rotatable too (the row scan below drops the expiry
-                    #      filter; #742 auth remains unaffected — expired keys
-                    #      still never authenticate).
-                    # Own PROVISIONED keys (deliberate user-created keys) are
-                    # NEVER rotation candidates (#750.10).
-                    # Review P2-1: RE-CHECK the persistent count after the
-                    # revoke — a rotated modern bootstrap was never in the count,
-                    # so a rotation that doesn't free a slot fails CLOSED (402)
-                    # instead of minting cap+1 persistent keys (unbounded growth
-                    # per login).
-                    cands = cp.query(
-                        "api_keys",
-                        select=["id", "key_prefix", "created_at", "created_by",
-                                "created_via", "last_used_at"],
-                        filters=[("org_id", "eq", tid), ("revoked_at", "is", None)],
-                    )
-                    legacy = [r for r in cands
-                              if r.get("created_by") is None
-                              and r.get("created_via") != "bootstrap"]
-                    own_recovery = [r for r in cands
-                                    if r.get("created_by") == user_id
-                                    and r.get("created_via") == "recovery"]
-                    own_boot = [r for r in cands
-                                if r.get("created_by") == user_id
-                                and r.get("created_via") == "bootstrap"]
-                    legacy.sort(key=lambda r: r.get("created_at") or "")
-                    # #1854: own_recovery is rotated least-recently-used FIRST.
-                    # Sort key: (last_used_at IS NULL, last_used_at, created_at).
-                    # NULL last_used_at = never used = an unused credential —
-                    # the SAFEST rotation target (nothing live depends on it),
-                    # so NULLs sort first; then least-recently-used; created_at
-                    # breaks ties so an all-NULL set keeps the pre-#1854
-                    # oldest-created behavior.
-                    own_recovery.sort(
-                        key=lambda r: (r.get("last_used_at") is not None,
-                                       r.get("last_used_at") or "",
-                                       r.get("created_at") or ""))
-                    own_boot.sort(key=lambda r: r.get("created_at") or "")
-                    rotatable = legacy if legacy else (own_recovery if own_recovery else own_boot)
-                    if rotatable:
-                        revoke_api_key(cp, rotatable[0]["id"], now)
-                        rotated_key_prefix = rotatable[0].get("key_prefix")
-                        # P2-1: only mint when a persistent slot actually opened
-                        # (legacy rotation frees one; a modern bootstrap never
-                        # counted against max_api_keys).
-                        recheck = [r for r in active_api_keys(cp, tid)
-                                   if r.get("created_via") != "bootstrap"]
-                        if max_keys is not None and len(recheck) >= max_keys:
-                            raise HTTPException(status_code=402, detail=_key_limit_refusal())
-                        rotated = True
-                    else:
-                        raise HTTPException(status_code=402, detail=_key_limit_refusal())
-            expires_at = None
-            created_via = "recovery"
-
-        insert_api_key(cp, {
-            "id": kid,
-            "org_id": tid,
-            "lookup_hash": lookup_hash(api_key),
-            "key_prefix": api_key[:10],
-            "created_via": created_via,
-            "created_by": user_id,
-            "created_at": now,
-            "revoked_at": None,
-            "expires_at": expires_at,
-        })
     await _async_audit(request, tid, "api_key_mint", resource_type="api_key", resource_id=kid)
     # #308 (R2): evaluate key-create velocity after a successful mint.
     await _abuse_evaluate_keys(tid)
 
-    return {"key": api_key, "key_prefix": api_key[:10], "expires_at": expires_at,
+    return {"key": api_key, "key_prefix": api_key[:10],
+            "expires_at": expires_at,
             "org_id": tid, "purpose": purpose, "rotated": rotated,
             "rotated_key_prefix": rotated_key_prefix}
 
@@ -23855,15 +23981,32 @@ _ANALYTICS_INCIDENT_KIND = "ANALYTICS_SINK_DEGRADED"
 # per-event call costs an R2 conditional PUT + a GitHub search + Telegram on
 # EVERY event of an outage (seconds each, once per event).
 #
-# #3820 (D5b — the ABSENCE half is DEFERRED, and recorded here rather than
-# dropped): D5b also asks for a sink that silently STOPS emitting to be caught
-# by a last-success timestamp against a wide cadence-derived threshold. That is
-# not implementable at this seam: analytics writes are user-driven with no
-# fixed cadence, so "no writes for N minutes" is indistinguishable from a
-# healthy idle process, and a real absence check needs a heartbeat the sink
-# does not emit — a new signal plus a timer, i.e. a separate change. The
-# transition INTO degradation (the next write) is covered by the streak below.
-# TRACKED: #3944 — the deferral must not evaporate with the #3820 branch.
+# #3820 (D5b — the ABSENCE half, LANDED by #3944): the streak below alerts on
+# a write that DEGRADES. It cannot see a sink that silently STOPS emitting —
+# no write means no outcome, no streak, nothing counted — and analytics writes
+# are user-driven with no fixed cadence, so "no writes for N minutes" is
+# indistinguishable from a healthy idle process. #3944 supplies the missing
+# signal as a dead-man's switch, split by role:
+#
+#   * the PROBE is a fixed-cadence CANARY write through the REAL sink path
+#     (``_analytics_canary_loop``, reserved event ``_ANALYTICS_CANARY_EVENT``
+#     / org ``_ANALYTICS_CANARY_ORG``) — it must use the sink, because only an
+#     end-to-end write proves the write path;
+#   * the HEARTBEAT is ``_ANALYTICS_LAST_DELIVERED_AT``, the last instant a
+#     write was DELIVERED (2xx), published on the internal ``/status``
+#     endpoint — a channel the sink cannot silence, which is the property a
+#     heartbeat must have;
+#   * the ALARM is owned by the EXTERNAL hourly DR driver
+#     (``.github/scripts/registry-cron.sh``), not by an in-process watchdog: a
+#     check that dies with the process it monitors cannot report that
+#     process's death. It files the SAME ``ANALYTICS_SINK_DEGRADED`` kind, so
+#     an absence incident and a degradation incident share one R2 dedup object
+#     (#2844) and cannot double-file.
+#
+# Receiver-liveness residual (a disabled or never-run driver also silences
+# this alarm) is #4573, deliberately NOT closed here: this closes the SINK
+# gap, not the RECEIVER gap. The dead-canary-with-live-traffic residual is
+# documented in docs/ops/registry-backup-dr.md §ANALYTICS_SINK_DEGRADED.
 _ANALYTICS_FALLBACK_ALERT_AFTER = 3
 # The alert-trigger streak — NOT part of the resolve state below: it counts
 # consecutive degraded writes and is reset by a delivered one.
@@ -24097,6 +24240,164 @@ def _analytics_http_client(url: str, key: str):
         _ANALYTICS_HTTP_CACHE["key"] = cache_key
     return client
 
+# ── #3944: the heartbeat (the D5b absence half) ─────────────────────────────
+# Reserved synthetic identity. The leading underscore is the marker: no real
+# tenant id starts with one, so a canary row can never be mistaken for one, and
+# every PER-ORG analytics read (the activation scorecard, capture-cost,
+# e2e_live_reconcile) excludes it without a filter change.
+_ANALYTICS_CANARY_EVENT = "_sink_canary"
+_ANALYTICS_CANARY_ORG = "__sink_canary__"
+# The probe period. Five minutes sits far below the external driver's hourly
+# cadence, so a healthy deployment reads FRESH at every driver run with ample
+# margin. Overridden in tests by patching this global (it is read per tick).
+_ANALYTICS_CANARY_PERIOD_S = 300
+# ``silent_threshold_s = 3 * period`` is Period + Grace: the alarm fires only
+# after THREE consecutive missed periods, so a slow tick, a GC pause or the
+# first period after a deploy cannot page. It is DERIVED from the period where
+# the period lives (``_analytics_heartbeat_block``) and PUBLISHED in the status
+# block, so the bash driver never re-types it and the two cannot drift.
+#
+# The boot reference for the cold-start guard: with no delivered write YET,
+# "unknown" is not "stale" — the alarm only fires once the process is older
+# than the threshold, so a just-started (or rolling-deployed) app is silent.
+_ANALYTICS_BOOT_AT = datetime.now(UTC)
+# The HEARTBEAT — wall-clock instant of the last DELIVERED (2xx) write. Written
+# ONLY on delivery (``_analytics_note_success``), never on an attempt: a
+# last-ATTEMPT stamp is fail-open, staying fresh while every write fails, which
+# is exactly the failure this exists to catch. Any delivered write refreshes it
+# (a real funnel event proves the sink as well as a canary does) — the canary
+# supplies the CADENCE, not the only evidence.
+_ANALYTICS_LAST_DELIVERED_AT: datetime | None = None
+# Counted separately from real emissions so the status block distinguishes
+# "the canary never ran" (a dead instrument) from "it ran and nothing landed"
+# (a dead sink). REPORTED, never alerted on: with live traffic the app's next
+# delivered write would resolve a canary-absence incident and the driver would
+# re-file on the next run — a file/close flap. See the runbook residual.
+_ANALYTICS_CANARY_ATTEMPTS = 0
+
+
+def _analytics_sink_probe():
+    """The ONE sink-configuration seam (#3944).
+
+    Returns ``(url, key, configured, intended)``. Every site that asks whether
+    a sink exists reads THIS, so ``configured`` cannot mean one thing in
+    ``_track_analytics_event`` and another in the canary's emit gate or the
+    status block: #3677's shape (``SUPABASE_URL`` set, key resolving to ``""``)
+    is ``intended`` but not ``configured``, and a site that gated on
+    ``configured`` alone was blind to it.
+
+    * ``configured`` — both present: a write can succeed.
+    * ``intended``   — at least one present: a sink was INTENDED, so a
+      half-configured write is a degradation (the #3820 P1-2 arm), and the
+      canary must still attempt it so the absence half can see it.
+    """
+    url = os.environ.get("SUPABASE_URL")
+    # The service-key names and their precedence come from one seam
+    # (`supabase_control._service_key()`): #3677 was exactly this site reading a
+    # name the hosted deployment never sets. Older sibling sites still
+    # hand-roll the same pair — see #3677's sibling audit.
+    key = _service_key()
+    return (url, key, bool(url and key), bool(url or key))
+
+
+def _analytics_heartbeat_block() -> dict:
+    """The #3944 heartbeat surface for the external DR driver.
+
+    Published on the INTERNAL ``/status`` endpoint — served by the app whatever
+    the sink's health — and never through the sink itself: the dead-man's-switch
+    rule is that the heartbeat must not travel the channel it verifies.
+
+    ``age_s`` is ``None`` until a write is DELIVERED (there is no fabricated
+    boot seed); ``uptime_s`` is what lets the driver tell "no delivery YET"
+    (cold start — stay silent) from "no delivery for longer than the threshold"
+    (an incident). Both booleans are reported so a half-configured deployment
+    is diagnosable, and the canary counters make a dead instrument visible. All
+    values are non-secret.
+    """
+    now = datetime.now(UTC)
+    with _ANALYTICS_ALERT_LOCK:
+        last = _ANALYTICS_LAST_DELIVERED_AT
+        attempts = _ANALYTICS_CANARY_ATTEMPTS
+        counts = dict(_ANALYTICS_COUNTS)
+        # Stamp `now` INSIDE the lock: a delivery landing between the read of
+        # `now` and the read of `last` would produce a negative age, which the
+        # driver reads as "not yet established" and therefore never resolves a
+        # resolved incident for one cadence. Clamping keeps the published age
+        # non-negative whatever the interleaving.
+        age_s = max(0.0, (datetime.now(UTC) - last).total_seconds()) if last is not None else None
+    period = _ANALYTICS_CANARY_PERIOD_S
+    # The sink probe reads the LIVE env. A read that raises must not 500 a
+    # liveness endpoint, so the exception is contained and the block reports
+    # the conservative pair (the driver then leaves the incident unchanged).
+    try:
+        _url, _key, configured, intended = _analytics_sink_probe()
+    except Exception:  # pragma: no cover — env reads do not raise in practice
+        configured = intended = False
+    return {
+        "configured": configured,
+        "intended": intended,
+        "canary_period_s": period,
+        # Period + Grace, derived at the ONE place the period lives.
+        "silent_threshold_s": 3 * period,
+        "uptime_s": (now - _ANALYTICS_BOOT_AT).total_seconds(),
+        "canary_attempts": attempts,
+        "last_delivered_at": last.isoformat() if last is not None else None,
+        "age_s": age_s,
+        "outcomes": counts,
+    }
+
+
+async def _analytics_canary_tick() -> bool:
+    """Emit ONE canary write through the REAL sink path (#3944).
+
+    Returns ``True`` when a write was attempted, ``False`` when no sink was
+    INTENDED (selfhost/dev: the local JSONL IS the intended sink, so there is
+    nothing to prove and a synthetic line would only pollute a real fallback
+    file). Split out of the loop so the emit decision is testable without a
+    clock.
+
+    The counter is incremented BEFORE the emit, so "attempted but never
+    delivered" is distinguishable from "never attempted" — the only signal
+    that separates a dead instrument from a dead sink.
+    """
+    global _ANALYTICS_CANARY_ATTEMPTS
+    _url, _key, _configured, intended = _analytics_sink_probe()
+    if not intended:
+        return False
+    with _ANALYTICS_ALERT_LOCK:
+        _ANALYTICS_CANARY_ATTEMPTS += 1
+    await _emit_analytics_off_loop(_ANALYTICS_CANARY_ORG,
+                                   _ANALYTICS_CANARY_EVENT)
+    return True
+
+
+async def _analytics_canary_loop() -> None:
+    """#3944: the fixed-cadence canary that makes absence observable.
+
+    SLEEPS FIRST, deliberately. Two invariants depend on it: a test that enters
+    a short-lived ``TestClient`` lifespan never emits a canary (the exact-count
+    assertions on the fallback JSONL in tests/test_onboarding_analytics_patch.py
+    assume no extra line), and a freshly-booted process does not emit before its
+    configuration is even readable.
+
+    Emits through the SAME off-loop entry point the production funnel uses, so
+    the canary exercises the real write path (and reuses the telemetry pool: no
+    new offload op, no new entry in the offload inventory).
+
+    It never files an incident itself. The absence ALARM is external — see the
+    D5b block above `_ANALYTICS_FALLBACK_ALERT_AFTER`.
+    """
+    while True:
+        await asyncio.sleep(_ANALYTICS_CANARY_PERIOD_S)
+        # A raise must not kill the heartbeat: a dead canary task is precisely
+        # the failure the external alarm exists to catch, and it must surface
+        # as staleness, never as a crashed task that nobody notices.
+        try:
+            await _analytics_canary_tick()
+        except Exception as e:  # pragma: no cover — defensive
+            _logger.warning("analytics canary tick failed: %s", e)
+
+
 
 def _track_analytics_event(org_id: str, event_name: str,
                            properties: dict | None = None) -> str:
@@ -24178,16 +24479,10 @@ def _track_analytics_event(org_id: str, event_name: str,
         "properties": props,
         "created_at": datetime.now(UTC).isoformat(),
     }
-    url = os.environ.get("SUPABASE_URL")
-    # The service-key names and their precedence come from one seam
-    # (`supabase_control._service_key()`): #3677 was exactly this site reading a
-    # name the hosted deployment never sets. Older sibling sites still
-    # hand-roll the same pair — see #3677's sibling audit.
-    key = _service_key()
-    # #3820 (D1): remember whether a sink was ATTEMPTED at all. This one
-    # boolean is what separates `fallback` (configured, but degraded — alert)
-    # from `unconfigured` (no sink by design — never alert).
-    configured = bool(url and key)
+    # #3944: url / key / configured / misconfigured all come from ONE probe,
+    # shared with the canary's emit gate and the /status heartbeat block, so
+    # "configured" cannot mean different things at the three sites.
+    url, key, configured, intended = _analytics_sink_probe()
     # #3820 (P1-2): a HALF-configured env is the FIFTH silent path. The
     # docstring of `unconfigured` is "no URL/key AT ALL", but `configured`
     # implements "both present" — so `SUPABASE_URL` set with the key missing
@@ -24196,7 +24491,7 @@ def _track_analytics_event(org_id: str, event_name: str,
     # incident. That is #3677 itself, and it made this signal blind to the very
     # failure that created the issue: with exactly one of the pair set, a sink
     # was clearly INTENDED, so the write is a degradation.
-    misconfigured = bool(url) != bool(key)
+    misconfigured = intended and not configured
     if configured:
         # #3820 (cycle-4 P2-1): the guard covers the NETWORK CALL only. The
         # delivered branch used to sit inside it, so a raise in the success leg
@@ -24339,9 +24634,16 @@ def _analytics_note_success() -> str:
     """
     global _ANALYTICS_DEGRADED_STREAK, _ANALYTICS_RESOLVE_PENDING
     global _ANALYTICS_RESOLVE_NOT_BEFORE, _ANALYTICS_RESOLVE_INFLIGHT
+    global _ANALYTICS_LAST_DELIVERED_AT
     with _ANALYTICS_ALERT_LOCK:
         _ANALYTICS_COUNTS["supabase"] += 1
         _ANALYTICS_DEGRADED_STREAK = 0
+        # #3944: the heartbeat is the LAST DELIVERED write — set here and
+        # nowhere else. This is the single write point for every delivery
+        # (canary or real funnel event), and it sits before the early
+        # not-claimed return below so a concurrent delivered write still
+        # refreshes it.
+        _ANALYTICS_LAST_DELIVERED_AT = datetime.now(UTC)
     _analytics_count_outcome("supabase")
     # #3820 (cycle-8 P1 / cycle-9 P2-2): the resolve is SERIALIZED by an
     # IN-FLIGHT claim taken under `_ANALYTICS_RESOLVE_LOCK` — never by holding
@@ -25883,13 +26185,20 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
     try:
         org_sdk = _make_sdk(namespace=org_id)
 
-        # #1844: the index job is OBJECT-ONLY — it writes zero non-episodic
-        # :Point nodes (the "points" quota resource counts ONLY
-        # `MATCH (n:Point) WHERE n.is_episodic IS NULL OR false`), so no
-        # points-quota preflight or per-batch re-check is needed. A org at
-        # its points cap must still be able to index issues. The #1843
-        # statement-write resurrection (point/statement mints) would re-add
-        # the points gate.
+        # #1844: the index job writes zero non-episodic :Point nodes, so it never
+        # trips the POINT arm of the "points" resource.
+        #
+        # #1975: that is no longer the whole count. Since #1911 the points resource
+        # ALSO counts Object/Subject nodes unconditionally (quota.py), and this job
+        # MINTS objects. So the gate decision below is unchanged but its reason is
+        # NOT "this job mints nothing countable". The job is deliberately left
+        # UNGATED, and the accepted consequence is that an indexing-heavy org CAN be
+        # pushed past max_points by the objects it mints, after which its
+        # points-gated writes 402 until an upgrade. That is a recorded DECISION, not
+        # an oversight: an org at its points cap must still be able to index issues.
+        # Adding a preflight here would gate the index job itself; the #1843
+        # statement-write resurrection (point/statement mints) would re-add the
+        # points gate.
         indexer = GitHubIndexer(token)
 
         # ── One-time legacy `-closed` backfill (T1-P1 + T2-P3). Gated on the
@@ -27610,7 +27919,13 @@ async def backups_status(request: Request):
         storage = _backup_storage()
     except RuntimeError as e:
         return {"enabled": False, "app_time": datetime.now(UTC).isoformat(),
-                "storage_error": str(e), "per_team": {}, "no_teams": False}
+                "storage_error": str(e), "per_team": {}, "no_teams": False,
+                # #3944: the analytics heartbeat is in-process state and needs
+                # no storage, so it is reported on the DEGRADED path too. An
+                # R2 misconfig must not blind the sink-absence check (the
+                # driver would read an absent block as "unknown" and stay
+                # silent).
+                "analytics": _analytics_heartbeat_block()}
     lock_block = _lock_status_block(cfg)
     watcher = _WATCHER
     now = datetime.now(UTC)
@@ -27714,6 +28029,10 @@ async def backups_status(request: Request):
             "r2_ok": hb.get("r2_ok"),
         },
         "driver": {"last_heartbeat_at": driver_hb.get("ran_at"), "age_minutes": driver_age_min},
+        # #3944: the analytics heartbeat the external DR driver reads to detect
+        # a sink that silently STOPPED emitting. Published here, never through
+        # the sink, so the sink cannot silence its own alarm.
+        "analytics": _analytics_heartbeat_block(),
     }
 
 @app.post("/v1/internal/driver/heartbeat")
