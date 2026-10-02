@@ -996,16 +996,19 @@ def test_the_usage_markers_are_not_inverted_and_every_row_is_well_formed_markdow
     doc = _manifest()
     tools = [r for r in doc["rows"] if not str(r["name"]).startswith("sdk:")]
     text = RENDERED.read_text(encoding="utf-8")
+    # Scope the row scan to the MCP tools section. The `response_fields` table
+    # (the #3863 carve-out record) also renders rows whose first cell is a
+    # backticked tool name, so scanning the whole document counted a recorded
+    # FIELD as a tool and made this check lie about the surface size (B6 #3892).
+    # The RETIRED names render in their own 4-column table below (#3883); it is
+    # not a tool row and must not be counted or checked as one here.
+    region = text.split("## The MCP tools", 1)[-1]
+    region = region.split("## Retired names", 1)[0].split("## The SDK methods", 1)[0]
 
     true_never = {r["name"] for r in tools if "never called" in (r.get("used_by") or "")}
     true_in_use = {r["name"] for r in tools} - true_never
     assert true_never and true_in_use, "the fixture is degenerate — no usage signal at all"
 
-    # Scope to the MCP-tool tables. The RETIRED names render in their own 4-column
-    # table below (#3883); it is not a tool row and must not be counted or checked
-    # as one here.
-    region = text.split("## The MCP tools", 1)[-1]
-    region = region.split("## Retired names", 1)[0].split("## The SDK methods", 1)[0]
     rows = [ln for ln in region.split("\n") if ln.startswith("| `tortoise_")]
     assert len(rows) == len(tools), f"rendered {len(rows)} tool rows for {len(tools)} tools"
 
@@ -1026,6 +1029,43 @@ def test_the_usage_markers_are_not_inverted_and_every_row_is_well_formed_markdow
         "the 'in use' marker does not match the manifest's usage evidence "
         f"(rendered-only={sorted(marked_in_use - true_in_use)[:5]})"
     )
+
+
+# ── the `response_fields` record (the #3863 carve-out; B6 #3892) ──────────────
+# An off-by-default field on an existing response is not a new tool or endpoint,
+# so it does not gate as an addition — but it must still be RECORDED. These pin
+# the record's existence, its anchoring, and its survival across a re-cut.
+
+def test_response_fields_block_is_present_and_anchored():
+    doc = _manifest()
+    block = doc.get("response_fields")
+    assert isinstance(block, list) and block, (
+        "the response_fields block is the single source of truth for "
+        "off-by-default response additions and must not be empty or missing"
+    )
+    row_names = {str(r["name"]) for r in doc["rows"] if isinstance(r, dict) and "name" in r}
+    for rf in block:
+        assert rf.get("response") and rf.get("field"), f"malformed entry: {rf!r}"
+        assert rf["response"] in row_names or f"sdk:{rf['response']}" in row_names, (
+            f"response_fields entry {rf!r} is not anchored to a tool/endpoint in the manifest"
+        )
+
+
+def test_response_fields_block_is_carried_across_a_re_cut():
+    """`cut` must carry the hand-authored record forward, not drop it."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    import surface_manifest
+
+    assert surface_manifest._carried_response_fields() == _manifest()["response_fields"]
+
+
+def test_recorded_response_field_is_rendered_in_the_list():
+    text = RENDERED.read_text(encoding="utf-8")
+    assert "### Recorded response fields" in text, (
+        "the record is not rendered into the list the owner reviews"
+    )
+    for rf in _manifest()["response_fields"]:
+        assert f"`{rf['field']}`" in text
 
 
 # --- ROUND-2 REVIEW FINDINGS: fail-open content paths, closed with mutations ---------
