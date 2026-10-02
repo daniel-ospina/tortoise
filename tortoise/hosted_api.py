@@ -15,6 +15,7 @@ extractor/indexer, update the catalog reference.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import contextlib
 import contextvars
 import functools
@@ -212,6 +213,42 @@ _CAPTURE_EXECUTOR = ThreadPoolExecutor(
     # deploy gate can fix).
     max_workers=max(1, min(_int_env("TORTOISE_CAPTURE_WORKERS", 4), 8)),
     thread_name_prefix="capture-extract")
+
+
+# ── #3087 item 1: dispose the capture pool during THREADING SHUTDOWN, before
+# the executor's own teardown hook joins every worker.
+#
+# `concurrent.futures.thread` registers `_python_exit` — which puts a sentinel
+# on the queue and JOINS every worker — via `threading._register_atexit`, NOT
+# `atexit.register` (CPython 3.9+, bpo-39812). CPython finalizes in two phases:
+# `wait_for_thread_shutdown()` -> `threading._shutdown()` runs the
+# `_threading_atexits` list (the join happens HERE), and only afterwards
+# `call_py_exitfuncs()` runs regular `atexit` handlers. So a plain-`atexit`
+# handler is STRUCTURALLY ALWAYS TOO LATE: it runs after the workers were
+# already joined, cancelling nothing. This must be `_register_atexit` too, and
+# registered AFTER the library's so the reversed order puts ours first.
+# (Verified: with a plain `atexit` handler the queued future still RAN; with
+# `_register_atexit` it is CANCELLED.)
+#
+# LIMITATION, stated because the fix is otherwise read as complete: `shutdown`
+# cancels QUEUED futures only. A worker already inside an extraction is NOT
+# interruptible, and the `threading._shutdown` join still waits for it. So the
+# bound that actually protects the graph write is the worker's OWN deadline
+# being below fly.toml's `kill_timeout` — this handler removes the queued-work
+# term, not the running-worker term.
+def _dispose_capture_executor() -> None:
+    """Cancel queued captures and release the pool during thread shutdown."""
+    with contextlib.suppress(Exception):
+        _CAPTURE_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+
+
+# `threading._register_atexit` orders against the executor's own hook (the whole
+# point); fall back to `atexit` where it is unavailable, which is strictly worse
+# (too late to cancel anything) but never crashes on import.
+if hasattr(threading, "_register_atexit"):
+    threading._register_atexit(_dispose_capture_executor)  # the hook the stdlib itself uses
+else:  # pragma: no cover — Python < 3.9
+    atexit.register(_dispose_capture_executor)
 
 # #3060 review: a bounded pool with an UNBOUNDED queue is a new failure mode —
 # four stalled extractions park every worker (each up to the token-scaled
@@ -1143,6 +1180,11 @@ _LIVENESS_TASK_ATTRS = (
     "_boot_sweep_task",
     "_event_retention_task",
     "_first_contact_task",
+    # #3944: the analytics canary heartbeat. It belongs here because it is a
+    # process-lifetime periodic task whose LOSS is the failure it exists to
+    # detect — a re-entry or shutdown that left it orphaned (or a second copy
+    # alive) would corrupt the very signal the external alarm reads.
+    "_analytics_canary_task",
 )
 
 
@@ -1176,6 +1218,9 @@ def _start_liveness(app) -> None:
             prev.cancel()
     heartbeat_record()
     app.state._loop_heartbeat_task = loop.create_task(loop_heartbeat_task())
+    # #3944: the analytics canary heartbeat. Armed with the liveness block
+    # (cheap, synchronous, no I/O at arm time — the coroutine sleeps first).
+    app.state._analytics_canary_task = loop.create_task(_analytics_canary_loop())
     app.state._healthz_server = start_health_listener()
     app.state._loop_watchdog_stop = threading.Event()
     # DISABLED BY DEFAULT (#2850 review P0): with TORTOISE_LOOP_STALL_EXIT_S
@@ -1597,6 +1642,12 @@ async def _lifespan(app):
 
         # ── shutdown: disarm the watchdog before the heartbeat task is
         # cancelled (see _stop_liveness), then cancel the loop tasks.
+        # NOTE: the capture pool is deliberately NOT shut down here. See
+        # `_dispose_capture_executor` (module level, defined with the pool
+        # above) — a lifespan may legally run more
+        # than once in a process (this repo's own suite does), and shutting a
+        # process-global singleton down from a lifespan poisons every later
+        # `submit()` with "cannot schedule new futures after shutdown".
         with suppress(Exception):
             await _stop_liveness(app)
 
@@ -5943,8 +5994,10 @@ async def _check_ip_bucket_rate_limit(
 
     #1719 (Task 5): ``defer_charge=True`` prunes + 429-checks but does NOT
     append — the caller charges via _charge_ip_bucket at the TERMINAL
-    outcome (success/401/403), so a server fault (5xx) never consumes the
-    user's budget and cannot mask an incident with an hour-long 429.
+    outcome, so a server fault (5xx) never consumes the user's budget and
+    cannot mask an incident with an hour-long 429. (session_login charges
+    on success/401/403; the sensitive-op family #2051 charges on any
+    non-5xx terminal — success or a 4xx client error.)
     """
     if os.environ.get("RATE_LIMIT_DISABLED") == "1":
         return
@@ -6419,9 +6472,22 @@ def _sensitive_op_budget(op: str, bucket_key: Hashable) -> dict | None:
     }
 
 
-async def _check_sensitive_op_rate_limit(request: Request, op: str) -> None:
-    """Per-IP hourly budget for sensitive org ops (export / org_delete /
-    import / pack_manifest)."""
+async def _check_sensitive_op_rate_limit(
+    request: Request, op: str, *, defer_charge: bool = False,
+) -> tuple | None:
+    """Per-IP hourly budget for the sensitive org ops (export /
+    team_delete / import / pack_manifest).
+
+    #2051: the family is on the #1719 deferred-terminal doctrine. With
+    ``defer_charge=True`` this only prunes + 429-checks (no append) and
+    returns the ``(ip, op)`` charge key for
+    ``_charge_sensitive_op_rate_limit`` at the TERMINAL outcome; the default
+    ``False`` keeps the check-time append for any non-migrated caller.
+
+    The limit / window / refusal copy come from ``_sensitive_op_budget``
+    (main's #2050 seam, shared with the MCP per-team arm) so the two arms
+    cannot drift; ``defer_charge`` is the #2051 axis layered on top of it.
+    """
     # P1-FIX-1: composite (ip, op) key — export and delete keep independent
     # budgets (locked by test_export_rate_limited_independently).
     # P3-3 (phase-7): normalize IPv4-mapped IPv6 HERE (tuple bypasses the
@@ -6436,11 +6502,110 @@ async def _check_sensitive_op_rate_limit(request: Request, op: str) -> None:
     # review restored it); stated here as well so the invariant is explicit
     # at the one place this key is formed.
     if _ip is None:
-        return
+        return None
     kwargs = _sensitive_op_budget(op, (_ip, op))
     if kwargs is None:
+        return None
+    await _check_ip_bucket_rate_limit(
+        request, defer_charge=defer_charge, **kwargs)
+    if not defer_charge:
+        return None
+    return (_ip, op)
+
+
+async def _charge_sensitive_op_rate_limit(
+    key: tuple | None, op: str,
+) -> None:
+    """#2051: append ONE terminal charge to the sensitive-op bucket store.
+
+    The deferred counterpart of the #1719 session_login shape — called once
+    when the terminal outcome is non-5xx (success or a 4xx client error); a
+    5xx passes through uncharged. ``_charge_ip_bucket`` carries the #1738
+    burst bound, so the 429 boundary stays at the limiter's limit.
+    """
+    limit = _SENSITIVE_OP_LIMITS.get(op)
+    if key is None or limit is None or key[0] is None:
         return
-    await _check_ip_bucket_rate_limit(request, **kwargs)
+    await _charge_ip_bucket(
+        _SENSITIVE_BUCKETS, _SENSITIVE_LOCK, key,
+        limit=limit, window_s=3600)
+
+
+async def _terminal_charge(key: tuple | None, op: str) -> None:
+    """#2051: the ONE shielded terminal charge for the sensitive-op family.
+
+    #2051 (review P2): the charge runs under ``asyncio.shield`` so a
+    cancellation delivered while it waits on the contended
+    ``_SENSITIVE_LOCK`` — ONE global lock shared by all four ops and all
+    IPs, so an attacker can manufacture the contention — cannot DROP a
+    charge for an operation that ALREADY EXECUTED. Un-shielded, the
+    cancellation propagated out of the wrapper and the append never
+    happened: the same evasion class the ``CancelledError`` branch closes,
+    left open on the success and 4xx paths. ``shield`` keeps the charge in
+    its own task, so a second cancellation cannot drop it either. The
+    best-effort guard keeps a charge-side fault from masking the underlying
+    outcome (a charge is telemetry, never a failure path), and it does NOT
+    swallow ``CancelledError`` (a ``BaseException``), so the cancellation
+    still propagates after the charge is committed.
+
+    All three terminal branches — success, non-5xx ``HTTPException`` and
+    cancellation — charge through this helper so they cannot diverge again.
+    """
+    with contextlib.suppress(Exception):
+        await asyncio.shield(_charge_sensitive_op_rate_limit(key, op))
+
+
+def _deferred_sensitive_op(op: str):
+    """#2051: deferred-terminal charging for a sensitive-op endpoint.
+
+    Factors the exact #1719 (Task 5) sequence session_login established —
+    prune + 429-check on admission (``defer_charge=True``), then charge ONCE
+    at the TERMINAL outcome — over the whole sensitive-op family. Charge iff
+    the endpoint returned normally, raised a non-5xx ``HTTPException`` (a
+    client error is terminal), or was CANCELLED mid-flight (a disconnect /
+    shutdown is a terminal non-5xx outcome, and an uncharged one is an
+    evasion path — see the ``CancelledError`` branch); a 5xx — including an
+    unhandled exception the global handler renders as one — passes through
+    UNCHARGED, so a control-plane/graph fault cannot burn the caller's
+    hourly budget and mask the underlying 5xx with a stale 429 (#1719
+    Task 5). The admission check still runs BEFORE the body (cheapest
+    rejection), and a 429 raised by it is a refusal and charges nothing.
+    """
+    def decorator(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            request = kwargs.get("request")
+            if request is None:
+                request = next(
+                    (a for a in args if isinstance(a, Request)), None)
+            key = None
+            if request is not None:
+                key = await _check_sensitive_op_rate_limit(
+                    request, op, defer_charge=True)
+            try:
+                result = await fn(*args, **kwargs)
+            except HTTPException as exc:
+                if exc.status_code < 500:
+                    await _terminal_charge(key, op)
+                raise
+            except asyncio.CancelledError:
+                # #2051 (review P2): a request cancelled mid-flight (client
+                # disconnect, server shutdown) is a terminal NON-5xx
+                # outcome and MUST charge. Left uncharged, a client could
+                # disconnect before every response and obtain unlimited
+                # uncharged executions of the heavy ``import``/``export``
+                # ops; the pre-migration check-time behaviour charged this
+                # class, so charging here restores parity (it REMOVES a
+                # limits change, it is not one). ``_terminal_charge`` is
+                # shielded, so a SECOND cancellation cannot drop it while it
+                # waits on the bucket lock. The cancellation is re-raised
+                # below, so it still reaches the caller.
+                await _terminal_charge(key, op)
+                raise
+            await _terminal_charge(key, op)
+            return result
+        return wrapper
+    return decorator
 
 
 async def _check_sensitive_op_budget(op: str, scope_key: Hashable) -> None:
@@ -7781,6 +7946,7 @@ async def list_packs(org: dict = Depends(get_current_org_gated)):  # noqa: B008
 
 
 @app.post("/v1/packs/manifests", status_code=201)
+@_deferred_sensitive_op("pack_manifest")
 async def upload_pack_manifest(
     request: Request,
     org: dict = Depends(get_current_org_gated),  # noqa: B008
@@ -7796,10 +7962,11 @@ async def upload_pack_manifest(
     (``:PackManifest``) and activates it (``PackInstall`` source='custom',
     idempotent MERGE + per-(graph, namespace) lock #1307). Per-IP rate
     budget (429) — checked BEFORE the body is read (cheapest rejection,
-    mirrors import #1389/#1230). Check-time charging (the sensitive-op
-    family doctrine; #1719's deferred terminal charge is session-login
-    only) — a server fault (503) consumes budget; a family-wide
-    defer_charge migration is tracked separately. The MCP install tool
+    mirrors import #1389/#1230). #2051: the family is now on the #1719
+    deferred-terminal doctrine — the budget is charged once at the terminal
+    outcome (success / 4xx), and a server fault (5xx/503) passes through
+    uncharged, so an outage cannot mask itself with a stale 429. The MCP
+    install tool
     (tortoise_pack_install) calls upsert_tenant_manifest in-process and
     is NOT covered by this REST budget (tracked separately).
 
@@ -7814,7 +7981,6 @@ async def upload_pack_manifest(
     Cross-tenant isolation is structural (tenant graph namespace — no
     tenant selector exists on any surface).
     """
-    await _check_sensitive_op_rate_limit(request, "pack_manifest")
     _reject_graph_bound_org_surface(org, "pack catalog upload")
     # C5 #2114 (re-review P1): the upload MERGEs :PackManifest/:PackInstall
     # into the DEFAULT graph — REST twin of tortoise_pack_install (write).
@@ -17819,6 +17985,7 @@ def _export_graph_snapshot(graph_name: str):
 
 
 @app.get("/v1/organizations/{org_id}/export")
+@_deferred_sensitive_op("export")
 async def export_org(org_id: str, request: Request,
                       user: dict = Depends(get_current_user)):  # noqa: B008
     """E2E-6-D — owner-only JSON export of the org graph + control plane.
@@ -17835,7 +18002,6 @@ async def export_org(org_id: str, request: Request,
     actor_user_id); idempotent by nature (GET). The graph read runs on a
     worker thread (never blocks the event loop).
     """
-    await _check_sensitive_op_rate_limit(request, "export")
     org_node = await _org_node(org_id)
     deleted_at = org_node.get("deleted_at") if org_node else None
     await _require_owner(user["user_id"], org_id, allow_removed=deleted_at)
@@ -18606,6 +18772,7 @@ def _rebuild_import_indexes(sdk, graph_name: str) -> None:
 
 
 @app.post("/v1/organizations/{org_id}/import")
+@_deferred_sensitive_op("import")
 async def import_org(org_id: str, request: Request,
                       user: dict = Depends(get_current_user)):  # noqa: B008
     """Ingest a ``tortoise-export-v1`` artifact into the org graph (#1230).
@@ -18627,7 +18794,6 @@ async def import_org(org_id: str, request: Request,
     retryable/rollback-able; a pack-application failure 422s AFTER the swap
     (the graph holds the restored dump, the vocabulary is not live).
     """
-    await _check_sensitive_op_rate_limit(request, "import")
     org_node = await _org_node(org_id)
     deleted_at = org_node.get("deleted_at") if org_node else None
     await _require_owner(user["user_id"], org_id, allow_removed=deleted_at)
@@ -18950,6 +19116,7 @@ def _soft_delete_registry_org(org_id: str, now: str, grace_hours: float) -> None
 
 
 @app.delete("/v1/organizations/{org_id}", status_code=202)
+@_deferred_sensitive_op("team_delete")
 async def delete_org(org_id: str, request: Request,
                       user: dict = Depends(get_current_user)):  # noqa: B008
     """E2E-6-D — owner-only org deletion (soft delete → TEAM_DELETE_GRACE_HOURS grace → hard delete).
@@ -18975,7 +19142,6 @@ async def delete_org(org_id: str, request: Request,
     a user can own multiple orgs (per-org deletion must not cascade to
     the account).
     """
-    await _check_sensitive_op_rate_limit(request, "team_delete")
     org_node = await _org_node(org_id)
     deleted_at = org_node.get("deleted_at") if org_node else None
     await _require_owner(user["user_id"], org_id, allow_removed=deleted_at)
@@ -23812,15 +23978,32 @@ _ANALYTICS_INCIDENT_KIND = "ANALYTICS_SINK_DEGRADED"
 # per-event call costs an R2 conditional PUT + a GitHub search + Telegram on
 # EVERY event of an outage (seconds each, once per event).
 #
-# #3820 (D5b — the ABSENCE half is DEFERRED, and recorded here rather than
-# dropped): D5b also asks for a sink that silently STOPS emitting to be caught
-# by a last-success timestamp against a wide cadence-derived threshold. That is
-# not implementable at this seam: analytics writes are user-driven with no
-# fixed cadence, so "no writes for N minutes" is indistinguishable from a
-# healthy idle process, and a real absence check needs a heartbeat the sink
-# does not emit — a new signal plus a timer, i.e. a separate change. The
-# transition INTO degradation (the next write) is covered by the streak below.
-# TRACKED: #3944 — the deferral must not evaporate with the #3820 branch.
+# #3820 (D5b — the ABSENCE half, LANDED by #3944): the streak below alerts on
+# a write that DEGRADES. It cannot see a sink that silently STOPS emitting —
+# no write means no outcome, no streak, nothing counted — and analytics writes
+# are user-driven with no fixed cadence, so "no writes for N minutes" is
+# indistinguishable from a healthy idle process. #3944 supplies the missing
+# signal as a dead-man's switch, split by role:
+#
+#   * the PROBE is a fixed-cadence CANARY write through the REAL sink path
+#     (``_analytics_canary_loop``, reserved event ``_ANALYTICS_CANARY_EVENT``
+#     / org ``_ANALYTICS_CANARY_ORG``) — it must use the sink, because only an
+#     end-to-end write proves the write path;
+#   * the HEARTBEAT is ``_ANALYTICS_LAST_DELIVERED_AT``, the last instant a
+#     write was DELIVERED (2xx), published on the internal ``/status``
+#     endpoint — a channel the sink cannot silence, which is the property a
+#     heartbeat must have;
+#   * the ALARM is owned by the EXTERNAL hourly DR driver
+#     (``.github/scripts/registry-cron.sh``), not by an in-process watchdog: a
+#     check that dies with the process it monitors cannot report that
+#     process's death. It files the SAME ``ANALYTICS_SINK_DEGRADED`` kind, so
+#     an absence incident and a degradation incident share one R2 dedup object
+#     (#2844) and cannot double-file.
+#
+# Receiver-liveness residual (a disabled or never-run driver also silences
+# this alarm) is #4573, deliberately NOT closed here: this closes the SINK
+# gap, not the RECEIVER gap. The dead-canary-with-live-traffic residual is
+# documented in docs/ops/registry-backup-dr.md §ANALYTICS_SINK_DEGRADED.
 _ANALYTICS_FALLBACK_ALERT_AFTER = 3
 # The alert-trigger streak — NOT part of the resolve state below: it counts
 # consecutive degraded writes and is reset by a delivered one.
@@ -24054,6 +24237,164 @@ def _analytics_http_client(url: str, key: str):
         _ANALYTICS_HTTP_CACHE["key"] = cache_key
     return client
 
+# ── #3944: the heartbeat (the D5b absence half) ─────────────────────────────
+# Reserved synthetic identity. The leading underscore is the marker: no real
+# tenant id starts with one, so a canary row can never be mistaken for one, and
+# every PER-ORG analytics read (the activation scorecard, capture-cost,
+# e2e_live_reconcile) excludes it without a filter change.
+_ANALYTICS_CANARY_EVENT = "_sink_canary"
+_ANALYTICS_CANARY_ORG = "__sink_canary__"
+# The probe period. Five minutes sits far below the external driver's hourly
+# cadence, so a healthy deployment reads FRESH at every driver run with ample
+# margin. Overridden in tests by patching this global (it is read per tick).
+_ANALYTICS_CANARY_PERIOD_S = 300
+# ``silent_threshold_s = 3 * period`` is Period + Grace: the alarm fires only
+# after THREE consecutive missed periods, so a slow tick, a GC pause or the
+# first period after a deploy cannot page. It is DERIVED from the period where
+# the period lives (``_analytics_heartbeat_block``) and PUBLISHED in the status
+# block, so the bash driver never re-types it and the two cannot drift.
+#
+# The boot reference for the cold-start guard: with no delivered write YET,
+# "unknown" is not "stale" — the alarm only fires once the process is older
+# than the threshold, so a just-started (or rolling-deployed) app is silent.
+_ANALYTICS_BOOT_AT = datetime.now(UTC)
+# The HEARTBEAT — wall-clock instant of the last DELIVERED (2xx) write. Written
+# ONLY on delivery (``_analytics_note_success``), never on an attempt: a
+# last-ATTEMPT stamp is fail-open, staying fresh while every write fails, which
+# is exactly the failure this exists to catch. Any delivered write refreshes it
+# (a real funnel event proves the sink as well as a canary does) — the canary
+# supplies the CADENCE, not the only evidence.
+_ANALYTICS_LAST_DELIVERED_AT: datetime | None = None
+# Counted separately from real emissions so the status block distinguishes
+# "the canary never ran" (a dead instrument) from "it ran and nothing landed"
+# (a dead sink). REPORTED, never alerted on: with live traffic the app's next
+# delivered write would resolve a canary-absence incident and the driver would
+# re-file on the next run — a file/close flap. See the runbook residual.
+_ANALYTICS_CANARY_ATTEMPTS = 0
+
+
+def _analytics_sink_probe():
+    """The ONE sink-configuration seam (#3944).
+
+    Returns ``(url, key, configured, intended)``. Every site that asks whether
+    a sink exists reads THIS, so ``configured`` cannot mean one thing in
+    ``_track_analytics_event`` and another in the canary's emit gate or the
+    status block: #3677's shape (``SUPABASE_URL`` set, key resolving to ``""``)
+    is ``intended`` but not ``configured``, and a site that gated on
+    ``configured`` alone was blind to it.
+
+    * ``configured`` — both present: a write can succeed.
+    * ``intended``   — at least one present: a sink was INTENDED, so a
+      half-configured write is a degradation (the #3820 P1-2 arm), and the
+      canary must still attempt it so the absence half can see it.
+    """
+    url = os.environ.get("SUPABASE_URL")
+    # The service-key names and their precedence come from one seam
+    # (`supabase_control._service_key()`): #3677 was exactly this site reading a
+    # name the hosted deployment never sets. Older sibling sites still
+    # hand-roll the same pair — see #3677's sibling audit.
+    key = _service_key()
+    return (url, key, bool(url and key), bool(url or key))
+
+
+def _analytics_heartbeat_block() -> dict:
+    """The #3944 heartbeat surface for the external DR driver.
+
+    Published on the INTERNAL ``/status`` endpoint — served by the app whatever
+    the sink's health — and never through the sink itself: the dead-man's-switch
+    rule is that the heartbeat must not travel the channel it verifies.
+
+    ``age_s`` is ``None`` until a write is DELIVERED (there is no fabricated
+    boot seed); ``uptime_s`` is what lets the driver tell "no delivery YET"
+    (cold start — stay silent) from "no delivery for longer than the threshold"
+    (an incident). Both booleans are reported so a half-configured deployment
+    is diagnosable, and the canary counters make a dead instrument visible. All
+    values are non-secret.
+    """
+    now = datetime.now(UTC)
+    with _ANALYTICS_ALERT_LOCK:
+        last = _ANALYTICS_LAST_DELIVERED_AT
+        attempts = _ANALYTICS_CANARY_ATTEMPTS
+        counts = dict(_ANALYTICS_COUNTS)
+        # Stamp `now` INSIDE the lock: a delivery landing between the read of
+        # `now` and the read of `last` would produce a negative age, which the
+        # driver reads as "not yet established" and therefore never resolves a
+        # resolved incident for one cadence. Clamping keeps the published age
+        # non-negative whatever the interleaving.
+        age_s = max(0.0, (datetime.now(UTC) - last).total_seconds()) if last is not None else None
+    period = _ANALYTICS_CANARY_PERIOD_S
+    # The sink probe reads the LIVE env. A read that raises must not 500 a
+    # liveness endpoint, so the exception is contained and the block reports
+    # the conservative pair (the driver then leaves the incident unchanged).
+    try:
+        _url, _key, configured, intended = _analytics_sink_probe()
+    except Exception:  # pragma: no cover — env reads do not raise in practice
+        configured = intended = False
+    return {
+        "configured": configured,
+        "intended": intended,
+        "canary_period_s": period,
+        # Period + Grace, derived at the ONE place the period lives.
+        "silent_threshold_s": 3 * period,
+        "uptime_s": (now - _ANALYTICS_BOOT_AT).total_seconds(),
+        "canary_attempts": attempts,
+        "last_delivered_at": last.isoformat() if last is not None else None,
+        "age_s": age_s,
+        "outcomes": counts,
+    }
+
+
+async def _analytics_canary_tick() -> bool:
+    """Emit ONE canary write through the REAL sink path (#3944).
+
+    Returns ``True`` when a write was attempted, ``False`` when no sink was
+    INTENDED (selfhost/dev: the local JSONL IS the intended sink, so there is
+    nothing to prove and a synthetic line would only pollute a real fallback
+    file). Split out of the loop so the emit decision is testable without a
+    clock.
+
+    The counter is incremented BEFORE the emit, so "attempted but never
+    delivered" is distinguishable from "never attempted" — the only signal
+    that separates a dead instrument from a dead sink.
+    """
+    global _ANALYTICS_CANARY_ATTEMPTS
+    _url, _key, _configured, intended = _analytics_sink_probe()
+    if not intended:
+        return False
+    with _ANALYTICS_ALERT_LOCK:
+        _ANALYTICS_CANARY_ATTEMPTS += 1
+    await _emit_analytics_off_loop(_ANALYTICS_CANARY_ORG,
+                                   _ANALYTICS_CANARY_EVENT)
+    return True
+
+
+async def _analytics_canary_loop() -> None:
+    """#3944: the fixed-cadence canary that makes absence observable.
+
+    SLEEPS FIRST, deliberately. Two invariants depend on it: a test that enters
+    a short-lived ``TestClient`` lifespan never emits a canary (the exact-count
+    assertions on the fallback JSONL in tests/test_onboarding_analytics_patch.py
+    assume no extra line), and a freshly-booted process does not emit before its
+    configuration is even readable.
+
+    Emits through the SAME off-loop entry point the production funnel uses, so
+    the canary exercises the real write path (and reuses the telemetry pool: no
+    new offload op, no new entry in the offload inventory).
+
+    It never files an incident itself. The absence ALARM is external — see the
+    D5b block above `_ANALYTICS_FALLBACK_ALERT_AFTER`.
+    """
+    while True:
+        await asyncio.sleep(_ANALYTICS_CANARY_PERIOD_S)
+        # A raise must not kill the heartbeat: a dead canary task is precisely
+        # the failure the external alarm exists to catch, and it must surface
+        # as staleness, never as a crashed task that nobody notices.
+        try:
+            await _analytics_canary_tick()
+        except Exception as e:  # pragma: no cover — defensive
+            _logger.warning("analytics canary tick failed: %s", e)
+
+
 
 def _track_analytics_event(org_id: str, event_name: str,
                            properties: dict | None = None) -> str:
@@ -24135,16 +24476,10 @@ def _track_analytics_event(org_id: str, event_name: str,
         "properties": props,
         "created_at": datetime.now(UTC).isoformat(),
     }
-    url = os.environ.get("SUPABASE_URL")
-    # The service-key names and their precedence come from one seam
-    # (`supabase_control._service_key()`): #3677 was exactly this site reading a
-    # name the hosted deployment never sets. Older sibling sites still
-    # hand-roll the same pair — see #3677's sibling audit.
-    key = _service_key()
-    # #3820 (D1): remember whether a sink was ATTEMPTED at all. This one
-    # boolean is what separates `fallback` (configured, but degraded — alert)
-    # from `unconfigured` (no sink by design — never alert).
-    configured = bool(url and key)
+    # #3944: url / key / configured / misconfigured all come from ONE probe,
+    # shared with the canary's emit gate and the /status heartbeat block, so
+    # "configured" cannot mean different things at the three sites.
+    url, key, configured, intended = _analytics_sink_probe()
     # #3820 (P1-2): a HALF-configured env is the FIFTH silent path. The
     # docstring of `unconfigured` is "no URL/key AT ALL", but `configured`
     # implements "both present" — so `SUPABASE_URL` set with the key missing
@@ -24153,7 +24488,7 @@ def _track_analytics_event(org_id: str, event_name: str,
     # incident. That is #3677 itself, and it made this signal blind to the very
     # failure that created the issue: with exactly one of the pair set, a sink
     # was clearly INTENDED, so the write is a degradation.
-    misconfigured = bool(url) != bool(key)
+    misconfigured = intended and not configured
     if configured:
         # #3820 (cycle-4 P2-1): the guard covers the NETWORK CALL only. The
         # delivered branch used to sit inside it, so a raise in the success leg
@@ -24296,9 +24631,16 @@ def _analytics_note_success() -> str:
     """
     global _ANALYTICS_DEGRADED_STREAK, _ANALYTICS_RESOLVE_PENDING
     global _ANALYTICS_RESOLVE_NOT_BEFORE, _ANALYTICS_RESOLVE_INFLIGHT
+    global _ANALYTICS_LAST_DELIVERED_AT
     with _ANALYTICS_ALERT_LOCK:
         _ANALYTICS_COUNTS["supabase"] += 1
         _ANALYTICS_DEGRADED_STREAK = 0
+        # #3944: the heartbeat is the LAST DELIVERED write — set here and
+        # nowhere else. This is the single write point for every delivery
+        # (canary or real funnel event), and it sits before the early
+        # not-claimed return below so a concurrent delivered write still
+        # refreshes it.
+        _ANALYTICS_LAST_DELIVERED_AT = datetime.now(UTC)
     _analytics_count_outcome("supabase")
     # #3820 (cycle-8 P1 / cycle-9 P2-2): the resolve is SERIALIZED by an
     # IN-FLIGHT claim taken under `_ANALYTICS_RESOLVE_LOCK` — never by holding
@@ -25840,13 +26182,20 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
     try:
         org_sdk = _make_sdk(namespace=org_id)
 
-        # #1844: the index job is OBJECT-ONLY — it writes zero non-episodic
-        # :Point nodes (the "points" quota resource counts ONLY
-        # `MATCH (n:Point) WHERE n.is_episodic IS NULL OR false`), so no
-        # points-quota preflight or per-batch re-check is needed. A org at
-        # its points cap must still be able to index issues. The #1843
-        # statement-write resurrection (point/statement mints) would re-add
-        # the points gate.
+        # #1844: the index job writes zero non-episodic :Point nodes, so it never
+        # trips the POINT arm of the "points" resource.
+        #
+        # #1975: that is no longer the whole count. Since #1911 the points resource
+        # ALSO counts Object/Subject nodes unconditionally (quota.py), and this job
+        # MINTS objects. So the gate decision below is unchanged but its reason is
+        # NOT "this job mints nothing countable". The job is deliberately left
+        # UNGATED, and the accepted consequence is that an indexing-heavy org CAN be
+        # pushed past max_points by the objects it mints, after which its
+        # points-gated writes 402 until an upgrade. That is a recorded DECISION, not
+        # an oversight: an org at its points cap must still be able to index issues.
+        # Adding a preflight here would gate the index job itself; the #1843
+        # statement-write resurrection (point/statement mints) would re-add the
+        # points gate.
         indexer = GitHubIndexer(token)
 
         # ── One-time legacy `-closed` backfill (T1-P1 + T2-P3). Gated on the
@@ -27567,7 +27916,13 @@ async def backups_status(request: Request):
         storage = _backup_storage()
     except RuntimeError as e:
         return {"enabled": False, "app_time": datetime.now(UTC).isoformat(),
-                "storage_error": str(e), "per_team": {}, "no_teams": False}
+                "storage_error": str(e), "per_team": {}, "no_teams": False,
+                # #3944: the analytics heartbeat is in-process state and needs
+                # no storage, so it is reported on the DEGRADED path too. An
+                # R2 misconfig must not blind the sink-absence check (the
+                # driver would read an absent block as "unknown" and stay
+                # silent).
+                "analytics": _analytics_heartbeat_block()}
     lock_block = _lock_status_block(cfg)
     watcher = _WATCHER
     now = datetime.now(UTC)
@@ -27671,6 +28026,10 @@ async def backups_status(request: Request):
             "r2_ok": hb.get("r2_ok"),
         },
         "driver": {"last_heartbeat_at": driver_hb.get("ran_at"), "age_minutes": driver_age_min},
+        # #3944: the analytics heartbeat the external DR driver reads to detect
+        # a sink that silently STOPPED emitting. Published here, never through
+        # the sink, so the sink cannot silence its own alarm.
+        "analytics": _analytics_heartbeat_block(),
     }
 
 @app.post("/v1/internal/driver/heartbeat")
