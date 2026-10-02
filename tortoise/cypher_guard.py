@@ -102,8 +102,14 @@ def _unsupported_cypher_operator(cypher: str) -> str | None:
         if c in ("'", '"', "`"):
             i = _skip_cypher_quoted(cypher, i, c)
         elif c == "/" and i + 1 < n and cypher[i + 1] == "/":
-            nl = cypher.find(chr(10), i + 2)
-            i = n if nl == -1 else nl + 1
+            # A ``//`` comment ends at the first newline of EITHER convention:
+            # terminating on ``\n`` alone let a bare ``\r`` (classic-Mac
+            # ending) swallow the remainder, so a real ``=~`` after it was
+            # never reported (#3595 review).
+            stop = min(
+                [j for j in (cypher.find("\n", i + 2), cypher.find("\r", i + 2))
+                 if j != -1], default=-1)
+            i = n if stop == -1 else stop + 1
         elif c == "/" and i + 1 < n and cypher[i + 1] == "*":
             end = cypher.find("*/", i + 2)
             i = n if end == -1 else end + 2
@@ -167,6 +173,18 @@ def _guard_unsupported_cypher(cypher: str) -> None:
         raise UnsupportedCypherOperatorError(op, cypher)
 
 
+def _as_text(value):
+    """Decode a bytes command/payload so the scan can see its text, else return it.
+
+    redis-py accepts the BYTES form of ``execute_command``, and the scanner
+    reports ``None`` for anything that is not ``str`` — so without this a bytes
+    payload would pass the guard untouched (#3595 review).
+    """
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).decode("utf-8", "replace")
+    return value
+
+
 def _guard_execute_command(args) -> None:
     """Refuse a ``=~`` in a raw ``execute_command`` payload.
 
@@ -179,13 +197,15 @@ def _guard_execute_command(args) -> None:
     (``GRAPH.DELETE``, ``GRAPH.COPY``, ``GRAPH.CONFIG``, ``INFO``, ...) and
     every non-``GRAPH`` command is forwarded untouched.
     """
-    if (
-        len(args) >= 3
-        and isinstance(args[0], str)
-        and args[0].upper() in _GRAPH_QUERY_COMMANDS
-        and isinstance(args[2], str)
-    ):
-        _guard_unsupported_cypher(args[2])
+    if len(args) >= 3:
+        verb = _as_text(args[0])
+        statement = _as_text(args[2])
+        if (
+            isinstance(verb, str)
+            and verb.upper() in _GRAPH_QUERY_COMMANDS
+            and isinstance(statement, str)
+        ):
+            _guard_unsupported_cypher(statement)
 
 
 def _guarded_execute_command(raw):
@@ -322,10 +342,16 @@ class _GuardedClientProxy:
     permissive object, the hole round 2 flagged.
     """
 
-    __slots__ = ("__weakref__", "_client")
+    __slots__ = ("__weakref__", "_client", "execute_command")
 
     def __init__(self, client):
         self._client = client
+        # Guard the client's own command channel too: it is an instance
+        # attribute on the vendor client, so ``__getattr__`` would otherwise
+        # hand back the unguarded bound method (#3595 review).
+        raw = getattr(client, "execute_command", None)
+        if raw is not None:
+            self.execute_command = _guarded_execute_command(raw)
 
     def select_graph(self, graph_id):
         return _guard_handle(self._client.select_graph(graph_id))
@@ -474,6 +500,20 @@ def guarded_client_class(base_client):
 
     class _GuardedClient(base_client):  # type: ignore[valid-type]  # a class object, not a type alias (#5414)
         """Vendor FalkorDB client whose every graph handle is guarded."""
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            # The vendor binds ``self.execute_command`` as an INSTANCE attribute
+            # (see :func:`_guard_execute_command`), so the client's OWN command
+            # channel carried Cypher unrefused while every handle verb was
+            # guarded — the same shadowed bypass this module closes at handle
+            # level, one level up (#3595 review). Reading it back through
+            # ``self`` finds the instance attribute when the vendor set one and
+            # the class method otherwise. A duck-typed base that has no command
+            # channel at all is left alone.
+            raw = getattr(self, "execute_command", None)
+            if raw is not None:
+                self.execute_command = _guarded_execute_command(raw)
 
         def select_graph(self, graph_id):
             return _guard_handle(super().select_graph(graph_id))

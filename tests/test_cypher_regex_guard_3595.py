@@ -645,3 +645,93 @@ def test_guarded_class_publishes_its_unguarded_base_and_still_blocks():
             raise AssertionError(
                 f"{verb} reached the UNGUARDED vendor method — publishing the "
                 f"base class must not become a bypass (#6072)")
+
+
+# ── the channels a review found still open on the guarded objects ───────────
+
+
+def test_carriage_return_terminates_a_line_comment():
+    """Falsifier: a ``//`` comment ending in a bare ``\\r`` must not swallow the rest.
+
+    Terminating the comment on ``\\n`` alone let a classic-Mac line ending hide
+    a real ``=~`` after it — a silent false negative, the class this module
+    exists to stop. Value that makes it fail:
+    ``"// prose\\rMATCH (n) WHERE n.x =~ 'a' RETURN n"``.
+    """
+    assert _unsupported_cypher_operator(
+        "// prose\rMATCH (n) WHERE n.x =~ 'a' RETURN n") == "=~"
+    # …and the comment itself is still prose, on either ending.
+    assert _unsupported_cypher_operator("// no =~ here\rRETURN 1") is None
+    g, handle = _guarded()
+    with pytest.raises(UnsupportedCypherOperatorError):
+        g.query("// prose\rMATCH (n) WHERE n.x =~ 'a' RETURN n")
+    assert handle.calls == [], "the statement after a \\r comment reached the handle"
+
+
+def test_execute_command_refuses_the_operator_in_a_bytes_payload():
+    """Falsifier: the BYTES form of a command/payload is scanned, not skipped.
+
+    redis-py accepts ``execute_command`` in bytes; the scanner reports ``None``
+    for anything not ``str``, so a bytes payload used to pass untouched.
+    """
+    g, wire = _guarded_vendor_handle()
+    with pytest.raises(UnsupportedCypherOperatorError):
+        g.execute_command(b"GRAPH.QUERY", b"g", LEGACY_SHAPE_CHECK.encode())
+    assert wire.commands == [], "the bytes payload reached the wire"
+    # A supported bytes query still passes through.
+    g.execute_command(b"GRAPH.QUERY", b"g", b"RETURN 1")
+    assert wire.commands == [(b"GRAPH.QUERY", b"g", b"RETURN 1")]
+
+
+def test_the_client_command_channel_is_guarded_too():
+    """Falsifier: the CLIENT's own ``execute_command`` is guarded, not just handles.
+
+    The vendor binds the command channel as an INSTANCE attribute, so
+    subclassing the client guarded only the handles it yields: measured
+    ``proj.db.execute_command("GRAPH.QUERY", g, cypher)`` reached the server
+    while every handle verb refused (#3595 review). This stub binds it the same
+    way — as an instance attribute — which is what makes it a pin: with the
+    rebinding removed, ``self.execute_command`` is the raw wire method and the
+    operator reaches it.
+    """
+
+    class _VendorLikeClient:
+        def __init__(self, wire):
+            self.wire = wire
+            # Exactly what falkordb.FalkorDB.__init__ does.
+            self.execute_command = wire.execute_command
+
+        def select_graph(self, graph_id):
+            return object()
+
+    wire = _SpyWire()
+    client = guarded_client(_VendorLikeClient, wire)
+    with pytest.raises(UnsupportedCypherOperatorError):
+        client.execute_command("GRAPH.QUERY", "g", LEGACY_SHAPE_CHECK)
+    assert wire.commands == [], "the client channel forwarded the operator"
+    # Non-query commands and supported queries still pass.
+    client.execute_command("GRAPH.DELETE", "g")
+    assert wire.commands == [("GRAPH.DELETE", "g")]
+
+
+def test_the_proxied_client_command_channel_is_guarded_too():
+    """Falsifier: the same channel on the PROXY path (a factory, not a class)."""
+
+    class _StubClient:
+        def __init__(self):
+            self.calls = []
+
+        def select_graph(self, graph_id):
+            return object()
+
+        def execute_command(self, *args, **kwargs):
+            self.calls.append(args)
+            return args
+
+    stub = _StubClient()
+    client = guarded_client(lambda: stub)
+    with pytest.raises(UnsupportedCypherOperatorError):
+        client.execute_command("GRAPH.QUERY", "g", LEGACY_SHAPE_CHECK)
+    assert stub.calls == [], "the proxied client channel forwarded the operator"
+    client.execute_command("GRAPH.DELETE", "g")
+    assert stub.calls == [("GRAPH.DELETE", "g")]
