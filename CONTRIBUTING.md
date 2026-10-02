@@ -127,6 +127,29 @@ names exists. The carrier for the approval is the **#4282 mandate above and Dani
 machine control. (The repository ruleset the #3863 scope doc proposed as that carrier was **rejected by
 the owner on #4282** as over-engineering; do not re-introduce one.)
 
+**What the gate does *not* fail on: an added field on an existing response.** A field that is off
+by default, and leaves the response unchanged when it is off, is neither a new tool nor a new
+endpoint — so it does not gate **as an addition**. The precedent is the W4 why-layer key on the
+`ask` response: written only when `TORTOISE_W4_ENRICHMENT` is truthy (1/true/yes/on; unset or `0`
+means off), with every other field byte-identical when it is absent. That is a different `why` key
+from the one on `volunteer_context`, which is present by default.
+
+**One qualification: the gate also fingerprints implementations.** It records a digest of each
+registered tool's own code object, so a field added *inside a tool's handler* changes that tool's
+fingerprint — and, since the fingerprint covers the function's source position, the fingerprint of
+every tool defined after it — and reds the gate, correctly, as a changed implementation rather than
+a new tool. Add response fields in the SDK or assembly layer, not inside a tool function.
+
+**And it must still be recorded.** Every such addition goes in the `response_fields` block of
+[`config/surface-manifest.yml`](config/surface-manifest.yml), rendered as a table in
+[`docs/product/mcp-sdk-surface.md`](docs/product/mcp-sdk-surface.md). Two of `check`'s properties
+defend that record: an empty or missing `response_fields` block is a failure, and every entry must
+name a tool or endpoint that exists in the manifest — so the record can be neither deleted nor left
+unanchored. Be precise about the half the machine cannot check: nothing inspects response bodies at
+runtime, so a field that nobody recorded at all is **not** caught by any check. That half is a
+reviewing obligation, and it is stated as one rather than implied to be automatic. The carve-out is
+about what the guard *fails* on — not about what goes *unrecorded*.
+
 **"Added tool" means the advertised surface, not just the registry.** A tool can reach agents without
 ever entering `TOOL_REGISTRY`, by three routes the guard checks separately, because each is invisible
 to the others:
