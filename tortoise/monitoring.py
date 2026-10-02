@@ -794,13 +794,10 @@ def _reset_egress() -> None:
 # never add a path child. The ``COMPUTE_MAX_PATHS`` cap is a safety net for route
 # growth, not an attacker-reachable budget.
 #
-# WHY ``_admit_bounded_label`` IS COMPUTE-BOUND, NOT GENERIC: the parent's recorded
-# divergence (#5045) is that every dimension brings its own cap, its own overflow
-# name and its own admission lifetime. This helper takes its registry set and cap
-# from the caller, but is hard-bound to ``_COMPUTE_LOCK`` — the egress twin
-# ``_admit_egress_label`` (#5315, already landed in this tree) admits under
-# ``_EGRESS_LOCK``. Folding both onto one lock-parameterised form is this lane's
-# proposal, pending #5045's admission-lifetime decision, not something #5045 records.
+# WHY ``_admit_bounded_label`` IS COMPUTE-BOUND, NOT GENERIC: it takes its registry
+# set and cap from the caller, but is hard-bound to ``_COMPUTE_LOCK``. The egress
+# twin ``_admit_egress_label`` (#5315) admits under ``_EGRESS_LOCK`` and has no
+# folded-label short-circuit, so the two are NOT drop-in equivalents.
 COMPUTE_MAX_ORGS = 512
 #: Code-literal route labels. The live app carries ~130 templates, so 512 is
 #: headroom for new routes rather than a tight fit. NOT traffic-reachable.
@@ -910,11 +907,10 @@ def _admit_bounded_label(label: str, seen: set[str], cap: int,
 
     The bounded-admission form for the COMPUTE dimension (#4490), hard-bound to
     ``_COMPUTE_LOCK`` — NOT the shared helper its name suggests: the egress twin
-    (``_admit_egress_label``) admits under ``_EGRESS_LOCK``, so the #5045
-    convergence is to fold both onto one lock-parameterised form. Recorded on
-    #5045, not claimed here. Additive by construction: an already-admitted label
-    never locks (and never changes); a
-    new label past the cap becomes ``overflow`` so the metric stays bounded rather
+    (``_admit_egress_label``) admits under ``_EGRESS_LOCK`` and has no
+    folded-label short-circuit. Additive by construction: an already-admitted
+    label never locks (and never changes); a new label past the cap becomes
+    ``overflow`` so the metric stays bounded rather
     than raising or dropping the whole record. Admission is first-come and an
     admitted label is never evicted — eviction either drops accumulated cost or
     grows the child set without bound, and choosing between those is the metering
@@ -1028,14 +1024,17 @@ def _reset_compute() -> None:
     Clears the cap registries as well as the children — leaving the registries
     behind would make a following test see labels "already admitted" that no
     longer exist in the metric, which is exactly the drift the cap must not have.
+
+    Scope of the guarantee: the clears are atomic with respect to ADMISSION (they
+    hold ``_COMPUTE_LOCK``), NOT with respect to recording —
+    ``record_compute``'s ``.labels(...).inc()`` runs after admission, outside the
+    lock, so a thread interleaving between admission and ``.inc()`` can recreate a
+    child. This is a test seam, not a production path; the promise is limited to
+    what the lock covers.
     """
     with _COMPUTE_LOCK:
         _COMPUTE_ORGS.clear()
         _COMPUTE_PATHS.clear()
-        # Clear the children INSIDE the lock too: a concurrent ``record_compute``
-        # that re-admitted a label between the registry clear and the metric clear
-        # would leave a registry entry for a child that no longer exists — the
-        # exact drift this seam must not produce.
         COMPUTE_REQUESTS.clear()
         COMPUTE_WALL_SECONDS.clear()
         COMPUTE_CPU_SECONDS.clear()
