@@ -96,18 +96,40 @@ def _fake_probe_db(sdk, setup_timeout=None) -> dict:
 
 @pytest.fixture
 def probe_state():
-    """Clean probe state for the two modules this file drives, before and after."""
+    """Clean probe state for the two modules this file drives, before and after.
+
+    The leak asserts are on DELTAS, not on zero. ``_PROBE_SDK_EPISODES`` and
+    ``_PROBE_SDK_DEFERRED`` are module-level on ``tortoise.hosted_api`` and
+    ``tortoise.selfhost``, i.e. PROCESS-GLOBAL: any other test in the same pytest
+    process that drives a probe leaves its mark there, so asserting ``== 0``
+    asserted on state THIS FILE DOES NOT OWN and converted an unrelated test's
+    residue into this file's error (main red at ``3b6f236ee``, where #6938's
+    routing change re-partitioned the shards and put this file in a process with
+    another probe user: ``assert 9 == 0``).
+
+    A delta is order-independent AND strictly stronger: it catches this file's
+    own leak even when the baseline is already non-zero, which ``== 0`` cannot
+    distinguish from foreign residue.
+    """
     for mod in (ha_mod, sh_mod):
         mod._HEALTH_PROBE.reset()
         mod._probe_sdk_reset()
     ha_mod._READY_PROBE.reset()
+    baseline = {
+        mod: (
+            getattr(mod, "_PROBE_SDK_EPISODES", 0),
+            len(getattr(mod, "_PROBE_SDK_DEFERRED", [])),
+        )
+        for mod in (ha_mod, sh_mod)
+    }
     yield
     for mod in (ha_mod, sh_mod):
         mod._HEALTH_PROBE.reset()
         mod._probe_sdk_reset()
-        assert getattr(mod, "_PROBE_SDK_EPISODES", 0) == 0, (
+        episodes_was, deferred_was = baseline[mod]
+        assert getattr(mod, "_PROBE_SDK_EPISODES", 0) <= episodes_was, (
             "a probe episode leaked its count")
-        assert getattr(mod, "_PROBE_SDK_DEFERRED", []) == [], (
+        assert len(getattr(mod, "_PROBE_SDK_DEFERRED", [])) <= deferred_was, (
             "a displaced handle was never closed")
     ha_mod._READY_PROBE.reset()
 
