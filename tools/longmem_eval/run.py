@@ -690,9 +690,16 @@ def _ingest_bound_banner(stall_timeout_s: float, *,
     the no-progress budget visible in the run log so "stalled" is
     distinguishable from "slow" without stack sampling. The read bound comes
     from :func:`_resolved_graph_read_timeout` — the SAME resolution the graph
-    client uses — so the reported value is exactly the client's, including the
-    product-knob fallback; the embedded lane has no graph socket, so it
-    reports n/a rather than a fiction.
+    client uses — so on the HOST lane the reported value is exactly the
+    client's, including the product-knob fallback.
+
+    The embedded lane reports n/a, and NOT because it has no graph socket: it
+    runs a Unix-domain-socket client that IS read-bounded by the product knob
+    (``socket_timeout=read_to`` in ``tortoise/projection``). It reports n/a
+    because :func:`_resolved_graph_read_timeout` resolves the PER-LANE var,
+    which the embedded branch never applies — so printing that number here
+    would name a bound the embedded client does not use. The embedded lane's
+    bound is ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S``.
     """
     stall_txt = (f"{stall_timeout_s:g}s" if stall_timeout_s else "disabled")
     if db_uri is None:
