@@ -58,6 +58,23 @@ from tortoise.exceptions import UnsupportedCypherOperatorError
 #: subclass layer. Read through :func:`_carries_marker`, never a bare
 #: ``getattr`` (a permissive ``__getattr__`` object answers every name).
 _GUARDED_GRAPH_MARKER = "_tortoise_cypher_guarded_graph"
+
+# #6072: the guard builds a SUBCLASS of the vendor graph class so that no
+# un-guarded query verb is reachable through the MRO (that isolation is
+# deliberate — see _UnsupportedOperatorGuardedQueries — and must NOT be traded
+# away for an instance-attribute patch, which `del handle.query` would undo).
+#
+# The cost of that isolation is that `type(handle)` is no longer the vendor
+# class, and any consumer keying on the concrete class changes behaviour
+# (tests/test_hosted_api.py monkeypatches `query` at vendor-class level and
+# dispatches via `_orig_query[type(self)]` -> KeyError -> the required
+# python-ci-gate leg fails).
+#
+# The remedy is to make the vendor class REACHABLE AS A PUBLISHED CONTRACT
+# rather than inferred: the generated class carries its base here, and
+# `unguarded_graph_class()` reads it. The guard keeps MRO-level isolation and
+# consumers stop guessing at identity.
+_GUARDED_GRAPH_BASE_MARKER = "_tortoise_cypher_unguarded_base"
 _GUARDED_CLIENT_MARKER = "_tortoise_cypher_guarded_client"
 
 #: The Redis commands that carry a Cypher statement on a graph handle. Used by
@@ -401,10 +418,31 @@ def guarded_graph_class(base_graph: type) -> type:
     cls = type(
         f"Guarded{base_graph.__name__}",
         (_UnsupportedOperatorGuardedQueries, base_graph),
-        {_GUARDED_GRAPH_MARKER: True},
+        {_GUARDED_GRAPH_MARKER: True,
+         _GUARDED_GRAPH_BASE_MARKER: base_graph},
     )
     _GUARDED_GRAPH_CLASSES[base_graph] = cls
     return cls
+
+
+def unguarded_graph_class(graph_cls: type) -> type:
+    """The VENDOR graph class a guarded class was built from (#6072).
+
+    The guard subclasses the vendor graph class so no un-guarded query verb is
+    reachable through the MRO. That isolation means ``type(handle)`` is a
+    generated subclass, so any consumer keying on the concrete class breaks
+    (measured: ``tests/test_hosted_api.py`` monkeypatches ``query`` at
+    vendor-class level and dispatches via ``_orig_query[type(self)]``, raising
+    ``KeyError`` and failing the REQUIRED ``python-ci-gate`` leg).
+
+    Consumers that need the vendor class must ask for it here rather than infer
+    it from ``type()`` — this is the supported contract, and it stays correct if
+    the guard ever changes how it isolates the query verbs.
+
+    A class that was never guarded is returned unchanged, so callers need no
+    special case.
+    """
+    return getattr(graph_cls, _GUARDED_GRAPH_BASE_MARKER, graph_cls)
 
 
 def guarded_client_class(base_client):

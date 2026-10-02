@@ -575,3 +575,73 @@ def test_the_embedded_client_class_is_guarded_too():
     assert "select_graph" in vars(cls), "select_graph is inherited, so unguarded"
     assert guarded_client_class(EmbeddedFalkorDB) is cls
 
+
+
+def test_guarded_class_publishes_its_unguarded_base_and_still_blocks():
+    """#6072: BOTH directions of the guard's identity contract.
+
+    (1) The vendor graph class stays REACHABLE as a published contract. The
+        guard subclasses it so no un-guarded query verb is reachable through the
+        MRO — that isolation is deliberate and is NOT traded away for instance
+        attributes (which `del handle.query` would undo). But consumers must not
+        have to infer the vendor class from `type()`: when they do, behaviour
+        changes under them (measured: tests/test_hosted_api.py patches `query` at
+        vendor-class level and dispatches via `_orig_query[type(self)]`, so a
+        generated subclass raises KeyError and the REQUIRED python-ci-gate leg
+        fails).
+
+    (2) The guard STILL REFUSES an unsupported operator. Publishing the base
+        class must not become a way to bypass the guard.
+
+    Mutation that must turn this RED: drop `_GUARDED_GRAPH_BASE_MARKER` from the
+    generated class in `guarded_graph_class` — then (1) fails while (2) still
+    passes, which is exactly the regression this pins.
+    """
+    from tortoise import cypher_guard as cg
+
+    class _VendorGraph:
+        """Stand-in for falkordb.graph.Graph (the vendor class)."""
+
+        def __init__(self, client=None, name="g"):
+            self.client, self.name = client, name
+
+        def query(self, q):          # pragma: no cover - never reached when guarded
+            return ("UNGURADED", q)
+
+        def ro_query(self, q):       # pragma: no cover - never reached when guarded
+            return ("UNGURADED", q)
+
+    guarded_cls = cg.guarded_graph_class(_VendorGraph)
+    assert guarded_cls is not _VendorGraph, "the guard must produce a guarded class"
+
+    # (1) the vendor class is REACHABLE as a published contract — not inferred.
+    assert cg.unguarded_graph_class(guarded_cls) is _VendorGraph, (
+        "the guarded class must publish its unguarded base; consumers keying on "
+        "type(handle) otherwise break (this is the #6072 defect)")
+    # ...and an unguarded class is returned unchanged, so callers need no special case.
+    assert cg.unguarded_graph_class(_VendorGraph) is _VendorGraph
+
+    # (2) the guard STILL BLOCKS. An unsupported operator must be refused even
+    #     though the base class is now reachable.
+    class _StubClient:
+        """Minimal client: the mixin's __init__ reads .execute_command."""
+
+        def execute_command(self, *a, **k):   # pragma: no cover - never reached
+            return ("UNGURADED", a)
+
+        def __getattr__(self, name):          # pragma: no cover
+            return lambda *a, **k: ("UNGURADED", name, a)
+
+    handle = guarded_cls(_StubClient(), "g")
+    for verb in ("query", "ro_query"):
+        try:
+            getattr(handle, verb)("MATCH (n) CALL apoc.foo() RETURN n")
+        except Exception:
+            pass          # refused — the contract that matters
+        else:
+            # If it did not raise, the base-class method must not have run
+            # unguarded: reaching _VendorGraph.query would return the UNGURADED
+            # tuple. Accept only a non-unguarded result.
+            raise AssertionError(
+                f"{verb} reached the UNGUARDED vendor method — publishing the "
+                f"base class must not become a bypass (#6072)")
