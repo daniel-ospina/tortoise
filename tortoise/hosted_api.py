@@ -47,6 +47,7 @@ import tortoise
 # a monkeypatch/override of the canonical constant reaches BOTH surfaces instead
 # of leaving a stale copy in this module.
 from tortoise import body_limits as _body_limits  # #2048 shared streaming body cap
+from tortoise import embed_metering as _embed_metering  # #4488 encode measurement
 from tortoise import mcp_auth as _mcp_auth
 from tortoise import monitoring as _monitoring  # #2924: call-time bound read
 from tortoise.abuse import (
@@ -69,6 +70,9 @@ from tortoise.capture_receipts import (  # #3809: ONE key definition
 )
 from tortoise.capture_receipts import (
     capture_receipt_key as _capture_receipt_key,
+)
+from tortoise.embed_metering import (  # #4488: pure-ASGI encode-work flusher
+    EmbedMeteringMiddleware as _EmbedMeteringMiddleware,
 )
 from tortoise.env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from tortoise.file_indexer import (  # #4005 shared identity primitives
@@ -2084,6 +2088,56 @@ def _enqueue_dream(org_id: str, dirty_roots: list[str],
         _DREAM_TASKS[key] = asyncio.create_task(_dream_worker(org_id, key))
 
 
+def _embed_metered(fn):
+    """Wrap a work-OWNING runner so its embedding encodes are attributed (#4488).
+
+    A DECORATOR rather than a ``with`` block at each call site on purpose: these
+    runners are reached from more than one boundary (the REST route, the MCP
+    tool, an internal call), and only the RUNNER knows the org with certainty —
+    the internal-seed lanes never populate ``scope["state"]["org_id"]``, so a
+    middleware-only attribution would drop their work into an unattributable
+    tally and fire a spurious operator alert on every tenant provisioning.
+    (The SESSION lane does populate it — ``_session_user_org`` stamps it — but
+    the runners themselves are reached directly by MCP too.)
+
+    The tally is FRESH and flushed on exit (``embed_metering.meted``): a detached
+    unit can neither double-count a request-scoped tally nor leak one. An
+    exception still flushes whatever the runner encoded before it failed, and
+    never propagates a measurement fault. Async runners get the async arm, whose
+    flush is offloaded so the blocking ledger write cannot stall the loop.
+
+    The org is pulled from the runner's own ``org_id`` parameter by signature
+    bind, so a positional or keyword call both work.
+
+    Defined BEFORE its first use (``_dream_worker``) because a decorator is
+    evaluated at import time, in file order.
+    """
+    import functools
+    import inspect
+
+    sig = inspect.signature(fn)
+
+    def _org(args, kwargs):
+        try:
+            return sig.bind_partial(*args, **kwargs).arguments.get("org_id")
+        except TypeError:  # pragma: no cover — defensive
+            return None
+
+    if inspect.iscoroutinefunction(fn):
+        @functools.wraps(fn)
+        async def _async_wrapper(*args, **kwargs):
+            async with _embed_metering.meted(_org(args, kwargs)):
+                return await fn(*args, **kwargs)
+        return _async_wrapper
+
+    @functools.wraps(fn)
+    def _sync_wrapper(*args, **kwargs):
+        with _embed_metering.meted(_org(args, kwargs)):
+            return fn(*args, **kwargs)
+    return _sync_wrapper
+
+
+@_embed_metered
 async def _dream_worker(org_id: str, key: str | None = None) -> None:
     """Drain one tenant's queue with debounce, then run incremental dream.
     C5: key carries the graph (org_id, or org_id::<graph_namespace> for a
@@ -2514,7 +2568,9 @@ app.add_middleware(McpPathCanonicalizerMiddleware)
 #     `test_hosted_api.py::test_in_flight_gauge_is_wired_into_the_real_app`) —
 #     an accounting wrapper must not take that seat. Starlette's `add_middleware`
 #     INSERTS at index 0, so this registration is placed BEFORE
-#     `InFlightMiddleware`'s to land at index 2.
+#     `InFlightMiddleware`'s registration to land INSIDE both of them — a
+#     RELATIVE rule, never a fixed index: the compute wrapper (#4490) registers
+#     after this one and legitimately takes the index this comment used to name.
 #   * Sitting INSIDE the bound is what makes the count truthful, not merely
 #     polite: on a breach the bound ABANDONS the handler and DROPS its response
 #     (`_guarded_send`), so bytes that never left must not be credited to the
@@ -2775,6 +2831,168 @@ class EgressBytesMiddleware:
 app.add_middleware(EgressBytesMiddleware)
 
 
+# ── #4490: HOSTED-API COMPUTE (machine time) per org ─────────────────────
+#
+# #4490: Fly machine time is a flat shared cost with NO per-org driver. Nothing
+# recorded the server-side wall time or CPU time an org's traffic caused, and the
+# product's only request metrics have their sole call site inside the monitoring
+# server's own handler. This wrapper supplies the missing dimension for EVERY
+# route, REST and the mounted MCP app alike (a FastAPI mount is an ordinary
+# route, so this middleware sees it): a new endpoint cannot be born unmeasured and
+# no handler needs editing.
+#
+# WHERE IT SITS — inside `InFlightMiddleware` and `WaitBoundMiddleware`, NOT
+# outermost: `WaitBoundMiddleware` must stay outermost (#3834, pinned by
+# `test_transport_wait_bound.py::test_middleware_is_installed_outermost`) and the
+# in-flight gauge at index 1 is pinned by
+# `test_hosted_api.py::test_in_flight_gauge_is_wired_into_the_real_app`. Starlette's
+# `add_middleware` INSERTS at index 0, so registering here — after
+# `McpPathCanonicalizerMiddleware`, before `InFlightMiddleware` — places this
+# INSIDE both. (A relative rule, never a fixed index.)
+#
+# SITTING INSIDE THE BOUND IS WHAT MAKES THE FIGURE TRUTHFUL, not merely polite.
+# On a breach the bound ABANDONS (never cancels) the handler and DROPS its late
+# response; the work still happened. Being inside means this measures the work
+# the org actually caused, including a request whose response was dropped. That is
+# deliberately the OPPOSITE of the sibling egress dimension (#4491), which must
+# NOT credit bytes that never left: compute is the CPU that WAS burned, egress is
+# the bytes that were SENT.
+#
+# THE ORG COMES FROM `scope["state"]["org_id"]` — the SAME dict the auth
+# dependency writes into (already read at `WaitBoundMiddleware` below) — never a
+# client-supplied header or query param, so it cannot be spoofed. WHICH lanes
+# resolve one is a real limit, stated rather than implied: the API-KEY data-plane
+# lanes publish the org (`get_current_org`, `_get_current_org_supabase`); the
+# SESSION-JWT lane resolves one but deliberately does not publish it (publishing
+# would also change analytics — `AnalyticsMiddleware` reads it), and an MCP call's
+# org lives in a ContextVar this ASGI layer does not own. Those lanes are
+# attributed to `""` (honest unattributed), the same documented limit #5315
+# accepted. Cited by SYMBOL, not line number: the numbers this comment used to
+# carry had already gone stale by the PR's own +172 lines, and a reader checking
+# a wrong number reaches the opposite conclusion about the coverage it bounds.
+
+#: Mount prefixes the app serves through a ``Mount`` — CODE LITERALS, so a
+#: request under one is admitted on the code-literal axis rather than falling to
+#: ``__unrouted__``. Boundary-aware matching (not a bare prefix test), so
+#: ``/mcpfoo`` is NOT attributed to the real ``/mcp`` class.
+_COMPUTE_DECLARED_PREFIXES = ("/mcp",)
+#: Exact paths of the app's PLAIN Starlette routes — CODE LITERALS that FastAPI
+#: does not stamp onto the scope (``APIRoute.matches`` sets ``scope["route"]``,
+#: plain ``Route.matches`` does not), so they would otherwise be ``__unrouted__``.
+_COMPUTE_DECLARED_PATHS = ("/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc")
+
+
+# NO SECOND ``_route_describes`` HERE: this dimension reuses the definition above
+# (#5420). A duplicate ``def`` executes later in the module body and silently
+# becomes the live binding for BOTH dimensions, leaving the earlier one as dead
+# code that a future edit could change with no effect — the same defect class as
+# the duplicate ``_now_iso`` in ``tortoise/sdk.py`` (#5375). Pinned by
+# ``tests/test_compute_attribution.py::test_only_one_module_level_route_describes``.
+
+
+def _compute_route_class(scope, entry_path: str) -> str:
+    """The CODE-LITERAL route class a response is attributed to (#4490).
+
+    ``entry_path`` is ``starlette.routing.get_route_path(scope)`` taken BEFORE the
+    app runs — the request path minus ``root_path``, which is what a route's
+    ``path_regex`` is matched against. Reading ``scope["path"]`` instead would
+    break template matching under a server ``--root-path`` AND pick up a
+    ``Mount``'s prefix once the sub-app has run (``root_path`` is mutated as it
+    descends), collapsing the whole path dimension to ``__unrouted__``.
+
+    The label is ALWAYS a code literal (a matched route template, a declared
+    mount prefix, or a declared plain path) or the single constant
+    ``COMPUTE_UNROUTED``. NO substring of the request path is ever emitted, so
+    traffic can never add a path child — a stricter bound than the two-axis
+    request-derived split the sibling egress dimension needs.
+
+    A ``Mount`` is NEVER the serving template: its pattern is relative to the mount
+    and matches everything beneath it, so it would stand in for the whole
+    undeclared surface. The declared-prefix rule is the only route from a mount to
+    a label — enforced by the ``_routed_inside_a_mount`` guard below, so this does
+    not rest on the declared-prefix list being complete.
+    """
+    path = entry_path or ""
+    if path in _COMPUTE_DECLARED_PATHS:
+        return path
+    for prefix in _COMPUTE_DECLARED_PREFIXES:
+        # Boundary-aware, and NO dot-gate: ``/mcpfoo`` is not the ``/mcp`` class
+        # (the boundary check handles that), while a DOTTED sub-path
+        # (``/mcp/tools.json``) stays ``/mcp`` rather than silently folding to
+        # ``__unrouted__``. A traversal shape (``/mcp/../x``) also lands on the
+        # ``/mcp`` literal, which is bounded and not request-derived — an
+        # acceptable price for not losing a legitimate dotted sub-route.
+        if path == prefix or path.startswith(prefix + "/"):
+            return prefix
+    route = scope.get("route")
+    template = getattr(route, "path", None)
+    if (isinstance(template, str) and template
+            and not isinstance(route, Mount)
+            and not _routed_inside_a_mount(scope, path)
+            and _route_describes(route, path)):
+        return template
+    return _monitoring.COMPUTE_UNROUTED
+
+
+class ComputeAttributionMiddleware:
+    """Account server-side compute per org and route class (#4490).
+
+    Pure ASGI and cheap: two clock reads at entry, two at exit, one record per
+    response. No request/response objects, no buffering, no change to what is
+    sent, no I/O.
+
+    Primitives (bounds stated, not assumed):
+      * wall = ``time.perf_counter()`` — exact per-request seconds;
+      * CPU = ``time.thread_time()`` — the calling (event-loop) thread's user+sys
+        CPU. Exact for a request that ran alone; an UPPER bound under async
+        concurrency, where co-scheduled requests share the loop thread's CPU for
+        the same window; a LOWER bound where work is offloaded to a thread pool
+        (``asyncio.to_thread`` / sync endpoints), which this layer cannot see. A
+        cost signal, not a billing harness.
+
+    MEASUREMENT MUST NEVER BE A NEW FAILURE MODE: the whole record — including the
+    label derivation — is wrapped, and a fault is a DEBUG log, never a raised
+    request (the same fail-soft discipline as ``AnalyticsMiddleware`` and the
+    sibling egress wrapper).
+
+    WHAT IT DOES NOT COUNT, stated rather than assumed: work done outside the ASGI
+    stack (background tasks, the isolated offload pool); and it reads
+    ``scope["state"]["org_id"]`` AFTER the app returns, so an org resolved
+    mid-request is still attributed.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":  # lifespan/websocket are not requests
+            await self.app(scope, receive, send)
+            return
+        # ``get_route_path`` (path minus ``root_path``) taken BEFORE the app runs:
+        # a ``Mount`` mutates ``root_path`` as it descends, so the same call at
+        # response time would no longer name the arrival path.
+        entry_path = get_route_path(scope)
+        wall0 = time.perf_counter()
+        cpu0 = time.thread_time()
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            wall_s = time.perf_counter() - wall0
+            cpu_s = time.thread_time() - cpu0
+            state = scope.get("state")
+            org_id = state.get("org_id") if isinstance(state, dict) else None
+            try:
+                # Call-time attribute read (`_monitoring`), so the writer can be
+                # substituted; the record is never a new failure mode.
+                path_label = _compute_route_class(scope, entry_path)
+                _monitoring.record_compute(org_id, path_label, wall_s, cpu_s)
+            except Exception:
+                _logger.debug("compute attribution failed", exc_info=True)
+
+
+app.add_middleware(ComputeAttributionMiddleware)
+
+
 class InFlightMiddleware:
     """Count requests in flight for the opt-in loop-stall self-kill (#2850 P0).
 
@@ -2812,6 +3030,7 @@ class InFlightMiddleware:
             workload_exit()
 
 
+app.add_middleware(_EmbedMeteringMiddleware)
 app.add_middleware(InFlightMiddleware)
 
 
@@ -4874,6 +5093,15 @@ async def _session_user_org(request: Request, user: dict) -> dict:
     # auth_ip event or counted toward R3 read velocity). Same best-effort
     # semantics as the key lanes — abuse telemetry never breaks auth.
     await _abuse_post_auth(request, org)
+    # #4488: publish the resolved org on the ASGI scope, exactly as the key
+    # lanes do (``hosted_api.py`` get_current_org / _get_current_org_supabase).
+    # This lane resolves the org WITHOUT stamping it, so an embed tally armed by
+    # ``EmbedMeteringMiddleware`` had no org to attribute to at flush time: every
+    # SESSION-authed write that encoded (POST /v1/points, /v1/objects,
+    # /v1/subjects) was dropped AND misreported as a bookkeeping fault
+    # (UNMETERED_INCREMENT on a perfectly resolvable org). Setting it here —
+    # before the handler runs — makes the org resolvable at the boundary.
+    request.state.org_id = org["org_id"]
     return org
 
 
@@ -5143,6 +5371,24 @@ async def get_current_org_gated(request: Request) -> dict:
     override = overrides.get(get_current_org)
     if override is not None:
         org = await _invoke_override(override, request)
+        # #4488: publish the resolved org on the ASGI scope, exactly as the
+        # real lanes do (``get_current_org`` :3864, ``_get_current_org_
+        # supabase`` :3982, ``_session_user_org`` :4248). This branch resolves
+        # an org WITHOUT stamping it, and an embed tally armed by
+        # ``EmbedMeteringMiddleware`` resolves its org at FLUSH time from
+        # exactly this key — so an unattributed tally filed a SPURIOUS
+        # UNMETERED_INCREMENT operator alert ("no resolvable org … the ledger
+        # will read short") for a capture whose org was never in doubt.
+        # There are TWO such branches, not one: the same hole existed on
+        # ``get_current_org_session`` below, which guards the encoding write
+        # routes (POST /v1/objects, /v1/subjects, /v1/points) — so both are
+        # stamped. Neither is reachable in production (nothing outside tests
+        # sets ``dependency_overrides``), but a test-only hole that files real
+        # operator alerts is still a hole.
+        # ``.get`` not ``[]``: an override is test-supplied and may return a
+        # bare dict; a missing id must not turn a metering lookup into a 500.
+        if org.get("org_id"):
+            request.state.org_id = org["org_id"]
         return org
     return await get_current_org(request)
 
@@ -5324,6 +5570,14 @@ async def get_current_org_session(request: Request, gate_key_login: bool = True)
     override = overrides.get(get_current_org)
     if override is not None:
         org = await _invoke_override(override, request)
+        # #4488: publish here too — see the twin note on ``get_current_org_
+        # gated`` above. This branch guards the encoding WRITE routes
+        # (POST /v1/objects, /v1/subjects, /v1/points), so leaving it
+        # unpublishing kept the tally unattributable on exactly the routes the
+        # embed meter exists to measure. Guarded with ``.get`` for the same
+        # reason: an override may return a bare dict.
+        if org.get("org_id"):
+            request.state.org_id = org["org_id"]
         return org
     # Session JWT (eyJ...) — verify + resolve the user's org.
     user = await get_current_user(request)
@@ -5807,6 +6061,24 @@ class OrgInfoResponse(BaseModel):
     ask_tokens_in: int = 0
     ask_tokens_out: int = 0
     ask_cost_usd: float = 0.0
+    # #4488: per-org LOCAL EMBEDDING-ENCODE workload for the current period.
+    # WORKLOAD, not a price — nothing here can bill, cap or throttle (the
+    # issue's explicit out-of-scope list). Additive + defaulted, so every
+    # existing consumer of this response is unaffected; a fresh org reads
+    # zeros with a None identity (the MERGE creates the row on first write).
+    # ``embed_model``/``embed_revision`` travel WITH the figure so a reading
+    # can never be attributed to an encoder that did not run; a None identity
+    # with non-zero calls means the identity was never stamped.
+    embed_calls: int = 0
+    embed_texts: int = 0
+    embed_chars: int = 0
+    embed_wall_ms: float = 0.0
+    embed_skipped: int = 0
+    embed_model: str | None = None
+    embed_revision: str | None = None
+    #: Sticky: TRUE once two different encoder identities were seen in the
+    #: window. A figure that silently averaged two models would be unusable.
+    embed_identity_mixed: bool = False
 
 
 # ── Billing: Checkout + Portal request/response models (#310, Task 5) ───────
@@ -7203,8 +7475,14 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
             if body.about_object:
                 # #1643: ID-based edge (never the name-resolution path, which
                 # mints Subject stubs on miss — #334 class).
+                # #3586: `about_object` is an Object handle, so scope the
+                # resolution to the Object label — the label-agnostic union
+                # (id OR eventId across EVERY label) let a client-supplied
+                # value that is a Subject/Event id silently produce
+                # ``(Point)-[:aboutObject]->(Subject)`` (a wrong-label steal).
                 sdk._get_proj().create_about_edge(
-                    out["id"], body.about_object, "aboutObject")
+                    out["id"], body.about_object, "aboutObject",
+                    target_label="Object")
             return out
 
         result = await asyncio.to_thread(_write_point)
@@ -7518,8 +7796,18 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
     was not relevance-ranked (#160). FTS index on content/title/name/subject
     works without the embedding extra; vector joins in automatically when
     embeddings are available.
+
+    B6 (#3892): the read-path status contract is ADDITIVE and OFF BY DEFAULT.
+    When ``TORTOISE_READ_STATUS`` is truthy the response carries ``status`` —
+    ONE of the four recorded terms (``available`` / ``empty`` / ``degraded`` /
+    ``unconfigured``, see ``tortoise/read_status.py``) — so a store that could
+    not be reached is never served as a clean empty result. Unset/``0`` leaves
+    this response byte-identical.
     """
     _require_scope(org, "graphs:read", "search")
+    from tortoise.read_status import read_status_enabled as _read_status_enabled
+
+    status_out: dict | None = {} if _read_status_enabled() else None
     sdk = _data_sdk(org)
     try:
         # #1676 (launch capacity): tortoise_fts_query is CPU-blocking — the
@@ -7529,7 +7817,8 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
         # thread so concurrent searches overlap their encode/DB work (same
         # asyncio.to_thread pattern used throughout this file).
         results = await asyncio.to_thread(
-            sdk.tortoise_fts_query, q, limit=limit)
+            sdk.tortoise_fts_query, q, limit=limit,
+            read_status_out=status_out)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("search failed")
@@ -7545,7 +7834,12 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
         if "kind" not in props:
             props["kind"] = "statement"
         out.append(props)
-    return {"results": out, "count": len(out)}
+    response = {"results": out, "count": len(out)}
+    if status_out is not None:
+        # The SDK sets this on every return path; a missing term is a bug, not
+        # a reason to emit null under a vocabulary of exactly four terms.
+        response["status"] = status_out["status"]
+    return response
 
 
 @app.get("/v1/topics/{topic}/summary")
@@ -7663,14 +7957,26 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
                 org["org_id"], exc_info=True)
             max_nodes = None
 
-    # Metering (#681): fetch write-op usage for the current billing period.
-    from tortoise.metering import get_current_usage
-    usage = get_current_usage(org["org_id"])
+    # Metering: write-op usage for the current billing period (#681), ask usage
+    # (#1987 Task 6) and embedding-encode workload (#4488). All three are
+    # SYNCHRONOUS ledger/control-plane reads, and each was previously run
+    # straight on the event loop. #4488 added the third, which is the clearest
+    # possible reason to move the GROUP off the loop rather than add another
+    # blocking hop to a route that is also under a 10s transport bound
+    # (`mcp_auth.py`). ONE offloaded hop for all three — the figures then come
+    # from the same moment, and the route does strictly less blocking work than
+    # before this PR rather than more. Found in review.
+    #
+    # All three degrade internally to a zero view (never raising), so the
+    # best-effort contract is unchanged by where they run.
+    from tortoise.metering import get_ask_usage, get_current_usage, get_embedding_usage
 
-    # #1987 Task 6: ask usage — best-effort read; any failure degrades to
-    # the zero-usage view (never 500).
-    from tortoise.metering import get_ask_usage
-    ask_usage = get_ask_usage(org["org_id"])
+    def _read_usage():
+        oid = org["org_id"]
+        return (get_current_usage(oid), get_ask_usage(oid),
+                get_embedding_usage(oid))
+
+    usage, ask_usage, embed_usage = await asyncio.to_thread(_read_usage)
 
     return OrgInfoResponse(
         org_id=org["org_id"],
@@ -7708,6 +8014,20 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
         ask_tokens_in=ask_usage.get("ask_tokens_in", 0),
         ask_tokens_out=ask_usage.get("ask_tokens_out", 0),
         ask_cost_usd=ask_usage.get("ask_cost_usd", 0.0),
+        # #4488: embedding-encode workload for the current period. The read
+        # degrades to the zero view on failure (never 500); the identity
+        # fields are renderable so a person can read WHICH encoder produced
+        # the figure, and ``embed_identity_mixed`` says when it is not one
+        # encoder at all.
+        embed_calls=embed_usage.get("embed_calls", 0),
+        embed_texts=embed_usage.get("embed_texts", 0),
+        embed_chars=embed_usage.get("embed_chars", 0),
+        embed_wall_ms=embed_usage.get("embed_wall_ms", 0.0),
+        embed_skipped=embed_usage.get("embed_skipped", 0),
+        embed_model=embed_usage.get("embed_model"),
+        embed_revision=embed_usage.get("embed_revision"),
+        embed_identity_mixed=bool(
+            embed_usage.get("embed_identity_mixed", False)),
         # #1082 (PR1): anon flag drives the dashboard claim card — the shared
         # is_anon_org predicate (Supabase mode only; registry = False).
         anon=_org_is_anon(org["org_id"]),
@@ -23242,6 +23562,7 @@ def _next_onboarding_step(org_id: str, proj) -> str | None:
     return "done"
 
 
+@_embed_metered
 def _run_onboarding_seed(org_id: str, *, org_name: str | None = None,
                          person_name: str | None = None,
                          person_user_id: str | None = None,
@@ -23436,6 +23757,7 @@ async def onboarding_seed(body: OnboardingSeedRequest,
 # Subject + memberOf with a user-confirmed name. Both legs are REAL data;
 # nothing is ever invented or silently derived on the provisioning path.
 
+@_embed_metered
 def _run_starter_seed(org_id: str, *, org_name: str | None = None,
                       person_name: str | None = None,
                       person_user_id: str | None = None,
@@ -26223,6 +26545,7 @@ def _is_safe_branch(branch: object) -> bool:
     return bool(_SAFE_BRANCH_RE.match(branch))
 
 
+@_embed_metered
 async def _run_indexing(job_id: str, org_id: str, org: str,
                         repos: list[str] | None) -> None:
     """Background indexing job: GitHub issues/PRs → entities/events.
@@ -26593,6 +26916,7 @@ class DocsIndexRequest(BaseModel):
     branch: str | None = None  # default "main" (fetcher falls back to master)
 
 
+@_embed_metered
 async def _run_docs_indexing(job_id: str, org_id: str, org: str,
                              scopes: list[dict] | None) -> None:
     """Background docs-indexing job: GitHub docs/ → staged corpus →

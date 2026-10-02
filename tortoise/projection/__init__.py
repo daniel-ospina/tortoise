@@ -29,9 +29,100 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple, Protocol, runtime_checkable
 
-from tortoise.env_truthy import env_flag  # #4097: the declared truthy contract
+from tortoise.env_truthy import FALSY, env_flag  # #4097: the declared truthy contract
 
 logger = logging.getLogger(__name__)
+
+# ── #2969: bounded graph socket reads (env-tunable) ─────────────────────────
+# The server/Docker FalkorDB client MUST carry a bounded socket READ timeout:
+# a server-side stall (FalkorDB active-defrag loop / MERGE lock — #2969,
+# #2838) otherwise blocks the caller in ``recv()`` forever, and the run looks
+# alive (process present, 0% CPU) with no error, no log output and no way to
+# tell "stalled" from "slow".
+#
+# What is ALREADY true without this block: the host branch below resolves
+# ``_socket_timeouts()`` and passes it, so the docker lane was bounded in
+# practice at the product defaults — 10s read / 2s connect
+# (``_DB_SOCKET_TIMEOUT_DEFAULT`` / ``_DB_CONNECT_TIMEOUT_DEFAULT``).
+# redis-py imposes nothing of its own here: measured on the pinned
+# `redis 7.4.1`, `Connection().socket_timeout` is ALREADY `None`, and
+# ``falkordb.FalkorDB.__init__`` defaults ``socket_timeout=None`` and passes it
+# explicitly — its historical 5s default is gone from this path either way.
+#
+# What this block ADDS is a PER-LANE override of those product defaults, so a
+# lane can raise its read bound without changing the product's. The longmem
+# eval lane raises it to 120s for its legitimately long ingest writes (see
+# ``tools/longmem_eval/stall_guard.py``). An operator can tune either knob:
+#
+#   TORTOISE_DB_SOCKET_TIMEOUT          seconds (default: the product read
+#                                       bound — 10s)
+#   TORTOISE_DB_SOCKET_CONNECT_TIMEOUT  seconds (default: the product connect
+#                                       bound — 2s)
+#
+# ``none`` / ``off`` / ``false`` / ``0`` / any number ≤ 0 disables the bound —
+# an explicit, documented opt-out for a workload whose reads legitimately
+# exceed any fixed budget (NOT recommended: it restores the unbounded-hang
+# failure mode). Above ``_DB_TIMEOUT_MAX_PER_LANE_S`` the knob fails loud
+# rather than clamping.
+_SOCKET_TIMEOUT_ENV = "TORTOISE_DB_SOCKET_TIMEOUT"
+_SOCKET_CONNECT_TIMEOUT_ENV = "TORTOISE_DB_SOCKET_CONNECT_TIMEOUT"
+# NOTE: there is deliberately no `_DEFAULT_SOCKET*` mirror here. Such a pair
+# existed and was dead — nothing in production read them — and the connect one
+# named 5.0 while the client's real connect default is
+# `_DB_CONNECT_TIMEOUT_DEFAULT` = 2.0 (see `_socket_timeouts`), so it advertised
+# a value the product never used. Assert against the real defaults instead.
+# #4097: this knob's "off" spellings come from the DECLARED contract
+# (`FALSY`), so an operator who reaches for `false` is not meeting a second
+# vocabulary. `none` is this knob's own spelling (a timeout is absent, not
+# false), and the numeric equivalents `0.0`/`-1` are below — keeping all three
+# here means the whole accepted set is readable in one place.
+_SOCKET_TIMEOUT_UNBOUNDED = FALSY | {"none", "0.0", "-1"}
+
+
+def _resolve_socket_timeout(name: str, default: float) -> float | None:
+    """Parse a seconds-valued socket-timeout knob (env > default).
+
+    Unset/blank → ``default``. ``none`` or any declared falsy spelling
+    (``off``/``no``/``false``/``0``), or any number ≤ 0 (the numeric off forms
+    ``0.0``/``-1``) → ``None`` (unbounded — the explicit opt-out). A value
+    below ``_DB_TIMEOUT_MIN_S`` falls back to ``default`` (see that constant).
+    A non-numeric, non-finite or above-``_DB_TIMEOUT_MAX_PER_LANE_S`` value
+    raises ``ValueError``: a typo must fail loud at connection time, never
+    silently leave the client effectively unbounded (``inf``/``1e30`` would).
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    token = raw.strip().lower()
+    if token in _SOCKET_TIMEOUT_UNBOUNDED:
+        return None
+    try:
+        value = float(token)
+    except ValueError:
+        raise ValueError(
+            f"{name}={raw!r} is not a number of seconds (use e.g. '120', "
+            f"or 'none' to disable the bound)") from None
+    if not math.isfinite(value):
+        raise ValueError(
+            f"{name}={raw!r} is not a finite number of seconds (inf/nan "
+            f"would leave the client unbounded; use 'none' to opt out "
+            f"explicitly)")
+    if value > _DB_TIMEOUT_MAX_PER_LANE_S:
+        raise ValueError(
+            f"{name}={raw!r} exceeds the {_DB_TIMEOUT_MAX_PER_LANE_S:g}s "
+            f"ceiling for this knob — above it the value is a typo, not a "
+            f"request (see _DB_TIMEOUT_MAX_PER_LANE_S)")
+    if value <= 0:
+        return None
+    if value < _DB_TIMEOUT_MIN_S:
+        # The same "finite but absurd" class the PRODUCT knob floors (#3350
+        # round-4): ``float()`` accepts ``1e-9``, which turns every FalkorDB
+        # operation into an instant timeout — a typo-induced total outage.
+        # Fall back to the default, exactly as ``_socket_timeouts()`` does.
+        # The absent CEILING on this knob is deliberate (the eval lane needs
+        # 120s); the absent FLOOR was not.
+        return default
+    return value
 
 
 def _embedded_aof_enabled() -> bool:
@@ -96,6 +187,17 @@ _DB_TIMEOUT_MAX_S = 60.0
 #: (fail-closed, so not #2850, but the same "finite but absurd" class floored
 #: for the health-probe interval). Below the floor we fall back to the default.
 _DB_TIMEOUT_MIN_S = 0.05
+#: Ceiling on the #2969 PER-LANE knob (``TORTOISE_DB_SOCKET_TIMEOUT`` /
+#: ``TORTOISE_DB_SOCKET_CONNECT_TIMEOUT``). The PRODUCT knob clamps at
+#: ``_DB_TIMEOUT_MAX_S`` (60s), but this knob exists so the eval lane can ask
+#: for its ``DEFAULT_EVAL_SOCKET_TIMEOUT_S`` (120s) — so it needs HEADROOM
+#: above that, not no ceiling at all. Beyond this a read bound stops being a
+#: bound, and it is the same "finite but absurd" class as the floor:
+#: ``sock.settimeout(1e30)`` raises ``OverflowError``, which redis-py does NOT
+#: catch (``except OSError`` only), so the client can never connect AND the
+#: failure is not retryable. Fails loud rather than clamping, per this knob's
+#: own typo contract (a silent clamp would hide the typo that caused it).
+_DB_TIMEOUT_MAX_PER_LANE_S = 600.0
 
 #: #3350: explicit, bounded retry policy for the EMBEDDED client.
 #:
@@ -3420,9 +3522,39 @@ class FalkorProjection(
         elif host is not None:
             # Docker FalkorDB
             from falkordb import FalkorDB  # ponytail: lazy import, only needed for Docker mode
+            # Resolved at CONNECTION time so an env knob covers every CONSUMER
+            # of this client (SDK sessions, ingest, hosted) — NOT every
+            # FalkorDB client even in `tortoise/`: `session_indexer.py`,
+            # `backup.py` and the probe in `__main__.py` construct their own,
+            # and neither knob reaches them. ACTUAL
+            # precedence: #2969's per-lane TORTOISE_DB_SOCKET_CONNECT_TIMEOUT /
+            # TORTOISE_DB_SOCKET_TIMEOUT (fail-loud, explicit none/off/0
+            # opt-out) WINS whenever it is set; #2850's product-wide
+            # `_socket_timeouts()` (TORTOISE_FALKORDB_CONNECT_TIMEOUT_S /
+            # _SOCKET_TIMEOUT_S) only supplies the DEFAULT, read when the
+            # per-lane var is unset. So the product knob is live for a bare
+            # SDK / hosted construction, but DEAD on the `--db` eval lane:
+            # `tools/longmem_eval/run.py::run_main` UNCONDITIONALLY presets the
+            # per-lane var to `DEFAULT_EVAL_SOCKET_TIMEOUT_S` (120s) when the
+            # operator has not set it, so the per-lane var is always set
+            # there. That 120s is deliberate headroom for a loaded/defragging
+            # server, NOT a size-derived bound (#2969) — measured on the pinned
+            # default split, the largest single graph write is ~76 KB, so the
+            # eval's DATA fits the product 10s; the point is that a healthy
+            # long write must not be cut off. It is NOT
+            # clamped by `_DB_TIMEOUT_MAX_S` (60s) — the per-lane parser has its
+            # OWN ceiling, `_DB_TIMEOUT_MAX_PER_LANE_S` (600s), deliberately set
+            # above the eval's 120s so the product's tighter bound is not
+            # re-imposed here; above 600s the knob fails loud. Only an explicit
+            # none/off/false/0 (or any non-positive number) removes the bound
+            # entirely — the block-forever mode #2850 exists to PREVENT, reachable
+            # only through that opt-out.
             connect_to, read_to = _socket_timeouts()
             self.db = FalkorDB(host=host, port=port, username=username, password=password,
-                               socket_connect_timeout=connect_to, socket_timeout=read_to,
+                               socket_connect_timeout=_resolve_socket_timeout(
+                                   _SOCKET_CONNECT_TIMEOUT_ENV, connect_to),
+                               socket_timeout=_resolve_socket_timeout(
+                                   _SOCKET_TIMEOUT_ENV, read_to),
                                ssl=ssl)
             # Epic #1647 (cycle-3 P0-1): record the host ON THE PROJECTION so
             # wipe_server/session sweep/tripwire read it instead of the raw
