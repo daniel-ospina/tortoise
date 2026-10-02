@@ -213,6 +213,12 @@ surfaces:
   # is named in SOURCE_PATTERNS["api"], so a VALIDATOR-only edit selects `api` and runs
   # this proof; `core` is the docs/default surface for the registries it guards.
   - test_registry_integrity.py
+  # #3875: the tenant REST surface is a THIRD surface — #3863's approval rule never
+  # reached it, because hosted_api.py imports neither TOOL_REGISTRY nor HTTP_ALLOWED.
+  # Both API modules it enumerates select `api`. It fails closed BOTH ways: a live
+  # route absent from config/rest-surface-inventory.yml, and a declared route with no
+  # live route. Measured while writing it: 7 routes were added while #3875 sat open.
+  - test_rest_surface_inventory.py
   - test_cimd_ssrf.py  # #2847: CIMD SSRF control set (URL/host validation, DNS-rebinding pin, redirects, caps, cache, rate limit)
   - test_claim_endpoints.py
   - test_user_identity_authority.py
@@ -814,6 +820,14 @@ surfaces:
   # it. Same reason as `test_boot_regressions.py` above. Hermetic (embedded DB per
   # test, no URI).
   - test_source_version_references_5199.py
+  # #3875: DUAL-REGISTERED with `api`, for the SAME reason as the #3154/#4367
+  # precedents above. The check enumerates `@app.*` from tortoise/hosted_api.py
+  # and tortoise/selfhost_api.py (both select `api`), but the declaration it
+  # reads is `config/rest-surface-inventory.yml` — and `config/*` falls through to
+  # `core`, NOT to `api`. Registered in `api` ALONE, an inventory-only edit would
+  # select `core` and run no guard at all on the file whose whole purpose is
+  # being checked. That is the #3154 silent-drop shape exactly.
+  - test_rest_surface_inventory.py
   # #5199 read half: the note is actually READABLE — the SDK provenance reader
   # (`get_provenance_chain`) reports it per link. `tortoise/search_engine.py`
   # selects this surface too, so the wiring's guard runs with the code it guards.
@@ -2822,6 +2836,7 @@ durations:
   test_reaper.py: 195.9  # unmeasured
   test_reaper_orphan.py: 0.1  # unmeasured
   test_redis_guard.py: 0.5  # unmeasured
+  test_rest_surface_inventory.py: 4.8  # unmeasured (new file, #3875 — no CI junit yet)
   test_resume_gate_parity.py: 0.1  # unmeasured
   test_sdk.py: 7.9  # unmeasured
   test_sdk_group3.py: 2.7  # unmeasured
