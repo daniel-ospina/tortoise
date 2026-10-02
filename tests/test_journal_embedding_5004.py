@@ -24,13 +24,19 @@ a model change is a RECORDED decision point, never a silent re-encode.
 SCOPE — an EXPLICIT exemption, field by field (not class by class)
 ------------------------------------------------------------------
 The **`PointRevised`** path is deliberately NOT covered here. Measured on the
-base tree: live ``update_point(content=...)`` does not change the node's vector
-at all, while the replay's ``_revise_point`` re-encodes — the divergence runs
-the OTHER way and its root is the LIVE writer, not the journal. That is the
+original base tree: live ``update_point(content=...)`` did not change the node's
+vector at all, while the replay's ``_revise_point`` re-encodes — the divergence
+ran the OTHER way and its root is the LIVE writer, not the journal. That is the
 content-edit-staleness class (#4206 / #4208 / #4302), which #5004 itself lists
-as *related, not duplicate*. This module does not claim coverage of it; the
-last test below PINS the exemption so it cannot be mistaken for a gap nobody
-noticed.
+as *related, not duplicate*.
+
+**#4208 has since fixed the LIVE content-edit arm**: ``update_point(content=…)``
+now re-encodes (and wipes on an unavailable embedder), so live == rebuild. This
+module STILL does not claim the revise path: its embedding is *re-encoded by the
+writer*, not restored from the journal, and the remaining unclaimed shape is the
+CALLER-supplied vector on a revise (live writes it and the record carries it,
+but the replay re-encodes — **#5046**). The test below PINS the residual
+exemption so it cannot be mistaken for a gap nobody noticed.
 
 Run (docker lane):
   TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' \\
@@ -536,36 +542,45 @@ def test_identity_keys_cannot_be_set_through_props(tmp_path):
 # ── 8. the declared exemption, pinned so it cannot be mistaken for coverage ─
 
 def test_revise_path_is_explicitly_out_of_scope_for_5004(sup):
-    """#5004 does NOT cover `PointRevised` — pin BOTH shapes, don't hide it.
+    """#5004 does NOT cover `PointRevised` — pin the residual shape.
 
-    TWO shapes live on this path and #5004 covers NEITHER:
+    TWO shapes lived on this path; only ONE is still an exemption:
 
-    1. **Content edit** (measured here): live ``update_point(content=...)``
-       leaves the vector UNCHANGED, while the replay's ``_revise_point``
-       re-encodes — so the divergence runs the other way and its root is the
-       LIVE writer, not the journal (#4206/#4208/#4302). This is the shape
-       #5004's own text lists as *related, not duplicate*.
+    1. **Content edit** — FIXED by **#4208**. Live ``update_point(content=…)``
+       now re-encodes from the new content (and wipes the vector when the
+       embedder is unavailable, mirroring `_revise_point`'s own `except … =
+       None`), so live == rebuild. The re-encoded vector is DERIVED and is
+       stripped from the record exactly like `content_hash`, because the
+       replay re-encodes from `new_content`. This half is now a POSITIVE pin:
+       it fails if the fix is reverted.
     2. **Caller-supplied vector** (``update_point(id, embedding=[...])``): live
        writes the caller's vector AND the record carries it, but the replay
-       ignores it and re-encodes. Here the journal is SUFFICIENT and is simply
-       not read — shape 1's rationale ("the root is the live writer") does not
-       reach it. Verified present on `origin/main`; filed as **#5046**.
+       ignores it and re-encodes. The journal is SUFFICIENT and simply not
+       read — shape 1's rationale ("the root is the live writer") does not
+       reach it. STILL an exemption, filed as **#5046**.
 
-    This test records the state #5004 leaves behind so a later lane sees it was
-    deliberate. When those issues land, this pin must be INVERTED, not deleted.
+    When #5046 lands, INVERT the second half too, not delete it.
     """
     events, sdk = sup
     pid = sdk.create_point("statement", "original").get("id")
     v_created = _vector(sdk, pid)
+    assert v_created is not None
 
     with mock.patch(_EMBED_PATCH, _embed_a):
         sdk.update_point(pid, content="a substantially longer replacement")
-    assert _vector(sdk, pid) == v_created, (
-        "exemption premise changed: live update_point now recomputes the "
-        "vector — revisit whether #5004 must extend to PointRevised"
+    # #4208: the vector now moves WITH the content — the old pin (
+    # `assert _vector(...) == v_created`) recorded the defect.
+    v_edited = _vector(sdk, pid)
+    assert v_edited != v_created, (
+        "#4208 regression: live update_point(content=…) left the vector STALE"
+    )
+    assert v_edited == _embed_a("a substantially longer replacement"), (
+        "the re-encoded vector must come from the NEW content"
     )
 
-    # And no vector is journalled on the content-edit revise record itself.
+    # The re-encoded vector stays OFF the record (DERIVED, like content_hash):
+    # the replay re-encodes from `new_content`, so a copy would be dead weight
+    # and a false presence-is-ownership claim under #5004.
     revises = [e for e in _events(events) if e.get("type") == "PointRevised"]
     assert revises, "expected a PointRevised record"
     assert all("embedding" not in (e.get("point") or {})

@@ -460,6 +460,16 @@ def integrity_problems(manifest_text: str) -> list[str]:
     here and surface later, with no diagnosis, as a red `python-ci-gate` with
     zero test failures.
 
+    ⛔ The list is HAND-MAINTAINED, so it can drift out of that parity
+    silently, and the drift is directional: this is the PRE-WRITE gate of
+    `refresh_durations`, the sole writer of `config/ci-surfaces.yml:durations`,
+    so a term omitted here lets the weekly refresh open a PR carrying a
+    manifest the REQUIRED `manifest-integrity` check immediately reds. #6145
+    caught exactly that for `watchdog_headroom_issues` and
+    `duplicate_entries`. `tests/test_ci_timing.py` pins the headroom term by
+    name and the CLI's rc on the clean and skewed manifests; the rest of the
+    composition is a review duty at the two call sites.
+
     Repo-scoped: `cs.integrity` walks this repo's `tests/` and the matrix
     checks read `python-ci.yml`, so this is defined only over this repo's own
     manifest — the refresh's only production target.
@@ -489,7 +499,8 @@ def integrity_problems(manifest_text: str) -> list[str]:
         red = [*red, stamp_issue]
     problems = (cs.integrity(manifest)
                 + cs.slow_file_issues(manifest)
-                + red)
+                + red
+                + cs.watchdog_headroom_issues(manifest))
     wf_issues = cs.workflow_matrix_issues(cs.WORKFLOW, manifest)
     problems += wf_issues
     if not wf_issues:
