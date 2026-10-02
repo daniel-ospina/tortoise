@@ -216,7 +216,7 @@ exactly like a live defect unless the report says which tree it came from.
 
 Every finding therefore carries **one machine-produced line**:
 
-```
+```text
 Measured at: <ref-label>@<40-hex-sha> on <YYYY-MM-DD>
 ```
 
