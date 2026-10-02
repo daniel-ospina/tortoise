@@ -354,10 +354,23 @@ def _raise_message(node: ast.Raise) -> ast.expr | None:
 
     An int argument is an exit CODE, not a message: `SystemExit(3)` carries no
     text, so a guard that raised only a code would tell the operator nothing
-    about the floor, the interpreter they got, or the invocation that works —
-    the unattributed failure #5128 was filed for. Only a string-yielding
-    expression counts (an f-string is a `JoinedStr`, not a `Constant`); a bare
-    name is accepted because it cannot be resolved statically.
+    about the floor, the interpreter they got, or the invocation that works --
+    the unattributed failure #5128 was filed for.
+
+    Precisely what is rejected: a NON-STRING `ast.Constant` (`SystemExit(3)`,
+    `SystemExit(None)`, `SystemExit(3.5)`). String expressions are accepted (an
+    f-string is a `JoinedStr`, not a `Constant`) as is a bare name, which cannot
+    be resolved statically. Every OTHER expression node is accepted too -- a
+    negative literal parses as `UnaryOp` rather than `Constant`, and a call or a
+    container has no knowable value from the AST alone.
+
+    That residual is deliberate, not overlooked. The BEHAVIOURAL half of this
+    harness proves the message actually reaches the operator, so a guard raising
+    a bare code is caught there whatever its AST shape (`str(SystemExit(-1))` is
+    `"-1"`, which fails the floor and interpreter assertions). This detector
+    deliberately does not try to duplicate that by guessing at expression values;
+    it rejects the cheap, common case as defence in depth and leaves the rest to
+    the check that can actually decide it.
     """
     exc = node.exc
     if not (
