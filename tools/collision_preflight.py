@@ -1536,6 +1536,109 @@ def closing_reference(text: str, issue: int) -> bool:
 
 # ── git surfaces ─────────────────────────────────────────────────────────────
 
+# ── #6622: a RECORD of work is not a WORKER ─────────────────────────────────
+# Both gates below exist because a blocking surface was counting a *record* as a
+# holder, and exit 1 is a hard "do not dispatch" in every enforcement site
+# (epic-executor, issue-workflow, executing-plans, subagent-driven-development).
+# So a record of work that no longer exists blocked the item INDEFINITELY: the
+# lane is told somebody holds it, takes the next item, and nobody ever picks
+# this one up. The measured instances (2026-09-29) were two worktree
+# directories that did not exist and a `.worktrees/` entry with no index.
+#
+# ⛔ THE SURFACES ARE MADE EVIDENCE-AWARE, NOT DELETED. `[local worktrees]`
+# prevents REAL duplicate work (#2985 vs #3005), so removing it would be the
+# over-correction the issue warns against. The defect is narrower: the surface
+# could not tell a record from a worker.
+#
+# ⚠️ The asymmetry is deliberate, and matches this tool's stated posture — a
+# missed duplicate is worse than a false alarm. Only conditions that make work
+# IMPOSSIBLE downgrade a hit (`exists=no`, `index=no`, a remote that is not a
+# configured remote). Recency is REPORTED (`age=`) but never applied: an agent
+# editing files makes no git call, so a live worktree's index mtime goes stale
+# while it still holds the work, and that false-negative direction is the
+# dangerous one.
+
+
+def _remote_tracking_remote(refname: str) -> str | None:
+    """The `<remote>` of `refs/remotes/<remote>/…`, else None (e.g. `origin`).
+
+    A ref outside `refs/remotes/` is not remote-tracking-shaped at all.
+    """
+    prefix = "refs/remotes/"
+    if not refname.startswith(prefix):
+        return None
+    rest = refname[len(prefix):]
+    remote, sep, _tail = rest.partition("/")
+    return remote if sep and remote else None
+
+
+def _configured_remotes(git_bin: str, repo: str, timeout: float) -> set[str] | None:
+    """Names from `git remote`, or None when the list could not be read.
+
+    ⛔ THIS IS THE DISCRIMINATOR BETWEEN A BRANCH AND A CACHE KEY (#6622). A
+    `refs/remotes/<name>/…` ref is a remote-tracking BRANCH only when `<name>`
+    is a CONFIGURED remote — one whose refspec actually populates that
+    namespace. Any other namespace is a one-shot fetch TARGET:
+    `git fetch <url> refs/pull/N/head:refs/remotes/pr/N` writes a ref whose name
+    is the CACHE KEY. Measured on this repo (2026-10-02): `origin` is the only
+    configured remote (`+refs/heads/*:refs/remotes/origin/*`), while
+    `refs/remotes/pr/*` holds 2,810 refs named `pr/1 … pr/2810` — every one a PR
+    number and not one of them a branch name. `refs/remotes/pr/3354` was
+    reported as a blocking holder for #3354.
+
+    None is fail-CLOSED: an unreadable remote list leaves every ref blocking,
+    exactly as before this change.
+    """
+    try:
+        rc, out, _err, timed_out = _run([git_bin, "remote"], repo, timeout)
+    except Exception:  # pragma: no cover - _run raises only on programmer error
+        return None
+    if rc != 0 or timed_out:
+        return None
+    return {line.strip() for line in out.splitlines() if line.strip()}
+
+
+def _fetch_cache_remote(
+    refname: str, configured_remotes: set[str] | None,
+) -> str | None:
+    """The non-configured remote namespace of a fetch-cache ref, else None.
+
+    Returns the namespace only when the ref IS remote-tracking-shaped and its
+    remote is NOT configured. None (the blocking answer) is returned when the
+    ref is a local branch, when its remote IS configured, and when the remote
+    list was unreadable — so every uncertain case stays exactly as strict as it
+    was.
+    """
+    if configured_remotes is None:
+        return None
+    remote = _remote_tracking_remote(refname)
+    if remote is None or remote in configured_remotes:
+        return None
+    return remote
+
+
+def _worktree_liveness(path: str) -> tuple[bool, str]:
+    """(can this registered record still hold work?, the basis, rendered).
+
+    `exists=no` and `index=no` are EVIDENCE, not heuristics: a directory that is
+    not on disk cannot contain a worker, and a directory with no `.git` has no
+    index, so no lane can be mid-task in it. The age is always reported, so a
+    false hold is visible at a glance instead of having to be re-derived by hand.
+    """
+    if not path:
+        return False, "exists=no (record carries no path)"
+    if not os.path.isdir(path):
+        return False, "exists=no (registered directory is not on disk)"
+    marker = os.path.join(path, ".git")
+    if not os.path.exists(marker):
+        return False, "index=no (no .git: the worktree has no index)"
+    try:
+        age_hours = max(0.0, (time.time() - os.path.getmtime(marker)) / 3600.0)
+    except OSError:
+        return True, "exists=yes index=yes age=unreadable"
+    return True, f"exists=yes index=yes age={age_hours:.1f}h"
+
+
 def _git_refs(
     git_bin: str, repo: str, namespace: str, timeout: float,
 ) -> list[tuple[str, str]]:
@@ -1841,6 +1944,7 @@ def scan_branch_surface(
     identity: Identity, merged_head_shas: set[str],
     ancestor_merged: set[str] | None, main_tip: str | None,
     first_parent: set[str] | None,
+    configured_remotes: set[str] | None = None,
 ) -> None:
     """NUMBER matching only — the lexical arm is gone (#3504).
 
@@ -1879,6 +1983,24 @@ def scan_branch_surface(
             surface.add(
                 ref,
                 f"branch is {terminal} — immutable history, not in-flight work "
+                "(non-blocking)",
+                "weak",
+            )
+            continue
+        # #6622: a fetch-cache ref names a CACHE KEY, not a holder. A
+        # `refs/remotes/<name>/…` ref whose `<name>` is not a configured remote
+        # was written by a one-shot `git fetch <url> …:refs/remotes/<name>/N`.
+        # This is the tool's OWN stated model of that surface — its note says a
+        # remote-tracking ref "is a local fetch cache", and
+        # `_branch_terminal_state` already refuses to judge one — so counting it
+        # as a strong holder contradicted the model the surface documents.
+        cache_remote = _fetch_cache_remote(ref, configured_remotes)
+        if cache_remote is not None:
+            surface.add(
+                ref,
+                f"fetch-cache ref (refs/remotes/{cache_remote}/…, and "
+                f"'{cache_remote}' is not a configured remote) — a cache KEY "
+                "written by a one-shot git fetch, not a branch a lane holds "
                 "(non-blocking)",
                 "weak",
             )
@@ -2035,7 +2157,21 @@ def scan_worktree_surface(
                 "weak",
             )
             continue
-        surface.add(label, f"matched issue-number ({issue})", "strong")
+        # #6622: a RECORD is not a WORKER. A registered worktree whose directory
+        # is gone, or which has no index, cannot contain a lane that is
+        # mid-task — so it is reported with its EVIDENCE and cannot block. The
+        # branch was checked first (above), so a live BRANCH that names this
+        # issue still blocks even when the worktree record is dead (#3611).
+        live, basis = _worktree_liveness(path)
+        if not live:
+            surface.add(
+                label,
+                f"matched issue-number ({issue}) but {basis} — a record that "
+                "cannot be live work (non-blocking)",
+                "weak",
+            )
+            continue
+        surface.add(label, f"matched issue-number ({issue}) ({basis})", "strong")
 
 
 # ── GitHub surfaces ──────────────────────────────────────────────────────────
@@ -3216,6 +3352,12 @@ def run_preflight(
     first_parent: set[str] | None = None
     if target.path is not None:
         first_parent = _first_parent_shas(git_bin, cwd, timeout)
+    # #6622: read the CONFIGURED remotes once (ONE `git remote` call). Only a
+    # configured remote can own a remote-tracking BRANCH; every other
+    # `refs/remotes/<name>/…` namespace is a one-shot fetch TARGET, so its refs
+    # are cache keys rather than holders. None (unreadable) leaves all refs
+    # blocking, which is the pre-existing behaviour.
+    configured_remotes = _configured_remotes(git_bin, cwd, timeout)
     for surface_name, namespace in (
         (SURFACE_LOCAL_BRANCHES, "refs/heads"),
         (SURFACE_REMOTE_BRANCHES, "refs/remotes"),
@@ -3252,6 +3394,7 @@ def run_preflight(
             scan_branch_surface(
                 surface, refs, issue, identity, merged_head_shas,
                 ancestor_merged, main_tip, first_parent,
+                configured_remotes=configured_remotes,
             )
             surface.note = f"{len(refs)} ref(s) enumerated"
             if namespace != "refs/heads":

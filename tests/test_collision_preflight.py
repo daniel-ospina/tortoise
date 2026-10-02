@@ -11,6 +11,11 @@ Coverage:
   * CLEAN: no hits on any surface -> exit 0, VERDICT: CLEAN
   * one stubbed/real HIT per hit-capable surface -> exit != 0, surface named
   * UNTRUNCATED worktree scan: a hit that a `tail -8` window would hide is found
+  * #6622 a RECORD is not a WORKER: a registered worktree whose directory is
+    gone, or which has no index, is reported with its basis (`exists=` /
+    `index=` / `age=`) and CANNOT block; a `refs/remotes/<name>/…` ref whose
+    `<name>` is not a CONFIGURED remote is a fetch-cache KEY, not a holder,
+    while a ref under a configured remote (`origin`) still blocks
   * number boundary: `3061` does NOT match `30610` (no fabricated collision)
   * PR-body PROSE is not a collision: a closed PR body that merely
     cross-references `#N` (the live #2926/#2754 shapes) is WEAK/non-blocking ->
@@ -1565,6 +1570,100 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("000-w3061-hit", out)
         # 1 main worktree + 1 hit + 8 fillers = 10, all enumerated.
         self.assertIn("10 worktree(s) enumerated (untruncated)", out)
+
+    # ── #6622: a RECORD of work is not a WORKER ─────────────────────────────
+
+    def test_unconfigured_remote_namespace_is_a_fetch_cache_not_a_holder(self):
+        # #6622 case 3. `git fetch <url> refs/pull/N/head:refs/remotes/pr/N`
+        # writes a ref whose name is the CACHE KEY, and `pr` is not a configured
+        # remote in this fixture (only `origin` is), so `refs/remotes/pr/3061`
+        # records that the PR head was FETCHED — not that a lane holds the work.
+        # Measured on the real repo: `refs/remotes/pr/*` holds 2,810 refs named
+        # `pr/1 … pr/2810`, every one a PR number. This was a STRONG blocking
+        # hit even though the surface's own note says a remote-tracking ref "is
+        # a local fetch cache" and `_branch_terminal_state` refuses to judge one.
+        _git(self.repo, "update-ref", f"refs/remotes/pr/{ISSUE}", "HEAD")
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertNotIn("do NOT dispatch", out)
+        # The ref WAS present, so the green verdict is not a fixture artefact.
+        self.assertIn(f"refs/remotes/pr/{ISSUE}", out)
+        self.assertIn("fetch-cache ref", out)
+        self.assertIn("not a configured remote", out)
+
+    def test_a_configured_remotes_branch_still_blocks(self):
+        # CONTROL for the test above, and the guard rail the issue says NOT to
+        # delete: `origin` IS a configured remote
+        # (`+refs/heads/*:refs/remotes/origin/*`), so a ref there is a real
+        # remote-tracking BRANCH and must keep blocking. Widening the fix to
+        # "any refs/remotes/* ref is a cache" would be a fail-OPEN on a blocking
+        # surface — the dangerous direction.
+        _git(self.repo, "update-ref",
+             f"refs/remotes/origin/fix/{ISSUE}-configured-control", "HEAD")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn(f"refs/remotes/origin/fix/{ISSUE}-configured-control", out)
+
+    def test_an_unreadable_remote_list_leaves_a_fetch_cache_ref_blocking(self):
+        # FAIL-CLOSED unit pin. `_configured_remotes` answers None when `git
+        # remote` cannot be read, and `_fetch_cache_remote` must then answer None
+        # — the BLOCKING answer. A change that read an unreadable list as "no
+        # configured remotes, so every ref is a cache" would convert every remote
+        # hit into a false CLEAN.
+        mod = _tool_module()
+        self.assertIsNone(
+            mod._fetch_cache_remote(f"refs/remotes/pr/{ISSUE}", None))
+        self.assertEqual(
+            mod._fetch_cache_remote(f"refs/remotes/pr/{ISSUE}", {"origin"}), "pr")
+        self.assertIsNone(mod._fetch_cache_remote(
+            f"refs/remotes/origin/fix/{ISSUE}", {"origin"}))
+        # A LOCAL branch is not remote-tracking-shaped at all.
+        self.assertIsNone(
+            mod._fetch_cache_remote(f"refs/heads/fix/{ISSUE}", {"origin"}))
+
+    def test_a_registered_worktree_whose_directory_is_gone_does_not_block(self):
+        # #6622 case 1. `git worktree add` registers the record; removing the
+        # directory does NOT deregister it (a `git worktree list --porcelain` on
+        # the real repo still prints a path that is not on disk). A directory
+        # that is not on disk cannot contain a lane that is mid-task, so the
+        # record must not block — otherwise the item is dropped from the queue
+        # for nobody, which is the whole defect.
+        path = self.add_worktree(f"{ISSUE}-dead-record")
+        rc, out = self.run_tool()          # control: while ALIVE it must block
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn(f"{ISSUE}-dead-record", out)
+        shutil.rmtree(path)
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn(f"{ISSUE}-dead-record", out)
+        self.assertIn("exists=no", out)
+        self.assertIn("cannot be live work", out)
+
+    def test_a_worktree_without_an_index_does_not_block(self):
+        # #6622 case 2: `.worktrees/review-6269` existed but had no index, so it
+        # was a leftover record rather than a worker.
+        path = self.add_worktree(f"{ISSUE}-no-index")
+        (path / ".git").unlink()
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("index=no", out)
+        self.assertIn("cannot be live work", out)
+
+    def test_a_live_worktree_still_blocks_and_reports_its_basis(self):
+        # The guard rail: a LIVE worktree is a real competing claim and must
+        # keep blocking. It now carries its EVIDENCE, so a false hold is visible
+        # at a glance instead of having to be re-derived by hand.
+        self.add_worktree(f"{ISSUE}-live")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("[local worktrees]", out)
+        self.assertIn("exists=yes index=yes age=", out)
 
     def test_issue_assignee_hit(self):
         self.gh_fixtures(issue=self.issue_payload(assignees=("other-agent",)))
