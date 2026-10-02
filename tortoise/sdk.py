@@ -39,6 +39,11 @@ from typing import Any
 
 from .domain_loader import known_kinds, register_kind
 from .cross_lens import DEFAULT_THRESHOLD
+# #3301: the canonical OBJECT terminal vocabulary — the SAME set the four
+# search legs exclude by default. Imported here so recall_state's Object
+# filter never re-literals it (a copy is how the read surface drifts from
+# search).
+from .commit_ops import OBJECT_TERMINAL_STATUSES as _OBJECT_TERMINAL_STATUSES
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
@@ -15383,9 +15388,15 @@ class TortoiseSDK:
         entity_type: 'point' (default), 'event', 'subject', 'document', 'object', 'operator', or 'source'.
         Full-scan mode: omit query, set kind → all Points of that kind.
         Best-match mode: provide query → RRF fusion of FTS + vector + structural.
-        include_terminal (#1391): default False — terminal-status Points
-        (retracted, superseded, outdated, archived) are excluded from the
-        BASE retrieval; pass True to surface them (audit/history queries).
+        include_terminal (#1391, #3301): default False — terminal-status
+        nodes are excluded from the BASE retrieval. For Points that is
+        ``live.TERMINAL_EXCLUDED_STATUSES`` (retracted, superseded, outdated,
+        archived, deprecated); for Objects it is the canonical OBJECT
+        vocabulary (superseded, deprecated, archived, retracted — no
+        ``outdated`` flag, which no Object writer sets). Pass
+        True to surface them (audit/history queries); a prior/resolution leg
+        that must still SEE a terminal node (link-before-create, anchor
+        resolution) opts in here too.
 
         pool_size: EXACT per-strategy retrieval depth override (benchmark/tests).
         Precedence: pool_size > TORTOISE_POOL_FLOOR env > the baked floor
@@ -16490,7 +16501,12 @@ class TortoiseSDK:
             anchor_rows = run_fts_query(
                 proj.g, query, entity_type="object",
                 limit=_ENTITY_ANCHOR_CANDIDATES,
-                keep_numeric=keep_numeric)
+                keep_numeric=keep_numeric,
+                # #3301: anchor RESOLUTION only — these ids/names are never
+                # surfaced to a caller, so terminal Objects must stay
+                # resolvable as anchors (the assembly-resolver principle);
+                # only the surfaced search legs hide them by default.
+                excluded_statuses=())
         except Exception:
             _logger.warning(
                 "C2 anchor resolution failed — keeping the original fts "
@@ -16907,6 +16923,7 @@ class TortoiseSDK:
         object_results = (
             self.tortoise_fts_query(
                 query, kind=kind, entity_type="object", limit=pool,
+                include_terminal=include_superseded,
                 leg_trace=leg_trace)
             if object_centric else []
         )
@@ -16915,9 +16932,12 @@ class TortoiseSDK:
         # from the state view unless include_superseded brings them back).
         objects = [dict(r, entity_type="object") for r in object_results]
         if not include_superseded:
+            # #3301: ONE canonical OBJECT vocabulary — the same set
+            # ``search_engine._status_vocab_for("Object")`` feeds the four
+            # search legs. Never re-literal it here.
             objects = [o for o in objects
-                       if (o.get("status") or "") not in
-                       ("superseded", "deprecated", "archived", "retracted")]
+                       if (o.get("status") or "")
+                       not in _OBJECT_TERMINAL_STATUSES]
 
         # UC1 state view: hide mitigation bookkeeping points (they are
         # surfaced ATTACHED to results as context, not standalone claims —
