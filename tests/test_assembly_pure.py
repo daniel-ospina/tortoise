@@ -685,8 +685,12 @@ def test_resolver_fts_window_grows_past_excluded_rows():
         def _get_proj(self):
             return _Proj()
 
-        def tortoise_fts_query(self, term, *, entity_type, limit):
+        def tortoise_fts_query(self, term, *, entity_type, limit,
+                               include_terminal=False):
             assert entity_type == "object"
+            # #3301: the resolver reads the terminal-INCLUSIVE view so its
+            # own narrower exclusion stays the only filter on this leg.
+            assert include_terminal is True
             return ranking[:limit]
 
     from tortoise.assembly import docker_resolver_port
@@ -694,7 +698,8 @@ def test_resolver_fts_window_grows_past_excluded_rows():
     # the raw SDK window at limit=8 is fully consumed by excluded rows
     assert all(h["status"] == "retracted"
                for h in _StubSDK().tortoise_fts_query(
-                   "widget", entity_type="object", limit=8))
+                   "widget", entity_type="object", limit=8,
+                   include_terminal=True))
     assert port.fts_objects("widget", 8) == [{"id": "obj-live",
                                                "name": "widget"}]
 
@@ -725,7 +730,10 @@ def test_resolver_fts_absent_status_is_not_live():
         def _get_proj(self):
             return _Proj()
 
-        def tortoise_fts_query(self, term, *, entity_type, limit):
+        def tortoise_fts_query(self, term, *, entity_type, limit,
+                               include_terminal=False):
+            # #3301: the resolver reads the terminal-INCLUSIVE view
+            assert include_terminal is True
             # the degraded payload: no `status` key at all
             return [{"id": "obj-retracted", "content": "couch", "kind": ""}]
 
@@ -1050,9 +1058,12 @@ def test_resolver_docker_fts_window_survives_retracted_crowd(
     port = docker_resolver_port(_docker_sdk)
 
     # PRECONDITION (fails loudly if the ranking ever stops crowding): the
-    # excluded rows occupy the ENTIRE raw SDK window
+    # excluded rows occupy the ENTIRE raw SDK window. #3301: read the SAME
+    # terminal-INCLUSIVE view the resolver's FTS leg reads — the default SDK
+    # view now excludes retracted Objects at the query layer, so the crowd
+    # only exists on the view the resolver actually asks for.
     raw = _docker_sdk.tortoise_fts_query("widget", entity_type="object",
-                                         limit=8)
+                                         limit=8, include_terminal=True)
     assert raw and all((h.get("status") or "") in {"retracted"}
                        for h in raw), [h.get("content") for h in raw]
 
