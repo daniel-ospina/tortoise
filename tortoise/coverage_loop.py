@@ -221,7 +221,11 @@ def facet_census(proj: Any, query: str, *,
         anchor_rows = run_fts_query(
             proj.g, query, entity_type="object",
             limit=_ENTITY_ANCHOR_CANDIDATES,
-            keep_numeric=keep_numeric)
+            keep_numeric=keep_numeric,
+            # #3301: anchor RESOLUTION only — the census harvests names,
+            # never surfaces these Objects, so terminal Objects stay
+            # resolvable (the assembly-resolver principle).
+            excluded_statuses=())
     except Exception:  # noqa: BLE001, RUF100
         logger.warning(
             "C3-1 facet census anchor resolution failed — loop no-ops "

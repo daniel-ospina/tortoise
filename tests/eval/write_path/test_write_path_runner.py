@@ -456,7 +456,7 @@ def test_run_rejects_config_posture_contradicting_env(tmp_path, monkeypatch):
     # llm lane's receipt must NOT carry the m2 structural excuse. On the
     # pre-fix code this assertion fails, so it gates the fix at zero added
     # bench cost.
-    assert "m2 echo lane has no relation extraction" not in "\n".join(
+    assert "m2 echo lane has no product relation extraction" not in "\n".join(
         report.get("notes", []))
 
 
@@ -478,11 +478,12 @@ def test_run_notes_vacuous_quote_fidelity_and_untracked_cost(tmp_path, monkeypat
 
 
 def test_operator_audit_m2_clause_is_posture_scoped():
-    """#2552 honesty: the m2-echo-lane caveat ("no relation extraction, so
-    0 is structural there") must appear ONLY in an m2-lane report. On the llm
-    lane a 0 is a behavioural signal; printing the structural excuse in that
-    receipt frames the behavioural result as a non-result in the very
-    artifact a reader consults (the pre-fix behaviour, reported on #2552).
+    """#2552/#4807 honesty: the m2-echo-lane caveat ("no product relation
+    extraction, so its edge score is not comparable with the llm lane's") must
+    appear ONLY in an m2-lane report. On the llm lane a 0 is a behavioural
+    signal; printing the structural excuse in that receipt frames the
+    behavioural result as a non-result in the very artifact a reader consults
+    (the pre-fix behaviour, reported on #2552).
 
     Pure posture-gate check — no bench run, no graph.
     """
@@ -493,27 +494,29 @@ def test_operator_audit_m2_clause_is_posture_scoped():
     llm_text = "\n".join(llm_notes)
     assert "operator-edge audit (#2514): 0/4" in llm_text
     assert "operator persistence (#2552): 10/10" in llm_text
-    assert "m2 echo lane has no relation extraction" not in llm_text
+    assert "m2 echo lane has no product relation extraction" not in llm_text
 
     m2_text = "\n".join(runner.operator_audit_notes(audit, "m2"))
-    assert "m2 echo lane has no relation extraction" in m2_text
+    assert "m2 echo lane has no product relation extraction" in m2_text
     # The persistence assertion rides BOTH lanes (write-path property).
     assert "operator persistence (#2552): 10/10" in m2_text
 
-    # EXACT-STRING goldens. The m2 note is byte-identical to the pre-refactor
-    # wording at the same call site — the wording the committed m2 receipt's
-    # note is built from (its numbers differ, `2/15` vs `0/4` here; the wording
-    # does not). That is the property that makes this refactor safe on the
-    # blessed lane, and a substring assert cannot hold it (both separator
-    # defects found while rebasing passed every substring assert).
+    # EXACT-STRING goldens. The m2 note's prose is DERIVED — no hardcoded `0`
+    # and no "no relation extraction" claim (#4807) — and pinned
+    # character-for-character: a substring assert cannot hold the wording (both
+    # separator defects found while rebasing #4806 passed every substring
+    # assert). The committed m2 receipt keeps the OLD text; no test reads the
+    # receipts and no baseline carries `notes`, so the source change reaches no
+    # hashed surface (#4807 verification).
     m2 = runner.operator_audit_notes(audit, "m2")
     llm = runner.operator_audit_notes(audit, "llm")
     assert m2[0] == (
         "operator-edge audit (#2514): 0/4 planted operator edges graded "
         "edge_correct (audit dimension only — not yet a gated metric); "
-        "the m2 echo lane has no relation extraction, so 0 is structural "
-        "there, never a bar. #2552: endpoint anchors + mitigation reasons "
-        "grade verbatim-first with the #2405-style paraphrase band — a "
+        "the m2 echo lane has no product relation extraction, so its "
+        "edge score is not comparable with the llm lane's and is never a "
+        "bar. #2552: endpoint anchors + mitigation reasons grade "
+        "verbatim-first with the #2405-style paraphrase band — a "
         "correctly wired edge whose endpoint claim was distilled still "
         "grades edge_correct"
     )
@@ -546,6 +549,34 @@ def test_operator_audit_m2_clause_is_posture_scoped():
     assert not any("operator-edge audit" in n for n in empty)
     assert any("operator persistence (#2552)" in n for n in empty)
     assert runner.operator_audit_notes(None, "llm") == []
+
+
+def test_operator_audit_m2_note_agrees_with_any_numerator():
+    """#4807: the m2 note's prose is DERIVED from the interpolated
+    ``{edge_correct}/{planted}`` numerator, so it must stay true for ANY value
+    — including the 2/15 the committed receipt grades, and any future m2 lane
+    beyond it. The pre-fix text hardcoded "so 0 is structural there" three
+    words after the number, so 2/15 printed as a self-contradiction.
+
+    Two independent properties, both pinned over the whole numerator range:
+      * the printed numerator matches the audit it was built from, and
+      * no constant-"0" structural clause and no "no relation extraction"
+        mechanism claim survives at any numerator (the false half that a
+        number-only fix would have left standing).
+    """
+    den = 15
+    for num in (0, 1, 2, 7, 15):
+        note = runner.operator_audit_notes(
+            {"planted": den, "edge_correct": num, "content_ok": 1,
+             "operators_total": 1, "operators_provenanced": 1}, "m2")[0]
+        assert f"{num}/{den} planted operator edges" in note
+        assert "0 is structural" not in note
+        assert "so 0" not in note
+        # The false mechanism cannot reappear: "has no relation extraction" is
+        # NOT a substring of the corrected "has no product relation
+        # extraction".
+        assert "has no relation extraction" not in note
+        assert "has no product relation extraction" in note
 
 
 def test_cli_protocol_bless_repins_judge_bump(tmp_path):
@@ -704,7 +735,7 @@ def test_run_carries_operator_edge_audit_dimension(tmp_path, monkeypatch):
     # the call-site half of the posture gate: without it, a call site passing
     # the wrong posture leaves every other test green while the blessed m2
     # receipt silently loses its caveat — the property this assertion protects.
-    assert "m2 echo lane has no relation extraction" in notes
+    assert "m2 echo lane has no product relation extraction" in notes
     # Per-session detail rides the owning session's result (the cross-session
     # SUPERSEDE is owned by wp07; its to-anchor lives in wp06's memory layer).
     owned_by = {

@@ -39,6 +39,11 @@ from typing import Any
 
 from .domain_loader import known_kinds, register_kind
 from .cross_lens import DEFAULT_THRESHOLD
+# #3301: the canonical OBJECT terminal vocabulary — the SAME set the four
+# search legs exclude by default. Imported here so recall_state's Object
+# filter never re-literals it (a copy is how the read surface drifts from
+# search).
+from .commit_ops import OBJECT_TERMINAL_STATUSES as _OBJECT_TERMINAL_STATUSES
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
@@ -595,9 +600,19 @@ def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
     lines: list[str] = []
     n_sentences = 0
     for turn in conversation:
-        raw_role = turn.get("role")
-        role = raw_role if isinstance(raw_role, str) else (
-            "unknown" if raw_role is None else str(raw_role))
+        # The ONE role-normalization funnel (#5445): a second, inline copy here
+        # was redundant, and removing it fixed NOTHING on its own — the deleted
+        # form was semantically identical to `_normalize_turn_role` for every
+        # input (#5445 review round 12). What actually protects this sink is the
+        # SCRUB: the caller hands in a role that already passed `redact_secrets`
+        # at `_redact_turn_contents`, the one chokepoint. Do not read this funnel
+        # as the protection — deleting the scrub while keeping the normalization
+        # would reopen the sink.
+        #
+        # On the capture path the conversation handed in is already role-scrubbed
+        # (``_materialize_session_source`` passes ``_redact_turn_contents``'s
+        # output), so this consumes the redacted role rather than re-scrubbing.
+        role = _normalize_turn_role(turn.get("role"))
         speaker = role.title()
         if not re.match(r"^[A-Z][\w .'-]{0,40}$", speaker):
             # non-word roles (123, dict str, weird casing) still extract under
@@ -642,13 +657,37 @@ def _capture_turn_window(
     loop and the extraction call so the LLM never sees a phrase with no home
     in any stored turn (stored-source parity, #721). Content coercion matches
     the store loop: None -> '', truthy non-strings -> str() (isinstance-first,
-    #721). Idempotent when the caller already truncated."""
+    #721). The ROLE is coerced with ``_normalize_turn_role`` and capped the same
+    way (#5445/#5775), so the scanned and the persisted role are the same bytes
+    and a non-string role cannot skip the bound. Idempotent when the caller
+    already truncated."""
     out: list[dict] = []
     for turn in conversation:
         t = dict(turn)
         raw = t.get("content")
         content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
         t["content"] = content[:cap]
+        # ⛔ The ROLE is capped here too (#5445 review round 12). It is persisted as
+        # text by the same frame AND scrubbed by ``_redact_turn_contents``, so a
+        # client-controlled role was the one scan on this path the cap did not
+        # reach: ``redact_secrets`` ran over the WHOLE role (measured ~2.7 s for a
+        # 500,000-char role, and ``cap`` changed nothing), and the module's own
+        # "``cap`` bounds the text scanned per turn" claim was false for it. Capping
+        # at the window keeps the scanned and the persisted role the SAME bytes.
+        #
+        # ⛔ COERCE BEFORE THE CAP (#5775). The guard here was
+        # ``isinstance(t.get("role"), str)``, so a NON-STRING role skipped the cap
+        # ENTIRELY while the downstream ``_redact_turn_contents`` still normalized
+        # it with ``str()`` and scanned the whole thing. It is reachable from
+        # untrusted input: the hosted model types ``conversation: list[dict]`` with
+        # no inner validation, so ``role`` can be any JSON type. A one-element list
+        # of a 1,000,000-char string stringifies to 1,000,004 chars and cost a
+        # measured ~0.7-3.8 s of scanning PER REQUEST, against ~0.002 s for a
+        # same-length STRING role (which the cap did cut). ``_normalize_turn_role``
+        # is the SAME normalization every consumer already applies to this value
+        # (None -> "unknown", any non-str -> ``str()``), so coercing before the cap
+        # changes no downstream output and makes the bound total.
+        t["role"] = _normalize_turn_role(t.get("role"))[:cap]
         out.append(t)
     return out
 
@@ -714,8 +753,9 @@ def _redact_turn_contents(
     """The ONE place capture text is scrubbed of credentials (#4911).
 
     Returns a copy of ``conversation`` whose turns carry a scrubbed
-    ``content``, plus the per-kind counts. Every capture consumer derives its
-    text from this — the stored turn text (``_capture_turn_texts``), the session
+    ``content`` AND a scrubbed ``role``, plus the per-kind counts. Every capture
+    consumer derives its text from this — the stored turn text
+    (``_capture_turn_texts``), the session
     ``:Source`` metadata (``_materialize_session_source``) and the extraction
     transcript (``_extract_session_llm`` / ``_extract_session_v2``) — so the
     control sits at the single point where a message becomes persisted or
@@ -736,6 +776,20 @@ def _redact_turn_contents(
     be stringified by a downstream consumer (the session ``:Source`` does exactly
     that with ``str()``). A turn with no match is returned as the SAME object, so
     nothing else about a stored shape moves.
+
+    ⛔ The sibling ``role`` is scrubbed HERE too (#5445). It is caller-controlled
+    (the hosted model takes ``conversation: list[dict]`` with no role validation)
+    and the capture path persists it as TEXT through three sinks — the
+    ``f"[{role}] {content}"`` stored turn, ``:Point.speaker`` and the session
+    ``:Source`` transcript (``_session_llm_transcript`` uses the role as the
+    speaker label). A credential placed in ``role`` therefore reached the graph
+    while the receipt reported zero. The role is scrubbed, not replaced with a
+    placeholder, because there is no canonical role enum in the capture contract
+    — the codebase and its own tests use ``developer``, ``toolResult``,
+    ``robot`` and ``agent`` — so a whitelist would silently rewrite legitimate
+    labels, i.e. over-redact ordinary text. The role scrub runs through this same
+    chokepoint (one ``redact_secrets`` owner, per the #4911 control-site rule)
+    and its counts join the same total.
 
     ``cap`` bounds the text scanned per turn. The turn store already caps, so
     callers there pass nothing; the session-``:Source``/extractor consumers get
@@ -763,14 +817,40 @@ def _redact_turn_contents(
     for turn in conversation:
         raw = turn.get("content")
         content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
+        # #5472: emptiness is judged on the PRE-cut content. Judging it after
+        # the cut made ``cap=0`` (which cuts any non-empty string to "") take
+        # the genuinely-empty branch below and append the ORIGINAL, untruncated
+        # turn — a cap that does not cap.
+        had_content = bool(content)
         cut = False
         if cap is not None and len(content) > cap:
             content = content[:cap]
             cut = True
-        if not content:
-            out.append(turn)
+        # #5445: the role is caller-controlled and persisted as text by three
+        # sinks, so it is coerced and scrubbed through this same chokepoint. The
+        # cap applies to it as well — ``_capture_turn_window`` already truncated a
+        # string role, and re-applying here keeps the bound true for callers that
+        # pass a raw conversation with an explicit ``cap``.
+        role = _normalize_turn_role(turn.get("role"))
+        if cap is not None and len(role) > cap:
+            role = role[:cap]
+        scrubbed_role, role_counts = redact_secrets(role)
+        if not had_content:
+            # Genuinely-empty content: nothing in the body to scan. The role is
+            # still caller-controlled, so it is scrubbed here too; the turn is
+            # copied only when that changed.
+            for kind, n in role_counts.items():
+                totals[kind] = totals.get(kind, 0) + n
+            if role_counts:
+                out.append({**turn, "role": scrubbed_role})
+            else:
+                out.append(turn)
             continue
         scrubbed, counts = redact_secrets(content)
+        if role_counts:
+            counts = {**counts}
+            for kind, n in role_counts.items():
+                counts[kind] = counts.get(kind, 0) + n
         for kind, n in counts.items():
             totals[kind] = totals.get(kind, 0) + n
         # ⛔ TWO and only two reasons to emit a new object, and the second one is
@@ -780,7 +860,11 @@ def _redact_turn_contents(
         # the ``_commit_session_v2`` call site meant a credential past the cap
         # was rendered into the extractor prompt and sent to the provider.
         if counts or cut:
-            out.append({**turn, "content": scrubbed})
+            if role_counts:
+                out.append({**turn, "content": scrubbed,
+                            "role": scrubbed_role})
+            else:
+                out.append({**turn, "content": scrubbed})
         else:
             out.append(turn)
     return out, totals
@@ -799,7 +883,12 @@ def _redact_summary_strings(obj, _depth: int = 0):
     never mutated.
 
     ⛔ KEYS are scrubbed too: ``json.dumps`` renders keys into the prompt, so an
-    unscrubbed key is the same leak in a different position. (If two keys
+    unscrubbed key is the same leak in a different position. Every key is passed
+    through this function recursively, so a ``str`` key is redacted and a tuple
+    key's ``str`` elements are redacted with it (a key that is neither a ``str``
+    nor a container of them — e.g. ``bytes`` — is passed through, but such a key
+    is not JSON-renderable: ``json.dumps`` raises ``TypeError`` before emitting
+    any key, so it cannot carry a credential into the prompt). (If two keys
     redact to the same marker the later one wins — a duplicate key is not a
     summary shape, and the alternative is a leak.)
 
@@ -807,16 +896,26 @@ def _redact_summary_strings(obj, _depth: int = 0):
     ``commit_session``, where a cyclic or very deep ``summary=`` previously
     reached ``construct_graph``, whose ``json.dumps`` raised ``ValueError`` and
     was swallowed (degraded, no crash). Unbounded recursion turned that into an
-    unhandled ``RecursionError`` on a public method. Past the guard the object
-    is returned as-is — the deepest shapes are not commit summaries, and the
-    caller's own credential is the only thing that could be hiding there.
+    unhandled ``RecursionError`` on a public method.
+
+    ⛔ ...and it must FAIL CLOSED (#5446). The original guard returned the
+    subtree VERBATIM past depth 64, so a credential nested deeper than 64 levels
+    was rendered into the commit prompt (``json.dumps``) and POSTed unbounded.
+    Past the bound a ``str`` leaf is still scrubbed (cheap at any depth) and a
+    container is replaced by a visible marker. The trade-off is deliberate:
+    a pathological deep summary is not a commit shape, so beyond the bound the
+    subtree is COLLAPSED (legible, ``[REDACTED:depth]``) rather than silently
+    omitted or returned raw. The recursion never passes depth 65, so the
+    no-crash property the guard exists for still holds.
     """
     if _depth > 64:
-        return obj
+        if isinstance(obj, str):
+            return redact_secrets(obj)[0]
+        return "[REDACTED:depth]"
     if isinstance(obj, str):
         return redact_secrets(obj)[0]
     if isinstance(obj, dict):
-        return {(k if not isinstance(k, str) else _redact_summary_strings(k)):
+        return {_redact_summary_strings(k):
                 _redact_summary_strings(v, _depth + 1) for k, v in obj.items()}
     if isinstance(obj, list):
         return [_redact_summary_strings(v, _depth + 1) for v in obj]
@@ -863,6 +962,18 @@ def _capture_turn_texts_with_redactions(
     texts: list[str] = []
     for turn in redacted:
         role = _normalize_turn_role(turn.get("role"))
+        # ⛔ NEUTRALIZE THE FRAMING DELIMITERS IN THE ROLE (#5445 review). The
+        # frame is ``[<role>] <body>`` and ``<role>`` is caller-controlled, so a
+        # role containing ``]`` ends the frame early. That is not hypothetical:
+        # the #5445 role scrub WRITES one — a role holding a credential becomes
+        # ``[REDACTED:github_token]``, and the stored text is
+        # ``[[REDACTED:github_token]] please review…``. The reader's inverse
+        # (``_CAPTURE_ROLE_PREFIX``, ``^\[([^\]]*)\]\s*``) then parses the
+        # speaker as ``[REDACTED:github_token`` — dropping the closing bracket —
+        # and hands the BODY a stray ``] ``, so ``:Point.speaker`` and the turn
+        # the read path serves are both corrupted on the exact path this cluster
+        # fixes. Brackets are rewritten in the ROLE only; the body is untouched.
+        role = role.replace("[", "(").replace("]", ")")
         raw = turn.get("content")
         content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
         texts.append(f"[{role}] {content[:_CAPTURE_TURN_CAP]}")
@@ -909,7 +1020,14 @@ def _capture_turn_texts(windowed: list[dict]) -> list[str]:
 #: anything comparing a stored turn against a served one must go through the
 #: inverse — comparing the raw string never matches (#4675). One definition so
 #: the writer's format and the reader's split cannot drift.
-_CAPTURE_ROLE_PREFIX = re.compile(r"^\[([^\]]+)\]\s*")
+_CAPTURE_ROLE_PREFIX = re.compile(r"^\[([^\]]*)\]\s*")
+#: ⛔ ``*``, not ``+`` (review round 12). A role can be EMPTY: ``_normalize_turn_role``
+#: passes ``""`` through, the writer emits the frame ``"[] <body>"``, and a ``+``
+#: quantifier refuses to match it — so the inverse returned the WHOLE string as the
+#: body (``("unknown", "[] hello world")``) and the served turn was corrupted with a
+#: stray ``[] `` prefix. That is the same corruption class round 11 closed for a role
+#: containing a bracket, on the one remaining way a role can break the frame. An empty
+#: role is recovered verbatim as ``""``, so writer and reader stay consistent.
 
 
 def _capture_turn_role_text(stored: str) -> tuple[str, str]:
@@ -1198,7 +1316,7 @@ def _write_capture_turns(
         turn_embs = [None] * len(turn_texts)
     turn_rows: list[dict] = []
     turn_hashes: list[str] = []
-    for i, turn in enumerate(windowed):
+    for i, _turn in enumerate(windowed):
         text = turn_texts[i]
         text_hash = _content_hash(text)
         turn_hashes.append(text_hash)
@@ -1206,11 +1324,13 @@ def _write_capture_turns(
             "id": f"{session_id}_t{i}",
             "c": text,
             "k": "event",
-            # `_normalize_turn_role` is the isinstance-first pattern (#721):
-            # None -> "unknown", truthy non-strings -> str() — a raw
-            # non-string stored as `speaker` contradicts the ontology row and
-            # a dict role could fail the write mid-batch.
-            "speaker": _normalize_turn_role(turn.get("role")),
+            # #5445: derived from the SCRUBBED stored text, not from the raw
+            # ``turn["role"]`` — the role is caller-controlled and the `role`
+            # sink must inherit `_redact_turn_contents`'s scrub. Going through
+            # the reader's own inverse (`_capture_turn_role_text`) also makes
+            # the stored `speaker` agree with what `get_session_detail` serves
+            # for the same row (#4675 parity).
+            "speaker": _capture_turn_role_text(text)[0],
             "s": "draft",
             "ch": text_hash,
             "emb": turn_embs[i],
@@ -1271,7 +1391,7 @@ def _write_capture_turns(
         # fold tombstones (the wrong meaning for a removal).
         sdk._emit_event("PointRetracted", {"id": tid})
         sdk._journal_entity_mutation("Point", tid, "delete")
-    for i, turn in enumerate(windowed):
+    for i, _turn in enumerate(windowed):
         turn_id = f"{session_id}_t{i}"
         created_at, status, stored_emb = stored.get(turn_id, (None, None, None))
         # #5004: the turn's vector WAS stored live (`turn_embs[i]` is the `emb`
@@ -1291,7 +1411,8 @@ def _write_capture_turns(
             "id": turn_id,
             "content": turn_texts[i],
             "pointKind": "event",
-            "speaker": _normalize_turn_role(turn.get("role")),
+            # #5445: the redacted role (see the turn_rows write above).
+            "speaker": _capture_turn_role_text(turn_texts[i])[0],
             "is_episodic": True,
             "status": status if status is not None else "draft",
             "createdAt": created_at if created_at is not None else now,
@@ -1701,8 +1822,10 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
             "'contains_session' is a server-managed capture field and cannot "
             "be set via props."
         )
-    # #1486 (code-review P1): is_episodic is the points-quota discriminator
-    # (quota.py counts only `is_episodic IS NULL OR = false` points). A tenant
+    # #1486 (code-review P1): is_episodic is the POINT-arm discriminator of the
+    # points quota — quota.py counts `is_episodic IS NULL OR = false` points, and
+    # since #1911 it ALSO counts Object/Subject nodes unconditionally, so the
+    # resource is no longer Points alone (#1975). For Points, a tenant
     # setting it true via props would exclude their points from the quota —
     # unlimited points past the paid-tier cap. Server-managed: internal
     # capture/extractor callers set it via the explicit `is_episodic` kwarg on
@@ -15385,9 +15508,15 @@ class TortoiseSDK:
         entity_type: 'point' (default), 'event', 'subject', 'document', 'object', 'operator', or 'source'.
         Full-scan mode: omit query, set kind → all Points of that kind.
         Best-match mode: provide query → RRF fusion of FTS + vector + structural.
-        include_terminal (#1391): default False — terminal-status Points
-        (retracted, superseded, outdated, archived) are excluded from the
-        BASE retrieval; pass True to surface them (audit/history queries).
+        include_terminal (#1391, #3301): default False — terminal-status
+        nodes are excluded from the BASE retrieval. For Points that is
+        ``live.TERMINAL_EXCLUDED_STATUSES`` (retracted, superseded, outdated,
+        archived, deprecated); for Objects it is the canonical OBJECT
+        vocabulary (superseded, deprecated, archived, retracted — no
+        ``outdated`` flag, which no Object writer sets). Pass
+        True to surface them (audit/history queries); a prior/resolution leg
+        that must still SEE a terminal node (link-before-create, anchor
+        resolution) opts in here too.
 
         pool_size: EXACT per-strategy retrieval depth override (benchmark/tests).
         Precedence: pool_size > TORTOISE_POOL_FLOOR env > the baked floor
@@ -16583,7 +16712,12 @@ class TortoiseSDK:
             anchor_rows = run_fts_query(
                 proj.g, query, entity_type="object",
                 limit=_ENTITY_ANCHOR_CANDIDATES,
-                keep_numeric=keep_numeric)
+                keep_numeric=keep_numeric,
+                # #3301: anchor RESOLUTION only — these ids/names are never
+                # surfaced to a caller, so terminal Objects must stay
+                # resolvable as anchors (the assembly-resolver principle);
+                # only the surfaced search legs hide them by default.
+                excluded_statuses=())
         except Exception:
             _logger.warning(
                 "C2 anchor resolution failed — keeping the original fts "
@@ -17009,6 +17143,7 @@ class TortoiseSDK:
         object_results = (
             self.tortoise_fts_query(
                 query, kind=kind, entity_type="object", limit=pool,
+                include_terminal=include_superseded,
                 leg_trace=leg_trace,
                 read_status_out=_object_status)
             if object_centric else []
@@ -17018,9 +17153,12 @@ class TortoiseSDK:
         # from the state view unless include_superseded brings them back).
         objects = [dict(r, entity_type="object") for r in object_results]
         if not include_superseded:
+            # #3301: ONE canonical OBJECT vocabulary — the same set
+            # ``search_engine._status_vocab_for("Object")`` feeds the four
+            # search legs. Never re-literal it here.
             objects = [o for o in objects
-                       if (o.get("status") or "") not in
-                       ("superseded", "deprecated", "archived", "retracted")]
+                       if (o.get("status") or "")
+                       not in _OBJECT_TERMINAL_STATUSES]
 
         # UC1 state view: hide mitigation bookkeeping points (they are
         # surfaced ATTACHED to results as context, not standalone claims —
