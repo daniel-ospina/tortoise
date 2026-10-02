@@ -1020,20 +1020,26 @@ def test_docs_only_edit_of_the_generated_doc_is_guarded_by_the_docs_job() -> Non
         "a bare `next(...)` lookup would accept the decoy"
     )
     step = matching[0]
-    assert "if" not in step, (
-        "the drift step must be unconditional — a step-level `if` is the #4454 "
-        "hole in a new shape"
+    # The step may carry ONLY `name` and `run`. Enumerating silencing keys one by
+    # one leaves the next open: `if:`/`continue-on-error:` skip a real failure,
+    # `shell:` swallows its exit code, `working-directory:` can point at a stub
+    # `tools/` tree, and `env:` (a PATH shim) shadows `python3` so the real
+    # `--check` never runs. A key-set assertion closes the family (measured GREEN
+    # on the enumerated form against a step-level `env: {PATH: ...}` shim).
+    assert set(step) == {"name", "run"}, (
+        f"the drift step may carry only `name` and `run`; found {sorted(step)}. "
+        "Any other key is a silencing vector (#2656)"
     )
-    assert not step.get("continue-on-error"), (
-        "the drift step must not be continue-on-error: a failed check would "
-        "report success and this required context would go green (#2656)"
-    )
-    assert not step.get("shell"), (
-        "the drift step must not override `shell:` — that can swallow the exit code"
-    )
-    assert not step.get("working-directory"), (
-        "the drift step must not set `working-directory:` — a stub tools/ tree "
-        "under another directory would let the `--check`s pass vacuously"
+    for scope, label in ((ci, "ci.yml"), (docs_job, "the docs job")):
+        _run_defaults = (scope.get("defaults") or {}).get("run") or {}
+        for key in ("shell", "working-directory"):
+            assert not _run_defaults.get(key), (
+                f"a `defaults.run.{key}` on {label} can swallow the drift check's "
+                "exit code or run it against a stub tree (#2656)"
+            )
+    assert not docs_job.get("env"), (
+        "the `docs` job must not carry `env:` — a PATH shim would shadow the "
+        "interpreter and the `--check`s would never run (#2656)"
     )
     # THE INVOCATION IS EXACT, as the ci.yml pin asserts and as the sibling
     # required gates already enforce (tests/test_ci_selection.py:3055 —

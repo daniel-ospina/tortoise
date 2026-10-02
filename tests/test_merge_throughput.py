@@ -3981,33 +3981,30 @@ def test_docs_job_guards_tracked_generated_artifacts_on_every_pr():
         "`--check` commands — no shell operator, no wrapper, no trailing "
         f"anything, or a real failure reports green (#2656); got {code!r}"
     )
-    # Unconditional and UNSILENCEABLE, like the #2656 gate in python-ci.yml. A
-    # step-level `if:` skips the guard entirely; `continue-on-error` lets a
-    # FAILING check report success, so this required context goes green with the
-    # artifact stale — the #4454 outcome with the step still present. Both are
-    # checked for the #2656 gate at tests/test_ci_selection.py:3022; the shape is
-    # the same, so the rule is too. `shell`/`working-directory` are the same
-    # family: either can swallow the exit code or run a stub copy of the tools.
-    assert "if" not in step, (
-        "the drift step must be unconditional — a step-level `if` would make the "
-        "guard skippable"
-    )
-    assert not step.get("continue-on-error"), (
-        "the drift step must not be continue-on-error: a failed check would "
-        "report success and this required context would go green (#2656)"
-    )
-    assert not step.get("shell"), (
-        "the drift step must not override `shell:` — that can swallow the exit code"
-    )
-    assert not step.get("working-directory"), (
-        "the drift step must not set `working-directory:` — a stub tools/ tree "
-        "under another directory would let the `--check`s pass vacuously"
+    # The step may carry ONLY `name` and `run`. Enumerating the silencing keys
+    # one by one leaves the next one open: `if:`/`continue-on-error:` skip a real
+    # failure, `shell:` swallows its exit code, `working-directory:` can point at
+    # a stub `tools/` tree, and `env:` (e.g. a PATH shim) shadows `python3` so the
+    # real `--check` never runs. A key-set assertion closes the family instead of
+    # the instance — measured GREEN on the enumerated form: a step-level
+    # `env: {PATH: ...}` shim, and a job-level `defaults.run.working-directory`.
+    assert set(step) == {"name", "run"}, (
+        f"the drift step may carry only `name` and `run`; found {sorted(step)}. "
+        "Any other key is a silencing vector (#2656)"
     )
     for scope, label in ((workflow, "ci.yml"), (workflow["jobs"]["docs"], "the docs job")):
-        assert not ((scope.get("defaults") or {}).get("run") or {}).get("shell"), (
-            f"a `defaults.run.shell` on {label} can swallow the drift check's "
-            "exit code (#2656)"
-        )
+        _run_defaults = (scope.get("defaults") or {}).get("run") or {}
+        for key in ("shell", "working-directory"):
+            assert not _run_defaults.get(key), (
+                f"a `defaults.run.{key}` on {label} can swallow the drift check's "
+                "exit code or run it against a stub tree (#2656)"
+            )
+    # A job-level `env:` is not covered by the step's key set, and a PATH shim
+    # there shadows `python3` just as effectively.
+    assert not workflow["jobs"]["docs"].get("env"), (
+        "the `docs` job must not carry `env:` — a PATH shim would shadow the "
+        "interpreter and the `--check`s would never run (#2656)"
+    )
     # A job-level `continue-on-error` silences the whole job (and so the required
     # context); `needs:` is subtler and worse — an upstream failure SKIPS the job
     # rather than failing it, so the guard never runs and the required context is
