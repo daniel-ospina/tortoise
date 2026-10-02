@@ -224,6 +224,26 @@ def _capture_redaction_warning(count: int) -> str:
         f"except for those spans"
     )
 
+
+def _journal_write_failure_warning(count: int) -> str:
+    """#4240 review F1: the additive warning a capture carries when a journal
+    append failed on a CONFIGURED journal.
+
+    One canonical string, shared with ``hosted_api._capture_session_impl``
+    (byte-parity: both lanes must describe the same event identically — the
+    hosted lane builds its OWN receipt and never calls ``capture_session``, so
+    without this the disclosure would exist only on the SDK lane), naming that
+    THIS capture's records never reached the journal and a later rebuild will
+    therefore lose them. Deliberately independent of the capture's ``ok`` flag:
+    the graph write persisted, and marking it failed would trip the #2335
+    TRUE-retry gate over a write that was in fact persisted.
+    """
+    return (
+        f"journal append failed {count}x — this capture is live-only and will "
+        f"not survive a rebuild (#4240)"
+    )
+
+
 #: #3892: a keyless session re-captured WITH a key while the deployment is on
 #: the NON-convergent M2 lane. The re-attempt is refused (re-running M2 could
 #: mint duplicate claims), so the re-capture replays — said OUT LOUD, because
@@ -1369,9 +1389,10 @@ def _write_capture_turns(
     # the CONTAINS link is a capture-write structural fact (ONTOLOGY §4.5),
     # restored by the projection's edge fold without inventing a node
     # property the live write never sets. Gated on a configured journal: on a
-    # lane with no `event_log_path` (`_make_sdk`/`_data_sdk` pass none) the
-    # JSONL half is a no-op and the `:GraphEvent` half is not a rebuild
-    # source — `ensure_event_schema` + `next_seq` + `append_event` per turn
+    # lane with no `event_log_path` (a hosted SDK when
+    # `TORTOISE_EVENT_LOG_BASE_DIR` is unset; #4240) the JSONL half is a
+    # no-op and the `:GraphEvent` half is not a rebuild source —
+    # `ensure_event_schema` + `next_seq` + `append_event` per turn
     # there buys no durability on the very lane #3086 measures.
     if sdk._get_event_log() is None:
         return redacted_total
@@ -2015,20 +2036,116 @@ def _iso_date10(value: object) -> str:
 # (label[:3] + '-' + sha256[:26], e.g. ``sub-<hex26>`` / ``obj-<hex26>``).
 # These are IDs, not names — a guard that only recognizes bare ULIDs treats
 # them as names and runs the stub-creating keyword fallback.
-_ENTITY_ID_RE = re.compile(r"^[a-z]{2,3}-[0-9a-f]{26}$")
+#
+# #3586: the digest spelling is deliberately NOT pinned to ``{26}``/lowercase.
+# An opaque id's spelling is a property of the MINTER, not of the value, so a
+# spelling the regex does not anticipate is not thereby a name: epic #2835
+# Stage 3 mints new opaque ids, and a minted spelling this regex rejected was
+# silently treated as a NAME and minted as a Subject whose name AND id are the
+# identifier (`_mint_subject_stub`, projection/edges.py). The predicate is
+# therefore LENIENT about casing and digest length — ``prefix`` + a 16..64 hex
+# digest covers every id spelling the SDK mints or can plausibly mint — and it
+# is used ONLY for the negative case at the about* seam (may an UNRESOLVED
+# value be treated as a name?), never to decide that a value IS an id: that is
+# provenance, decided by resolution (`_wire_about_value`). Over-refusal there
+# is fail-closed (one warning, no node); the reverse mints junk a caller cannot
+# distinguish from data.
+#
+# ``_is_canonical_entity_id`` is the STRICT, HARD-REJECTION predicate. The two
+# are NOT interchangeable, and widening this one is not free: its consumer
+# (`_check_refs`) fails the WHOLE bundle closed on a hit, so a digest it newly
+# rejects is a previously-valid ref that stops ingesting. Keep it pinned to the
+# shapes the minting surfaces actually emit — a bare ULID, or
+# ``label[:3]-<sha256[:26]>`` (`_entity_name_id`). A spelling no minter can
+# produce (``pr-<hex16>``) cannot shadow a real node, so rejecting it buys no
+# safety and breaks a live ingest.
+_ENTITY_ID_RE = re.compile(r"^[a-z]{2,8}-[0-9a-f]{16,64}$", re.IGNORECASE)
+_CANONICAL_ENTITY_ID_RE = re.compile(r"^[a-z]{2,3}-[0-9a-f]{26}$")
 
 
 def _is_entity_id(s: str) -> bool:
-    """Return True if *s* is an entity id: the prefixed _entity_name_id format
-    OR a bare ULID. Used by the about* wiring guards (create_entity event
-    branch) so ID-valued aboutSubject/aboutObject/aboutPoint/aboutDocument
-    props never hit the name-resolution fallback.
+    """Return True if *s* is shaped like an entity handle (an opaque id), not
+    a name: a bare ULID (canonical or Crockford) OR ``prefix-<hex digest>``.
 
-    Boundary: a NAME shaped exactly like ``[a-z]{2,3}-<26 lowercase hex>``
-    (e.g. ``ab-0123456789abcdef0123456789``) is classified as an id and skips
-    name resolution — vanishingly rare for human names and consistent with
-    the pre-existing bare-ULID/Crockford behavior."""
+    NOT a provenance test (#3586): a minted id and a legacy
+    ``obj-<sha26(name)>`` alias are shape-identical, so shape alone cannot say
+    which node — if any — a value addresses. Callers that need that answer MUST
+    resolve the value first (``_wire_about_value`` does) and use this predicate
+    only for the negative case: may an UNRESOLVED value be resolve-or-minted as
+    a name? See ``_ENTITY_ID_RE`` for why the spelling range is lenient.
+
+    Boundary: a NAME shaped like ``[a-z]{2,8}-<16..64 hex>`` (e.g.
+    ``ab-0123456789abcdef``) is classified as an id — vanishingly rare for
+    human names, and now REPORTED rather than silently dropped by the about*
+    seam."""
     return bool(_is_ulid(s) or _ENTITY_ID_RE.match(s))
+
+
+def _is_canonical_entity_id(s: str) -> bool:
+    """Return True if *s* is shaped like an id the minting surfaces EMIT — a
+    bare ULID or ``label[:3]-<sha256[:26]>`` (``_entity_name_id``) — and so
+    could address (and shadow) a real node.
+
+    The HARD-REJECTION predicate (``_check_refs`` fails the whole bundle closed
+    on a hit). Do NOT widen it to anticipate a future id format: that trades a
+    live, previously-accepted ingest for protection against a spelling no
+    minter produces and which therefore cannot shadow anything. The lenient
+    about*-seam predicate is ``_is_entity_id``."""
+    return bool(_is_ulid(s) or _CANONICAL_ENTITY_ID_RE.match(s))
+
+
+def _wire_about_value(proj, source_id: str, value, rel: str) -> bool:
+    """Wire ONE ``about*`` prop of a freshly-written Event; True iff an edge
+    was created.
+
+    **Provenance first (#3586).** ``create_about_edge`` resolves the value
+    against the id/eventId index WITHIN the label *rel* implies — the surfaces
+    a HANDLE comes from — so a value that resolves to a node of that label is
+    an id, whatever its spelling, and a value that resolves only to a
+    DIFFERENT label is refused here and falls through to the name path below
+    (it must not steal the rel from its intended target). Its result previously
+    went unread and a shape test decided instead, which took the wrong branch in
+    both directions:
+
+    * a resolvable value whose spelling the shape test did not recognize (a
+      minted id under a new format) fell through to the name fallback, which
+      found no node NAMED after the id and minted a stub — so the edge landed
+      on a junk Subject, not on the entity the caller named;
+    * an unresolvable id-shaped value fell through to that same fallback, whose
+      ``_mint_subject_stub`` made the identifier BOTH a name and an id;
+    * an unresolvable recognized-id was a silent no-op — no edge, no node, no
+      signal — which is how a cached legacy alias vanishes.
+
+    So: only a value that resolves to nothing can be a name, and only a value
+    that is not handle-shaped may then be resolve-or-minted as one. An
+    unresolvable handle is a stale/unknown reference and is REPORTED, never
+    minted — the #1917 precedent (a long id that does not resolve is never
+    stubbed; warn and skip, projection/edges.py) applied to the about* seam.
+
+    epic #2835 Stage 3: while legacy ``obj-<sha26(name)>`` aliases remain
+    resolvable they are shape-identical to minted ids, so the alias→id lookup is
+    the REQUIRED resolution branch here — extend the ``create_about_edge`` hop
+    below, never this shape predicate.
+    """
+    from .projection.edges import STRUCTURAL_REL_LABELS
+    # The rel names its target label; scope the resolution to it so a value that
+    # collides with ANOTHER label's id/eventId cannot win (review of #3586 —
+    # `aboutSubject="acme"` landing on the Event whose eventId is "acme" and
+    # dropping the intended Subject).
+    target_label = STRUCTURAL_REL_LABELS.get(rel)
+    if proj.create_about_edge(source_id, value, rel, target_label=target_label):
+        return True
+    if not isinstance(value, str):
+        return False
+    if _is_entity_id(value):
+        _logger.warning(
+            "create_entity: %s %r is handle-shaped but does not resolve to a "
+            "%s node — edge not created and no stub minted (an identifier "
+            "must not become a name, #3586)", rel, value,
+            target_label or "node")
+        return False
+    proj._create_about_edges(source_id, value)
+    return True
 
 
 def _content_hash(text: str) -> str:
@@ -2919,6 +3036,58 @@ HOLDS_ROLE_UNAVAILABLE = (
 )
 
 
+def _derive_graph_name(*, namespace: str | None,
+                       graph_name: str | None,
+                       uri_graph: str | None = None) -> str:
+    """The SDK's ONE namespace/graph_name → DB graph-name derivation.
+
+    Extracted from ``_get_proj`` (#4240 review F2) so a caller that must name
+    the graph OUTSIDE a projection derives it identically instead of
+    re-implementing the branches. The hosted lane's per-graph journal path is
+    exactly such a caller: a second derivation there would key the journal to a
+    graph the SDK never opens (a rebuild would replay the wrong file), and the
+    branches are not obvious — ``namespace="test-foo"`` opens
+    ``test_foo_tortoise``, NOT ``org_test-foo``.
+
+    Precedence is unchanged from ``_get_proj`` (in order): registry control
+    plane → explicit ``graph_name`` verbatim → namespace (test_*/
+    tortoise_test* → ``{ns}_tortoise``, hyphenated test-* → normalized to
+    ``test_<ns>_tortoise``, otherwise ``org_{ns}``) → the URI's own graph,
+    else ``tortoise``.
+    """
+    if namespace == "registry":
+        # Control-plane SDK: shared registry main graph.
+        return "registry_tortoise"
+    if graph_name is not None:
+        # C5 #2114 (D-C5-1): explicit graph-name override (a custom
+        # org_{tid}_{gid} graph). Never a namespace derivation — the name is
+        # used verbatim.
+        return graph_name
+    if namespace:
+        if namespace.startswith(("test_", "tortoise_test")):
+            # Test namespace: isolate on a test-prefixed graph so the
+            # _assert_test_graph guard still passes (#221). Matches the
+            # historical {ns}_tortoise naming.
+            return f"{namespace}_tortoise"
+        if namespace.startswith("test-"):
+            # Epic #1647 (T7, cycle-5 P1-5): the hyphenated test-* family
+            # (test-tiers, test-invites, test-hosted, test-e1, test-org-722,
+            # ...) is a TEST namespace too — normalize '-' → '_' so it maps to
+            # the guard-passing test_<ns>_tortoise graph (test-tiers →
+            # test_tiers_tortoise). Without the branch it falls into org_<ns>
+            # (org_test-tiers) — a NON-test graph that is invisible to
+            # `grep -v 'namespace="test_'` and fails _assert_test_graph on
+            # bulk wipe.
+            return f"{namespace.replace('-', '_')}_tortoise"
+        # Org SDK: isolated org graph (matches provision's org_{org_id}
+        # namespace creation, #7886).
+        return f"org_{namespace}"
+    # No namespace: honor the URI's own graph (the conftest session graph for
+    # tests). Fixes #7886 regression that hardcoded 'tortoise' and clobbered
+    # the test graph.
+    return uri_graph or "tortoise"
+
+
 def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
                           stored_vf, successor_created_at, now):
     """Resolve the predecessor's window END and refuse an inverted window (#4021).
@@ -3169,6 +3338,12 @@ class TortoiseSDK:
         self._graph_name = graph_name
         self._event_log_path = event_log_path
         self._event_log = None  # lazy-init EventLog (#548)
+        # #4240 review F1: count journal appends that failed on a CONFIGURED
+        # journal. A configured journal that cannot record makes the derived
+        # graph live-only, so a failure is a real degradation — it is counted
+        # (monitoring.record_journal_write_failure) and disclosed on the next
+        # capture receipt instead of being only a log line.
+        self._journal_write_failures = 0
         # Epic #900 §5.3 (cycle-21): cross-process embedded overlap probe —
         # fail-fast when another PROCESS holds this embedded store (redislite
         # pid-registry + liveness probe). Same-process threads reuse the daemon
@@ -3289,40 +3464,9 @@ class TortoiseSDK:
                 from urllib.parse import urlparse
                 uri_graph = urlparse(self._db_uri).path.lstrip('/') or "tortoise"
 
-            if self._namespace == "registry":
-                # Control-plane SDK: shared registry main graph.
-                graph_name = "registry_tortoise"
-            elif self._graph_name is not None:
-                # C5 #2114 (D-C5-1): explicit graph-name override (a custom
-                # org_{tid}_{gid} graph). Never a namespace derivation — the
-                # name is used verbatim.
-                graph_name = self._graph_name
-            elif self._namespace:
-                if self._namespace.startswith(("test_", "tortoise_test")):
-                    # Test namespace: isolate on a test-prefixed graph so the
-                    # _assert_test_graph guard still passes (#221). Matches the
-                    # historical {ns}_tortoise naming.
-                    graph_name = f"{self._namespace}_tortoise"
-                elif self._namespace.startswith("test-"):
-                    # Epic #1647 (T7, cycle-5 P1-5): the hyphenated test-*
-                    # family (test-tiers, test-invites, test-hosted, test-e1,
-                    # test-org-722, ...) is a TEST namespace too — normalize
-                    # '-' → '_' so it maps to the guard-passing
-                    # test_<ns>_tortoise graph (test-tiers →
-                    # test_tiers_tortoise). Without the branch it falls
-                    # into org_<ns> (org_test-tiers) — a NON-test graph that
-                    # is invisible to `grep -v 'namespace="test_'` and fails
-                    # _assert_test_graph on bulk wipe.
-                    graph_name = f"{self._namespace.replace('-', '_')}_tortoise"
-                else:
-                    # Org SDK: isolated org graph (matches provision's
-                    # org_{org_id} namespace creation, #7886).
-                    graph_name = f"org_{self._namespace}"
-            else:
-                # No namespace: honor the URI's own graph (the conftest
-                # session graph for tests). Fixes #7886 regression that
-                # hardcoded 'tortoise' and clobbered the test graph.
-                graph_name = uri_graph or "tortoise"
+            graph_name = _derive_graph_name(
+                namespace=self._namespace, graph_name=self._graph_name,
+                uri_graph=uri_graph)
             if self._db_uri is not None:
                 # Multi-tenant isolation (#7886): pass the namespaced graph
                 # name so tenants never share the URI's default graph.
@@ -3780,8 +3924,35 @@ class TortoiseSDK:
             # not crash the caller or pretend the write failed. Rebuild parity
             # is best-effort here: rebuild_all's graph snapshot catches any
             # point missing from the log on the next rebuild (#548).
-            _logger.warning(
-                "failed to append %s event to SDK log %s: %s",
+            #
+            # #4240 review F1: on a CONFIGURED journal that posture is the
+            # silent-live-only hazard the journal exists to close, so the
+            # failure must not be a bare WARNING. Never raise (the write
+            # succeeded, and raising would hand the caller a failure for it),
+            # but count it (`monitoring.record_journal_write_failure`, carried
+            # by ``monitoring.metrics()``) and return it to the caller through
+            # ``capture_session``'s receipt warning below.
+            # Residual (deliberate, recorded on #5612): a journal that starts
+            # failing AFTER the entrypoint's boot-time writability probe — the
+            # probe catches a NON-ROOT mode-bit failure and EROFS/ENOSPC on any
+            # uid, but NOT a mode-bit failure under root (the image has no USER,
+            # so on Fly the process is uid 0; F1 cycle 2) — is still fail-soft.
+            # The foreseeable trigger is ENOSPC once the journal has grown below
+            # the volume's free space. The record is lost
+            # from the journal, `rebuild_all` reconstructs only what the
+            # journal holds (so a later rebuild cannot restore that write), and
+            # the ONLY signals are this ERROR log, the failure counter and the
+            # capture-receipt warning. It is not fatal by design: the graph
+            # mutation stands, and failing the request would lose a write that
+            # actually persisted.
+            self._journal_write_failures += 1
+            try:  # noqa: SIM105 — counting must never mask the original error
+                monitoring.record_journal_write_failure()
+            except Exception:  # noqa: BLE001, RUF100
+                pass
+            _logger.error(
+                "failed to append %s event to SDK log %s: %s — the write is "
+                "LIVE-ONLY and will not survive a rebuild (#4240)",
                 type_, self._event_log_path, exc,
             )
 
@@ -4660,6 +4831,13 @@ class TortoiseSDK:
         proj = self._get_proj()
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
+        # #5632: snapshot the LIFETIME journal-failure counter at the START of
+        # THIS capture. The receipt below must disclose only appends that
+        # failed DURING it — a failure from an earlier, unrelated write on this
+        # SDK used to make every later capture falsely report itself
+        # live-only, forever. The counter itself stays lifetime (monitoring
+        # reads it; no other consumer changes).
+        _journal_failures_before = self._journal_write_failures
 
         if len(conversation) > max_turns:
             # #2335 WI-1c: the self-host turn-cap refusal is a structured
@@ -5382,6 +5560,22 @@ class TortoiseSDK:
         if _capture_redactions:
             extraction_warnings.append(
                 _capture_redaction_warning(_capture_redactions))
+        # #4240 review F1: a journal append that failed during this capture is
+        # disclosed on the receipt. ``ok`` stays True — the graph write
+        # succeeded, and flipping it would mark the capture failed, which the
+        # #2335 TRUE-retry gate would then RE-RUN (duplicating extraction) over
+        # a write that was in fact persisted. Additive and present only when
+        # non-zero, so an ordinary capture's warning list is unchanged. The same
+        # failure also increments ``tortoise_journal_write_failures_total``
+        # (monitoring) and logs at ERROR — a receipt alone is only seen by the
+        # caller of a capture that happened to fail. #5632: the count is THIS
+        # capture's DELTA (``_journal_failures_before``), not the lifetime
+        # counter — an earlier failed write is not this capture's residue.
+        _capture_journal_failures = (
+            self._journal_write_failures - _journal_failures_before)
+        if _capture_journal_failures > 0:
+            extraction_warnings.append(
+                _journal_write_failure_warning(_capture_journal_failures))
         resp = {
             "session_id": session_id,
             "turns": len(conversation),
@@ -5821,8 +6015,8 @@ class TortoiseSDK:
         # `event_log_path` (a journal-less SDK's `_emit_event` is a no-op).
         # The claim → Object edges below are routed through the shared
         # journaled writer, so they survive rebuild_all when such a journal is
-        # configured — without one they stay live-only (the hosted lane's
-        # `_make_sdk`/`_data_sdk` set no `event_log_path`). The SESSION-level
+        # configured — without one they stay live-only (a hosted SDK built with
+        # `TORTOISE_EVENT_LOG_BASE_DIR` unset has no journal; #4240). The SESSION-level
         # attachment is owned by the
         # conversation-reference link pass (session_link.link_session_entities,
         # WorkItem Objects) — deliberately NOT the extractor's per-claim
@@ -6643,6 +6837,51 @@ class TortoiseSDK:
         elif "embedding" in props:
             props["embedding_verbatim"] = None
 
+        # #4208: a content edit must recompute the DERIVED vector in the SAME
+        # write, exactly as it already recomputes the derived `content_hash`
+        # (#1904). Before this, `update_point(content=B)` left the node holding
+        # content B with `vec(A)` — the dense leg then ranked it by text no
+        # longer on the node, and live != rebuild, because the replay's
+        # `_revise_point` DOES re-encode. Same rule as the hash, and the same
+        # rule #19 set for the revise fold: recompute from the new content, or
+        # WIPE it when the embedder is unavailable (`None`) — never preserve a
+        # vector the new content did not produce (a vector for different text
+        # is worse than none). #4194/#4280: route through `encode_for_store`
+        # (the store-width-declaring seam) so the stored width matches the
+        # Point HNSW index this store created; the seam is still
+        # `compute_embedding` (module global), so installed doubles intercept.
+        #
+        # A CALLER-supplied vector is deliberately NOT recomputed: the caller
+        # owns that write, the verbatim marker above already describes it, and
+        # the record/replay treatment of a caller vector on a revise is the
+        # separate declared gap #5046. Gated on the KEY, so this fires only
+        # when the caller supplied none.
+        _derived_embedding = False
+        _new_content = props.get("content")
+        if ("content" in props and "embedding" not in props
+                and _new_content is not None):
+            # `_new_content is not None` mirrors `_revise_point`'s own boundary
+            # — a `None` new_content is "no content edit" there, so it must not
+            # derive (or wipe) a vector either.
+            try:
+                from .embeddings import encode_for_store
+                props["embedding"] = (
+                    encode_for_store(_new_content, proj.required_embedding_dim)
+                    if _new_content else None)
+            except Exception:
+                props["embedding"] = None
+            _derived_embedding = True
+            # #5238 review P3: the vector just derived is NOT caller-owned, so
+            # a node that previously held a CALLER-supplied vector (and still
+            # carries `embedding_verbatim=true`) must have that marker cleared —
+            # exactly as the `embedding=None` path above does. Left set, the
+            # node advertises a SERVER-derived vector as caller-owned: the
+            # marker selects raw-vs-`vecf32` storage on every later re-emit and
+            # flips the consistency comparison to an exact-float compare, while
+            # a rebuild drops it (`_revise_point` re-encodes and never reads
+            # the marker) — live != rebuild, the round-6 false-verbatim class.
+            props["embedding_verbatim"] = None
+
         # #49 Phase 2: context is REMOVED — raise TypeError if passed
         if "context" in props:
             raise TypeError(
@@ -6742,7 +6981,17 @@ class TortoiseSDK:
         # #548: emit PointRevised event for rebuild parity
         # #1904: content_hash is derived from content — keep it out of the
         # event record (mirrors create_point's snapshot strip at emit).
-        emit_props = {k: v for k, v in props.items() if k != "content_hash"}
+        # #4208: the vector this path just DERIVED from the content is stripped
+        # for the same reason — it is not owned by this record. The replay's
+        # `_revise_point` re-encodes from `new_content`, so a journalled copy
+        # would be dead weight, and #5004's presence-is-ownership rule would
+        # read the key as a producer claim the replay does not honour (the
+        # #5046 shape). A CALLER-supplied vector stays in the record, as before.
+        emit_props = {
+            k: v for k, v in props.items()
+            if k != "content_hash"
+            and not (_derived_embedding and k == "embedding")
+        }
         self._emit_event("PointRevised", id=id,
                          new_content=props.get("content"), **emit_props)
         return result
@@ -9467,7 +9716,15 @@ class TortoiseSDK:
         """Check 3 (ref-table half) — duplicate refs across the whole bundle
         and node-id-shadowing rejection: a ref shaped like a real node id —
         a bare ULID OR a prefixed entity id (e.g. ``sub-<hex26>``, #1553) —
-        would make refs.get(x, x) silently address an existing node."""
+        would make refs.get(x, x) silently address an existing node.
+
+        #3586: rejection fails the WHOLE bundle closed, so this check uses the
+        STRICT canonical predicate (``_is_canonical_entity_id``): only a shape
+        a minting surface can actually emit is rejected. The lenient about*-
+        seam predicate (``_is_entity_id``) is deliberately broader, and sharing
+        it here hard-rejected previously-valid refs whose digest is not a
+        canonical id (``pr-<hex16>``) — an id no minter produces, and which
+        therefore cannot shadow anything."""
         seen: dict[str, str] = {}
         for section in ("sources", "points", "entities"):
             for i, item in enumerate(bundle.get(section) or []):
@@ -9476,7 +9733,7 @@ class TortoiseSDK:
                 ref = item.get("ref")
                 if not ref:
                     continue
-                if _is_entity_id(str(ref)):
+                if _is_canonical_entity_id(str(ref)):
                     violations.append({
                         "section": section, "index": i,
                         "message": f"ingest: {section}[{i}] ref {ref!r} is "
@@ -19991,22 +20248,13 @@ class TortoiseSDK:
                 is_episodic=is_episodic)
             proj = self._get_proj()
             if about_subject:
-                proj.create_about_edge(eid, about_subject, "aboutSubject")
-                # Only name-resolve if it looks like a plain name, not an ID
-                if isinstance(about_subject, str) and not _is_entity_id(about_subject):
-                    proj._create_about_edges(eid, about_subject)
+                _wire_about_value(proj, eid, about_subject, "aboutSubject")
             if about_object:
-                proj.create_about_edge(eid, about_object, "aboutObject")
-                if isinstance(about_object, str) and not _is_entity_id(about_object):
-                    proj._create_about_edges(eid, about_object)
+                _wire_about_value(proj, eid, about_object, "aboutObject")
             if about_point:
-                proj.create_about_edge(eid, about_point, "aboutPoint")
-                if isinstance(about_point, str) and not _is_entity_id(about_point):
-                    proj._create_about_edges(eid, about_point)
+                _wire_about_value(proj, eid, about_point, "aboutPoint")
             if about_document:
-                proj.create_about_edge(eid, about_document, "aboutDocument")
-                if isinstance(about_document, str) and not _is_entity_id(about_document):
-                    proj._create_about_edges(eid, about_document)
+                _wire_about_value(proj, eid, about_document, "aboutDocument")
         elif t == "document":
             documentKind = props.pop("documentKind", None)
             if not documentKind:
