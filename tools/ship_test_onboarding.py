@@ -832,12 +832,16 @@ _SECRET_KEY_RE = re.compile(
     # A quoted value consumes to its MATCHING quote — pair-aware, so a value
     # containing the other quote char ("pa'ss word") still reaches its close.
     # The delimiter tolerates a RUN of backslashes (a body recorded as a string
-    # is serialized once more, so its escapes DOUBLE), and the body must START
-    # on a value character — which is what keeps an enclosing JSON string's
+    # is serialized once more, so its escapes DOUBLE). A quoted value is
+    # delimited by its OWN quotes, so its first character does not have to be a
+    # "value-start" character: `]`, `}`, `,`, `;` and `:` are accepted here too
+    # (#5630 review — the pair-aware class could not start on them, so the value
+    # was left verbatim). The `,;:` guard still keeps an enclosing JSON string's
     # quote (`…?token=", "status": 200`) from being read as this value's
-    # OPENING quote and eating the following key.
+    # OPENING quote, and the positional check in `_delim_value_is_structure`
+    # handles the rest.
     r'(?:(?P<esc>\\{0,32})(?P<q>["\'])'
-    r'(?:(?P<tval>(?![,;:]\s*(?:["\'\[\]{]|-?\d|null|true|false))(?:(?!(?P=q))[^\\,;:)\]}&"\'\s]|(?P=q)(?=[^\\,;:)\]}&"\'\s])|[,;:](?=[^\\,;:)\]}&"\'\s\[{])|\\.)'
+    r'(?:(?P<tval>(?![,;:]\s*(?:["\'\[\]{]|-?\d|null|true|false))(?:(?!(?P=q))[^\\\)&"\'\s]|(?P=q)(?=[^\\,;:)\]}&"\'\s])|[,;:](?=[^\\,;:)\]}&"\'\s\[{])|\\.)'
     r'(?:(?!(?P=q))[^\\"]|\\.)*)(?P=esc)(?P=q)(?=[\s,;:)\]}&"\']|$)'
     # ...or an UNTERMINATED quote (a truncated URL, an exception message) is still
     # a value: `oq` takes a non-empty token-shaped run, so the escape run before
@@ -850,22 +854,25 @@ _SECRET_KEY_RE = re.compile(
     # ...or an UNTERMINATED value that starts on whitespace or a delimiter:
     # without this fallback a field CUT mid-value left the credential in free
     # text, which is the shape the bound produces (review cycle 19).
-    r'|(?P<oq2>(?!\s*[,;:]\s*(?:["\'\[\]{]|-?\d|null|true|false))(?!\s*[,\]}])\s*(?:[,;:](?=[A-Za-z_]))?(?:(?!(?P=q))[^\\"]|\\.)+))'
+    r'|(?P<oq2>(?!\s*[,;:]\s*(?:["\'\[\]{]|-?\d|null|true|false))(?!\s*[,\}\]](?![^\\,;:)\]}&"\'\s]))\s*(?:[,;:](?=[A-Za-z_]))?(?:(?!(?P=q))[^\\"]|\\.)+))'
     # ...and an unquoted value treats a backslash-escape as a UNIT, so a `\"`
     # inside the value neither ends it at the quote nor loses the escape that
     # keeps the serialized string balanced.
     # ...a bracketed value is EMPTIED (`[]`/`{}`) rather than quoted: the value
     # goes, and the marker cannot be quoted here without corrupting an
     # enclosing JSON string (review cycle 10/11).
-    # ...or a TERMINATED quoted value whose FIRST character is a delimiter
-    # or whitespace (`{"password": " S3CRET"}`): the branch above cannot
-    # start on one, so without this the value was left verbatim — HEAD
-    # redacted it (review cycle 14). It is lower priority than the pair-aware
-    # branch, and `[^\\"']*` stops on either quote, so it cannot
-    # backtrack. The lookahead keeps the VALUELESS-key shape
-    # (`?token=", "status": 200`) in `oq`, which is what must not eat the
-    # following key.
-    r'|(?P<esc2>\\{0,32})(?P<q2>["\'])(?!(?:\s*[,;:]\s*(?:["\'\[\]{]|-?\d|null|true|false)))(?!\s*[,\]}])'
+    # ...or a TERMINATED quoted value whose FIRST character is a delimiter,
+    # brace or whitespace (`{"password": " S3CRET"}`, `{"password": "]x"}`):
+    # the branch above cannot start on one, so without this the value was left
+    # verbatim — HEAD redacted it (review cycle 14). It is lower priority than
+    # the pair-aware branch, and `[^\\"']*` stops on either quote, so it cannot
+    # backtrack. A quoted value is delimited by its OWN quotes, so its first
+    # character does not have to be a "value-start" character — dropping the
+    # two first-char guards is what closes the `]`/`}`/`;`/`:`-led leak (#5630
+    # review). The VALUELESS-key / JSON-CONTINUATION shape (`["?token=", -2]`,
+    # `?token=", "status": 200`) is still protected, but now in CODE rather
+    # than in the pattern: see `_delim_value_is_structure()`.
+    r'|(?P<esc2>\\{0,32})(?P<q2>["\'])'
     r'(?P<tval2>(?:(?!(?P=q2))[^\\"]|\\.)*)(?P=esc2)(?P=q2)(?=[\s,;:)\]}&"\']|$)'
     r'|(?P<struct>' + _STRUCT_VALUE + r")"
     r'|(?P<plain>(?:\\[^"\']|[^\s,}&"\\{[])(?:\\[^"\']|[^\s,}&"\\{[])*))',
@@ -936,6 +943,32 @@ def _at_json_value_position(match: re.Match) -> bool:
     return i < 0 or match.string[i] in "{[],"
 
 
+# A quoted value whose FIRST character is one of these is AMBIGUOUS inside a
+# JSON document: it may be a genuine quoted string (`{"password": "]x"}`) or
+# the CLOSING quote of an enclosing string followed by the next JSON token
+# (`["?token=", -2, ""]`, where the quote after `=` closes `"?token="` and
+# `, -2, ` is structure). The tell is POSITIONAL: in a real document a genuine
+# value sits at a JSON value position, while a quote that merely closes an
+# enclosing string does not (`_at_json_value_position`). Outside a document the
+# text is prose, where a quoted credential is still a credential — so the caller
+# passes `is_json=False` and the value is redacted.
+_DELIM_VALUE_START_RE = re.compile(r"\s*[\]},;:]")
+
+
+def _delim_value_is_structure(match: re.Match, is_json: bool) -> bool:
+    """Is a delimiter-led quoted value actually the enclosing document's
+    structure rather than a value? (See `_DELIM_VALUE_START_RE`.)"""
+    if not is_json or _at_json_value_position(match):
+        return False
+    for name in ("tval2", "tval", "oq2", "oq"):
+        run = match.group(name)
+        if run is not None:
+            break
+    else:
+        return False
+    return bool(_DELIM_VALUE_START_RE.match(run))
+
+
 # What may follow our own marker for a settled value to count as OURS: a value
 # merely STARTING with the marker (`token="[REDACTED]S3CRET"`) is still a value
 # and must be redacted, tail included (review cycle 18).
@@ -987,7 +1020,13 @@ def _marker_leads(rest: str) -> bool:
     return not tail or tail[0] in _MARKER_TAIL
 
 
-def _redact_secret_value(match: re.Match) -> str:
+def _redact_secret_value(match: re.Match, is_json: bool = False) -> str:
+    # A delimiter-led quoted value inside a JSON document that does NOT sit at a
+    # JSON value position is the document's own structure, not a credential:
+    # emitting a marker over it would eat a separator and the next key (#5630
+    # review — `["?token=", -2, ""]`). See `_delim_value_is_structure`.
+    if _delim_value_is_structure(match, is_json):
+        return match.group(0)
     head = f"{match.group('key')}{match.group('sep')}"
     esc = match.group("esc") or ""
     q = match.group("q") or ""
@@ -1677,7 +1716,13 @@ def _scrub_text(text: str) -> str:
     # survives — the same ordering the named pass needs INSIDE `scrub_urls`
     # (review cycles 11, 18).
     t = scrub_urls(t)
-    t = _SECRET_KEY_RE.sub(_redact_secret_value, t)
+    # Whether the field IS a JSON document is decided ONCE: a delimiter-led
+    # quoted value in one is judged by its position (see
+    # `_delim_value_is_structure`), and re-parsing per match would be the only
+    # superlinear work the pass added.
+    is_json = _is_json(t)
+    t = _SECRET_KEY_RE.sub(
+        lambda m: _redact_secret_value(m, is_json), t)
     t = _collapse_keyed_marker_tail(t)
     # ...again on the FINAL text: a URL rewrite can delete a `[`, which changes
     # a bracket's balance, and a fixed point requires the pair to be judged on

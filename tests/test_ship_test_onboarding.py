@@ -23,6 +23,7 @@ import ast
 import inspect as _inspect
 import os
 import signal
+import string
 import textwrap
 import threading
 import time
@@ -553,6 +554,19 @@ def test_scrub_closes_the_cut_delimiter_remnant_class() -> None:
                 out = scrub(raw)
                 assert canary not in out, (raw, out)
                 assert scrub(out) == out, (raw, out, scrub(out))
+    # ...and the cut character AS the value's FIRST character — the shape the
+    # `p`-prefixed forms above cannot reach, because `p{cut}` hides it. This is
+    # the sibling class: a TERMINATED quoted value whose first char is the cut
+    # had no matching alternative and was left whole (#5630 review).
+    for cut in ";:]},:":
+        for raw in (
+            f'{{"password": "{cut}A{canary}"}}',
+            f'{{"password": "{cut}A{canary}',
+            f'password: "{cut}A{canary}"',
+        ):
+            out = scrub(raw)
+            assert canary not in out, (raw, out)
+            assert scrub(out) == out, (raw, out, scrub(out))
     # KEY-GUARDED: a following pair's NAME (whose value the named pass already
     # replaced) is not eaten by the remnant run
     guarded = scrub('token: "[REDACTED];password=abc"')
@@ -1001,21 +1015,70 @@ def test_a_quoted_value_that_STARTS_on_a_delimiter_is_still_redacted() -> None:
     # (review cycle 17 — taking it ate the separator and the next key)
     for lead in (" ", "\t", ")", "&", ":", ";", "=", "(", "[", "{", "\\"):
         assert secret not in _mod.scrub(f'?code="{lead}{secret}"'), lead
-    # `]`/`}` are structure, not a value, on BOTH sides of the quote rule: after
-    # a JSON string's close they close the enclosing document, and a marker
-    # there corrupts it (review cycle 17). The credential that really STARTS on
-    # one is a stated gap — the body wins.
+    # `]`/`}` used to be the stated gap — "structure, not a value, so the body
+    # wins". A TERMINATED quoted value is delimited by its OWN quotes, so a
+    # credential that really starts on one is a value and must go (#5630
+    # review). The document still wins where the quote IS structure — the
+    # continuation and valueless shapes below.
     for lead in ("]", "}"):
         got = _mod.scrub(f'{{"password": "{lead}{secret}"}}')
+        assert secret not in got, (lead, got)
         assert json.loads(got) is not None, (lead, got)
         assert _mod.scrub(got) == got, (lead, got)
         query = _mod.scrub(f'?code="{lead}{secret}"')
+        assert secret not in query, (lead, query)
         assert _mod.scrub(query) == query, (lead, query)
     # the valueless-param shape keeps the following key (the reason the branch
     # above it is first-char-restricted at all)
     for param in ("token", "code", "session", "api_key"):
         pair = f'{{"url": "?{param}=", "status": 200}}'
         assert json.loads(_mod.scrub(pair))["status"] == 200, pair
+
+
+def test_a_value_that_STARTS_on_a_brace_or_delimiter_is_redacted() -> None:
+    """A quoted value is delimited by its OWN quotes, so its first character
+    does not have to be a "value-start" character. A TERMINATED value whose
+    first char is `]`, `}`, `,`, `;` or `:` had NO matching value alternative
+    and was left completely VERBATIM — a sibling under-redaction class against
+    `origin/main` (#5630 review; 4 620 under-redactions over a 278 901-case
+    corpus, 1 420 of them well-formed JSON with the credential under a secret
+    key). The five shapes the review reported, verbatim, then the punctuation
+    family."""
+    import json
+
+    for raw, leaked in (
+        ('{"password": "]x"}', "]x"),
+        ('{"password": "}x"}', "}x"),
+        ('{"password": ":]x"}', ":]x"),
+        ('{"password": ";{x"}', ";{x"),
+        ('{"access_token": ";]x"}', ";]x"),
+    ):
+        got = _mod.scrub(raw)
+        assert leaked not in got, (raw, got)
+        assert got == raw.replace(leaked, "[REDACTED]"), (raw, got)
+        assert json.loads(got) is not None, (raw, got)
+    secret = "S3CRETCANARY7f3a91d2"
+    # TERMINATED: every leading punctuation, in a JSON body — redacted, still a
+    # document, and a fixed point
+    for lead in string.punctuation:
+        body = f'{{"password": "{lead}{secret}"}}'
+        got = _mod.scrub(body)
+        assert secret not in got, (body, got)
+        assert json.loads(got) is not None, (body, got)
+        assert _mod.scrub(got) == got, (body, got)
+    # UNTERMINATED: the same family, minus a leading quote — a quoted run
+    # cannot OPEN on its own delimiter, and `origin/main` leaves that shape too
+    for lead in string.punctuation.replace('"', ""):
+        body = f'{{"password": "{lead}{secret}'
+        got = _mod.scrub(body)
+        assert secret not in got, (body, got)
+        assert _mod.scrub(got) == got, (body, got)
+    # free text
+    for lead in string.punctuation:
+        raw = f'password="{lead}{secret}"'
+        got = _mod.scrub(raw)
+        assert secret not in got, (raw, got)
+        assert _mod.scrub(got) == got, (raw, got, _mod.scrub(got))
 
 
 def test_an_unmatched_bracket_only_eats_the_string_it_sits_in() -> None:
