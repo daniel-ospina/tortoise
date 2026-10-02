@@ -3540,8 +3540,9 @@ class FalkorProjection(
             # OWN ceiling, `_DB_TIMEOUT_MAX_PER_LANE_S` (600s), deliberately set
             # above the eval's 120s so the product's tighter bound is not
             # re-imposed here; above 600s the knob fails loud. Only an explicit
-            # none/off/false/0 (or any non-positive number) restores #2850's
-            # unbounded mode.
+            # none/off/false/0 (or any non-positive number) removes the bound
+            # entirely — the block-forever mode #2850 exists to PREVENT, reachable
+            # only through that opt-out.
             connect_to, read_to = _socket_timeouts()
             self.db = FalkorDB(host=host, port=port, username=username, password=password,
                                socket_connect_timeout=_resolve_socket_timeout(
