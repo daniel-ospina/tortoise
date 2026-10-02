@@ -1494,7 +1494,11 @@ def watchdog_headroom_issues(manifest: dict) -> list[str]:
     "a shard unable to fit is flagged rather than silently killed"). The estimate
     and the budget therefore move together: raising an estimate (or lowering the
     shard count) past the ceiling's reach REDS this check, and the remedy is a
-    deliberate ceiling raise or a re-split — never a silent kill.
+    deliberate ceiling raise or a re-split — never a silent kill. "Fail-closed"
+    includes the extreme: an estimate so large that the ratio rounds to `0.00`
+    still fires, because the SENTINEL is read from the UNROUNDED value. A `0.00`
+    on a PASSING row therefore means one thing only — that the leg has no usable
+    estimate (an empty leg) — and never that its margin was too small to report.
     """
     issues = []
     for s in push_legs(manifest)["shards"]:
@@ -1507,8 +1511,17 @@ def watchdog_headroom_issues(manifest: dict) -> list[str]:
         # 2.0x", contradicting itself at exactly the boundary this check exists
         # to police. Decision, message and emission are therefore ONE value; the
         # cost is that a sub-0.005 excursion is inside the reporting quantum.
-        headroom = round(watchdog_headroom(est, budget), 2)
-        if headroom and headroom < WATCHDOG_HEADROOM:
+        #
+        # The SENTINEL test reads the UNROUNDED value. `raw == 0.0` is
+        # `watchdog_headroom`'s "no usable estimate" answer (est <= 0, or a
+        # non-finite one), and it is NOT the same thing as a genuine ratio small
+        # enough to round to 0.00: testing the ROUNDED value for truthiness would
+        # FAIL OPEN on an estimate large enough to collapse the ratio onto the
+        # sentinel — the guard would skip the very leg it exists to name, and
+        # would publish `0.00` on a row it passed.
+        raw = watchdog_headroom(est, budget)
+        headroom = round(raw, 2)
+        if raw and headroom < WATCHDOG_HEADROOM:
             issues.append(
                 f"shard {s['name']}: its emitted budget retains "
                 f"{headroom:.2f}x, below the {WATCHDOG_HEADROOM:.1f}x it is built "

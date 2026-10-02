@@ -1748,7 +1748,12 @@ def test_a_shard_merely_slow_under_load_still_fits_its_budget():
     shard by roughly the setup constant — the pytest step is the only surface
     the watchdog actually bounds, hence the only comparable one.
     """
-    from tools.ci_selection import WATCHDOG_HEADROOM, load_manifest, push_legs
+    from tools.ci_selection import (
+        WATCHDOG_HEADROOM,
+        load_manifest,
+        push_legs,
+        watchdog_headroom_issues,
+    )
     # The slowest healthy shard measured. A frozen literal is right HERE, unlike
     # the derived floor below: this is an observation about runs that have
     # already happened, not a property of the committed manifest, so there is
@@ -1760,7 +1765,13 @@ def test_a_shard_merely_slow_under_load_still_fits_its_budget():
         "budget is built from — the margin no longer covers even the "
         "successful distribution, and the constant must be raised "
         "DELIBERATELY (#6145)")
-    for s in push_legs(load_manifest())["shards"]:
+    # The shipped gate's OWN verdict on the committed manifest is the primary
+    # assertion, so this test cannot disagree with the gate at either end of the
+    # reporting quantum (#6145). The loop below is a readable restatement for a
+    # non-empty leg, not a second, differently-precise gate.
+    committed = load_manifest()
+    assert watchdog_headroom_issues(committed) == [], watchdog_headroom_issues(committed)
+    for s in push_legs(committed)["shards"]:
         headroom = s["watchdog_minutes"] * 60.0 / s["est_seconds"]
         assert headroom >= measured_max_healthy_shard_ratio, (
             f"shard {s['name']}: {headroom:.2f}x is below the slowest healthy "
@@ -1827,6 +1838,21 @@ def test_a_shard_that_cannot_fit_its_budget_is_named_not_silently_killed():
     assert watchdog_headroom_issues(edge) == [], watchdog_headroom_issues(edge)
     past = _shard_manifest(1, heavy={"test_past.py": 1660.0}, tiny=0)
     assert watchdog_headroom_issues(past), "1.99x must still be refused"
+    # (e) the OTHER end of the same quantum. A ratio below 0.005 rounds to 0.00,
+    #     which is also `watchdog_headroom`'s "no usable estimate" sentinel — so
+    #     a guard testing the ROUNDED value for truthiness FAILS OPEN here: it
+    #     skips the leg and publishes `0.00` on a row it passed. The sentinel is
+    #     therefore read from the UNROUNDED ratio, and a leg this far past the
+    #     ceiling is still NAMED. 844400.0s = 14073.3 min -> 55/14073.3 = 0.0039
+    #     -> rounds to 0.0.
+    collapsed = _shard_manifest(1, heavy={"test_collapsed.py": 844400.0},
+                               tiny=0)
+    assert watchdog_headroom_issues(collapsed), (
+        "a ratio that rounds to 0.00 is a mis-sized leg, not an absent estimate")
+    # and the sentinel itself is NOT a finding: a leg with no estimate has no
+    # ratio to judge (an empty leg is not over-tight).
+    empty = _shard_manifest(1, tiny=0)
+    assert watchdog_headroom_issues(empty) == [], watchdog_headroom_issues(empty)
     # (c) a genuinely wedged leg is STILL KILLED. The check makes an over-tight
     #     budget visible; it does not widen it and it does not disarm the kill —
     #     the emitted budget is unchanged, and the workflow still applies it with
