@@ -39,13 +39,23 @@ Also:
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/ci_selection.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/ci_selection.py`"
+    )
+
 import argparse
 import ast
 import json
 import math
 import os
 import re
-import sys
 from pathlib import Path
 
 # 1.4.0 (#6135): the fast pool is split into N shards (config `fast_shards`)
@@ -373,6 +383,14 @@ SOURCE_PATTERNS = {
                    # (tests/test_ci_selection.py) the moment this branch merged main.
                    "website/404.html",
                    "website/apps/dashboard/public/invite-accept.html",
+                   # The design-partner one-pager. `noindex`, so it is out of the
+                   # #3950 blog guard's scope — but NOT out of the element-id
+                   # uniqueness guard, whose scope is every served document: a
+                   # noindex page is still a page whose own script runs, and
+                   # duplicate ids are invalid in it. Without this entry a PR
+                   # touching only this page selects no surface and the id guard
+                   # never executes on it.
+                   "website/design-partners-intro.html",
                    # The shared href extractor both blog-guard layers call
                    # (tests/test_website_docs_consistency.py here, and
                    # tests/e2e/test_legal_pages.py in the separate `legal-e2e`
