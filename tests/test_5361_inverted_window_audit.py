@@ -60,6 +60,10 @@ def _plant(sdk, kind: str, valid_from=None, valid_to=None) -> str:
 
     Bounds are written verbatim (including unparseable text); a ``None`` bound
     is left unset so the read path sees honest absence.
+
+    NOTE: the bound is set with an UN-scoped ``MATCH (n:Point {id:$id})``, so
+    this helper is only safe while ids are unique. A test that needs colliding
+    ids must write the bounds INLINE at CREATE time instead.
     """
     pid = f"p5361_{uuid.uuid4().hex[:12]}"
     _q(
@@ -292,3 +296,47 @@ def test_paged_scan_counts_every_row_exactly_once(sdk, monkeypatch):
     assert ch is not None, report
     assert ch["count"] == 5, ch
     assert len(ch["samples"]) == 5, ch
+
+
+def test_paged_scan_survives_colliding_ids(sdk, monkeypatch):
+    """FALSIFIER: a page boundary inside a TIE GROUP must not lose or double rows.
+
+    Value that makes it fail: a count OTHER than the 6 planted inverted
+    windows. ``n.id`` is not unique (colliding ids are a tested shape), so
+    ordering by it alone leaves the order of equal-id rows to the engine;
+    because the scan pages with SKIP/LIMIT and each page is a SEPARATE query,
+    that order can differ between executions and rows are then MISSED and
+    DOUBLE-COUNTED, which moves the reported count off the truth.
+
+    The fixture reaches it: ``CHECK8_PAGE`` is monkeypatched DOWN to 2, all 12
+    Points COLLIDE on ``id`` (one tie group spanning all six pages), and the
+    windows are MIXED — 6 inverted, 6 well-formed. The mix is what makes the
+    test able to fail: with every row inverted the missed and doubled rows
+    cancel and the count lands on the truth regardless, which is why the
+    unique-id test above cannot catch this (its ids are distinct, so its order
+    is already total). Measured on the PRE-FIX head: the same fixture reported
+    9 — deterministic, 8 reps out of 8 — while the truth is 6.
+    """
+    import tortoise.audit as audit_mod
+
+    monkeypatch.setattr(audit_mod, "CHECK8_PAGE", 2)
+    kind = _kind()
+    inverted = _planted = 6
+    for i in range(inverted * 2):
+        inverted_row = i < inverted
+        _q(
+            sdk,
+            "CREATE (n:Point {id:'p5361_collide', pointKind:$kind, content:'w', "
+            "is_operator:false, status:'live', validFrom:$f, validTo:$t})",
+            params={
+                "kind": kind,
+                "f": "2030-06-01" if inverted_row else "2020-06-01",
+                "t": "2020-06-01" if inverted_row else "2030-06-01",
+            },
+        )
+
+    report = sdk.audit(point_kinds=[kind])
+    ch = _check(report, "inverted_validity_window")
+    assert ch is not None, report
+    assert ch["count"] == _planted, ch
+    assert len(ch["samples"]) == _planted, ch

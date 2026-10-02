@@ -638,7 +638,16 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             f"MATCH (n:Point) WHERE {_kinds_w('n')} "
             "AND n.validFrom IS NOT NULL AND n.validTo IS NOT NULL "
             "RETURN n.id, n.validFrom, n.validTo "
-            "ORDER BY n.id "
+            # `n.id` is NOT unique (colliding ids are a tested shape), so
+            # ordering by it alone is not a total order. This scan pages with
+            # SKIP/LIMIT, and each page is a SEPARATE query, so a tie group
+            # straddling the boundary can be reordered between the two
+            # executions: rows are then DROPPED and DUPLICATED, and an inverted
+            # window can be missed entirely (a false clean). Measured on this
+            # head at CHECK8_PAGE=5000: 5100 tied rows lost 82 and repeated 82.
+            # `id(n)` (the internal node id) is unique and makes the order
+            # total, which is what paging requires.
+            "ORDER BY n.id, id(n) "
             f"SKIP {offset} LIMIT {CHECK8_PAGE}",
             params=params,
         )
