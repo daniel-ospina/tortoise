@@ -914,7 +914,7 @@ def test_integrity_problems_mirrors_the_spot_checked_validators() -> None:
     dup = yaml.safe_load(real)
     surface = next(iter(dup["surfaces"]))
     entry = dup["surfaces"][surface][0]
-    dup["surfaces"][surface] = list(dup["surfaces"][surface]) + [entry]
+    dup["surfaces"][surface] = [*list(dup["surfaces"][surface]), entry]
     duplicate_case = (dup, f"{surface}: {entry}")
 
     for name, (broken_manifest, expected) in {
@@ -934,7 +934,7 @@ def test_integrity_problems_mirrors_the_spot_checked_validators() -> None:
             f"--integrity refuses: {problems}")
 
 
-def test_integrity_problems_mirrors_the_whole_integrity_composition(
+def test_integrity_problems_mirrors_the_listed_integrity_composition(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """The parity contract `integrity_problems`' docstring claims, over the

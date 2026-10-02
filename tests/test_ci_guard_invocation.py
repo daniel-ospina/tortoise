@@ -627,8 +627,8 @@ def test_the_carve_out_scope_names_the_frozen_path_form():
     name. A substitution carrying the extension built
     `tests/test_fork_safety_3845.py.py`, which matched no frozen nodeid: the
     guard printed "0 of 4 frozen nodeid(s) filtered out … 0 required of this
-    run" and exited 0 — a vacuous pass, the opposite of the step's stated
-    contract that it "exercises the real comparison".
+    run" and exited 0 — a vacuous pass, the opposite of the enforcement the
+    step exists to perform.
 
     Decided on the argv the process RECEIVED, not on the substitution: for every
     enforcing invocation that passes `--scope`, the scope must name file paths
@@ -819,9 +819,10 @@ def _expressions_in_run(step: dict) -> list[str]:
     return re.findall(r"\$\{\{[^}]*\}\}", step.get("run") or "")
 
 
-#: The GitHub expressions `_relocated` substitutes. Kept beside the substitution so
-#: the two cannot drift, and so a step interpolating an expression NOT listed here
-#: is still refused — the property that must survive, not be deleted.
+#: The GitHub expressions `_relocated` substitutes. Kept beside the substitution
+#: so an expression added in one place is visible in the other, and so a step
+#: interpolating an expression NOT listed here is still refused — the property
+#: that must survive, not be deleted.
 EVALUATED_EXPRESSIONS = {
     "${{ matrix.files }}",
     "${{ needs.changes.outputs.full }}",

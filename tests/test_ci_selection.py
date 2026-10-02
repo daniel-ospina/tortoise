@@ -2660,21 +2660,24 @@ def test_every_bounded_pytest_job_caps_above_its_watchdog():
         f"watchdog may legitimately reach it (#6135/#3239)")
 
 
-def test_carve_out_bounds_clear_the_measured_work_without_dwarfing_it():
-    """#3239: the carve-out's watchdog must clear its MEASURED work with the
-    house headroom, and its cap must not dwarf that work.
+def test_carve_out_shard_bounds_clear_the_committed_work_without_dwarfing_it():
+    """#3239: each shard's watchdog must clear THAT SHARD's committed work with
+    the house headroom, and the job's cap must not dwarf the work it backstops.
 
-    The floor is tapped twice on purpose: the frozen API measurement (what the
-    bound was chosen from) and the committed `durations` map for the carve-out
-    set (a lower bound that moves with the code — so a carve-out set that grows
-    past the budget reds here instead of surfacing as a 90-minute hang).
+    The watchdog's floor is the committed `durations` map for the shard (a lower
+    bound that moves with the code — so a carve-out set that grows past the
+    budget reds here instead of surfacing as a 90-minute hang). The frozen API
+    measurement is a WHOLE-SET quantity: after W37 it bounds the cap from above
+    (the cap may not dwarf the measured step) rather than flooring a watchdog,
+    because one shard carries only a fraction of that work.
 
-    W37: with the carve-out SHARDED, both floors are now PER SHARD. The
-    invariant that matters is no longer "the one job's watchdog clears the whole
-    set" (that is the sum, and the sum is precisely the 16.9m wall this change
-    removes) but "EVERY shard's watchdog clears THAT SHARD's committed work by
-    the house headroom" — checked for every shard, because one under-budgeted
-    shard is a guaranteed red and averaging would hide it."""
+    W37: with the carve-out SHARDED the watchdog floor and the cap proportion
+    are PER SHARD. The invariant that matters is no longer "the one job's
+    watchdog clears the whole set" (that is the sum, and the sum is precisely
+    the 16.9m wall this change removes) but "EVERY shard's watchdog clears THAT
+    SHARD's committed work by the house headroom" — checked for every shard,
+    because one under-budgeted shard is a guaranteed red and averaging would
+    hide it."""
     job = _load_python_ci()["jobs"]["test-carve-out"]
     cap = job["timeout-minutes"]
     measured = _MEASURED_PYTEST_MAX_MIN["test-carve-out"]
@@ -2721,7 +2724,7 @@ def test_carve_out_matrix_partitions_the_leg():
     one shard.
 
     This is the coverage pin, and it is the one that matters most: the whole
-    justification for sharding a 1016-test embedded suite is that a dropped
+    justification for sharding the embedded carve-out suite is that a dropped
     file would be a SILENTLY green, permanently unexecuted gate (the exact
     failure #4047 was about)."""
     manifest = load_manifest()

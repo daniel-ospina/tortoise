@@ -2011,7 +2011,7 @@ jobs:
     # exposure #3239 is about rather than loosening it. Both directions are
     # derived, not chosen: `test_every_bounded_pytest_job_caps_above_its_
     # watchdog` asserts cap > the LARGEST emitted shard watchdog, and
-    # `test_carve_out_bounds_clear_the_measured_work_without_dwarfing_it`
+    # `test_carve_out_shard_bounds_clear_the_committed_work_without_dwarfing_it`
     # asserts cap <= 3x that watchdog (and <= 3x the measured step).
     timeout-minutes: 30
     env:
