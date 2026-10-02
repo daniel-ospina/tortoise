@@ -2710,14 +2710,22 @@ def test_workflow_lint_pins_the_actionlint_image_and_its_scope():
 
 
 def _extract_pytest_marker(run_script: str) -> str:
-    """Pull the `-m <marker>` filter from a job's pytest run script. The
+    """Pull the `-m <marker>` filter from a job's GATING pytest run. The
     docker lanes quote it (`-m 'not track_b and not live'`); the track-b
     job's is bare (`-m track_b`). The launcher's own `python -m pytest`
-    module form is never a marker — the unquoted fallback skips 'pytest'."""
-    quoted = _re.search(r"-m '([^']+)'", run_script)
+    module form is never a marker — the unquoted fallback skips 'pytest'.
+
+    #6142: the `test` job now has a SECOND pytest invocation — the last-failed
+    pre-phase, whose junit is /tmp/junit-lf.xml. Scanning the whole script
+    silently retargets this pin to the pre-phase (the same class of bug fixed
+    in tests/test_skip_guard.py), so the pre-phase line is dropped and the
+    search stays on the canonical gating invocation."""
+    searchable = "\n".join(
+        ln for ln in run_script.splitlines() if "junit-lf.xml" not in ln)
+    quoted = _re.search(r"-m '([^']+)'", searchable)
     if quoted:
         return quoted.group(1)
-    for m in _re.finditer(r"-m\s+([^\s]+)", run_script):
+    for m in _re.finditer(r"-m\s+([^\s]+)", searchable):
         if m.group(1) != "pytest":
             return m.group(1)
     raise AssertionError(f"no -m marker found in run script:\n{run_script}")
@@ -4982,12 +4990,21 @@ def test_every_changed_set_diff_disables_rename_detection():
       `npx markdownlint-cli <nonexistent.md>` exits 0, and plain `.md` deletions
       already put nonexistent paths into this list.
     * Do NOT generalise this rule to `.github/scripts/check-migration-append-only`.
-      That script deliberately runs
-      `git diff --find-renames=20% ... --name-status` because its #1235
-      pure-prefix-rename repair exception is keyed on the `R*` status (recorded
-      at `docs/plans/2026-08-13-1095-migration-drift-gate.md:148`); `--no-renames`
-      there would emit `D`+`A` and break the gate. The rule in this pin is scoped
-      to changed-set *selection* diffs; that file is a deliberate exception.
+      That script deliberately runs `git diff --find-renames=20% ... --name-status`
+      (recorded at `docs/plans/2026-08-13-1095-migration-drift-gate.md:148`).
+      Its exempt arm IS keyed on the `R*` status: #2240 scoped the exemption to a
+      git-detected forward prefix rename whose destination version sorts strictly
+      AFTER the newest applied version, with BOTH endpoints absent from
+      `supabase_migrations.schema_migrations`. A bare `M`/`D` path carries no
+      destination version, so it has no content-independent ordering bound and is
+      NEVER admitted — it falls through to KEEP and is reported as a violation.
+      The old justification ("`--no-renames` would break the gate") therefore
+      holds again: `--find-renames=20%` is what lets a HIGH-SIMILARITY forward
+      renumber report as one `R<sim>` line and reach the exempt arm at all; a
+      re-land carrying a real content delta still degrades to `D`+`A` even with
+      the flag set, and that form is now reported rather than exempted.
+      The rule in this pin is scoped to changed-set
+      *selection* diffs; that file is a deliberate exception.
     """
     root = Path(__file__).resolve().parents[1]
     wf_dir = root / ".github" / "workflows"
