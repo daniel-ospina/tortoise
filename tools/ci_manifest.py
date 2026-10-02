@@ -109,7 +109,7 @@ CAPTURED_AT_KEY = "durations_captured_at"
 
 # `dt.UTC` is 3.11+ only; the 3.9 system interpreter has no such attribute, so
 # every map (red or not) reported UNKNOWN instead of a verdict. Alias it once.
-UTC = getattr(dt, "UTC", dt.timezone.utc)
+UTC = getattr(dt, "UTC", dt.UTC)
 
 
 def _module_is(path: Path, mod: object) -> bool:
