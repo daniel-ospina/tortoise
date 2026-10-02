@@ -4020,17 +4020,6 @@ def test_docs_job_guards_tracked_generated_artifacts_on_every_pr():
             "with a doctored image they pass vacuously and the drift step's own "
             "shape stays clean (#2656)"
         )
-    # A sibling step can also inject the shim without touching the drift step at
-    # all: appending a directory holding an `exit 0` stub named `python3` to
-    # `$GITHUB_PATH` leaves the drift step's own shape pristine.
-    #
-    # This scan catches that spelling. It is deliberately NOT claimed as a
-    # control over the whole family, because a substring test can only enumerate
-    # spellings and the family is open: measured GREEN, each leaving the drift
-    # step pristine — an obfuscated
-    # `>> "$(env | sed -n 's/^GITHUB_PA''TH=//p')"`, a stub interpreter written
-    # to /usr/local/bin/python3, and overwriting a generator under `tools/`.
-    #
     # A sibling step can install the shim without touching the drift step:
     # appending a directory holding an `exit 0` stub named `python3` to
     # `$GITHUB_PATH` leaves the drift step's own shape pristine. This scan reds
