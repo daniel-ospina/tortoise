@@ -386,6 +386,32 @@ def test_drop_one_graph_REFUSAL_is_not_a_success():
     assert db.calls == [], "a refusal must transmit nothing"
 
 
+def test_purge_owned_namespace_refusal_RAISES(monkeypatch):
+    """Review P3 (the caller CLASS, not just _drop_one_graph): a guard refusal
+    must never be treated as a successful purge. Here the consequence is real —
+    the battery scenario would be seeded into a namespace that still holds the
+    previous run. `purge_owned_namespace` returns early on the embedded lane,
+    so this drives the non-embedded branch with a refusing lock."""
+    from battery.runner.setup import scenario_namespace
+    from battery.testing import seeds as seeds_mod
+
+    class _OOMConn:
+        def execute_command(self, *a, **k):
+            if a and a[0] == "SET":
+                raise RuntimeError("OOM")
+            return None
+
+    name = scenario_namespace("s1")
+    db = _FakeDb(graphs=[name])
+    db.connection = _OOMConn()
+    proj = types.SimpleNamespace(db=db, _is_embedded=False, close=lambda: None)
+    monkeypatch.setattr(seeds_mod, "_uri_set_supported", lambda: True)
+    monkeypatch.setattr(seeds_mod, "_open_proj", lambda ns: proj)
+    with pytest.raises(RuntimeError, match="refused to purge"):
+        seeds_mod.purge_owned_namespace("/tmp/namespace", "s1")
+    assert db.calls == [], "a refusal must transmit nothing"
+
+
 # ── poisoned-AOF detection + recovery guidance ────────────────────────────
 
 def test_poison_signature_is_recognised_verbatim():
