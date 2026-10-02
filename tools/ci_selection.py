@@ -1418,6 +1418,62 @@ def shard_watchdog_minutes(est_seconds: float) -> int:
     return int(min(max(raw, WATCHDOG_FLOOR_MIN), WATCHDOG_CEILING_MIN))
 
 
+def watchdog_headroom(est_seconds: float, watchdog_minutes: int) -> float:
+    """#6145: the headroom the EMITTED budget actually retains (`budget / est`).
+
+    `shard_watchdog_minutes()` builds the budget from `WATCHDOG_HEADROOM`, but the
+    FLOOR and CEILING clamps can deliver a different multiple than the one it was
+    built from: upward at the floor (intended — the floor exists to clear the
+    #6133 single-file time) and DOWNWARD at the ceiling, which is the hazard.
+
+    Returns 0.0 for an unusable estimate: the budget is then the floor, and
+    "headroom over an unknown estimate" is not a number anyone should act on.
+    """
+    try:
+        minutes = float(est_seconds) / 60.0
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(minutes) or minutes <= 0:
+        return 0.0
+    return float(watchdog_minutes) / minutes
+
+
+def watchdog_headroom_issues(manifest: dict) -> list[str]:
+    """#6145 / #4819 option 2: NAMED issues where a shard's emitted budget retains
+    LESS headroom than the factor the budget is built from.
+
+    This closes the gap #4819 recorded and nobody checked — "the watchdog value
+    and the shard count: nothing checks that [they are consistent]". A budget
+    that silently drifts TIGHTER than the validated factor is the state in which
+    a shard that legally fits its own declared estimate is killed, and it is
+    reachable today: at a 30.62-minute estimate `ceil(30.62 * 2) = 62` is clamped
+    to the 55-minute ceiling — an EFFECTIVE 1.80x — which the ceiling's own
+    comment treats as "the validated budget" rather than as a breach, and which
+    the #6135 test above asserts without ever computing the margin.
+
+    Fail-closed and NAMED, so a shard that cannot fit its budget is flagged at
+    SELECTION time instead of being killed at run time (#6145's sizing contract:
+    "a shard unable to fit is flagged rather than silently killed"). The estimate
+    and the budget therefore move together: raising an estimate (or lowering the
+    shard count) past the ceiling's reach REDS this check, and the remedy is a
+    deliberate ceiling raise or a re-split — never a silent kill.
+    """
+    issues = []
+    for s in push_legs(manifest)["shards"]:
+        budget = s["watchdog_minutes"]
+        est = s["est_seconds"]
+        headroom = watchdog_headroom(est, budget)
+        if headroom and headroom < WATCHDOG_HEADROOM:
+            issues.append(
+                f"shard {s['name']} cannot fit its watchdog budget: est="
+                f"{est:.1f}s ({est / 60.0:.2f} min) but the budget is {budget}m = "
+                f"{headroom:.2f}x, below the {WATCHDOG_HEADROOM:.1f}x the budget is "
+                f"built from (the {WATCHDOG_CEILING_MIN}m ceiling clamped it) — "
+                f"raise the ceiling deliberately or re-split the shards "
+                f"(#6145/#4819)")
+    return issues
+
+
 def push_legs(manifest: dict) -> dict:
     """#1472/#6135: partition every manifest-classified file into exactly one
     push leg (fast shards / slow / env_broken / carve_out), duration-balanced
@@ -1460,9 +1516,18 @@ def push_legs(manifest: dict) -> dict:
         names = [f[len("tests/"):].replace(".py", "") for f in bin_files]
         names += extras[i::len(labels)]
         est = sum(_duration_weight(durations.get(f + ".py")) for f in names)
+        # #6145: derive the budget from the ROUNDED estimate — the value the
+        # matrix publishes — so the estimate, the budget and the emitted
+        # headroom are mutually consistent and the integrity check measures
+        # exactly the input the budget was built from (a check recomputing
+        # from a different precision carries a ~1 ms false negative exactly at
+        # the ceiling boundary, the boundary the check exists to police).
+        est = round(est, 1)
+        budget = shard_watchdog_minutes(est)
         shards.append({"name": label, "files": sorted(names),
-                       "est_seconds": round(est, 1),
-                       "watchdog_minutes": shard_watchdog_minutes(est)})
+                       "est_seconds": est,
+                       "watchdog_minutes": budget,
+                       "watchdog_headroom": round(watchdog_headroom(est, budget), 2)})
     strip = lambda xs: sorted(x.replace(".py", "") for x in xs)  # noqa: E731
     return {"shards": shards,
             # Epic #1647 Task 9: slow carve-out files (test_reaper et al.)
@@ -1503,9 +1568,12 @@ def build_shard_entries(files: list[str], durations: dict,
         names = sorted((f[len("tests/"):] if f.startswith("tests/") else f)
                        .replace(".py", "") for f in bin_files)
         est = sum(_duration_weight(durations.get(n + ".py")) for n in names)
+        est = round(est, 1)  # #6145: the budget follows the published estimate
+        budget = shard_watchdog_minutes(est)
         entries.append({"name": label, "files": names,
-                        "est_seconds": round(est, 1),
-                        "watchdog_minutes": shard_watchdog_minutes(est)})
+                        "est_seconds": est,
+                        "watchdog_minutes": budget,
+                        "watchdog_headroom": round(watchdog_headroom(est, budget), 2)})
     return entries
 
 
@@ -1520,10 +1588,19 @@ def fast_matrix_include(shards: list[dict]) -> dict:
     """
     include = []
     for i, s in enumerate(shards):
+        # #6145: carry the headroom alongside the budget so the margin a leg was
+        # actually given is VISIBLE in the matrix — the ceiling can silently
+        # deliver less than the factor the budget was built from, and an
+        # implicit margin cannot be audited.
+        headroom = s.get("watchdog_headroom")
+        if headroom is None:
+            headroom = watchdog_headroom(s.get("est_seconds", 0.0),
+                                         s["watchdog_minutes"])
         include.append({
             "half": s["name"],
             "files": " ".join(s["files"]),
             "watchdog_minutes": s["watchdog_minutes"],
+            "watchdog_headroom": round(float(headroom), 2),
             "canary_producer": i == len(shards) - 1,
         })
     return {"include": include}
@@ -2773,6 +2850,7 @@ def main() -> int:
         problems = missing + slow_file_issues(manifest) \
             + fast_shard_issues(manifest) \
             + duration_issues(manifest) + leg_coverage_issues(manifest) \
+            + watchdog_headroom_issues(manifest) \
             + duration_coverage_issues(manifest) + duplicate_entries(manifest)
         # #1472: the matrix must come from the selector derivation — when it
         # does, the #1266 halves-parse tie check is

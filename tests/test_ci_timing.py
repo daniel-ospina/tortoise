@@ -871,6 +871,16 @@ def test_integrity_problems_agrees_with_the_integrity_cli(
     assert cs.main() == 1
     assert any("duration-imbalanced" in p
                for p in ci_timing.integrity_problems(skewed))
+    # #6145: the duration skew above trips several checks at once, so a bare
+    # "non-empty" assertion cannot see a MISSING term. Pin the headroom term by
+    # name — the 90000s skew clamps a shard to the ceiling (1500 min -> 55m =
+    # 0.04x). The list is hand-maintained against `--integrity`, so an omission
+    # here would let the refresh WRITE a manifest the required
+    # `manifest-integrity` check immediately reds.
+    assert any("cannot fit its watchdog budget" in p
+               for p in ci_timing.integrity_problems(skewed)), (
+        "the refresh's pre-write gate must compose the watchdog-headroom check "
+        "(#6145) — otherwise the refresh writes what `--integrity` rejects")
 
 
 def test_ci_timing_docstring_no_longer_claims_it_never_gates_ci() -> None:
