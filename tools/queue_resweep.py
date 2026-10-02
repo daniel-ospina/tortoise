@@ -95,11 +95,23 @@ Exit codes
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below. A module-level
+# 3.11+-only import would raise ImportError first, which reads as "this tool is
+# broken" rather than "your interpreter is too old" — and a lane that concludes
+# "broken" substitutes a naive judgement for the tool's own (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/queue_resweep.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/queue_resweep.py`"
+    )
+
 import argparse
 import json
 import re
 import subprocess
-import sys
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
