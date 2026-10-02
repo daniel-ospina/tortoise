@@ -338,3 +338,40 @@ def test_probe_failure_does_not_raise(monkeypatch, tmp_path, capsys):
     assert "E2E-7 survivor probe failed" in out
     assert "NOT a leak signal" in out
     assert "E2E-7: 1 owned journalled" not in out
+
+
+def test_reimporting_conftest_cannot_change_the_session_identity():
+    """#6323: the re-import this module performs must not strand the session.
+
+    pytest loads this conftest as the TOP-LEVEL ``conftest``, so
+    ``import tests.conftest`` is a SECOND module whose body re-executes
+    mid-session. Before #6323 that body re-rolled ``TORTOISE_TEST_SESSION``,
+    which re-pointed the journal and made the session read its OWN pre-import
+    journal as a live PEER — so ``wipe_server(scope=None)`` spared graphs the
+    session itself had minted.
+
+    The guard sits here, beside the call site, so it runs wherever the trigger
+    runs. Mutation-tested in both directions: against the pre-#6323 body it
+    fails with the nonce having moved (observed 535d522c47e0 -> c611df786317),
+    and it passes once the identity is idempotent within a process.
+
+    The companion direction — that the fix must not become the REJECTED
+    ``setdefault`` design, which ``conftest.py`` rules out because a pre-set
+    value would make concurrent sessions share one journal filename — is
+    asserted by ``test_redirect_seam.py``: an externally pre-set
+    ``TORTOISE_TEST_SESSION`` is still overwritten, since it carries no
+    owner-pid marker.
+    """
+    import os
+
+    before = os.environ.get("TORTOISE_TEST_SESSION")
+    assert before, "conftest must export TORTOISE_TEST_SESSION before tests run"
+
+    import tests.conftest  # noqa: F401 — the re-import shape #6323 reports
+
+    after = os.environ.get("TORTOISE_TEST_SESSION")
+    assert after == before, (
+        "re-executing conftest's body changed TORTOISE_TEST_SESSION "
+        f"({before!r} -> {after!r}) — the session's own journal is now "
+        "stranded as a live peer (#6323)"
+    )
