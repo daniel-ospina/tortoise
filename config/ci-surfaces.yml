@@ -638,6 +638,7 @@ surfaces:
   - test_4542_retract_fold_decay.py
   - test_4716_capture_operator_ref_remap.py
   - test_6131_operator_mutation_vocabulary.py
+  - test_comove_dispatch_3627.py
   # #4971: the `(op_type, src, dst)` idempotency guard hoisted into
   # `commit_ops.apply_payload_operators` — the helper is core engine code, and
   # the re-key regression drives the real embedded capture commit, so this is
@@ -667,10 +668,12 @@ surfaces:
   # GENERATOR-only edit selects `api` and runs this drift gate.
   # NOTE: `core` does NOT catch a docs-only hand-edit of the GENERATED
   # `docs/product/mcp-rename-table.md` — a docs-only change selects no surface at
-  # all (#4454, the repo's deliberate docs-PR policy), so this test does not run
-  # and no workflow runs the generator's `--check` standalone. Correcting that
-  # gap is #4454's job, not this registration's; do not read this entry as
-  # covering a hand-edited document.
+  # all (#4454, the repo's deliberate docs-PR policy), so this test does not run.
+  # That direction is closed by the required `docs` job in ci.yml, which runs
+  # `tools/mcp_rename_table.py --check` unconditionally on every PR (#4454). This
+  # registration keeps its own direction: a GENERATOR-only edit selects `api` and
+  # runs this drift gate. Do not read this entry as covering a hand-edited
+  # document.
   - test_mcp_rename_table.py
   # #6138: the queue-conflict census. Hermetic (no DB, no network — every live
   # read is injected through a fixture), so `core` can run it on engine-wide
@@ -680,6 +683,11 @@ surfaces:
   # test_queue_window_observe.py.
   - test_queue_conflict_census.py
   - test_registry_integrity.py
+  # NOTE (rebase): this PR also registered `test_pack_extraction_slots_v31.py`
+  # here. main has since registered it in `core` (see the `test_pack_cli.py`
+  # block) with its #1026/#5647 comment, so the PR's bare entry is dropped —
+  # keeping both would be a same-surface DUPLICATE, which `--integrity`
+  # reports (`duplicate_entries`, #2913) and which `merge=union` can emit.
   - test_rotate_key.py
   # #3981: dual-registered with `api` (the arm that fires on a tortoise/hosted_api.py-only
   # change); this `core` entry is the fallback arm, since core is only added when nothing
@@ -697,8 +705,11 @@ surfaces:
   # NOTE: docs paths are in NON_PYTHON_PREFIXES, not SOURCE_PATTERNS, so editing
   # `docs/product/beta-sdk-surface.md` or
   # `docs/product/canonical-sdk-methods.md` selects NO surface at all (#4454), so
-  # this registration does not run for a docs-only change — a hand-edit of those two
-  # TRACKED docs is therefore UNGUARDED BY DESIGN (#4454). The GENERATED
+  # this registration does not run for a docs-only change. Coverage of the two
+  # TRACKED docs is now split: the rows of `beta-sdk-surface.md` that the bridge
+  # table CITES are guarded by the `docs` job's `bridge_table.py --check` (mutating
+  # a cited row exits 1), while `canonical-sdk-methods.md` is read only by this
+  # generator and so is still not checked on a docs-only edit. The GENERATED
   # `docs/product/sdk-rename-table.md` is a different case: NOT committed (#5373 —
   # gitignored, generated on demand), so no hand-edited copy can appear in a PR.
   - test_sdk_rename_table.py
@@ -707,9 +718,11 @@ surfaces:
   # plus the GENERATED `config/sdk-surface.json` and
   # `docs/product/sdk-surface-declaration.md`. Editing those selected NO surface, so the drift
   # gate never ran on precisely the PRs that can break it. `core` is the docs/default surface.
-  # NOTE: a docs-only change is in NON_PYTHON_PREFIXES, so editing the GENERATED declaration
-  # doc alone still selects NO surface and is UNGUARDED BY DESIGN (#4454), exactly as the
-  # sibling bridge-table registration documents for its own generated document.
+  # NOTE: a docs-only change is in NON_PYTHON_PREFIXES, so editing the GENERATED
+  # declaration doc alone still selects NO surface here. That direction is now
+  # closed by the required `docs` job, which runs `tools/sdk_surface.py --check`
+  # on every PR (#4454). This registration keeps its own direction: a PR that
+  # edits `tools/sdk_surface.py` itself must still select this surface.
   - test_sdk_surface.py
   - test_capture_cost_measurement.py
   - test_eval_reinjection_cap_resume.py
@@ -1806,6 +1819,7 @@ surfaces:
   - longmem_eval/test_context_assembly_leakage.py  # #3011: gold-leakage hard stop — static reference assertion + gold-field perturbation (hermetic)
   - longmem_eval/test_ep_activation.py  # #3011/#2598: EP activation — promote drafts, run EP, never fabricate a 0.5 (hermetic)
   - longmem_eval/test_gold_evidence_claims.py  # #3011 §9.5: gold-evidence claim artifact builder — frozen tokenizer, MIN_GOLD_TOKENS, non-emptiness (hermetic)
+  - longmem_eval/test_ingest_stall_guard.py  # #2969: bounded graph socket read (socket_timeout env knobs) + ingest heartbeat/no-progress budget → retryable `ingest:retries_exhausted` (hermetic: fake hung/pong TCP servers + injected clock)
   - eval/write_path/test_write_path_corpus.py
   - eval/write_path/test_write_path_grading.py
   - eval/write_path/test_write_path_runner.py
@@ -2518,6 +2532,17 @@ durations:
   eval/harness/test_harness_corpus.py: 0.1
   eval/write_path/test_write_path_grading.py: 0.1
   longmem_eval/test_context_assembly_arms.py: 0.2
+  # #2969: new file in this pool, never sampled by a CI run, so it takes the
+  # flat 2.0s default under the #3400/#4221 convention (a local timing is not
+  # the input). The "second reason" this entry was originally justified by —
+  # that omitting it dropped the fast pool to 541/602 (89.87%) and so failed
+  # the `manifest-integrity` gate — is NO LONGER TRUE, measured 2026-10-02:
+  # the pool has grown well past the 90% `DURATION_COVERAGE_MIN` floor, and
+  # removing this entry leaves `ci_selection.py --integrity` at exit 0 with
+  # `duration_coverage_issues()` empty. The entry stays because it is the
+  # file's declared cost, not because the gate requires it. Refresh from the
+  # first post-merge main run.
+  longmem_eval/test_ingest_stall_guard.py: 2.0
   longmem_eval/test_gold_evidence_claims.py: 0.1
   mini_beir/test_mini_beir.py: 0.1
   test_3926_error_prop_guard.py: 0.3
@@ -2612,6 +2637,7 @@ durations:
   test_crash_recovery_e2e.py: 0.1
   test_crypto.py: 0.1
   test_dataset_audit.py: 0.1
+  test_comove_dispatch_3627.py: 1.5
   test_deploy_workflow.py: 0.4
   test_deployment.py: 0.1
   test_embedder_probe.py: 0.1
