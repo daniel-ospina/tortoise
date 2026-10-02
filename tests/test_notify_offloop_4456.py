@@ -417,10 +417,17 @@ def test_stripe_billing_notify_queued_submission_still_runs(monkeypatch):
     # system never has: since #4350 also routes the webhook's own org_tier /
     # webhook_event_marker reads through _cp_offload(pool="auth"), such a fake
     # 503s the webhook before the notify under test is ever reached (#4456).
-    _real_cp_worker = monitoring.control_plane_worker
+    #
+    # The auth pool gets its own FRESH, UNSATURATED worker rather than the
+    # process-global one: the 0.1 s bound set below is process-wide, so
+    # delegating to the shared pool would make this test's verdict depend on
+    # auth capacity it neither controls nor resets — and a parked auth worker
+    # reproduces the very 500 this test pins.
+    _auth_fresh = monitoring._SingleSlotWorker("test-4456-auth",
+                                               workers=1, max_backlog=1)
     monkeypatch.setattr(monitoring, "control_plane_worker",
                         lambda pool="auth": fresh if pool == "telemetry"
-                        else _real_cp_worker(pool))
+                        else _auth_fresh)
 
     blocker_started = [threading.Event()
                        for _ in range(monitoring.CONTROL_PLANE_TELEMETRY_WORKERS)]
@@ -573,11 +580,13 @@ def test_stripe_billing_notify_refused_through_the_real_seam(monkeypatch,
                                          workers=1, max_backlog=1)
     # Refuse the NOTIFY's own pool only; the webhook's auth-pool reads must
     # still run, or the refusal under test is never reached (see the queued-
-    # submission test for the full reasoning).
-    _real_cp_worker = monitoring.control_plane_worker
+    # submission test for the full reasoning). Own fresh worker, not the
+    # process-global pool — same reason.
+    _auth_fresh = monitoring._SingleSlotWorker("test-4456-real-refusal-auth",
+                                               workers=1, max_backlog=1)
     monkeypatch.setattr(monitoring, "control_plane_worker",
                         lambda pool="auth": fresh if pool == "telemetry"
-                        else _real_cp_worker(pool))
+                        else _auth_fresh)
 
     blocker_started = threading.Event()
     release = threading.Event()
