@@ -1766,9 +1766,15 @@ def test_a_shard_merely_slow_under_load_still_fits_its_budget():
             f"shard {s['name']}: {headroom:.2f}x is below the slowest healthy "
             f"shard measured ({measured_max_healthy_shard_ratio}x) — a merely "
             f"slow shard would be killed")
-        assert headroom >= WATCHDOG_HEADROOM, (
-            f"shard {s['name']}: emitted budget retains {headroom:.2f}x, below "
-            f"the {WATCHDOG_HEADROOM}x it is built from (#6145)")
+        # The shipped gate's own invariant, asserted on the value the matrix
+        # PUBLISHES (2 dp) rather than on a second, differently-precise
+        # recomputation: otherwise this test and the gate could disagree in the
+        # band where rounding decides — a manifest could pass `--integrity` and
+        # then red here (#6145).
+        assert s["watchdog_headroom"] >= WATCHDOG_HEADROOM, (
+            f"shard {s['name']}: emitted budget retains "
+            f"{s['watchdog_headroom']:.2f}x, below the {WATCHDOG_HEADROOM}x it "
+            f"is built from (#6145)")
 
 
 def test_a_shard_that_cannot_fit_its_budget_is_named_not_silently_killed():
@@ -1808,7 +1814,7 @@ def test_a_shard_that_cannot_fit_its_budget_is_named_not_silently_killed():
                                   "test_huge_b.py": 1837.2})
     issues = watchdog_headroom_issues(m)
     assert issues, "a shard the ceiling clamps below the build factor must be NAMED"
-    assert any("cannot fit its watchdog budget" in i for i in issues), issues
+    assert any("its emitted budget retains" in i for i in issues), issues
     assert any("ceiling clamped it" in i for i in issues), issues
     # (d) the decision is taken at the PUBLISHED precision (2 dp — the same
     #     rounding the emitters apply), so a manifest is never refused while the

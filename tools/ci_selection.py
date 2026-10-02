@@ -1471,11 +1471,13 @@ def watchdog_headroom_issues(manifest: dict) -> list[str]:
     from. The two axes are independent and only ONE is visible here:
 
     - What the check sees: the DECLARED `est_seconds` and the emitted budget. It
-      fires IFF the ceiling clamped, i.e. iff the declared estimate is past the
-      ceiling's 2x reach (est > 27.5 min). A shard whose DECLARED estimate
-      exceeds that is flagged even when the estimate is perfectly accurate, and
-      one whose declared estimate stays within it passes even when the estimate
-      is far too low.
+      fires iff the ceiling clamped the budget below that factor AT THE
+      PUBLISHED PRECISION — `round(budget / est_min, 2) < 2.0`, i.e. a declared
+      estimate above ~27.57 min. A shard whose DECLARED estimate exceeds that is
+      flagged even when the estimate is perfectly accurate, and one whose
+      declared estimate stays within it passes even when the estimate is far too
+      low. A clamp inside the 2-dp quantum (est in ~(27.500, 27.569] min) passes
+      by design, because the value the matrix publishes reads a compliant 2.0.
     - What it cannot see: the ACTUAL runtime. The observed kills are the other
       axis — a shard that ran ~2.11x its declared cost (the shape #6145
       measured) — and a shard like that passes if its DECLARED value is in
@@ -1508,12 +1510,13 @@ def watchdog_headroom_issues(manifest: dict) -> list[str]:
         headroom = round(watchdog_headroom(est, budget), 2)
         if headroom and headroom < WATCHDOG_HEADROOM:
             issues.append(
-                f"shard {s['name']} cannot fit its watchdog budget: est="
-                f"{est:.1f}s ({est / 60.0:.2f} min) but the budget is {budget}m = "
-                f"{headroom:.2f}x, below the {WATCHDOG_HEADROOM:.1f}x the budget is "
-                f"built from (the {WATCHDOG_CEILING_MIN}m ceiling clamped it) — "
-                f"raise the ceiling deliberately or re-split the shards "
-                f"(#6145/#4819)")
+                f"shard {s['name']}: its emitted budget retains "
+                f"{headroom:.2f}x, below the {WATCHDOG_HEADROOM:.1f}x it is built "
+                f"from — the shard may still fit the {budget}m wall, but the "
+                f"budget no longer holds that factor (est={est:.1f}s = "
+                f"{est / 60.0:.2f} min; the {WATCHDOG_CEILING_MIN}m ceiling "
+                f"clamped it). Raise the ceiling deliberately or re-split the "
+                f"shards (#6145/#4819)")
     return issues
 
 

@@ -877,7 +877,7 @@ def test_integrity_problems_agrees_with_the_integrity_cli(
     # 0.04x). The list is hand-maintained against `--integrity`, so an omission
     # here would let the refresh WRITE a manifest the required
     # `manifest-integrity` check immediately reds.
-    assert any("cannot fit its watchdog budget" in p
+    assert any("its emitted budget retains" in p
                for p in ci_timing.integrity_problems(skewed)), (
         "the refresh's pre-write gate must compose the watchdog-headroom check "
         "(#6145) — otherwise the refresh writes what `--integrity` rejects")
