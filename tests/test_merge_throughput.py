@@ -3968,9 +3968,12 @@ def test_docs_job_guards_tracked_generated_artifacts_on_every_pr():
         s for s in steps if str(s.get("uses", "")).startswith("actions/setup-python")
     )
     assert setup["with"]["python-version"] == "3.12"
-    # Negative control: docs/product/sdk-rename-table.md is gitignored and
-    # untracked (.gitignore:112), so it cannot drift in a PR. Listing it here
-    # would be a check that can never fire.
+    # Negative control: `sdk_rename_table.py --check` is deliberately NOT listed.
+    # Its output `docs/product/sdk-rename-table.md` is untracked (.gitignore:112), so
+    # in a clean checkout a bare `--check` has no file to compare and exits 1 on
+    # EVERY run — a fail-always gate, not a drift gate (measured: with that output
+    # absent, the command exits 1). Its tracked-input validation is reachable only
+    # via `--out` to a rendered copy, which `tests/test_sdk_rename_table.py` does.
     assert "sdk_rename_table" not in step["run"]
 
 

@@ -686,8 +686,11 @@ surfaces:
   # NOTE: docs paths are in NON_PYTHON_PREFIXES, not SOURCE_PATTERNS, so editing
   # `docs/product/beta-sdk-surface.md` or
   # `docs/product/canonical-sdk-methods.md` selects NO surface at all (#4454), so
-  # this registration does not run for a docs-only change — a hand-edit of those two
-  # TRACKED docs is therefore UNGUARDED BY DESIGN (#4454). The GENERATED
+  # this registration does not run for a docs-only change. Coverage of the two
+  # TRACKED docs is now split: the rows of `beta-sdk-surface.md` that the bridge
+  # table CITES are guarded by the `docs` job's `bridge_table.py --check` (mutating
+  # a cited row exits 1), while `canonical-sdk-methods.md` is read only by this
+  # generator and so is still not checked on a docs-only edit. The GENERATED
   # `docs/product/sdk-rename-table.md` is a different case: NOT committed (#5373 —
   # gitignored, generated on demand), so no hand-edited copy can appear in a PR.
   - test_sdk_rename_table.py
