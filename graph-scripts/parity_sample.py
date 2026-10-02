@@ -9,7 +9,7 @@ Block the REMOVE migration if there are unexplained operator-set deltas.
 
 Usage:
   # Sample 50 contexts from the DEV graph:
-  TORTOISE_DB_URI=docker://:@localhost:16379/tortoise \\
+  TORTOISE_DB_URI=docker://:@127.0.0.1:16379/tortoise \\
     python3 graph-scripts/parity_sample.py
 
   # With explicit limit and seed:
@@ -23,10 +23,20 @@ Usage:
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"graph-scripts/parity_sample.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python graph-scripts/parity_sample.py`"
+    )
+
 import argparse
 import os
 import random
-import sys
 import time
 from collections import defaultdict  # noqa: F401
 
@@ -237,7 +247,7 @@ def main() -> int:
     args = parser.parse_args()
 
     uri = args.uri or os.environ.get(
-        "TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise"
+        "TORTOISE_DB_URI", "docker://:@127.0.0.1:16379/tortoise"
     )
     cfg = _parse_uri(uri)
 

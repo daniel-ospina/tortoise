@@ -318,7 +318,7 @@ The general rule (research, 2026-09-23):
 - It is consistent with the field: GraphRAG-class systems treat the graph as a **derived, rebuildable index**, not the record (Microsoft GraphRAG persists to Parquet; only Cognee and Neo4j physically separate the two).
 
 ### What is already in the code
-The store sits behind a **two-method Protocol** — `apply(event)` and `rebuild(log)` — and an **`InMemoryProjection`** already exists as a second implementation. The architecture is **event-sourced by construction**; the hosted write path simply does not journal (`#4240: no event_log_path`) — a **wiring gap, not a design gap**.
+The store sits behind a **two-method Protocol** — `apply(event)` and `rebuild(log)` — and an **`InMemoryProjection`** already exists as a second implementation. The architecture is **event-sourced by construction**; the hosted write path does not journal unless `TORTOISE_EVENT_LOG_BASE_DIR` is set (`#4240` wired the per-graph journal) — a **wiring gap, not a design gap**.
 
 ---
 
@@ -1191,7 +1191,7 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 | §1 the problem | `#4333` | the measured volume, and the true bytes per quota node. ⚠️ **Corrected 2026-09-23:** the earlier *"5.6 KB vs 1 KB, a 5.6× understatement"* divided **total instance RAM (140 MB)** by the **capped node count (25,000)** — but the numerator includes ~19,944 **quota-FREE** episodic turns, plus Events, Sessions, Documents, scaffolding and the full HNSW index. **`#4333` — the authority this row cites — estimates 2.5–4×.** The honest figure is **~3 KB per node (140 MB ÷ ~45k total nodes) ≈ ~3×**; 5.6 KB must be labelled *"total resident bytes per CAPPED node, including uncapped nodes"* |
 | §2 mechanism | `#4333` | why the RAM/disk difference *is* the economics |
 | §3 architecture | `#4333` | the physical split, **in the ontology's own vocabulary** — not a new layer |
-| §3 what is already in code | **`#4240`** | **the hosted path does not journal → a wiring gap, not a design gap** |
+| §3 what is already in code | **`#4240`** | **the hosted path does not journal unless `TORTOISE_EVENT_LOG_BASE_DIR` is set (`#4240` wired the per-graph journal) → a wiring gap, not a design gap** |
 | §3 why this shape | `#3895` | the derived layer becomes **REBUILDABLE** — ⚠️ **NOT "disposable"**: §3 forbids that reading in bold, and `#3895` is a *restore*. "Disposable" is the label that would license dropping the only copy. It regenerates **from the truth layer**, and only because the journal carries the payload |
 | §4 tenancy | `#3885` | **one project, tenant-scoped rows** — not one project per team |
 | §5 cost | `#4333` · `#4614` | published rates; ~10× headroom at 1,000 users |

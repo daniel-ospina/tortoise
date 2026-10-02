@@ -359,12 +359,69 @@ the fields the UI reads; keep `app_metadata`); keep `SIZE_GUARD + 100`; add `COO
 text-extractable by the same regex the bridge suite uses at `:408`) and the **refuse-and-report**
 branch (no write). **The landed form of the refusal differs from this sketch:** the branch
 `console.warn`s AND reports on the page (`showSignin()` + `showError("Your sign-in session is too
-large…")`) and returns — it does NOT read the cookie back, does NOT compare the credential pair, and
+large…")` — a #3496-era string, since replaced by #5734's copy; see the #5734 block below) and
+returns — it does NOT read the cookie back, does NOT compare the credential pair, and
 does NOT route through the Step-6 terminal state (`showTerminalFallback()` also calls
 `sanitiseUrl()`; this branch never does). The bridge's `writeLanded()` read-back (#3503) was **not**
 ported. Whether a refused write should render through the terminal state, and that its message
 SURVIVES the consent view (a stale session currently lets `showConsentOnce()` `hideError()` it), is
 #5734 (per-cause refusal UX).
+
+> **#5734 — landed on a stacked branch above this one. Three things in this record are superseded;
+> read them here rather than re-deriving them.** (1) The Step 3b/Step 6 sketch's **browser-global
+> copy** — `"This browser cannot complete a secure sign-in here (no WebCrypto)"`, `"This browser is
+> blocking site storage…"`, `"Sign-in failed — please start again."` — is **replaced by page-scoped
+> copy** (`"This page can't start a secure sign-in here …"`), because a browser-level absolute on
+> this surface is the #4678 defect class. This also **supersedes the Step 6 cross-surface
+> word-consistency note for the terminal copy**: the landed terminal copy is per-cause
+> (`"Sign-in was declined at the provider…"`, `"The provider reported a temporary failure…"`,
+> `"This page could not finish the sign-in it had started…"`), which shares no wording with the
+> dashboard's `signup.html:697` phrasing. The dashboard `public/` pages are **unchanged** and remain
+> a separate app (Step 6: the separation is recorded) — no shared message module, so this is not a
+> cross-surface message table. (2) The refusal is now decided **at LOAD** as well as at click:
+> `pkceIncapable()` runs at page load, an incapable page disables both provider buttons and shows the
+> cause inline before the user acts, and `signInWithProvider` **re-checks at click** — the load probe
+> is an affordance and never the security boundary. (3) The refused over-`SIZE_CAP` write renders its
+> own cause/remedy copy with a retry affordance whose handler re-probes capability, and that message
+> now **survives the transitions that would replace it**, by two mechanisms over one page-lifetime
+> `writeRefused` flag: (a) `showError` and `hideError` both
+> **yield while a refusal is pending**, so
+> no later message — the generic `?code` terminal branch, the consent flow's org resolution
+> ("No usable org for this account."), a preview's `e.message`, "Your session expired — sign in
+> again." from `showExpiredSignin` or the authorize handler — can replace or clear it; and (b)
+> `showConsentOnce()` refuses to enter the consent view at all while a refusal is pending (the check
+> sits after its session read, so it also covers a flow already in flight when the refusal landed),
+> rather than presenting consent for a session the user did not just sign in as. The flag clears when
+> a write lands and at the start of each user-initiated attempt, and `runConsentFlow()` hands back the
+> running flow, so a second call can AWAIT the flow it did not start rather than racing it. The Step 7
+> sketch's `"Your sign-in session is too large…"` refusal string is #3496-era text, superseded by this
+> branch's copy.
+>
+> That control's warrant — a separate matter from the message's survival — is owned by the same two
+> helpers: it is a sibling of `#error` and is OUTSIDE both views, so once shown it is visible in
+> whatever view follows, and only a message can end its warrant. `showSignin()` re-asserts it
+> whenever a refusal is what is displayed, so a caller that lands there (`showExpiredSignin` after a
+> refused refresh write, the no-session branches of `showConsentOnce` and the authorize handler)
+> cannot leave the copy's "Retry" without a control; the consent flow's own ENTRY drops it rather
+> than carrying it under the approve/deny decision; `showError` drops it for every message that is
+> not a refusal (the email form's own validation message included), and `hideError` drops it for
+> every transition with nothing to say. On every UI route to a message that is not a refusal the
+> control is dropped before `showError` runs, so `showError`'s drop is redundancy the direct pin
+> keeps honest rather than the only guard. The capability copy's named alternative —
+> the email form — is not disabled by the probe, so the remedy it offers is reachable in the state
+> that prescribes it. The load-time probe also adds a residual the R3 ledger does not carry:
+> `pkceIncapable()` mints a fresh sentinel per invocation, so probing at load adds one
+> non-credential `__tt_probe-*` entry per page load (and one per click and per retry), not
+> "at most one". Pinned by
+> `tests/test_oauth_consent_pkce.py::test_5734_a_refused_write_is_not_overwritten_by_the_terminal_state`,
+> which drives the refusal through the REAL exchange callback — with and without a stale session in
+> the cookie, and through the email form as a third variant — rather than by calling `setItem`
+> directly, and which pins the two rules on the page's own helpers WHERE A UI-ONLY TEST CANNOT REACH
+> THEM — `hideError()`'s refusal-pending guard (unreachable because the consent view is not entered
+> while a refusal is pending) and `showError()`'s drop of the retry control (unreachable because
+> every UI route to a message that is not a refusal drops the control first) — in addition to the UI
+> scenarios that drive the rest: `showError`'s precedence on the refusal's behalf, and
+> `hideError()`'s own drop at the consent view's entry, witnessed by that entry's scenario.
 
 **Step 8 — harness `tests/test_oauth_consent_pkce.py`.** Render with `consent_page_html(...)`
 **directly** (pure function; no app boot, no fixture refactor); extract the inline block from the

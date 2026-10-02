@@ -94,7 +94,7 @@ body:
       label: Measured at (if you have a checkout)
       description: >-
         The exact commit you measured against. In your checkout run
-        `python3 tools/finding_provenance.py --emit` and paste the single line
+        `uv run python tools/finding_provenance.py --emit` and paste the single line
         it prints. The `finding-provenance` CI job uses this line to tell a
         stale measurement from a live defect (#4290). If you are reporting
         against a hosted/released version, leave this blank.
@@ -133,7 +133,7 @@ body:
         ### If you are an agent working this issue — record what you learn in the graph
 
         Before you close this, write what you found into the **Tortoise graph**
-        (`TORTOISE_DB_URI='docker://:@localhost:16379/tortoise'`) as an `evidence` point, wired to the
+        (`TORTOISE_DB_URI='docker://:@127.0.0.1:16379/tortoise'`) as an `evidence` point, wired to the
         **objective it serves** — never to this issue. A finding left in a session dies with it, and the
         next lane re-derives it from scratch. This is the mechanism that keeps the map current as we work
         the chain of objectives and, ultimately, find the best path to **revenue**.
