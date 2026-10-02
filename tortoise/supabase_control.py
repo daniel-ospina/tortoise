@@ -1097,7 +1097,7 @@ def claim_api_key_revocation(cp, key_id: str, now: str | None = None) -> bool:
 # ── #1879: durable multi-worker mint serialization ────────────────────────
 #
 # The mint critical sections below run as ONE Postgres transaction through a
-# SECURITY DEFINER RPC (migration 20260927000001), which serializes on the
+# SECURITY DEFINER RPC (migration 20261001000002), which serializes on the
 # `organizations` row (`FOR NO KEY UPDATE`). WHY a whole-section RPC: each
 # `cp.query`/`cp.rpc` is its own PostgREST HTTP request, and PostgREST is
 # stateless per request — a lock taken by a WRAPPER RPC releases at that

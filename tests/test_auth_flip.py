@@ -982,7 +982,7 @@ class TestSessionKeyMintConcurrency:
 class TestSessionKeyMintSerialization1879:
     """#1879 — a Supabase session-key mint is ONE `session_key_mint` RPC.
 
-    Migration 20260927000001 opens that RPC with
+    Migration 20261001000002 opens that RPC with
     ``SELECT id FROM organizations WHERE id = p_org_id FOR NO KEY UPDATE``, so
     the whole cap/revoke/recheck/insert section runs in ONE transaction that
     holds the org row — the serialization point that survives a second worker

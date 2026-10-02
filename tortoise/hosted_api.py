@@ -20934,7 +20934,7 @@ def _now_iso() -> str:
 #
 # ⛔ #1879 LANDED: the SUPABASE lane now does exactly that —
 # `_session_key_supabase` runs the whole section inside `session_key_mint`
-# (migration 20260927000001), serialized on the `organizations` row, and
+# (migration 20261001000002), serialized on the `organizations` row, and
 # `_mint_key`'s Supabase branch runs inside `provision_api_key` under the same
 # lock. This in-process lock is retained as belt-and-braces for the Supabase
 # lane and is still the ONLY guard for the REGISTRY lane (embedded FalkorDB is
@@ -21292,7 +21292,7 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     get_current_org / MCP resolve it via the unique lookup_hash index, and
     api_keys.revoked_at is the authoritative revoke. #1879: the whole
     cap/revoke/recheck/insert section runs as ONE Postgres transaction inside
-    the `session_key_mint` RPC (migration 20260927000001), which serializes on
+    the `session_key_mint` RPC (migration 20261001000002), which serializes on
     the `organizations` row (`FOR NO KEY UPDATE`) — so the cap holds ACROSS
     worker processes, not just within this one. The per-org in-process lock
     (see _org_mint_lock above) is retained as belt-and-braces: a second worker

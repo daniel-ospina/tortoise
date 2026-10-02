@@ -1,5 +1,5 @@
 -- ============================================================================
--- SQL-level verification for migration 20260927000001 (issue #1879)
+-- SQL-level verification for migration 20261001000002 (issue #1879)
 -- Durable multi-worker mint serialization: api_key_slot_count /
 -- session_key_mint / provision_api_key / recover_team_key (org-row lock).
 --
