@@ -1,7 +1,8 @@
 """ai-review-gate ↔ record-review.sh signing-contract guard (#3076).
 
 The ``ai-review-gate`` check (``.github/workflows/ai-review-gate.yml``)
-accepts a PR only when the body carries a signed evidence marker whose HMAC
+accepts a PR only when the body — or, since #1224, a repo-affiliated PR
+comment — carries a signed evidence marker whose HMAC
 verifies against the ``AI_REVIEW_GATE_KEY`` secret::
 
     review recorded: reviews/<PR>.json verdict=clean @ <40-hex-sha>[ diff=<64-hex>] (<owner/repo>) sig=<64-hex>
@@ -26,12 +27,23 @@ falls back to the ``PR_BODY`` env var (its documented fallback) — that is the
 ``event-snapshot`` path. ``_run_gate(live_body=…)`` opts into the OTHER source: the
 stub then answers the REST body fetch (``body=rest-live``) while still failing the diff
 fetch. Both paths are hermetic and fast.
+
+
+#1224 adds the COMMENT channel: the gate reads the same signed marker from an
+append-only PR comment as well, because the body is a mutable field any later
+legitimate edit rewrites. The gate must therefore accept a marker from EITHER
+channel, while every security property is preserved — the HMAC over the marker
+text is what makes it unforgeable (a forged comment FAILS), and the binding
+rules are untouched (a stale comment FAILS). The #1224 cases below drive a
+second stub that serves the PR-comment endpoint through the caller's own
+``--jq`` expression, so the gate's admission filter is genuinely exercised.
 """
 
 from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import os
 import re
 import shutil
@@ -52,6 +64,47 @@ _HEAD = "9d05b01f8f187915fc5d1048dec72604793bbd46"
 _PR = "3069"
 _REPO = "daniel-ospina/tortoise"
 _DIFF = "8b96e47622011603a31a6b7a59bd096fc7c5850c898a887d528811ff7806a7fd"
+_STALE_HEAD = "a" * 40
+
+# Offline ``gh`` stub for the #1224 comment-channel cases. It serves ONLY the
+# PR-comment endpoint, applying the caller's ``--jq`` expression with the REAL
+# jq — so a gate that stops passing the affiliation filter is genuinely
+# observable instead of being handed the unfiltered payload by the stub.
+#
+# Every other call exits 1, which keeps the PR body on its documented PR_BODY
+# fallback and leaves BOTH live diff digests empty (the markers used by these
+# cases are head-bound, so acceptance rule (a) is the path under test).
+_COMMENT_STUB = """#!/usr/bin/env bash
+payload="__PAYLOAD__"
+text="__TEXT__"
+url=""; jq_expr=""
+args=("$@"); i=0
+while [ "$i" -lt "${#args[@]}" ]; do
+  a="${args[$i]}"
+  case "$a" in
+    --jq) jq_expr="${args[$((i+1))]:-}"; i=$((i+2));;
+    -H|--header|-X|--input|-f|--field|-F|--raw-field) i=$((i+2));;
+    --paginate|--silent) i=$((i+1));;
+    repos/*) url="$a"; i=$((i+1));;
+    *) i=$((i+1));;
+  esac
+done
+case "$url" in
+  */issues/*/comments)
+    if [ -n "__FAIL__" ]; then
+      # Model the WORST-CASE failure: the call exits non-zero but its stdout
+      # still carries marker text. A gate that captures stdout on the failure
+      # path (``|| true``, or an unguarded assignment) accepts it — the
+      # fail-open this pins shut. A real ``gh api`` prints its HTTP error body
+      # (JSON) there instead; the marker-line form is strictly harder.
+      cat "$text"
+      exit 1
+    fi
+    exec jq -r "$jq_expr" "$payload"
+    ;;
+esac
+exit 1
+"""
 
 
 @lru_cache(maxsize=1)
@@ -89,6 +142,31 @@ def _diff_marker(key: str = _FIXTURE_KEY) -> str:
     )
 
 
+def _stale_marker(key: str = _FIXTURE_KEY) -> str:
+    return _marker(
+        f"review recorded: reviews/{_PR}.json verdict=clean @ {_STALE_HEAD} ({_REPO})",
+        key,
+    )
+
+
+def _comment(body: str, association: str = "MEMBER") -> dict[str, str]:
+    """A GitHub issue-comment object as the REST API returns it.
+
+    ``MEMBER`` is the affiliation the filter admits; the affiliation filter the
+    gate applies is ``PR_EVIDENCE_COMMENTS_JQ``.
+    """
+    return {"body": body, "author_association": association}
+
+
+def _require_jq() -> None:
+    """The comment cases serve jq-filtered bodies; a missing jq must FAIL.
+
+    Never skip: a skipped test is not evidence.
+    """
+    if shutil.which("jq") is None:
+        pytest.fail("the #1224 comment-channel cases need jq on PATH")
+
+
 def _run_gate(
     body: str,
     tmp_path: Path,
@@ -97,6 +175,8 @@ def _run_gate(
     repo: str = _REPO,
     pr: str = _PR,
     secret: str = _FIXTURE_KEY,
+    comments: list[dict[str, str]] | None = None,
+    comments_fail: bool = False,
     live_body: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Execute the workflow's run block offline (stubbed ``gh``) on ``body``.
@@ -107,24 +187,42 @@ def _run_gate(
     the stub answer the PR fetch with those bytes, which is the path production
     normally takes (``body=rest-live``) — and the only way to reach it, since a
     snapshot body and a live body are otherwise indistinguishable to these tests.
+
+    ``comments`` serves the PR-comment endpoint (#1224) as GitHub issue-comment
+    objects (``body`` + ``author_association``); ``comments_fail`` makes that
+    call exit non-zero while still printing marker text on stdout. The comment
+    channel takes precedence: with ``comments``/``comments_fail`` set, every other
+    ``gh`` call still fails, so the body comes from the ``PR_BODY`` event payload.
+    Without any of these, every ``gh`` call fails — the original stub, unchanged.
     """
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
     gh = bindir / "gh"
-    if live_body is None:
-        gh.write_text("#!/usr/bin/env bash\nexit 1\n")  # force the PR_BODY fallback
+    if comments is None and not comments_fail:
+        if live_body is None:
+            gh.write_text("#!/usr/bin/env bash\nexit 1\n")  # force the PR_BODY fallback
+        else:
+            # Answer ONLY the body fetch (`--jq .body`); the live diff fetch carries the
+            # `Accept: …v3.diff` header and still fails, which is the fail-closed arm a
+            # `diff=` marker must trip.
+            (tmp_path / "live-body.txt").write_text(live_body)
+            gh.write_text(
+                "#!/usr/bin/env bash\n"
+                "case \"$*\" in\n"
+                "  *v3.diff*) exit 1 ;;\n"
+                f'  *.body*) cat "{tmp_path}/live-body.txt" ;;\n'
+                "  *) exit 1 ;;\n"
+                "esac\n"
+            )
     else:
-        # Answer ONLY the body fetch (`--jq .body`); the live diff fetch carries the
-        # `Accept: …v3.diff` header and still fails, which is the fail-closed arm a
-        # `diff=` marker must trip.
-        (tmp_path / "live-body.txt").write_text(live_body)
+        payload = tmp_path / "comments.json"
+        payload.write_text(json.dumps(comments or []), encoding="utf-8")
+        text = tmp_path / "comments.txt"
+        text.write_text("\n".join(c["body"] for c in (comments or [])), encoding="utf-8")
         gh.write_text(
-            "#!/usr/bin/env bash\n"
-            "case \"$*\" in\n"
-            "  *v3.diff*) exit 1 ;;\n"
-            f'  *.body*) cat "{tmp_path}/live-body.txt" ;;\n'
-            "  *) exit 1 ;;\n"
-            "esac\n"
+            _COMMENT_STUB.replace("__PAYLOAD__", str(payload))
+            .replace("__TEXT__", str(text))
+            .replace("__FAIL__", "1" if comments_fail else "")
         )
     gh.chmod(0o755)
     script = tmp_path / "run.sh"
@@ -269,7 +367,10 @@ def test_gate_reports_stale_marker(tmp_path: Path) -> None:
     )
     proc = _run_gate(body, tmp_path)
     assert proc.returncode == 1
+    # This run's comment fetch FAILED (the stub fails every call), so the verdict
+    # names only the body: it must not assert an inspection that never happened.
     assert f"NO marker in this PR's body is bound to {_HEAD}" in proc.stdout, proc.stdout
+    assert "comments=NOT-READ" in proc.stdout, proc.stdout
     assert other[:12] in proc.stdout, "the candidate list must name the marker that IS there"
     assert f"head expected: {_HEAD}" in proc.stdout, proc.stdout
     assert "candidate marker(s): 1" in proc.stdout, proc.stdout
@@ -394,6 +495,173 @@ def test_gate_reports_missing_wellformed_sha(tmp_path: Path) -> None:
 def test_gate_reports_no_evidence_at_all(tmp_path: Path) -> None:
     proc = _run_gate("just a PR description, no marker", tmp_path)
     assert proc.returncode == 1
+    assert "No AI review evidence found" in proc.stdout, proc.stdout
+
+
+# ── #1224: the signed marker may be carried by a PR COMMENT ────────────────
+# The body is a mutable field the recording party routinely rewrites, so the
+# gate also reads the SAME signed text from an append-only PR comment. The
+# gate must accept it from EITHER channel — and must preserve EVERY security
+# property while doing so: the HMAC over the marker text is what makes a marker
+# unforgeable, and the head/diff binding rules are unchanged.
+
+
+def test_gate_accepts_head_bound_marker_from_a_comment(tmp_path: Path) -> None:
+    """#1224 case 1: a comment-carried marker with a VALID HMAC, head-bound, passes.
+
+    The body carries NO marker, so a pass here is only possible if the comment
+    channel is actually read. The pass message must name the channel it used.
+    The marker carries the optional ``diff=`` segment, so the comment path also
+    exercises the #3076 shape.
+    """
+    _require_jq()
+    proc = _run_gate(
+        "A PR description with no evidence marker in it.",
+        tmp_path,
+        comments=[_comment(_diff_marker())],
+    )
+    assert proc.returncode == 0, proc.stdout
+    assert "AI review gate passed" in proc.stdout, proc.stdout
+    assert "marker found in PR comment" in proc.stdout, proc.stdout
+
+
+def test_gate_rejects_forged_hmac_in_a_comment(tmp_path: Path) -> None:
+    """#1224 case 2 (SECURITY): a comment with a FORGED HMAC must fail.
+
+    This must genuinely exercise the HMAC path — not fall out at the shape
+    filter — so it asserts the HMAC-mismatch diagnostic fired AND that it names
+    the comment channel. The channel is not a trust boundary; the signature is.
+    """
+    _require_jq()
+    proc = _run_gate(
+        "An edited PR description with no marker.",
+        tmp_path,
+        comments=[_comment(_diff_marker(key="attacker-key"))],
+    )
+    assert proc.returncode == 1, proc.stdout
+    assert "HMAC mismatch" in proc.stdout, proc.stdout
+    assert "found in PR comment" in proc.stdout, proc.stdout
+    assert "attacker-key" not in proc.stdout, proc.stdout
+
+
+def test_gate_rejects_stale_marker_in_a_comment(tmp_path: Path) -> None:
+    """#1224 case 3: a STALE comment marker still fails.
+
+    Channel membership must not weaken the binding: this marker is for another
+    head and carries no ``diff=``, so neither rule (a) nor rule (b) can carry
+    it. It must be reported as stale, and say WHERE it was found.
+    """
+    _require_jq()
+    proc = _run_gate(
+        "An edited PR description with no marker.",
+        tmp_path,
+        comments=[_comment(_stale_marker())],
+    )
+    assert proc.returncode == 1, proc.stdout
+    # The comment channel WAS read here, so the verdict names both channels.
+    assert f"NO marker in this PR's body or its admitted comments is bound to {_HEAD}" in proc.stdout, proc.stdout
+    assert "found in PR comment" in proc.stdout, proc.stdout
+    assert "comments=read sha256=" in proc.stdout, proc.stdout
+
+
+def test_gate_classifies_an_unsigned_comment_marker_as_unsigned(tmp_path: Path) -> None:
+    """#1224: the failure CLASSIFICATION works for a comment-carried marker too.
+
+    If only the body were searched for markers-to-classify, a comment-carried
+    failure would fall through to "no evidence found" and send the operator
+    after the wrong cause — exactly the misleading-diagnostic trap #3076 is
+    about. An unsigned comment marker must be reported as UNSIGNED, saying it
+    was found in a comment.
+    """
+    _require_jq()
+    unsigned = f"review recorded: reviews/{_PR}.json verdict=clean @ {_HEAD} ({_REPO})"
+    proc = _run_gate(
+        "An edited PR description with no marker.",
+        tmp_path,
+        comments=[_comment(unsigned)],
+    )
+    assert proc.returncode == 1, proc.stdout
+    assert "is UNSIGNED" in proc.stdout, proc.stdout
+    assert "found in PR comment" in proc.stdout, proc.stdout
+
+
+def test_gate_body_path_unaffected_when_comment_fetch_fails(tmp_path: Path) -> None:
+    """#1224 case 4: a failed comment fetch leaves the BODY path exactly as before.
+
+    Fail closed does not mean fail the check: the body marker is still
+    sufficient, the failure is warned about, and no comment text is invented.
+    """
+    proc = _run_gate(
+        _legacy_marker(),
+        tmp_path,
+        comments=[_comment(_legacy_marker())],
+        comments_fail=True,
+    )
+    assert proc.returncode == 0, proc.stdout
+    assert "AI review gate passed" in proc.stdout, proc.stdout
+    assert "PR comment fetch via the REST API failed" in proc.stdout, proc.stdout
+
+
+def test_gate_accepts_comment_marker_after_a_body_edit(tmp_path: Path) -> None:
+    """#1224 case 5 (THE DEFECT): a comment-carried marker is accepted after a body edit.
+
+    This is the exact failure the issue is about: a legitimate edit rewrites the
+    body and removes the body copy of the marker. The gate must pass on the
+    comment alone, because it reads the comment channel too.
+    """
+    _require_jq()
+    edited_body = (
+        "## Summary\n\nEdited after review to correct a claim (the marker below\n"
+        "was removed by this edit when the tool last rewrote the body).\n"
+    )
+    proc = _run_gate(edited_body, tmp_path, comments=[_comment(_legacy_marker())])
+    assert proc.returncode == 0, proc.stdout
+    assert "AI review gate passed" in proc.stdout, proc.stdout
+    assert "No AI review evidence found" not in proc.stdout, proc.stdout
+    assert "marker found in PR comment" in proc.stdout, proc.stdout
+
+
+def test_gate_fails_closed_when_failed_comment_fetch_prints_marker_text(
+    tmp_path: Path,
+) -> None:
+    """#1224 (fail-closed): stdout of a FAILED comment fetch is never evidence.
+
+    The stub exits non-zero AND prints a valid-looking marker line on stdout
+    (the worst case; a real ``gh api`` prints its HTTP error body there). A gate
+    that captured stdout on the failure path would accept unreviewed text —
+    a network failure turned into a pass. The body carries no marker here, so
+    the run must fail with "no evidence".
+    """
+    proc = _run_gate(
+        "An edited PR description with no marker.",
+        tmp_path,
+        comments=[_comment(_legacy_marker())],
+        comments_fail=True,
+    )
+    assert proc.returncode == 1, proc.stdout
+    assert "No AI review evidence found" in proc.stdout, proc.stdout
+    assert "comment-carried evidence could not be examined" in proc.stdout, proc.stdout
+    # The provenance must say WHICH BYTES were judged, and that the comment side
+    # was NOT among them — distinct from a successful read that found nothing.
+    assert "comments=NOT-READ" in proc.stdout, proc.stdout
+
+
+def test_gate_does_not_admit_a_non_affiliated_comment(tmp_path: Path) -> None:
+    """#1224: comment admission is narrowed to repo-affiliated authors.
+
+    On a public repo any user with read access can comment, so the gate applies
+    ``PR_EVIDENCE_COMMENTS_JQ`` — the filter the producer side and the other
+    readers must share — so a drive-by author's comment is not admitted, and a
+    reader must not act on a comment the others refuse. The marker HMAC is valid:
+    this fails on AUTHORSHIP, not on the signature.
+    """
+    _require_jq()
+    proc = _run_gate(
+        "An edited PR description with no marker.",
+        tmp_path,
+        comments=[_comment(_legacy_marker(), association="NONE")],
+    )
+    assert proc.returncode == 1, proc.stdout
     assert "No AI review evidence found" in proc.stdout, proc.stdout
 
 
@@ -575,4 +843,30 @@ def test_candidate_regex_accepts_the_diff_segment() -> None:
         "the gate's marker regex must accept the optional ' diff=<64hex>' "
         "segment produced by record-review.sh since #2982 — without it every "
         "correctly-signed diff-bearing marker is rejected (#3076)"
+    )
+
+
+def test_gate_applies_the_producer_comment_admission_filter() -> None:
+    """#1224: the gate applies the comment-admission jq the producer must share.
+
+    ``PR_EVIDENCE_COMMENTS_JQ`` must stay byte-identical across the producer and
+    every reader (record-review.sh, check-pipeline-compliance.sh,
+    atomic-land.sh — agent-infra#1224): they must admit the SAME evidence, or
+    one of them acts on a comment the others refuse. This pins that the tortoise
+    reader carries the constant AND passes it at its own fetch (the runtime cases
+    prove the fetch applies it; this pins the contract text so a rewrite is a
+    visible diff).
+    """
+    block = _gate_run_block()
+    constant = (
+        '.[] | select(.author_association == "OWNER" or .author_association == "MEMBER"'
+        ' or .author_association == "COLLABORATOR") | .body'
+    )
+    assert constant in block, (
+        "the gate must narrow comment admission to repo-affiliated authors "
+        "(agent-infra#1224) — dropping the filter admits a drive-by comment "
+        "that every other reader of this evidence refuses"
+    )
+    assert re.search(r"--jq \"\$PR_EVIDENCE_COMMENTS_JQ\"", block), (
+        "the constant must be APPLIED at the comment fetch, not merely defined"
     )
