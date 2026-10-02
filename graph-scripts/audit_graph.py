@@ -4,8 +4,19 @@
 HISTORICAL ONE-SHOT — queries the removed context field (see #49);
 connection now env-based (TORTOISE_DB_URI).
 """
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"graph-scripts/audit_graph.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python graph-scripts/audit_graph.py`"
+    )
+
 from falkordb import FalkorDB  # noqa: I001
-import json, os, sys  # noqa: E401, F401
+import json, os  # noqa: E401, F401
 
 # Repo-root import (matches the sibling graph-scripts).
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -28,10 +39,64 @@ def _parse_uri(uri: str) -> dict:
     }
 
 
-_uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise")
+_uri = os.environ.get("TORTOISE_DB_URI", "docker://:@127.0.0.1:16379/tortoise")
 _cfg = _parse_uri(_uri)
-DB = FalkorDB(host=_cfg["host"], port=_cfg["port"], password=_cfg["password"] or None)
-G = DB.select_graph(_cfg["graph"])
+
+# Importing this module must NOT open a socket. The URI parse above is
+# import-safe; the connection is not. Connecting here made every importer
+# depend on a live server being reachable at TORTOISE_DB_URI — or, in the CI
+# fast shards, on the FIXED fallback port (localhost:16379) happening to have
+# something listening, which it does not: the fast lane deliberately gets no
+# TORTOISE_DB_URI. So a test that only wants `_parse_uri` failed with
+# ConnectionError instead of testing the parser.
+_CONN: dict = {}
+
+
+def _connect(key: str):
+    """The client (``DB``) or its graph (``G``), built on FIRST USE.
+
+    Both names are published in ONE ``update`` and the guard tests the key the
+    caller actually asked for, so a raise from the second construction cannot
+    leave a half-built pair behind (which would both poison the guard and hand
+    a racing caller a ``KeyError``). Import-time stays inert.
+    """
+    if key not in _CONN:
+        client = FalkorDB(host=_cfg["host"], port=_cfg["port"],
+                          password=_cfg["password"] or None)
+        _CONN.update({"DB": client, "G": client.select_graph(_cfg["graph"])})
+    return _CONN[key]
+
+
+class _Lazy:
+    """A module-global stand-in for ``DB``/``G`` that connects on first USE.
+
+    A module-global is required rather than a PEP 562 module ``__getattr__``: a
+    function defined in this module resolves ``G`` through ``LOAD_GLOBAL``, which
+    never consults the module object's ``__getattr__``.
+    """
+
+    __slots__ = ("_key",)
+
+    def __init__(self, key: str) -> None:
+        self._key = key
+
+    def __getattr__(self, name: str):
+        # `_`-prefixed lookups must not be forwarded: `copy`/`pickle`/`inspect`
+        # probe them, and `self._key` before `__init__` has run would recurse
+        # back into this same method and exhaust the stack.
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(_connect(self._key), name)
+
+    def __repr__(self) -> str:
+        return f"<lazy {self._key}>"
+
+    def __format__(self, spec: str) -> str:
+        return format(repr(self), spec)
+
+
+DB = _Lazy("DB")
+G = _Lazy("G")
 
 CONTEXTS = [
     'concept|operations|agent',

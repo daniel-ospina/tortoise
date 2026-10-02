@@ -15,6 +15,7 @@ extractor/indexer, update the catalog reference.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import contextlib
 import contextvars
 import functools
@@ -48,7 +49,10 @@ import tortoise
 from tortoise import body_limits as _body_limits  # #2048 shared streaming body cap
 from tortoise import mcp_auth as _mcp_auth
 from tortoise import monitoring as _monitoring  # #2924: call-time bound read
-from tortoise.abuse import _int_env  # #1081 signup limiter env knobs (SignupVelocityTracker)
+from tortoise.abuse import (
+    _int_env,  # #1081 signup limiter env knobs (SignupVelocityTracker)
+    _window_env,  # #5493 window knobs must never fail open
+)
 from tortoise.alert_store import OpenOutcome, ResolveOutcome  # #3820 resolve/open tri-state
 from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op without key)
     api_key_created,
@@ -119,6 +123,7 @@ from tortoise.sdk import (
     TortoiseSDK,
     _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
     _capture_ep_target_ids,  # W5 Phase D (#2104): EP pass targets (minted + first-time folds)
+    _capture_extraction_window,  # #6246: the shared extraction view (both lanes)
     _capture_minted_ids,  # W5 Phase D (#2104): provenance-stamp gate (minted only)
     _capture_redaction_warning,  # #4911: the shared "a secret was redacted" receipt warning
     _capture_resp_error_split,  # #2335 WI-2: customer error contract (headline/diagnostics)
@@ -208,6 +213,42 @@ _CAPTURE_EXECUTOR = ThreadPoolExecutor(
     # deploy gate can fix).
     max_workers=max(1, min(_int_env("TORTOISE_CAPTURE_WORKERS", 4), 8)),
     thread_name_prefix="capture-extract")
+
+
+# ── #3087 item 1: dispose the capture pool during THREADING SHUTDOWN, before
+# the executor's own teardown hook joins every worker.
+#
+# `concurrent.futures.thread` registers `_python_exit` — which puts a sentinel
+# on the queue and JOINS every worker — via `threading._register_atexit`, NOT
+# `atexit.register` (CPython 3.9+, bpo-39812). CPython finalizes in two phases:
+# `wait_for_thread_shutdown()` -> `threading._shutdown()` runs the
+# `_threading_atexits` list (the join happens HERE), and only afterwards
+# `call_py_exitfuncs()` runs regular `atexit` handlers. So a plain-`atexit`
+# handler is STRUCTURALLY ALWAYS TOO LATE: it runs after the workers were
+# already joined, cancelling nothing. This must be `_register_atexit` too, and
+# registered AFTER the library's so the reversed order puts ours first.
+# (Verified: with a plain `atexit` handler the queued future still RAN; with
+# `_register_atexit` it is CANCELLED.)
+#
+# LIMITATION, stated because the fix is otherwise read as complete: `shutdown`
+# cancels QUEUED futures only. A worker already inside an extraction is NOT
+# interruptible, and the `threading._shutdown` join still waits for it. So the
+# bound that actually protects the graph write is the worker's OWN deadline
+# being below fly.toml's `kill_timeout` — this handler removes the queued-work
+# term, not the running-worker term.
+def _dispose_capture_executor() -> None:
+    """Cancel queued captures and release the pool during thread shutdown."""
+    with contextlib.suppress(Exception):
+        _CAPTURE_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+
+
+# `threading._register_atexit` orders against the executor's own hook (the whole
+# point); fall back to `atexit` where it is unavailable, which is strictly worse
+# (too late to cancel anything) but never crashes on import.
+if hasattr(threading, "_register_atexit"):
+    threading._register_atexit(_dispose_capture_executor)  # the hook the stdlib itself uses
+else:  # pragma: no cover — Python < 3.9
+    atexit.register(_dispose_capture_executor)
 
 # #3060 review: a bounded pool with an UNBOUNDED queue is a new failure mode —
 # four stalled extractions park every worker (each up to the token-scaled
@@ -1139,6 +1180,11 @@ _LIVENESS_TASK_ATTRS = (
     "_boot_sweep_task",
     "_event_retention_task",
     "_first_contact_task",
+    # #3944: the analytics canary heartbeat. It belongs here because it is a
+    # process-lifetime periodic task whose LOSS is the failure it exists to
+    # detect — a re-entry or shutdown that left it orphaned (or a second copy
+    # alive) would corrupt the very signal the external alarm reads.
+    "_analytics_canary_task",
 )
 
 
@@ -1172,6 +1218,9 @@ def _start_liveness(app) -> None:
             prev.cancel()
     heartbeat_record()
     app.state._loop_heartbeat_task = loop.create_task(loop_heartbeat_task())
+    # #3944: the analytics canary heartbeat. Armed with the liveness block
+    # (cheap, synchronous, no I/O at arm time — the coroutine sleeps first).
+    app.state._analytics_canary_task = loop.create_task(_analytics_canary_loop())
     app.state._healthz_server = start_health_listener()
     app.state._loop_watchdog_stop = threading.Event()
     # DISABLED BY DEFAULT (#2850 review P0): with TORTOISE_LOOP_STALL_EXIT_S
@@ -1593,6 +1642,12 @@ async def _lifespan(app):
 
         # ── shutdown: disarm the watchdog before the heartbeat task is
         # cancelled (see _stop_liveness), then cancel the loop tasks.
+        # NOTE: the capture pool is deliberately NOT shut down here. See
+        # `_dispose_capture_executor` (module level, defined with the pool
+        # above) — a lifespan may legally run more
+        # than once in a process (this repo's own suite does), and shutting a
+        # process-global singleton down from a lifespan poisons every later
+        # `submit()` with "cannot schedule new futures after shutdown".
         with suppress(Exception):
             await _stop_liveness(app)
 
@@ -5393,23 +5448,44 @@ async def _emit_capture_ledger(org_id: str, session_id: str,
     Both writes run off the event loop: the Supabase RPC / embedded registry
     write and ``_track_analytics_event``'s synchronous ``httpx.Client`` POST are
     blocking I/O, and this API runs a single uvicorn worker (the #2988 / #3498
-    class). The analytics emit keeps its OWN best-effort handler — a ledger
-    failure is not an analytics failure and must not be labelled one.
+    class). The analytics emit goes through the SHARED off-loop entry point
+    (``_emit_analytics_off_loop`` → ``_cp_offload`` on the dedicated
+    ``telemetry`` pool, #4468) rather than the loop's SHARED default executor,
+    which the abuse hooks compete on — #4015 moved every other hosted funnel
+    emit there and left this lane for #4468. The ledger write stays on
+    ``asyncio.to_thread`` deliberately: it is a DIFFERENT op (the durable
+    per-period row the spend cap reads, not the analytics row), it has no
+    pooled seam that owns it, and moving it is not #4468's question. The
+    analytics emit keeps its OWN best-effort handler — a ledger failure is not
+    an analytics failure and must not be labelled one.
     """
     try:
         _cost_props = _capture_cost_props(session_id, meta)
         if _cost_props is None:
             return
         from tortoise.metering import record_capture_usage
+        # #5045: the SAME measured token counts ride the ledger as the
+        # analytics row — carried from ``_cost_props``, never re-derived from
+        # cost. WORKLOAD only; the spend ceiling never reads them.
         await asyncio.to_thread(
             record_capture_usage, org_id,
-            cost_usd=float(_cost_props.get("cost_usd") or 0.0))
+            cost_usd=float(_cost_props.get("cost_usd") or 0.0),
+            tokens_in=int(_cost_props.get("prompt_tokens") or 0),
+            tokens_out=int(_cost_props.get("completion_tokens") or 0))
     except Exception as e:  # noqa: BLE001, RUF100 — never block a committed capture
         _alert_unmetered("capture_ledger", org_id, e)
         return
     try:
-        await asyncio.to_thread(
-            _track_analytics_event, org_id, "capture_cost", _cost_props)
+        # #4468: the analytics emit rides the shared off-loop entry point
+        # (telemetry pool) instead of the loop's shared default executor.
+        # ``_emit_analytics_off_loop`` deliberately lets the #3821 strict-mode
+        # ``UnregisteredTelemetryKey`` escape so a misregistered prop cannot be
+        # silently swallowed — and HERE that escape is deliberately re-caught
+        # by the handler below, because this function's contract is that a
+        # committed capture is never failed by bookkeeping. The onboarding
+        # wrapper (``_track_onboarding_event``) depends on the same raise, so
+        # do NOT "unify" the two sites by weakening either one.
+        await _emit_analytics_off_loop(org_id, "capture_cost", _cost_props)
     except Exception:  # noqa: BLE001, RUF100 — never block capture
         logging.getLogger("tortoise.api").exception(
             "capture_cost analytics emit failed (non-fatal)")
@@ -6453,7 +6529,7 @@ async def _check_signup_ip_rate_limit(request: Request) -> None:
     (default 86400). The 429 detail carries the support pointer (P2 #8) —
     hard-limit posture with a documented appeal path.
     """
-    window_s = _int_env("TORTOISE_SIGNUP_IP_WINDOW_S", 86400)
+    window_s = _window_env("TORTOISE_SIGNUP_IP_WINDOW_S", 86400)
     await _check_ip_bucket_rate_limit(
         request, buckets=_SIGNUP_BUCKETS, lock=_SIGNUP_LOCK,
         limit=_int_env("TORTOISE_SIGNUP_IP_LIMIT", 2),
@@ -6510,7 +6586,7 @@ async def _check_recovery_rate_limit(request: Request,
     await _check_ip_bucket_rate_limit(
         request, buckets=_RECOVER_BUCKETS, lock=_RECOVER_LOCK,
         limit=_int_env("TORTOISE_RECOVER_IP_LIMIT", 5),
-        window_s=_int_env("TORTOISE_RECOVER_IP_WINDOW_S", 86400),
+        window_s=_window_env("TORTOISE_RECOVER_IP_WINDOW_S", 86400),
         key=_request_ip_key(request),
         detail={
             "error_code": "over_recovery_ip_rate_limit",
@@ -6522,7 +6598,7 @@ async def _check_recovery_rate_limit(request: Request,
         await _check_ip_bucket_rate_limit(
             request, buckets=_RECOVER_TOKEN_BUCKETS, lock=_RECOVER_TOKEN_LOCK,
             limit=_int_env("TORTOISE_RECOVER_TOKEN_LIMIT", 10),
-            window_s=_int_env("TORTOISE_RECOVER_TOKEN_WINDOW_S", 3600),
+            window_s=_window_env("TORTOISE_RECOVER_TOKEN_WINDOW_S", 3600),
             key=("signup-token", token_hash),
             detail={
                 "error_code": "over_recovery_token_rate_limit",
@@ -6646,14 +6722,14 @@ async def _check_claim_rate_limit(request: Request) -> None:
     # that helper, so it must apply it here.
     ip = _normalize_mapped_ipv6(ip)
     limit = _int_env("TORTOISE_CLAIM_MAX_PER_24H", _CLAIM_MAX_PER_24H_DEFAULT)
-    window_s = _int_env("TORTOISE_CLAIM_WINDOW_S", _CLAIM_WINDOW_DEFAULT)
-    if window_s <= 0:
-        # An invalid window must never fail OPEN: with window_s <= 0 the
-        # in-window test `now - t < window_s` is never true, the bucket is
-        # emptied on every request and the limiter is silently disabled.
-        # Fall back to the default (the D6 convention for an out-of-range
-        # value) — the intended off-switch is RATE_LIMIT_DISABLED.
-        window_s = _CLAIM_WINDOW_DEFAULT
+    # #5493: the WINDOW is read through the floored accessor — with a
+    # non-positive window the in-window test `now - t < window_s` is never
+    # true, the bucket is emptied on every request and this limiter is
+    # silently disabled (fail OPEN). `_window_env` falls back to the default
+    # and warns once per distinct misconfig; the intended off-switch is
+    # RATE_LIMIT_DISABLED. `limit`/`store_cap` stay on `_int_env`: a
+    # non-positive limit is a legitimate fail-CLOSED deny-all.
+    window_s = _window_env("TORTOISE_CLAIM_WINDOW_S", _CLAIM_WINDOW_DEFAULT)
     store_cap = _int_env("TORTOISE_CLAIM_STORE_CAP", _CLAIM_STORE_CAP_DEFAULT)
     # User-facing period, derived so a tuned window cannot make the 429
     # message lie (identical to "24h" at the default window).
@@ -6775,8 +6851,8 @@ async def _check_invite_accept_rate_limit(request: Request, token: str) -> None:
         lock=_INVITE_ACCEPT_TOKEN_LOCK,
         limit=_int_env("TORTOISE_INVITE_ACCEPT_TOKEN_LIMIT",
                        _INVITE_ACCEPT_TOKEN_LIMIT),
-        window_s=_int_env("TORTOISE_INVITE_ACCEPT_TOKEN_WINDOW_S",
-                          _INVITE_ACCEPT_TOKEN_WINDOW_S),
+        window_s=_window_env("TORTOISE_INVITE_ACCEPT_TOKEN_WINDOW_S",
+                             _INVITE_ACCEPT_TOKEN_WINDOW_S),
         key=("invite-accept", "token", token_key),
         detail=detail, retry_after_s=None)
     await _check_ip_bucket_rate_limit(
@@ -6784,8 +6860,8 @@ async def _check_invite_accept_rate_limit(request: Request, token: str) -> None:
         lock=_INVITE_ACCEPT_IP_LOCK,
         limit=_int_env("TORTOISE_INVITE_ACCEPT_IP_LIMIT",
                        _INVITE_ACCEPT_IP_LIMIT),
-        window_s=_int_env("TORTOISE_INVITE_ACCEPT_IP_WINDOW_S",
-                          _INVITE_ACCEPT_IP_WINDOW_S),
+        window_s=_window_env("TORTOISE_INVITE_ACCEPT_IP_WINDOW_S",
+                             _INVITE_ACCEPT_IP_WINDOW_S),
         key=("invite-accept", "ip", ip),
         detail=detail, retry_after_s=None)
     await _check_ip_bucket_rate_limit(
@@ -6793,8 +6869,8 @@ async def _check_invite_accept_rate_limit(request: Request, token: str) -> None:
         lock=_INVITE_ACCEPT_GLOBAL_LOCK,
         limit=_int_env("TORTOISE_INVITE_ACCEPT_GLOBAL_LIMIT",
                        _INVITE_ACCEPT_GLOBAL_LIMIT),
-        window_s=_int_env("TORTOISE_INVITE_ACCEPT_GLOBAL_WINDOW_S",
-                          _INVITE_ACCEPT_GLOBAL_WINDOW_S),
+        window_s=_window_env("TORTOISE_INVITE_ACCEPT_GLOBAL_WINDOW_S",
+                             _INVITE_ACCEPT_GLOBAL_WINDOW_S),
         key=("invite-accept", "global"),
         detail=detail, retry_after_s=None)
 
@@ -10778,6 +10854,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # home in any stored turn (stored-source parity; >5000 turns are accepted
     # and truncated here — the old 422 is removed, D1 contract change).
     windowed = _capture_turn_window(body.conversation)
+    # #6246: the SHARED extraction view, built ONCE and handed to whichever
+    # lane runs below, so a clipped turn with nothing to say contributes no
+    # unit to EITHER the m2 transcript lane or the default v2 lane. The STORED
+    # turns (`windowed`) keep their clipped text — this is the copy only the
+    # extractors see.
+    extraction = _capture_extraction_window(body.conversation)
 
     # P1 #1529 (D3): empty/blank conversation fails closed BEFORE any write —
     # whole-conversation transcript emptiness (of the STORED window, the exact
@@ -11235,7 +11317,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # event loop, and never on the shared default pool either.
             extracted, meta = await _run_capture_bounded(
                 slot, sdk._extract_session_llm,
-                windowed, session_id, now)
+                extraction, session_id, now)
         except ValueError as e:
             # inner provider-gate drift on the M2 lane → a clean fail-closed
             # 503 (mirrors the v2 branch below; belt-and-braces so an
@@ -11310,7 +11392,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # See tests/test_capture_loop_responsiveness.py.
             extracted, meta = await _run_capture_bounded(
                 slot, sdk._extract_session_v2,
-                windowed, session_id, now, master=tenant_master)
+                extraction, session_id, now, master=tenant_master)
         except ValueError as e:
             raise HTTPException(status_code=503, detail=str(e)) from e
 
@@ -12609,12 +12691,33 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         # (keyed on these urls) addresses the SAME node create_source wrote.
         u = sdk._resolve_source_url(src.url)
         external_urls.append(u)
+        # #4146: an ABSENT anchor stays absent — NULL, not "" — exactly as the
+        # session-Source write above does. `_upsert_source`'s ON MATCH preserve
+        # branch fires only WHEN `$hash IS NULL` (entities.py: the JOINT-E2E
+        # #900/#1032 contract: "when the caller carries NO contentHash ... the
+        # ingest must never clobber an index-created Source's contentHash to ''").
+        # Coercing the back-compat NULL to "" made `s.contentHash <> $hash`
+        # TRUE for any stored non-empty hash, so an anchorless re-commit of the
+        # same url WIPED the stored anchor, bumped `version` and rewrote
+        # updatedAt/title — and against a corpus-indexed url it also wiped the
+        # hash the INDEX path owns. It does NOT null `_searchText`: `$st` is
+        # `ev.get("_searchText") or ev.get("title")` and this call carries
+        # NEITHER, so the `coalesce($st, s._searchText)` SET preserves the
+        # stored text.
+        # `or None` (not a bare pass-through) is deliberate: the field admits
+        # "" (no min_length), and an empty anchor is an absent one — the same
+        # normalization the session-Source write applies via its
+        # `next((ref.contentHash for ref in ... if ref.contentHash), None)`.
         sdk.create_source(
             u, src.sourceKind, tier=src.credibilityTier,
-            contentHash=src.contentHash or "", is_episodic=True,
+            contentHash=(src.contentHash or None), is_episodic=True,
         )
     for url in session_urls:
-        sdk.link_source_to_entity(url, doc_id, "Source")
+        # "Document" is the RELATION's spelling (D10 retired the node label and the
+        # writer remaps the identity onto `:Source`) — it is what marks this a
+        # derivation link, so it takes the `sourceVersion` anchor. See
+        # `edges.py::_DERIVATION_REFERENCES_LABELS`.
+        sdk.link_source_to_entity(url, doc_id, "Document")
     for session_url in session_urls:
         for external_url in external_urls:
             proj.g.query(
@@ -13040,6 +13143,45 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     # past. Replays already returned above: quota never gates a duplicate
     # (zero writes).
     _check_org_limit(org, "sessions")
+    # #4051 — the org points gate (the second half of step [4a]). The sessions
+    # gate above is VACUOUS since #4010 (sessions unlimited for every tier).
+    #
+    # ⛔ SCOPE — stated precisely, because overstating a gate is worse than the
+    # gap it leaves: this polices the COUNTED CATEGORY (value Points, plus the
+    # :Object/:Subject nodes entities mint), because `_count_resource("points")`
+    # counts exactly `(n:Point AND (n.is_episodic IS NULL OR n.is_episodic =
+    # false)) OR n:Object OR n:Subject OR (n:Event AND (n.is_episodic IS NULL OR
+    # n.is_episodic = false))` (tortoise/quota.py:734-736).
+    # ⛔ IT GATES THE PRE-STATE, NOT THE PAYLOAD: it refuses when the org's count
+    # is ALREADY at/over `max_points`. It therefore does NOT bound the count this
+    # lane's own commit can leave behind — the lane writes in bulk and carries
+    # no payload estimate, so a commit from just under the cap can finish past
+    # it. (The capture lane's `count + est > max_points` at :10888 IS
+    # estimate-aware; this is the pre-write form every OTHER write endpoint
+    # uses — /v1/points, /v1/objects, /v1/subjects — which is the parity #4051
+    # asked for, NOT a new bound.)
+    # It does NOT bound the lane's total node growth and it CANNOT close the
+    # uncounted loop this issue is about: a `points: []` commit mints :Session
+    # + transcript :Source (D10 — a document is a :Source; :Document is
+    # retired) + :Event, none of which match that predicate, so the count never
+    # moves and this gate can never trip. MEASURED: four fresh-session
+    # `points: []` commits all returned 200, minting 4 Sessions + 4 Sources + 4
+    # Events while the points count stayed 0. Closing that needs `max_points`
+    # widened to include those labels (a meaning change for every existing
+    # tenant, needing a migration) or a new limit (a pricing decision) — both
+    # OWNER decisions, tracked on #4051, deliberately not taken here.
+    #
+    # What it buys: parity with every other write endpoint's points gate
+    # (/v1/points, /v1/objects, /v1/subjects, the demo seed) in place of the
+    # now-vacuous sessions-only gate. Same pre-write site as the sessions gate
+    # (after every replay return above) so an idempotent re-POST is never gated
+    # — a replay writes no nodes and must never 402 (#1727's lesson); the
+    # budget 402 below is unchanged. Same shipped machinery + structured
+    # `quota_refusal_payload` as the /v1/points-class gates (#4614), off the
+    # event loop via the #3773 seam (a full tenant-graph count on a billing hot
+    # path).
+    await _graph_offload(lambda: _check_org_limit(org, "points"),
+                         op="check_org_limit.points")
 
     # [4b] Budget — the authoritative §6.1 semantics live in adjudicate_budget.
     if plan.budget.outcome == "fail":
@@ -16632,19 +16774,19 @@ async def _check_invite_otp_rate_limit(request: Request, token: str) -> None:
     await _check_ip_bucket_rate_limit(
         request, buckets=_INVITE_OTP_TOKEN_BUCKETS, lock=_INVITE_OTP_TOKEN_LOCK,
         limit=_int_env("TORTOISE_INVITE_OTP_TOKEN_LIMIT", 5),
-        window_s=_int_env("TORTOISE_INVITE_OTP_TOKEN_WINDOW_S", 15 * 60),
+        window_s=_window_env("TORTOISE_INVITE_OTP_TOKEN_WINDOW_S", 15 * 60),
         key=("invite-otp", "token", token_key),
         detail=detail, retry_after_s=None)
     await _check_ip_bucket_rate_limit(
         request, buckets=_INVITE_OTP_IP_BUCKETS, lock=_INVITE_OTP_IP_LOCK,
         limit=_int_env("TORTOISE_INVITE_OTP_IP_LIMIT", 10),
-        window_s=_int_env("TORTOISE_INVITE_OTP_IP_WINDOW_S", 3600),
+        window_s=_window_env("TORTOISE_INVITE_OTP_IP_WINDOW_S", 3600),
         key=("invite-otp", "ip", ip),
         detail=detail, retry_after_s=None)
     await _check_ip_bucket_rate_limit(
         request, buckets=_INVITE_OTP_GLOBAL_BUCKETS, lock=_INVITE_OTP_GLOBAL_LOCK,
         limit=_int_env("TORTOISE_INVITE_OTP_GLOBAL_LIMIT", 200),
-        window_s=_int_env("TORTOISE_INVITE_OTP_GLOBAL_WINDOW_S", 3600),
+        window_s=_window_env("TORTOISE_INVITE_OTP_GLOBAL_WINDOW_S", 3600),
         key=("invite-otp", "global"),
         detail=detail, retry_after_s=None)
 
@@ -16660,7 +16802,7 @@ async def _check_invite_resend_rate_limit(request: Request,
     await _check_ip_bucket_rate_limit(
         request, buckets=_INVITE_RESEND_BUCKETS, lock=_INVITE_RESEND_LOCK,
         limit=_int_env("TORTOISE_INVITE_RESEND_LIMIT", 5),
-        window_s=_int_env("TORTOISE_INVITE_RESEND_WINDOW_S", 24 * 3600),
+        window_s=_window_env("TORTOISE_INVITE_RESEND_WINDOW_S", 24 * 3600),
         key=("invite-resend", "invitation", invitation_id),
         detail={"error_code": "over_invite_resend_rate_limit",
                 "message": "Too many resend requests for this invitation."},
@@ -23650,7 +23792,7 @@ _ALLOWED_ANALYTICS_PROPS = {
     # the PII filter or the measurement is silently lost.
     "calls", "retries", "prompt_tokens", "completion_tokens",
     "cost_usd", "calls_without_cost", "calls_without_usage",
-    "deadline_aborts", "by_stage",
+    "calls_without_tokens", "deadline_aborts", "by_stage",
     # #3824: provider calls the capture made that NO roll-up accounted for.
     # Without this key in the allowlist the counter is stripped here — the
     # documented #3359 loss mode — and F2 stays invisible even though the
@@ -23895,15 +24037,32 @@ _ANALYTICS_INCIDENT_KIND = "ANALYTICS_SINK_DEGRADED"
 # per-event call costs an R2 conditional PUT + a GitHub search + Telegram on
 # EVERY event of an outage (seconds each, once per event).
 #
-# #3820 (D5b — the ABSENCE half is DEFERRED, and recorded here rather than
-# dropped): D5b also asks for a sink that silently STOPS emitting to be caught
-# by a last-success timestamp against a wide cadence-derived threshold. That is
-# not implementable at this seam: analytics writes are user-driven with no
-# fixed cadence, so "no writes for N minutes" is indistinguishable from a
-# healthy idle process, and a real absence check needs a heartbeat the sink
-# does not emit — a new signal plus a timer, i.e. a separate change. The
-# transition INTO degradation (the next write) is covered by the streak below.
-# TRACKED: #3944 — the deferral must not evaporate with the #3820 branch.
+# #3820 (D5b — the ABSENCE half, LANDED by #3944): the streak below alerts on
+# a write that DEGRADES. It cannot see a sink that silently STOPS emitting —
+# no write means no outcome, no streak, nothing counted — and analytics writes
+# are user-driven with no fixed cadence, so "no writes for N minutes" is
+# indistinguishable from a healthy idle process. #3944 supplies the missing
+# signal as a dead-man's switch, split by role:
+#
+#   * the PROBE is a fixed-cadence CANARY write through the REAL sink path
+#     (``_analytics_canary_loop``, reserved event ``_ANALYTICS_CANARY_EVENT``
+#     / org ``_ANALYTICS_CANARY_ORG``) — it must use the sink, because only an
+#     end-to-end write proves the write path;
+#   * the HEARTBEAT is ``_ANALYTICS_LAST_DELIVERED_AT``, the last instant a
+#     write was DELIVERED (2xx), published on the internal ``/status``
+#     endpoint — a channel the sink cannot silence, which is the property a
+#     heartbeat must have;
+#   * the ALARM is owned by the EXTERNAL hourly DR driver
+#     (``.github/scripts/registry-cron.sh``), not by an in-process watchdog: a
+#     check that dies with the process it monitors cannot report that
+#     process's death. It files the SAME ``ANALYTICS_SINK_DEGRADED`` kind, so
+#     an absence incident and a degradation incident share one R2 dedup object
+#     (#2844) and cannot double-file.
+#
+# Receiver-liveness residual (a disabled or never-run driver also silences
+# this alarm) is #4573, deliberately NOT closed here: this closes the SINK
+# gap, not the RECEIVER gap. The dead-canary-with-live-traffic residual is
+# documented in docs/ops/registry-backup-dr.md §ANALYTICS_SINK_DEGRADED.
 _ANALYTICS_FALLBACK_ALERT_AFTER = 3
 # The alert-trigger streak — NOT part of the resolve state below: it counts
 # consecutive degraded writes and is reset by a delivered one.
@@ -24137,6 +24296,164 @@ def _analytics_http_client(url: str, key: str):
         _ANALYTICS_HTTP_CACHE["key"] = cache_key
     return client
 
+# ── #3944: the heartbeat (the D5b absence half) ─────────────────────────────
+# Reserved synthetic identity. The leading underscore is the marker: no real
+# tenant id starts with one, so a canary row can never be mistaken for one, and
+# every PER-ORG analytics read (the activation scorecard, capture-cost,
+# e2e_live_reconcile) excludes it without a filter change.
+_ANALYTICS_CANARY_EVENT = "_sink_canary"
+_ANALYTICS_CANARY_ORG = "__sink_canary__"
+# The probe period. Five minutes sits far below the external driver's hourly
+# cadence, so a healthy deployment reads FRESH at every driver run with ample
+# margin. Overridden in tests by patching this global (it is read per tick).
+_ANALYTICS_CANARY_PERIOD_S = 300
+# ``silent_threshold_s = 3 * period`` is Period + Grace: the alarm fires only
+# after THREE consecutive missed periods, so a slow tick, a GC pause or the
+# first period after a deploy cannot page. It is DERIVED from the period where
+# the period lives (``_analytics_heartbeat_block``) and PUBLISHED in the status
+# block, so the bash driver never re-types it and the two cannot drift.
+#
+# The boot reference for the cold-start guard: with no delivered write YET,
+# "unknown" is not "stale" — the alarm only fires once the process is older
+# than the threshold, so a just-started (or rolling-deployed) app is silent.
+_ANALYTICS_BOOT_AT = datetime.now(UTC)
+# The HEARTBEAT — wall-clock instant of the last DELIVERED (2xx) write. Written
+# ONLY on delivery (``_analytics_note_success``), never on an attempt: a
+# last-ATTEMPT stamp is fail-open, staying fresh while every write fails, which
+# is exactly the failure this exists to catch. Any delivered write refreshes it
+# (a real funnel event proves the sink as well as a canary does) — the canary
+# supplies the CADENCE, not the only evidence.
+_ANALYTICS_LAST_DELIVERED_AT: datetime | None = None
+# Counted separately from real emissions so the status block distinguishes
+# "the canary never ran" (a dead instrument) from "it ran and nothing landed"
+# (a dead sink). REPORTED, never alerted on: with live traffic the app's next
+# delivered write would resolve a canary-absence incident and the driver would
+# re-file on the next run — a file/close flap. See the runbook residual.
+_ANALYTICS_CANARY_ATTEMPTS = 0
+
+
+def _analytics_sink_probe():
+    """The ONE sink-configuration seam (#3944).
+
+    Returns ``(url, key, configured, intended)``. Every site that asks whether
+    a sink exists reads THIS, so ``configured`` cannot mean one thing in
+    ``_track_analytics_event`` and another in the canary's emit gate or the
+    status block: #3677's shape (``SUPABASE_URL`` set, key resolving to ``""``)
+    is ``intended`` but not ``configured``, and a site that gated on
+    ``configured`` alone was blind to it.
+
+    * ``configured`` — both present: a write can succeed.
+    * ``intended``   — at least one present: a sink was INTENDED, so a
+      half-configured write is a degradation (the #3820 P1-2 arm), and the
+      canary must still attempt it so the absence half can see it.
+    """
+    url = os.environ.get("SUPABASE_URL")
+    # The service-key names and their precedence come from one seam
+    # (`supabase_control._service_key()`): #3677 was exactly this site reading a
+    # name the hosted deployment never sets. Older sibling sites still
+    # hand-roll the same pair — see #3677's sibling audit.
+    key = _service_key()
+    return (url, key, bool(url and key), bool(url or key))
+
+
+def _analytics_heartbeat_block() -> dict:
+    """The #3944 heartbeat surface for the external DR driver.
+
+    Published on the INTERNAL ``/status`` endpoint — served by the app whatever
+    the sink's health — and never through the sink itself: the dead-man's-switch
+    rule is that the heartbeat must not travel the channel it verifies.
+
+    ``age_s`` is ``None`` until a write is DELIVERED (there is no fabricated
+    boot seed); ``uptime_s`` is what lets the driver tell "no delivery YET"
+    (cold start — stay silent) from "no delivery for longer than the threshold"
+    (an incident). Both booleans are reported so a half-configured deployment
+    is diagnosable, and the canary counters make a dead instrument visible. All
+    values are non-secret.
+    """
+    now = datetime.now(UTC)
+    with _ANALYTICS_ALERT_LOCK:
+        last = _ANALYTICS_LAST_DELIVERED_AT
+        attempts = _ANALYTICS_CANARY_ATTEMPTS
+        counts = dict(_ANALYTICS_COUNTS)
+        # Stamp `now` INSIDE the lock: a delivery landing between the read of
+        # `now` and the read of `last` would produce a negative age, which the
+        # driver reads as "not yet established" and therefore never resolves a
+        # resolved incident for one cadence. Clamping keeps the published age
+        # non-negative whatever the interleaving.
+        age_s = max(0.0, (datetime.now(UTC) - last).total_seconds()) if last is not None else None
+    period = _ANALYTICS_CANARY_PERIOD_S
+    # The sink probe reads the LIVE env. A read that raises must not 500 a
+    # liveness endpoint, so the exception is contained and the block reports
+    # the conservative pair (the driver then leaves the incident unchanged).
+    try:
+        _url, _key, configured, intended = _analytics_sink_probe()
+    except Exception:  # pragma: no cover — env reads do not raise in practice
+        configured = intended = False
+    return {
+        "configured": configured,
+        "intended": intended,
+        "canary_period_s": period,
+        # Period + Grace, derived at the ONE place the period lives.
+        "silent_threshold_s": 3 * period,
+        "uptime_s": (now - _ANALYTICS_BOOT_AT).total_seconds(),
+        "canary_attempts": attempts,
+        "last_delivered_at": last.isoformat() if last is not None else None,
+        "age_s": age_s,
+        "outcomes": counts,
+    }
+
+
+async def _analytics_canary_tick() -> bool:
+    """Emit ONE canary write through the REAL sink path (#3944).
+
+    Returns ``True`` when a write was attempted, ``False`` when no sink was
+    INTENDED (selfhost/dev: the local JSONL IS the intended sink, so there is
+    nothing to prove and a synthetic line would only pollute a real fallback
+    file). Split out of the loop so the emit decision is testable without a
+    clock.
+
+    The counter is incremented BEFORE the emit, so "attempted but never
+    delivered" is distinguishable from "never attempted" — the only signal
+    that separates a dead instrument from a dead sink.
+    """
+    global _ANALYTICS_CANARY_ATTEMPTS
+    _url, _key, _configured, intended = _analytics_sink_probe()
+    if not intended:
+        return False
+    with _ANALYTICS_ALERT_LOCK:
+        _ANALYTICS_CANARY_ATTEMPTS += 1
+    await _emit_analytics_off_loop(_ANALYTICS_CANARY_ORG,
+                                   _ANALYTICS_CANARY_EVENT)
+    return True
+
+
+async def _analytics_canary_loop() -> None:
+    """#3944: the fixed-cadence canary that makes absence observable.
+
+    SLEEPS FIRST, deliberately. Two invariants depend on it: a test that enters
+    a short-lived ``TestClient`` lifespan never emits a canary (the exact-count
+    assertions on the fallback JSONL in tests/test_onboarding_analytics_patch.py
+    assume no extra line), and a freshly-booted process does not emit before its
+    configuration is even readable.
+
+    Emits through the SAME off-loop entry point the production funnel uses, so
+    the canary exercises the real write path (and reuses the telemetry pool: no
+    new offload op, no new entry in the offload inventory).
+
+    It never files an incident itself. The absence ALARM is external — see the
+    D5b block above `_ANALYTICS_FALLBACK_ALERT_AFTER`.
+    """
+    while True:
+        await asyncio.sleep(_ANALYTICS_CANARY_PERIOD_S)
+        # A raise must not kill the heartbeat: a dead canary task is precisely
+        # the failure the external alarm exists to catch, and it must surface
+        # as staleness, never as a crashed task that nobody notices.
+        try:
+            await _analytics_canary_tick()
+        except Exception as e:  # pragma: no cover — defensive
+            _logger.warning("analytics canary tick failed: %s", e)
+
+
 
 def _track_analytics_event(org_id: str, event_name: str,
                            properties: dict | None = None) -> str:
@@ -24218,16 +24535,10 @@ def _track_analytics_event(org_id: str, event_name: str,
         "properties": props,
         "created_at": datetime.now(UTC).isoformat(),
     }
-    url = os.environ.get("SUPABASE_URL")
-    # The service-key names and their precedence come from one seam
-    # (`supabase_control._service_key()`): #3677 was exactly this site reading a
-    # name the hosted deployment never sets. Older sibling sites still
-    # hand-roll the same pair — see #3677's sibling audit.
-    key = _service_key()
-    # #3820 (D1): remember whether a sink was ATTEMPTED at all. This one
-    # boolean is what separates `fallback` (configured, but degraded — alert)
-    # from `unconfigured` (no sink by design — never alert).
-    configured = bool(url and key)
+    # #3944: url / key / configured / misconfigured all come from ONE probe,
+    # shared with the canary's emit gate and the /status heartbeat block, so
+    # "configured" cannot mean different things at the three sites.
+    url, key, configured, intended = _analytics_sink_probe()
     # #3820 (P1-2): a HALF-configured env is the FIFTH silent path. The
     # docstring of `unconfigured` is "no URL/key AT ALL", but `configured`
     # implements "both present" — so `SUPABASE_URL` set with the key missing
@@ -24236,7 +24547,7 @@ def _track_analytics_event(org_id: str, event_name: str,
     # incident. That is #3677 itself, and it made this signal blind to the very
     # failure that created the issue: with exactly one of the pair set, a sink
     # was clearly INTENDED, so the write is a degradation.
-    misconfigured = bool(url) != bool(key)
+    misconfigured = intended and not configured
     if configured:
         # #3820 (cycle-4 P2-1): the guard covers the NETWORK CALL only. The
         # delivered branch used to sit inside it, so a raise in the success leg
@@ -24379,9 +24690,16 @@ def _analytics_note_success() -> str:
     """
     global _ANALYTICS_DEGRADED_STREAK, _ANALYTICS_RESOLVE_PENDING
     global _ANALYTICS_RESOLVE_NOT_BEFORE, _ANALYTICS_RESOLVE_INFLIGHT
+    global _ANALYTICS_LAST_DELIVERED_AT
     with _ANALYTICS_ALERT_LOCK:
         _ANALYTICS_COUNTS["supabase"] += 1
         _ANALYTICS_DEGRADED_STREAK = 0
+        # #3944: the heartbeat is the LAST DELIVERED write — set here and
+        # nowhere else. This is the single write point for every delivery
+        # (canary or real funnel event), and it sits before the early
+        # not-claimed return below so a concurrent delivered write still
+        # refreshes it.
+        _ANALYTICS_LAST_DELIVERED_AT = datetime.now(UTC)
     _analytics_count_outcome("supabase")
     # #3820 (cycle-8 P1 / cycle-9 P2-2): the resolve is SERIALIZED by an
     # IN-FLIGHT claim taken under `_ANALYTICS_RESOLVE_LOCK` — never by holding
@@ -24883,18 +25201,33 @@ def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
         # F1: zero provider calls. No measurement exists, so no row — a
         # fabricated $0 row here is the phantom the reader must never see.
         return None
+    # #5854: the emitter validates the token fields with the SAME normaliser
+    # the accumulator uses, so a future lane that builds its own ``meta``
+    # (the docstring's F2 concern) cannot reintroduce the fabricate/truncate
+    # defect downstream of the accumulator. Imported lazily: ``extractor_v2``
+    # is a documented cold-start cost and this lane always runs AFTER
+    # extraction, so the module is already loaded.
+    from tortoise.extractor_v2 import _normalise_token_count
     return {
         "session_id": session_id,
         "calls": int(llm.get("calls", 0) or 0),
         "retries": int(llm.get("retries", 0) or 0),
-        "prompt_tokens": int(llm.get("prompt_tokens", 0) or 0),
-        "completion_tokens": int(llm.get("completion_tokens", 0) or 0),
+        "prompt_tokens": _normalise_token_count(llm.get("prompt_tokens")) or 0,
+        "completion_tokens": (
+            _normalise_token_count(llm.get("completion_tokens")) or 0),
         "cost_usd": round(float(llm.get("cost_usd", 0.0) or 0.0), 6),
         "calls_without_cost": int(llm.get("calls_without_cost", 0) or 0),
         # #3359: a call that returned NO usage block at all (no tokens, no
         # charge) is a distinct disclosure from one that returned tokens but
         # no charge — both ride the row, so neither is silently a clean $0.
         "calls_without_usage": int(llm.get("calls_without_usage", 0) or 0),
+        # #5854: calls whose provider TOKEN count was malformed (a bool, a
+        # fractional float, a negative, an absurd magnitude). Rejected, never
+        # shaped into a number — the counter races the row so the absence is
+        # disclosed. (``calls_without_usage`` cannot carry it: a rejected
+        # token can sit beside a valid sibling and a valid charge, so the
+        # call is not usage-less.)
+        "calls_without_tokens": int(llm.get("calls_without_tokens", 0) or 0),
         # #3359: deadline-killed generations are BILLED upstream but produce
         # no tokens, so they are spend this measurement cannot price. Carried
         # on the row so the report can disclose it instead of reading the
@@ -24913,11 +25246,12 @@ async def _emit_analytics_off_loop(org_id: str, event_name: str,
     """#4015: the shared off-loop entry point for a hosted funnel-event emit.
 
     It is the one entry point for the sites that #4352 routed through
-    ``_cp_offload``; the capture-cost lane (``_emit_capture_ledger``) keeps its
-    own ``asyncio.to_thread`` path — still off-loop, but on the loop's SHARED
+    ``_cp_offload``, and since #4468 it is also the capture-cost lane's
+    (``_emit_capture_ledger``) off-loop path: that lane used to keep its own
+    ``asyncio.to_thread`` call — still off-loop, but on the loop's SHARED
     default executor, which the abuse hooks and the selfhost readiness probe
-    also use, so it is not isolated the way this pool is — and ``mcp_server``
-    its own retained emitter. Moving the capture lane onto this pool is #4468.
+    also use, so it was not isolated the way this pool is. ``mcp_server`` keeps
+    its own retained emitter.
 
     ``_track_analytics_event`` is a synchronous ``httpx.Client`` POST and
     ``hosted_api`` runs a SINGLE uvicorn worker, so calling it inline from an
@@ -25910,13 +26244,20 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
     try:
         org_sdk = _make_sdk(namespace=org_id)
 
-        # #1844: the index job is OBJECT-ONLY — it writes zero non-episodic
-        # :Point nodes (the "points" quota resource counts ONLY
-        # `MATCH (n:Point) WHERE n.is_episodic IS NULL OR false`), so no
-        # points-quota preflight or per-batch re-check is needed. A org at
-        # its points cap must still be able to index issues. The #1843
-        # statement-write resurrection (point/statement mints) would re-add
-        # the points gate.
+        # #1844: the index job writes zero non-episodic :Point nodes, so it never
+        # trips the POINT arm of the "points" resource.
+        #
+        # #1975: that is no longer the whole count. Since #1911 the points resource
+        # ALSO counts Object/Subject nodes unconditionally (quota.py), and this job
+        # MINTS objects. So the gate decision below is unchanged but its reason is
+        # NOT "this job mints nothing countable". The job is deliberately left
+        # UNGATED, and the accepted consequence is that an indexing-heavy org CAN be
+        # pushed past max_points by the objects it mints, after which its
+        # points-gated writes 402 until an upgrade. That is a recorded DECISION, not
+        # an oversight: an org at its points cap must still be able to index issues.
+        # Adding a preflight here would gate the index job itself; the #1843
+        # statement-write resurrection (point/statement mints) would re-add the
+        # points gate.
         indexer = GitHubIndexer(token)
 
         # ── One-time legacy `-closed` backfill (T1-P1 + T2-P3). Gated on the
@@ -27637,7 +27978,13 @@ async def backups_status(request: Request):
         storage = _backup_storage()
     except RuntimeError as e:
         return {"enabled": False, "app_time": datetime.now(UTC).isoformat(),
-                "storage_error": str(e), "per_team": {}, "no_teams": False}
+                "storage_error": str(e), "per_team": {}, "no_teams": False,
+                # #3944: the analytics heartbeat is in-process state and needs
+                # no storage, so it is reported on the DEGRADED path too. An
+                # R2 misconfig must not blind the sink-absence check (the
+                # driver would read an absent block as "unknown" and stay
+                # silent).
+                "analytics": _analytics_heartbeat_block()}
     lock_block = _lock_status_block(cfg)
     watcher = _WATCHER
     now = datetime.now(UTC)
@@ -27741,6 +28088,10 @@ async def backups_status(request: Request):
             "r2_ok": hb.get("r2_ok"),
         },
         "driver": {"last_heartbeat_at": driver_hb.get("ran_at"), "age_minutes": driver_age_min},
+        # #3944: the analytics heartbeat the external DR driver reads to detect
+        # a sink that silently STOPPED emitting. Published here, never through
+        # the sink, so the sink cannot silence its own alarm.
+        "analytics": _analytics_heartbeat_block(),
     }
 
 @app.post("/v1/internal/driver/heartbeat")
