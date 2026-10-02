@@ -354,8 +354,10 @@ class _BoomSDK:
 
 def test_ingest_haystack_v2_aborts_stalled_question(monkeypatch):
     """Two sessions, a frozen clock, and a phase-A writer that consumes 100s
-    of (fake) wall clock: session 2's boundary check must abort with
-    ``IngestStallTimeout`` — classified retryable — instead of grinding on."""
+    of (fake) wall clock: the boundary check that FOLLOWS that stage must abort
+    with ``IngestStallTimeout`` — classified retryable — instead of grinding on.
+    It fires on the FIRST session's post-phase-A boundary (``s0:phase-a``), so
+    the second session never runs."""
     from tools.longmem_eval import ingest_v2 as iv2
 
     clock = _FakeClock()

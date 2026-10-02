@@ -2495,10 +2495,14 @@ durations:
   longmem_eval/test_context_assembly_arms.py: 0.2
   # #2969: new file in this pool, never sampled by a CI run, so it takes the
   # flat 2.0s default under the #3400/#4221 convention (a local timing is not
-  # the input). The entry is REQUIRED for a second reason: registering the file
-  # without one took the fast pool from 541/601 (90.02%, exactly the floor) to
-  # 541/602 (89.87%) — a hard `manifest-integrity` failure, the #4348
-  # `--register` gap. Refresh from the first post-merge main run that includes it.
+  # the input). The "second reason" this entry was originally justified by —
+  # that omitting it dropped the fast pool to 541/602 (89.87%) and so failed
+  # the `manifest-integrity` gate — is NO LONGER TRUE, measured 2026-10-02:
+  # the pool has grown well past the 90% `DURATION_COVERAGE_MIN` floor, and
+  # removing this entry leaves `ci_selection.py --integrity` at exit 0 with
+  # `duration_coverage_issues()` empty. The entry stays because it is the
+  # file's declared cost, not because the gate requires it. Refresh from the
+  # first post-merge main run.
   longmem_eval/test_ingest_stall_guard.py: 2.0
   longmem_eval/test_gold_evidence_claims.py: 0.1
   mini_beir/test_mini_beir.py: 0.1
