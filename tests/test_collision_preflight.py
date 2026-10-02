@@ -1762,6 +1762,16 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertFalse(live, basis)
         self.assertIn("locked=initializing", basis)
         self.assertIn("cannot hold work", basis)
+        # ⛔ A LOCK IS PRUNE-PROTECTION, NOT LIVENESS. `git worktree lock` exists
+        # for a worktree whose path is EXPECTED to be absent (a portable device, a
+        # network share), and `--porcelain` emits `locked` INSTEAD OF `prunable` —
+        # so a MOVED worktree its owner also locked reports only `locked portable`
+        # and would be demoted if ANY lock counted. It must block.
+        for other_lock in ("portable", "yes", "reason: on a USB stick"):
+            live, basis = mod._worktree_liveness(absent, other_lock)
+            self.assertTrue(live, basis)
+            self.assertIn("prune-protection", basis)
+            self.assertIn("NOT demoted", basis)
         # ⛔ A LOCK-FREE `prunable` RECORD IS THE MOVED WORKTREE AND MUST BLOCK.
         live, basis = mod._worktree_liveness(
             absent, None, "gitdir file points to non-existent location")

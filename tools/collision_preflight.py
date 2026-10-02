@@ -1720,13 +1720,14 @@ def _worktree_liveness(
     false-CLEAN the pre-dispatch check exists to prevent (the duplicate-ownership
     defect #3061 was filed for).
 
-    The discriminator is git's OWN signal, which this parser already read and
-    threw away: an ABORTED `git worktree add` leaves `locked initializing` — a
-    registration that can never acquire work, the shape MEASURED for both dead
-    records in this repo — whereas a MOVED worktree is `prunable` WITHOUT a lock.
-    So a record is demoted only when git itself says it is locked; everything
-    else, including a lock-free `prunable` and a bare absence, FAILS CLOSED and
-    keeps blocking.
+    The discriminator is git's ABORTED-ADD marker, `initializing`, which is the
+    only value that means "cannot hold work": it is the shape MEASURED for both
+    dead records in this repo. A LOCK IS PRUNE-PROTECTION, NOT LIVENESS —
+    `git worktree lock` is documented for a worktree "on a portable device or
+    network share which is not always mounted", i.e. one whose path is EXPECTED
+    to be absent — and `--porcelain` emits `locked` INSTEAD OF `prunable`, so a
+    moved worktree its owner also locked reports only `locked portable`. Every
+    other lock, a lock-free `prunable`, and a bare absence FAIL CLOSED.
 
     `exists=no` and `gitdir=no` remain EVIDENCE and are always reported, so a
     false hold is visible at a glance instead of having to be re-derived by hand.
@@ -1749,15 +1750,39 @@ def _worktree_liveness(
     evidence this fix exists to surface.
     """
     def _shape(basis: str) -> tuple[bool, str]:
-        """Demote ONLY on git's own lock; otherwise FAIL CLOSED."""
+        """Demote ONLY on git's ABORTED-ADD marker; otherwise FAIL CLOSED.
+
+        ⛔ A LOCK IS PRUNE-PROTECTION, NOT A LIVENESS SIGNAL. `git worktree
+        lock` exists for a worktree "on a portable device or network share which
+        is not always mounted" — i.e. precisely a worktree whose PATH is EMPTY
+        EXPECTED TO BE ABSENT. Reading any lock as "cannot hold work" therefore
+        demotes a live lane, and `--porcelain` emits `locked` INSTEAD OF
+        `prunable` (git's own if/else-if), so the prunable guard below never sees
+        it: a MOVED worktree that its owner also LOCKED reports only
+        `locked portable` and was read as non-blocking — a false CLEAN on this
+        gate, the duplicate-ownership direction (#3061).
+
+        The one value that does mean "cannot hold work" is `initializing`, the
+        marker an ABORTED `git worktree add` leaves behind — the shape MEASURED
+        for both dead records in this repo. Every other lock, and a lock-free
+        `prunable`, and a bare absence, keeps blocking.
+        """
         lock = f"locked={locked}" if locked else "locked=no"
+        if locked == "initializing":
+            return False, (
+                f"{basis} {lock} — aborted `git worktree add`; cannot hold work"
+            )
         if locked:
-            return False, f"{basis} {lock} — git says this record cannot hold work"
+            return True, (
+                f"{basis} {lock} — a lock is prune-protection, NOT a liveness "
+                "signal — NOT demoted (fail-closed)"
+            )
         if prunable:
             return True, (
-                f"{basis} {lock} prunable={prunable} — a prunable record with NO "
-                "lock can still hold work (a MOVED worktree keeps working from "
-                "its new path) — NOT demoted"
+                f"{basis} {lock} prunable={prunable} — a moved worktree and a "
+                "deleted one are indistinguishable here, and a moved one is "
+                "LIVE (its .git holds an absolute gitdir) — NOT demoted "
+                "(fail-closed; run `git worktree prune` if genuinely dead)"
             )
         return True, f"{basis} {lock} — no lock, NOT demoted (fail-closed)"
 
