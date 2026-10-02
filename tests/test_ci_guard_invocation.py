@@ -387,11 +387,20 @@ class _Run:
         # enforced by nothing. Only the non-matrix `embedded_only` step ever got
         # through, which is exactly the 9-steps-found / 1-enforcing-run pattern.
         #
-        # `test_fork_safety_3845.py` is deliberate, not arbitrary: it is the file
-        # whose nodeids the frozen platform-gated manifest actually carries, so a
-        # scope built from it selects a non-empty required subset and the step
-        # exercises the real comparison rather than passing vacuously.
-        text = text.replace("${{ matrix.files }}", "test_fork_safety_3845.py")
+        # `test_fork_safety_3845` is deliberate, not arbitrary: it is the BARE
+        # name (no `.py`) of the file whose nodeids the frozen platform-gated
+        # manifest actually carries. BARE is load-bearing, not cosmetic: the
+        # selector emits bare names (`ci_selection.carve_matrix_include`) and the
+        # carve-out guard step builds its scope as `tests/$f.py`, so a
+        # substitution carrying the extension produced
+        # `tests/test_fork_safety_3845.py.py` — which matched no frozen nodeid,
+        # so the step reported "0 required of this run" and passed exactly
+        # vacuously, the opposite of what the scope exists to prove. The frozen
+        # manifest names the PATH form (`tests/test_fork_safety_3845.py`), so the
+        # bare substitution is what makes the recorded scope require its 4
+        # nodeids. `test_the_carve_out_scope_names_the_frozen_path_form` pins
+        # this on the recorded argv.
+        text = text.replace("${{ matrix.files }}", "test_fork_safety_3845")
         # The `needs.changes.outputs.*` gates select the FULL/slow lane. They are
         # truthy here for the same reason `pytest-rc` is "0": the frozen-set steps
         # must take their real branch, not an early exit, or the assertion would
@@ -534,6 +543,21 @@ def _manifest_values(args: list[str]) -> list[str]:
     return values
 
 
+def _scope_values(args: list[str]) -> list[str]:
+    """Every `--scope` value in a RECORDED argv, in order, both spellings.
+
+    Like :func:`_manifest_values`, decided on the argv the process received, so
+    what is asserted is the scope the guard was actually handed.
+    """
+    values: list[str] = []
+    for position, word in enumerate(args):
+        if word == "--scope" and position + 1 < len(args):
+            values.append(args[position + 1])
+        elif word.startswith("--scope="):
+            values.append(word.split("=", 1)[1])
+    return values
+
+
 def _resolve(value: str, committed: dict[Path, str]) -> str | None:
     """The frozen manifest a recorded `--manifest` value names, or None."""
     path = Path(value)
@@ -591,6 +615,70 @@ def test_every_frozen_manifest_is_enforced_by_an_executed_step():
         "with the check deleted instead of bypassed. If the invocation now reaches the guard "
         "through an interpreter this harness does not stub (python3.12, `uv run python`), extend "
         "the stub in this file rather than deleting the assertion"
+    )
+
+
+def test_the_carve_out_scope_names_the_frozen_path_form():
+    """★ The recorded `--scope` must name the frozen manifest's OWN file paths.
+
+    The carve-out guard step builds its scope from `${{ matrix.files }}` as
+    `tests/$f.py`, and the selector emits BARE names
+    (`ci_selection.carve_matrix_include`), so the harness MUST substitute a bare
+    name. A substitution carrying the extension built
+    `tests/test_fork_safety_3845.py.py`, which matched no frozen nodeid: the
+    guard printed "0 of 4 frozen nodeid(s) filtered out … 0 required of this
+    run" and exited 0 — a vacuous pass, the opposite of the step's stated
+    contract that it "exercises the real comparison".
+
+    Decided on the argv the process RECEIVED, not on the substitution: for every
+    enforcing invocation that passes `--scope`, the scope must name file paths
+    the FROZEN manifest it is compared against actually declares, and must
+    require at least one of that manifest's nodeids — a scope whose paths the
+    manifest never mentions narrows the required set to EMPTY, and an empty
+    requirement can only ever pass.
+    """
+    committed = _committed_manifests()
+    scoped = 0
+    for run, flagged in _enforcing_steps():
+        for args in flagged:
+            values = _scope_values(args)
+            if not values:
+                continue
+            scoped += 1
+            assert len(values) == 1, (
+                f"{run.where}: the guard was invoked with {len(values)} `--scope` values "
+                f"({values}); the guard takes the LAST one, so nothing here identifies which "
+                f"set was narrowed (argv: {args})"
+            )
+            manifests = _manifest_values(args)
+            assert len(manifests) == 1, (
+                f"{run.where}: a scoped invocation must name exactly one `--manifest` "
+                f"(got {manifests}) — `--scope` is meaningless without the frozen set it narrows"
+            )
+            rel = _resolve(manifests[0], committed)
+            assert rel is not None, f"{run.where}: `--scope` against a non-committed manifest"
+            nodeids = [
+                line.strip()
+                for line in (ROOT / rel).read_text(encoding="utf-8").splitlines()
+                if line.strip() and not line.lstrip().startswith("#")
+            ]
+            frozen_files = {nid.split("::", 1)[0] for nid in nodeids}
+            scope_files = set(values[0].split())
+            assert scope_files <= frozen_files, (
+                f"{run.where}: the recorded `--scope` names files {sorted(scope_files)} that "
+                f"{rel} does not declare ({sorted(frozen_files)}) — the carve-out guard step "
+                f"builds `tests/${{ matrix.files }}.py` from BARE selector names, so a "
+                f"substituted name carrying the extension yields `….py.py`, which matches no "
+                f"frozen nodeid and narrows the required set to empty (argv: {args})"
+            )
+            assert scope_files & frozen_files, (
+                f"{run.where}: the recorded `--scope` requires NONE of {rel}'s "
+                f"nodeids ({sorted(scope_files)}), so the frozen check passes vacuously"
+            )
+    assert scoped, (
+        "no enforcing invocation passed `--scope` — the shard filter is what makes the "
+        "repo-level frozen manifest comparable to ONE shard's junit, so its absence must "
+        "not read as green"
     )
 
 
@@ -746,9 +834,11 @@ def test_frozen_enforcement_is_not_hidden_in_an_unevaluable_step():
 
     The harness runs each enforcing step's real shell under `bash -e`, substituting
     the GitHub expressions in `EVALUATED_EXPRESSIONS` (`_relocated`). Enforcement
-    MAY therefore live in a step that interpolates one of those — the carve-out
-    step does exactly that with `${{ matrix.files }}`, `${{ needs.changes.outputs.full }}`
-    and `${{ needs.changes.outputs.slow_selected }}`. What must not happen is an
+    MAY therefore live in a step that interpolates one of those. The carve-out
+    guard step does exactly that with `${{ matrix.files }}`; the test-slow
+    emit-manifest step uses `${{ needs.changes.outputs.full }}` and
+    `${{ needs.changes.outputs.slow_selected }}` (no single step carries all
+    three). What must not happen is an
     expression the harness cannot evaluate: an unresolved `${{ … }}` reaches the
     shell as a `bad substitution` and kills the step before the guard runs, so the
     frozen set would read as enforced by nothing. The assertion's job is to refuse

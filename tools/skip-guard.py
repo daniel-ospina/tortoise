@@ -891,8 +891,8 @@ def main(argv: list[str]) -> int:
     if log_path is None:
         print(
             f"usage: {argv[0]} <path-to-pytest.log> "
-            "[--manifest <expected-nodeids.txt>] [--junitxml <path>] "
-            "[--manifest-only]\n"
+            "[--manifest <expected-nodeids.txt>] [--scope \"<space-joined files>\"] "
+            "[--junitxml <path>] [--manifest-only]\n"
             f"       {argv[0]} --emit-manifest \"<space-joined $FILES>\" "
             "[--marker <expr>] [--output <path>]\n"
             "exit 0 = no live-FalkorDB skips (or no log / no manifest); "

@@ -445,7 +445,8 @@ def integrity_problems(manifest_text: str) -> list[str]:
                 + cs.carve_shard_issues(manifest)
                 + cs.duration_issues(manifest)
                 + cs.leg_coverage_issues(manifest)
-                + cs.duration_coverage_issues(manifest))
+                + cs.duration_coverage_issues(manifest)
+                + cs.duplicate_entries(manifest))
     wf_issues = cs.workflow_matrix_issues(cs.WORKFLOW, manifest)
     problems += wf_issues
     if not wf_issues:

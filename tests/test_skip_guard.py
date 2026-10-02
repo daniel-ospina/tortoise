@@ -340,6 +340,22 @@ def test_scope_without_manifest_fails_closed(tmp_path):
     assert "requires --manifest" in proc.stderr, proc.stderr
 
 
+def test_runtime_usage_lists_scope():
+    """#6804: the runtime synopsis and the module docstring must agree.
+
+    The module docstring's `Usage:` block lists `--scope`, but the synopsis
+    printed on a misuse did not, so a caller who ran the CLI wrong was shown an
+    incomplete option list — two descriptions of the same CLI disagreeing. A
+    bare invocation (no log positional) prints the runtime synopsis and exits 2.
+    """
+    proc = subprocess.run(
+        [sys.executable, str(TOOL)], capture_output=True, text=True)
+    assert proc.returncode == 2, (proc.returncode, proc.stdout, proc.stderr)
+    assert "--scope" in proc.stderr, (
+        f"the runtime usage synopsis omits --scope, which the module docstring's "
+        f"Usage: block documents:\n{proc.stderr}")
+
+
 def test_manifest_junit_without_file_attrs_is_red(tmp_path):
     # A junitxml written WITHOUT -o junit_family=xunit1 lacks file/line attrs —
     # nodeid reconstruction is impossible, so the guard must fail closed with

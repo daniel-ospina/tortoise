@@ -854,36 +854,133 @@ def test_integrity_problems_agrees_with_the_integrity_cli(
                for p in ci_timing.integrity_problems(skewed))
 
 
-def test_integrity_problems_mirrors_the_carve_shard_validator() -> None:
-    """W37 MUTATION PROOF: the refresh's gate must include the PR's new
-    validator.
+def test_integrity_problems_mirrors_every_integrity_validator() -> None:
+    """W37/#5373 MUTATION PROOF: the refresh's gate must include EVERY validator
+    the gate of record runs.
 
     `refresh_durations` gates on :func:`integrity_problems`, so a validator
     present in `ci_selection.py --integrity` and missing here lets the weekly
     durations writer persist a manifest the gate of record rejects.
     `integrity_problems`' docstring contracts "the same functions, in the same
-    order, as --integrity"; this pins that contract for `carve_shard_issues`
-    specifically, because a validator added to one composition and not the other
-    is exactly how the two diverge silently. Build the violation by MUTATION of
-    the real manifest, so the pin does not depend on a literal value and still
-    fires if `carve_shards` is later rolled back or renumbered.
+    order, as --integrity"; a validator added to one composition and not the
+    other is exactly how the two diverge silently. This exercises one real
+    violation per validator the composition carries a fixture for — a
+    `carve_shards` explicit null (W37) and a same-surface duplicate (#5373, a
+    GATE FAILURE under the manifest's `merge=union`) — each built by MUTATION of
+    the real manifest so the pin does not depend on a literal value and still
+    fires if `carve_shards` is later rolled back or a surface is renamed. The
+    composition-parity test below covers the remaining validators whose
+    violation is not cheap to construct in isolation.
     """
     import ci_selection as cs
 
     real = cs.MANIFEST.read_text()
+
+    # `carve_shard_issues`: an explicit null (absence is legitimate; null is a typo).
     broken = yaml.safe_load(real)
     broken["carve_shards"] = None
-    text = yaml.safe_dump(broken, sort_keys=False)
-    # The gate of record refuses it …
-    assert cs.carve_shard_issues(broken), (
-        "the carve_shards validator no longer rejects an explicit null")
-    # … and the refresh's gate must agree, naming the same problem rather than
-    # some unrelated one the re-serialization happened to introduce.
-    problems = ci_timing.integrity_problems(text)
-    assert any("carve_shards is explicitly null" in p for p in problems), (
-        f"integrity_problems does not surface the carve_shards validator the "
-        f"gate of record runs — the weekly refresh could write a manifest "
-        f"--integrity refuses: {problems}")
+    carve_case = (broken, "carve_shards is explicitly null")
+
+    # `duplicate_entries`: a same-surface repeat — what `merge=union` emits when
+    # two lanes append the same registration (#5373).
+    dup = yaml.safe_load(real)
+    surface = next(iter(dup["surfaces"]))
+    entry = dup["surfaces"][surface][0]
+    dup["surfaces"][surface] = list(dup["surfaces"][surface]) + [entry]
+    duplicate_case = (dup, f"{surface}: {entry}")
+
+    for name, (broken_manifest, expected) in {
+        "carve_shard_issues": carve_case,
+        "duplicate_entries": duplicate_case,
+    }.items():
+        # The gate of record refuses it …
+        assert getattr(cs, name)(broken_manifest), (
+            f"the {name} validator no longer rejects the mutation this pin builds")
+        # … and the refresh's gate must agree, naming the same problem rather than
+        # some unrelated one the re-serialization happened to introduce.
+        problems = ci_timing.integrity_problems(
+            yaml.safe_dump(broken_manifest, sort_keys=False))
+        assert any(expected in p for p in problems), (
+            f"integrity_problems does not surface the {name} validator the "
+            f"gate of record runs — the weekly refresh could write a manifest "
+            f"--integrity refuses: {problems}")
+
+
+def test_integrity_problems_mirrors_the_whole_integrity_composition(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The docstring's "cannot disagree" contract, validator by validator.
+
+    The per-validator violation test above can only cover validators whose
+    violation is cheap to build. The docstring claims a stronger property —
+    "the same functions, in the same ORDER, as the --integrity entry point ... so
+    the two cannot disagree" — and that is pinned here directly: wrap EVERY
+    validator the composition is supposed to call with a recorder that appends
+    a unique sentinel to the real result, run BOTH compositions over the same
+    manifest (a manifest that therefore violates every validator at once), and
+    require the two to call the SAME functions in the SAME order and to surface
+    the SAME sentinels. A validator added to one composition alone, removed from
+    one, or moved changes the recorded sequence and reds here; `set(cli_calls)
+    == set(validators)` additionally reds if a validator stops being called by
+    the gate of record at all, so the spy cannot pass by finding nothing.
+    """
+    import ci_selection as cs
+
+    validators = (
+        "integrity",
+        "slow_file_issues",
+        "fast_shard_issues",
+        "carve_shard_issues",
+        "duration_issues",
+        "leg_coverage_issues",
+        "duration_coverage_issues",
+        "duplicate_entries",
+        "workflow_matrix_issues",
+        "workflow_halves_issues",
+    )
+    sentinel = "SENTINEL<{}>"
+    calls: list[str] = []
+    for name in validators:
+        real_validator = getattr(cs, name)
+
+        def recorder(*args, _name=name, _real=real_validator, **kwargs):
+            calls.append(_name)
+            return [sentinel.format(_name), *_real(*args, **kwargs)]
+
+        monkeypatch.setattr(cs, name, recorder)
+
+    real = cs.MANIFEST.read_text()
+
+    # The gate of record: run `python3 tools/ci_selection.py --integrity`.
+    monkeypatch.setattr(sys, "argv", ["ci_selection.py", "--integrity"])
+    cli_rc = cs.main()
+    cli_out = capsys.readouterr().out
+    assert cli_rc == 1, "the injected sentinel problems must make --integrity red"
+    cli_calls = list(calls)
+    calls.clear()
+
+    # … and the refresh's gate over the same manifest.
+    problems = ci_timing.integrity_problems(real)
+    mirror_calls = list(calls)
+
+    assert set(cli_calls) == set(validators), (
+        f"the gate of record no longer calls every validator this parity test "
+        f"guards: missing {sorted(set(validators) - set(cli_calls))}, "
+        f"extra {sorted(set(cli_calls) - set(validators))} — update the list "
+        f"if a validator was deliberately removed")
+    assert mirror_calls == cli_calls, (
+        f"integrity_problems and --integrity called DIFFERENT validators "
+        f"(integrity_problems: {mirror_calls}; --integrity: {cli_calls}) — the "
+        f"docstring's \"same functions, in the same order\" contract is broken, "
+        f"so the weekly refresh can persist a manifest --integrity rejects")
+    missing_cli = [n for n in validators if sentinel.format(n) not in cli_out]
+    assert not missing_cli, (
+        f"--integrity did not report these validators' problems: {missing_cli}")
+    missing_mirror = [n for n in validators if sentinel.format(n) not in problems]
+    assert not missing_mirror, (
+        f"integrity_problems did not surface these validators' problems: "
+        f"{missing_mirror} — the weekly refresh could write a manifest "
+        f"--integrity refuses")
 
 
 def test_ci_timing_docstring_no_longer_claims_it_never_gates_ci() -> None:
