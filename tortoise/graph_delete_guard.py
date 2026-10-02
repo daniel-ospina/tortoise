@@ -44,7 +44,8 @@ issues ``GRAPH.DELETE`` directly can still interleave with it — which is
 precisely why routing every caller through here is the point, rather than a
 property this function can establish on its own. The sweeps that drop graphs route
 through it: ``tests/_embedded.py`` (``_sweep_legacy_strays``, ``wipe``,
-``_drop_one_graph``, ``_sweep_team_strays``, ``wipe_server``, ``_sweep_proj``),
+``_drop_one_graph``, ``_sweep_drop``, ``_sweep_team_strays``, ``wipe_server``,
+``_sweep_proj``),
 ``battery/testing/seeds.py``'s ``purge_owned_namespace``, and the two routed
 shared-server cleanup sites in ``tests/test_wipe_server.py``. Other
 ``finally:`` cleanups in this tree still issue ``DETACH``/``GRAPH.DELETE``
@@ -207,12 +208,14 @@ def safe_graph_delete(
     the DETACH is what materialises the record-less phantom that poisons the
     AOF (module docstring).
 
-    Returns True when the graph was present AND the drop was performed (or the
-    call was a no-op because BOTH ``detach`` and ``drop`` were False — then the
-    True only reports presence). Returns False when nothing was transmitted:
-    either the graph was already absent, or a client exposing a raw connection
-    could not take the cross-process lock (a refusal — the graph is left for a
-    later sweep).
+    Returns True when the graph was present AND the requested work was done
+    (with ``detach=True, drop=False`` that is the DETACH alone; with
+    ``detach=False, drop=True`` the GRAPH.DELETE alone; with both True, both).
+    A call with BOTH False is a pure presence probe: it returns True having
+    transmitted nothing. Returns False when nothing was transmitted: either the
+    graph was already absent, or a client exposing a raw connection could not
+    take the cross-process lock (a refusal — the graph is left for a later
+    sweep).
     **Those two are not distinguishable from the return value alone**, so a
     caller that records a drop-set entry must re-check presence before
     treating False as "satisfied" —

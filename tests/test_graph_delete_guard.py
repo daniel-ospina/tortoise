@@ -231,17 +231,22 @@ def test_presence_read_happens_INSIDE_the_held_lock():
             return super().execute_command(*args)
 
     class _MarkedGraph:
-        """Records that the DROP ran, wherever it runs."""
+        """Records the DETACH and the GRAPH.DELETE SEPARATELY.
+
+        One shared "drop" marker would mask a mutant that leaves the DETACH
+        inside the lock but issues ``graph.delete()`` after release: both
+        append it, and ``order.index`` takes the first occurrence (review P2).
+        """
 
         def __init__(self, inner):
             self._inner = inner
 
         def query(self, *a, **k):
-            order.append("drop")
+            order.append("detach")
             return self._inner.query(*a, **k)
 
         def delete(self):
-            order.append("drop")
+            order.append("delete")
             return self._inner.delete()
 
     class _Db(_LockingDb):
@@ -255,16 +260,21 @@ def test_presence_read_happens_INSIDE_the_held_lock():
     conn = _Conn()
     db = _Db(graphs=["test_here"], connection=conn)
     assert safe_graph_delete(db, "test_here") is True
-    # ALL FOUR positions (review P2): asserting only `read < release` also
+    # ALL FIVE positions (review P2): asserting only `read < release` also
     # passes a mutant that reads BEFORE acquiring — unlock-check → acquire →
     # drop — and one that drops AFTER releasing — check → release → act. Both
-    # reinstate the #2961 check-then-act window, one from each side. Mutants
-    # this catches: read-before-acquire, read-after-release, drop-after-release.
-    for marker in ("acquire", "read", "drop", "release"):
+    # reinstate the #2961 check-then-act window, one from each side, and the
+    # DETACH and the DELETE must be pinned SEPARATELY or a delete-after-release
+    # hides behind the detach's marker. Mutants this catches:
+    # read-before-acquire, read-after-release, detach-after-release,
+    # delete-after-release, drop-both-after-release.
+    for marker in ("acquire", "read", "detach", "delete", "release"):
         assert marker in order, f"{marker} never happened: {order}"
-    assert order.index("acquire") < order.index("read") \
-        < order.index("drop") < order.index("release"), (
-            f"the read AND the drop must run INSIDE the held lock — got {order}")
+    assert (order.index("acquire") < order.index("read")
+            < order.index("detach") < order.index("delete")
+            < order.index("release")), (
+        f"the read AND both drop commands must run INSIDE the held lock — "
+        f"got {order}")
 
 
 def test_read_failure_RAISES_even_when_the_lock_is_ALSO_unavailable():
@@ -351,6 +361,29 @@ def test_drop_one_graph_present_detaches_and_deletes():
     assert _drop_one_graph(proj, "test_here", drop=True) is True
     assert db.calls == [("query", "test_here", "MATCH (n) DETACH DELETE n"),
                         ("delete", "test_here")]
+
+
+def test_drop_one_graph_REFUSAL_is_not_a_success():
+    """Review P3: safe_graph_delete's False is ambiguous — "already absent"
+    (the journal entry is satisfied) vs "the guard refused because it could not
+    take the lock" (the graph is STILL THERE). Treating a refusal as a drop
+    makes _sweep_drop record the name and REMOVE the journal, leaking a graph
+    that still holds stale contents with no retry. The two tests above pass no
+    connection, so neither reaches the refusal branch."""
+    from tests._embedded import _drop_one_graph
+
+    class _OOMConn:
+        def execute_command(self, *a, **k):
+            if a and a[0] == "SET":
+                raise RuntimeError("OOM")
+            return None
+
+    db = _FakeDb(graphs=["test_here"])
+    db.connection = _OOMConn()
+    proj = types.SimpleNamespace(db=db)
+    assert _drop_one_graph(proj, "test_here", drop=True) is False, \
+        "a refusal must not be recorded as a successful drop"
+    assert db.calls == [], "a refusal must transmit nothing"
 
 
 # ── poisoned-AOF detection + recovery guidance ────────────────────────────
