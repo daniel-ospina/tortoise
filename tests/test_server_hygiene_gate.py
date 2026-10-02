@@ -351,23 +351,42 @@ def test_reimporting_conftest_cannot_change_the_session_identity():
     session itself had minted.
 
     The guard sits here, beside the call site, so it runs wherever the trigger
-    runs. Mutation-tested in both directions: against the pre-#6323 body it
-    fails with the nonce having moved (observed 535d522c47e0 -> c611df786317),
-    and it passes once the identity is idempotent within a process.
+    runs.
 
-    The companion direction — that the fix must not become the REJECTED
-    ``setdefault`` design, which ``conftest.py`` rules out because a pre-set
-    value would make concurrent sessions share one journal filename — is
-    asserted by ``test_redirect_seam.py``: an externally pre-set
-    ``TORTOISE_TEST_SESSION`` is still overwritten, since it carries no
-    owner-pid marker.
+    The re-execution is made GENUINE on purpose. In this file `import
+    tests.conftest` is normally a CACHED NO-OP — ``_start_teardown`` (below)
+    already imported it, so the body does not run again and the assertion below
+    would hold trivially, passing even against the pre-#6323 unconditional
+    re-roll. Popping the module first forces the body to re-execute, and the
+    identity check on the module object makes that condition LOUD rather than
+    silent: if a future change makes the import cached again, this fails
+    instead of quietly becoming a tautology.
+
+    Scope of the guarantee: this pins "re-executing the body does not move the
+    nonce". It does NOT pin the companion direction — that a fix must not
+    become the REJECTED ``setdefault`` design (a pre-set value would freeze the
+    nonce, so concurrent sessions would share one journal filename). That
+    decision is documented at ``tests/conftest.py:118-126`` and asserted by no
+    test: ``test_redirect_seam.py`` compares the env against the import-time
+    value, which a ``setdefault`` reversion would also satisfy. Guarding it
+    would mean re-executing the body with the marker removed, which mints a new
+    nonce and perturbs the live session — a worse trade than an unguarded, and
+    so far unobserved, reversion.
     """
     import os
+    import sys
 
     before = os.environ.get("TORTOISE_TEST_SESSION")
     assert before, "conftest must export TORTOISE_TEST_SESSION before tests run"
 
-    import tests.conftest  # noqa: F401 — the re-import shape #6323 reports
+    prior_module = sys.modules.get("tests.conftest")
+    sys.modules.pop("tests.conftest", None)
+    import tests.conftest  # noqa: F401 — a GENUINE second execution of the body
+
+    assert sys.modules["tests.conftest"] is not prior_module, (
+        "importing tests.conftest did not re-execute its body (the module was "
+        "still cached), so this guard proved nothing — see the docstring"
+    )
 
     after = os.environ.get("TORTOISE_TEST_SESSION")
     assert after == before, (
