@@ -31,7 +31,8 @@ rather than a new error vocabulary:
 Why a boundary check and not a watchdog thread: a thread blocked in
 ``recv()`` cannot be interrupted from another thread, so the only reliable
 hard bound is the socket timeout itself. The heartbeat adds the
-*cumulative* bound plus the visible liveness signal the issue asked for
+*per-gap* bound (any SINGLE gap between progress beats that exceeds the
+budget aborts the question) plus the visible liveness signal the issue asked for
 ("log file byte-identical for 4+ minutes").
 
 Env knobs (all optional, fail-loud on malformed values):
@@ -205,13 +206,18 @@ class Heartbeat:
         emit_line: str | None = None
         with self._lock:
             now = self._clock()
+            # Capture the gap BEFORE resetting the progress clock. The line
+            # reports how long the PREVIOUS stage ran — the diagnostic #2969
+            # exists to provide. Resetting first made every emitted line read
+            # `idle=0.0s`, i.e. the line could not show the number it is for.
+            idle = now - self._last_progress
             self._last_progress = now
             self._stage = stage
             self._beats += 1
             if (self.emit_interval_s >= 0
                     and now - self._last_emit >= self.emit_interval_s):
                 self._last_emit = now
-                emit_line = self._line_locked(stage, detail)
+                emit_line = self._line_locked(stage, detail, idle_s=idle)
         if emit_line is not None:
             self._emit(emit_line)
 
@@ -233,12 +239,14 @@ class Heartbeat:
         with self._lock:
             return self._line_locked(stage or self._stage, detail)
 
-    def _line_locked(self, stage: str, detail: str) -> str:
+    def _line_locked(self, stage: str, detail: str,
+                     idle_s: float | None = None) -> str:
         now = self._clock()
         suffix = f" {detail}" if detail else ""
+        idle = now - self._last_progress if idle_s is None else idle_s
         return (f"[longmem_eval] ingest heartbeat {self.label} "
                 f"stage={stage} beats={self._beats} "
-                f"idle={now - self._last_progress:.1f}s "
+                f"idle={idle:.1f}s "
                 f"total={now - self._started:.1f}s{suffix}")
 
     # ── liveness read ─────────────────────────────────────────────────────

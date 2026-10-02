@@ -45,9 +45,9 @@ from tools.longmem_eval.stall_guard import (  # noqa: E402, RUF100
     resolve_stall_timeout_s,
 )
 from tortoise.projection import (  # noqa: E402, RUF100
+    _DB_CONNECT_TIMEOUT_DEFAULT,
+    _DB_SOCKET_TIMEOUT_DEFAULT,
     _DB_TIMEOUT_MAX_S,
-    _DEFAULT_SOCKET_CONNECT_TIMEOUT,
-    _DEFAULT_SOCKET_TIMEOUT,
     _SOCKET_CONNECT_TIMEOUT_ENV,
     _SOCKET_TIMEOUT_ENV,
     FalkorProjection,
@@ -199,10 +199,17 @@ def test_ingest_stall_timeout_is_retryable_and_resume_eligible():
 def test_socket_timeout_defaults_preserve_product_behaviour(monkeypatch):
     monkeypatch.delenv(_SOCKET_TIMEOUT_ENV, raising=False)
     monkeypatch.delenv(_SOCKET_CONNECT_TIMEOUT_ENV, raising=False)
-    assert _resolve_socket_timeout(_SOCKET_TIMEOUT_ENV, _DEFAULT_SOCKET_TIMEOUT) \
-        == _DEFAULT_SOCKET_TIMEOUT == 10.0
     assert _resolve_socket_timeout(
-        _SOCKET_CONNECT_TIMEOUT_ENV, _DEFAULT_SOCKET_CONNECT_TIMEOUT) == 5.0
+        _SOCKET_TIMEOUT_ENV, _DB_SOCKET_TIMEOUT_DEFAULT) == 10.0
+    # Assert against the defaults PRODUCTION actually passes. This used to read
+    # test-only mirror constants that named 5.0 for the connect knob while the
+    # client's real connect default is 2.0, so it pinned a value nothing used —
+    # and passed unchanged even when the production wiring was mutated to hand
+    # the connect knob the READ default. `_socket_timeouts()` IS that wiring.
+    assert _resolve_socket_timeout(
+        _SOCKET_CONNECT_TIMEOUT_ENV, _DB_CONNECT_TIMEOUT_DEFAULT) == 2.0
+    assert _socket_timeouts() == (_DB_CONNECT_TIMEOUT_DEFAULT,
+                                  _DB_SOCKET_TIMEOUT_DEFAULT) == (2.0, 10.0)
     # Env-tunable, both directions.
     monkeypatch.setenv(_SOCKET_TIMEOUT_ENV, "120")
     assert _resolve_socket_timeout(_SOCKET_TIMEOUT_ENV, 10.0) == 120.0
@@ -544,8 +551,8 @@ def test_ingest_bound_banner_is_well_formed(monkeypatch):
     # Both sides unset → the client falls back to the product default (10s),
     # and the banner must print THAT. The old code printed the eval default
     # (120s) here — the exact disagreement P2-2 reports.
-    assert _DEFAULT_SOCKET_TIMEOUT == 10.0
-    assert _client_read_timeout_via_projection() == _DEFAULT_SOCKET_TIMEOUT
+    assert _DB_SOCKET_TIMEOUT_DEFAULT == 10.0
+    assert _client_read_timeout_via_projection() == _DB_SOCKET_TIMEOUT_DEFAULT
     line = runner._ingest_bound_banner(900.0, db_uri="docker://h:6379/g")
     assert line == (
         "[longmem_eval] ingest stall budget: 900s "

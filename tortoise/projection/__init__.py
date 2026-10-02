@@ -66,8 +66,11 @@ logger = logging.getLogger(__name__)
 # rather than clamping.
 _SOCKET_TIMEOUT_ENV = "TORTOISE_DB_SOCKET_TIMEOUT"
 _SOCKET_CONNECT_TIMEOUT_ENV = "TORTOISE_DB_SOCKET_CONNECT_TIMEOUT"
-_DEFAULT_SOCKET_TIMEOUT = 10.0
-_DEFAULT_SOCKET_CONNECT_TIMEOUT = 5.0
+# NOTE: there is deliberately no `_DEFAULT_SOCKET*` mirror here. Such a pair
+# existed and was dead — nothing in production read them — and the connect one
+# named 5.0 while the client's real connect default is
+# `_DB_CONNECT_TIMEOUT_DEFAULT` = 2.0 (see `_socket_timeouts`), so it advertised
+# a value the product never used. Assert against the real defaults instead.
 # #4097: this knob's "off" spellings come from the DECLARED contract
 # (`FALSY`), so an operator who reaches for `false` is not meeting a second
 # vocabulary. `none` is this knob's own spelling (a timeout is absent, not

@@ -838,8 +838,11 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
     #     cross-session consolidation is not visible to the workers — the
     #     documented trade-off of the parallel fast path.
     def _phase_a_ctx(si: int, session: list[dict]) -> dict:
-        # #2969: bounds the previous stage — notices the CUMULATIVE grind
-        # (many sub-socket-timeout stalls) before starting new work.
+        # #2969: bounds the previous stage — notices a SINGLE gap that drifted
+        # past the socket bound before starting new work. NOTE: this bounds one
+        # inter-boundary gap, NOT the question's cumulative time — a grind whose
+        # every stage stays under the budget is still not detected (#2969's
+        # measured shape was one long stage, which this does catch).
         hb.stage(f"s{si}:phase-a")
         sid = ids[si] if si < len(ids) else f"{qid}-s{si}"
         session_date = dates[si] if si < len(dates) else ""
