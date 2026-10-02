@@ -934,14 +934,24 @@ def test_generator_names_only_existing_source_paths() -> None:
     )
 
 
-def test_docs_only_edit_of_the_generated_doc_is_unguarded_by_ci() -> None:
-    """The ci-surfaces note must not overstate a guard that does not exist.
+def test_docs_only_edit_of_the_generated_doc_is_guarded_by_the_docs_job() -> None:
+    """The docs-only gap is closed by the required `docs` job; the matrix still cannot close it.
 
     A docs-only edit of the GENERATED document selects NO surface (#4454), so
-    this test file does not run — and no workflow runs the generator's `--check`
-    standalone. The `core` note once claimed the guard was "the `api` arm plus
-    the `--check` drift form"; both halves are false for a docs-only change
-    (P2-7). This pins the real selection behaviour and forbids the claim.
+    this test file does not run for it. Until #4454 was fixed that was the whole
+    story: no workflow ran the generator's `--check` either, so a hand-edit could
+    ship stale numbers. The `core` note once claimed the guard was "the `api` arm
+    plus the `--check` drift form"; both halves were false for a docs-only
+    change (P2-7).
+
+    BOTH halves of the fixed behaviour are pinned, because either one alone makes
+    the other a false claim:
+      * the matrix STILL skips a docs-only edit — which is precisely why the
+        check cannot live there, and why "register it in `core`" does not fix
+        #4454; and
+      * the standalone check DOES run, from `ci.yml`'s `docs` job — the only home
+        that is a required context AND carries no `paths:` filter, so it cannot
+        inherit the very skip it exists to close.
     """
     sys.path.insert(0, str(ROOT))
     from tools.ci_selection import load_manifest, select
@@ -958,7 +968,42 @@ def test_docs_only_edit_of_the_generated_doc_is_unguarded_by_ci() -> None:
     workflows = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
     assert workflows, "no workflows found — the standalone `--check` claim cannot be checked"
     runners = [w.name for w in workflows if "mcp_rename_table.py --check" in w.read_text()]
-    assert not runners, f"a workflow now runs the standalone check: {runners}"
+    assert runners == ["ci.yml"], (
+        "the standalone check must run, from ci.yml and nowhere else — a second "
+        f"home means the guard has drifted, and none means #4454 is open again: {runners}"
+    )
+
+    # WHERE it runs is what makes it a guard, so the properties are pinned rather
+    # than the file name. A path-gated or conditional home would silently restore
+    # the #4454 hole while every assertion above still passed.
+    import json
+
+    import yaml
+
+    ci = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yml").read_text())
+    # PyYAML reads a bare `on:` key as the boolean True, not the string "on".
+    on_block = ci.get("on") or ci.get(True) or {}
+    assert not (on_block.get("pull_request") or {}).get("paths"), (
+        "the `docs` job must run on EVERY pull_request — a `paths:` filter would "
+        "make the check inherit the docs-PR skip it exists to close"
+    )
+    docs_job = ci["jobs"]["docs"]
+    assert "if" not in docs_job, (
+        "the docs job must be unconditional — a job-level `if` makes the guard skippable"
+    )
+    required = json.loads((ROOT / "docs" / "ci" / "required-contexts.json").read_text())
+    assert "docs" in required["required_contexts"], (
+        "the docs job must be a REQUIRED context, or a skipped check blocks nothing"
+    )
+    step = next(
+        s
+        for s in docs_job["steps"]
+        if "mcp_rename_table.py --check" in str(s.get("run", ""))
+    )
+    assert "if" not in step, (
+        "the drift step must be unconditional — a step-level `if` is the #4454 "
+        "hole in a new shape"
+    )
 
     note = (ROOT / "config" / "ci-surfaces.yml").read_text(encoding="utf-8")
     m = re.search(r"((?:^  #.*\n)+)  - test_mcp_rename_table\.py", note, re.M)
@@ -975,7 +1020,7 @@ def test_docs_only_edit_of_the_generated_doc_is_unguarded_by_ci() -> None:
     )
     assert "the `api` arm plus the `--check` drift form" not in flat, (
         "the `core` note again claims the `--check` drift form guards a docs-only "
-        "change — no workflow runs it standalone"
+        "change — the drift form runs in ci.yml's docs job, not in a selection"
     )
 
 

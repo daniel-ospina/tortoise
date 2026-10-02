@@ -654,10 +654,12 @@ surfaces:
   # GENERATOR-only edit selects `api` and runs this drift gate.
   # NOTE: `core` does NOT catch a docs-only hand-edit of the GENERATED
   # `docs/product/mcp-rename-table.md` — a docs-only change selects no surface at
-  # all (#4454, the repo's deliberate docs-PR policy), so this test does not run
-  # and no workflow runs the generator's `--check` standalone. Correcting that
-  # gap is #4454's job, not this registration's; do not read this entry as
-  # covering a hand-edited document.
+  # all (#4454, the repo's deliberate docs-PR policy), so this test does not run.
+  # That direction is closed by the required `docs` job in ci.yml, which runs
+  # `tools/mcp_rename_table.py --check` unconditionally on every PR (#4454). This
+  # registration keeps its own direction: a GENERATOR-only edit selects `api` and
+  # runs this drift gate. Do not read this entry as covering a hand-edited
+  # document.
   - test_mcp_rename_table.py
   # #6138: the queue-conflict census. Hermetic (no DB, no network — every live
   # read is injected through a fixture), so `core` can run it on engine-wide
