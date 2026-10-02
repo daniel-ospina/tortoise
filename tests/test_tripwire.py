@@ -27,6 +27,7 @@ from pathlib import Path
 import pytest
 
 from tests import _live_utils
+from tests._tmpdir_hygiene import scan_root
 from tortoise.projection import FalkorProjection
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -67,7 +68,8 @@ def _tripwire_probe() -> FalkorProjection:
     (test_probe_flips' inert-redirect half) never races a concurrent suite's
     redislite daemon on a fixed machine-global path (re-review Issue 3).
     """
-    return FalkorProjection(f"/tmp/tripwire-probe-{os.getpid()}.db")
+    return FalkorProjection(
+        os.path.join(scan_root(), f"tripwire-probe-{os.getpid()}.db"))
 
 
 def test_session_target_probe():
