@@ -4,8 +4,9 @@
 count from authored data, so a citation in the generated doc cannot be wrong. What it
 CAN still do is go *stale* — someone edits `tool_registry.py`, `tools/bridge_table.py`'s
 destination map, or the registry's `RETIRED_USE_INSTEAD` and never regenerates — and
-that is the drift the generator's own docstring promises cannot happen. Nothing runs
-`--check` unless a test does. This is that enforcement.
+that is the drift the generator's own docstring promises cannot happen. Nothing used
+to run `--check`: this test is the matrix's enforcement, and since #4454 the required
+`docs` job runs `tools/mcp_rename_table.py --check` on every PR as well.
 
 WHY EVERY EXPECTED VALUE HERE IS A LITERAL OR AN INDEPENDENT WALK
 -----------------------------------------------------------------

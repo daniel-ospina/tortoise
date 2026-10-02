@@ -3940,6 +3940,16 @@ def test_docs_job_guards_tracked_generated_artifacts_on_every_pr():
         s for s in steps
         if str(s.get("name", "")).startswith("Generated-artifact drift check")
     )
+    # Unconditional, like the job. The `docs` job also serves the scheduled
+    # main-health call with step-level `if:` guards on its markdown/link steps; a
+    # step-level `if` here would make the drift guard skippable, which is the
+    # #4454 hole in a new shape. The sibling pin in test_mcp_rename_table.py
+    # already checks this; asserting it here too means a `ci.yml`-only edit is
+    # caught by both the mcp test and this one.
+    assert "if" not in step, (
+        "the drift step must be unconditional — a step-level `if` would make the "
+        "guard skippable"
+    )
     # The generators import `tortoise.sdk`, which pulls the full declared
     # dependency set (numpy, prometheus_client, fastmcp). Without the package
     # install both commands abort at IMPORT time and the step exits 1 on EVERY

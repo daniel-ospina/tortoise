@@ -14,8 +14,10 @@ no network, which is why it can run in both places. It is registered in BOTH `ap
 `config/ci-surfaces.yml`, and `tools/bridge_table.py` is named in the `api`
 SOURCE_PATTERNS — because `tools/` and `docs/` are in NON_PYTHON_PREFIXES, an
 edit to the generator alone used to select NO surface, so the gate did not run on
-the PR that can break it. Residual: a change touching ONLY the docs skips the
-matrix by the repo's deliberate docs-PR policy (filed as tortoise #4454).
+the PR that can break it. A change touching ONLY the docs still skips the matrix
+by the repo's deliberate docs-PR policy; that direction is covered by the `docs`
+job's `--check` instead, which is why the step has to live there rather than here
+(#4454).
 """
 from __future__ import annotations
 
