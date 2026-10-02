@@ -3267,6 +3267,24 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
     return succ_vf
 
 
+def _installed_namespaces_for_gate(sdk) -> frozenset[str] | None:
+    """#5163: the graph's installed-pack set for the SDK's LOCAL compile
+    gates — the v1 objectKind enforcer (``validate_summary``) and the
+    client-side Layer-1 pre-check (``validate_payload_dict``).
+
+    ``None`` = no gate (the catalog union) — the documented back-compat value
+    for a graph with no ``:PackInstall`` records, and for an SDK that carries
+    no graph handle at all (never ``__init__``-ed — the test seams that build
+    a summary path with ``object.__new__``). A graph that IS bound but
+    unreachable RAISES out of ``graph_installed_namespaces`` — an outage must
+    never read as "no packs" and silently widen the gate to the union.
+    """
+    if not hasattr(sdk, "_proj"):
+        return None
+    from tortoise.pack_state import graph_installed_namespaces
+    return graph_installed_namespaces(sdk)
+
+
 class TortoiseSDK:
     """Layer 1 facade for Tortoise epistemic graph interaction.
 
@@ -4614,7 +4632,7 @@ class TortoiseSDK:
         validated payload → POST. Errors are surfaced (ok=False) with the
         payload for inspection — never a silent partial write."""
         from tortoise.extractor_v2 import extract_session_v2  # noqa: I001
-        from tortoise.commit_schema import validate_payload_dict
+        from tortoise.commit_schema import compile_vocab, validate_payload_dict
         from datetime import datetime, timezone
         model = extractor_model or _default_byok_model()
         # E1 (#1533, D8): capture time is the production session date — an
@@ -4647,11 +4665,39 @@ class TortoiseSDK:
             errors.append("no payload produced (empty or failed conversation)")
         l1_errors: list[str] = []
         if payload is not None:
-            l1, _model = validate_payload_dict(payload)
-            if not l1.ok:
-                for field, reasons in l1.errors.items():
-                    for r in reasons:
-                        l1_errors.append(f"Layer-1 {field}: {r}")
+            # #5163: validate against the GRAPH's installed-pack gate, not the
+            # process-global union — the same decision the hosted commit door
+            # enforces server-side, so the client never POSTs a payload it
+            # knows the door will 422.
+            #
+            # #5339: the resolver RAISES on a bound-but-unreachable graph
+            # (pack_state's documented posture — an outage must never read as
+            # "no packs"). That must not escape this public entry point, and
+            # it must not degrade to the ungated union either: ``None`` means
+            # NO gate, which WIDENS the allowed kind set. The fail-closed
+            # property is local — the recorded error makes ``errors``
+            # non-empty, so the ``if errors or payload is None: return``
+            # below runs BEFORE ``_post_commit`` and the caller gets a
+            # structured ``ok=False`` with nothing sent. (This is NOT
+            # mirroring the sibling resolver call in ``extract_session_v2``:
+            # that one sets ``classify_later = False`` and continues the
+            # legacy pipeline, which ``extractor_v2.py`` labels an explicit
+            # FAIL-OPEN onto the wider vocabulary — not the fail-closed
+            # direction taken here.)
+            try:
+                gate = _installed_namespaces_for_gate(self)
+            except Exception as e:  # noqa: BLE001, RUF100 — an outage must
+                # never raise out of a public method, and must never widen
+                # the gate to the catalog union (see above).
+                errors.append(
+                    f"Layer-1 gate resolution failed: {type(e).__name__}: {e}")
+            else:
+                l1, _model = validate_payload_dict(
+                    payload, vocab=compile_vocab(installed_namespaces=gate))
+                if not l1.ok:
+                    for field, reasons in l1.errors.items():
+                        for r in reasons:
+                            l1_errors.append(f"Layer-1 {field}: {r}")
         if l1_errors:
             errors = l1_errors + errors
         result = {
@@ -4695,6 +4741,27 @@ class TortoiseSDK:
                                               validate_summary, check_guards)
 
         from tortoise.value_extractor import construct_graph
+        # #5163: the objectKind enforcer's set is graph-gated. Resolve ONCE —
+        # both the extraction path and the direct-summary path below need it.
+        #
+        # #5339: the resolver RAISES on a bound-but-unreachable graph
+        # (pack_state's documented posture). Guard the call for the same
+        # reason as the v2 sibling above: the outage must not escape this
+        # public entry point, and it must not become ``installed = None``
+        # either — ``None`` means NO gate and would widen the objectKind set
+        # to the catalog union, silently admitting another pack's kinds.
+        # Fail-closed: record the failure and return BEFORE the extraction/
+        # validation that needs the gate, so nothing is POSTed and the caller
+        # gets a structured ``ok=False``.
+        try:
+            installed = _installed_namespaces_for_gate(self)
+        except Exception as e:  # noqa: BLE001, RUF100 — an outage must
+            # never raise out of a public method, and must never widen
+            # the gate to the catalog union (see above).
+            return {"session_id": session_id, "ok": False,
+                    "errors": [f"Layer-1 gate resolution failed: "
+                               f"{type(e).__name__}: {e}"],
+                    "payload": None}
         if summary is None and conversation is not None:
             model = extractor_model or _default_byok_model()
             # #4911: the v1 sibling of the v2 scrub below — same reason (this
@@ -4704,13 +4771,15 @@ class TortoiseSDK:
             conversation = _redact_turn_contents(conversation)[0]
             extracted = extract_session(
                 model, conversation, existing_state=existing_state,
-                session_id=session_id, chunk_size=chunk_size, mode=mode)
+                session_id=session_id, chunk_size=chunk_size, mode=mode,
+                installed_namespaces=installed)
             summary = extracted["summary"]
             errors = extracted.get("errors", [])
             guards = extracted.get("guards", [])
             delta = extracted.get("delta")
         else:
-            errors = validate_summary(summary or {}, mode=mode)
+            errors = validate_summary(summary or {}, mode=mode,
+                                      installed_namespaces=installed)
             guards = check_guards(summary or {})
             delta = None
 
