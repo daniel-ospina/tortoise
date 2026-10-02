@@ -626,7 +626,7 @@ def test_the_carve_out_scope_names_the_frozen_path_form():
     (`ci_selection.carve_matrix_include`), so the harness MUST substitute a bare
     name. A substitution carrying the extension built
     `tests/test_fork_safety_3845.py.py`, which matched no frozen nodeid: the
-    guard printed "0 of 4 frozen nodeid(s) filtered out … 0 required of this
+    guard printed "4 of 4 frozen nodeid(s) filtered out …; 0 required of this
     run" and exited 0 — a vacuous pass, the opposite of the enforcement the
     step exists to perform.
 

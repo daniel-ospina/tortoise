@@ -1813,14 +1813,6 @@ jobs:
           print(f"packs-compile OK: {loaded} packs loaded, 0 validation errors")
           EOF
 
-  # #1008 queue health: REQUIRED check (branch protection). Aggregates the
-  # SHORT deterministic legs so docs-only PRs (those legs skipped) still report
-  # a green check. Fails iff any leg it needs failed OR was cancelled (a runner-
-  # killed suite must never pass silently). NOTE: it deliberately does NOT gate
-  # on the long legs (`test`, `test-slow`, `test-carve-out`) — see this job's own
-  # `needs:` comment for the merge-path rationale and the disclosure that goes
-  # with it. Job id is load-bearing: branch protection requires the exact check
-  # name `python-ci-gate` — do NOT rename or add a `name:` field.
   # Track B job (epic #902 A8, #1058): runs ONLY the @track_b tests
   # explicitly. MUST-PASS — both Track B sentinels (_TRACK_B_FULL,
   # SENTINEL_A9) have shipped; wired into python-ci-gate's needs. The suite
@@ -2067,11 +2059,12 @@ jobs:
             done ) &
           HB_PID=$!
           ulimit -n 65536 || true  # #1988: fd headroom for the embedded suites
-          # #3239: 35m = 2x the measured pytest step (max 16.02m over the 60
-          # newest completed runs) — tools/ci_selection.WATCHDOG_HEADROOM, the
-          # factor #6135 already validated for the fast shards. Was 75m, 4.7x
-          # the work, so a hang inside pytest ran the long pole for an hour+
-          # on the old budget.
+          # #3239 history: this literal was 35m = 2x the then-measured pytest
+          # step (max 16.02m over the 60 newest completed runs) —
+          # tools/ci_selection.WATCHDOG_HEADROOM, the factor #6135 already
+          # validated for the fast shards. Before that it was 75m, 4.7x the
+          # work, so a hang inside pytest ran the long pole for an hour+ on
+          # the old budget.
           # #3239/W37: the watchdog is now the SHARD's own budget
           # (`${{ matrix.watchdog_minutes }}`m, derived by
           # `tools/ci_selection.shard_watchdog_minutes` from the shard's packed

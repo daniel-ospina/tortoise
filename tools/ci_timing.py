@@ -448,8 +448,14 @@ def integrity_problems(manifest_text: str) -> list[str]:
     manifest the REQUIRED `manifest-integrity` check immediately reds. #6145
     caught exactly that for `watchdog_headroom_issues` and
     `duplicate_entries`. `tests/test_ci_timing.py` pins the headroom term by
-    name and the CLI's rc on the clean and skewed manifests; the rest of the
-    composition is a review duty at the two call sites.
+    name and the CLI's rc on the clean and skewed manifests, and
+    `test_integrity_problems_mirrors_the_listed_integrity_composition` pins
+    the composition parity over the validators in its hand-maintained
+    allow-list — both compositions must call the same validators in the same
+    order, and a listed validator that the gate of record no longer calls
+    reds. The list itself is the caveat: a validator absent from it is never
+    wrapped, so a drift touching only unlisted terms is still a review duty at
+    the two call sites.
 
     Repo-scoped: `cs.integrity` walks this repo's `tests/` and the matrix
     checks read `python-ci.yml`, so this is defined only over this repo's own
