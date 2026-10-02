@@ -280,7 +280,9 @@ jobs:
         #
         # #6135: the emitted `fast_matrix` is the COMPLETE GHA matrix object
         # (`{include: [...]}`) — one entry per shard, each carrying its own
-        # `files` (space-joined), `watchdog_minutes` and `canary_producer`. The
+        # `files` (space-joined), `watchdog_minutes`, `watchdog_headroom` (the
+        # margin that budget retains, #6145 — reported, not consumed here) and
+        # `canary_producer`. The
         # shard COUNT is `config/ci-surfaces.yml::fast_shards`, and the count
         # of include rows is whatever the selector emits — nothing here counts
         # shards.
@@ -428,7 +430,8 @@ jobs:
       # (`config/ci-surfaces.yml::fast_shards`) and the leg names are derived,
       # and neither is written here. `include` rows carry `half` (the positional
       # letter label), `files` (space-joined bare names), `watchdog_minutes`
-      # (per-leg budget) and `canary_producer` (the one shard whose artifacts
+      # (per-leg budget), `watchdog_headroom` (the margin that budget retains,
+      # #6145) and `canary_producer` (the one shard whose artifacts
       # feed the canary streak). The labels MUST stay a, b, c, … — the merge
       # rail's lane-parity is a name subtraction, so an S-adding diff has to be
       # a SUPERSET of main's `test (a)`, `test (b)`.
