@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple, Protocol, runtime_checkable
 
-from tortoise.env_truthy import env_flag  # #4097: the declared truthy contract
+from tortoise.env_truthy import FALSY, env_flag  # #4097: the declared truthy contract
 
 logger = logging.getLogger(__name__)
 
@@ -57,15 +57,21 @@ _SOCKET_TIMEOUT_ENV = "TORTOISE_DB_SOCKET_TIMEOUT"
 _SOCKET_CONNECT_TIMEOUT_ENV = "TORTOISE_DB_SOCKET_CONNECT_TIMEOUT"
 _DEFAULT_SOCKET_TIMEOUT = 10.0
 _DEFAULT_SOCKET_CONNECT_TIMEOUT = 5.0
-_SOCKET_TIMEOUT_UNBOUNDED = frozenset({"none", "off", "no", "0", "0.0", "-1"})
+# #4097: the "off" spellings are the DECLARED contract (`FALSY`), not a second
+# per-knob vocabulary — an operator learns one disable vocabulary, not one per
+# knob. `none` is this knob's own spelling (a timeout is absent, not false), and
+# `0.0`/`-1` are the numeric equivalents; keeping all three here means the whole
+# accepted set is readable in one place.
+_SOCKET_TIMEOUT_UNBOUNDED = FALSY | {"none", "0.0", "-1"}
 
 
 def _resolve_socket_timeout(name: str, default: float) -> float | None:
     """Parse a seconds-valued socket-timeout knob (env > default).
 
-    Unset/blank → ``default``. ``none``/``off``/``0``/negative → ``None``
-    (unbounded — the explicit opt-out). A non-numeric OR non-finite value
-    raises ``ValueError``: a typo must fail loud at connection time, never
+    Unset/blank → ``default``. ``none``, any declared falsy spelling
+    (``off``/``no``/``false``/``0``), or the numeric off forms ``0.0``/``-1``
+    → ``None`` (unbounded — the explicit opt-out). A non-numeric OR non-finite
+    value raises ``ValueError``: a typo must fail loud at connection time, never
     silently leave the client effectively unbounded (``inf`` would).
     """
     raw = os.environ.get(name)
