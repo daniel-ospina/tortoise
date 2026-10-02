@@ -22,6 +22,14 @@ The two falsification directions the gate must satisfy (#4290 ask 4):
 
 The live-incident tests at the bottom replay B2 against this repository's own
 history (``65b26f6c2``) when the commit is present, and skip otherwise.
+
+The COMMENT path (#4732) has its own falsification pair, because the gate's
+trigger now covers ``issue_comment`` and the failure mode is the opposite one —
+an over-eager gate that flags every comment becomes noise. So the comment tests
+assert BOTH directions of the CLASSIFIER: a finding comment (with a stale
+``Measured at:`` line, with a malformed one, or with no line at all but the
+``<!-- finding -->`` marker) is selected and flagged, and an ordinary
+discussion comment is routed away without ever being validated.
 """
 from __future__ import annotations
 
@@ -31,8 +39,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "tools" / "finding_provenance.py"
+WORKFLOW = ROOT / ".github" / "workflows" / "finding-provenance.yml"
+# The GitHub Actions expression opener (`${{`), assembled from parts so this
+# module can assert on its ABSENCE in a `run:` block without the literal
+# opener appearing here as something a reader has to brace-count.
+ACTIONS_EXPR = "$" + "{" + "{"
 PYTHON = sys.executable
 
 # The B2 fix: "re-cut the MCP/SDK baseline with main's move-invariant
@@ -97,6 +112,23 @@ class FindingProvenanceTestBase(unittest.TestCase):
             [PYTHON, str(TOOL), "--repo", str(self.repo), *args],
             capture_output=True, text=True, input=stdin, check=False,
         )
+
+    def route_comment(self, body: str) -> int | None:
+        """Replay the workflow's COMMENT routing (#4732).
+
+        Mirrors the two steps exactly: ``--is-finding`` selects the body (exit
+        0) or does not (exit 1); only a SELECTED body reaches ``--validate``,
+        whose exit code is the gate's. ``None`` means the comment was never
+        gated — it passes untouched and unannotated. The classifier assertion
+        is what makes the noise arm real: a gate that flagged every comment
+        would return an int here for an ordinary comment.
+        """
+        selected = self.invoke("--is-finding", "-", stdin=body)
+        self.assertIn(selected.returncode, (0, 1),
+                      f"classifier must answer yes/no: {selected.stdout}{selected.stderr}")
+        if selected.returncode == 1:
+            return None
+        return self.invoke("--validate", "-", stdin=body).returncode
 
     # ── (a) IT FLAGS a finding measured against a tree that predates the fix
 
@@ -223,6 +255,85 @@ class FindingProvenanceTestBase(unittest.TestCase):
                         stdin=_provenance("fix", self.fix))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("CURRENT", r.stdout)
+
+    # ── the COMMENT path (#4732)
+
+    def test_is_finding_classifier_contract(self) -> None:
+        """``--is-finding`` is a CLASSIFIER, not a verdict: 0 = the body claims
+        to be a finding (validate it), 1 = ordinary discussion (leave it), 2 =
+        the body could not be read. Frozen here so the comment gate's selector
+        and its verdict can never be conflated."""
+        for body in (
+            _provenance("main", self.base),
+            "**Measured at:** `2b8ad274f` on my branch\n",
+            "> Measured at: main@" + self.tip + " on 2026-09-20\n",
+            "- Measured at 2b8ad274f\n",
+            "<!-- finding -->\n\nPosting this without a line.\n",
+            "<!-- finding-provenance -->\n",
+        ):
+            with self.subTest(body=body):
+                r = self.invoke("--is-finding", "-", stdin=body)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        for body in (
+            "Thanks — merging now.",
+            "## Rail verdict: refused (not merged)\n\nThe refusal is correct.",
+            # Prose, not a claim: line-anchored matching is what keeps a
+            # discussion comment from being gated on the word "measured".
+            "As measured at runtime, the loop is hot, but that is by design.",
+            "",
+        ):
+            with self.subTest(body=body):
+                r = self.invoke("--is-finding", "-", stdin=body)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        missing = self.invoke("--is-finding", str(self.repo / "no-such-comment.md"))
+        self.assertEqual(missing.returncode, 2, missing.stdout + missing.stderr)
+
+    def test_comment_path_flags_a_stale_finding_comment(self) -> None:
+        """(a) STALE arm: a finding comment measured on a tree that never took
+        origin/main is selected and flagged with the gate's exit 1 — the code
+        that annotates the comment."""
+        body = "## Finding: the rename table drifted\n\n" + _provenance("main", self.base)
+        self.assertEqual(self.route_comment(body), 1,
+                         "a stale finding comment must be annotated")
+        self.assertIn("STALE", self.invoke("--validate", "-", stdin=body).stdout)
+
+    def test_comment_path_flags_a_finding_comment_missing_the_line(self) -> None:
+        """(a) ABSENT arm — the shape that actually occurred (#4732): findings
+        posted as comments carrying NO `Measured at:` line at all. The explicit
+        `<!-- finding -->` marker selects it, so it is flagged
+        UNKNOWN_PROVENANCE instead of slipping through as discussion."""
+        body = "<!-- finding -->\n\nThe rename table's line numbers are stale.\n"
+        self.assertEqual(self.route_comment(body), 1)
+        self.assertIn("UNKNOWN_PROVENANCE",
+                      self.invoke("--validate", "-", stdin=body).stdout)
+
+    def test_comment_path_flags_a_loose_provenance_claim(self) -> None:
+        """A bolded/quoted `Measured at` line (the form this repo's own
+        scoping docs use) is still a CLAIM — selected, then refused as UNKNOWN
+        by the strict parser, rather than treated as discussion."""
+        body = "**Measured at:** `2b8ad274f` on my branch fix/4732\n"
+        self.assertEqual(self.route_comment(body), 1)
+        self.assertIn("UNKNOWN_PROVENANCE",
+                      self.invoke("--validate", "-", stdin=body).stdout)
+
+    def test_comment_path_skips_an_ordinary_discussion_comment(self) -> None:
+        """(b) THE NOISE ARM. An ordinary comment must be routed AWAY WITHOUT
+        VALIDATION. The assertion is on the classifier, so this test fails on a
+        gate that flags every comment (such a gate would return an int here)."""
+        for body in (
+            "Thanks — merging now.",
+            "## Rail verdict: refused (not merged)\n\nRefusal is correct; recorded.",
+            "As measured at runtime, the loop is hot, but that is by design.",
+            "",
+        ):
+            with self.subTest(body=body):
+                self.assertIsNone(self.route_comment(body),
+                                  f"discussion comment must never be gated: {body!r}")
+
+    def test_comment_path_passes_a_current_finding_comment(self) -> None:
+        """A claiming comment that IS current returns 0 — no annotation, so
+        the live-state behaviour carries over to the new path."""
+        self.assertEqual(self.route_comment(_provenance("origin/main", self.tip)), 0)
 
     # ── the emit / checkout verbs (ask 1 + ask 2)
 
@@ -354,6 +465,59 @@ class FindingProvenanceTestBase(unittest.TestCase):
         decide = decide.split("Gate the finding's provenance", 1)[0]
         self.assertLess(decide.index("Measured at:"), decide.index("beta-feedback"),
                         "the provenance check must precede the beta-feedback exemption")
+
+    # ── the COMMENT path's workflow shape (#4732)
+
+    def test_workflow_has_the_issue_comment_trigger(self) -> None:
+        """The gate must FIRE on a comment, not only on `opened`. `on:` parses
+        as the boolean True key in YAML 1.1, which is why it is looked up both
+        ways rather than assumed."""
+        wf = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+        triggers = wf["on"] if "on" in wf else wf[True]
+        self.assertIn("issue_comment", triggers)
+        self.assertEqual(triggers["issue_comment"]["types"], ["created"])
+        # the body path is unchanged — this is an ADDITION, not a replacement
+        self.assertEqual(triggers["issues"]["types"], ["opened"])
+
+    def test_workflow_never_interpolates_event_text_into_a_run_block(self) -> None:
+        """#4732 SECURITY. The comment trigger runs the gate on text ANYONE can
+        write. `${{ github.event.comment.body }}` (or any event field) inside a
+        `run:` block is the classic script-injection sink: `$(…)`, backticks and
+        quotes in the comment become shell. So NO expression at all may appear
+        in run source — the body reaches the script as a FILE fetched by its
+        numeric id, which carries no shell metacharacters."""
+        wf = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+        offenders: list[str] = []
+        for job_name, job in wf["jobs"].items():
+            for step in job.get("steps", []):
+                run = step.get("run") or ""
+                if ACTIONS_EXPR in run:
+                    offenders.append(
+                        f"{job_name}: step {step.get('name')!r} interpolates "
+                        f"an expression into run source")
+        self.assertFalse(offenders, offenders)
+        # The body must reach the tool from a FILE, fetched by id — not from
+        # the event context. Numeric ids carry no shell metacharacters, so the
+        # only untrusted text in play is DATA read off disk.
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("issues/comments/$COMMENT_ID", text)
+        code = "\n".join(ln for ln in text.splitlines()
+                         if not ln.lstrip().startswith("#"))
+        self.assertNotIn("comment.body", code,
+                         "the comment body must never be referenced from YAML code "
+                         "— it reaches the tool only as a file fetched by id")
+
+    def test_workflow_comment_path_classifies_before_it_gates(self) -> None:
+        """The comment branch must SELECT with `--is-finding` (so discussion is
+        never validated), and it must come before the label-based exemptions —
+        a comment carries no labels to read."""
+        decide = WORKFLOW.read_text(encoding="utf-8").split(
+            "Decide whether this issue is a finding", 1)[1]
+        decide = decide.split("Gate the finding's provenance", 1)[0]
+        self.assertIn("--is-finding", decide)
+        self.assertLess(decide.index("--is-finding"), decide.index("beta-feedback"))
+        self.assertLess(decide.index('"$KIND" = "comment"'),
+                        decide.index("beta-feedback"))
 
     # ── environment errors are exit 2, never a silent pass
 

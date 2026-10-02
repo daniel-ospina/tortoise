@@ -1285,19 +1285,26 @@ def run_benchmark(
 
 
 def operator_audit_notes(audit: dict | None, posture: str) -> list[str]:
-    """The operator-audit note(s) for a run report (#2514/#2552).
+    """The operator-audit note(s) for a run report (#2514/#2552/#4807).
 
-    The m2-echo-lane caveat — "no relation extraction, so 0 is structural
-    there, never a bar" — is **posture-scoped**. (The quoted wording is itself
-    stale on BOTH counts: the lane's cue-word stage does extract relations, and
-    its grading is no longer 0. It is preserved verbatim here only because this
-    refactor is scoped to posture, not to the note's prose; the prose fix is
-    tracked by #4807.) The m2 lane's relation stage is a cue-word heuristic,
-    not the product extractor, so its edge score is not comparable with the llm
-    lane's; on the llm lane the score IS a genuine behavioural signal about
-    emission fidelity, and printing the m2 lane's excuse verbatim in that
-    receipt frames a real result as a non-result in the very artifact a reader
-    consults.
+    The m2-echo-lane caveat — "the m2 echo lane has no product relation
+    extraction, so its edge score is not comparable with the llm lane's and is
+    never a bar" — is **posture-scoped**. The m2 lane's relation stage is a
+    cue-word heuristic, not the product extractor, so its edge score is not
+    comparable with the llm lane's; on the llm lane the score IS a genuine
+    behavioural signal about emission fidelity, and printing the m2 lane's
+    excuse verbatim in that receipt frames a real result as a non-result in the
+    very artifact a reader consults.
+
+    #4807: the caveat is DERIVED, never a constant. Its numerator is
+    interpolated (``{audit['edge_correct']}/{audit['planted']}``), so the prose
+    must stay true for ANY value — a lane grading 2/15 must not sit beside a
+    hardcoded "0" (the pre-fix text read "2/15 ... so 0 is structural there",
+    a self-contradiction three words apart). The mechanism is likewise the
+    **product** extraction the lane lacks (``baselines/m2.json``'s own
+    justification wording), never "no relation extraction": the m2 lane's
+    cue-word stage DOES emit IMPL/NAND edges, and the edges it grades correct
+    are SUPPORTS edges.
 
     The caveat is emitted ONLY when ``posture == "m2"``; any other value
     (including a future lane) takes the llm-shaped note, whereas the
@@ -1314,14 +1321,18 @@ def operator_audit_notes(audit: dict | None, posture: str) -> list[str]:
     # silently drop the edge note from a receipt whose job is honesty about
     # the audit.
     if audit["planted"]:
-        # The m2 clause keeps main's EXACT wording and separator `); ` so an
-        # m2 run's note is byte-identical to the pre-refactor text — the
-        # blessed m2 receipt text is provably unchanged by this refactor. The
-        # llm lane terminates its sentence with a bare `.`, so the note reads
-        # as prose either way.
+        # The m2 clause names the mechanism the lane LACKS (product relation
+        # extraction — ``baselines/m2.json``'s wording) and refuses to compare
+        # its edge score with the llm lane's. It asserts no constant, so it
+        # stays true beside any interpolated numerator (#4807). The separator
+        # `); ` and the terminating `.` are load-bearing: the note must read as
+        # prose on both lanes. The committed m2 receipt keeps the OLD text; no
+        # test reads the receipts and no baseline carries `notes`, so this
+        # prose change reaches no hashed surface (#4807 verification).
         tail = (
-            "; the m2 echo lane has no relation extraction, so 0 is structural "
-            "there, never a bar."
+            "; the m2 echo lane has no product relation extraction, so its "
+            "edge score is not comparable with the llm lane's and is never a "
+            "bar."
             if posture == "m2" else "."
         )
         notes.append(
