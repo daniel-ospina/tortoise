@@ -886,6 +886,36 @@ def test_run_with_eval_keys_tool_change_fails_closed_to_full():
     assert "core" in r["surfaces"]
 
 
+def test_ci_manifest_tool_change_fails_closed_to_full():
+    # #5050: tools/ci_manifest.py owns tests/test_ci_manifest.py. Same
+    # silent-drop class as the collision-preflight carve-out above — the flat
+    # "tools/" NON_PYTHON_PREFIXES entry swallows a tool-only change, so
+    # without a TOOL_CARVEOUTS entry `changed` is empty and the docs-only return
+    # runs tier-1 smoke only: the validator's own verdict-boundary suite would
+    # never run on the PR that changes the validator. No SOURCE_PATTERNS entry
+    # matches, so it lands in the unknown-path fail-closed branch -> FULL.
+    r = _sel(["tools/ci_manifest.py"])
+    assert r["full"] is True
+    assert r["test_files"] == "ALL"
+    assert "core" in r["surfaces"]
+
+
+def test_ci_timing_tool_change_fails_closed_to_full():
+    # #5050: tools/ci_timing.py is the SOLE writer of the measured `durations`
+    # map, and the validator's own suites pin the writer's output (the
+    # `VALUE_FLOOR == ci_timing.DURATIONS_VALUE_FLOOR_S` pin and the one-decimal
+    # render pin in tests/test_ci_manifest.py). Same silent-drop class as the
+    # ci_manifest carve-out above — the flat "tools/" prefix swallows a
+    # writer-only change, `changed` is empty and select() takes the docs-only
+    # return, so neither tests/test_ci_timing.py nor tests/test_ci_manifest.py
+    # would run on the PR that changes the writer. No SOURCE_PATTERNS entry
+    # matches, so it lands in the unknown-path branch -> FULL matrix + both legs.
+    r = _sel(["tools/ci_timing.py"])
+    assert r["full"] is True
+    assert r["test_files"] == "ALL"
+    assert "core" in r["surfaces"]
+
+
 def test_finding_provenance_tool_change_fails_closed_to_full():
     # #4290: tools/finding_provenance.py owns tests/test_finding_provenance.py.
     # Same silent-drop class as the collision-preflight carve-out above — the
@@ -895,6 +925,23 @@ def test_finding_provenance_tool_change_fails_closed_to_full():
     # never run on the PR that changes the gate. No SOURCE_PATTERNS entry
     # matches, so it lands in the unknown-path fail-closed branch -> FULL.
     r = _sel(["tools/finding_provenance.py"])
+    assert r["full"] is True
+    assert r["test_files"] == "ALL"
+    assert "core" in r["surfaces"]
+
+
+def test_edge_census_tool_change_fails_closed_to_full():
+    # #4503: tools/edge_census.py owns
+    # tests/test_4503_edge_relationship_accounting.py. Same silent-drop class
+    # as the carve-outs above — and it was observed live, not predicted: before
+    # the TOOL_CARVEOUTS entry, `--changed-files tools/edge_census.py` returned
+    # `"surfaces": []`, i.e. the docs-only return, so the census/probe's own
+    # guard tests would never have run on the PR that changes the instrument.
+    # The instrument exists to make an uncounted class visible; being itself
+    # invisible to CI selection would be the same defect one level up. No
+    # SOURCE_PATTERNS entry matches the path, so it lands in the unknown-path
+    # branch -> FULL matrix (fail closed).
+    r = _sel(["tools/edge_census.py"])
     assert r["full"] is True
     assert r["test_files"] == "ALL"
     assert "core" in r["surfaces"]
@@ -4237,6 +4284,110 @@ def test_null_or_non_mapping_durations_reports_instead_of_tracebacking(tmp_path,
         monkeypatch.setattr(cs, "MANIFEST", ok)
         monkeypatch.setattr(_sys, "argv", ["ci_selection.py", "--integrity"])
         assert cs.main() == 0, f"an empty durations map ({empty!r}) was treated as a failure"
+
+
+# ── #6243 review cycle 2 (K1): presence-with-junk is RED, absence is a notice ──
+
+# Distinguishes "remove the key" from "the key is present with a `null` value"
+# — the two states the whole promotion turns on, and which a bare `None` default
+# would collapse (a present explicit `null` is a MALFORMED value, not absence).
+_ABSENT = object()
+
+
+def _integrity_with_stamp(tmp_path, monkeypatch, stamp=_ABSENT):
+    """Drive the real `--integrity` CLI over the committed manifest with the
+    capture date set to `stamp` (the key is removed entirely when `stamp` is
+    left out)."""
+    import sys as _sys
+
+    import yaml
+
+    from tools import ci_selection as cs
+    # The committed map, read from the REPO path — never through `cs.MANIFEST`,
+    # which a previous call in the same test has already monkeypatched.
+    base = cs.REPO / "config" / "ci-surfaces.yml"
+    m = dict(cs._normalize_surfaces(yaml.safe_load(base.read_text())))
+    m.pop("durations_captured_at", None)
+    if stamp is not _ABSENT:
+        m["durations_captured_at"] = stamp
+    path = tmp_path / "stamped-ci-surfaces.yml"
+    path.write_text(yaml.safe_dump(m))
+    monkeypatch.setattr(cs, "MANIFEST", path)
+    monkeypatch.setattr(_sys, "argv", ["ci_selection.py", "--integrity"])
+    return cs.main()
+
+
+def test_integrity_reds_a_stale_but_parseable_stamp(tmp_path, monkeypatch):
+    # (a) The baseline the inversion is measured against: an old but parseable
+    # capture date is an OBSERVED defect, so the enforcing entry point exits 1.
+    assert _integrity_with_stamp(tmp_path, monkeypatch,
+                                 "2000-01-01T00:00:00Z") == 1
+
+
+def test_integrity_reds_a_present_but_unparseable_stamp(tmp_path, monkeypatch):
+    # (b) #6243 review cycle 2 (K1): this is the INVERSION. `--integrity`
+    # printed the validator's UNKNOWN list as a notice and returned only `red`,
+    # so a stale-but-parseable stamp exited 1 while the SAME value degraded to
+    # 'not-a-date' exited 0 — strictly worse data, strictly better verdict. A
+    # stamp that is present but unparseable is a MALFORMED manifest value, i.e.
+    # an observed defect: RED, exit 1. Absence stays the soft notice below.
+    assert _integrity_with_stamp(tmp_path, monkeypatch, "not-a-date") == 1, (
+        "a present-but-unparseable stamp must be RED (exit 1), not the soft "
+        "UNKNOWN notice — otherwise degrading a stale stamp to junk flips "
+        "exit 1 to exit 0 (fail-open, K1)")
+
+
+def test_integrity_reds_every_present_but_unparseable_spelling(
+        tmp_path, monkeypatch):
+    """#6243 review cycle 3 (L1): pin the CLASS, not one spelling.
+
+    The predicate is the KEY'S PRESENCE plus `_parse_captured_at`'s verdict,
+    so no present value the parser rejects can slip through the soft channel —
+    in particular `""` and an explicit `null`, which a value-tuple test
+    (`raw_stamp not in (None, "")`) exempted as absence. Only a genuinely
+    MISSING key is the non-gating notice (pinned by the next test).
+    """
+    for stamp in ("", None, "   ", "not-a-date", 0, [], {}, False):
+        assert _integrity_with_stamp(tmp_path, monkeypatch, stamp) == 1, (
+            f"a present-but-unparseable stamp {stamp!r} must be RED (exit 1)"
+        )
+
+
+def test_integrity_never_lets_blanking_a_stale_stamp_exit_zero(
+        tmp_path, monkeypatch):
+    """The exact inversion pair, in ONE test: the same manifest with a stale
+    parseable stamp exits 1, and blanking that stamp to `""` must STILL exit 1
+    — never 0. A blanked stamp is a MALFORMED value, not an absent one."""
+    assert _integrity_with_stamp(
+        tmp_path, monkeypatch, "2000-01-01T00:00:00Z") == 1
+    assert _integrity_with_stamp(tmp_path, monkeypatch, "") == 1, (
+        "blanking a stale stamp must not turn exit 1 into exit 0")
+
+
+def test_integrity_still_notices_an_absent_stamp_and_exits_zero(
+        tmp_path, monkeypatch, capsys):
+    # (c) Absence — the key GENUINELY MISSING, which is the ONLY case that stays
+    # soft — is the never-refreshed state no lane owns until #6091 lets a
+    # refresh carry a real date, so it must stay a NOTICE: exit 0, with the
+    # reason still printed (visible, not silent).
+    assert _integrity_with_stamp(tmp_path, monkeypatch) == 0
+    out = capsys.readouterr().out
+    assert "durations map UNKNOWN (not gating this run)" in out, out
+    assert "durations_captured_at" in out, out
+
+
+def test_integrity_prints_a_promoted_stamp_once_with_red_wording(
+        tmp_path, monkeypatch, capsys):
+    """#6243 review cycle 3 (L2): an OBSERVED defect must not ALSO be announced
+    through the soft channel. `--integrity` used to print the UNKNOWN notice
+    for the promoted reason and gate on it at the same time."""
+    assert _integrity_with_stamp(tmp_path, monkeypatch, "not-a-date") == 1
+    out = capsys.readouterr().out
+    assert "durations map UNKNOWN (not gating this run)" not in out, out
+    problems = next(line for line in out.splitlines()
+                    if line.startswith("❌ manifest drift:"))
+    assert "not a parseable timestamp" in problems, problems
+    assert problems.count("not a parseable timestamp") == 1, problems
 
 
 # ── #4378: changed-set diffs must disable rename detection ──────────────

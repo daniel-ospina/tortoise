@@ -29,9 +29,107 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple, Protocol, runtime_checkable
 
-from tortoise.env_truthy import env_flag  # #4097: the declared truthy contract
+from tortoise.cypher_guard import (  # #3595 `=~` guard — the ONE seam
+    _guard_execute_command,
+    _guard_unsupported_cypher,
+    _skip_cypher_quoted,  # noqa: F401  re-export: the scanner's public test surface
+    _unsupported_cypher_operator,  # noqa: F401  re-export
+    guarded_client,
+)
+from tortoise.env_truthy import FALSY, env_flag  # #4097: the declared truthy contract
 
 logger = logging.getLogger(__name__)
+
+# ── #2969: bounded graph socket reads (env-tunable) ─────────────────────────
+# The server/Docker FalkorDB client MUST carry a bounded socket READ timeout:
+# a server-side stall (FalkorDB active-defrag loop / MERGE lock — #2969,
+# #2838) otherwise blocks the caller in ``recv()`` forever, and the run looks
+# alive (process present, 0% CPU) with no error, no log output and no way to
+# tell "stalled" from "slow".
+#
+# What is ALREADY true without this block: the host branch below resolves
+# ``_socket_timeouts()`` and passes it, so the docker lane was bounded in
+# practice at the product defaults — 10s read / 2s connect
+# (``_DB_SOCKET_TIMEOUT_DEFAULT`` / ``_DB_CONNECT_TIMEOUT_DEFAULT``).
+# redis-py imposes nothing of its own here: measured on the pinned
+# `redis 7.4.1`, `Connection().socket_timeout` is ALREADY `None`, and
+# ``falkordb.FalkorDB.__init__`` defaults ``socket_timeout=None`` and passes it
+# explicitly — its historical 5s default is gone from this path either way.
+#
+# What this block ADDS is a PER-LANE override of those product defaults, so a
+# lane can raise its read bound without changing the product's. The longmem
+# eval lane raises it to 120s for its legitimately long ingest writes (see
+# ``tools/longmem_eval/stall_guard.py``). An operator can tune either knob:
+#
+#   TORTOISE_DB_SOCKET_TIMEOUT          seconds (default: the product read
+#                                       bound — 10s)
+#   TORTOISE_DB_SOCKET_CONNECT_TIMEOUT  seconds (default: the product connect
+#                                       bound — 2s)
+#
+# ``none`` / ``off`` / ``false`` / ``0`` / any number ≤ 0 disables the bound —
+# an explicit, documented opt-out for a workload whose reads legitimately
+# exceed any fixed budget (NOT recommended: it restores the unbounded-hang
+# failure mode). Above ``_DB_TIMEOUT_MAX_PER_LANE_S`` the knob fails loud
+# rather than clamping.
+_SOCKET_TIMEOUT_ENV = "TORTOISE_DB_SOCKET_TIMEOUT"
+_SOCKET_CONNECT_TIMEOUT_ENV = "TORTOISE_DB_SOCKET_CONNECT_TIMEOUT"
+# NOTE: there is deliberately no `_DEFAULT_SOCKET*` mirror here. Such a pair
+# existed and was dead — nothing in production read them — and the connect one
+# named 5.0 while the client's real connect default is
+# `_DB_CONNECT_TIMEOUT_DEFAULT` = 2.0 (see `_socket_timeouts`), so it advertised
+# a value the product never used. Assert against the real defaults instead.
+# #4097: this knob's "off" spellings come from the DECLARED contract
+# (`FALSY`), so an operator who reaches for `false` is not meeting a second
+# vocabulary. `none` is this knob's own spelling (a timeout is absent, not
+# false), and the numeric equivalents `0.0`/`-1` are below — keeping all three
+# here means the whole accepted set is readable in one place.
+_SOCKET_TIMEOUT_UNBOUNDED = FALSY | {"none", "0.0", "-1"}
+
+
+def _resolve_socket_timeout(name: str, default: float) -> float | None:
+    """Parse a seconds-valued socket-timeout knob (env > default).
+
+    Unset/blank → ``default``. ``none`` or any declared falsy spelling
+    (``off``/``no``/``false``/``0``), or any number ≤ 0 (the numeric off forms
+    ``0.0``/``-1``) → ``None`` (unbounded — the explicit opt-out). A value
+    below ``_DB_TIMEOUT_MIN_S`` falls back to ``default`` (see that constant).
+    A non-numeric, non-finite or above-``_DB_TIMEOUT_MAX_PER_LANE_S`` value
+    raises ``ValueError``: a typo must fail loud at connection time, never
+    silently leave the client effectively unbounded (``inf``/``1e30`` would).
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    token = raw.strip().lower()
+    if token in _SOCKET_TIMEOUT_UNBOUNDED:
+        return None
+    try:
+        value = float(token)
+    except ValueError:
+        raise ValueError(
+            f"{name}={raw!r} is not a number of seconds (use e.g. '120', "
+            f"or 'none' to disable the bound)") from None
+    if not math.isfinite(value):
+        raise ValueError(
+            f"{name}={raw!r} is not a finite number of seconds (inf/nan "
+            f"would leave the client unbounded; use 'none' to opt out "
+            f"explicitly)")
+    if value > _DB_TIMEOUT_MAX_PER_LANE_S:
+        raise ValueError(
+            f"{name}={raw!r} exceeds the {_DB_TIMEOUT_MAX_PER_LANE_S:g}s "
+            f"ceiling for this knob — above it the value is a typo, not a "
+            f"request (see _DB_TIMEOUT_MAX_PER_LANE_S)")
+    if value <= 0:
+        return None
+    if value < _DB_TIMEOUT_MIN_S:
+        # The same "finite but absurd" class the PRODUCT knob floors (#3350
+        # round-4): ``float()`` accepts ``1e-9``, which turns every FalkorDB
+        # operation into an instant timeout — a typo-induced total outage.
+        # Fall back to the default, exactly as ``_socket_timeouts()`` does.
+        # The absent CEILING on this knob is deliberate (the eval lane needs
+        # 120s); the absent FLOOR was not.
+        return default
+    return value
 
 
 def _embedded_aof_enabled() -> bool:
@@ -96,6 +194,17 @@ _DB_TIMEOUT_MAX_S = 60.0
 #: (fail-closed, so not #2850, but the same "finite but absurd" class floored
 #: for the health-probe interval). Below the floor we fall back to the default.
 _DB_TIMEOUT_MIN_S = 0.05
+#: Ceiling on the #2969 PER-LANE knob (``TORTOISE_DB_SOCKET_TIMEOUT`` /
+#: ``TORTOISE_DB_SOCKET_CONNECT_TIMEOUT``). The PRODUCT knob clamps at
+#: ``_DB_TIMEOUT_MAX_S`` (60s), but this knob exists so the eval lane can ask
+#: for its ``DEFAULT_EVAL_SOCKET_TIMEOUT_S`` (120s) — so it needs HEADROOM
+#: above that, not no ceiling at all. Beyond this a read bound stops being a
+#: bound, and it is the same "finite but absurd" class as the floor:
+#: ``sock.settimeout(1e30)`` raises ``OverflowError``, which redis-py does NOT
+#: catch (``except OSError`` only), so the client can never connect AND the
+#: failure is not retryable. Fails loud rather than clamping, per this knob's
+#: own typo contract (a silent clamp would hide the typo that caused it).
+_DB_TIMEOUT_MAX_PER_LANE_S = 600.0
 
 #: #3350: explicit, bounded retry policy for the EMBEDDED client.
 #:
@@ -239,6 +348,13 @@ def _is_bulk_wipe(cypher: str) -> bool:
     if m and _WHERE_REAL_RE.search(m.group(1)):  # noqa: SIM103
         return False
     return True
+
+
+# ── #3595: unsupported-Cypher-operator guard (`=~`) ──────────────────────
+# The scanner and the guarded graph/client classes live in
+# ``tortoise.cypher_guard`` (the single seam). They are re-exported above so
+# `_GuardedGraph` can share them and so the tests that pin the scanner keep
+# resolving through this module. See that module for the doctrine.
 
 
 # ── #2943: durable pre-wipe snapshot sidecar ────────────────────────────────
@@ -1578,6 +1694,20 @@ class _GuardedGraph:
     Intercepts bulk DETACH DELETE (no property map, no real WHERE) and asserts
     the graph is a test graph before allowing execution. Targeted deletes
     (MATCH (n:Label {id:$id}) ...) pass through unchanged.
+
+    #3595: also refuses the unsupported Cypher ``=~`` operator, so a future
+    ``=~`` written directly against ``proj.g`` fails loudly. This class covers
+    ONE of the repo's handle paths (the projection's write handle); the
+    remaining paths (``proj.db.select_graph(...)`` in hosted_api/backup_sweep/
+    navigation/..., the SDK registry handles) are covered because ``proj.db``
+    and every other FalkorDB client the ``tortoise`` package builds are
+    constructed through ``tortoise.cypher_guard.guarded_client``, whose handles
+    guard every query entry point. For defence in depth this wrapper also
+    overrides every query entry point itself (``query``, ``ro_query``,
+    ``_query``, ``profile``, ``explain``, ``execute_command``), so it does not
+    depend on the inner handle's class to refuse. ``__getattr__`` below forwards
+    only the remaining non-query attributes (``name``, ``delete``, ``schema``,
+    ...) to the underlying handle.
     """
 
     __slots__ = ("_g", "_proj")
@@ -1587,17 +1717,63 @@ class _GuardedGraph:
         self._proj = projection
 
     def query(self, cypher: str, params=None, timeout=None):
+        # #3595: refuse an unsupported operator BEFORE it is sent. FalkorDB
+        # answers `=~` with an EMPTY result set, so this is the one decision
+        # point for the `proj.g` path. The decision itself lives in
+        # ``cypher_guard._guard_unsupported_cypher`` — shared with the guarded
+        # handles so the two paths cannot drift.
+        _guard_unsupported_cypher(cypher)
         if _is_bulk_wipe(cypher) and not getattr(self._proj, "_skip_guard", False):
             self._proj._assert_test_graph(
                 "REFUSING to run bulk DETACH DELETE on non-test graph"
             )
+        # #3359: count the op as ISSUED to the raw handle, AFTER the destructive
+        # guard — a refused bulk wipe is not work the capture caused, and the
+        # count is "ops issued", not "ops succeeded" (a query that raises on a
+        # dead socket is still an op the capture generated). No-op (one
+        # ContextVar read) when no capture is active.
+        record_graph_op(cypher)
         return self._g.query(cypher, params=params, timeout=timeout)
+
+    def ro_query(self, cypher: str, params=None, timeout=None):
+        # Same refusal for the read-only verb: the raw handle this wrapper
+        # holds is guarded too, but keep the projection's own wrapper complete
+        # rather than relying on the inner handle's class.
+        _guard_unsupported_cypher(cypher)
+        return self._g.ro_query(cypher, params=params, timeout=timeout)
+
+    def _query(self, cypher: str, params=None, timeout=None, read_only=False):
+        # The vendor's `query`/`ro_query` both delegate to `_query`; a caller
+        # reaching `_query` directly must not slip past the refusal either.
+        _guard_unsupported_cypher(cypher)
+        return self._g._query(
+            cypher, params=params, timeout=timeout, read_only=read_only
+        )
+
+    def profile(self, cypher: str, params=None):
+        # PROFILE/EXPLAIN put the statement on the wire WITHOUT routing through
+        # `_query`, so they carry their own refusal.
+        _guard_unsupported_cypher(cypher)
+        return self._g.profile(cypher, params=params)
+
+    def explain(self, cypher: str, params=None):
+        _guard_unsupported_cypher(cypher)
+        return self._g.explain(cypher, params=params)
+
+    def execute_command(self, *args, **kwargs):
+        # #3595 (review round 2, P2): the raw Redis command channel carries
+        # `GRAPH.QUERY` / `GRAPH.PROFILE` / ... too, and the guarded handles
+        # beneath `self._g` already intercept it — but keep the wrapper's own
+        # refusal complete rather than depending on the inner handle's class.
+        _guard_execute_command(args)
+        return self._g.execute_command(*args, **kwargs)
 
     def __getattr__(self, name):
         return getattr(self._g, name)
 
 from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES, LOOPBACK_HOSTS, parse_uri_userinfo  # noqa: E402, I001
 from tortoise.fork_slot import is_fork_refusal  # noqa: E402
+from tortoise.graph_ops import record_graph_op  # noqa: E402  #3359: per-capture graph-op accounting
 from tortoise.live import (  # noqa: E402
     VACUITY_BELIEF,
     _live_only,
@@ -3408,7 +3584,14 @@ class FalkorProjection(
             # black hole: the read leg is. (Operators wanting that leg too
             # need a custom connection class — filed separately.)
             read_to = _socket_timeouts()[1]
-            self.db = FalkorDB(
+            # #3595: build through `cypher_guard.guarded_client` — the ONE
+            # client-construction seam — so every handle this client yields
+            # (here and from the direct `proj.db.select_graph(...)` sites
+            # elsewhere) refuses the unsupported `=~` operator. Passing the
+            # vendor class down means the embedded path keeps its own
+            # lifecycle/path guards and only gains the query guard on top.
+            self.db = guarded_client(
+                FalkorDB,
                 path,
                 serverconfig=(
                     {"appendonly": "yes", "appenddirname": aof_dir}
@@ -3420,10 +3603,45 @@ class FalkorProjection(
         elif host is not None:
             # Docker FalkorDB
             from falkordb import FalkorDB  # ponytail: lazy import, only needed for Docker mode
+            # Resolved at CONNECTION time so an env knob covers every CONSUMER
+            # of this client (SDK sessions, ingest, hosted) — NOT every
+            # FalkorDB client even in `tortoise/`: `session_indexer.py`,
+            # `backup.py` and the probe in `__main__.py` construct their own,
+            # and neither knob reaches them. ACTUAL
+            # precedence: #2969's per-lane TORTOISE_DB_SOCKET_CONNECT_TIMEOUT /
+            # TORTOISE_DB_SOCKET_TIMEOUT (fail-loud, explicit none/off/0
+            # opt-out) WINS whenever it is set; #2850's product-wide
+            # `_socket_timeouts()` (TORTOISE_FALKORDB_CONNECT_TIMEOUT_S /
+            # _SOCKET_TIMEOUT_S) only supplies the DEFAULT, read when the
+            # per-lane var is unset. So the product knob is live for a bare
+            # SDK / hosted construction, but DEAD on the `--db` eval lane:
+            # `tools/longmem_eval/run.py::run_main` UNCONDITIONALLY presets the
+            # per-lane var to `DEFAULT_EVAL_SOCKET_TIMEOUT_S` (120s) when the
+            # operator has not set it, so the per-lane var is always set
+            # there. That 120s is deliberate headroom for a loaded/defragging
+            # server, NOT a size-derived bound (#2969) — measured on the pinned
+            # default split, the largest single graph write is ~76 KB, so the
+            # eval's DATA fits the product 10s; the point is that a healthy
+            # long write must not be cut off. It is NOT
+            # clamped by `_DB_TIMEOUT_MAX_S` (60s) — the per-lane parser has its
+            # OWN ceiling, `_DB_TIMEOUT_MAX_PER_LANE_S` (600s), deliberately set
+            # above the eval's 120s so the product's tighter bound is not
+            # re-imposed here; above 600s the knob fails loud. Only an explicit
+            # none/off/false/0 (or any non-positive number) removes the bound
+            # entirely — the block-forever mode #2850 exists to PREVENT, reachable
+            # only through that opt-out.
             connect_to, read_to = _socket_timeouts()
-            self.db = FalkorDB(host=host, port=port, username=username, password=password,
-                               socket_connect_timeout=connect_to, socket_timeout=read_to,
-                               ssl=ssl)
+            # #3595: same guarded-construction seam on the server lane — the
+            # ~142 `reg.query(...)` sites behind TortoiseSDK._get_registry and
+            # the direct `proj.db.select_graph(...)` sites all reach the wire
+            # through handles this client produces.
+            self.db = guarded_client(FalkorDB, host=host, port=port,
+                                     username=username, password=password,
+                                     socket_connect_timeout=_resolve_socket_timeout(
+                                         _SOCKET_CONNECT_TIMEOUT_ENV, connect_to),
+                                     socket_timeout=_resolve_socket_timeout(
+                                         _SOCKET_TIMEOUT_ENV, read_to),
+                                     ssl=ssl)
             # Epic #1647 (cycle-3 P0-1): record the host ON THE PROJECTION so
             # wipe_server/session sweep/tripwire read it instead of the raw
             # client (redis-py 8.1.0 has no .host on the client — the host
