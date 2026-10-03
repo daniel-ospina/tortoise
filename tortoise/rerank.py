@@ -46,6 +46,7 @@ import time
 from collections.abc import Sequence
 
 from .env_truthy import TRUTHY, is_truthy  # #4097: the declared truthy contract
+from .heavy_imports import import_cross_encoder, import_torch  # #5718
 
 logger = logging.getLogger(__name__)
 
@@ -189,18 +190,25 @@ class CrossEncoderScorer:
     def __init__(self, model: str, max_length: int = RERANK_MAX_LENGTH):
         import threading as _t
 
-        from sentence_transformers import CrossEncoder
+        # #5718: both of these are torch importers, so both take the shared
+        # heavy-import lock (only across the import — construction below stays
+        # outside it; see ``tortoise.heavy_imports``).
+        CrossEncoder = import_cross_encoder()
+        # ``torch`` is imported here, once, rather than inside ``score()``: the
+        # cross-encoder import above has already put torch in ``sys.modules``,
+        # so this is a dict lookup, and the scoring hot path never touches the
+        # heavy-import lock.
+        self._torch = import_torch()
         self._model = CrossEncoder(model, max_length=max_length)
         self._lock = _t.Lock()   # serializes predict() under threads
 
     def score(self, query: str, contents: Sequence[str]) -> list[float]:
         with self._lock:
-            import torch
             # char pre-truncation lives in rerank_hits (both scorers
             # exercise it — D7); max_length is the tokenizer backstop
             pairs = [(query, c) for c in contents]
             logits = self._model.predict(pairs)     # v3+ API (score_pairs deprecated)
-            return [float(torch.sigmoid(torch.tensor(x))) for x in logits]
+            return [float(self._torch.sigmoid(self._torch.tensor(x))) for x in logits]
 
 
 class FakeScorer:

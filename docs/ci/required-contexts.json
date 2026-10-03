@@ -402,7 +402,7 @@
         "test"
       ]
     ],
-    "test-carve-out": [
+    "test-carve-out${{ matrix.suffix }}": [
       [
         "python-ci.yml",
         "test-carve-out"
@@ -479,7 +479,7 @@
       ]
     ]
   },
-  "gate_digest": "764f9d4077349da715d29d7e857e39a67b475926e5f97049ff67a08a6c0ff1ab",
+  "gate_digest": "8e7054d359bf68bca74046c6f8ad55e119ec3beab8b1fc34c66701f39479f176",
   "live_checked_at": "2026-09-29T02:35:26Z",
   "live_observed_contexts": [
     "ai-review-gate",
@@ -503,5 +503,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-09-30T21:54:46Z"
+  "verified_at": "2026-10-01T13:18:04Z"
 }
