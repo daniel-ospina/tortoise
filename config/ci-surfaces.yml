@@ -1013,6 +1013,15 @@ surfaces:
   - test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan
   - test_session_attribution.py
   - test_ci_selection.py
+  # #6884: pins the `uri_requiring` declaration (re-derived BEHAVIOURALLY — it
+  # runs the failing `pytest --collect-only` with an EMPTY TORTOISE_DB_URI and
+  # compares) and
+  # the tier-2 subtraction that keeps URI-requiring modules out of a URI-less PR
+  # leg. Registered here rather than left unlisted: an unlisted tests/*.py reds
+  # `manifest-integrity` (#2642), and this file is a gate test for the selector,
+  # so it belongs with the other ones — and a `config/`-only edit selects `core`,
+  # so the gate runs on exactly the edits that can break the lane.
+  - test_uri_requiring_selection.py
   # #6142: the last-failed fast-fail pre-phase's shape — that it never narrows
   # the GATING run, is PR-only and fail-open, and keys its cache per
   # (job, half, ref). Hermetic (reads the workflow YAML; no DB, no network).
@@ -2099,6 +2108,71 @@ carve_out:
 # excluded from EVERY docker leg, so this lane is the one that runs all five.
 - test_write_path_unreachable_seam_5148.py
 - bench/test_smoke_embedded.py
+# #6884: modules that REQUIRE the docker lane — each one module-skips at import
+# when `TORTOISE_DB_URI` is not a usable URI — in the tier-2 PR legs that means
+# present and EMPTY (`URI=""`), not absent (`if not _is_db_uri(...): pytest.skip(...)`
+# with `allow_module_level=True`). A module-level skip collects ZERO tests, so
+# `pytest --collect-only` exits 5 and the fail-closed manifest guard in
+# python-ci.yml ('Generate coverage manifest') kills the leg BEFORE any test
+# runs. Because it fails outside the test step there is no `FAILED <nodeid>`
+# line, so the merge rail cannot attribute it and refuses for want of a failure
+# identity (the #6798 shape) — #6390 was `mergeable=true` with a clean review
+# record AT HEAD and still could not be landed.
+#
+# WHY THE FIX IS HERE AND NOT IN THE WORKFLOW: the tier-2 PR legs are URI-EMPTY
+# (present and empty, never unset) BY DESIGN — both the URI and EXPECT_URI are
+# emptied, which is what keeps the E2E-6 tripwire INERT on the tier-2 shape (it
+# arms only when full==true, where both are set; python-ci.yml:600-602 and
+# 1367-1368, epic #1647 Task 9 + cycle-6 P2-8), so 'provision the URI' is a
+# reversal of a recorded decision, not a fix. A file that cannot collect in a
+# URI-less leg must therefore not be handed to one — the exact MIRROR of
+# `carve_out` above, which excludes files that cannot run in a URI-SET leg.
+# tools/ci_selection.py subtracts this list on the tier-2 path ONLY: the `full`
+# path returns earlier and keeps running these files, which is correct because
+# a full leg HAS the URI.
+#
+# Derived, not hand-maintained: tests/test_uri_requiring_selection.py re-derives
+# the set and reds if a module that collects NOTHING in a URI-less leg is not
+# registered here — the #2944 discipline (structural, not name-based).
+#
+# The derivation is BEHAVIOURAL, not syntactic. It runs the failing CI command
+# itself — `pytest --collect-only` over the candidate modules with the leg's own
+# environment shape (`TORTOISE_DB_URI` PRESENT AND EMPTY, not removed; see
+# python-ci.yml:606-624 and :671) — and takes "this module produced no nodeids"
+# as the rule. Four review cycles tried a static predicate (module `if`s, alias
+# renames, local wrappers, class bodies, decorators, lambdas, `**kwargs`
+# forwarding, constructed env names, transitive helpers, default arguments,
+# guard polarity) and every cycle found more shapes: an AST check is an
+# approximation of a question pytest answers exactly. Asking pytest is the
+# invariant itself, not a model of it, and it cannot remove coverage — whatever
+# the reason a module yields no nodeids, it was not going to run a test in that
+# leg.
+#
+# The candidate set is a cheap superset and the bound is a DISJUNCTION, because
+# each half alone was measured to leak under review: (a) the module NAMES the URI
+# (`TORTOISE_DB_URI`/`is_db_uri`) — the property the lane is about, which a
+# mechanism-only filter misses (a module-level `raise unittest.SkipTest(...)`
+# carries no `allow_module_level` literal); and (b) the module CARRIES the abort
+# mechanism — which a URI-only filter misses (a caller that reads the URI through
+# a helper never names it). pytest decides the answer over the union. Two
+# consequences are stated in the guard's module docstring: `pytest.importorskip`
+# is excluded structurally (it spells neither half — and a missing dependency must
+# RED the leg rather than be silently subtracted), and the residual is a
+# collection abort through something neither half spells, e.g. a helper that
+# raises, closed by the tripwire. A module emptied by some other cause (the
+# manifest's own `-m` marker, a collection error — note `pytest.exit`/`sys.exit`
+# give rc=1/3, not this rc=5 shape) is the attribution half of #6884 and is
+# tracked on the issue, not here.
+uri_requiring:
+- test_capabilities_endpoint.py
+- test_eval_ingest_cache.py
+- test_invite_fusion_docker.py
+- test_onboarding_false_completion_repair.py
+- test_onboarding_seed_endpoint.py
+- test_onboarding_state_cas.py
+- test_onboarding_state_split.py
+- test_onboarding_w4_settings.py
+- test_onboarding_w6_capture_disclosure.py
 push_extra: []
 durations:
 # #3395: per-file CI wall time (seconds), swept from the junit artifacts of four
