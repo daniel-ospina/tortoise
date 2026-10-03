@@ -10345,9 +10345,10 @@ class TortoiseSDK:
         is the safe direction.
 
         #3142: the terminal filter is ``live._terminal_expression`` — the shared
-        Cypher builder whose Python mirror ``live.is_terminal_status`` the
-        direct-edge leg of ``_check_endpoints`` and Phase-2
-        ``_check_endpoint_race`` both consume. It reads
+        Cypher builder for the predicate the direct-edge leg of
+        ``_check_endpoints`` and Phase-2 ``_check_endpoint_race`` both express
+        in Python as ``status in TERMINAL_EXCLUDED_STATUSES or outdated``
+        (that composition is ``live.is_terminal_status``). It reads
         ``status IN TERMINAL_EXCLUDED_STATUSES OR coalesce(outdated,false)``,
         in the POSITIVE direction. Before #3142 this site carried its own
         forked ``status IN $terminal AND coalesce(outdated,false) = false``,
