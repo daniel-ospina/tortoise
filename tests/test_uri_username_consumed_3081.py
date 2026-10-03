@@ -27,6 +27,15 @@ its ``_redis_cli`` consumes it as ``--user``), and its tests in
 ``tests/test_wiring_phase01.py`` already assert the named-user case. It is
 included here so the invariant covers all six helpers rather than the five that
 happened to be broken.
+
+COVERAGE NOTE — for ``rdb_snapshot_restore.py`` only the PARSER half applies.
+It builds no ``FalkorDB(...)`` client at all (it authenticates through
+``redis-cli --user``), so the two constructor checks match zero constructs there
+and are VACUOUS for that file, by construction rather than by accident. Its
+``--user`` consumption is pinned by
+``tests/test_restore_container_recovery.py::test_named_user_uri_authenticates_end_to_end``
+and ``::test_redis_cli_uses_env_not_argv``. Stated here because a check that
+matches nothing is not protecting the file it appears to cover.
 """
 from __future__ import annotations
 
@@ -142,10 +151,13 @@ def _password_only_constructors(tree: ast.AST) -> list[int]:
 
 def _unwrap_or_none(value: ast.expr) -> ast.expr:
     """``X or None`` -> ``X``; anything else unchanged."""
-    if isinstance(value, ast.BoolOp) and isinstance(value.op, ast.Or):
-        left = value.values[0]
-        if len(value.values) == 2 and _is_none(value.values[1]):
-            return left
+    if (
+        isinstance(value, ast.BoolOp)
+        and isinstance(value.op, ast.Or)
+        and len(value.values) == 2
+        and _is_none(value.values[1])
+    ):
+        return value.values[0]
     return value
 
 
@@ -153,32 +165,70 @@ def _is_none(node: ast.expr) -> bool:
     return isinstance(node, ast.Constant) and node.value is None
 
 
-def _is_username_derived(value: ast.expr) -> bool:
+def _local_aliases(tree: ast.AST) -> dict:
+    """One level of local ``name = <expr>`` bindings, for provenance resolution.
+
+    ``u = cfg["username"]`` followed by ``username=u`` is a correct refactor of
+    the same credential. Judging provenance by the call's spelling alone would
+    red a clean PR for a semantically identical tidy-up, which is a worse
+    failure than missing a shape none of these files uses.
+    """
+    aliases: dict = {}
+    for node in ast.walk(tree):
+        targets = []
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+            value = node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets = [node.target]
+            value = node.value
+        else:
+            continue
+        for t in targets:
+            if isinstance(t, ast.Name):
+                aliases.setdefault(t.id, value)
+    return aliases
+
+
+def _is_username_derived(value: ast.expr, aliases: dict | None = None) -> bool:
     """True if ``value`` is the parsed URI username rather than a literal.
 
-    Accepts the two shapes this codebase actually uses:
+    Accepts the shapes this codebase actually uses, plus a single level of local
+    aliasing:
 
         username=<mapping>["username"] or None   # the decoded URI field
         username=username or None                # the helper's own parameter
+        u = mapping["username"]; username=u      # the same value, via a local
 
-    The point is PROVENANCE, not presence: the first version of this guard
+    The point is PROVENANCE, not presence: an earlier version of this guard
     only checked that a ``username=`` keyword existed, so ``username=None`` —
     which discards the decoded username and reintroduces #3081 exactly —
     satisfied it.
     """
-    value = _unwrap_or_none(value)
-    if isinstance(value, ast.Subscript):
-        sl = value.slice
-        if isinstance(sl, ast.Constant) and sl.value == "username":
+    for _ in range(4):  # bounded: a chain of aliases, not a resolver
+        value = _unwrap_or_none(value)
+        if (
+            isinstance(value, ast.Subscript)
+            and isinstance(value.slice, ast.Constant)
+            and value.slice.value == "username"
+        ):
             return True
-    if isinstance(value, ast.Name):
-        return "username" in value.id
+        if isinstance(value, ast.Name):
+            if "username" in value.id:
+                return True
+            nxt = (aliases or {}).get(value.id)
+            if nxt is None:
+                return False
+            value = nxt
+            continue
+        return False
     return False
 
 
 def _unprovenanced_usernames(tree: ast.AST) -> list[int]:
     """FalkorDB(...) calls whose ``username=`` value is not the URI username."""
     names = _falkordb_names(tree)
+    aliases = _local_aliases(tree)
     offenders = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -188,7 +238,7 @@ def _unprovenanced_usernames(tree: ast.AST) -> list[int]:
         if called not in names:
             continue
         for kw in node.keywords:
-            if kw.arg == "username" and not _is_username_derived(kw.value):
+            if kw.arg == "username" and not _is_username_derived(kw.value, aliases):
                 offenders.append(node.lineno)
     return offenders
 
@@ -211,6 +261,7 @@ def _call_sites_missing_username(tree: ast.AST) -> list[int]:
     suite stayed at 33 passed. This is the check that closes it.
     """
     offenders = []
+    aliases = _local_aliases(tree)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -218,12 +269,17 @@ def _call_sites_missing_username(tree: ast.AST) -> list[int]:
         called = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
         if called not in CREDENTIAL_HELPERS:
             continue
-        # These helpers forward credentials; `host, port, password` are the
-        # first three positional parameters, and `username` follows by keyword.
-        if len(node.args) < 3:
-            continue
+        # "Was a credential supplied?" is the question — NOT "were the first
+        # three parameters positional?". These helpers take
+        # `(host, port, password, username)`, but a password may equally arrive
+        # as `password=`, giving fewer positional args. Gating on the positional
+        # COUNT skipped every keyword-form call site BEFORE the username was
+        # examined, so dropping `username=` at one of those reintroduced #3081
+        # with the whole suite green.
         kws = {k.arg: k.value for k in node.keywords}
-        if "username" not in kws or not _is_username_derived(kws["username"]):
+        if len(node.args) < 3 and "password" not in kws:
+            continue
+        if "username" not in kws or not _is_username_derived(kws["username"], aliases):
             offenders.append(node.lineno)
     return offenders
 
@@ -342,6 +398,17 @@ def test_the_provenance_check_can_fail():
         "username=None discards the decoded username and must be rejected"
     )
     assert _unprovenanced_usernames(ast.parse(hardcoded)) == [2]
+    # A semantically identical refactor via a local must NOT be a false
+    # positive — reddening a clean PR is the opposite failure and just as real.
+    via_local = (
+        "def f(cfg):\n"
+        "    u = cfg['username']\n"
+        "    return FalkorDB(host=cfg['h'], username=u or None,\n"
+        "                     password=cfg['p'] or None)\n"
+    )
+    assert _unprovenanced_usernames(ast.parse(via_local)) == [], (
+        "a correct refactor through a local alias must not be flagged"
+    )
 
 
 def test_call_sites_forward_the_username_from_the_config():
@@ -362,24 +429,59 @@ def test_call_sites_forward_the_username_from_the_config():
 
 
 def test_the_call_site_check_can_fail():
-    """This check must reject exactly the deletion round 2 found surviving."""
-    dropped = (
-        "def f(cfg):\n"
-        "    return trigger_bgsave(cfg['host'], cfg['port'], cfg['password'])\n"
-    )
+    """This check must reject every spelling that can drop the username.
+
+    The first version gated on `len(node.args) < 3` — "were the first three
+    parameters positional?" rather than "was a credential supplied?". A call
+    supplying the password by KEYWORD has fewer than three positionals, so it
+    was skipped before the username was examined, and dropping `username=` at
+    such a call site reintroduced #3081 with the suite green. Each case below is
+    one of those spellings; a canary that only exercises the positional form
+    cannot fail for the shapes it misses.
+    """
+    cases = {
+        "three positional, username dropped": (
+            "def f(cfg):\n"
+            "    return trigger_bgsave(cfg['host'], cfg['port'], cfg['password'])\n"
+        ),
+        "password by KEYWORD, username dropped": (
+            "def f(cfg):\n"
+            "    return trigger_bgsave(cfg['host'], cfg['port'],\n"
+            "                          password=cfg['password'])\n"
+        ),
+        "fully keyword, username dropped": (
+            "def f(cfg):\n"
+            "    return trigger_bgsave(host=cfg['host'], port=cfg['port'],\n"
+            "                          password=cfg['password'])\n"
+        ),
+        "fully keyword on check_rdb, username dropped": (
+            "def f(cfg):\n"
+            "    return check_rdb(host=cfg['host'], port=cfg['port'],\n"
+            "                     password=cfg['password'])\n"
+        ),
+        "username present but a literal": (
+            "def f(cfg):\n"
+            "    return check_rdb(cfg['host'], cfg['port'], cfg['password'],\n"
+            "                     username='admin')\n"
+        ),
+    }
+    for label, src in cases.items():
+        assert _call_sites_missing_username(ast.parse(src)) == [2], (
+            f"the call-site check missed: {label}"
+        )
+
     kept = (
         "def f(cfg):\n"
         "    return trigger_bgsave(cfg['host'], cfg['port'], cfg['password'],\n"
         "                          username=cfg['username'])\n"
     )
-    literal = (
-        "def f(cfg):\n"
-        "    return check_rdb(cfg['host'], cfg['port'], cfg['password'],\n"
-        "                     username='admin')\n"
-    )
-    assert _call_sites_missing_username(ast.parse(dropped)) == [2]
     assert _call_sites_missing_username(ast.parse(kept)) == []
-    assert _call_sites_missing_username(ast.parse(literal)) == [2]
+
+    # A call with no credential at all supplies no username by construction and
+    # must not be flagged — otherwise the check would be a false-positive on
+    # every unrelated helper call.
+    no_creds = "def f(cfg):\n    return trigger_bgsave(host, port)\n"
+    assert _call_sites_missing_username(ast.parse(no_creds)) == []
 
 
 def test_the_reference_file_stays_in_the_invariant():
