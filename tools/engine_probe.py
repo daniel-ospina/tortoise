@@ -95,6 +95,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     )
 
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -103,7 +104,6 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Optional
 
 DEFAULT_HOST = "127.0.0.1"
 #: The canonical graph port. NOT 6379 (`localhost` resolves `::1` first and a
@@ -159,7 +159,7 @@ def _resolve_within_bound(host: str, port: int, timeout: float):
     def resolve():
         try:
             done.append(socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP))
-        except Exception as exc:  # noqa: BLE001 — the worker must always report
+        except Exception as exc:
             done.append(exc)
 
     worker = threading.Thread(target=resolve, daemon=True)
@@ -201,7 +201,7 @@ def probe_graph(host: str, port: int, timeout: float) -> dict:
         # `ok` there.
         try:
             addrinfo = _resolve_within_bound(host, port, timeout)
-        except Exception as exc:  # noqa: BLE001 — unmeasured, never a verdict
+        except Exception as exc:
             return {"ok": None, "reply": None,
                     "error": f"resolve-failed: {type(exc).__name__}: {exc}",
                     "elapsed_s": round(time.monotonic() - started, 3)}
@@ -258,13 +258,13 @@ def probe_graph(host: str, port: int, timeout: float) -> dict:
             "error": None if ok else "unexpected-reply",
             "elapsed_s": round(elapsed, 3),
         }
-    except socket.timeout:
+    except TimeoutError:
         return {"ok": False, "reply": None, "error": "timeout",
                 "elapsed_s": round(time.monotonic() - started, 3)}
     except OSError as exc:
         return {"ok": False, "reply": None, "error": type(exc).__name__,
                 "elapsed_s": round(time.monotonic() - started, 3)}
-    except Exception as exc:  # noqa: BLE001 — "Never raises" is the contract
+    except Exception as exc:
         # An exception before any connect is an UNMEASURED endpoint: `ok=None`,
         # not a verdict. `ok=False` would become a confident GRAPH_DOWN for an
         # endpoint that was never dialled. Reporting a cause the probe did not
@@ -275,13 +275,11 @@ def probe_graph(host: str, port: int, timeout: float) -> dict:
                 "elapsed_s": round(time.monotonic() - started, 3)}
     finally:
         if sock is not None:
-            try:
+            with contextlib.suppress(OSError):
                 sock.close()
-            except OSError:
-                pass
 
 
-def docker_socket() -> Optional[Path]:
+def docker_socket() -> Path | None:
     """The first configured engine socket that exists, else None.
 
     `DOCKER_HOST` is consulted first: a `unix://` DOCKER_HOST names the socket
@@ -342,7 +340,7 @@ def probe_engine(timeout: float) -> dict:
             "elapsed_s": elapsed}
 
 
-def classify(graph: dict, engine: Optional[dict]) -> str:
+def classify(graph: dict, engine: dict | None) -> str:
     """The verdict. Pure, so the answers are testable without a machine.
 
     Order matters: a wedged engine makes the graph's state UNMEASURABLE, so it
@@ -365,7 +363,7 @@ def classify(graph: dict, engine: Optional[dict]) -> str:
     return GRAPH_UP if graph["ok"] else GRAPH_DOWN
 
 
-def graph_target_from_env() -> Optional[dict]:
+def graph_target_from_env() -> dict | None:
     """The resolved graph endpoint from TORTOISE_DB_URI, or None when UNSET.
 
     None means exactly one thing: no URI is configured, so the caller's own
@@ -395,7 +393,7 @@ def graph_target_from_env() -> Optional[dict]:
     return {"host": host, "port": ep.port, "ssl": ep.ssl, "uri": uri}
 
 
-def main(argv: Optional[list] = None) -> int:
+def main(argv: list | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--host", default=None,
                     help=f"graph host (default {DEFAULT_HOST}, or TORTOISE_DB_URI's)")
@@ -465,7 +463,7 @@ def main(argv: Optional[list] = None) -> int:
 
 
 def _refuse(args, error: str, exc, message: str,
-            host: Optional[str] = None, port: Optional[int] = None) -> int:
+            host: str | None = None, port: int | None = None) -> int:
     """Report a refusal through `_report` so `--json` still yields JSON, and
     return the UNMEASURABLE code. "Could not tell" is not "broken".
 
@@ -486,7 +484,7 @@ def _refuse(args, error: str, exc, message: str,
 
 
 def _report(args, verdict: str, graph: dict, host: str, port: int,
-            engine: Optional[dict], probed: bool = True) -> None:
+            engine: dict | None, probed: bool = True) -> None:
     """Print the human summary or the JSON for a probe result.
 
     Every exit path AFTER argument validation reports through here — including

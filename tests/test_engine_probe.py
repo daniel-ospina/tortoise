@@ -18,8 +18,6 @@ from __future__ import annotations
 import socket
 import sys
 import threading
-
-_v4 = socket.AF_INET
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -27,6 +25,7 @@ sys.path.insert(0, str(REPO / "tools"))
 
 import engine_probe as e  # noqa: E402
 
+_v4 = socket.AF_INET
 
 # ==========================================================================
 # THE INVERSION — a wedged engine is not a graph failure
@@ -887,9 +886,10 @@ def test_every_resolved_address_is_tried_not_just_the_first(monkeypatch):
     dead_v6 = (socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP, "",
                ("::1", port, 0, 0))
     monkeypatch.setattr(e.socket, "getaddrinfo",
-                        lambda *a, **k: [dead_v6]
-                        + real_getaddrinfo("127.0.0.1", port,
-                                           proto=socket.IPPROTO_TCP))
+                        lambda *a, **k: [dead_v6,
+                                         *real_getaddrinfo(
+                                             "127.0.0.1", port,
+                                             proto=socket.IPPROTO_TCP)])
     result = e.probe_graph("dual.example.com", port, timeout=2.0)
     assert result["ok"] is True, result
 
@@ -900,8 +900,6 @@ def test_a_non_oserror_resolver_failure_is_not_reported_as_a_timeout(monkeypatch
     `resolve-timeout` — a timeout it never measured.
     (b) Reachable: any unexpected resolver error.
     """
-    seen = {}
-
     def explode(*_a, **_k):
         raise RuntimeError("resolver exploded")
 
@@ -999,7 +997,6 @@ def test_a_pre_connect_exception_is_unmeasured(monkeypatch):
     monkeypatch.setattr(e, "_resolve_within_bound",
                         lambda *a: [(_v4, e.socket.SOCK_STREAM,
                                      e.socket.IPPROTO_TCP, "", ("127.0.0.1", 1))])
-    real_socket = e.socket.socket
 
     def broken(*a, **k):
         raise ValueError("Timeout value out of range")
