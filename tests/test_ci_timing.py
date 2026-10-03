@@ -897,8 +897,8 @@ def test_integrity_problems_mirrors_the_spot_checked_validators() -> None:
     depend on a literal value and still fires if `carve_shards` is later rolled
     back or a surface is renamed. It is NOT a per-validator sweep of the whole
     composition: the composition-parity test below covers the remaining
-    validators, pinning their call ORDER and requiring each one's problems to be
-    surfaced, rather than building a real violation for each.
+    validators, requiring each one's problems to be surfaced on BOTH entry
+    points, rather than building a real violation for each.
     """
     import ci_selection as cs
 
@@ -985,7 +985,10 @@ def test_integrity_problems_mirrors_the_listed_integrity_composition(
     # ⛔ HAND-MAINTAINED ALLOW-LIST, NOT A DERIVATION — see the docstring. A
     # validator absent from this tuple is never wrapped, so a composition that
     # gains it on ONE side alone is invisible to the parity assertions below.
-    # Kept in the `--integrity` composition's order. Deriving the set would mean
+    # The tuple's ORDER is NOT asserted (the pins below are order-insensitive —
+    # see the assertion for why order is not a contract after #5050); keep it
+    # stable and extend it whenever a validator is added to either composition.
+    # Deriving the set would mean
     # introspecting an inline `main()` block or guessing which list-returning
     # helpers are validators; a wrong guess would inject sentinels into a
     # filename list and corrupt the run.
