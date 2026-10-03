@@ -278,10 +278,10 @@ def test_non_int_parseable_suffix_does_not_break_capture(tmp_path):
     admitted by ``_capture_turn_ids`` and then blow up the sweep's parse AFTER
     the caller's :Session MERGE had committed, turning a benign cleanup into a
     failed capture. The guard now uses ``isdecimal()``, which excludes the
-    ``²``-class — but ``isdecimal()`` is NECESSARY, not SUFFICIENT, for
-    ``int()`` (see the huge-suffix test below for the length limit that
-    separates them), so the sweep also wraps its parse and RETAINS any id it
-    cannot place instead of assuming the guard guaranteed one.
+    ``²``-class — but ``isdecimal()`` being True is not SUFFICIENT to guarantee
+    ``int()`` parses it (see the huge-suffix test below for the length limit
+    that separates them), so the sweep also wraps its parse and RETAINS any id
+    it cannot place instead of assuming the guard guaranteed one.
     """
     sdk = TortoiseSDK(db_path=str(tmp_path / "wide.db"))
     proj = sdk._get_proj()
@@ -323,14 +323,15 @@ def test_huge_decimal_suffix_is_not_swept_and_does_not_break_capture(tmp_path):
     """An ``isdecimal()``-True suffix past ``int()``'s conversion limit must not
     break the sweep either (#3551 review).
 
-    ``isdecimal()`` is NECESSARY but not SUFFICIENT for ``int()``: ``int()``
-    refuses a decimal string longer than its conversion limit (4300 digits by
-    default), so a ``<sid>_t<many nines>`` id PASSES the guard and used to reach
-    ``int()`` in the sweep, which raised ``ValueError`` AFTER the caller's
-    :Session MERGE had committed — a benign cleanup turned into a failed
-    capture. The sweep now wraps its parse and RETAINS an id it cannot place,
-    the same treatment the ``²``-class gets, so no admitted id can make it
-    raise. The suffix is sized from the LIVE limit, and the test SKIPS when that
+    ``isdecimal()`` being True is not SUFFICIENT to guarantee ``int()`` parses
+    it: ``int()`` refuses a decimal string longer than its conversion limit
+    (4300 digits by default), so a ``<sid>_t<many nines>`` id PASSES the guard
+    and used to reach ``int()`` in the sweep, which raised ``ValueError`` AFTER
+    the caller's :Session MERGE had committed — a benign cleanup turned into a
+    failed capture. The sweep now wraps its parse and RETAINS an id it cannot
+    place — the guard EXCLUDES the ``²``-class, whereas this layer retains an
+    id the guard ADMITTED — so no admitted id can make it raise. The suffix is
+    sized from the LIVE limit, and the test SKIPS when that
     limit is disabled: with no limit ``int()`` cannot raise the conversion error
     at all, so the class this test guards is unreachable there and there is
     nothing to exercise.

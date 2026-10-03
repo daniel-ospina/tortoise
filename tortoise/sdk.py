@@ -1274,8 +1274,9 @@ def _capture_turn_ids(proj, session_id: str) -> list[str]:
     # refuses a decimal string longer than its conversion limit (4300 digits by
     # default), so ``isdecimal()`` being True does not imply parseable. The
     # sweep therefore does not ASSUME a total parse — it wraps its own and
-    # RETAINS an id it cannot place, the same treatment the ``²``-class gets,
-    # so no id returned here can make the sweep raise. (``int()`` also parses
+    # RETAINS an id it cannot place (the guard EXCLUDES the ``²``-class; this
+    # layer retains an id the guard ADMITTED), so no id returned here can make
+    # the sweep raise. (``int()`` also parses
     # suffixes ``isdecimal()`` rejects, e.g.
     # ``'-1'``/``' 3'``/``'3_0'``; those are not ids this writer mints —
     # ``_capture_turn_id`` formats an ``int`` — so they are left untouched
