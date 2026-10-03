@@ -220,6 +220,34 @@ def _blocks() -> dict[str, str]:
     assert ": Request" not in server and ": string" not in server, (
         "TS annotations remain in the extracted returnToPath — update this harness"
     )
+    # #3955: serveShell was executed by NO test, which left two blank-page
+    # mechanisms unchecked: a missing /admin/assets/*.js answered 200 text/html,
+    # and a session that expires between the document and subresource loads
+    # handing the module an HTML redirect. Extract it (and its predicate) with
+    # the TS annotations stripped, prepending the two constants it reads from
+    # outside its own body (ADMIN_CSP comes from _shared/security-headers; HSTS
+    # is module-local).
+    shell = (
+        'const ADMIN_CSP = "default-src \'none\'";\nconst HSTS = { "Strict-Transport-Security": "max-age=31536000; includeSubDomains" };\n'
+        + _function(gate_src, "isAssetRequest")
+        .replace("function isAssetRequest(request: Request): boolean {", "function isAssetRequest(request) {")
+        + "\n"
+        + _function(gate_src, "serveShell")
+        # `_function` anchors on `function serveShell(`, which sits INSIDE
+        # `async function ...` — so the prefix is DROPPED by extraction. It must
+        # be put back: serveShell awaits env.ASSETS.fetch, and `await` in a
+        # non-async function is a SyntaxError, not a silent success.
+        .replace("function serveShell(env: Env, request: Request): Promise<Response> {", "async function serveShell(env, request) {")
+    )
+    assert "function isAssetRequest(request) {" in shell, (
+        "isAssetRequest signature changed — update this harness"
+    )
+    assert "async function serveShell(env, request) {" in shell, (
+        "serveShell signature changed — update this harness"
+    )
+    assert ": Request" not in shell and ": Env" not in shell, (
+        "TS annotations remain in the extracted serveShell — update this harness"
+    )
     return {
         # The dashboard-origin validator and the base composer live in the FIRST
         # inline script. The early block calls only `dashboardOrigin`, so only that
@@ -255,6 +283,9 @@ def _blocks() -> dict[str, str]:
         + "\n"
         + _function(gate_src, "adminKindForResponse"),
         "server": server,
+        # #3955: the shell/server-response path. Executed against a fake
+        # env.ASSETS so the two blank-page mechanisms are pinned behaviourally.
+        "shell": shell,
     }
 
 
@@ -263,10 +294,10 @@ const fs = require('fs');
 const path = require('path');
 const dir = process.argv[2];
 const blocks = [];
-for (const n of ['early.js', 'headgate.js', 'claim.js', 'consumer.js', 'gate.js', 'server.js']) {
+for (const n of ['early.js', 'headgate.js', 'claim.js', 'consumer.js', 'gate.js', 'server.js', 'shell.js']) {
   blocks.push(fs.readFileSync(path.join(dir, n), 'utf8'));
 }
-const early = blocks[0], headGate = blocks[1], claimSrc = blocks[2], consumerSrc = blocks[3], gateSrc = blocks[4], serverSrc = blocks[5];
+const early = blocks[0], headGate = blocks[1], claimSrc = blocks[2], consumerSrc = blocks[3], gateSrc = blocks[4], serverSrc = blocks[5], shellSrc = blocks[6];
 const cases = JSON.parse(fs.readFileSync(path.join(dir, 'cases.json'), 'utf8'));
 const ORIGIN = process.argv[3];
 const APP = process.argv[4];
@@ -407,7 +438,7 @@ function runConsumer(status, ret, cookie, opts) {
   return { nav: e.navigations, errors: errors };
 }
 
-const out = { early: [], headGate: [], claim: [], funnel: [], consumer: [], gate: [] };
+const out = { early: [], headGate: [], claim: [], funnel: [], consumer: [], gate: [], shell: [] };
 for (const c of cases.early) out.early.push(runEarly(c[0], c[1], c[2], c[3]));
 for (const c of cases.headGate) out.headGate.push(runHeadGate(c[0], c[1], c[2]));
 for (const c of cases.claim) out.claim.push(runTargets(c[0], c[1], c[2]));
@@ -434,7 +465,48 @@ out.corpus = cases.corpus.map(function (e) {
   const c = runEarly('?next=' + encodeURIComponent(s), '');
   return { path: p, expected: e[1], server: s, clientRet: c.ret };
 });
-console.log(JSON.stringify(out));
+// #3955: execute serveShell against a fake env.ASSETS. Each case is
+// [pathname, assetStatus, assetContentType, shellOk]. The fake router answers the
+// requested URL with that status/type, and /admin/index.html with the shell
+// (200 text/html) unless shellOk is false (the 'build did not ship' shape).
+const shellFn = new Function(shellSrc + '\\nreturn { serveShell: serveShell, isAssetRequest: isAssetRequest };')();
+for (const c of cases.shell) {
+  const p = c[0], st = c[1], ct = c[2], shellOk = c[3];
+  const target = ORIGIN + p;
+  const env = {
+    ASSETS: {
+      fetch: async function (req) {
+        const u = typeof req === 'string' ? req : (req && req.url) || String(req);
+        if (u.indexOf('/admin/index.html') !== -1) {
+          return shellOk
+            ? new Response('<html></html>', { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } })
+            : new Response('nope', { status: 404, headers: { 'content-type': 'text/plain' } });
+        }
+        return new Response('body', {
+          status: st,
+          headers: { 'content-type': ct },
+        });
+      },
+    },
+  };
+  out.shell.push({
+    path: p,
+    isAsset: shellFn.isAssetRequest({ url: target }),
+    status: null,
+    contentType: null,
+    _promise: shellFn.serveShell(env, { url: target }).then(function (r) { return r; }),
+  });
+}
+// Resolve asynchronously, then print (the driver's single stdout line must wait).
+(async function () {
+  for (const e of out.shell) {
+    const r = await e._promise;
+    e.status = r.status;
+    e.contentType = r.headers.get('content-type') || '';
+    delete e._promise;
+  }
+  console.log(JSON.stringify(out));
+})();
 """
 
 
@@ -443,6 +515,8 @@ def _run(cases: dict) -> dict:
     node = shutil.which("node")
     for key in ("early", "headGate", "claim", "funnel", "consumer", "gate"):
         cases.setdefault(key, [])
+    # #3955: the shell/server-response cases.
+    cases.setdefault("shell", [])
     cases.setdefault("tokenReason", [])
     cases.setdefault("adminResponse", [])
     cases.setdefault("corpus", [])
@@ -450,7 +524,7 @@ def _run(cases: dict) -> dict:
     import tempfile
 
     with tempfile.TemporaryDirectory() as td:
-        for key, name in (("early", "early.js"), ("headGate", "headgate.js"), ("claim", "claim.js"), ("consumer", "consumer.js"), ("gate", "gate.js"), ("server", "server.js")):
+        for key, name in (("early", "early.js"), ("headGate", "headgate.js"), ("claim", "claim.js"), ("consumer", "consumer.js"), ("gate", "gate.js"), ("server", "server.js"), ("shell", "shell.js")):
             (Path(td) / name).write_text(blocks[key], encoding="utf-8")
         (Path(td) / "cases.json").write_text(json.dumps(cases), encoding="utf-8")
         driver = Path(td) / "driver.js"
@@ -705,7 +779,13 @@ def test_gate_maps_every_decision_to_a_response() -> None:
     ):
         i = src.find(decision)
         assert i != -1, f"the gate no longer handles {decision}"
-        window = src[i : i + 160]
+        # #3955: the window is the case BODY, not a fixed byte count. It was 160
+        # chars until the auth branch grew an asset guard (a comment plus the
+        # guard plus the exit), which pushed `redirectToAuth(returnTo)` past the
+        # edge and reddened this pin for a change that made the gate STRONGER.
+        # Widened rather than reordered: the pin's intent is "this case returns
+        # that call", and a byte-count proxy for "the body" is what broke.
+        window = src[i : i + 900]
         assert call in window, f"{decision} does not return {call}: {window[:120]!r}"
 
 
@@ -1383,3 +1463,104 @@ def test_dot_segments_resolving_into_the_allowlist_are_accepted_same_origin() ->
     (row,) = _run({"early": [["?next=/welcome/../team", "", APP_ORIGIN]]})["early"]
     assert row["ret"] == "/team", row
     assert row["base"] == APP_ORIGIN + "/team", row
+
+
+# ── #3955: serveShell — the two blank-page mechanisms ────────────────────────
+#
+# serveShell was executed by NO test before this. Both mechanisms below are
+# silent-failure shapes: the browser refuses the module on MIME type, so the
+# console blanks while the server reports success. Each case is
+# [pathname, assetStatus, assetContentType, shellOk].
+
+
+def test_missing_asset_is_not_answered_with_the_html_shell() -> None:
+    """A 404 under /admin/assets/ must NOT fall through to the shell.
+
+    The passthrough cannot distinguish "real asset" from "client route", so a
+    request for a MISSING `/admin/assets/index-<stalehash>.js` used to fall
+    through and be answered `200 text/html`. The browser then refuses the module
+    ("expected a JavaScript module script but the server responded with a MIME
+    type of text/html") — a chunk dropped by a deploy presents as a blank
+    console with no signal. Assert on BOTH the status and the MIME type: the
+    status alone does not prove the shell was skipped.
+    """
+    (row,) = _run({"shell": [["/admin/assets/index-stale.js", 404, "text/html; charset=utf-8", True]]})["shell"]
+    assert row["isAsset"] is True, row
+    assert row["status"] == 404, f"a missing asset was not a real 404: {row}"
+    assert "text/html" not in row["contentType"], (
+        f"a missing asset was answered as HTML — the MIME-masked blank console: {row}"
+    )
+
+
+def test_real_asset_passes_through_with_its_own_type() -> None:
+    """The fix must not swallow the healthy path."""
+    (row,) = _run({"shell": [["/admin/assets/index-abc123.js", 200, "application/javascript", True]]})["shell"]
+    assert row["status"] == 200, row
+    assert "application/javascript" in row["contentType"], row
+
+
+def test_client_route_still_serves_the_html_shell() -> None:
+    """Anti-vacuity: a client route must STILL get the shell.
+
+    Without this, "the asset branch returns 404" is satisfied by answering
+    everything 404 — which would break the console entirely.
+    """
+    (row,) = _run({"shell": [["/admin/settings", 404, "text/html", True]]})["shell"]
+    assert row["isAsset"] is False, row
+    assert row["status"] == 200, row
+    assert "text/html" in row["contentType"], row
+
+
+def test_asset_404_beats_the_shell_even_when_the_shell_exists() -> None:
+    """Ordering: the asset branch is checked BEFORE the shell fallthrough."""
+    (row,) = _run({"shell": [["/admin/assets/gone.js", 404, "text/plain", True]]})["shell"]
+    assert row["status"] == 404, row
+    assert "text/html" not in row["contentType"], row
+
+
+def test_missing_spa_build_reports_503_not_a_blank_200() -> None:
+    """The pre-existing #3620 guard must survive the new branch."""
+    (row,) = _run({"shell": [["/admin/settings", 404, "text/html", False]]})["shell"]
+    assert row["status"] == 503, row
+
+
+def test_asset_predicate_covers_the_bundle_prefix() -> None:
+    """The predicate that guards BOTH mechanisms, exercised directly.
+
+    Mechanism 2 (a session expiring between the document and the subresource
+    loads) is closed by the SAME predicate gating the `auth` branch, so its
+    boundary is pinned here: `/admin/assets/...` is an asset, `/admin/assets`
+    (no trailing slash) and a client route are not.
+    """
+    rows = _run(
+        {
+            "shell": [
+                ["/admin/assets/index-abc.js", 200, "application/javascript", True],
+                ["/admin/assets/nested/chunk.css", 200, "text/css", True],
+                ["/admin/assets", 200, "text/html", True],
+                ["/admin/settings", 200, "text/html", True],
+            ]
+        }
+    )["shell"]
+    got = [r["isAsset"] for r in rows]
+    assert got == [True, True, False, False], got
+
+
+def test_auth_branch_guards_asset_requests() -> None:
+    """Mechanism 2 is closed in the gate, not only in the shell.
+
+    `onRequest` needs Supabase to execute, so the guard is pinned at the source:
+    the `auth` branch must consult `isAssetRequest` BEFORE emitting the HTML
+    redirect. A behavioural proxy (the predicate's boundary) is pinned by
+    test_asset_predicate_covers_the_bundle_prefix above; this pins that the
+    branch actually CALLS it — reverting the guard reddens this, not that.
+    """
+    src = GATE.read_text(encoding="utf-8")
+    auth = src.index('case "auth":')
+    redirect = src.index("return redirectToAuth(returnTo);", auth)
+    body = src[auth:redirect]
+    assert "isAssetRequest(request)" in body, (
+        "the auth branch no longer guards asset requests — a session expiring "
+        "mid-load would hand the module an HTML redirect (MIME blank page)"
+    )
+    assert body.index("isAssetRequest(request)") < body.index("return new Response("), body

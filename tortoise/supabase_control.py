@@ -1094,6 +1094,153 @@ def claim_api_key_revocation(cp, key_id: str, now: str | None = None) -> bool:
     )
     return bool(updated)
 
+# ── #1879: durable multi-worker mint serialization ────────────────────────
+#
+# The mint critical sections below run as ONE Postgres transaction through a
+# SECURITY DEFINER RPC (migration 20261001000002), which serializes on the
+# `organizations` row (`FOR NO KEY UPDATE`). WHY a whole-section RPC: each
+# `cp.query`/`cp.rpc` is its own PostgREST HTTP request, and PostgREST is
+# stateless per request — a lock taken by a WRAPPER RPC releases at that
+# request's commit (before the section runs), and a session-level advisory
+# lock binds to a pooled connection the next request may not reuse. Only a
+# lock taken INSIDE the same transaction as the whole section can serialize
+# it. See the migration header for the lock-resource/mode reasoning.
+
+
+class SessionKeyMintRefusal(RuntimeError):
+    """A SEMANTIC refusal from ``session_key_mint`` (#1879).
+
+    ``code`` is ``"bootstrap_cap"`` (→ 429) or ``"key_limit"`` (→ 402); the
+    HTTP layer maps it. Every OTHER ``RuntimeError`` — transport failure, a
+    missing RPC (PostgREST 404 on a not-yet-applied migration), a truncated
+    response — MUST propagate: the caller fails CLOSED (500, no key) and must
+    never fall back to the pre-#1879 multi-request section, which is exactly
+    the race this RPC closes.
+    """
+
+    def __init__(self, message: str, code: str):
+        super().__init__(message)
+        self.code = code
+
+
+class KeyCapRefusal(RuntimeError):
+    """The ATOMIC cap gate inside ``provision_api_key`` refused (#1879).
+
+    Distinct from the Python pre-check's ``_KeyCapExceeded``: this one fired
+    inside the serialized transaction, i.e. it is the authoritative refusal
+    (#4355's ``cap_slot_credit`` is applied in the same place).
+    """
+
+
+#: RAISE-message substrings → refusal code. The RAISE text is load-bearing
+#: contract (``rpc()`` carries PostgREST's error body `message`), same pattern
+#: as `_RECOVER_ERROR_CODES`.
+_SESSION_MINT_ERROR_CODES = {
+    "session_key_mint: bootstrap cap reached": "bootstrap_cap",
+    "session_key_mint: key limit reached": "key_limit",
+}
+
+
+def mint_session_key(cp, *, org_id: str, user_id: str, purpose: str,
+                     key_id: str, lookup_hash: str, key_prefix: str,
+                     created_at: str, expires_at: str | None,
+                     max_api_keys: int | None,
+                     bootstrap_cap: int = 3) -> dict:
+    """Mint a session key through the atomic ``session_key_mint`` RPC (#1879).
+
+    ONE transaction: lock the org row → (bootstrap 3-active check | recovery
+    cap count → oldest-OTHER revoke → fail-closed re-check → 3-tier rotation →
+    fail-closed re-check) → INSERT. The whole ``_session_key_supabase``
+    critical section lives in SQL so it is serialized across processes; the
+    caller keeps its in-process lock as belt-and-braces only.
+
+    Returns ``{"rotated": bool, "rotated_key_prefix": str | None}``.
+    Raises :class:`SessionKeyMintRefusal` on a semantic refusal, ``RuntimeError``
+    (fail-closed) on anything else.
+    """
+    try:
+        result = cp.rpc_value("session_key_mint", {
+            "p_org_id": org_id,
+            "p_user_id": user_id,
+            "p_purpose": purpose,
+            "p_key_id": key_id,
+            "p_lookup_hash": lookup_hash,
+            "p_key_prefix": key_prefix,
+            "p_created_at": created_at,
+            "p_expires_at": expires_at,
+            "p_max_api_keys": max_api_keys,
+            "p_bootstrap_cap": bootstrap_cap,
+        })
+    except RuntimeError as e:
+        msg = str(e)
+        for marker, code in _SESSION_MINT_ERROR_CODES.items():
+            if marker in msg:
+                raise SessionKeyMintRefusal(msg, code) from e
+        raise
+    if not isinstance(result, dict):
+        # The RPC returns jsonb; an unreadable envelope is a contract
+        # violation, but the mint may ALREADY have committed — reporting a
+        # failure there would strand a live key the client never saw. Confirm
+        # from the row instead. The rotation envelope is advisory UX (the
+        # dashboard's one-time banner), so a missing envelope degrades the
+        # banner, never the key.
+        rows = cp.query(
+            "api_keys",
+            select=["id"],
+            filters=[("org_id", "eq", org_id),
+                     ("lookup_hash", "eq", lookup_hash),
+                     ("revoked_at", "is", None)],
+        )
+        if not rows:
+            raise RuntimeError(
+                "session_key_mint returned an unreadable envelope and no "
+                "committed row (fail-closed)")
+        result = {"rotated": False, "rotated_key_prefix": None}
+    return {
+        "rotated": bool(result.get("rotated")),
+        "rotated_key_prefix": result.get("rotated_key_prefix"),
+    }
+
+
+def mint_provisioned_key(cp, row: dict, *, max_keys: int | None,
+                         cap_slot_credit: int = 0) -> None:
+    """Atomic provisioned/rotate key mint (``provision_api_key``, #1879).
+
+    ``row`` is the ``_mint_key`` insert row (id/org_id/lookup_hash/key_prefix/
+    created_via/created_by/created_at/expires_at/name/graph_id/scopes/
+    created_by_key_id/delegation_depth). The cap gate and the INSERT are one
+    transaction under the SAME org-row lock ``session_key_mint`` takes, so a
+    provisioned mint cannot race a session mint (or another provisioned mint)
+    past the cap. ``cap_slot_credit`` (#4355) is applied inside SQL exactly as
+    the Python pre-check applies it: ``count - credit >= cap``.
+
+    Raises :class:`KeyCapRefusal` when the serialized gate refuses; any other
+    ``RuntimeError`` propagates (fail closed).
+    """
+    try:
+        cp.rpc("provision_api_key", {
+            "p_org_id": row["org_id"],
+            "p_key_id": row["id"],
+            "p_lookup_hash": row["lookup_hash"],
+            "p_key_prefix": row["key_prefix"],
+            "p_created_via": row["created_via"],
+            "p_created_by": row.get("created_by"),
+            "p_created_at": row["created_at"],
+            "p_expires_at": row.get("expires_at"),
+            "p_name": row.get("name"),
+            "p_graph_id": row.get("graph_id"),
+            "p_scopes": row.get("scopes") or [],
+            "p_created_by_key_id": row.get("created_by_key_id"),
+            "p_delegation_depth": row.get("delegation_depth"),
+            "p_max_api_keys": max_keys,
+            "p_cap_slot_credit": cap_slot_credit,
+        })
+    except RuntimeError as e:
+        if "provision_api_key: key cap reached" in str(e):
+            raise KeyCapRefusal(str(e)) from e
+        raise
+
+
 def set_api_key_enabled(cp, key_id: str, enabled: bool) -> None:
     """#1148: enable/disable an API key (per-key toggle). Disabled keys stop
     authenticating (resolve_api_key rejects enabled=false) but stay listed —
@@ -1651,6 +1798,45 @@ def update_onboarding_state(cp, org_id: str, state_dict: dict) -> None:
         filters=[("id", "eq", org_id)],
         json_body={"onboarding_state": state_dict},
     )
+
+
+def cas_update_onboarding_state(cp, org_id: str, state_dict: dict,
+                                expected_version: int) -> bool:
+    """#3553: conditional (compare-and-set) PATCH of ``organizations.onboarding_state``.
+
+    A TRUE atomic CAS on the Supabase leg: ONE PostgREST PATCH whose WHERE
+    carries the version guard, with ``Prefer: return=representation`` (a
+    non-empty ``select``; see ``query``) so the response body is non-empty IFF
+    the row matched. PostgREST issues a single
+    ``UPDATE ... WHERE id = ... AND <version guard>``; PostgreSQL re-evaluates
+    the guard against the latest committed row under READ COMMITTED, so two
+    racing writers cannot both match — the loser gets ``[]`` and retries.
+
+    Returns True iff the guarded write applied.
+
+    The version lives INSIDE the jsonb dict (``state_version``) — the
+    ``organizations`` table has no version column, and adding one is a schema
+    migration whose deploy order would be a launch-path hazard, while a jsonb
+    path filter needs no migration. ``expected_version == 0`` means "never
+    CAS-written": the guard is ``onboarding_state->>state_version IS NULL``,
+    which is the only representable form of 0 — the CAS always stores
+    ``expected + 1 >= 1``, so a stored literal 0 is unreachable.
+    """
+    from tortoise.hosted_api import _STATE_VERSION_KEY
+
+    payload = dict(state_dict)
+    payload[_STATE_VERSION_KEY] = expected_version + 1
+    guard_col = f"onboarding_state->>{_STATE_VERSION_KEY}"
+    guard = ((guard_col, "is", None) if expected_version == 0
+             else (guard_col, "eq", str(expected_version)))
+    rows = cp.query(
+        "organizations",
+        method="PATCH",
+        select=["id"],
+        filters=[("id", "eq", org_id), guard],
+        json_body={"onboarding_state": payload},
+    )
+    return bool(rows)
 
 
 def org_email(cp, org_id: str) -> str | None:
@@ -3355,25 +3541,183 @@ def metering_increment_ask(cp, org_id: str, period_start: str,
 def metering_increment_capture_cost(cp, org_id: str, period_start: str,
                                     period_end: str, *,
                                     calls: int = 0,
+                                    tokens_in: int = 0,
+                                    tokens_out: int = 0,
                                     cost_usd: float = 0.0) -> None:
-    """Increment the org's MEASURED capture-extraction cost for the window
-    ``[period_start, period_end)`` (#3665) via the
-    ``metering_increment_capture_cost`` SQL RPC (20260918000001 re-issues it)
+    """Increment the org's MEASURED capture-extraction cost and TOKEN WORKLOAD
+    for the window ``[period_start, period_end)`` (#3665, #5045) via the
+    ``metering_increment_capture_cost`` SQL RPC (20260926000001 re-issues it)
     — the capture-side mirror of ``metering_increment_ask`` (atomic under
     Postgres row locking; best-effort by contract — the caller swallows
     exceptions).
 
-    #3825: the window, not a month label, is the row key. NOTE the RPC is
-    DROPPED and recreated by 20260918000001 rather than replaced in place:
-    a new argument list would otherwise be an OVERLOAD, leaving the old
-    month-keyed function callable — the silent second path #3825 removes.
+    ``tokens_in``/``tokens_out`` are the extraction LLM token counts the
+    caller ALREADY measured (``hosted_api._capture_cost_props`` reads them
+    from ``meta["stats"]["llm"]``) — they are WORKLOAD, never price, and are
+    never read by any spend cap (#5045).
+
+    #3825/#5045: the window, not a month label, is the row key. NOTE the RPC
+    is DROPPED and recreated (20260918000001, then 20260926000001) rather than
+    replaced in place: a new argument list would otherwise be an OVERLOAD,
+    leaving the old signature callable — the silent second path #3825 removes.
     """
     cp.rpc(
         "metering_increment_capture_cost",
         {"p_org_id": org_id, "p_period_start": period_start,
          "p_period_end": period_end, "p_calls": calls,
+         "p_tokens_in": tokens_in, "p_tokens_out": tokens_out,
          "p_cost_usd": cost_usd},
     )
+
+
+def metering_get_embed_usage(cp, org_id: str, period_start: str) -> dict:
+    """Embedding-encode WORKLOAD for an org's window STARTING at
+    *period_start* (#4488) — the supabase-mode READ path for
+    ``get_embedding_usage``. Returns the ``embed_*`` columns as a dict (ZEROS
+    and a ``None`` identity when the row is absent — the MERGE only creates the
+    record on the first write).
+
+    A plain table READ, deliberately mirroring ``metering_get_usage`` rather
+    than adding a SQL function: this is one row per (org, period) read by its
+    PRIMARY KEY, so there is no row LIST for PostgREST's ``db-max-rows`` cap to
+    truncate (the truncation mode ``metering_cohort_spend`` exists to design
+    out applies to COHORT aggregates, not to a single-row PK read).
+
+    #3825: keyed on ``period_start``, not the derived month label.
+    """
+    zeros = {"embed_calls": 0, "embed_texts": 0, "embed_chars": 0,
+             "embed_wall_ms": 0.0, "embed_skipped": 0,
+             "embed_model": None, "embed_revision": None,
+             "embed_identity_mixed": False}
+    rows = cp.query(
+        "metering_records",
+        select=["embed_calls", "embed_texts", "embed_chars", "embed_wall_ms",
+                "embed_skipped", "embed_model", "embed_revision",
+                "embed_identity_mixed"],
+        filters=[("org_id", "eq", org_id),
+                 ("period_start", "eq", period_start)],
+    )
+    if not rows:
+        return zeros
+    row = rows[0]
+    return {
+        "embed_calls": int(row.get("embed_calls") or 0),
+        "embed_texts": int(row.get("embed_texts") or 0),
+        "embed_chars": int(row.get("embed_chars") or 0),
+        "embed_wall_ms": float(row.get("embed_wall_ms") or 0.0),
+        "embed_skipped": int(row.get("embed_skipped") or 0),
+        "embed_model": row.get("embed_model"),
+        "embed_revision": row.get("embed_revision"),
+        "embed_identity_mixed": bool(row.get("embed_identity_mixed")),
+    }
+
+
+def metering_increment_embedding(cp, org_id: str, period_start: str,
+                                 period_end: str, *, calls: int = 0,
+                                 texts: int = 0, chars: int = 0,
+                                 wall_ms: float = 0.0, skipped: int = 0,
+                                 model: str | None = None,
+                                 revision: str | None = None,
+                                 identity_mixed: bool = False) -> None:
+    """Increment the org's embedding-encode WORKLOAD for the window
+    ``[period_start, period_end)`` (#4488) via the
+    ``metering_increment_embedding`` SQL RPC — the embed-side mirror of
+    ``metering_increment_capture_cost`` (atomic under Postgres row locking;
+    best-effort by contract — the caller swallows exceptions).
+
+    ``p_identity_mixed`` carries an IN-TALLY swap (two different encoders inside
+    one work unit); a swap ACROSS windows is derived server-side from the stored
+    identity, which is why the flag is sticky there too.
+
+    #3825: the window, not a month label, is the row key. NOTE the RPC is
+    DROPPED and recreated by its migration rather than replaced in place: a new
+    argument list would otherwise be an OVERLOAD, leaving the old signature
+    callable — the silent second path #3825 removes.
+    """
+    cp.rpc(
+        "metering_increment_embedding",
+        {"p_org_id": org_id, "p_period_start": period_start,
+         "p_period_end": period_end, "p_calls": calls, "p_texts": texts,
+         "p_chars": chars, "p_wall_ms": wall_ms, "p_skipped": skipped,
+         "p_model": model, "p_revision": revision,
+         "p_identity_mixed": identity_mixed},
+    )
+
+
+def metering_set_graph_storage(cp, org_id: str, period_start: str,
+                               period_end: str, *, total_mb: float,
+                               indices_mb: float | None = None,
+                               samples: int = 100, repeats: int = 1,
+                               min_mb: float | None = None,
+                               max_mb: float | None = None,
+                               spread_mb: float = 0.0,
+                               measured_at: str | None = None) -> None:
+    """SET the org's graph-storage GAUGE for the window
+    ``[period_start, period_end)`` (#5331) via the ``metering_set_graph_storage``
+    SQL RPC.
+
+    A GAUGE, not an increment: the latest reading in the window wins. Callers
+    are best-effort by contract — ``metering.record_graph_storage_reading``
+    absorbs a failure and the request is served.
+
+    ``indices_mb`` is the index share of the total and ``min_mb``/``max_mb``/
+    ``spread_mb`` are the observed range across the reading's repeats, so the
+    figure's own precision (or lack of it) is stored WITH it.
+
+    #3825: the window, not a month label, is the row key.
+    """
+    cp.rpc(
+        "metering_set_graph_storage",
+        {"p_org_id": org_id, "p_period_start": period_start,
+         "p_period_end": period_end, "p_total_mb": total_mb,
+         "p_indices_mb": indices_mb, "p_samples": samples,
+         "p_repeats": repeats, "p_min_mb": min_mb, "p_max_mb": max_mb,
+         "p_spread_mb": spread_mb, "p_measured_at": measured_at},
+    )
+
+
+def metering_get_graph_storage(cp, org_id: str, period_start: str) -> dict:
+    """The org's last graph-storage reading for the window STARTING at
+    *period_start* (#5331) — the supabase-mode READ path for
+    ``get_graph_storage_reading``. Returns the ``graph_storage_*`` columns as a
+    dict (ZEROS and a ``None`` timestamp when the row is absent).
+
+    A plain table READ, mirroring ``metering_get_usage``: one row per
+    (org, period) read by its PRIMARY KEY, so there is no row LIST for
+    PostgREST's ``db-max-rows`` cap to truncate.
+
+    #3825: keyed on ``period_start``, not the derived month label.
+    """
+    zeros = {"graph_storage_mb": 0.0, "graph_storage_indices_mb": None,
+             "graph_storage_samples": 0, "graph_storage_repeats": 0,
+             "graph_storage_min_mb": 0.0, "graph_storage_max_mb": 0.0,
+             "graph_storage_spread_mb": 0.0,
+             "graph_storage_measured_at": None}
+    rows = cp.query(
+        "metering_records",
+        select=["graph_storage_mb", "graph_storage_indices_mb",
+                "graph_storage_samples", "graph_storage_repeats",
+                "graph_storage_min_mb", "graph_storage_max_mb",
+                "graph_storage_spread_mb", "graph_storage_measured_at"],
+        filters=[("org_id", "eq", org_id),
+                 ("period_start", "eq", period_start)],
+    )
+    if not rows:
+        return zeros
+    row = rows[0]
+    return {
+        "graph_storage_mb": float(row.get("graph_storage_mb") or 0.0),
+        "graph_storage_indices_mb": (
+            float(row["graph_storage_indices_mb"])
+            if row.get("graph_storage_indices_mb") is not None else None),
+        "graph_storage_samples": int(row.get("graph_storage_samples") or 0),
+        "graph_storage_repeats": int(row.get("graph_storage_repeats") or 0),
+        "graph_storage_min_mb": float(row.get("graph_storage_min_mb") or 0.0),
+        "graph_storage_max_mb": float(row.get("graph_storage_max_mb") or 0.0),
+        "graph_storage_spread_mb": float(
+            row.get("graph_storage_spread_mb") or 0.0),
+        "graph_storage_measured_at": row.get("graph_storage_measured_at"),
+    }
 
 
 def metering_cohort_spend(cp, org_ids: list[str], period_start: str,

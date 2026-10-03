@@ -862,7 +862,8 @@ def test_kind_constants_match_the_runbook():
             and ln.count("|") >= 3}
     kinds = (oa.UNMETERED_INCREMENT_KIND, cc.UNENFORCEABLE_INCIDENT_KIND,
              cc.INCIDENT_KIND, oa.ABUSE_DECISION_FAULT_KIND,
-             oa.ABUSE_ENFORCEMENT_FAULT_KIND, oa.BILLING_NOTIFY_REFUSED_KIND)
+             oa.ABUSE_ENFORCEMENT_FAULT_KIND, oa.BILLING_NOTIFY_REFUSED_KIND,
+             oa.PROVIDER_BILLING_EXHAUSTED_KIND)
     for kind in kinds:
         assert kind in rows, f"no runbook triage row for {kind}"
         row = rows[kind]
@@ -881,6 +882,14 @@ def test_kind_constants_match_the_runbook():
     for kind in (oa.ABUSE_DECISION_FAULT_KIND, oa.ABUSE_ENFORCEMENT_FAULT_KIND):
         assert kind not in cc.INCIDENT_KIND
         assert kind not in cc.UNENFORCEABLE_INCIDENT_KIND
+    # #3873: a provider-billing exhaustion is its OWN incident, not a spelling of
+    # the Stripe notification drop or of a cohort cap firing — the adoption path
+    # resolves by GitHub search on the subject suffix, so a superstring relation
+    # would cross-adopt.
+    assert oa.PROVIDER_BILLING_EXHAUSTED_KIND != oa.BILLING_NOTIFY_REFUSED_KIND
+    assert oa.PROVIDER_BILLING_EXHAUSTED_KIND not in cc.INCIDENT_KIND
+    assert oa.PROVIDER_BILLING_EXHAUSTED_KIND not in cc.UNENFORCEABLE_INCIDENT_KIND
+    assert cc.INCIDENT_KIND not in oa.PROVIDER_BILLING_EXHAUSTED_KIND
 
 
 def test_alert_unmetered_increment_helper_dispatches(monkeypatch):
@@ -926,3 +935,110 @@ def test_billing_notify_refused_incident_is_platform_scoped(monkeypatch):
         "op": "billing_notify",
         "event_type": "checkout.session.completed",
         "org_id": "org-a"})], store.calls
+
+
+# ── PROVIDER_BILLING_EXHAUSTED: the post-hoc spend-bound record (#3873) ─────
+
+
+class _StubHTTPError(Exception):
+    """The requests-shaped error the classifier reads (``response.status_code``).
+
+    Local to this file: ``operator_alert`` must stay free of a ``requests``
+    dependency, so the helper only ever sees the exception CLASS (``error_type``)
+    and the status the caller passed in.
+    """
+
+    def __init__(self, status: int):
+        super().__init__(f"HTTP {status}")
+        self.response = type("R", (), {"status_code": status})()
+
+
+def test_provider_billing_exhausted_helper_dispatches_on_the_serving_leg(monkeypatch):
+    """#3873 option C: the provider's own refusal becomes a recorded incident.
+
+    The SUBJECT is the serving leg's provider slug — not the platform sentinel
+    and not an org. The 2026-09-28 evidence on the issue shows the live failure
+    can be a HOP leg (deepseek reached from venice) whose provider was not the
+    configured primary, so an org- or platform-scoped key would name the wrong
+    thing. Detail is the bounded, message-free vocabulary.
+
+    REDs on: dropping the dispatch (no incident at all — the pre-fix state), and
+    on swapping the subject to "" (the leg that refused is lost).
+    """
+    store = _RecordingStore()
+    monkeypatch.setattr(oa, "alert_store", lambda: store)
+
+    oa.alert_provider_billing_exhausted(
+        "deepseek-direct", _StubHTTPError(402), status=402, has_alternative=True)
+    assert oa.join_operator_alerts() == 0, "the dispatch is asynchronous"
+
+    assert store.calls == [(oa.PROVIDER_BILLING_EXHAUSTED_KIND, "deepseek-direct", {
+        "provider": "deepseek-direct",
+        "error_type": "_StubHTTPError",
+        "status": 402,
+        "has_alternative": True,
+    })], store.calls
+
+
+def test_provider_billing_exhausted_dedups_per_leg_not_across_legs(monkeypatch):
+    """The throttle key is ``(kind, leg)``: a STORM on one leg is ONE incident,
+    but a SECOND leg exhausting is a SECOND incident — not swallowed by the
+    first's still-open one. That is the whole reason the subject is the leg.
+
+    REDs on: keying on the platform sentinel (``""``), which collapses every leg
+    onto one dedup key and makes the second leg's exhaustion invisible while the
+    first incident is open.
+    """
+    store = _RecordingStore()
+    monkeypatch.setattr(oa, "alert_store", lambda: store)
+    oa.reset_operator_alert_state_for_tests()
+    try:
+        oa.alert_provider_billing_exhausted("venice", _StubHTTPError(402), status=402)
+        oa.alert_provider_billing_exhausted("venice", _StubHTTPError(402), status=402)
+        oa.alert_provider_billing_exhausted("moonshot", _StubHTTPError(402), status=402)
+        assert oa.join_operator_alerts() == 0
+        subjects = [c[1] for c in store.calls]
+        assert subjects == ["venice", "moonshot"], (
+            f"expected one incident per exhausted LEG (venice then moonshot); "
+            f"got {subjects} — a same-leg storm must throttle to ONE "
+            "dispatch (#3873)")
+    finally:
+        oa.reset_operator_alert_state_for_tests()
+
+
+def test_provider_billing_exhausted_blank_leg_never_becomes_the_platform_sentinel(
+        monkeypatch):
+    """A leg-less caller must not silently read as a PLATFORM incident.
+
+    ``""`` is the store's platform-scoped sentinel (stored as ``_``), so a blank
+    provider passed through verbatim would fold a per-leg event onto the
+    platform key and lose the leg. The helper names it ``unknown`` instead.
+
+    REDs on: passing ``provider`` straight to ``alert_operator`` without the
+    fallback (the subject would be ``""`` and the incident platform-scoped).
+    """
+    store = _RecordingStore()
+    monkeypatch.setattr(oa, "alert_store", lambda: store)
+
+    oa.alert_provider_billing_exhausted("", _StubHTTPError(402), status=402)
+    assert oa.join_operator_alerts() == 0
+    assert store.calls and store.calls[0][1] == "unknown", store.calls
+    assert store.calls[0][2]["provider"] == "unknown", store.calls
+
+
+def test_provider_billing_exhausted_never_raises(monkeypatch):
+    """Best-effort BY CONSTRUCTION (#3873 requirement).
+
+    It is called from the LLM rotation path, so an alert that raises is a
+    refusal by another name — it would turn a rotation into a 500. With the
+    driver replaced by a raising double the helper must still return normally.
+
+    REDs on: removing the ``contextlib.suppress`` in the helper.
+    """
+    def _boom(kind, org_id, detail=None):
+        raise RuntimeError("alert plane down")
+
+    monkeypatch.setattr(oa, "alert_operator", _boom)
+    oa.alert_provider_billing_exhausted("openrouter", _StubHTTPError(402),
+                                        status=402, has_alternative=False)
+    # Reaching here IS the assertion: no exception escaped.
