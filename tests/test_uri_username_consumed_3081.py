@@ -350,11 +350,36 @@ def _resolve_attr_chain(node, module_bindings: dict):
 
 
 def _names_the_class(node, local_names: set, module_bindings: dict) -> bool:
-    """True when an EXPRESSION's value is the class — by name or by chain."""
+    """True when an EXPRESSION's value is the class.
+
+    Covers a name, an attribute chain, either branch of a conditional
+    expression, and ``getattr(module, "FalkorDB")`` with a CONSTANT name. Each
+    of these is a rebind the removed suffix counter counted — it matched the
+    CALL SITE's spelling — so each must be followed here, or the change narrows
+    coverage where it claims to widen it.
+    """
     if isinstance(node, ast.Name):
         return node.id in local_names
     if isinstance(node, ast.Attribute):
         return _resolve_attr_chain(node, module_bindings) is REAL_FALKORDB
+    if isinstance(node, ast.IfExp):
+        return _names_the_class(node.body, local_names, module_bindings) or (
+            _names_the_class(node.orelse, local_names, module_bindings)
+        )
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "getattr"
+        and len(node.args) == 2
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id in module_bindings
+        and isinstance(node.args[1], ast.Constant)
+        and isinstance(node.args[1].value, str)
+    ):
+        return (
+            getattr(module_bindings[node.args[0].id], node.args[1].value, None)
+            is REAL_FALKORDB
+        )
     return False
 
 
@@ -369,14 +394,18 @@ def _count_client_sites(source: str) -> int:
     falkordb.falkordb import FalkorDB``, then ``from falkordb import
     falkordb``). Identity closes the class instead of re-spelling it.
 
-    A module-level REBIND is followed too (``FalkorDB = falkordb.FalkorDB``),
-    because the removed suffix counter counted that call site: dropping it here
-    would be a coverage REGRESSION, not the widening this change claims to be.
+    A module-level REBIND is followed too — ``FalkorDB = falkordb.FalkorDB``,
+    tuple unpacking, either branch of ``X if flag else Y``, and
+    ``getattr(module, "FalkorDB")`` with a CONSTANT name. This is a regression
+    guard, not a nicety: the removed suffix counter matched the CALL SITE's
+    spelling, so it counted every one of those shapes. Following only the import
+    forms would narrow coverage where this change claims to widen it.
 
-    Residual, deliberately NOT counted: indirection that never names the object
-    — ``getattr(falkordb, "FalkorDB")``, a factory returning the class, or a
-    rebind whose right-hand side this walk cannot resolve. The suffix counter
-    missed those too.
+    Residual, deliberately NOT counted, and NOT counted before either: a callee
+    that never names the class in a form this walk can resolve — a factory
+    returning it, ``getattr(module, variable_name)``, or a rebind through a
+    container. A call spelled ``FalkorDB(...)`` after such a rebind WAS a
+    suffix-counter hit, so that residue is the one place this walk is narrower.
 
     An unresolvable import is skipped, but ONLY for `ImportError`: a blanket
     `except` would map a genuine failure onto a count of 0, which is the exact
@@ -440,7 +469,10 @@ def _count_client_sites(source: str) -> int:
                         top = alias.name.split(".")[0]
                         module_bindings[top] = importlib.import_module(top)
 
-    # A module-level assignment binds the class just as an import does.
+    # A module-level assignment binds the class just as an import does. This is
+    # a REGRESSION guard, not a nicety: the removed suffix counter counted the
+    # call site whatever the binding was, so every rebind shape it reached must
+    # be followed here or the change narrows coverage where it claims to widen.
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             targets, value = node.targets, node.value
@@ -448,10 +480,21 @@ def _count_client_sites(source: str) -> int:
             targets, value = [node.target], node.value
         else:
             continue
-        if _names_the_class(value, local_names, module_bindings):
-            for target in targets:
-                if isinstance(target, ast.Name):
-                    local_names.add(target.id)
+        pairs: list[tuple[ast.expr, ast.expr]] = []
+        for target in targets:
+            if (
+                isinstance(target, ast.Tuple)
+                and isinstance(value, ast.Tuple)
+                and len(target.elts) == len(value.elts)
+            ):
+                pairs.extend(zip(target.elts, value.elts, strict=True))
+            else:
+                pairs.append((target, value))
+        for target, rhs in pairs:
+            if isinstance(target, ast.Name) and _names_the_class(
+                rhs, local_names, module_bindings
+            ):
+                local_names.add(target.id)
 
     n = 0
     for node in ast.walk(tree):
@@ -517,6 +560,25 @@ def test_a_novel_alias_does_not_escape_the_count():
         "the removed suffix counter counted this; losing it is a regression"
     )
     assert _count_client_sites(rebind_alias) == 1
+
+    # Rebind shapes the suffix counter ALSO counted, because it matched the call
+    # site's spelling. Each was a regression while this walk saw only assignments
+    # whose right-hand side it could resolve (found in review on #7053).
+    conditional = (
+        "from falkordb import FalkorDB as _F\n"
+        "FalkorDB = _F if True else None\nclient = FalkorDB(host='h')\n"
+    )
+    unpacked = (
+        "import falkordb\nFalkorDB, other = falkordb.FalkorDB, None\n"
+        "client = FalkorDB(host='h')\n"
+    )
+    via_getattr = (
+        "import falkordb\nFalkorDB = getattr(falkordb, 'FalkorDB')\n"
+        "client = FalkorDB(host='h')\n"
+    )
+    assert _count_client_sites(conditional) == 1
+    assert _count_client_sites(unpacked) == 1
+    assert _count_client_sites(via_getattr) == 1
 
     # Multiplicity, so that a count of 1 is never a coincidence of arithmetic.
     two_aliases = (
