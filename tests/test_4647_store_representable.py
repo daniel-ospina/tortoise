@@ -234,6 +234,43 @@ class TestCreateSourceBypassIsClosed:
             assert "'sourceDate'" in str(exc.value), str(exc.value)
             assert not create.called, "the guard must fire BEFORE the write"
 
+    @pytest.mark.parametrize("alpha,beta", [(2**70, 1.0), (1.0, 2**70), (D("0.1"), 1.0)])
+    def test_set_point_baseline_is_guarded_too(self, alpha, beta):
+        """Cycle-4 P1 — the THIRD bypass found. ``set_point_baseline`` writes
+        ``alpha``/``beta`` straight into ``n.ep_alpha``/``n.ep_beta`` through a
+        direct ``proj.g.query``, so it reaches the store without passing
+        ``_sanitize_props`` at all: ``alpha=2**70`` was silently clamped to INT64
+        max and ``alpha=Decimal('0.1')`` stored as a different number, corrupting
+        the Beta prior that feeds EP confidence.
+        """
+        from unittest import mock
+
+        from tortoise.sdk import TortoiseSDK
+
+        sdk = TortoiseSDK.__new__(TortoiseSDK)
+        sdk._evidence = {}
+        with mock.patch.object(TortoiseSDK, "_get_proj", autospec=True) as proj:
+            with pytest.raises(ValueError) as exc:
+                TortoiseSDK.set_point_baseline(sdk, "p1", alpha, beta)
+            msg = str(exc.value)
+            assert "alpha" in msg or "beta" in msg, msg
+            assert not proj.called, "the guard must fire BEFORE the write"
+        assert sdk._evidence == {}, (
+            "a refused write must not leave the in-memory prior divergent from the graph"
+        )
+
+    @pytest.mark.parametrize("alpha,beta", [(2.0, 3.0), (1.0, 1.0), (2**63 - 1, 1.0), (0.5, 0.25)])
+    def test_set_point_baseline_does_not_refuse_an_ordinary_prior(self, alpha, beta):
+        """The other half: the guard added to ``set_point_baseline`` must not
+        reject a legitimate Beta prior. Asserted against the guard directly
+        rather than through the whole method, which runs EP/dreaming work that a
+        ``__new__``-built instance cannot support.
+        """
+        from tortoise.sdk import _reject_unrepresentable_number
+
+        _reject_unrepresentable_number("alpha", alpha)
+        _reject_unrepresentable_number("beta", beta)
+
 
 class TestNumpyArrays:
 

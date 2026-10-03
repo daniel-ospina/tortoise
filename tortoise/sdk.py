@@ -14491,6 +14491,17 @@ class TortoiseSDK:
                 "graph-scripts/2199_baseline_source_rename.py against the graph "
                 "before writing new baselines."
             )
+        # #4647 (code-review P1): this writer reaches the store directly — the
+        # `proj.g.query` below takes `alpha`/`beta` as raw Cypher parameters — so
+        # it bypasses `_sanitize_props` entirely and must apply the
+        # numeric-domain guard itself, exactly as `create_source` does. Without
+        # it a caller silently corrupts the Beta prior this method exists to set:
+        # `alpha=2**70` is CLAMPED to INT64 max and `alpha=Decimal('0.1')` is
+        # stored as a different number, and those parameters feed EP confidence.
+        # The guard runs BEFORE `self._evidence` is updated so a refused write
+        # cannot leave the in-memory prior divergent from the graph.
+        _reject_unrepresentable_number("alpha", alpha)
+        _reject_unrepresentable_number("beta", beta)
         self._evidence[claim_id] = (alpha, beta)
         # Persist to graph so baselines survive SDK restarts
         proj = self._get_proj()
