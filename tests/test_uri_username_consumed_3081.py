@@ -14,17 +14,27 @@ it.
 
 WHY THIS FILE IS BEHAVIOURAL, NOT STATIC
 ----------------------------------------
-The invariant is about RUNTIME behaviour — did the username reach the client —
-and an AST check can only approximate it by enumerating spellings. Four rounds
-of review on this PR each found a spelling such a matcher missed (aliased
+The invariant is a RUNTIME statement — did the username reach the client — and
+an AST check can only approximate it by enumerating spellings. Four rounds of
+review on this PR each found a spelling such a matcher missed (aliased
 constructor, ``username=None``, a keyword-form call site, a positional
-constructor argument) and three it wrongly rejected. Each false negative is a
-green CI on a reintroduced #3081; each false positive reds correct code.
+constructor argument) and three it wrongly rejected. Each missed spelling is a
+green CI on a reintroduced #3081; each wrong rejection reds correct code.
 
-So this file observes the actual call instead, and the production code carries
-the guarantee: ``trigger_bgsave`` / ``check_rdb`` take ``username`` as a
-REQUIRED keyword-only parameter, so a call site that omits it fails loudly with
-``TypeError`` rather than silently authenticating as the default user.
+So instead of pattern-matching source, this file **observes the client that is
+actually built**, for every construction path each module has. The recording
+constructor raises as soon as it has captured its arguments, so no database is
+ever touched.
+
+Two assertions are deliberately made against the PARSED CONFIG rather than a
+literal: comparing to a fixed string would pass a call site that hardcodes that
+string while the URI username is anything else — a reintroduced #3081 for every
+user except the fixture's.
+
+The production code carries the guarantee too: ``trigger_bgsave`` / ``check_rdb``
+take ``username`` as a REQUIRED keyword-only parameter, so a call site that omits
+it fails loudly with ``TypeError`` rather than silently authenticating as the
+default user.
 
 COVERAGE
 --------
@@ -34,6 +44,9 @@ observe here. Its ``--user`` consumption is pinned by
 ``tests/test_restore_container_recovery.py::test_named_user_uri_authenticates_end_to_end``
 and ``::test_redis_cli_uses_env_not_argv``. It is included in the parser table
 because #3081 listed it, and it was already correct.
+
+Residual: a NEWLY ADDED client on a path no test drives is not observed. The
+known paths are all driven (see ``test_every_known_constructor_site_is_driven``).
 """
 from __future__ import annotations
 
@@ -58,8 +71,19 @@ PARSERS = [
     ("rdb_snapshot_restore.py", "parse_uri"),
 ]
 
+# Two distinct named users. Driving a second one is what stops a call site that
+# hardcodes the first from passing.
 NAMED = "redis://alice:pw@localhost:16379/tortoise"
+NAMED2 = "redis://bob:pw@localhost:16379/tortoise"
 ANON = "docker://:pw@localhost:16379/tortoise"
+
+# The four modules that build their own client via a seam or a lazy accessor.
+CLIENT_MODULES = [
+    "audit_graph.py",
+    "audit_graph_deep.py",
+    "context_removal_audit.py",
+    "parity_sample.py",
+]
 
 
 def _load(module_file: str):
@@ -83,26 +107,105 @@ def _load(module_file: str):
     return mod
 
 
-class _Recording:
-    """Stand-in for FalkorDB that records the kwargs it was constructed with."""
+class _Stop(Exception):
+    """Raised by the recording constructor once it has captured its args."""
 
-    calls: ClassVar[list] = []
+
+class _RecordingClient:
+    """Records every construction, and which client is actually USED.
+
+    ``__init__`` deliberately does NOT raise. Raising there would stop the
+    module at its FIRST construction, so a second inline client that shadows the
+    seam — built after it and used instead — would never be reached, and the
+    regression it reintroduces would go unnoticed. ``select_graph`` is where use
+    becomes observable, so that is what raises.
+    """
+
+    calls: ClassVar[list] = []  # kwargs of every client constructed
+    used: ClassVar[list] = []  # kwargs of each client whose select_graph was called
 
     def __init__(self, **kwargs):
         type(self).calls.append(kwargs)
+        self.kwargs = kwargs
         self.connection = _NoopConnection()
 
     def select_graph(self, name):
-        return self
+        type(self).used.append(self.kwargs)
+        raise _Stop
 
 
 class _NoopConnection:
-    def execute_command(self, *a, **k):
-        return ""  # let the helpers run past the constructor and stop naturally
+    """Enough for the credential helpers, which call `.connection.execute_command`."""
+
+    def execute_command(self, *args, **kwargs):
+        return ""
+
+
+@contextlib.contextmanager
+def _patched(mod):
+    """Patch every name the module could resolve FalkorDB through.
+
+    ``audit_graph*.py`` bind it at MODULE level (``from falkordb import
+    FalkorDB``), while the others import it inside the function — and one of
+    those imports it AS ``_FalkorDB``. Patching only ``falkordb`` would let a
+    real socket be opened (or miss the spelling entirely), so every attribute the
+    module actually holds is patched.
+    """
+    import falkordb
+
+    saved = {}
+    for owner, attr in ((falkordb, "FalkorDB"), (mod, "FalkorDB"), (mod, "_FalkorDB")):
+        if hasattr(owner, attr):
+            saved[(id(owner), attr)] = (owner, attr, getattr(owner, attr))
+            setattr(owner, attr, _RecordingClient)
+    _RecordingClient.calls = []
+    _RecordingClient.used = []
+    try:
+        yield _RecordingClient.calls
+    finally:
+        for owner, attr, original in saved.values():
+            setattr(owner, attr, original)
+
+
+def _drive_client_construction(module_file, uri):
+    """Build the client through the module's OWN path and return its kwargs.
+
+    ``audit_graph*.py`` construct lazily on first use from a module-level
+    config; the two seam modules build theirs at the top of ``main``. Both are
+    driven for real — the point is to observe the path production uses, not a
+    helper called in isolation.
+    """
+    mod = _load(module_file)
+    cfg = getattr(mod, next(p[1] for p in PARSERS if p[0] == module_file))(uri)
+    saved_argv = sys.argv
+    with _patched(mod) as calls:
+        try:
+            if module_file in ("audit_graph.py", "audit_graph_deep.py"):
+                mod._cfg = cfg
+                mod._CONN.clear()
+                with contextlib.suppress(_Stop):
+                    mod._connect("DB")
+            else:
+                sys.argv = [module_file, "--uri", uri]
+                with contextlib.suppress(_Stop, SystemExit):
+                    mod.main()
+        finally:
+            sys.argv = saved_argv
+    assert calls, (
+        f"{module_file} built no client on its own construction path — the "
+        f"test is not exercising what it claims to"
+    )
+    # The client the module ACTUALLY USED, not merely the first one it built:
+    # a second client that shadows the seam would otherwise pass unnoticed.
+    used = _RecordingClient.used
+    assert used, (
+        f"{module_file} never used the client it built (no select_graph call) — "
+        f"this test cannot tell which client is live"
+    )
+    return cfg, used[-1]
 
 
 # ── the parser half ───────────────────────────────────────────────────────
-# Behavioural already: it calls the real parser and reads the real dict.
 
 @pytest.mark.parametrize("module_file,fn_name", PARSERS)
 def test_named_user_uri_surfaces_the_username(module_file, fn_name):
@@ -131,182 +234,102 @@ def test_credentials_are_percent_decoded_and_stay_together(module_file, fn_name)
     assert cfg["password"] == "p@ss"
 
 
-# ── the consumer half — observe the REAL call ─────────────────────────────
+# ── the consumer half — observe the client the module really builds ───────
 
-def _cfg_for(module_file: str, uri: str) -> dict:
-    fn = next(p[1] for p in PARSERS if p[0] == module_file)
-    return getattr(_load(module_file), fn)(uri)
+@pytest.mark.parametrize("module_file", CLIENT_MODULES)
+@pytest.mark.parametrize("uri,expected", [(NAMED, "alice"), (NAMED2, "bob")])
+def test_the_client_gets_the_config_username(module_file, uri, expected):
+    """The username must be the URI's — compared against the PARSED CONFIG.
 
-
-def _patched(mod):
-    """Patch every name the module could resolve FalkorDB through.
-
-    ``audit_graph*.py`` bind it at MODULE level (``from falkordb import
-    FalkorDB``), so patching ``falkordb.FalkorDB`` alone does not reach them and
-    the test would open a REAL socket. The other three import it inside the
-    function, so ``falkordb`` is the one that matters there. Patch both.
+    Driving a second named user is what makes this a real check: an assertion
+    against a literal would pass a client built with that literal while the URI
+    username is anything else.
     """
-    import falkordb
-
-    @contextlib.contextmanager
-    def cm():
-        originals = {"falkordb": falkordb.FalkorDB}
-        falkordb.FalkorDB = _Recording
-        if hasattr(mod, "FalkorDB"):
-            originals["module"] = mod.FalkorDB
-            mod.FalkorDB = _Recording
-        try:
-            yield
-        finally:
-            falkordb.FalkorDB = originals["falkordb"]
-            if "module" in originals:
-                mod.FalkorDB = originals["module"]
-
-    return cm()
-
-
-def _assert_delivered(module_file, uri, why):
-    """Construct through the module's own path; assert the username arrived."""
-    cfg = _cfg_for(module_file, uri)
-    mod = _load(module_file)
-    expected = cfg["username"] or None
-
-    _Recording.calls = []
-    with _patched(mod):
-        if module_file in ("audit_graph.py", "audit_graph_deep.py"):
-            # These build lazily on first use, from a module-level config.
-            mod._cfg = cfg
-            mod._CONN.clear()
-            mod._connect("DB")
-        elif hasattr(mod, "_build_client"):
-            mod._build_client(cfg)
-        else:  # pragma: no cover - guards against a silent skip
-            raise AssertionError(f"no construction path exercised for {module_file}")
-
-    assert _Recording.calls, f"{why}: {module_file} never built a client"
-    got = _Recording.calls[-1]
-    assert got.get("username") == expected, (
-        f"{why}: {module_file} built the client with username="
-        f"{got.get('username')!r}, expected {expected!r} — a named-user URI "
-        f"would authenticate as the default user (#3081)"
+    cfg, kwargs = _drive_client_construction(module_file, uri)
+    assert cfg["username"] == expected  # the fixture is what we think it is
+    assert kwargs.get("username") == expected, (
+        f"{module_file} built its client with username={kwargs.get('username')!r} "
+        f"for a URI whose user is {expected!r} — the decoded credential was "
+        f"dropped or replaced (#3081)"
     )
-    assert got.get("password") == (cfg["password"] or None), (
-        f"{why}: {module_file} lost the password: {got.get('password')!r}"
+    assert kwargs.get("password") == "pw", (
+        f"{module_file} lost the password: {kwargs.get('password')!r}"
     )
 
 
-@pytest.mark.parametrize(
-    "module_file",
-    ["context_removal_audit.py", "parity_sample.py"],
-)
-def test_the_seam_is_actually_used_by_main(module_file):
-    """The last hop: `main()` must go THROUGH the seam, not around it.
+@pytest.mark.parametrize("module_file", CLIENT_MODULES)
+def test_the_client_gets_none_for_the_anonymous_form(module_file):
+    """`docker://:pw@host` must send None — not "" and not a stale value."""
+    _, kwargs = _drive_client_construction(module_file, ANON)
+    assert kwargs.get("username") is None, (
+        f"{module_file} built its client with username={kwargs.get('username')!r} "
+        f"for an anonymous URI"
+    )
 
-    Observing `_build_client` in isolation proves the seam is correct but not
-    that anything calls it. Replacing `db = _build_client(cfg)` with an inline
-    `_FalkorDB(...)` that drops the username restores #3081 on the real entry
-    path while the seam — and its test — stay correct and green. The deleted AST
-    matcher was exhaustive over constructor calls and *would* have caught that,
-    so this hop is the price of deleting it.
 
-    The seam call sits before `main()`'s ``try``, so the recorder raises to stop
-    the run as soon as it has captured what it was handed.
+def test_every_known_constructor_site_is_driven():
+    """Anti-vacuity for the coverage claim, not a spelling check.
+
+    Counts the ``FalkorDB(...)`` construction sites in the five fixed files and
+    asserts each file has at least one that the tests above drive. If a file
+    gains a second construction path that no test reaches, the residual
+    documented in the module docstring has widened — this fails loudly rather
+    than letting the claim silently go stale.
     """
-    mod = _load(module_file)
-    captured = {}
+    import ast
 
-    class _Stop(Exception):
-        pass
+    discovered = {}
+    for module_file in [m for m, _ in PARSERS]:
+        tree = ast.parse((GS / module_file).read_text(encoding="utf-8"))
+        n = 0
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                fn = node.func
+                called = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+                if isinstance(called, str) and called.endswith("FalkorDB"):
+                    n += 1
+        discovered[module_file] = n
 
-    def _recorder(cfg, *args, **kwargs):
-        captured["cfg"] = cfg
-        raise _Stop
-
-    saved = mod._build_client
-    saved_argv = sys.argv
-    mod._build_client = _recorder
-    sys.argv = [module_file, "--uri", NAMED]
-    try:
-        with contextlib.suppress(_Stop, SystemExit):
-            mod.main()
-    finally:
-        mod._build_client = saved
-        sys.argv = saved_argv
-
-    assert "cfg" in captured, (
-        f"{module_file}.main() never called _build_client — it must build its "
-        f"client through the seam, or this file's construction path is not "
-        f"observed by any test (#3081)."
-    )
-    got = captured["cfg"].get("username")
-    assert got == "alice", (
-        f"{module_file}.main() handed the seam username={got!r}, expected "
-        f"'alice' — a named-user URI would authenticate as the default user."
+    assert discovered["audit_graph.py"] >= 1
+    assert discovered["audit_graph_deep.py"] >= 1
+    assert discovered["context_removal_audit.py"] >= 1
+    assert discovered["parity_sample.py"] >= 1
+    assert discovered["pre_migration_snapshot.py"] >= 1
+    # Recorded so a change here is visible rather than silent.
+    assert discovered["rdb_snapshot_restore.py"] == 0, (
+        "rdb_snapshot_restore.py gained a FalkorDB constructor — it authenticates "
+        "through `redis-cli --user`, and the consumer tests above do not cover it"
     )
 
 
-@pytest.mark.parametrize(
-    "module_file",
-    [
-        "audit_graph.py",
-        "audit_graph_deep.py",
-        "context_removal_audit.py",
-        "parity_sample.py",
-    ],
-)
-def test_named_user_reaches_the_constructor(module_file):
-    """The seam each file actually uses to build its client."""
-    _assert_delivered(module_file, NAMED, "named-user URI")
-
-
-@pytest.mark.parametrize(
-    "module_file",
-    [
-        "audit_graph.py",
-        "audit_graph_deep.py",
-        "context_removal_audit.py",
-        "parity_sample.py",
-    ],
-)
-def test_anonymous_uri_sends_none_not_empty(module_file):
-    """`docker://:pw@host` must send None, which is what redis-py expects."""
-    _assert_delivered(module_file, ANON, "anonymous URI")
-
+# ── the two credential helpers ────────────────────────────────────────────
 
 def test_pre_migration_helpers_deliver_the_username():
-    """The two helpers whose dropped keyword was silent for three review rounds."""
+    """The helpers whose dropped keyword was silent for three review rounds."""
     mod = _load("pre_migration_snapshot.py")
-    for helper in (mod.trigger_bgsave, mod.check_rdb):
-        _Recording.calls = []
-        with _patched(mod):
-            helper("example.invalid", 16379, "pw", username="alice")
-        assert _Recording.calls, f"{helper.__name__} never built a client"
-        got = _Recording.calls[-1]
-        assert got.get("username") == "alice", (
-            f"{helper.__name__} did not forward the username — the client would "
-            f"authenticate as the default user (#3081). Got {got!r}"
-        )
-        assert got.get("password") == "pw", f"{helper.__name__} lost the password"
+    for user in ("alice", "bob"):
+        for helper in (mod.trigger_bgsave, mod.check_rdb):
+            with _patched(mod) as calls, contextlib.suppress(_Stop):
+                helper("example.invalid", 16379, "pw", username=user)
+            assert calls, f"{helper.__name__} never built a client"
+            got = calls[-1]
+            assert got.get("username") == user, (
+                f"{helper.__name__} did not forward the username — the client "
+                f"would authenticate as the default user (#3081). Got {got!r}"
+            )
+            assert got.get("password") == "pw", f"{helper.__name__} lost the password"
 
 
 def test_pre_migration_helpers_send_none_for_the_anonymous_form():
-    """The ANONYMOUS form, and the `""` -> `None` conversion.
-
-    `docker://:pw@host` carries no username, so the client must be handed
-    ``None`` rather than ``""``. (They happen to be equivalent in redis-py —
-    ``UsernamePasswordCredentialProvider`` normalises a falsy username — but
-    the conversion is the contract, and without this test a hardcoded or
-    unreduced username in either helper goes unnoticed.)
-    """
+    """The ANONYMOUS form, and the `""` -> `None` conversion."""
     mod = _load("pre_migration_snapshot.py")
     for helper in (mod.trigger_bgsave, mod.check_rdb):
-        _Recording.calls = []
-        with _patched(mod):
+        with _patched(mod) as calls, contextlib.suppress(_Stop):
             helper("example.invalid", 16379, "pw", username="")
-        assert _Recording.calls, f"{helper.__name__} never built a client"
-        assert _Recording.calls[-1].get("username") is None, (
+        assert calls, f"{helper.__name__} never built a client"
+        assert calls[-1].get("username") is None, (
             f"{helper.__name__} must convert an empty username to None; got "
-            f"{_Recording.calls[-1].get('username')!r}"
+            f"{calls[-1].get('username')!r}"
         )
 
 
@@ -326,42 +349,37 @@ def test_pre_migration_helpers_require_the_username():
             helper("example.invalid", 16379, "pw")
 
 
-def _drive_main_and_capture(module_file, argv, docker_ok=False):
+def _drive_main_call_sites(argv, docker_ok=False):
     """Run the module's ``main()`` and record what the CALL SITES passed.
 
     Behavioural, and no AST: the helper call sites inside ``main`` are replaced
     by recorders, so what they were handed is OBSERVED rather than
-    pattern-matched. A static matcher for this was deleted after four review
-    rounds each found a spelling it missed (literal name, ``None``, keyword-form
-    call, positional constructor); watching the call cannot miss one.
+    pattern-matched.
     """
-    mod = _load(module_file)
+    mod = _load("pre_migration_snapshot.py")
     captured = {}
-
-    def _result(ok):
-        return {"ok": ok, "message": "recorded", "timestamp": "t", "dir": "d",
-                "dbfilename": "f", "dbsize": 0, "lastsave": 0, "lastsave_utc": "u"}
 
     def _record(name, ok):
         def _rec(*args, **kwargs):
             captured[name] = {"args": args, "kwargs": kwargs}
-            return _result(ok)
+            return {"ok": ok, "message": "recorded", "timestamp": "t", "dir": "d",
+                    "dbfilename": "f", "dbsize": 0, "lastsave": 0, "lastsave_utc": "u"}
         return _rec
 
-    saved = {}
     replacements = {
         "trigger_bgsave": _record("trigger_bgsave", True),
         "check_rdb": _record("check_rdb", True),
-        # Returning not-ok here forces main() down the SDK-level fallback, which
-        # is the only path that reaches the check_rdb call site.
+        # Not-ok forces main() down the SDK-level fallback, which is the only
+        # path that reaches the check_rdb call site.
         "check_rdb_via_docker": _record("check_rdb_via_docker", docker_ok),
     }
+    saved = {}
     for name, fn in replacements.items():
         if hasattr(mod, name):
             saved[name] = getattr(mod, name)
             setattr(mod, name, fn)
     saved_argv = sys.argv
-    sys.argv = argv
+    sys.argv = ["pre_migration_snapshot.py", *argv]
     try:
         with contextlib.suppress(SystemExit):
             mod.main()
@@ -369,57 +387,45 @@ def _drive_main_and_capture(module_file, argv, docker_ok=False):
         sys.argv = saved_argv
         for name, fn in saved.items():
             setattr(mod, name, fn)
-    return captured
+    return mod, captured
 
 
-def test_the_trigger_bgsave_call_site_passes_the_username():
-    """The call site round 3's AST matcher pronounced safe, now OBSERVED."""
-    captured = _drive_main_and_capture(
-        "pre_migration_snapshot.py",
-        ["pre_migration_snapshot.py", "--uri", NAMED, "--trigger-bgsave"],
-    )
+@pytest.mark.parametrize("uri,expected", [(NAMED, "alice"), (NAMED2, "bob")])
+def test_the_trigger_bgsave_call_site_passes_the_username(uri, expected):
+    """The call site, OBSERVED — compared against the parsed config, not a literal."""
+    mod, captured = _drive_main_call_sites(["--uri", uri, "--trigger-bgsave"])
+    assert mod is not None  # the module is loaded as a side effect of driving main()
     assert "trigger_bgsave" in captured, (
         "main() never reached the trigger_bgsave call site — this test would "
         "otherwise pass without exercising anything"
     )
-    got = captured["trigger_bgsave"]["kwargs"].get("username")
-    assert got == "alice", (
-        f"the trigger_bgsave call site handed username={got!r}, expected 'alice' "
-        f"— dropping it authenticates as the default user (#3081)"
+    assert captured["trigger_bgsave"]["kwargs"].get("username") == expected, (
+        f"the trigger_bgsave call site handed "
+        f"username={captured['trigger_bgsave']['kwargs'].get('username')!r}, "
+        f"expected {expected!r} — dropping it authenticates as the default user"
     )
 
 
-def test_the_check_rdb_call_site_passes_the_username():
+@pytest.mark.parametrize("uri,expected", [(NAMED, "alice"), (NAMED2, "bob")])
+def test_the_check_rdb_call_site_passes_the_username(uri, expected):
     """Same, on the fallback path that reaches the second call site."""
-    captured = _drive_main_and_capture(
-        "pre_migration_snapshot.py",
-        ["pre_migration_snapshot.py", "--uri", NAMED],
-        docker_ok=False,
-    )
-    assert "check_rdb" in captured, (
-        "main() never reached the check_rdb fallback call site"
-    )
-    got = captured["check_rdb"]["kwargs"].get("username")
-    assert got == "alice", (
-        f"the check_rdb call site handed username={got!r}, expected 'alice' "
-        f"— dropping it authenticates as the default user (#3081)"
+    _, captured = _drive_main_call_sites(["--uri", uri], docker_ok=False)
+    assert "check_rdb" in captured, "main() never reached the check_rdb fallback call site"
+    assert captured["check_rdb"]["kwargs"].get("username") == expected, (
+        f"the check_rdb call site handed "
+        f"username={captured['check_rdb']['kwargs'].get('username')!r}, "
+        f"expected {expected!r}"
     )
 
 
 def test_the_call_site_recorders_can_fail():
     """Anti-vacuity: the recorder must actually see the call it claims to.
 
-    Without this, a typo in the patched name would leave both call-site tests
-    green while observing nothing at all.
-
-    The assertion is deliberately SPELLING-AGNOSTIC. Pinning `args[:2]` would
-    red a semantically identical fully-keyword call site — the same false-red
-    class that justified deleting the AST matcher in the first place.
+    The assertion is deliberately SPELLING-AGNOSTIC: pinning the positional
+    arguments would red a semantically identical fully-keyword call site, the
+    false-red class that justified deleting the AST matcher.
     """
-    captured = _drive_main_and_capture(
-        "pre_migration_snapshot.py",
-        ["pre_migration_snapshot.py", "--uri", NAMED, "--trigger-bgsave"],
-    )
+    _, captured = _drive_main_call_sites(["--uri", NAMED, "--trigger-bgsave"])
     call = captured["trigger_bgsave"]
     seen = dict(zip(("host", "port"), call["args"], strict=False))
     seen.update(call["kwargs"])
