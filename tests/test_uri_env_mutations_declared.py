@@ -167,6 +167,12 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
                               r'monkeypatch\.setenv\s*\(\s*"TORTOISE_DB_URI"'],
     "test_directional_impl.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_directional_impl_fix.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
+    # #7108: module-level live probe (os.environ set + restore, DELIBERATE_URI —
+    # the probe is what asserts the docker lane is reachable at all) + a per-test
+    # fresh-URI fixture (raw os.environ set + save/restore) giving each test its
+    # OWN graph, so the operator-scope assertions cannot see a neighbour's
+    # residue. No monkeypatch site is declared, because this file has none.
+    "test_7108_operator_scope_predicate.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     # C3-1 #2567: docker-lane coverage-loop tests — module-level live probe
     # (set + restore) + per-test fresh-graph fixture (the test_entity_key_
     # expansion pattern; the monkeypatch.setenv is auto-restored).
