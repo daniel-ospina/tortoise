@@ -1749,7 +1749,7 @@ def get_current_usage(org_id: str) -> dict:
             "RETURN m.write_ops",
             params={"tid": org_id, "pstart": period.start_iso},
         ).result_set
-        if rows:
+        if rows and rows[0][0] is not None:
             ops_used = int(rows[0][0])
     except Exception as e:
         _logger.warning(
