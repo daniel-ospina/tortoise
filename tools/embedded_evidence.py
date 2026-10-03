@@ -1248,9 +1248,15 @@ def closes_issue(rec: dict) -> tuple[bool, list[str]]:
     # The ceiling is enforced as a PRODUCER gate in `_run_once`, but this function
     # is also the RE-EVALUATION surface for a persisted record, and `load.ceiling`
     # was persisted for exactly this comparison. Without the conjunct below the
-    # field is WRITE-ONLY: a record carrying a run that began above its own
-    # declared ceiling still closes. Measured on the live #3882 record — run 2
-    # begins at 67.998 against `ceiling` 60.0 and nothing here reported it. The
+    # field is WRITE-ONLY: the contravention is RECORDED but never NAMED in the
+    # reason list this function returns. Measured on the live #3882 record — run 2
+    # begins at 67.998 against `ceiling` 60.0 and the reason list omitted it. That
+    # record does NOT close either way (`closes_issue` returns
+    # ["non-green-bucket","no-rate-change"] at origin/main and
+    # ["non-green-bucket","load-above-ceiling","no-rate-change"] with the
+    # conjunct), so this conjunct is NOT what refuses it — the change is that the
+    # contravention is now NAMED rather than silently dropped, and no persisted
+    # record's verdict flips. The
     # issue's own defect was "the contravention is recorded and never asserted";
     # asserting it only in the producer leaves the consumer doing exactly that.
     #

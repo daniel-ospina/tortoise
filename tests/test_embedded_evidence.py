@@ -1512,21 +1512,37 @@ class TestRecordConstructionReadsTheCanonicalConstants:
         each call site passes was unpinned: substituting `float("inf")` at either
         the measurement loop or the pairing baseline disables the entire per-run
         gate while the record still declares `"ceiling": 60.0` — a record claiming
-        a gate that never ran. That substitution passed all 121 tests before this.
+        a gate that never ran.
+
+        BOTH call sites must be in the asserted population, which is the point of
+        this test and not an incidental detail. The first version passed
+        `pairing_ref=None`, so the `if args.pairing_ref:` branch never ran, the
+        pairing `_run_once` call site was never reached, and the "at EITHER call
+        site" claim above was FALSE for the baseline half: substituting
+        `float("inf")` at the pairing call site alone left this test green.
+        Asserting on the LABELS — not only on the ceiling values — is what makes
+        that half impossible to drop silently again.
         """
         files = list(ee.FAMILY_REPRODUCERS)
         runs = [
             self._run(files, 1, "unexpected-divergence"),
             self._run(files, 2, "unexpected-divergence"),
         ]
-        seen: list[float] = []
+        baseline = self._run(files, 1, "unexpected-divergence")
+        seen: list[tuple[float, str]] = []
 
         def _capture(_files, _measured_root, _run_root, run_id, _marker, _timeout,
-                     ceiling, _label):
-            seen.append(ceiling)
-            return runs[run_id - 1]
+                     ceiling, label):
+            seen.append((ceiling, label))
+            return runs[run_id - 1] if label == "measured" else baseline
 
         monkeypatch.setattr(ee, "_run_once", _capture)
+        # The pairing branch needs a ref, a strict-ancestor answer and a worktree;
+        # stub all three so the branch RUNS without touching real git. `added=False`
+        # keeps the `finally` from invoking a real `git worktree remove`.
+        monkeypatch.setattr(
+            ee, "_worktree_at", lambda ref, run_root, name: (run_root / name, False))
+        monkeypatch.setattr(ee, "_strict_ancestor", lambda *a, **k: True)
         monkeypatch.setattr(
             ee, "_manifest_receipt",
             lambda files, marker, out_dir: {
@@ -1538,9 +1554,12 @@ class TestRecordConstructionReadsTheCanonicalConstants:
         monkeypatch.setattr(ee, "_git", lambda *a, cwd=None: "0" * 40)
         monkeypatch.setattr(ee, "_porcelain_digest", lambda *a, **k: ("sha256:0", False))
         monkeypatch.setattr(ee, "_tool_version", lambda: "blob0")
-        rec = ee._build_record(self._args(load_ceiling=60.0))
-        assert seen, "the producer never called _run_once"
-        assert set(seen) == {60.0}, f"a call site passed something else: {seen}"
+        rec = ee._build_record(self._args(load_ceiling=60.0, pairing_ref="main"))
+        labels = {label for _ceiling, label in seen}
+        assert labels == {"measured", "pairing baseline"}, (
+            f"a call site was never exercised: {sorted(labels)}")
+        assert {ceiling for ceiling, _label in seen} == {60.0}, (
+            f"a call site passed a different ceiling: {seen}")
         assert rec["load"]["ceiling"] == 60.0
 
     def test_an_unusable_sample_does_not_also_claim_to_be_above_the_ceiling(
