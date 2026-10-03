@@ -1299,17 +1299,18 @@ def _write_capture_turns(
 ) -> int:
     """Write a capture's episodic turn stream — ONE batched statement (#3086).
 
-    Called from BOTH capture lanes: ``TortoiseSDK.capture_session`` (sync, no
-    loop to free) and hosted ``_capture_session_impl`` (off the event loop, on
+    The ONE turn store, called by ``_write_session_and_turns`` — which BOTH
+    capture lanes call: ``TortoiseSDK.capture_session`` (sync, no loop to free)
+    and hosted ``_capture_session_impl`` (off the event loop, on
     ``_CAPTURE_EXECUTOR``). It replaces the per-turn loop the two lanes each
     kept, so the turn store can no longer fork.
 
     ``turn_embs`` must be the batch from ``_capture_turn_embeddings`` over
-    ``_capture_turn_texts(windowed)``. The writer recomputes the stored text
-    from that same helper, so the vector can never describe different text
-    than the node holds (#4194); a length mismatch (unreachable from both
-    callers) drops the whole batch's vectors with an error log rather than
-    misaligning them.
+    ``_capture_turn_texts(windowed)``. The stored text is the caller-supplied
+    pair (``texts_and_counts``), never re-derived here, so the vector can never
+    describe different text than the node holds (#4194); a length mismatch
+    (unreachable from the caller) drops the whole batch's vectors with an error
+    log rather than misaligning them.
 
     ``texts_and_counts`` lets a caller that has ALREADY computed
     ``_capture_turn_texts_with_redactions(windowed)`` hand the result in rather
@@ -1328,10 +1329,11 @@ def _write_capture_turns(
     stale-turn sweep is bounded to ids at or beyond ``turn_offset +
     len(window)`` so it can never delete the prefix it is appending to.
 
-    The Session MUST already exist (both callers MERGE it immediately before)
-    — the statement both node- and edge-writes, and a missing Session would
-    leave nodes unwired. ``proj`` is the caller's projection (the SDK lane
-    passes ``self._get_proj()``); ``sdk`` supplies the journal seam.
+    The Session MUST already exist (``_write_session_and_turns`` MERGEs it
+    immediately before) — the statement both node- and edge-writes, and a
+    missing Session would leave nodes unwired. ``proj`` is the caller's
+    projection (the SDK lane passes ``self._get_proj()``); ``sdk`` supplies the
+    journal seam.
 
     A SHORTER re-capture DELETES the turns the previous capture left beyond
     the new window (#1920): the merge alone keeps them on the graph AND
@@ -1349,7 +1351,7 @@ def _write_capture_turns(
 
     #4911: RETURNS the number of credential-shaped spans redacted from this
     window, and writes the same number to the Session as ``capture_redactions``
-    in the batched statement (both lanes call this writer, so the count is
+    in the batched statement (both lanes reach this writer, so the count is
     recorded per session at the ONE chokepoint). The text itself was already
     scrubbed upstream in ``_capture_turn_texts`` — see that function for why
     the redaction cannot live here — and the count is taken from the SAME
@@ -1357,7 +1359,7 @@ def _write_capture_turns(
     extractor scrub over the same stored window. When the Source is handed the
     raw conversation these are different OBJECTS holding the same first
     ``_CAPTURE_TURN_CAP`` characters of each turn, which is all either of them
-    persists. Both callers surface it on their capture receipt.
+    persists. Both lanes surface it on their capture receipt.
     """
     if texts_and_counts is None:
         turn_texts, redaction_counts = _capture_turn_texts_with_redactions(windowed)
@@ -1367,7 +1369,7 @@ def _write_capture_turns(
     if not turn_texts:
         return redacted_total
     if len(turn_embs) != len(turn_texts):
-        # Unreachable from both callers (each derives `turn_embs` from this
+        # Unreachable from the caller (each lane derives `turn_embs` from this
         # same helper over this same `windowed`) and deliberately NOT a raise:
         # this helper runs after the caller's Session MERGE, so raising would
         # 500 a capture whose Session is already committed. Drop the whole

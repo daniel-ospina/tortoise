@@ -273,7 +273,7 @@ def test_non_int_parseable_suffix_does_not_break_capture(tmp_path):
     """A turn-shaped id whose suffix passes the SHAPE filter but is not
     ``int()``-parseable must not break the stale sweep (#3551 review).
 
-    ``str.isdigit()`` is strictly wider than ``int()`` — ``'²'.isdigit()`` is
+    ``str.isdigit()`` is not sufficient for ``int()`` — ``'²'.isdigit()`` is
     True yet ``int('²')`` raises — so an id shaped ``<sid>_t²`` used to be
     admitted by ``_capture_turn_ids`` and then blow up the sweep's parse AFTER
     the caller's :Session MERGE had committed, turning a benign cleanup into a
