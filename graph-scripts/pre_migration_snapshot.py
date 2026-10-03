@@ -61,8 +61,16 @@ def _parse_uri(uri: str) -> dict:
 # ── BGSAVE trigger ────────────────────────────────────────────────────
 
 def trigger_bgsave(host: str = "localhost", port: int = 16379,
-                   password: str = "", username: str = "") -> dict:
+                   password: str = "", *, username: str) -> dict:
     """Trigger FalkorDB BGSAVE and return status.
+
+    ``username`` is keyword-only and REQUIRED, with no default. It previously
+    defaulted to ``""``, which turned a dropped credential into a silent
+    authentication as the DEFAULT user — #3081 — and was the reason a static
+    AST guard was needed to police the call sites. With the default gone, any
+    call site that fails to pass it fails loudly with ``TypeError``, which
+    covers every spelling (positional, keyword, ``*args``, ``**kwargs``,
+    ``functools.partial``) rather than the ones a matcher happens to enumerate.
 
     Returns {"ok": bool, "message": str, "timestamp": str}
     """
@@ -81,8 +89,11 @@ def trigger_bgsave(host: str = "localhost", port: int = 16379,
 
 
 def check_rdb(host: str = "localhost", port: int = 16379,
-              password: str = "", username: str = "") -> dict:
+              password: str = "", *, username: str) -> dict:
     """Check FalkorDB persistence state via CONFIG GET + DBSIZE + LASTSAVE.
+
+    ``username`` is keyword-only and REQUIRED — see ``trigger_bgsave`` for why
+    the silent default was removed.
 
     Returns {"ok": bool, "dir": str, "dbfilename": str, "dbsize": int,
              "lastsave": int, "lastsave_utc": str}

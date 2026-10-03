@@ -1,45 +1,43 @@
-"""#3081 — the URI username must be CONSUMED, not merely decoded.
+"""#3081 — the decoded URI username must REACH THE CLIENT.
 
 `parse_uri_userinfo` (tortoise/config.py, #3039) is the single percent-decoding
-rule for URI credentials. Its contract is that BOTH fields come back. Six
+rule for URI credentials. Its contract is that BOTH fields come back. Five
 `graph-scripts` helpers bound the username to a discarded ``_username`` and
-returned only the password, so a named-user URI
-(``redis://user:pw@host``) reached ``FalkorDB(...)`` with no username and
-authenticated as the DEFAULT user — a misleading ``AuthenticationError`` /
-``NOPERM``.
+returned only the password, so a named-user URI (``redis://user:pw@host``)
+reached ``FalkorDB(...)`` with no username and authenticated as the DEFAULT
+user — a misleading ``AuthenticationError`` / ``NOPERM``.
 
 The pre-existing AST guard from PR #3047 proves no helper reads a RAW
 (undecoded) ``parsed.password``. It cannot see a *dropped* field, which is why
 the defect survived: decoding correctly and then discarding the result passes
-that guard. The class-level invariant this file pins is therefore about the
-CONSUMER, not the decoder:
+it.
 
-    every FalkorDB(...) construction that is handed a password must also be
-    handed the username.
+WHY THIS FILE IS BEHAVIOURAL, NOT STATIC
+----------------------------------------
+The invariant is about RUNTIME behaviour — did the username reach the client —
+and an AST check can only approximate it by enumerating spellings. Four rounds
+of review on this PR each found a spelling such a matcher missed (aliased
+constructor, ``username=None``, a keyword-form call site, a positional
+constructor argument) and three it wrongly rejected. Each false negative is a
+green CI on a reintroduced #3081; each false positive reds correct code.
 
-Both halves are checked, because either alone is insufficient: returning the
-username from the parser does nothing if the constructor ignores it, and
-passing ``cfg["username"]`` is a ``KeyError`` if the parser never produced it.
+So this file observes the actual call instead, and the production code carries
+the guarantee: ``trigger_bgsave`` / ``check_rdb`` take ``username`` as a
+REQUIRED keyword-only parameter, so a call site that omits it fails loudly with
+``TypeError`` rather than silently authenticating as the default user.
 
-`graph-scripts/rdb_snapshot_restore.py` is the reference implementation — it was
-already correct when #3081 was filed (its ``parse_uri`` returns ``username`` and
-its ``_redis_cli`` consumes it as ``--user``), and its tests in
-``tests/test_wiring_phase01.py`` already assert the named-user case. It is
-included here so the invariant covers all six helpers rather than the five that
-happened to be broken.
-
-COVERAGE NOTE — for ``rdb_snapshot_restore.py`` only the PARSER half applies.
-It builds no ``FalkorDB(...)`` client at all (it authenticates through
-``redis-cli --user``), so the two constructor checks match zero constructs there
-and are VACUOUS for that file, by construction rather than by accident. Its
-``--user`` consumption is pinned by
+COVERAGE
+--------
+``rdb_snapshot_restore.py`` builds no ``FalkorDB`` client at all — it
+authenticates through ``redis-cli --user`` — so it has no constructor to
+observe here. Its ``--user`` consumption is pinned by
 ``tests/test_restore_container_recovery.py::test_named_user_uri_authenticates_end_to_end``
-and ``::test_redis_cli_uses_env_not_argv``. Stated here because a check that
-matches nothing is not protecting the file it appears to cover.
+and ``::test_redis_cli_uses_env_not_argv``. It is included in the parser table
+because #3081 listed it, and it was already correct.
 """
 from __future__ import annotations
 
-import ast
+import contextlib
 import importlib.util
 import sys
 from pathlib import Path
@@ -50,7 +48,7 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 GS = REPO / "graph-scripts"
 
-# The six helpers #3081 names, with the function that parses the URI.
+# Every helper #3081 named, with the function that parses the URI.
 PARSERS = [
     ("audit_graph.py", "_parse_uri"),
     ("audit_graph_deep.py", "_parse_uri"),
@@ -60,15 +58,17 @@ PARSERS = [
     ("rdb_snapshot_restore.py", "parse_uri"),
 ]
 
+NAMED = "redis://alice:pw@localhost:16379/tortoise"
+ANON = "docker://:pw@localhost:16379/tortoise"
+
 
 def _load(module_file: str):
     """Import a graph-scripts module without executing its __main__ block.
 
-    ``graph-scripts/`` is put on ``sys.path`` first: when these modules are run
-    directly that directory is ``sys.path[0]``, so sibling imports such as
-    ``from connectivity_gate import ...`` (rdb_snapshot_restore.py) resolve.
-    Imported from a test they do not, so the test supplies what the script's
-    own run context supplies.
+    ``graph-scripts/`` is put on ``sys.path`` first: run directly, that
+    directory is ``sys.path[0]``, so sibling imports such as
+    ``from connectivity_gate import ...`` resolve. Imported from a test they do
+    not, so the test supplies what the script's own run context supplies.
     """
     path = GS / module_file
     name = "gs_" + path.stem
@@ -83,22 +83,31 @@ def _load(module_file: str):
     return mod
 
 
-def _bare_uri(module_file: str) -> str:
-    """A URI shaped like the one each helper defaults to (docker://, port 16379)."""
-    mod = _load(module_file)
-    fn = getattr(mod, next(p[1] for p in PARSERS if p[0] == module_file))
-    # Probe with the anonymous form to learn the default port, then build the
-    # named-user form against it. Keeps this test independent of each helper's
-    # hard-coded default (16379 vs 6379).
-    base = fn("docker://:pw@localhost:16379/tortoise")
-    return f"redis://alice:pw@localhost:{base['port']}/tortoise"
+class _Recording:
+    """Stand-in for FalkorDB that records the kwargs it was constructed with."""
 
+    calls: ClassVar[list] = []
+
+    def __init__(self, **kwargs):
+        type(self).calls.append(kwargs)
+        self.connection = _NoopConnection()
+
+    def select_graph(self, name):
+        return self
+
+
+class _NoopConnection:
+    def execute_command(self, *a, **k):
+        return ""  # let the helpers run past the constructor and stop naturally
+
+
+# ── the parser half ───────────────────────────────────────────────────────
+# Behavioural already: it calls the real parser and reads the real dict.
 
 @pytest.mark.parametrize("module_file,fn_name", PARSERS)
 def test_named_user_uri_surfaces_the_username(module_file, fn_name):
-    """The parser must RETURN the username — dropping it is the defect."""
-    fn = getattr(_load(module_file), fn_name)
-    cfg = fn(_bare_uri(module_file))
+    """The parser must RETURN the decoded username — dropping it is the defect."""
+    cfg = getattr(_load(module_file), fn_name)(NAMED)
     assert cfg["username"] == "alice", (
         f"{module_file}::{fn_name} dropped the decoded username; a named-user "
         f"URI authenticates as the default user (#3081)"
@@ -108,440 +117,234 @@ def test_named_user_uri_surfaces_the_username(module_file, fn_name):
 @pytest.mark.parametrize("module_file,fn_name", PARSERS)
 def test_anonymous_uri_yields_empty_username(module_file, fn_name):
     """`docker://:pw@host` carries an EMPTY username -> "" (client default)."""
-    fn = getattr(_load(module_file), fn_name)
-    cfg = fn(_bare_uri(module_file).replace("alice", ""))
+    cfg = getattr(_load(module_file), fn_name)(ANON)
     assert cfg["username"] == ""
 
 
-def _falkordb_names(tree: ast.AST) -> set[str]:
-    """Names bound to ``falkordb.FalkorDB`` by this module's imports.
-
-    ``context_removal_audit.py`` and ``parity_sample.py`` do
-    ``from falkordb import FalkorDB as _FalkorDB`` and call ``_FalkorDB(...)``.
-    Matching the literal spelling ``FalkorDB`` therefore skipped exactly those
-    two modules — the guard could not fail on them, so a future deletion of
-    ``username=`` there would have been a green-CI return of #3081. Resolve the
-    name from the import instead of guessing it from the call site.
-    """
-    names = {"FalkorDB"}  # a bare `FalkorDB(...)` needs no import to be matched
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and (node.module or "").endswith("falkordb"):
-            for alias in node.names:
-                if alias.name == "FalkorDB":
-                    names.add(alias.asname or alias.name)
-    return names
-
-
-def _password_only_constructors(tree: ast.AST) -> list[int]:
-    """Line numbers of FalkorDB(...) calls handed a password but no username."""
-    names = _falkordb_names(tree)
-    offenders = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        called = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-        if called not in names:
-            continue
-        kws = {k.arg for k in node.keywords}
-        if "password" in kws and "username" not in kws:
-            offenders.append(node.lineno)
-    return offenders
-
-
-def _unwrap_or_none(value: ast.expr) -> ast.expr:
-    """``X or None`` -> ``X``; anything else unchanged."""
-    if (
-        isinstance(value, ast.BoolOp)
-        and isinstance(value.op, ast.Or)
-        and len(value.values) == 2
-        and _is_none(value.values[1])
-    ):
-        return value.values[0]
-    return value
-
-
-def _is_none(node: ast.expr) -> bool:
-    return isinstance(node, ast.Constant) and node.value is None
-
-
-def _local_aliases(tree: ast.AST) -> dict:
-    """One level of local ``name = <expr>`` bindings, for provenance resolution.
-
-    ``u = cfg["username"]`` followed by ``username=u`` is a correct refactor of
-    the same credential. Judging provenance by the call's spelling alone would
-    red a clean PR for a semantically identical tidy-up, which is a worse
-    failure than missing a shape none of these files uses.
-    """
-    aliases: dict = {}
-    for node in ast.walk(tree):
-        targets = []
-        if isinstance(node, ast.Assign):
-            targets = node.targets
-            value = node.value
-        elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            targets = [node.target]
-            value = node.value
-        else:
-            continue
-        for t in targets:
-            if isinstance(t, ast.Name):
-                aliases.setdefault(t.id, value)
-    return aliases
-
-
-def _is_username_derived(value: ast.expr, aliases: dict | None = None) -> bool:
-    """True if ``value`` is the parsed URI username rather than a literal.
-
-    Accepts the shapes this codebase actually uses, plus a single level of local
-    aliasing:
-
-        username=<mapping>["username"] or None   # the decoded URI field
-        username=username or None                # the helper's own parameter
-        u = mapping["username"]; username=u      # the same value, via a local
-
-    The point is PROVENANCE, not presence: an earlier version of this guard
-    only checked that a ``username=`` keyword existed, so ``username=None`` —
-    which discards the decoded username and reintroduces #3081 exactly —
-    satisfied it.
-    """
-    for _ in range(4):  # bounded: a chain of aliases, not a resolver
-        value = _unwrap_or_none(value)
-        if (
-            isinstance(value, ast.Subscript)
-            and isinstance(value.slice, ast.Constant)
-            and value.slice.value == "username"
-        ):
-            return True
-        if isinstance(value, ast.Name):
-            if "username" in value.id:
-                return True
-            nxt = (aliases or {}).get(value.id)
-            if nxt is None:
-                return False
-            value = nxt
-            continue
-        return False
-    return False
-
-
-def _unprovenanced_usernames(tree: ast.AST) -> list[int]:
-    """FalkorDB(...) calls whose ``username=`` value is not the URI username."""
-    names = _falkordb_names(tree)
-    aliases = _local_aliases(tree)
-    offenders = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        called = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-        if called not in names:
-            continue
-        for kw in node.keywords:
-            if kw.arg == "username" and not _is_username_derived(kw.value, aliases):
-                offenders.append(node.lineno)
-    return offenders
-
-
-# Helpers that take credentials and build a client. Their own `username`
-# parameter DEFAULTS to `""`, so dropping the keyword at a call site is SILENT:
-# the client authenticates as the default user and no constructor-level check
-# can see it (the constructor still reads `username=username or None`).
-CREDENTIAL_HELPERS = ("trigger_bgsave", "check_rdb")
-
-
-def _call_sites_missing_username(tree: ast.AST) -> list[int]:
-    """Calls to a credential-taking helper with no username-derived argument.
-
-    This sits one level ABOVE the constructor check. A behavioural test that
-    calls the helper directly with ``username="alice"`` exercises the helper's
-    plumbing but not the call site that reads it out of the parsed config — so
-    deleting the keyword at the call site leaves such a test green. Observed:
-    both ``pre_migration_snapshot.py`` call sites dropped the keyword and the
-    suite stayed at 33 passed. This is the check that closes it.
-    """
-    offenders = []
-    aliases = _local_aliases(tree)
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        fn = node.func
-        called = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
-        if called not in CREDENTIAL_HELPERS:
-            continue
-        # "Was a credential supplied?" is the question — NOT "were the first
-        # three parameters positional?". These helpers take
-        # `(host, port, password, username)`, but a password may equally arrive
-        # as `password=`, giving fewer positional args. Gating on the positional
-        # COUNT skipped every keyword-form call site BEFORE the username was
-        # examined, so dropping `username=` at one of those reintroduced #3081
-        # with the whole suite green.
-        kws = {k.arg: k.value for k in node.keywords}
-        if len(node.args) < 3 and "password" not in kws:
-            continue
-        if "username" not in kws or not _is_username_derived(kws["username"], aliases):
-            offenders.append(node.lineno)
-    return offenders
-
-
-@pytest.mark.parametrize("module_file", [p[0] for p in PARSERS])
-def test_every_password_construction_also_passes_a_username(module_file):
-    """The consumer half. A dropped field is invisible to the #3047 AST guard.
-
-    Walks every ``FalkorDB(...)`` call in the module — including the aliased
-    ``_FalkorDB(...)`` spelling two of these modules use — and requires that any
-    call supplying ``password=`` also supplies ``username=``. This is the check
-    that would have caught the original five: each decoded the username (so the
-    #3047 guard was satisfied) and then built the client without it.
-    """
-    tree = ast.parse((GS / module_file).read_text(encoding="utf-8"))
-    offenders = _password_only_constructors(tree)
-    assert not offenders, (
-        f"{module_file}: FalkorDB(...) at line(s) {offenders} is handed a "
-        f"password but no username — a named-user URI would authenticate as the "
-        f"default user (#3081). Add `username=<cfg>[\"username\"] or None`."
+@pytest.mark.parametrize("module_file,fn_name", PARSERS)
+def test_credentials_are_percent_decoded_and_stay_together(module_file, fn_name):
+    """#3039's decode rule still holds, and both fields survive it."""
+    cfg = getattr(_load(module_file), fn_name)(
+        "redis://al%40ice:p%40ss@localhost:16379/tortoise"
     )
+    assert cfg["username"] == "al@ice"
+    assert cfg["password"] == "p@ss"
 
 
-def test_the_ast_guard_can_fail_on_both_spellings():
-    """A guard that cannot fail is not a guard.
+# ── the consumer half — observe the REAL call ─────────────────────────────
 
-    This canary drives the REAL matcher (``_password_only_constructors``), not a
-    copy of its logic, because a copy would stay green while the matcher was
-    broken. It covers both the literal and the aliased spelling — the alias case
-    is the one that silently passed for two of the six modules when this guard
-    first landed.
-    """
-    literal = (
-        "def f(cfg):\n"
-        "    return FalkorDB(host=cfg['h'], password=cfg['p'] or None)\n"
-    )
-    aliased = (
-        "from falkordb import FalkorDB as _FalkorDB\n"
-        "\n"
-        "def f(cfg):\n"
-        "    return _FalkorDB(host=cfg['h'], password=cfg['p'] or None)\n"
-    )
-    compliant = (
-        "from falkordb import FalkorDB as _FalkorDB\n"
-        "\n"
-        "def f(cfg):\n"
-        "    return _FalkorDB(host=cfg['h'], username=cfg['u'] or None,\n"
-        "                     password=cfg['p'] or None)\n"
-    )
-    assert _password_only_constructors(ast.parse(literal)) == [2]
-    assert _password_only_constructors(ast.parse(aliased)) == [4], (
-        "the matcher missed the ALIASED constructor (_FalkorDB) — the hole that "
-        "left context_removal_audit.py and parity_sample.py unguarded"
-    )
-    assert _password_only_constructors(ast.parse(compliant)) == []
+def _cfg_for(module_file: str, uri: str) -> dict:
+    fn = next(p[1] for p in PARSERS if p[0] == module_file)
+    return getattr(_load(module_file), fn)(uri)
 
 
-def test_real_modules_use_an_aliased_constructor():
-    """Anti-vacuity: the alias path above must actually be exercised by a real
-    module, otherwise this suite's alias coverage is theoretical."""
-    aliased = [
-        m
-        for m, _ in PARSERS
-        if "_FalkorDB" in _falkordb_names(
-            ast.parse((GS / m).read_text(encoding="utf-8"))
-        )
-    ]
-    assert aliased, (
-        "no module in PARSERS uses an aliased FalkorDB constructor — if that "
-        "changes, drop this test rather than let it pass vacuously"
-    )
+def _patched(mod):
+    """Patch every name the module could resolve FalkorDB through.
 
-
-@pytest.mark.parametrize("module_file", [p[0] for p in PARSERS])
-def test_the_username_value_is_the_uri_username_not_a_literal(module_file):
-    """Provenance, not presence.
-
-    ``username=None`` satisfies a presence-only check while discarding the
-    decoded username and reintroducing #3081 — so assert the value is derived
-    from the parsed URI (or the helper's own parameter), never a literal.
-    """
-    tree = ast.parse((GS / module_file).read_text(encoding="utf-8"))
-    offenders = _unprovenanced_usernames(tree)
-    assert not offenders, (
-        f"{module_file}: FalkorDB(...) at line(s) {offenders} passes a username "
-        f"that is not the parsed URI username (e.g. a literal or None) — that "
-        f"discards the decoded credential and reintroduces #3081."
-    )
-
-
-def test_the_provenance_check_can_fail():
-    """The provenance check must reject the shapes that reintroduce #3081."""
-    good = (
-        "def f(cfg):\n"
-        "    return FalkorDB(host=cfg['h'], username=cfg['username'] or None,\n"
-        "                     password=cfg['p'] or None)\n"
-    )
-    from_param = (
-        "def f(host, password, username):\n"
-        "    return FalkorDB(host=host, username=username or None,\n"
-        "                     password=password or None)\n"
-    )
-    none_literal = (
-        "def f(cfg):\n"
-        "    return FalkorDB(host=cfg['h'], username=None,\n"
-        "                     password=cfg['p'] or None)\n"
-    )
-    hardcoded = (
-        "def f(cfg):\n"
-        "    return FalkorDB(host=cfg['h'], username='admin',\n"
-        "                     password=cfg['p'] or None)\n"
-    )
-    assert _unprovenanced_usernames(ast.parse(good)) == []
-    assert _unprovenanced_usernames(ast.parse(from_param)) == []
-    assert _unprovenanced_usernames(ast.parse(none_literal)) == [2], (
-        "username=None discards the decoded username and must be rejected"
-    )
-    assert _unprovenanced_usernames(ast.parse(hardcoded)) == [2]
-    # A semantically identical refactor via a local must NOT be a false
-    # positive — reddening a clean PR is the opposite failure and just as real.
-    via_local = (
-        "def f(cfg):\n"
-        "    u = cfg['username']\n"
-        "    return FalkorDB(host=cfg['h'], username=u or None,\n"
-        "                     password=cfg['p'] or None)\n"
-    )
-    assert _unprovenanced_usernames(ast.parse(via_local)) == [], (
-        "a correct refactor through a local alias must not be flagged"
-    )
-
-
-def test_call_sites_forward_the_username_from_the_config():
-    """The call sites that read the username out of the parsed URI.
-
-    One level above the constructor: `trigger_bgsave`/`check_rdb` default
-    `username` to `""`, so a dropped keyword silently authenticates as the
-    default user while every constructor-level check stays green.
-    """
-    offenders = _call_sites_missing_username(
-        ast.parse((GS / "pre_migration_snapshot.py").read_text(encoding="utf-8"))
-    )
-    assert not offenders, (
-        f"pre_migration_snapshot.py: helper call(s) at line(s) {offenders} drop "
-        f"the username — the helper defaults it to \"\" and the client would "
-        f"authenticate as the default user (#3081)."
-    )
-
-
-def test_the_call_site_check_can_fail():
-    """This check must reject every spelling that can drop the username.
-
-    The first version gated on `len(node.args) < 3` — "were the first three
-    parameters positional?" rather than "was a credential supplied?". A call
-    supplying the password by KEYWORD has fewer than three positionals, so it
-    was skipped before the username was examined, and dropping `username=` at
-    such a call site reintroduced #3081 with the suite green. Each case below is
-    one of those spellings; a canary that only exercises the positional form
-    cannot fail for the shapes it misses.
-    """
-    cases = {
-        "three positional, username dropped": (
-            "def f(cfg):\n"
-            "    return trigger_bgsave(cfg['host'], cfg['port'], cfg['password'])\n"
-        ),
-        "password by KEYWORD, username dropped": (
-            "def f(cfg):\n"
-            "    return trigger_bgsave(cfg['host'], cfg['port'],\n"
-            "                          password=cfg['password'])\n"
-        ),
-        "fully keyword, username dropped": (
-            "def f(cfg):\n"
-            "    return trigger_bgsave(host=cfg['host'], port=cfg['port'],\n"
-            "                          password=cfg['password'])\n"
-        ),
-        "fully keyword on check_rdb, username dropped": (
-            "def f(cfg):\n"
-            "    return check_rdb(host=cfg['host'], port=cfg['port'],\n"
-            "                     password=cfg['password'])\n"
-        ),
-        "username present but a literal": (
-            "def f(cfg):\n"
-            "    return check_rdb(cfg['host'], cfg['port'], cfg['password'],\n"
-            "                     username='admin')\n"
-        ),
-    }
-    for label, src in cases.items():
-        assert _call_sites_missing_username(ast.parse(src)) == [2], (
-            f"the call-site check missed: {label}"
-        )
-
-    kept = (
-        "def f(cfg):\n"
-        "    return trigger_bgsave(cfg['host'], cfg['port'], cfg['password'],\n"
-        "                          username=cfg['username'])\n"
-    )
-    assert _call_sites_missing_username(ast.parse(kept)) == []
-
-    # A call with no credential at all supplies no username by construction and
-    # must not be flagged — otherwise the check would be a false-positive on
-    # every unrelated helper call.
-    no_creds = "def f(cfg):\n    return trigger_bgsave(host, port)\n"
-    assert _call_sites_missing_username(ast.parse(no_creds)) == []
-
-
-def test_the_reference_file_stays_in_the_invariant():
-    """`rdb_snapshot_restore.py` was already correct, so it needed no change —
-    but it must stay in PARSERS, or the invariant would silently cover only the
-    five files that happened to be broken and stop pinning the reference.
-    """
-    assert len(PARSERS) == 6  # five fix sites + the already-correct reference
-    assert ("rdb_snapshot_restore.py", "parse_uri") in PARSERS
-
-
-class _RecordingFalkorDB:
-    """Stand-in for FalkorDB that records the kwargs it was constructed with."""
-
-    calls: ClassVar[list] = []
-
-    def __init__(self, **kwargs):
-        type(self).calls.append(kwargs)
-        self.connection = _ExplodingConnection()
-
-
-class _ExplodingConnection:
-    def execute_command(self, *a, **k):
-        raise RuntimeError("stop after recording the constructor call")
-
-
-def test_pre_migration_helpers_forward_the_username(monkeypatch):
-    """BEHAVIOURAL: the plumbing that carries the username to the client.
-
-    ``pre_migration_snapshot``'s two helpers take ``username`` as a parameter
-    defaulting to ``""``. Omitting it at the call site is therefore SILENT: the
-    client authenticates as the default user. An AST check on the constructor
-    cannot see that (the constructor still reads ``username=username or None``)
-    and neither can the parser test, so a one-line deletion at either call site
-    would have left the whole suite green. This drives the real call path.
+    ``audit_graph*.py`` bind it at MODULE level (``from falkordb import
+    FalkorDB``), so patching ``falkordb.FalkorDB`` alone does not reach them and
+    the test would open a REAL socket. The other three import it inside the
+    function, so ``falkordb`` is the one that matters there. Patch both.
     """
     import falkordb
 
+    @contextlib.contextmanager
+    def cm():
+        originals = {"falkordb": falkordb.FalkorDB}
+        falkordb.FalkorDB = _Recording
+        if hasattr(mod, "FalkorDB"):
+            originals["module"] = mod.FalkorDB
+            mod.FalkorDB = _Recording
+        try:
+            yield
+        finally:
+            falkordb.FalkorDB = originals["falkordb"]
+            if "module" in originals:
+                mod.FalkorDB = originals["module"]
+
+    return cm()
+
+
+def _assert_delivered(module_file, uri, why):
+    """Construct through the module's own path; assert the username arrived."""
+    cfg = _cfg_for(module_file, uri)
+    mod = _load(module_file)
+    expected = cfg["username"] or None
+
+    _Recording.calls = []
+    with _patched(mod):
+        if module_file in ("audit_graph.py", "audit_graph_deep.py"):
+            # These build lazily on first use, from a module-level config.
+            mod._cfg = cfg
+            mod._CONN.clear()
+            mod._connect("DB")
+        elif hasattr(mod, "_build_client"):
+            mod._build_client(cfg)
+        else:  # pragma: no cover - guards against a silent skip
+            raise AssertionError(f"no construction path exercised for {module_file}")
+
+    assert _Recording.calls, f"{why}: {module_file} never built a client"
+    got = _Recording.calls[-1]
+    assert got.get("username") == expected, (
+        f"{why}: {module_file} built the client with username="
+        f"{got.get('username')!r}, expected {expected!r} — a named-user URI "
+        f"would authenticate as the default user (#3081)"
+    )
+    assert got.get("password") == (cfg["password"] or None), (
+        f"{why}: {module_file} lost the password: {got.get('password')!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "module_file",
+    [
+        "audit_graph.py",
+        "audit_graph_deep.py",
+        "context_removal_audit.py",
+        "parity_sample.py",
+    ],
+)
+def test_named_user_reaches_the_constructor(module_file):
+    """The seam each file actually uses to build its client."""
+    _assert_delivered(module_file, NAMED, "named-user URI")
+
+
+@pytest.mark.parametrize(
+    "module_file",
+    [
+        "audit_graph.py",
+        "audit_graph_deep.py",
+        "context_removal_audit.py",
+        "parity_sample.py",
+    ],
+)
+def test_anonymous_uri_sends_none_not_empty(module_file):
+    """`docker://:pw@host` must send None, which is what redis-py expects."""
+    _assert_delivered(module_file, ANON, "anonymous URI")
+
+
+def test_pre_migration_helpers_deliver_the_username():
+    """The two helpers whose dropped keyword was silent for three review rounds."""
     mod = _load("pre_migration_snapshot.py")
     for helper in (mod.trigger_bgsave, mod.check_rdb):
-        _RecordingFalkorDB.calls = []
-        monkeypatch.setattr(falkordb, "FalkorDB", _RecordingFalkorDB, raising=False)
-        helper("example.invalid", 16379, "pw", username="alice")
-        assert _RecordingFalkorDB.calls, f"{helper.__name__} never built a client"
-        got = _RecordingFalkorDB.calls[-1]
+        _Recording.calls = []
+        with _patched(mod):
+            helper("example.invalid", 16379, "pw", username="alice")
+        assert _Recording.calls, f"{helper.__name__} never built a client"
+        got = _Recording.calls[-1]
         assert got.get("username") == "alice", (
             f"{helper.__name__} did not forward the username — the client would "
             f"authenticate as the default user (#3081). Got {got!r}"
         )
-        assert got.get("password") == "pw", (
-            f"{helper.__name__} lost the password: {got!r}"
-        )
+        assert got.get("password") == "pw", f"{helper.__name__} lost the password"
 
 
-def test_pre_migration_helpers_send_no_username_for_the_anonymous_form(monkeypatch):
-    """The ``docker://:pw@host`` form must send ``None``, not ``""``."""
-    import falkordb
+def test_pre_migration_helpers_require_the_username():
+    """The root-cause fix: the silent default is gone.
 
+    ``username`` used to default to ``""``, so a call site that omitted it
+    authenticated as the DEFAULT user with no error — the failure this whole
+    file exists to catch, and the reason a static AST guard was needed to police
+    the call sites. As a required keyword-only parameter, every call site fails
+    loudly instead, which covers every spelling at once: positional, keyword,
+    ``*args``, ``**kwargs``, ``functools.partial``.
+    """
     mod = _load("pre_migration_snapshot.py")
-    _RecordingFalkorDB.calls = []
-    monkeypatch.setattr(falkordb, "FalkorDB", _RecordingFalkorDB, raising=False)
-    mod.trigger_bgsave("example.invalid", 16379, "pw")
-    assert _RecordingFalkorDB.calls[-1].get("username") is None
+    for helper in (mod.trigger_bgsave, mod.check_rdb):
+        with pytest.raises(TypeError, match="username"):
+            helper("example.invalid", 16379, "pw")
+
+
+def _drive_main_and_capture(module_file, argv, docker_ok=False):
+    """Run the module's ``main()`` and record what the CALL SITES passed.
+
+    Behavioural, and no AST: the helper call sites inside ``main`` are replaced
+    by recorders, so what they were handed is OBSERVED rather than
+    pattern-matched. A static matcher for this was deleted after four review
+    rounds each found a spelling it missed (literal name, ``None``, keyword-form
+    call, positional constructor); watching the call cannot miss one.
+    """
+    mod = _load(module_file)
+    captured = {}
+
+    def _result(ok):
+        return {"ok": ok, "message": "recorded", "timestamp": "t", "dir": "d",
+                "dbfilename": "f", "dbsize": 0, "lastsave": 0, "lastsave_utc": "u"}
+
+    def _record(name, ok):
+        def _rec(*args, **kwargs):
+            captured[name] = {"args": args, "kwargs": kwargs}
+            return _result(ok)
+        return _rec
+
+    saved = {}
+    replacements = {
+        "trigger_bgsave": _record("trigger_bgsave", True),
+        "check_rdb": _record("check_rdb", True),
+        # Returning not-ok here forces main() down the SDK-level fallback, which
+        # is the only path that reaches the check_rdb call site.
+        "check_rdb_via_docker": _record("check_rdb_via_docker", docker_ok),
+    }
+    for name, fn in replacements.items():
+        if hasattr(mod, name):
+            saved[name] = getattr(mod, name)
+            setattr(mod, name, fn)
+    saved_argv = sys.argv
+    sys.argv = argv
+    try:
+        with contextlib.suppress(SystemExit):
+            mod.main()
+    finally:
+        sys.argv = saved_argv
+        for name, fn in saved.items():
+            setattr(mod, name, fn)
+    return captured
+
+
+def test_the_trigger_bgsave_call_site_passes_the_username():
+    """The call site round 3's AST matcher pronounced safe, now OBSERVED."""
+    captured = _drive_main_and_capture(
+        "pre_migration_snapshot.py",
+        ["pre_migration_snapshot.py", "--uri", NAMED, "--trigger-bgsave"],
+    )
+    assert "trigger_bgsave" in captured, (
+        "main() never reached the trigger_bgsave call site — this test would "
+        "otherwise pass without exercising anything"
+    )
+    got = captured["trigger_bgsave"]["kwargs"].get("username")
+    assert got == "alice", (
+        f"the trigger_bgsave call site handed username={got!r}, expected 'alice' "
+        f"— dropping it authenticates as the default user (#3081)"
+    )
+
+
+def test_the_check_rdb_call_site_passes_the_username():
+    """Same, on the fallback path that reaches the second call site."""
+    captured = _drive_main_and_capture(
+        "pre_migration_snapshot.py",
+        ["pre_migration_snapshot.py", "--uri", NAMED],
+        docker_ok=False,
+    )
+    assert "check_rdb" in captured, (
+        "main() never reached the check_rdb fallback call site"
+    )
+    got = captured["check_rdb"]["kwargs"].get("username")
+    assert got == "alice", (
+        f"the check_rdb call site handed username={got!r}, expected 'alice' "
+        f"— dropping it authenticates as the default user (#3081)"
+    )
+
+
+def test_the_call_site_recorders_can_fail():
+    """Anti-vacuity: the recorder must actually see the call it claims to.
+
+    Without this, a typo in the patched name would leave both call-site tests
+    green while observing nothing at all.
+    """
+    captured = _drive_main_and_capture(
+        "pre_migration_snapshot.py",
+        ["pre_migration_snapshot.py", "--uri", NAMED, "--trigger-bgsave"],
+    )
+    assert captured["trigger_bgsave"]["args"][:2] == ("localhost", 16379), (
+        f"the recorder did not capture the real call: {captured!r}"
+    )
