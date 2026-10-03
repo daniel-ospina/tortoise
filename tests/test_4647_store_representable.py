@@ -103,9 +103,10 @@ class TestStillAllowsWhatStillFits:
     def test_int64_endpoints_and_ordinary_ints_pass_through(self, value):
         assert _sanitize_props({"v": value})["v"] == value
 
-    @pytest.mark.parametrize("value", [True, False])
-    def test_bools_are_not_treated_as_ints(self, value):
-        assert _sanitize_props({"flag": value})["flag"] is value
+    def test_bools_pass_through(self):
+        """0/1 are in range either way — this pins behaviour, not a branch."""
+        assert _sanitize_props({"flag": True})["flag"] is True
+        assert _sanitize_props({"flag": False})["flag"] is False
 
     @pytest.mark.parametrize(
         "value",
@@ -131,6 +132,100 @@ class TestStillAllowsWhatStillFits:
     def test_a_container_of_fine_values_still_passes(self):
         out = _sanitize_props({"arr": [1, 2, 3], "d": {"k": [4, 5]}})
         assert out["arr"] == [1, 2, 3] and out["d"] == {"k": [4, 5]}
+
+
+class TestIntegralDecimalTakesTheInt64Path:
+    """A ``Decimal`` with no fraction/exponent is an INT64 literal, not a double.
+
+    Cycle-2 review P1: the driver sends ``str(value)`` and Cypher parses a bare
+    integer literal as INT64 — a DIFFERENT domain. Checking only the double
+    round-trip was wrong in BOTH directions: ``Decimal(2**70)`` is exactly a
+    double yet the store clamps it; ``Decimal('9223372036854775807')`` is not
+    exactly a double yet the store holds it exactly. Verified live against
+    FalkorDB that ``create_point(..., v=Decimal(2**63))`` stored
+    9223372036854775807.
+    """
+
+    @pytest.mark.parametrize(
+        "value", [D(2**63), D(2**70), D(10**19), D("10000000000000000000")]
+    )
+    def test_integral_decimal_out_of_int64_is_refused(self, value):
+        with pytest.raises(ValueError) as exc:
+            _sanitize_props({"v": value})
+        assert "'v'" in str(exc.value), str(exc.value)
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            D("9223372036854775807"),   # INT64 max as a Decimal — held exactly
+            D("9007199254740993"),      # > 2**53, still held exactly as an int
+            D("1000000000000001"),
+            D(0),
+            D(-1),
+        ],
+    )
+    def test_integral_decimal_inside_int64_passes(self, value):
+        assert _sanitize_props({"v": value})["v"] == value
+
+    def test_a_fractional_decimal_still_takes_the_double_path(self):
+        with pytest.raises(ValueError):
+            _sanitize_props({"v": D("0.1")})
+        assert _sanitize_props({"v": D("1.5")})["v"] == D("1.5")
+
+    def test_signaling_nan_still_names_its_key(self):
+        """``float(Decimal('sNaN'))`` raises — the reason must survive (P3)."""
+        with pytest.raises(ValueError) as exc:
+            _sanitize_props({"v": D("sNaN")})
+        assert "'v'" in str(exc.value), str(exc.value)
+
+    def test_a_self_referential_container_is_bounded(self):
+        a: list = []
+        a.append(a)
+        try:
+            _sanitize_props({"k": a})
+        except RecursionError:  # pragma: no cover
+            pytest.fail("self-referential container raised RecursionError")
+
+
+class TestCreateSourceBypassIsClosed:
+    """``create_source`` uses ``_skip_sanitize=True``, so it must guard itself.
+
+    Cycle-2 review P2: deleting the guard call left the ENTIRE suite green — the
+    repair shipped untested. This test fails if the guard is removed, by
+    asserting the refusal happens BEFORE ``_create_entity`` is reached.
+    """
+
+    @pytest.mark.parametrize("value", [2**70, D(2**63)])
+    def test_an_unrepresentable_prop_is_refused_before_any_write(self, value):
+        from unittest import mock
+
+        from tortoise.sdk import TortoiseSDK
+
+        sdk = TortoiseSDK.__new__(TortoiseSDK)
+        with mock.patch.object(
+            TortoiseSDK, "_create_entity", autospec=True
+        ) as create:
+            with pytest.raises(ValueError) as exc:
+                TortoiseSDK.create_source(
+                    sdk, "https://example.test/p", "web", v=value
+                )
+            assert "'v'" in str(exc.value), str(exc.value)
+            assert not create.called, "the guard must fire BEFORE the write"
+
+
+class TestNumpyArrays:
+
+    def test_an_out_of_range_array_element_is_refused(self):
+        np = pytest.importorskip("numpy")
+        with pytest.raises(ValueError):
+            _sanitize_props({"k": np.array([2**70])})
+        with pytest.raises(ValueError):
+            _sanitize_props({"k": np.array([[1, 2], [2**70, 3]])})
+
+    def test_an_in_range_array_passes(self):
+        np = pytest.importorskip("numpy")
+        out = _sanitize_props({"k": np.array([1, 2, 3])})
+        assert list(out["k"]) == [1, 2, 3]
 
 
 class TestNumpyScalars:

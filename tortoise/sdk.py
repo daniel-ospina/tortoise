@@ -2111,8 +2111,23 @@ _RESERVED_ACTOR_PROPS = frozenset(
 _INT64_MIN = -(2 ** 63)
 _INT64_MAX = 2 ** 63 - 1
 
+#: Depth cap for the container recursion: a self-referential container would
+#: otherwise raise ``RecursionError`` instead of a bounded fail-closed error
+#: (code-review cycle 2, P3).
+_MAX_RECURSION_DEPTH = 12
 
-def _numeric_alteration_reason(key: str, value: object) -> str | None:
+try:  # numpy is a declared dependency, but not on every import path.
+    import numpy as _np
+
+    _HAS_NUMPY = True
+except Exception:  # pragma: no cover - environment dependent
+    _np = None
+    _HAS_NUMPY = False
+
+
+def _numeric_alteration_reason(
+    key: str, value: object, _depth: int = 0
+) -> str | None:
     """#4647: why the store would ALTER this value, or None if it would not.
 
     The test is EXACTNESS, not a digit count. A digit-count proxy is wrong in
@@ -2127,7 +2142,13 @@ def _numeric_alteration_reason(key: str, value: object) -> str | None:
     numpy integers are NOT Python ``int`` subclasses. ``bool`` is excluded
     explicitly: it is an ``int`` subclass and is always representable.
     """
+    if _depth > _MAX_RECURSION_DEPTH:
+        # Bounded, rather than ``RecursionError`` (cycle-2 P3). Props are shallow;
+        # anything past the cap is left to the existing boundaries.
+        return None
     if isinstance(value, bool):
+        # ``bool`` is an ``int`` subclass, but 0/1 are in range either way — this
+        # is documentation, not a load-bearing branch (cycle-2 P3).
         return None
     if isinstance(value, numbers.Integral):
         ivalue = int(value)
@@ -2143,29 +2164,66 @@ def _numeric_alteration_reason(key: str, value: object) -> str | None:
             )
         return None
     if isinstance(value, decimal.Decimal):
-        as_float = float(value)
-        if not math.isfinite(as_float):
+        if not value.is_finite():
             return (
                 f"{key!r}: Decimal {value} is not a finite number, so the "
                 "store cannot represent it faithfully. Store it as a string "
                 "if the full value is needed."
             )
-        if decimal.Decimal(as_float) != value:
+        # The driver sends ``str(value)``, and Cypher parses a bare integer
+        # literal as INT64 — a DIFFERENT domain from the double. An integral
+        # Decimal must therefore be range-checked, not round-tripped through a
+        # double (code-review cycle 2, P1): ``Decimal(2**70)`` is exactly
+        # representable as a double yet the store CLAMPS it, while
+        # ``Decimal('9223372036854775807')`` is NOT exactly a double yet the
+        # store holds it exactly. Checking one domain for both was wrong in
+        # both directions.
+        _text = str(value)
+        if "e" not in _text.lower() and "." not in _text:
+            _ivalue = int(value)
+            if not (_INT64_MIN <= _ivalue <= _INT64_MAX):
+                return (
+                    f"{key!r}: integer with {_ivalue.bit_length()} bits is "
+                    "outside the range FalkorDB can store "
+                    f"({_INT64_MIN}..{_INT64_MAX}) and would be SILENTLY "
+                    "clamped to a different number. Store it as a string if "
+                    "the full value is needed."
+                )
+            return None
+        try:
+            _as_float = float(value)
+        except (ValueError, OverflowError):
+            # e.g. Decimal('sNaN'): ``float`` raises before a reason can be
+            # built, which would lose the key and the remedy (cycle-2 P3).
+            return (
+                f"{key!r}: Decimal {value} cannot be represented as a finite "
+                "number by the store. Store it as a string if the full value "
+                "is needed."
+            )
+        if not math.isfinite(_as_float) or decimal.Decimal(_as_float) != value:
             return (
                 f"{key!r}: Decimal {value} is not exactly representable as a "
                 "double, so FalkorDB would store a DIFFERENT number. Store it "
                 "as a string if the full precision is needed."
             )
         return None
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, (list, tuple, set, frozenset)):
         for item in value:
-            reason = _numeric_alteration_reason(key, item)
+            reason = _numeric_alteration_reason(key, item, _depth + 1)
             if reason:
                 return reason
         return None
     if isinstance(value, dict):
         for item in value.values():
-            reason = _numeric_alteration_reason(key, item)
+            reason = _numeric_alteration_reason(key, item, _depth + 1)
+            if reason:
+                return reason
+        return None
+    if _HAS_NUMPY and isinstance(value, _np.ndarray):
+        # list/tuple/dict alone missed array-likes (cycle-2 P2):
+        # `np.array([2**70])` was admitted and stored as [9223372036854775807].
+        for item in value.ravel().tolist():
+            reason = _numeric_alteration_reason(key, item, _depth + 1)
             if reason:
                 return reason
         return None
