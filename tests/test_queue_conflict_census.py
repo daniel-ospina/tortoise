@@ -305,6 +305,83 @@ def test_a_read_only_path_constant_is_not_a_declared_output():
     assert "beta-sdk-surface.md" not in outputs
 
 
+def test_an_open_call_without_a_mode_is_a_read_and_not_a_declared_output():
+    """(a) FAILS if `open(x)` is treated as a write whatever its mode — the
+    regression that classified the hand-written `.github/workflows/python-ci.yml`
+    as a generated artifact.
+    (b) Reachable: `tools/ci_selection.py` line 1292 reads the workflow through
+    `yaml.safe_load(open(workflow_path))`, which is `open(x)` with the default
+    `'r'` mode. Nothing writes that file.
+    """
+    source = (
+        'def wf_issues(path, manifest):\n'
+        '    import yaml\n'
+        '    return yaml.safe_load(open(path))\n'
+        'M = ROOT / "config" / "ci-surfaces.yml"\n'
+        'M.write_text("x")\n'
+        'p = wf_issues(ROOT / ".github" / "workflows" / "python-ci.yml", M)\n'
+    )
+    outputs = q.declared_outputs(source)
+    assert "python-ci.yml" not in outputs
+    # the genuine write in the same source is still resolved — the fix narrows
+    # the open() arm, it does not disable output detection.
+    assert "ci-surfaces.yml" in outputs
+
+
+def test_an_open_call_with_a_read_mode_is_not_a_declared_output():
+    """(a) FAILS if an explicit `open(x, "r")` is read as a write.
+    (b) Reachable: an explicit read mode on a path that is never written.
+    """
+    source = (
+        'def wf_issues(path, manifest):\n'
+        '    return open(path, "r").read()\n'
+        'p = wf_issues(ROOT / ".github" / "workflows" / "python-ci.yml", M)\n'
+    )
+    assert "python-ci.yml" not in q.declared_outputs(source)
+
+
+def test_an_open_call_with_a_write_mode_is_still_a_declared_output():
+    """(a) FAILS if the fix narrows `open()` so far that a real write through
+    `open(x, "w")` stops being resolved — the failure mode this arm exists for.
+    (b) Reachable: a generator that writes its output through the builtin.
+    """
+    source = (
+        'def emit(path, manifest):\n'
+        '    with open(path, "w") as fh:\n'
+        '        fh.write("x")\n'
+        'emit(ROOT / "config" / "selection.json", M)\n'
+    )
+    assert "selection.json" in q.declared_outputs(source)
+
+
+def test_an_open_call_with_a_keyword_write_mode_is_a_declared_output():
+    """(a) FAILS if only the positional mode argument is inspected, so the
+    `mode=` spelling silently reads as a read.
+    (b) Reachable: `open(path, mode="a")` is the same write as `open(path, "a")`.
+    """
+    source = (
+        'def emit(path, manifest):\n'
+        '    open(path, mode="a").write("x")\n'
+        'emit(ROOT / "config" / "selection.json", M)\n'
+    )
+    assert "selection.json" in q.declared_outputs(source)
+
+
+def test_the_workflow_python_ci_is_not_a_declared_output_of_ci_selection():
+    """(a) FAILS on the real tree if `open()`-as-write survives: the census for
+    2026-10-03 reports `.github/workflows/python-ci.yml` as
+    'declared output of tools/ci_selection.py' and puts it in the top-N, which
+    would send a fixer to regenerate a hand-written workflow.
+    (b) Reachable: `tools/ci_selection.py` READS that workflow (line 2360 via
+    `WORKFLOW.read_text()`, line 1292 via `open(workflow_path)`) and never writes
+    it; the basename lookup is what joins the two.
+    """
+    text = (REPO / "tools" / "ci_selection.py").read_text()
+    outputs = q.declared_outputs(text)
+    assert "python-ci.yml" not in outputs
+    assert "ci-surfaces.yml" in outputs
+
+
 def test_declared_outputs_follows_a_parameter_into_the_helper_that_writes_it():
     """(a) FAILS if only direct writes count: `register()` never writes its own
     parameter, so `config/ci-surfaces.yml` would read as hand-written.
