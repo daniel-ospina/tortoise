@@ -66,7 +66,7 @@ Skipped — plan touches zero third-party dependencies (pure additions over comm
 - Test: `tests/longmem_eval/test_measure_temporal.py`
 
 **Step 1:** Failing tests per Acceptance (subset count; arm-table shape incl. the 6 arms + Indicator mapping + per-arm reach statements; classifier agreement over the materialized calibration corpus).
-**Step 2:** RED. **Step 3:** Implement scaffold (embedded-safe: census is a committed JSON; classifier is pure string logic; no DB in this task). **Step 4:** Green + `python3 tools/ci_selection.py --integrity` clean. **Step 5:** Commit: `feat(eval): #2578 measurement scaffold — census loader, 55-Q pin, pre-registration writer, refusal classifier (+ ci-surfaces)`.
+**Step 2:** RED. **Step 3:** Implement scaffold (embedded-safe: census is a committed JSON; classifier is pure string logic; no DB in this task). **Step 4:** Green + `uv run python tools/ci_selection.py --integrity` clean. **Step 5:** Commit: `feat(eval): #2578 measurement scaffold — census loader, 55-Q pin, pre-registration writer, refusal classifier (+ ci-surfaces)`.
 
 ## Task 3: Arm driver + taxonomy aggregation + gate output (measure_temporal.py, run.py untouched)
 

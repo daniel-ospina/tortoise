@@ -23,6 +23,16 @@ def _env(monkeypatch):
     monkeypatch.delenv("RESEND_FROM_EMAIL", raising=False)
     monkeypatch.delenv("BILLING_FROM_EMAIL", raising=False)
     notify._skip_logged.clear()
+    # #3631: billing reserves from email_notify's shared send budget — reset it
+    # (and the skip-incident day guard) via monkeypatch so nothing leaks out.
+    from tortoise import email_notify
+    monkeypatch.delenv("RESEND_SEND_BUDGET_DAILY", raising=False)
+    monkeypatch.delenv("RESEND_SEND_BUDGET_MONTHLY", raising=False)
+    monkeypatch.setattr(email_notify, "_send_counts_day", 0)
+    monkeypatch.setattr(email_notify, "_send_counts_month", 0)
+    monkeypatch.setattr(email_notify, "_send_counts_day_period", "")
+    monkeypatch.setattr(email_notify, "_send_counts_month_period", "")
+    monkeypatch.setattr(notify, "_incident_day", {})
     yield
 
 
@@ -259,3 +269,59 @@ def test_abuse_signup_velocity_kind_allowed_with_ip(monkeypatch):
     assert calls == [], "abuse must not post to Resend (#3639)"
     assert sent and "203.0.113.7" in sent["text"]  # IP renders in Telegram
     assert "abuse_signup_velocity" in sent["text"]
+
+
+def test_billing_email_skipped_when_shared_budget_exhausted(monkeypatch, caplog):
+    """#3631: billing shares the Resend account with transactional email, so it
+    reserves from the SAME budget — budget 0 hard-stops it (it used to bypass
+    the guard entirely, so a billing storm could starve invites)."""
+    monkeypatch.setenv("RESEND_SEND_BUDGET_DAILY", "0")
+    monkeypatch.setattr(
+        notify.httpx, "post",
+        lambda url, **kw: (_ for _ in ()).throw(AssertionError("no send")))
+    with caplog.at_level(logging.WARNING):
+        notify.notify_billing_event("billing_upgrade", TEAM, {"tier": "pro"})
+    assert any("SKIPPED" in r.message and "budget" in r.message
+               for r in caplog.records)
+
+
+def test_billing_budget_skip_files_a_deduped_incident(monkeypatch, caplog):
+    """#3631: a budget-skipped billing leg is ops-visible on the same deduped
+    incident the provider-failure path uses, and it is blocked BEFORE any
+    provider call — the webhook has already claimed its idempotency marker, so
+    the alert can never re-fire. Asserting no POST makes this revert-sensitive
+    (pre-fix the provider-failure path filed the incident instead)."""
+    filed, _pushed = _install_alert_store(monkeypatch)
+    monkeypatch.setenv("RESEND_SEND_BUDGET_DAILY", "0")
+    posted: list[str] = []
+    monkeypatch.setattr(
+        notify.httpx, "post",
+        lambda url, **kw: posted.append(url))
+    with caplog.at_level(logging.WARNING):
+        notify.notify_billing_event("billing_payment_failed", TEAM, DETAILS)
+        notify.notify_billing_event("billing_payment_failed", TEAM, DETAILS)
+    assert notify.RESEND_URL not in posted  # blocked before any Resend call
+    assert len(filed) == 1, f"expected one deduped incident, got {filed}"
+    assert notify._BILLING_SEND_FAILED_KIND in filed[0]
+
+
+def test_billing_email_refunds_its_slot_on_provider_failure(monkeypatch):
+    """#3631: a provider-rejected billing POST returns the slot to the shared
+    budget — no permanent leak that would silently starve later invites. The
+    counter is observed INSIDE the failing POST so a no-op skip (which would
+    also leave it at 0) cannot pass."""
+    from tortoise import email_notify
+
+    monkeypatch.setenv("RESEND_SEND_BUDGET_DAILY", "1")
+    reserved_at_post = []
+
+    def boom(url, **kwargs):
+        if url == notify.RESEND_URL:  # telegram_push shares httpx.post
+            reserved_at_post.append(email_notify._send_counts_day)
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(notify.httpx, "post", boom)
+    notify.notify_billing_event("billing_upgrade", TEAM, {"tier": "pro"})
+    assert reserved_at_post == [1]  # the send was attempted, and it was counted
+    assert email_notify._send_counts_day == 0    # ... then refunded on failure
+    assert email_notify._send_counts_month == 0

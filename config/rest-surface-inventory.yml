@@ -1,0 +1,416 @@
+# Declared inventory of the tenant REST surface (#3875).
+#
+# WHY THIS FILE EXISTS: the MCP tools and the SDK cannot be expanded without
+# human approval (#3863), but the REST surface is a THIRD surface that rule
+# never reached. `tortoise/hosted_api.py` imports neither TOOL_REGISTRY nor
+# HTTP_ALLOWED, so a new `@app.*` route expands the product's public API while
+# every #3863 check stays green. Measured: 7 routes were added between #3875
+# being filed and being picked up, and nothing failed.
+#
+# The CHECK (tests/test_rest_surface_inventory.py) enumerates `@app.*` from
+# `tortoise/hosted_api.py` and `tortoise/selfhost_api.py` and fails closed in BOTH
+# directions: a live route absent here, and an entry here with no live route.
+# It reads the SOURCE, so the check cannot drift from the code — only the
+# declarations below are hand-maintained.
+#
+# classes:
+#   tenant        — the public /v1 API. A new one MUST appear here.
+#   control-plane — DELIBERATELY outside registry scope; exempt, with a reason.
+#   protocol      — path fixed by an external contract (OAuth/RFC 8414/webhook).
+routes:
+  - method: GET
+    path: /.well-known/oauth-authorization-server
+    class: protocol
+  - method: GET
+    path: /.well-known/oauth-authorization-server/mcp
+    class: protocol
+  - method: GET
+    path: /.well-known/oauth-protected-resource
+    class: protocol
+  - method: GET
+    path: /.well-known/oauth-protected-resource/mcp
+    class: protocol
+  - method: GET
+    path: /backups
+    class: protocol
+  - method: POST
+    path: /backups
+    class: protocol
+  - method: POST
+    path: /backups/restore
+    class: protocol
+  - method: GET
+    path: /health
+    class: control-plane
+  - method: GET
+    path: /health/ready
+    class: protocol
+  - method: GET
+    path: /health/security
+    class: protocol
+  - method: POST
+    path: /internal/demo
+    class: control-plane
+  - method: POST
+    path: /internal/onboarding-email
+    class: control-plane
+  - method: POST
+    path: /internal/provision
+    class: control-plane
+  - method: POST
+    path: /internal/starter-seed
+    class: control-plane
+  - method: GET
+    path: /oauth/authorize
+    class: protocol
+  - method: POST
+    path: /oauth/consent
+    class: protocol
+  - method: GET
+    path: /oauth/consent/preview
+    class: protocol
+  - method: POST
+    path: /oauth/revoke
+    class: protocol
+  - method: POST
+    path: /oauth/token
+    class: protocol
+  - method: POST
+    path: /register
+    class: protocol
+  - method: GET
+    path: /v1/activation/scorecard
+    class: tenant
+  - method: POST
+    path: /v1/agent/recover
+    class: tenant
+  - method: POST
+    path: /v1/agent/signup
+    class: tenant
+  - method: POST
+    path: /v1/agent/token/revoke
+    class: tenant
+  - method: GET
+    path: /v1/backups
+    class: tenant
+  - method: POST
+    path: /v1/backups
+    class: tenant
+  - method: POST
+    path: /v1/backups/restore
+    class: tenant
+  - method: POST
+    path: /v1/billing/checkout
+    class: tenant
+  - method: POST
+    path: /v1/billing/checkout/new-org
+    class: tenant
+  - method: POST
+    path: /v1/billing/portal
+    class: tenant
+  - method: GET
+    path: /v1/capabilities
+    class: tenant
+  - method: POST
+    path: /v1/claim
+    class: tenant
+  - method: POST
+    path: /v1/claim/email
+    class: tenant
+  - method: GET
+    path: /v1/claim/status
+    class: tenant
+  - method: GET
+    path: /v1/context
+    class: tenant
+  - method: POST
+    path: /v1/context
+    class: tenant
+  - method: POST
+    path: /v1/context
+    class: tenant
+  - method: POST
+    path: /v1/demo
+    class: tenant
+  - method: POST
+    path: /v1/dream
+    class: tenant
+  - method: GET
+    path: /v1/dream/health
+    class: tenant
+  - method: GET
+    path: /v1/events
+    class: tenant
+  - method: GET
+    path: /v1/graphs
+    class: tenant
+  - method: POST
+    path: /v1/graphs
+    class: tenant
+  - method: GET
+    path: /v1/graphs/trash
+    class: tenant
+  - method: GET
+    path: /v1/graphs/trash/{graph_id}/points
+    class: tenant
+  - method: POST
+    path: /v1/graphs/trash/{graph_id}/restore
+    class: tenant
+  - method: DELETE
+    path: /v1/graphs/{graph_id}
+    class: tenant
+  - method: PATCH
+    path: /v1/graphs/{graph_id}
+    class: tenant
+  - method: POST
+    path: /v1/index/docs
+    class: tenant
+  - method: GET
+    path: /v1/index/docs/{job_id}
+    class: tenant
+  - method: POST
+    path: /v1/index/github
+    class: tenant
+  - method: POST
+    path: /v1/index/github/re-poll
+    class: tenant
+  - method: GET
+    path: /v1/index/github/{job_id}
+    class: tenant
+  - method: POST
+    path: /v1/internal/backups/acl-reconcile
+    class: control-plane
+  - method: POST
+    path: /v1/internal/backups/drill
+    class: control-plane
+  - method: POST
+    path: /v1/internal/backups/drill-scheduled
+    class: control-plane
+  - method: POST
+    path: /v1/internal/backups/purge
+    class: control-plane
+  - method: POST
+    path: /v1/internal/backups/re-baseline
+    class: control-plane
+  - method: POST
+    path: /v1/internal/backups/simulate-recover
+    class: control-plane
+  - method: POST
+    path: /v1/internal/backups/simulate-stale
+    class: control-plane
+  - method: GET
+    path: /v1/internal/backups/status
+    class: control-plane
+  - method: POST
+    path: /v1/internal/backups/sweep
+    class: control-plane
+  - method: POST
+    path: /v1/internal/backups/verify-lock
+    class: control-plane
+  - method: POST
+    path: /v1/internal/driver/heartbeat
+    class: control-plane
+  - method: POST
+    path: /v1/internal/reconcile
+    class: control-plane
+  - method: GET
+    path: /v1/invites
+    class: tenant
+  - method: POST
+    path: /v1/invites
+    class: tenant
+  - method: POST
+    path: /v1/invites/accept
+    class: tenant
+  - method: GET
+    path: /v1/invites/info
+    class: tenant
+  - method: POST
+    path: /v1/invites/otp
+    class: tenant
+  - method: GET
+    path: /v1/invites/pending
+    class: tenant
+  - method: DELETE
+    path: /v1/invites/pending/{invitation_id}
+    class: tenant
+  - method: POST
+    path: /v1/invites/pending/{invitation_id}/accept
+    class: tenant
+  - method: DELETE
+    path: /v1/invites/{invitation_id}
+    class: tenant
+  - method: POST
+    path: /v1/invites/{invitation_id}/expire
+    class: tenant
+  - method: POST
+    path: /v1/invites/{invitation_id}/resend
+    class: tenant
+  - method: GET
+    path: /v1/issue-insight
+    class: tenant
+  - method: POST
+    path: /v1/objects
+    class: tenant
+  - method: GET
+    path: /v1/onboarding/github/branches
+    class: tenant
+  - method: GET
+    path: /v1/onboarding/github/callback
+    class: tenant
+  - method: POST
+    path: /v1/onboarding/github/connect
+    class: tenant
+  - method: POST
+    path: /v1/onboarding/github/disconnect
+    class: tenant
+  - method: GET
+    path: /v1/onboarding/github/repos
+    class: tenant
+  - method: GET
+    path: /v1/onboarding/github/status
+    class: tenant
+  - method: POST
+    path: /v1/onboarding/seed
+    class: tenant
+  - method: POST
+    path: /v1/onboarding/session-recording
+    class: tenant
+  - method: GET
+    path: /v1/onboarding/state
+    class: tenant
+  - method: PATCH
+    path: /v1/onboarding/state
+    class: tenant
+  - method: POST
+    path: /v1/onboarding/state/checkpoint
+    class: tenant
+  - method: POST
+    path: /v1/onboarding/team
+    class: tenant
+  - method: GET
+    path: /v1/organizations
+    class: tenant
+  - method: POST
+    path: /v1/organizations
+    class: tenant
+  - method: DELETE
+    path: /v1/organizations/{org_id}
+    class: tenant
+  - method: GET
+    path: /v1/organizations/{org_id}/export
+    class: tenant
+  - method: POST
+    path: /v1/organizations/{org_id}/graphs
+    class: tenant
+  - method: POST
+    path: /v1/organizations/{org_id}/import
+    class: tenant
+  - method: GET
+    path: /v1/organizations/{org_id}/members
+    class: tenant
+  - method: DELETE
+    path: /v1/organizations/{org_id}/members/{user_id}
+    class: tenant
+  - method: PATCH
+    path: /v1/organizations/{org_id}/members/{user_id}
+    class: tenant
+  - method: GET
+    path: /v1/packs
+    class: tenant
+  - method: POST
+    path: /v1/packs/manifests
+    class: tenant
+  - method: GET
+    path: /v1/points
+    class: tenant
+  - method: POST
+    path: /v1/points
+    class: tenant
+  - method: GET
+    path: /v1/points/{point_id}
+    class: tenant
+  - method: POST
+    path: /v1/register
+    class: tenant
+  - method: GET
+    path: /v1/search
+    class: tenant
+  - method: POST
+    path: /v1/session/key
+    class: tenant
+  - method: POST
+    path: /v1/session/login
+    class: tenant
+  - method: GET
+    path: /v1/sessions
+    class: tenant
+  - method: POST
+    path: /v1/sessions
+    class: tenant
+  - method: POST
+    path: /v1/sessions/commit
+    class: tenant
+  - method: POST
+    path: /v1/sessions/install-probe
+    class: tenant
+  - method: DELETE
+    path: /v1/sessions/{session_id}
+    class: tenant
+  - method: GET
+    path: /v1/sessions/{session_id}
+    class: tenant
+  - method: POST
+    path: /v1/signup/email
+    class: tenant
+  - method: POST
+    path: /v1/subjects
+    class: tenant
+  - method: GET
+    path: /v1/team
+    class: tenant
+  - method: GET
+    path: /v1/team/alerts
+    class: tenant
+  - method: PATCH
+    path: /v1/team/dashboard-login
+    class: tenant
+  - method: GET
+    path: /v1/team/keys
+    class: tenant
+  - method: POST
+    path: /v1/team/keys
+    class: tenant
+  - method: DELETE
+    path: /v1/team/keys/{key_id}
+    class: tenant
+  - method: PATCH
+    path: /v1/team/keys/{key_id}
+    class: tenant
+  - method: POST
+    path: /v1/team/keys/{key_id}/rotate
+    class: tenant
+  - method: GET
+    path: /v1/topics/{topic}/summary
+    class: tenant
+  - method: GET
+    path: /v1/user/identity
+    class: tenant
+  - method: POST
+    path: /v1/user/identity/link-commit
+    class: tenant
+  - method: POST
+    path: /v1/user/identity/link-intent
+    class: tenant
+  - method: POST
+    path: /v1/user/identity/resend-confirmation
+    class: tenant
+  - method: POST
+    path: /v1/user/identity/unlink
+    class: tenant
+  - method: GET
+    path: /v1/version
+    class: tenant
+  - method: POST
+    path: /webhooks/stripe
+    class: protocol

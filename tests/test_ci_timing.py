@@ -467,6 +467,23 @@ def test_ci_timing_workflow_embeds_no_inline_python() -> None:
     assert "python3 tools/ci_timing.py --pick-run" in _find_step_body()
 
 
+def install_ci_python3(bin_dir: Path) -> None:
+    """Put a 3.12 `python3` on the step's PATH, the way the runner has one.
+
+    The `find` step invokes `python3 tools/ci_timing.py --pick-run` — correct in
+    CI, where `actions/setup-python@v5` pins `python3` to 3.12. Executing that
+    step LOCALLY without this shim runs it under the developer's ambient
+    interpreter, which since #5128 can be older and is (correctly) refused by
+    `tools/ci_timing.py`'s inline `>=3.12` guard — a local-only failure that says
+    nothing about the workflow. Shadow it with the interpreter running this
+    suite: the same stub-bin idiom as tests/test_ci_guard_invocation.py.
+    """
+    for name in ("python3", "python"):
+        target = bin_dir / name
+        if not target.exists():
+            target.symlink_to(sys.executable)
+
+
 def test_find_step_writes_run_id_to_github_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -482,6 +499,7 @@ def test_find_step_writes_run_id_to_github_output(
         {"id": 303, "conclusion": "success"},
         {"id": 404, "conclusion": "failure"},
     ], record=record)
+    install_ci_python3(bin_dir)
     gh_output = tmp_path / "github_output"
     gh_output.write_text("")
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
@@ -506,6 +524,7 @@ def test_find_step_warns_when_no_eligible_run(
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     make_fake_gh_runs(bin_dir, [{"id": 1, "conclusion": "cancelled"}])
+    install_ci_python3(bin_dir)
     gh_output = tmp_path / "github_output"
     gh_output.write_text("")
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
@@ -852,6 +871,41 @@ def test_integrity_problems_agrees_with_the_integrity_cli(
     assert cs.main() == 1
     assert any("duration-imbalanced" in p
                for p in ci_timing.integrity_problems(skewed))
+    # #6145: the duration skew above trips several checks at once, so a bare
+    # "non-empty" assertion cannot see a MISSING term. Pin the headroom term by
+    # name — the 90000s skew clamps a shard to the ceiling (1500 min -> 55m =
+    # 0.04x). The list is hand-maintained against `--integrity`, so an omission
+    # here would let the refresh WRITE a manifest the required
+    # `manifest-integrity` check immediately reds.
+    assert any("its emitted budget retains" in p
+               for p in ci_timing.integrity_problems(skewed)), (
+        "the refresh's pre-write gate must compose the watchdog-headroom check "
+        "(#6145) — otherwise the refresh writes what `--integrity` rejects")
+
+
+def test_integrity_problems_promotes_a_present_but_unparseable_stamp() -> None:
+    """#6243 review cycle 3 (L3): the refresh gate composes the SAME promotion
+    as `--integrity`, so the claimed parity is real.
+
+    A refreshed manifest is NOT guaranteed a parseable stamp:
+    `render_refreshed_manifest` writes the caller's `captured_at` verbatim via
+    `_set_captured_at` — it OVERWRITES any stamp the input carried rather than
+    preserving it, so nothing validates it — the `CI_TIMING_NOW` override can
+    set it to anything, and this file's own tests render with `"T"`. Gating on
+    `check`'s `red` alone therefore accepted exactly the manifests the gate
+    rejects. A present-but-unparseable stamp must be refused here too, while a
+    GENUINELY ABSENT one stays the one soft class.
+    """
+    before = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+    rendered, _ = ci_timing.render_refreshed_manifest(
+        before, {"test_bridge_table.py": 12.0}, "T")
+    # The DURATION subset is blind to it — which is why the full gate is what
+    # must catch it, and why this test exists rather than trusting the subset.
+    assert ci_timing.validate_refreshed_manifest(rendered) == []
+    problems = ci_timing.integrity_problems(rendered)
+    assert any("not a parseable timestamp" in p for p in problems), problems
+    # Absence is still the notice-only class: no stamp key, no problem.
+    assert ci_timing.integrity_problems(before) == []
 
 
 def test_ci_timing_docstring_no_longer_claims_it_never_gates_ci() -> None:
