@@ -94,9 +94,16 @@ def _hermetic_pool_and_legs(monkeypatch):
 
 @pytest.fixture
 def sdk():
-    db_path = os.path.join(
-        tempfile.mkdtemp(prefix="tortoise_prior_bound_4509_"), "test.db")
-    s = TortoiseSDK(db_path)
+    from tests._embedded import register_session_tmpdir
+
+    tmpdir = tempfile.mkdtemp(prefix="tortoise_prior_bound_4509_")
+    # #4096: the tree is registered for session-scoped reclamation rather than
+    # removed by a local finalizer — a local `rmtree` would run before the session
+    # teardown that keeps the tree as evidence, and could orphan a live
+    # redislite server (the same reason `conftest.py`'s shared fixture registers
+    # instead of deleting).
+    register_session_tmpdir(tmpdir)
+    s = TortoiseSDK(os.path.join(tmpdir, "test.db"))
     with contextlib.suppress(Exception):  # fresh store has nothing to clear
         s._get_proj().g.query("MATCH (n) DETACH DELETE n")
     try:
