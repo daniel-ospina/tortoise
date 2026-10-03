@@ -369,3 +369,50 @@ def test_create_endpoint_returns_no_credential_enc(client) -> None:
     assert "credential_enc" not in body
     assert any(x["source_type"] == "slack" and x["org_id"] == ORG_A
                for x in cp.tables["connectors"])
+
+
+# ── Boundary validation (#2642 re-review P2) ────────────────────────────────
+# The allowed value sets live in the migration's CHECK constraints, so without
+# a boundary validator a bad value reaches PostgREST, the seam returns None, and
+# the handler reports the caller's mistake as a 500.
+
+def test_create_rejects_an_unknown_source_type_at_the_boundary(client) -> None:
+    """Unknown source_type → 422, never a write, never a 500.
+
+    Observed RED shape (validator stripped, measured): the POST returns 200 and
+    the fake INSERTS the invalid row. The 500 is production's shape — the real
+    PostgREST CHECK rejects the value, the seam returns None, and the handler
+    reports the caller's mistake as ``500 Failed to create connector``. The fake
+    models no CHECK, so it cannot show that half; these assertions pin the half
+    it can: the boundary is what stops the write.
+    """
+    tc, cp = client
+    r = tc.post("/v1/connectors", json={"source_type": "gitlab"})
+    assert r.status_code == 422, r.text
+    assert not any(x["source_type"] == "gitlab"
+                   for x in cp.tables["connectors"])
+
+
+def test_patch_rejects_an_unknown_sync_status_at_the_boundary(client) -> None:
+    """Unknown sync_status → 422 and no write, same shape as source_type.
+
+    Observed RED shape by the same method (validator stripped): 200
+    ``{"status": "updated"}``, with the invalid value written to the row.
+    """
+    tc, cp = client
+    r = tc.patch(f"/v1/connectors/{CONN_A}", json={"sync_status": "retrying"})
+    assert r.status_code == 422, r.text
+    mine = next(x for x in cp.tables["connectors"] if x["id"] == CONN_A)
+    assert mine["sync_status"] == "idle"
+
+
+def test_list_connectors_501s_on_self_host(client, monkeypatch) -> None:
+    """Self-host list is 501 like its siblings, not a silently-empty [].
+
+    REDs on: restoring the ``:Connector`` graph-node read, which no endpoint in
+    this surface can ever populate, so it answered [] for every org.
+    """
+    tc, _ = client
+    monkeypatch.setattr(sc, "is_supabase_enabled", lambda: False)
+    r = tc.get("/v1/connectors")
+    assert r.status_code == 501, r.text

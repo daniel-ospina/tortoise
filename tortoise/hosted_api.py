@@ -26880,9 +26880,30 @@ def _clear_github_credentials(org_id: str) -> None:
 # extractors differ.
 
 
+# The allowed value sets mirror the CHECK constraints in the migration that
+# owns them (supabase/migrations/20260922000001_connectors.sql). Without a
+# boundary check a bad value reaches PostgREST, the seam returns None, and the
+# handler reports a CLIENT error as a 500 "Failed to create connector" — the
+# #2642 re-review P2. Validated at the model boundary (422), following the
+# SessionRequest.harness precedent above.
+_CONNECTOR_SOURCE_TYPES = frozenset({
+    "github", "slack", "linear", "google_drive", "confluence", "notion", "asana",
+})
+_CONNECTOR_SYNC_STATUSES = frozenset({"idle", "syncing", "error", "completed"})
+
+
 class ConnectorCreateRequest(BaseModel):
     source_type: str
     config: dict | None = None
+
+    @field_validator("source_type")
+    @classmethod
+    def _validate_source_type(cls, v):
+        if v not in _CONNECTOR_SOURCE_TYPES:
+            raise ValueError(
+                f"invalid source_type {v!r} — must be one of "
+                f"{sorted(_CONNECTOR_SOURCE_TYPES)}")
+        return v
 
 
 class ConnectorUpdateRequest(BaseModel):
@@ -26890,6 +26911,17 @@ class ConnectorUpdateRequest(BaseModel):
     sync_status: str | None = None
     sync_cursor: dict | None = None
     last_error: str | None = None
+
+    # Same 500-instead-of-4xx shape as source_type, on the same migration's
+    # CHECK (sync_status). Mirroring both keeps the twins from re-diverging.
+    @field_validator("sync_status")
+    @classmethod
+    def _validate_sync_status(cls, v):
+        if v is not None and v not in _CONNECTOR_SYNC_STATUSES:
+            raise ValueError(
+                f"invalid sync_status {v!r} — must be one of "
+                f"{sorted(_CONNECTOR_SYNC_STATUSES)}")
+        return v
 
 
 @app.get("/v1/connectors")
@@ -26907,13 +26939,12 @@ async def list_connectors(
     org_id = org["org_id"]
     if is_supabase_enabled():
         return {"connectors": _sb_conn_by_org(get_control_plane(), org_id)}
-    # Self-host: read from registry graph
-    sdk = _make_sdk(namespace="registry")
-    rows = sdk._get_registry().query(
-        "MATCH (c:Connector {org_id: $tid}) RETURN c ORDER BY c.created_at",
-        params={"tid": org_id},
-    ).result_set
-    return {"connectors": [dict(row[0]) for row in rows] if rows else []}
+    # Self-host has no connector store: the siblings (create/get/patch/delete)
+    # all 501 here. This branch used to read a `:Connector` GRAPH node, which
+    # no endpoint in this PR can ever write, so it could only ever answer [] —
+    # a silently-empty surface that reads as "no connectors" instead of
+    # "unsupported" (#2642 re-review P2).
+    raise HTTPException(status_code=501, detail="Self-host connectors not yet implemented")
 
 
 @app.post("/v1/connectors")
