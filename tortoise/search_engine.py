@@ -1640,6 +1640,7 @@ def expand_structural_hops(
         start = time.monotonic()
         cypher = (
             "MATCH (seed:Point) WHERE seed.id IN $seeds "
+            "WITH seed "  # #6976 — load-bearing: keeps the seed predicate bound
             f"MATCH path = (seed)-[:IMPL|NAND*1..{max_hops}]-(n:Point) "
             "WHERE n.id <> seed.id AND n.is_operator <> true"
             + ("" if excluded_statuses == ()
@@ -1980,6 +1981,44 @@ CONTESTED_VARIANCE_THRESHOLD = 0.04
 # kill per query bounds a hung FalkorDB's impact on search latency (#1353 review).
 _DECORATION_TIMEOUT_MS = 200
 
+#: ⛔ #6976 — FalkorDB 6.0.0 DROPS `MATCH (n:L) WHERE <predicate>` when another
+#: MATCH / OPTIONAL MATCH / CALL follows it in the same query. The predicate is
+#: property-GENERAL and not `.id`-specific — measured dropped for `.id`,
+#: `.pointKind` and `.status`. The plan then
+#: returns rows for OTHER points entirely (measured on the canonical instance —
+#: the 6.0.0 one on port 16379: with one requested id, 30 rows carrying 30
+#: distinct FOREIGN ids; a correctly-bound point with no neighbours returns 0
+#: rows, never another point's rows). Every reader below builds its result dict
+#: from the REQUESTED ids, so those rows are silently discarded and the read
+#: reports "nothing" — the mandated map read lying about a live graph.
+#:
+#: The fix is a load-bearing `WITH <var>` between the predicate and the next
+#: clause, or folding the predicate into the same MATCH as the expansion (both
+#: measured to restore the binding; the repo already used the barrier form at
+#: ep.py's `WITH DISTINCT op` and session_reinjection's "PLAN barrier" comment).
+#: The `#6976` comment on each query below marks a site where that `WITH` is
+#: what makes the predicate hold — do NOT delete it as redundant.
+#:
+#: ⚠️ The shape is ENGINE-VERSION-DEPENDENT: it drops on 6.0.0 and BINDS on the
+#: 4.20.4 test instance, so (a) the unit lane cannot reproduce the failure — the
+#: source-shape guard in tests/test_relationships_bounded.py is the only rail
+#: that catches a regression, and (b) a wire-level refusal at the handle seam
+#: (tortoise/cypher_guard.py, #3595) is deliberately NOT used here: refusing the
+#: shape outright would break the engines where it is correct.
+
+#: Full-fidelity relationship reads (``get_relationships`` / ``expand_relationships``)
+#: are documented as trivially cheap for a single point, so they get a generous
+#: budget — but they MUST have one. This call site previously passed no ``timeout``
+#: at all, which is how a single unbounded read could occupy the shared,
+#: effectively single-threaded instance (#6976).
+#:
+#: Honest scope of that measurement: "returns in well under a second" was measured
+#: on the FIXED shape. On the unbound shape the same query is graph-wide (the
+#: issue measured a 10,000-row result), so 5 s is a budget it exceeds — and a
+#: timeout lands in the SAME ``except`` as any other failure, returning the empty
+#: map. The budget bounds the stall; on its own it does not make the read truthful.
+_FULL_RELATIONSHIP_TIMEOUT_MS = 5000
+
 
 #: A value that is a CALENDAR DATE with NO time-of-day component, optionally
 #: followed by a timezone offset — the shape ``_created_sort_key`` must ANCHOR
@@ -2180,6 +2219,7 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
         cypher = (
             "MATCH (n:Point) "
             "WHERE n.id IN $ids "
+            "WITH n "  # #6976 — load-bearing: keeps the id predicate bound
             "OPTIONAL MATCH (n)<-[r:IMPL]-(:Point) "
             "WITH n, count(r) AS impl_count "
             "OPTIONAL MATCH (n)<-[r2:NAND]-(:Point) "
@@ -2260,6 +2300,13 @@ def get_relationships(graph, point_ids: list[str]) -> dict[str, list[dict]]:
     related_content, direction, operator_id}.
 
     Points with no operator edges get an empty list.
+
+    ⚠️ An ALL-EMPTY map can also mean the read did not happen: a query timeout
+    returns early after logging, and the same value comes back when the id
+    predicate is dropped by the engine and every returned row belongs to some
+    other point (the `foreign rows` warning, #6976). A caller therefore cannot
+    distinguish "this point has no relationships" from "the read failed" — if
+    that distinction matters at a call site, do not infer it from this value.
     """
     if not point_ids:
         return {}
@@ -2269,6 +2316,7 @@ def get_relationships(graph, point_ids: list[str]) -> dict[str, list[dict]]:
     try:
         cypher = (
             "MATCH (n:Point) WHERE n.id IN $ids "
+            "WITH n "  # #6976 — load-bearing: keeps the id predicate bound
             "MATCH (n)-[r:IMPL|NAND|hasPart]-(op:Point {is_operator:true}) "
             "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point) "
             "WHERE other.id <> n.id "
@@ -2280,8 +2328,13 @@ def get_relationships(graph, point_ids: list[str]) -> dict[str, list[dict]]:
             "  other.content AS related_content, "
             "  r.idx AS n_idx, r2.idx AS other_idx"
         )
-        rows = graph.query(cypher, params={"ids": point_ids}).result_set
+        rows = graph.query(
+            cypher,
+            params={"ids": point_ids},
+            timeout=_FULL_RELATIONSHIP_TIMEOUT_MS,
+        ).result_set
 
+        foreign = 0
         for row in rows:
             pid = row[0]
             mechanism = row[1] or "IMPL"
@@ -2312,6 +2365,17 @@ def get_relationships(graph, point_ids: list[str]) -> dict[str, list[dict]]:
             }
             if pid in rels:
                 rels[pid].append(rel_entry)
+            else:
+                foreign += 1
+        if foreign:
+            # Canary for #6976: the id predicate stopped binding, so the whole
+            # call is about to report "no relationships" for real ones. Loud on
+            # purpose — the silent version of this cost hours across lanes.
+            logger.warning(
+                "get_relationships: %d row(s) carried a point id outside the %d "
+                "requested id(s); the id predicate did not bind (#6976). "
+                "Returned relationships are incomplete.",
+                foreign, len(point_ids))
     except Exception:
         logger.warning("Relationship query failed", exc_info=True)
 
@@ -2356,18 +2420,26 @@ def get_relationships_bounded(
     op_created_at. related_content is intentionally ABSENT in the list view
     (D5 — full content via expand_relationships, D14).
 
+    ⚠️ Same caveat as get_relationships: an all-empty result can mean the read
+    FAILED rather than that the points have no relationships (#6976) — the
+    foreign-row guard logs, then returns this documented empty map.
+
     Contested coverage: contested peers are computed EXACTLY in Q2-crit — the
     in-Cypher variance on the coalesced persisted α/β (same formula as
     `_beta_variance`/TortoiseEP), so contested is cap-exempt with no sampling.
     NAND, terminal-status, mitigated and CORRECTS classes are always complete.
 
     get_relationships() is intentionally UNTOUCHED (D12) — topic_summarization
-    needs full NAND completeness for disputed-pair detection.
+    needs full NAND completeness for disputed-pair detection. (#6976 narrows this
+    deliberately: a ``timeout`` was added to it — a budget, not a semantic
+    change — because it previously had none and a single call could occupy the
+    shared instance. The NAND-completeness guarantee D12 protects is unchanged.)
     """
     if not point_ids:
         return {}
 
     rels: dict[str, list[dict]] = {pid: [] for pid in point_ids}
+    foreign = 0
 
     try:
         # Q1a: operator edges per point (bounded by point degree).
@@ -2375,6 +2447,7 @@ def get_relationships_bounded(
         # are not live epistemic structure).
         rows = graph.query(
             "MATCH (n:Point) WHERE n.id IN $ids "
+            "WITH n "  # #6976 — load-bearing: keeps the id predicate bound
             "MATCH (n)-[r:IMPL|NAND|hasPart]-(op:Point {is_operator:true}) "
             f"WHERE {_exclude_status_clause('op')} "
             "RETURN n.id, type(r) AS et, r.idx AS n_idx, op.id AS op_id, "
@@ -2387,6 +2460,9 @@ def get_relationships_bounded(
         op_ids: set[str] = set()
         for row in rows:
             pid = row[0]
+            if pid not in point_ops:
+                foreign += 1  # #6976 — the id predicate did not bind
+                continue
             point_ops[pid].append((row[1], row[2], row[3], row[4] or "IMPL", row[5], row[6]))
             op_ids.add(row[3])
 
@@ -2398,6 +2474,7 @@ def get_relationships_bounded(
         if point_ids:
             rows = graph.query(
                 "MATCH (n:Point) WHERE n.id IN $ids "
+                "WITH n "  # #6976 — load-bearing: keeps the id predicate bound
                 "OPTIONAL MATCH (n)-[r:CORRECTS]->(old:Point) "
                 "OPTIONAL MATCH (new:Point)-[r2:CORRECTS]->(n) "
                 "RETURN n.id, old.id, old.status, old.createdAt, "
@@ -2407,6 +2484,9 @@ def get_relationships_bounded(
             ).result_set
             for row in rows:
                 pid = row[0]
+                if pid not in corrects_out:
+                    foreign += 1  # #6976 — the id predicate did not bind
+                    continue
                 old_id, old_status, old_created = row[1], row[2], row[3]
                 new_id, new_status, new_created = row[4], row[5], row[6]
                 if old_id and old_id not in {o[0] for o in corrects_out[pid]}:
@@ -2421,6 +2501,7 @@ def get_relationships_bounded(
         if op_ids:
             rows = graph.query(
                 "MATCH (op:Point {is_operator:true}) WHERE op.id IN $op_ids "
+                "WITH op "  # #6976 — load-bearing: keeps the op predicate bound
                 "MATCH (op)-[:mitigated_by]->(m:Point) "
                 "RETURN op.id, m.id, m.status, m.createdAt, m.content",
                 params={"op_ids": list(op_ids)},
@@ -2442,6 +2523,7 @@ def get_relationships_bounded(
         if op_ids:
             rows = graph.query(
                 "MATCH (op:Point {is_operator:true}) WHERE op.id IN $op_ids "
+                "WITH op "  # #6976 — load-bearing: keeps the op predicate bound
                 "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point) "
                 "WHERE (other.is_operator = false OR other.is_operator IS NULL) "
                 "  AND NOT (op)-[:mitigated_by]->(other) "
@@ -2491,6 +2573,7 @@ def get_relationships_bounded(
         if expand_ops:
             rows = graph.query(
                 "MATCH (op:Point {is_operator:true}) WHERE op.id IN $op_ids "
+                "WITH op "  # #6976 — load-bearing: keeps the op predicate bound
                 "CALL { WITH op MATCH (op)-[r2:IMPL|hasPart]-(other:Point) "
                 "WHERE (other.is_operator = false OR other.is_operator IS NULL) "
                 "  AND NOT (op)-[:mitigated_by]->(other) "
@@ -2534,6 +2617,7 @@ def get_relationships_bounded(
         if op_ids:
             rows = graph.query(
                 "MATCH (op:Point {is_operator:true}) WHERE op.id IN $op_ids "
+                "WITH op "  # #6976 — load-bearing: keeps the op predicate bound
                 "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point) "
                 "WHERE (other.is_operator = false OR other.is_operator IS NULL) "
                 "RETURN op.id, type(r2) AS et, count(other)",
@@ -2675,6 +2759,17 @@ def get_relationships_bounded(
     except Exception:
         logger.warning("Bounded relationship query failed", exc_info=True)
 
+    if foreign:
+        # #6976 canary — the same defect as get_relationships, and the reader
+        # that used to raise KeyError on it (#6134). Fail CLOSED on detection:
+        # return the documented empty map, never a silently partial one.
+        logger.warning(
+            "get_relationships_bounded: %d row(s) carried an id outside the %d "
+            "requested id(s); the id predicate did not bind (#6976). Returning "
+            "the empty map rather than a partial one.",
+            foreign, len(point_ids))
+        rels = {pid: [] for pid in point_ids}
+
     return rels
 
 
@@ -2793,6 +2888,7 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
     try:
         rows = graph.query(
             "MATCH (n:Point) WHERE n.id IN $ids "
+            "WITH n "  # #6976 — load-bearing: keeps the id predicate bound
             "OPTIONAL MATCH (n)-[:aboutSubject]->(s:Subject) "
             # #1417: provenance hop via the point's eventId property (the
             # provenance surface) — NOT an aboutEvent edge, which is reserved

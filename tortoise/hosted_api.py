@@ -13148,7 +13148,9 @@ def _load_commit_graph_state(sdk: TortoiseSDK, payload: CommitPayload):  # noqa:
         mit_rows = proj.g.query(
             "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
             "MATCH (o)-[:IMPL {idx:0}]->(s) WHERE (s:Point OR s:Event) AND s.id = $src "
+            "WITH o, s "  # #6976 — load-bearing: keeps the id predicate bound
             "MATCH (o)-[:IMPL {idx:1}]->(d) WHERE (d:Point OR d:Event) AND d.id = $dst "
+            "WITH o, d "  # #6976 — load-bearing: keeps the id predicate bound
             "MATCH (o)-[:mitigated_by]->(m) RETURN count(m)",
             params={"src": t.src, "dst": t.dst},
         ).result_set

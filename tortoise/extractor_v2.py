@@ -2066,6 +2066,7 @@ def _enrich_point_priors(sdk, points: list[dict]) -> None:
     try:
         rows = proj.g.query(
             "MATCH (p:Point) WHERE p.id IN $ids "
+            "WITH p "  # #6976 — load-bearing: keeps the id predicate bound
             "OPTIONAL MATCH (p)-[:aboutObject]->(o:Object) "
             "RETURN p.id, collect(o.name), p.when, p.createdAt",
             params={"ids": ids}).result_set

@@ -401,6 +401,7 @@ def _assemble_dig_deeper(by_id: dict[str, dict]) -> None:
 # Direct: a bare statement→statement IMPL edge (the reification rule).
 _SUPPORT_OP_CYPHER = (
     "MATCH (n:Point) WHERE n.id IN $ids "
+    "WITH n "  # #6976 — load-bearing: keeps the id predicate bound
     "MATCH (sup:Point)-[r:INPUT]->(op:Point {is_operator:true})-[:IMPL]->(n) "
     f"WHERE r.idx = 0 AND sup.id <> n.id "
     f"AND (sup.is_operator = false OR sup.is_operator IS NULL) AND {_exclude_status_clause('sup')} "
@@ -410,6 +411,7 @@ _SUPPORT_OP_CYPHER = (
 )
 _SUPPORT_DIRECT_CYPHER = (
     "MATCH (n:Point) WHERE n.id IN $ids "
+    "WITH n "  # #6976 — load-bearing: keeps the id predicate bound
     "MATCH (sup:Point)-[r:IMPL]->(n) "
     f"WHERE sup.id <> n.id "
     f"AND (sup.is_operator = false OR sup.is_operator IS NULL) AND {_exclude_status_clause('sup')} "
@@ -426,6 +428,7 @@ _SUPPORT_DIRECT_CYPHER = (
 # counterargument's own content over the operator label).
 _CONFLICTS_CYPHER = (
     "MATCH (n:Point) WHERE n.id IN $ids "
+    "WITH n "  # #6976 — load-bearing: keeps the id predicate bound
     "MATCH (c:Point)-[r:NAND]->(n) "
     "OPTIONAL MATCH (src:Point)-[ri:INPUT]->(c) "
     "WITH n, c, r, src, ri "
@@ -467,6 +470,7 @@ _EP_CYPHER = (
 # never an alternative); mitigations ride the connecting operator.
 _TRADEOFFS_CYPHER = (
     "MATCH (n:Point) WHERE n.id IN $ids "
+    "WITH n "  # #6976 — load-bearing: keeps the id predicate bound
     "MATCH (n)-[ri:INPUT]->(op:Point {is_operator:true})-[r2:IMPL]->(alt:Point) "
     f"WHERE ri.idx = 0 AND r2.idx > 0 "
     f"AND (alt.is_operator = false OR alt.is_operator IS NULL) AND {_exclude_status_clause('alt')} "

@@ -614,3 +614,198 @@ def test_searchresult_to_dict_additive(sdk):
     assert d2["subject"]["name"] == "Team"
     # legacy keys still present
     assert d2["id"] == "p2" and d2["similarity"] == 0.01
+
+
+# ── #6976: the id predicate must survive a following clause ──────────────
+#
+# Measured on the canonical instance (FalkorDB 6.0.0): `MATCH (n:Point) WHERE
+# n.id IN $ids` followed by another MATCH / OPTIONAL MATCH / CALL is planned as
+# a WHOLE-GRAPH read — the rows come back carrying OTHER points' ids (30 rows,
+# 30 distinct foreign ids in a minimal probe). Every reader here builds its
+# result dict from the REQUESTED ids, so those rows were silently discarded and
+# a point with live relationships read as having none — `expand_relationships`
+# returned `[]` for a point that had two
+# (`sdk.py: expand_relationships` → `get_relationships(...).get(point_id, [])`).
+#
+# The fix is a load-bearing `WITH <var>` between the predicate and the next
+# clause (or folding the predicate into the same MATCH as the expansion).
+#
+# WHICH TEST ACTUALLY GUARDS THIS — measured by mutating the fix and re-running:
+#   * ``test_no_query_loses_its_id_predicate`` FAILS without the ``WITH``. It is
+#     the regression guard — for every site, once the CALL-body import is
+#     excluded (a `WITH` inside `CALL { … }` is not a barrier; see the test).
+#   * the two behavioural tests below PASS either way: ``get_relationships``
+#     pre-seeds its result dict from the requested ids and DROPS any row whose
+#     pid is unknown, so the leak is invisible to those assertions *by
+#     construction*. Do not "enlarge the fixture" hoping they will catch it.
+#   * the unit lane cannot reproduce the defect at all — the 4.20.4 test engine
+#     BINDS this shape while the 6.0.0 canonical instance drops it (see the
+#     module comment in tortoise/search_engine.py), which is exactly why the
+#     static guard is the rail.
+
+
+def test_point_with_relationships_does_not_read_as_empty(sdk):
+    a = _point(sdk, content="claim A content for 6976")
+    b = _point(sdk, content="claim B content for 6976")
+    sdk.create_operator("IMPL", a["id"], [b["id"]])
+
+    out = get_relationships(_graph(sdk), [a["id"]])
+    assert set(out) == {a["id"]}, "keys must be exactly the requested ids"
+    assert out[a["id"]], (
+        "a point with an operator edge read as having none — the id predicate "
+        "did not bind (#6976)"
+    )
+    assert b["id"] in {e["related_id"] for e in out[a["id"]]}
+
+
+def test_id_predicate_does_not_leak_other_points(sdk):
+    """Two independent pairs: asking about one must not return the other's."""
+    a = _point(sdk, content="claim A content for 6976")
+    b = _point(sdk, content="claim B content for 6976")
+    c = _point(sdk, content="claim C content for 6976")
+    d = _point(sdk, content="claim D content for 6976")
+    sdk.create_operator("IMPL", a["id"], [b["id"]])
+    sdk.create_operator("IMPL", c["id"], [d["id"]])
+
+    out = get_relationships(_graph(sdk), [a["id"]])
+    assert set(out) == {a["id"]}
+    related = {e["related_id"] for e in out[a["id"]]}
+    assert d["id"] not in related, (
+        "a relationship belonging to an unrequested point leaked into the "
+        "result — the id predicate did not bind (#6976)"
+    )
+
+
+def test_no_query_loses_its_id_predicate():
+    """#6976 — forbid the shape outright so a silent wrong read cannot return.
+
+    The scan is parser-based: it walks every string constant (implicit
+    concatenation is already folded into one), the string fragments inside a
+    list/tuple/set/dict literal, and `+`-joined expressions. What it cannot see
+    is what the parser cannot see — a query assembled at runtime from a
+    variable, or from pieces joined by a call whose arguments are not literals.
+    Prose in a docstring IS scanned (it is a string constant), so quoting the
+    bad shape in prose will be flagged; that is a false positive to fix at the
+    prose, not a hole.
+
+    Two deliberate boundaries:
+      * a `WITH` INSIDE a `CALL { … }` body is that subquery's ARGUMENT IMPORT,
+        not a barrier for the outer predicate. That falls out of the window
+        itself — the window ends at the `CALL` keyword — and a pinned case
+        holds it down.
+      * the predicate regex is property-GENERAL (`<var>.<prop> IN|= $<param>`),
+        case-insensitive, and tolerant of parentheses and backtick quoting —
+        because the engine drops the predicate for ANY property, not only `id`
+        (measured on 6.0.0 for `.pointKind` and `.status` as well).
+    """
+    import ast
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parent.parent / "tortoise"
+    pred = re.compile(
+        r"(?:WHERE|AND|OR)\s+\(?\s*`?([A-Za-z_][A-Za-z0-9_]*)`?\s*\.\s*[A-Za-z_]"
+        r"[A-Za-z0-9_]*`?\s*(?:IN|=)\s*\$",
+        re.IGNORECASE,
+    )
+    clause = re.compile(r"\b(OPTIONAL\s+MATCH|MATCH|CALL)\b", re.IGNORECASE)
+    with_any = re.compile(r"\bWITH\b", re.IGNORECASE)
+
+    def _strings(node):
+        """The query text a node contributes, or None if it contributes none.
+
+        Using the PARSER is what makes this correct: implicit concatenation
+        across lines is already folded into ONE Constant, a comment is not a
+        string at all, an assignment line is irrelevant, and an inline barrier
+        (`… WHERE n.id IN $ids WITH n `) is part of the same string. A
+        line-based scan got every one of those wrong (#7050 review P2).
+        """
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.JoinedStr):
+            parts: list[str] = []
+            for piece in node.values:
+                if isinstance(piece, ast.Constant) and isinstance(piece.value, str):
+                    parts.append(piece.value)
+                else:
+                    parts.append(" \x00 ")  # expression placeholder
+            return "".join(parts)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left, right = _strings(node.left), _strings(node.right)
+            if left is not None or right is not None:
+                return (left or " \x00 ") + (right or " \x00 ")
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            parts = [p for p in (_strings(e) for e in node.elts) if p is not None]
+            return " \x00 ".join(parts) if parts else None
+        if isinstance(node, ast.Dict):
+            parts = [p for p in (_strings(v) for v in node.values) if p is not None]
+            return " \x00 ".join(parts) if parts else None
+        if isinstance(node, (ast.Name, ast.Call, ast.Attribute, ast.Subscript)):
+            return " \x00 "  # a fragment only known at runtime
+        return None
+
+    def unbarred(source: str) -> list[str]:
+        """#6976 offenders in one module's source text."""
+        found: set[str] = set()
+        for node in ast.walk(ast.parse(source)):
+            text = _strings(node)
+            if text is None:
+                continue
+            for m in pred.finditer(text):
+                after = text[m.end():]
+                nxt = clause.search(after)
+                if not nxt:
+                    continue
+                # Everything between the predicate and the NEXT clause is the
+                # window. A `WITH` inside a `CALL { … }` body is that
+                # subquery's ARGUMENT IMPORT, not a barrier for the outer
+                # predicate — and it is already outside this window, because
+                # the window stops at the `CALL` keyword itself.
+                if with_any.search(after[: nxt.start()]):
+                    continue
+                found.add(f"{node.lineno} ({m.group(1)})")
+        return sorted(found)
+
+    # The five shapes a line-based scan got wrong (review P2). Pinned here so
+    # the holes cannot quietly reopen.
+    assignment = 'Q = ("MATCH (n:Point) WHERE n.id IN $ids " "MATCH (n)-[r:IMPL]-(o) RETURN n")'
+    assert unbarred(assignment) == ["1 (n)"], assignment
+    inline = 'Q = ("MATCH (n:Point) WHERE n.id IN $ids WITH n " "MATCH (n)-[r]-(o) RETURN n")'
+    assert unbarred(inline) == [], inline
+    long_block = (
+        'Q = (\n    "MATCH (n:Point) WHERE n.id IN $ids "\n    "WITH n "\n'
+        '    "MATCH (n)-[r]-(o) "\n    "MATCH (o)-[r2]-(p) "\n'
+        '    "WHERE p.id <> n.id "\n    "RETURN n"\n)'
+    )
+    assert unbarred(long_block) == [], long_block
+    mixed = 'Q = ("MATCH (n:Point) WHERE n.id IN $ids " + extra + " MATCH (n)-[r]-(o) RETURN n")'
+    assert unbarred(mixed) == ["1 (n)"], mixed
+    call_body = 'Q = ("MATCH (n:Point) WHERE n.id IN $ids " "CALL { WITH n MATCH (n)-[r]-(o) } RETURN n")'
+    assert unbarred(call_body) == ["1 (n)"], call_body
+    # Coverage the AST rewrite initially LOST against the line-scan it replaced
+    # (review P2): a query assembled from string fragments in a list/tuple/dict.
+    joined = 'Q = "\\n".join(["MATCH (n:Point) WHERE n.id IN $ids ", "MATCH (n)-[r]-(o) RETURN n"])'
+    assert unbarred(joined) == ["1 (n)"], joined
+    # The defect is property-GENERAL, not `.id`-only (measured on 6.0.0 for
+    # `.pointKind` and `.status` too) — so the rail must not be either.
+    other_prop = 'Q = ("MATCH (n:Point) WHERE n.pointKind IN $k " "MATCH (n)-[r]-(o) RETURN n")'
+    assert unbarred(other_prop) == ["1 (n)"], other_prop
+    # Tolerances: parentheses, uppercase variable, lowercase keyword.
+    tolerant = 'Q = ("MATCH (N:Point) WHERE (N.id IN $ids) match (N)-[r]-(o) RETURN N")'
+    assert unbarred(tolerant) == ["1 (N)"], tolerant
+    # Backtick-quoted variable.
+    backtick = 'Q = ("MATCH (`n`:Point) WHERE `n`.id IN $ids MATCH (`n`)-[r]-(o) RETURN `n`")'
+    assert unbarred(backtick) == ["1 (n)"], backtick
+
+    offenders: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        try:
+            for hit in unbarred(path.read_text(encoding="utf-8", errors="replace")):
+                offenders.append(f"{path.name}:{hit}")
+        except SyntaxError:
+            continue  # a syntax error is py_compile's to report, not this rail's
+    assert not offenders, (
+        "these queries lose their id predicate when a following clause expands "
+        "the match (#6976) — add a load-bearing `WITH <var>` between the "
+        "predicate and the next clause: " + ", ".join(offenders)
+    )

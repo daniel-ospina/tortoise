@@ -300,6 +300,7 @@ _CYPHER_POINT_META = f"MATCH (p:Point) WHERE p.id IN $ids RETURN {_prop_projecti
 # bare operator walk — the other endpoint is always the claim).
 _CYPHER_OPS = (
     "MATCH (n:Point) WHERE n.id = $id "
+    "WITH n "  # #6976 — load-bearing: keeps the id predicate bound
     "MATCH (n)-[r:IMPL|NAND]-(op:Point {is_operator:true}) "
     "MATCH (op)-[r2:IMPL|NAND]-(other:Point) "
     "WHERE other.id <> n.id AND other.is_operator = false "
@@ -311,6 +312,7 @@ _CYPHER_OPS = (
 # 1-hop aboutObject entity link (the hub itself is never a candidate).
 _CYPHER_ABOUT = (
     "MATCH (n:Point) WHERE n.id = $id "
+    "WITH n "  # #6976 — load-bearing: keeps the id predicate bound
     "MATCH (n)-[:aboutObject]->(o:Object) "
     "RETURN o.id AS hub_id, o.name AS hub_name"
 )
@@ -326,6 +328,7 @@ _CYPHER_ABOUT = (
 # a mega-hub cannot starve a co-hub of its rows.
 _CYPHER_SIBLINGS = (
     "MATCH (n:Point) WHERE n.id = $id "
+    "WITH n "  # #6976 — load-bearing: keeps the id predicate bound
     "MATCH (n)-[:aboutObject]->(o:Object) "
     "MATCH (o)<-[:aboutObject]-(sib:Point) "
     "WHERE sib.id <> n.id AND sib.is_operator = false "
@@ -339,6 +342,7 @@ _CYPHER_SIBLINGS = (
 # Whole-graph incident-edge count of a hub entity (not subgraph degree).
 _CYPHER_HUB_DEGREE = (
     "MATCH (o:Object) WHERE o.id IN $ids "
+    "WITH o "  # #6976 — load-bearing: keeps the id predicate bound
     "MATCH (o)-[r]-() "
     "RETURN o.id AS hub_id, count(r) AS hub_degree"
 )
@@ -347,12 +351,14 @@ _CYPHER_HUB_DEGREE = (
 # superseded_by property, so BOTH directions are walked.
 _CYPHER_CORRECTS_OUT = (
     "MATCH (n:Point) WHERE n.id = $id "
+    "WITH n "  # #6976 — load-bearing: keeps the id predicate bound
     "MATCH (n)-[:CORRECTS]->(other:Point) "
     "WHERE other.is_operator = false "
     f"RETURN {_prop_projection('other', 'other_')}"
 )
 _CYPHER_CORRECTS_IN = (
     "MATCH (n:Point) WHERE n.id = $id "
+    "WITH n "  # #6976 — load-bearing: keeps the id predicate bound
     "MATCH (other:Point)-[:CORRECTS]->(n) "
     "WHERE other.is_operator = false "
     f"RETURN {_prop_projection('other', 'other_')}"

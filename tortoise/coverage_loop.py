@@ -239,6 +239,7 @@ def facet_census(proj: Any, query: str, *,
     try:
         rows = proj.g.query(
             "MATCH (o:Object) WHERE o.id IN $ids "
+            "WITH o "  # #6976 — load-bearing: keeps the id predicate bound
             "OPTIONAL MATCH (o)<-[:aboutObject]-(p:Point) "
             "RETURN o.id, o.name, "
             "       collect(DISTINCT coalesce(p.session_id, '')), "

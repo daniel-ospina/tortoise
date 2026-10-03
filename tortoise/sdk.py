@@ -15960,6 +15960,7 @@ class TortoiseSDK:
             # multiply rows, and the engine's row order is unspecified).
             rows = proj.g.query(
                 "MATCH (n:Point) WHERE n.id IN $ids "
+                "WITH n "  # #6976 — load-bearing: keeps the id predicate bound
                 "OPTIONAL MATCH (ev:Event) WHERE ev.eventId = n.eventId "
                 "OPTIONAL MATCH (n)<-[:CONTAINS]-(s:Session) "
                 "OPTIONAL MATCH (t:Point) WHERE t.id = n.source_turn_id "
@@ -16887,6 +16888,7 @@ class TortoiseSDK:
                 _prov_cols = ", n.extractedFrom, n.createdAt" if _prov else ""
                 rows = graph.query(
                     "MATCH (n:Point) WHERE n.id IN $ids "
+                    "WITH n "  # #6976 — load-bearing: keeps the id predicate bound
                     "OPTIONAL MATCH (sess:Session)-[:CONTAINS]->(n) "
                     "RETURN n.id, n.content, n.pointKind, "
                     "       coalesce(n.has_answer, false), n.sessionId, "
@@ -17381,6 +17383,7 @@ class TortoiseSDK:
         try:
             rows = proj.g.query(
                 "MATCH (o:Object) WHERE o.id IN $ids "
+                "WITH o "  # #6976 — load-bearing: keeps the id predicate bound
                 "OPTIONAL MATCH (o)<-[:aboutObject]-(p:Point) "
                 "RETURN o.id, o.name, collect(coalesce(p.search_keys, ''))",
                 params={"ids": anchor_ids},
@@ -23755,6 +23758,7 @@ class TortoiseSDK:
         # non-Subject targets are out of contract.
         r = proj.g.query(
             "MATCH (s:Subject) WHERE s.id = $sid OR s.name = $sid "
+            "WITH s "  # #6976 — load-bearing: keeps the id predicate bound
             "MATCH (s)<-[:ownedBy]-(e) RETURN properties(e) LIMIT 100",
             params={"sid": subject_id},
         )
@@ -23952,11 +23956,13 @@ class TortoiseSDK:
         # Scan) then traverse outward; roles filters the source Subject p.
         members = proj.g.query(
             "MATCH (s:Subject) WHERE s.id = $sid OR s.name = $sid "
+            "WITH s "  # #6976 — load-bearing: keeps the id predicate bound
             "MATCH (p:Subject)-[:memberOf]->(s) RETURN properties(p)",
             params={"sid": subject_id},
         )
         roles = proj.g.query(
             "MATCH (p:Subject) WHERE p.id = $sid OR p.name = $sid "
+            "WITH p "  # #6976 — load-bearing: keeps the id predicate bound
             "MATCH (p)-[:holdsRole]->(r:Subject) RETURN properties(r)",
             params={"sid": subject_id},
         )

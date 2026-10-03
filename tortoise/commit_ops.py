@@ -383,6 +383,7 @@ def apply_payload_operators(proj, sdk, operators: list, *,
         _dup = proj.g.query(
             f"MATCH (o:Point {{is_operator:true, op_type:$t}})-"
             f"[:{_edge_type} {{idx:0}}]->(s) WHERE s.id = $src "
+            "WITH o, s "  # #6976 — load-bearing: keeps the id predicate bound
             f"MATCH (o)-[:{_edge_type} {{idx:1}}]->(d) WHERE d.id = $dst "
             "RETURN count(*) LIMIT 1",
             params={"t": op_type, "src": src, "dst": dst}).result_set
@@ -420,6 +421,7 @@ def apply_payload_operators(proj, sdk, operators: list, *,
             rows = proj.g.query(
                 "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
                 "MATCH (o)-[:IMPL {idx:0}]->(s) WHERE (s:Point OR s:Event) AND s.id = $src "
+                "WITH o, s "  # #6976 — load-bearing: keeps the id predicate bound
                 "MATCH (o)-[:IMPL {idx:1}]->(d) WHERE (d:Point OR d:Event) AND d.id = $dst "
                 "RETURN o.id LIMIT 1",
                 params={"src": t_src, "dst": t_dst},

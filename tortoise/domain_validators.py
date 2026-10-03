@@ -106,6 +106,7 @@ def validate_chain_integrity(graph) -> list[dict]:
     rows = graph.g.query(
         "MATCH (uc:Point) WHERE uc.pointKind IN $uc_kinds "
         f"AND {_live_clause('uc')} "
+        "WITH uc "  # #6976 — load-bearing: keeps the pointKind predicate bound
         "OPTIONAL MATCH (uc)<-[:hasPart]-(op:Point {is_operator:true, "
         "op_type:'composedOf'})-[:hasPart]->(jtbd:Point) "
         "WHERE jtbd.pointKind IN $jtbd_kinds "
@@ -175,6 +176,7 @@ def validate_chain_integrity(graph) -> list[dict]:
         f"AND {_live_clause('req')} "
         "AND req.enabled_workflow IS NOT NULL AND req.enabled_workflow <> '' "
         "AND req.enabled_workflow <> 'ALL' "
+        "WITH req "  # #6976 — load-bearing: keeps the pointKind predicate bound
         "OPTIONAL MATCH (w:Point {wf_id: req.enabled_workflow}) "
         "WHERE w.pointKind IN $wf_kinds "
         "WITH req, w WHERE w IS NULL "

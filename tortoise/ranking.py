@@ -134,6 +134,7 @@ def resolve_contested_relevance(
         rows = projection.g.query(
             "MATCH (n:Point) WHERE n.id IN $ids "
             "AND (n.is_operator = false OR n.is_operator IS NULL) "
+            "WITH n "  # #6976 — load-bearing: keeps the id predicate bound
             "MATCH (c:Point)-[r:NAND]->(n) "
             "OPTIONAL MATCH (src:Point)-[ri:INPUT]->(c) "
             "WITH n, c, r, src, ri "
@@ -418,6 +419,7 @@ class GraphRanker:
         # other surface read 0.75.
         cypher = (
             "MATCH (n:Point) WHERE n.id IN $ids "
+            "WITH n "  # #6976 — load-bearing: keeps the id predicate bound
             "OPTIONAL MATCH (n)-[r:IMPL|NAND]-(:Point {is_operator: true}) "
             "WITH n, count(r) AS degree "
             "RETURN n.id, coalesce(n.confidence, "
@@ -458,6 +460,7 @@ class GraphRanker:
     def _fetch_event_signals(self, ids: list[str]) -> dict[str, dict]:
         cypher = (
             "MATCH (e:Event) WHERE e.eventId IN $ids "
+            "WITH e "  # #6976 — load-bearing: keeps the eventId predicate bound
             "OPTIONAL MATCH (e)-[:aboutObject]->(o:Object) "
             "WITH e, count(o) AS about_objects "
             "OPTIONAL MATCH (e)-[:PRODUCES]->(p:Point) "
@@ -709,6 +712,7 @@ class StateRanker:
             return {}
         cypher = (
             "MATCH (n:Point) WHERE n.id IN $ids "
+            "WITH n "  # #6976 — load-bearing: keeps the id predicate bound
             "OPTIONAL MATCH (n)-[r:IMPL|NAND]-() "
             "WITH n, count(r) AS ep_degree "
             "OPTIONAL MATCH (n)-[a:aboutSubject|aboutObject|aboutAction|"
@@ -751,6 +755,7 @@ class StateRanker:
         about_types = "|".join(ABOUT_EDGE_TYPES)
         rows = self.projection.g.query(
             "MATCH (o:Object) WHERE o.id IN $ids "
+            "WITH o "  # #6976 — load-bearing: keeps the id predicate bound
             "OPTIONAL MATCH (p:Point)-[a:" + about_types + "]->(o) "
             "WITH o, count(a) AS about_degree, collect(DISTINCT p.id) AS pids "
             "RETURN o.id, about_degree, pids",
@@ -953,6 +958,7 @@ class GapsRanker:
             return {}
         rows = self.projection.g.query(
             "MATCH (n:Point) WHERE n.id IN $ids "
+            "WITH n "  # #6976 — load-bearing: keeps the id predicate bound
             "OPTIONAL MATCH (op:Point {is_operator:true})-[r1:IMPL|NAND]->(n) "
             "  WHERE coalesce(r1.idx, 1) = 0 "
             "OPTIONAL MATCH (n)-[r2:IMPL|NAND]->(m:Point) "
@@ -981,6 +987,7 @@ class GapsRanker:
             return {}
         rows = self.projection.g.query(
             "MATCH (n:Point) WHERE n.id IN $ids "
+            "WITH n "  # #6976 — load-bearing: keeps the id predicate bound
             "OPTIONAL MATCH (op:Point {is_operator:true, op_type:'IMPL'})-[r3:IMPL]->(n) "
             "  WHERE coalesce(r3.idx, 0) >= 1 "
             "OPTIONAL MATCH (s)-[r4:IMPL]->(n) "
@@ -1195,6 +1202,7 @@ class SubgraphExpander:
         # out: edges FROM frontier nodes (n)-[r]->(m) → record n→m, neighbor m.
         rows = self.projection.g.query(
             f"MATCH (n) WHERE n.id IN $frontier "
+            "WITH n "  # #6976 — load-bearing: keeps the id predicate bound
             f"MATCH (n)-{edge_decl}->(m) "
             f"WHERE {_SUBNODE_LABEL_WHERE} RETURN n.id, type(r), m.id",
             params={"frontier": frontier},
@@ -1206,6 +1214,7 @@ class SubgraphExpander:
         # in: edges INTO frontier nodes (m)-[r]->(n) → record m→n, neighbor m.
         rows = self.projection.g.query(
             f"MATCH (n) WHERE n.id IN $frontier "
+            "WITH n "  # #6976 — load-bearing: keeps the id predicate bound
             f"MATCH (m)-{edge_decl}->(n) "
             f"WHERE {_SUBNODE_LABEL_WHERE} RETURN m.id, type(r), n.id",
             params={"frontier": frontier},
