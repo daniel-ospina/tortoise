@@ -33,6 +33,7 @@ import logging
 import os
 import re
 import stat
+from collections.abc import Callable
 from contextvars import ContextVar
 from time import monotonic as _monotonic
 from typing import Any
@@ -677,7 +678,7 @@ def _capture_turn_window(
     Returns a NEW list; the windowed conversation feeds BOTH the turn-store
     loop and the extraction call so the LLM never sees a phrase with no home
     in any stored turn (stored-source parity, #721). Content coercion matches
-    the store loop: None -> '', truthy non-strings -> str() (isinstance-first,
+    the store loop: None -> '', non-strings -> str() (isinstance-first,
     #721). The ROLE is coerced with ``_normalize_turn_role`` and capped the same
     way (#5445/#5775), so the scanned and the persisted role are the same bytes
     and a non-string role cannot skip the bound. Idempotent when the caller
@@ -813,14 +814,19 @@ def _redact_turn_contents(
     and its counts join the same total.
 
     ``cap`` bounds the text scanned per turn. The turn store already caps, so
-    callers there pass nothing; the session-``:Source``/extractor consumers get
-    the RAW conversation and MUST pass the same window the persisted text uses
+    callers there pass nothing; the session-``:Source`` consumer receives the RAW
+    conversation and passes the same window the persisted text uses
     (``_capture_turn_window``'s 5,000), because a client-controlled turn of a few
     MB otherwise costs seconds of scanning (measured: 2 MB → ~6.9 s at
     ~3 s/MB), and because the value beyond that window is never persisted
-    anyway. The bound is a CPU-cost and window-parity bound, NOT loop
-    protection: in the hosted lane every capture-path caller of this is now off
-    the event loop (#4911 cycle 1).
+    anyway. The capture-lane extraction consumers (``_extract_session_llm``,
+    ``_extract_session_v2``) are handed ``_capture_extraction_window``'s
+    already-clipped view, so a ``cap`` there would be a no-op; the commit
+    consumers (``_commit_session_v1``/``_commit_session_v2``) pass none for the
+    reason given in ``_capture_turn_texts_with_redactions``. The bound is a
+    CPU-cost and window-parity bound, NOT
+    loop protection: in the hosted lane every capture-path caller of this is now
+    off the event loop (#4911 cycle 1).
 
     Idempotent: no rule's ANCHOR GROUP can be satisfied inside a
     ``[REDACTED:<kind>]`` marker, so re-running over already-redacted text
@@ -951,10 +957,10 @@ def _capture_turn_texts_with_redactions(
     """``_capture_turn_texts`` PLUS the per-kind redaction counts of the window.
 
     Split out (rather than returning a tuple from ``_capture_turn_texts``) so
-    the five read-only callers keep the plain-list contract. The writer is the
-    only caller that needs the counts — it records them on the Session, and it
-    is the count of record because it scans the same window (and therefore the
-    same spans) the ``:Source`` sink and the extractor do.
+    the five read-only callers keep the plain-list contract. The capture writer
+    records the counts on the Session, and its count is the count of record
+    because it scans the same window (and therefore the same spans) the
+    ``:Source`` sink and the extractor do.
 
     The scrubber runs on the FULL content of each turn in the list it is given,
     and the ``[:5000]`` cut is applied to the RESULT. That order matters for a
@@ -969,15 +975,18 @@ def _capture_turn_texts_with_redactions(
     confirmation path avoids the mismatch this order would otherwise create by
     windowing first (see ``session_confirm.expected_turns``).
 
-    ⛔ The extraction consumers (``_extract_session_llm``,
-    ``_extract_session_v2``, ``_commit_session_v1``, ``_commit_session_v2``)
-    deliberately pass NO ``cap``: the extractor renders each turn verbatim into
-    its prompt (``extractor_v2._edus_from_conversation`` does not window), so a
-    cap there would both leave the tail un-scanned and silently truncate the
-    extraction input — a fidelity loss with nothing to show for it (#4897's
-    lesson). They therefore pay a full linear scan of client-controlled text
-    (measured ~3 s/MB); the hosted lane keeps that off the event loop, and the
-    SDK-side call is bounded only by what the caller passes.
+    ⛔ The extraction consumers pass NO ``cap``, for two different reasons.
+    ``_commit_session_v1`` / ``_commit_session_v2`` receive the RAW conversation
+    and the extractor renders each turn verbatim into its prompt
+    (``extractor_v2._edus_from_conversation`` does not window), so a cap there
+    would both leave the tail un-scanned and silently truncate the extraction
+    input — a fidelity loss with nothing to show for it (#4897's lesson); those
+    two therefore pay a full linear scan of client-controlled text (measured
+    ~3 s/MB). ``_extract_session_llm`` / ``_extract_session_v2`` are instead
+    handed ``_capture_extraction_window``'s already-clipped view, so their scan
+    is bounded by that window and a ``cap`` would be a no-op. The hosted lane
+    keeps the scan off the event loop, and the SDK-side call is bounded only by
+    what the caller passes.
     """
     redacted, counts = _redact_turn_contents(windowed)
     texts: list[str] = []
@@ -1004,25 +1013,30 @@ def _capture_turn_texts_with_redactions(
 def _capture_turn_texts(windowed: list[dict]) -> list[str]:
     """The exact stored turn text (``[role] <content>``) for each windowed turn.
 
-    One definition shared by the turn-store write and the turn-embedding batch
-    (#4194) — the vector is computed over the string the node stores (the
-    embedder applies its own 512-word cap; model/dimension/normalisation are
-    shared with the read path, the cap is write-side), so a dense (vector) hit
-    can never resolve to a turn whose stored content differs from what was
-    encoded. Coercion is the loop's own (isinstance-first: None -> "", truthy
-    non-strings -> ``str()``, #721); the ``[:5000]`` is the idempotent
-    re-application of ``_capture_turn_window``'s cap (#1532 D1).
+    The stored-text definition (#4194) — the vector is computed over the string
+    the node stores (the embedder applies its own 512-word cap;
+    model/dimension/normalisation are shared with the read path, the cap is
+    write-side), so a dense (vector) hit can never resolve to a turn whose
+    stored content differs from what was encoded. The write path reaches
+    ``_capture_turn_texts_with_redactions`` through ``_write_session_and_turns``;
+    this function delegates to it and returns its first element. Coercion is the
+    loop's own (isinstance-first: None -> "", non-strings -> ``str()``, #721); the
+    ``[:5000]`` is the idempotent re-application of ``_capture_turn_window``'s
+    cap (#1532 D1).
 
-    #4911: THIS is where a stored turn's credentials are scrubbed — one place,
-    applied by every writer of every lane, because this function IS the stored
-    text. The control cannot live inside ``_write_capture_turns`` instead: both
-    callers compute ``turn_embs`` from ``_capture_turn_texts(windowed)`` BEFORE
-    calling the writer, so redacting only at the write would store
+    #4911: the scrub lives in ``_capture_turn_texts_with_redactions`` (via
+    ``_redact_turn_contents``) — the ONE stored-text definition every writer
+    reaches through ``_write_session_and_turns``; this function is its read-only
+    projection. The control cannot live inside ``_write_capture_turns`` instead:
+    the writer computes ``turn_embs`` from that same stored-text result, before
+    ``_write_capture_turns`` stores the row, so redacting only at the write would
+    store
     ``[REDACTED:…]`` while the vector described the raw secret — violating the
     #4194 invariant the docstring above states ("the vector can never describe
-    different text than the node holds"). Redacting here keeps the encoded
-    text, the stored text and the ``content_hash`` the same string by
-    construction. A second, deliberate consequence: the #4675 confirmation
+    different text than the node holds"). Redacting in the stored-text
+    definition keeps the encoded text, the stored text and the ``content_hash``
+    the same string by construction. A second, deliberate consequence: the #4675
+    confirmation
     path (``tortoise/session_confirm.expected_turns``) calls THIS function to
     build what it expects the server to have stored, so the client's
     expectation and the server's stored row cannot drift for the same
@@ -1158,7 +1172,8 @@ def _capture_turn_embeddings(
 # then a `CONTAINS` edge `MERGE`. For a 500-turn capture that is ~1000
 # blocking calls — the ~4.75s single-loop freeze #3086 measures.
 #
-# This is the ONE implementation both lanes call. The batch is a single
+# This is the ONE turn store — reached by the primitive both lanes call. The
+# batch is a single
 # `UNWIND $turns` statement, i.e. ONE transaction per capture: a runtime error
 # anywhere in `$turns` rolls the WHOLE batch back, so a failed batch leaves no
 # turn written without its CONTAINS edge (never a partially-wired session).
@@ -1167,7 +1182,8 @@ def _capture_turn_embeddings(
 # (`{session_id}_t{i}`), so a retried batch MERGEs the same rows and converges.
 # (Precondition, stated in the docstring: the Session must already exist — the
 # statement MATCHes it, so a missing Session leaves the batch's nodes
-# unwired. Both callers MERGE it immediately before.)
+# unwired. Its caller, ``_write_session_and_turns``, MERGEs it immediately
+# before.)
 _TURN_WRITE_CYPHER = (
     "UNWIND $turns AS turn "
     # `MERGE (t:Point {id:...})` binds the node FIRST: a full-path
@@ -1227,6 +1243,27 @@ _TURN_WRITE_CYPHER = (
 )
 
 
+def _capture_turn_id(session_id: str, index: int, turn_offset: int = 0) -> str:
+    """The deterministic per-turn Point id: ``{session_id}_t{index + offset}``.
+
+    #3551: the ONE definition of the turn-id derivation for the capture lanes
+    (``_write_session_and_turns`` / ``_write_capture_turns`` and the entity-link
+    pass). ``turn_offset`` shifts the whole window, so an APPEND onto an existing
+    turn list mints the next contiguous ids instead of re-MERGing index 0 — the
+    offset-aware derivation the shared primitive owns. At the capture lanes'
+    offset 0 the output is byte-identical to the pre-refactor literal
+    (``f"{session_id}_t{i}"``).
+
+    The CLIENT's constructor (``session_confirm.turn_point_id``) is deliberately
+    its own copy: ``tests/test_session_confirm.py`` re-parses this module, drops
+    this function's docstring, and asserts the unparsed BODY still formats
+    ``{session_id}_t<index>`` — so the module's prose cannot satisfy the pin. It
+    is pinned by a test rather than an import (a version-bound parity — a
+    client on an older table cannot be made to import this module).
+    """
+    return f"{session_id}_t{index + turn_offset}"
+
+
 def _capture_turn_ids(proj, session_id: str) -> list[str]:
     """Every turn-Point id currently ``CONTAINS``-wired to ``session_id``.
 
@@ -1246,8 +1283,22 @@ def _capture_turn_ids(proj, session_id: str) -> list[str]:
     ).result_set
     # str-only: a non-string id would make the suffix slice raise, and no
     # writer ever stores one (the same str-only posture the replay folds take).
+    # ``isdecimal()`` — NOT ``isdigit()`` — is the right guard for the class it
+    # was introduced for: ``'²'.isdigit()`` is True while ``int('²')`` raises,
+    # so an ``isdigit()`` guard admitted an id the sweep then could not index
+    # (#3551 review). It is NOT by itself sufficient for ``int()``: ``int()``
+    # refuses a decimal string longer than its conversion limit (4300 digits by
+    # default), so ``isdecimal()`` being True does not imply parseable. The
+    # sweep therefore does not ASSUME a total parse — it wraps its own and
+    # RETAINS an id it cannot place (the guard EXCLUDES the ``²``-class; this
+    # layer retains an id the guard ADMITTED), so no id returned here can make
+    # the sweep raise. (``int()`` also parses
+    # suffixes ``isdecimal()`` rejects, e.g.
+    # ``'-1'``/``' 3'``/``'3_0'``; those are not ids this writer mints —
+    # ``_capture_turn_id`` formats an ``int`` — so they are left untouched
+    # rather than swept, never deleted where we cannot place them.)
     return [r[0] for r in (rows or [])
-            if isinstance(r[0], str) and r[0][len(prefix):].isdigit()]
+            if isinstance(r[0], str) and r[0][len(prefix):].isdecimal()]
 
 
 def _write_capture_turns(
@@ -1260,34 +1311,48 @@ def _write_capture_turns(
     turn_embs: list[list[float] | None],
     session_existed: bool = True,
     texts_and_counts: tuple[list[str], dict[str, int]] | None = None,
+    turn_offset: int = 0,
 ) -> int:
     """Write a capture's episodic turn stream — ONE batched statement (#3086).
 
-    Called from BOTH capture lanes: ``TortoiseSDK.capture_session`` (sync, no
-    loop to free) and hosted ``_capture_session_impl`` (off the event loop, on
+    The ONE turn store, called by ``_write_session_and_turns`` — which BOTH
+    capture lanes call: ``TortoiseSDK.capture_session`` (sync, no loop to free)
+    and hosted ``_capture_session_impl`` (off the event loop, on
     ``_CAPTURE_EXECUTOR``). It replaces the per-turn loop the two lanes each
     kept, so the turn store can no longer fork.
 
     ``turn_embs`` must be the batch from ``_capture_turn_embeddings`` over
-    ``_capture_turn_texts(windowed)``. The writer recomputes the stored text
-    from that same helper, so the vector can never describe different text
-    than the node holds (#4194); a length mismatch (unreachable from both
-    callers) drops the whole batch's vectors with an error log rather than
-    misaligning them.
+    ``_capture_turn_texts(windowed)``. The stored text is the caller-supplied
+    pair (``texts_and_counts``) on the live path; when it is ``None`` this
+    function re-derives it with
+    ``_capture_turn_texts_with_redactions(windowed)`` (the retained branch below,
+    currently unreached) — either way the vector is derived from the same text,
+    so it can never describe different text than the node holds (#4194); a
+    length mismatch (unreachable from the caller) drops the whole batch's
+    vectors with an error log rather than misaligning them.
 
     ``texts_and_counts`` lets a caller that has ALREADY computed
     ``_capture_turn_texts_with_redactions(windowed)`` hand the result in rather
-    than pay for a second scrub of the same client-controlled text. The hosted
-    lane passes it because its embeddings and its entity-linking pass both need
-    the same stored texts: the scrub is ~3 s/MB, so re-deriving it per consumer
-    cost seconds of CPU per legal-maximum capture (#4911 cycle 1). Defaults to
-    ``None`` — recompute — so the sync SDK lane and every test are unchanged,
-    and the count is always taken from the same window either way.
+    than pay for a second scrub of the same client-controlled text (the scrub is
+    ~3 s/MB, so a second consumer of the same texts costs seconds of CPU per
+    legal-maximum capture — #4911 cycle 1). Its ONE caller is
+    ``_write_session_and_turns``, which derives the pair from this same window
+    and always forwards it, so the ``None`` branch is retained for direct
+    callers and is currently unreached. Either way the count is read from this
+    same window, so a donation cannot make the two disagree.
 
-    The Session MUST already exist (both callers MERGE it immediately before)
-    — the statement both node- and edge-writes, and a missing Session would
-    leave nodes unwired. ``proj`` is the caller's projection (the SDK lane
-    passes ``self._get_proj()``); ``sdk`` supplies the journal seam.
+    ``turn_offset`` (#3551) shifts the id window: row ``i`` MERGEs
+    ``_capture_turn_id(session_id, i, turn_offset)``. At the capture lanes'
+    offset 0 the output is byte-identical to the pre-refactor
+    ``f"{session_id}_t{i}"``; a non-zero offset is an APPEND, and the
+    stale-turn sweep is bounded to ids at or beyond ``turn_offset +
+    len(window)`` so it can never delete the prefix it is appending to.
+
+    The Session MUST already exist (``_write_session_and_turns`` MERGEs it
+    immediately before) — the statement both node- and edge-writes, and a
+    missing Session would leave nodes unwired. ``proj`` is the caller's
+    projection (the SDK lane passes ``self._get_proj()``); ``sdk`` supplies the
+    journal seam.
 
     A SHORTER re-capture DELETES the turns the previous capture left beyond
     the new window (#1920): the merge alone keeps them on the graph AND
@@ -1305,15 +1370,16 @@ def _write_capture_turns(
 
     #4911: RETURNS the number of credential-shaped spans redacted from this
     window, and writes the same number to the Session as ``capture_redactions``
-    in the batched statement (both lanes call this writer, so the count is
+    in the batched statement (both lanes reach this writer, so the count is
     recorded per session at the ONE chokepoint). The text itself was already
-    scrubbed upstream in ``_capture_turn_texts`` — see that function for why
-    the redaction cannot live here — and the count is taken from the SAME
+    scrubbed upstream in ``_capture_turn_texts_with_redactions`` (via
+    ``_redact_turn_contents``) — ``_capture_turn_texts`` carries why the control
+    cannot live here — and the count is taken from the SAME
     window, so it covers the spans the session ``:Source`` sink and the
     extractor scrub over the same stored window. When the Source is handed the
     raw conversation these are different OBJECTS holding the same first
     ``_CAPTURE_TURN_CAP`` characters of each turn, which is all either of them
-    persists. Both callers surface it on their capture receipt.
+    persists. Both lanes surface it on their capture receipt.
     """
     if texts_and_counts is None:
         turn_texts, redaction_counts = _capture_turn_texts_with_redactions(windowed)
@@ -1323,8 +1389,9 @@ def _write_capture_turns(
     if not turn_texts:
         return redacted_total
     if len(turn_embs) != len(turn_texts):
-        # Unreachable from both callers (each derives `turn_embs` from this
-        # same helper over this same `windowed`) and deliberately NOT a raise:
+        # Unreachable from the caller (it derives `turn_embs` from the same
+        # `_capture_turn_texts_with_redactions(windowed)` result it passes as
+        # `texts_and_counts`) and deliberately NOT a raise:
         # this helper runs after the caller's Session MERGE, so raising would
         # 500 a capture whose Session is already committed. Drop the whole
         # batch's vectors rather than misaligning them — the turns are still
@@ -1342,7 +1409,7 @@ def _write_capture_turns(
         text_hash = _content_hash(text)
         turn_hashes.append(text_hash)
         turn_rows.append({
-            "id": f"{session_id}_t{i}",
+            "id": _capture_turn_id(session_id, i, turn_offset),
             "c": text,
             "k": "event",
             # #5445: derived from the SCRUBBED stored text, not from the raw
@@ -1376,8 +1443,39 @@ def _write_capture_turns(
     stale: list[str] = []
     if session_existed:
         keep = {row["id"] for row in turn_rows}
-        stale = [tid for tid in _capture_turn_ids(proj, session_id)
-                 if tid not in keep]
+        # #3551: offset-aware. Only ids at or beyond the window this write just
+        # MERGEd are stale; a non-zero ``turn_offset`` is an APPEND, and every
+        # id BELOW it belongs to a prior window that must never be swept. At
+        # the capture lanes' offset 0 the ``_first_live`` bound is a NO-OP for
+        # every id this writer MINTS (a decimal index below the window is in
+        # ``keep`` by construction), so for those ids the sweep is #1920's
+        # "everything not kept". It is NOT #1920 exactly, on two counts:
+        # (i) ``_capture_turn_ids`` now guards with ``isdecimal()``, so a
+        # turn-shaped id whose suffix is not a decimal integer (``<sid>_t²``)
+        # — which #1920's ``isdigit()`` guard admitted and swept — is
+        # deliberately left in place (see that function's docstring, and
+        # ``test_non_int_parseable_suffix_does_not_break_capture``, which pins
+        # the residue); and (ii) the ``_first_live`` bound retains a
+        # non-canonical DECIMAL suffix (``<sid>_t01``) whose value is
+        # numerically below the window, which #1920's sweep would have deleted.
+        # (ii) is the bound, not the guard: it is present even with
+        # ``isdigit()`` restored.
+        _prefix = f"{session_id}_t"
+        _first_live = turn_offset + len(turn_rows)
+        # The parse is DEFENDED, not assumed total: ``_capture_turn_ids``'s
+        # ``isdecimal()`` guard cannot imply ``int()``-parseable (the 4300-digit
+        # conversion limit), so an id we cannot place is RETAINED — never
+        # deleted where we cannot place it — and the sweep can never raise.
+        stale = []
+        for _tid in _capture_turn_ids(proj, session_id):
+            if _tid in keep:
+                continue
+            try:
+                _index = int(_tid[len(_prefix):])
+            except ValueError:
+                continue
+            if _index >= _first_live:
+                stale.append(_tid)
         if stale:
             proj.g.query(
                 "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
@@ -1414,7 +1512,7 @@ def _write_capture_turns(
         sdk._emit_event("PointRetracted", {"id": tid})
         sdk._journal_entity_mutation("Point", tid, "delete")
     for i, _turn in enumerate(windowed):
-        turn_id = f"{session_id}_t{i}"
+        turn_id = _capture_turn_id(session_id, i, turn_offset)
         created_at, status, stored_emb = stored.get(turn_id, (None, None, None))
         # #5004: the turn's vector WAS stored live (`turn_embs[i]` is the `emb`
         # column of `_TURN_WRITE_CYPHER`), so it must be journalled too — this
@@ -1474,6 +1572,143 @@ def _write_capture_turns(
         "SessionRecorded", id=session_id,
         capture_redactions=redacted_total)
     return redacted_total
+
+
+def _write_session_and_turns(
+    proj,
+    sdk,
+    session_id: str,
+    turns: list[dict],
+    *,
+    now: str,
+    harness: str | None = None,
+    actor_user_id: str | None = None,
+    machine_id: str | None = None,
+    model: str | None = None,
+    turn_offset: int = 0,
+    embed_fn: Callable[[list[str]], list[list[float] | None]] | None = None,
+    turn_embs: list[list[float] | None] | None = None,
+    texts_and_counts: tuple[list[str], dict[str, int]] | None = None,
+    session_existed: bool = True,
+    on_session_merged: Callable[[dict], None] | None = None,
+) -> dict:
+    """The ONE shared Session + turn store writer (#3551).
+
+    Called from BOTH capture lanes: ``TortoiseSDK.capture_session`` (sync, no
+    loop to free) and hosted ``_capture_session_impl`` (off the event loop, on
+    ``_CAPTURE_EXECUTOR``). It owns everything the two lanes used to keep
+    BYTE-IDENTICAL COPIES of and could therefore drift on:
+
+      * the ``:Session`` MERGE field list (``created_at``/``turn_count``/
+        ``is_episodic`` + the conditional ``harness``/``actor_user_id``/
+        ``machine_id``/``model`` clauses);
+      * the per-turn MERGE field list, the turn-point Cypher text, the
+        ``CONTAINS`` wiring and the stale-turn sweep — all delegated to
+        ``_write_capture_turns``, which holds the ONE ``UNWIND $turns``
+        statement (#3086);
+      * offset-aware turn-id derivation (``_capture_turn_id``), so a caller
+        that appends a window does not re-MERGE index 0;
+      * the optional ``embed_fn`` call — ``None`` is a NO-OP default, so the
+        deferred embedding work flips a switch instead of structurally editing
+        a multi-caller function.
+
+    STAYS IN EACH CALLER (this is the boundary the lane comments cite —
+    admission/reservation, quota preflight, replay-skip/``retry_failed_capture``,
+    the abandoned-capture marker, receipt writing, extraction invocation and all
+    HTTP/error mapping):
+
+      * ``harness`` is RESOLVED by the caller. Hosted passes
+        ``_observed_capture_harness`` (first-writer-wins against the stored
+        value); the SDK passes the caller-supplied argument. This function
+        writes whatever it is given, set-only-when-present — it never erases a
+        stored value with ``None``.
+      * ``machine_id`` / ``model`` are CLIENT-CLAIMED and HOSTED-ONLY today
+        (#2599). The SDK lane deliberately passes neither: ``derive_machine_id``
+        is machine-local, so stamping it at SDK/audit time would misattribute
+        the machine that actually captured the session. That absence is
+        RECORDED (``tests/test_write_session_and_turns_3551.py``), not a gap to
+        close here.
+      * ``session_existed`` is the caller's own pre-MERGE probe (it also drives
+        the caller's replay/retry gate); it is forwarded to the turn writer so
+        the fresh-capture hot path keeps its exact query count.
+      * ``on_session_merged`` lets a journaling caller emit its
+        ``SessionRecorded`` record BETWEEN the MERGE and the turn write — the
+        order the SDK lane's live/replay parity depends on. ``None`` is a no-op
+        (hosted journals nothing here).
+
+    ⛔ ``machine_id`` and ``model`` MUST keep the set-if-absent ``coalesce``
+    semantics. A plain ``SET s.machine_id=$mid`` would let a re-capture from a
+    SECOND machine overwrite the first machine's id — the subtle regression this
+    extraction exists to prevent.
+
+    Returns the write facts the callers READ — the stored turn texts (hosted
+    reuses them for its entity-link pass instead of re-scrubbing) and the total
+    redaction count — plus the rest of the post-write state (the offset-aware
+    turn ids, the per-kind redaction counts, the ``Session`` record and the
+    MERGE params), which nothing reads today. The journal emit rides the
+    ``on_session_merged`` callback, not the returned ``session_record``.
+    """
+    turn_count = len(turns)
+    # The canonical :Session field list. Order is load-bearing only in that it
+    # is the byte-identical text the pre-refactor lanes emitted; the conditional
+    # clauses mirror the #1727 harness rule and the #2600 actor rule.
+    merge_sets = ["s.created_at=coalesce(s.created_at, $now)",
+                  "s.turn_count=$tc", "s.is_episodic=true"]
+    merge_params: dict[str, Any] = {"sid": session_id, "now": now,
+                                    "tc": turn_count}
+    session_record: dict[str, Any] = {
+        "id": session_id, "created_at": now,
+        "turn_count": turn_count, "is_episodic": True,
+    }
+    if harness:
+        merge_sets.append("s.harness=$harness")
+        merge_params["harness"] = harness
+        session_record["harness"] = harness
+    if actor_user_id:
+        merge_sets.append("s.actor_user_id=coalesce(s.actor_user_id, $uid)")
+        merge_params["uid"] = actor_user_id
+        session_record["actor_user_id"] = actor_user_id
+    if machine_id:
+        merge_sets.append("s.machine_id=coalesce(s.machine_id, $mid)")
+        merge_params["mid"] = machine_id
+    if model:
+        merge_sets.append("s.model=coalesce(s.model, $model)")
+        merge_params["model"] = model
+    proj.g.query(
+        f"MERGE (s:Session {{id:$sid}}) SET {', '.join(merge_sets)}",
+        params=merge_params,
+    )
+    if on_session_merged is not None:
+        on_session_merged(session_record)
+
+    # The stored text is the WRITER'S OWN definition (#4911's scrubber runs
+    # there), and the vector is derived from it, so the two cannot describe
+    # different strings (#4194). ``texts_and_counts`` is an OPTIONAL donation for
+    # a caller that has already computed the pair. NO caller passes it today —
+    # the sync SDK lane and the hosted lane both take the recompute branch below
+    # — so that branch is the live path for every caller.
+    if texts_and_counts is None:
+        turn_texts, redaction_counts = _capture_turn_texts_with_redactions(turns)
+    else:
+        turn_texts, redaction_counts = texts_and_counts
+    if embed_fn is not None:
+        turn_embs = embed_fn(turn_texts)
+    elif turn_embs is None:
+        turn_embs = [None] * len(turn_texts)
+    redacted_total = _write_capture_turns(
+        proj, sdk, session_id, turns, now=now, turn_embs=turn_embs,
+        session_existed=session_existed, turn_offset=turn_offset,
+        texts_and_counts=(turn_texts, redaction_counts))
+    return {
+        "turn_count": turn_count,
+        "turn_ids": [_capture_turn_id(session_id, i, turn_offset)
+                     for i in range(turn_count)],
+        "turn_texts": turn_texts,
+        "redaction_counts": redaction_counts,
+        "redacted_total": redacted_total,
+        "session_record": session_record,
+        "merge_params": merge_params,
+    }
 
 
 # #1352: minimal stopword set for the cheap session-Source topic derivation —
@@ -4937,24 +5172,16 @@ class TortoiseSDK:
         # Review PR #1827 (parity with hosted_api.py): created_at uses
         # coalesce so an idempotent re-POST preserves the ORIGINAL capture
         # time.
-        _merge_sets = ["s.created_at=coalesce(s.created_at, $now)",
-                       "s.turn_count=$tc", "s.is_episodic=true"]
-        _merge_params = {"sid": session_id, "now": now,
-                         "tc": len(conversation)}
-        if harness:
-            _merge_sets.append("s.harness=$harness")
-            _merge_params["harness"] = harness
-        # #2600 (SDK-mirror parity): actor stamp — same conditional coalesce
-        # clause as the hosted MERGE, reading the ContextVar (set by the
-        # mcp_auth middleware / hosted _data_sdk). Embedded/local captures
-        # have no auth → var unset → sets unchanged → byte-identical legacy
-        # shape. First-writer-wins on idempotent re-POST; backfills legacy-
-        # None on true retry. Keep the two MERGE clauses in sync.
+        # #3551: the :Session MERGE field list is owned by the shared
+        # primitive below, not by this lane. This lane still RESOLVES its own
+        # inputs: ``harness`` is the caller-supplied argument (NOT hosted
+        # parity #3681 — selfhost/embedded has no server credential lane to
+        # resolve it from), and the actor comes from the ContextVar (set by
+        # the mcp_auth middleware / hosted ``_data_sdk``). Embedded/local
+        # captures have no auth → var unset → the primitive writes no actor
+        # clause → byte-identical legacy shape. First-writer-wins on
+        # idempotent re-POST; backfills legacy-None on true retry.
         _mirror_actor = _current_actor_user_id.get()
-        if _mirror_actor:
-            _merge_sets.append(
-                "s.actor_user_id=coalesce(s.actor_user_id, $uid)")
-            _merge_params["uid"] = _mirror_actor
         # W5 Phase F (#2104, indicator 8 — SDK mirror replay parity): probe
         # session_existed BEFORE the Session MERGE, mirroring the hosted
         # #1727 replay skip — a re-capture of an EXISTING session_id skips
@@ -5034,70 +5261,41 @@ class TortoiseSDK:
             session_existed and prior_capture_ok is False
             and prior_capture_extractor in ("v2", "none")
             and os.environ.get("TORTOISE_SESSION_EXTRACTOR") != "m2")
-        proj.g.query(
-            f"MERGE (s:Session {{id:$sid}}) SET {', '.join(_merge_sets)}",
-            params=_merge_params,
-        )
-        # #3664: journal the :Session node. The MERGE above is a raw graph
-        # write — with no Session in the journal a rebuild lost the node
-        # itself, which in turn made any EntityLinked edge FROM it
-        # unreplayable (a session stayed an unattached island after rebuild
-        # even when the Object side replayed). Idempotent fold: MERGE by id +
-        # coalesce-preserve created_at/actor_user_id, mirroring the live SET
-        # clauses. Emitted on every capture (the Session MERGE is itself
-        # unconditional) so the journaled turn_count tracks the live value on
-        # the #1727 longer-replay-payload path.
-        _session_record = {
-            "id": session_id, "created_at": now,
-            "turn_count": len(conversation), "is_episodic": True,
-        }
-        if harness:
-            _session_record["harness"] = harness
-        if _mirror_actor:
-            _session_record["actor_user_id"] = _mirror_actor
-        self._emit_event("SessionRecorded", **_session_record)
-
-        # #3086: the episodic turn stream is written by the ONE shared writer
-        # (`_write_capture_turns`), also called by hosted POST /v1/sessions —
-        # so this lane and that one can no longer drift (the #1532/#2813
-        # duplicated-loop class). Node shape, per-row idempotency
-        # (`{session_id}_t{i}`), the stale-vector guard and the rebuild journal
-        # all live in that definition. NOTE the THIRD, still-separate copy:
-        # tools/ask_spotcheck.py::seed_capture_turn_store mirrors the same
-        # store shape to seed the ask fixtures — the ONE copy every ask seeder
-        # writes through since #3914. It omits Source/extraction, but since W7A
-        # it EMBEDS every turn BY DEFAULT through the shared store seam
-        # (`_capture_turn_embeddings` + `required_embedding_dim`,
-        # #4194/#4304) and retains `embed=False` for #4197's un-backfilled
-        # backlog; that shape must stay identical, or the fixtures teach a
-        # shape capture no longer produces (#3910). #3551 tracks collapsing it
-        # onto the shared primitive too.
+        # #3551: ONE call writes both the :Session MERGE and the turn store —
+        # the field list, the turn-id derivation, the batched Cypher and the
+        # ``CONTAINS`` wiring all live in ``_write_session_and_turns`` (shared
+        # with hosted POST /v1/sessions), so the two lanes can no longer drift
+        # (the #1532/#2813 duplicated-store class).
         #
-        # #4194: embed the window BEFORE the write — the stored text of each
-        # turn, exactly as the writer stores it — in ONE local-model call.
-        # Batched so the added work on this already-hot synchronous path (#3086
-        # measures ~4.75 s for a 500-turn capture) is one model call rather
-        # than one per turn. The vector is the same one `create_point` stores,
-        # from the same embedder the read path encodes a query with. Every
-        # turn is re-encoded on every capture, so a model rotation self-heals
-        # on re-capture (no model fingerprint is stored on the node, so a
-        # "skip unchanged" optimisation would silently keep old-space vectors).
-        # The writer reads the node's pre-write content_hash to decide
-        # preserve-vs-clear, so no external probe can fail. Fail-soft: `None`
-        # per turn when no embedder is available — the turn is still stored
-        # and the read path declares its vector leg impaired.
-        _turn_texts = _capture_turn_texts(windowed)
-        _turn_embs = _capture_turn_embeddings(
-            _turn_texts, proj.required_embedding_dim)
-        # One batched `UNWIND $turns` transaction instead of the per-turn loop
-        # (two FalkorDB round-trips per turn on the event loop).
-        # #4911: the writer RETURNS the number of credential-shaped spans it
-        # redacted from this window (and records it on the Session as
-        # `capture_redactions`). Surfaced on the receipt below so the control is
-        # visible to the caller, not merely applied.
-        _capture_redactions = _write_capture_turns(
-            proj, self, session_id, windowed, now=now, turn_embs=_turn_embs,
-            session_existed=session_existed)
+        # #3664: the journal's ``SessionRecorded`` for the raw :Session MERGE
+        # must land BETWEEN the MERGE and the turn write (a rebuild otherwise
+        # loses the node, making any EntityLinked edge FROM it unreplayable), so
+        # it rides the ``on_session_merged`` hook rather than following the
+        # whole write. The idempotent fold MERGEs by id and coalesce-preserves
+        # created_at/actor_user_id, mirroring the live SET clauses; it is
+        # emitted on every capture (the MERGE is itself unconditional) so the
+        # journaled ``turn_count`` tracks the live value on the #1727
+        # longer-replay-payload path.
+        #
+        # #4194: ``embed_fn`` is the ONE local-encoder batch, computed over the
+        # writer's OWN stored text (the primitive derives it and passes it in),
+        # so the vector can never describe different text than the node holds.
+        # Fail-soft: ``None`` per turn when no embedder is available — the turn
+        # is still stored and the read path declares its vector leg impaired.
+        # #4911: the writer RETURNS the credential-redaction count for this
+        # window (recorded on the Session as ``capture_redactions``); it is
+        # surfaced on the receipt below so the control is visible, not merely
+        # applied.
+        _capture_write = _write_session_and_turns(
+            proj, self, session_id, windowed, now=now,
+            harness=harness, actor_user_id=_mirror_actor,
+            session_existed=session_existed,
+            embed_fn=lambda texts: _capture_turn_embeddings(
+                texts, proj.required_embedding_dim),
+            on_session_merged=lambda record: self._emit_event(
+                "SessionRecorded", **record),
+        )
+        _capture_redactions = _capture_write["redacted_total"]
 
         # M2 LLM extraction over the whole conversation (#822) — replaces the
         # regex decision/claim loop (removed as a product path). Shared with
@@ -5445,7 +5643,7 @@ class TortoiseSDK:
             link_texts = _capture_turn_texts(windowed)
             link_result = link_session_entities(
                 proj, session_id, link_texts,
-                turn_ids=[f"{session_id}_t{i}"
+                turn_ids=[_capture_turn_id(session_id, i)
                           for i in range(len(link_texts))],
                 sdk=self)
             if link_result["attempted"]:
@@ -9290,8 +9488,10 @@ class TortoiseSDK:
         Runs the audit checks (missing sourceKind point-level legacy + Source-
         level canonical, missing sourceDate, superseded points without a
         CORRECTS edge, live IMPL/NAND edges into superseded points, naive-IMPL
-        heuristic, low-confidence operators without mitigation, and legacy
-        ``mitigates`` edges). Returns per-check counts (uncapped) + capped
+        heuristic, low-confidence operators without mitigation, legacy
+        ``mitigates`` edges, and inverted validity windows — a persisted
+        ``validTo`` earlier than ``validFrom``, which no instant satisfies).
+        Returns per-check counts (uncapped) + capped
         samples + summary + exit_code (0 clean, 1 issues found — the
         check-consistency precedent).
 
@@ -17166,6 +17366,14 @@ class TortoiseSDK:
           {found: false, nearest: {...}, chain: [...]} — honest absence:
             the date lies outside every window (before the earliest / after
             the latest); ``nearest`` is the closest window for context.
+            When a chain window is INVERTED (``validTo`` before
+            ``validFrom``, so it covers no instant at all) the reply also
+            carries ``malformed: true`` and ``malformed_ids``, and the
+            affected ``nearest`` entry carries ``malformed: true``. Without
+            that flag a corrupt window is indistinguishable from a point
+            that honestly has no window at this date (#5361). Detection is
+            scoped to THIS branch: a covering window cannot be inverted, so
+            the signal is only needed where absence is being reported.
 
         Legacy undated points: no ``validFrom`` ⇒ open start; a superseded
         point without ``validTo`` ⇒ open end (covers everything before the
@@ -17254,6 +17462,27 @@ class TortoiseSDK:
 
         # Honest absence: no window covers. Report the nearest window.
         out["found"] = False
+
+        # #5361: an inverted window (validTo before validFrom) covers NO
+        # instant, so `_covers` can never match it and this reply is otherwise
+        # byte-identical to a point that honestly has no window at this date.
+        # The read path is where the ambiguity costs most: a caller reads
+        # corruption as "nothing was true then". Flag it, using the same
+        # primitive `_covers` orders with.
+        def _inverted(vf, vt) -> bool:
+            if vf is None or vt is None:
+                return False          # open end — a legal interval
+            kf, kt = _created_sort_key(vf), _created_sort_key(vt)
+            if kf[0] != 0 or kt[0] != 0:
+                return False          # unparseable — #5360's concern
+            return kt < kf
+
+        malformed = [e for e in chain
+                     if _inverted(e["valid_from"], e["valid_to"])]
+        if malformed:
+            out["malformed"] = True
+            out["malformed_ids"] = [e["id"] for e in malformed]
+
         nearest = None
         best = None
         for e in chain:
@@ -17275,7 +17504,9 @@ class TortoiseSDK:
         if nearest is not None:
             out["nearest"] = {"id": nearest["id"],
                                "valid_from": nearest["valid_from"],
-                               "valid_to": nearest["valid_to"]}
+                               "valid_to": nearest["valid_to"],
+                               "malformed": _inverted(nearest["valid_from"],
+                                                      nearest["valid_to"])}
         return out
 
     # ── Recall (epic #898) — UC1 STATE ──────────────────────────────

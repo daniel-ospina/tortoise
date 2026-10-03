@@ -8,7 +8,8 @@ a matching probe), the run must flip RED — the historical silent-green masked 
 #1382 EP regression class for days.
 
 Usage:
-  python3 tools/skip-guard.py <path-to-pytest.log> [--manifest <expected-nodeids.txt>] [--junitxml <path>]
+  python3 tools/skip-guard.py <path-to-pytest.log> [--manifest <expected-nodeids.txt>]
+                              [--scope "<space-joined files>"] [--junitxml <path>] [--manifest-only]
   python3 tools/skip-guard.py --emit-manifest "<space-joined $FILES>" [--marker <expr>] [--output <path>] [--ignore <path>]...
 
 Manifest GENERATION mode (epic #1647 Task 6 — the coverage-manifest
@@ -96,6 +97,21 @@ Coverage-manifest mode (epic #1647 Task 3 — the skip-guard inversion):
                                      e2e module. Use this where the property is
                                      "the frozen nodeid set is still COLLECTED
                                      (and the tests that must run, run)".
+  --scope "<space-joined files>"     restrict the frozen set to the nodeids whose
+                                     FILE is listed. The manifest is always
+                                     passed VERBATIM (never a grep-derived temp
+                                     file, which a tree could silently
+                                     redefine); only what THIS invocation must
+                                     observe shrinks — for a lane that runs one
+                                     SHARD of a repo-level frozen set. A scope
+                                     naming no frozen nodeid is a legitimate
+                                     empty requirement for a shard that owns
+                                     none, and the guard prints the filtered
+                                     count (and says so when the requirement is
+                                     empty) so a wrong scope is not silent.
+                                     Requires --manifest: with no frozen set
+                                     there is nothing to narrow, so the
+                                     combination fails closed (exit 2).
 
   Every expected nodeid must appear as a junitxml <testcase> — passed OR
   skipped-with-reason; a missing nodeid (deselected, file dropped from $FILES,
@@ -814,6 +830,60 @@ def main(argv: list[str]) -> int:
     manifest_only = "--manifest-only" in argv
     if manifest_only:
         argv = [a for a in argv if a != "--manifest-only"]
+    # `--scope` (#6804): restrict WHICH frozen nodeids this invocation must see.
+    # Needed because the frozen manifest is REPO-LEVEL while this job runs ONE
+    # shard of it — comparing the whole file against one shard's junitxml reds
+    # every shard that does not run its siblings (measured on the sharding PR:
+    # shards 0 and (b) reddened on a run whose pytest was green — the frozen
+    # file belongs to shard (c)).
+    #
+    # ⛔ The filter must NOT live in the manifest argument. A `--manifest` that is
+    # a grep-derived TEMP file is a set the tree can silently redefine, which is
+    # the #4207 defect this guard exists to kill; tests/test_ci_guard_invocation.py
+    # asserts `--manifest` resolves to a COMMITTED frozen path, and it is right to.
+    # So the frozen path is passed verbatim and the shard's subset is expressed
+    # here instead: `expected` stays the frozen set, and only the SUBSET required
+    # of this run shrinks. An empty scope result is legitimate (a shard owning no
+    # nodeid in the frozen set requires none) and must NOT be confused with an
+    # empty MANIFEST, which stays fail-closed below.
+    scope: set[str] | None = None
+    _stripped: list[str] = []
+    _i = 0
+    while _i < len(argv):
+        _a = argv[_i]
+        if _a.startswith("--scope="):
+            _v = _a.split("=", 1)[1]
+            _i += 1
+        elif _a == "--scope":
+            if _i + 1 >= len(argv):
+                print(f"❌ {argv[0]}: --scope requires a value", file=sys.stderr)
+                return 2
+            _v = argv[_i + 1]
+            _i += 2
+        else:
+            _stripped.append(_a)
+            _i += 1
+            continue
+        scope = {p for p in _v.split() if p}
+    if scope is not None and not scope:
+        # Fail CLOSED on an EMPTY scope, for the same reason the
+        # `--manifest-only` branch below fails closed without a manifest: the
+        # flag means "assert the frozen set is intact AND that THIS shard
+        # observed its slice", so an empty scope asserts nothing while still
+        # printing success. `--scope` is substituted from the shard matrix
+        # (`--scope "$SCOPE"` built from `${{ matrix.files }}`), so an
+        # unexpanded or empty variable arrives as `--scope ''` rather than as
+        # an absent flag — and absence is the ONLY spelling that legitimately
+        # means "no scope". This is deliberately NARROWER than the check
+        # further down: a scope that names real files which merely do not
+        # intersect the frozen set is still a legitimate pass (announced on
+        # stderr), while a scope naming NO file at all is a caller bug.
+        print("❌ --scope requires at least one file path — an empty scope "
+              "would require no frozen nodeid and report success without "
+              "asserting anything", file=sys.stderr)
+        return 2
+    if scope is not None:
+        argv = _stripped
     log_path, manifest_path, junit_path = _parse_args(argv)
     if manifest_only and manifest_path is None:
         # Fail CLOSED without a manifest: the flag's whole meaning is "assert the
@@ -832,11 +902,25 @@ def main(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return 2
+    if scope is not None and manifest_path is None:
+        # `--scope` narrows the required subset of the FROZEN set, so it has no
+        # meaning without `--manifest`. Accepting it and then silently ignoring
+        # it is the same no-op class as `--manifest-only` with no manifest
+        # (cycle-5/cycle-7 findings): the caller believes a scoped check ran
+        # when nothing was scoped at all.
+        print(
+            f"❌ {argv[0]}: --scope requires --manifest <expected-nodeids.txt> "
+            "— the flag narrows which FROZEN nodeids this run must observe, and "
+            "with no manifest there is no frozen set to narrow; silently "
+            "dropping it would report a scoped check that never happened.",
+            file=sys.stderr,
+        )
+        return 2
     if log_path is None:
         print(
             f"usage: {argv[0]} <path-to-pytest.log> "
-            "[--manifest <expected-nodeids.txt>] [--junitxml <path>] "
-            "[--manifest-only]\n"
+            "[--manifest <expected-nodeids.txt>] [--scope \"<space-joined files>\"] "
+            "[--junitxml <path>] [--manifest-only]\n"
             f"       {argv[0]} --emit-manifest \"<space-joined $FILES>\" "
             "[--marker <expr>] [--output <path>]\n"
             "exit 0 = no live-FalkorDB skips (or no log / no manifest); "
@@ -871,6 +955,36 @@ def main(argv: list[str]) -> int:
                   "construction); the manifest generator emitted nothing.",
                   file=sys.stderr)
             return 1
+        if scope is not None:
+            # The frozen set is intact (checked non-empty above); this only
+            # narrows what THIS run must observe. A scope naming no frozen
+            # nodeid yields an empty required set — a shard that owns none of
+            # the frozen tests — which is a legitimate pass, NOT the vacuous
+            # green the check above forbids (that check ran on the frozen set).
+            # The frozen set must never lose its owner SILENTLY. Exiting 0
+            # without a word makes a shard that required nothing
+            # indistinguishable in the CI log from one that required the whole
+            # set and passed — and that silence is what would hide a frozen
+            # nodeid whose file belongs to NO shard (every shard would happily
+            # require nothing, forever). test_ci_selection.py pins that the
+            # shard scopes COVER the frozen files; the count line below names
+            # the scope and what it filtered, and the empty case is announced
+            # on stderr.
+            frozen_count = len(expected)
+            expected = {n for n in expected
+                        if n.split("::", 1)[0] in scope}
+            print(
+                f"scope: {frozen_count - len(expected)} of {frozen_count} frozen "
+                f"nodeid(s) filtered out by --scope={sorted(scope)}; "
+                f"{len(expected)} required of this run."
+            )
+            if not expected:
+                print(f"ℹ skip-guard: --scope required none of the {frozen_count} "
+                      f"frozen nodeid(s) for this run (files: "
+                      f"{sorted(scope)}). This shard owns none of "
+                      f"{manifest_path!r} — nothing to require, asserting the "
+                      f"frozen set is unchanged is still checked above.",
+                      file=sys.stderr)
         observed: set[str] = set()
         skipped_tests: set[str] = set()
         falkor_violations: list[str] = []

@@ -23,6 +23,23 @@ version: 1
 # trying to enlarge), so it is a wall-clock lever, not a free win.
 fast_shards: 9
 
+# W37: the CARVE-OUT pool. `test-carve-out` was the CI critical path as ONE
+# unsharded job — measured 2026-09-30 over 23 PR runs and 3 successful main
+# runs: work p50 16.9m against a median run wall of 18.6m, i.e. 91% of the wall,
+# while the fast band is already split nine ways. Sharding it is the demand
+# reduction that has to land BEFORE any capacity argument, because the wall was
+# `max(9 fast shards, 1 carve-out)` and the carve-out was the pole in every run
+# examined.
+#
+# Absence means 1 — the unsharded job this repo ran until now — so deleting this
+# key is a complete rollback (unlike `fast_shards`, where absence means 2).
+# 3 is chosen from the measured distribution: the carve-out's work is BROAD —
+# its slowest single test is a small share of the suite's total test time — so
+# it packs evenly and each shard lands near a third of the suite's test time,
+# level with the fast band instead of 16.9m above it. Raising this trades wall
+# clock for aggregate runner-minutes, exactly like `fast_shards`.
+carve_shards: 3
+
 surfaces:
   api:
   # #3561/#3359: per-capture graph-op accounting. Dual-registered because NO
@@ -164,6 +181,12 @@ surfaces:
   # surface, and `core` is only matched when nothing else matched — so `api`
   # is what makes these run on an api-only change to the file they guard.
   - test_onboarding_truth_surface.py
+  # #3553: the onboarding-state jsonb read-modify-write CAS (docker-lane).
+  # Dual-registered under `api` as well as `onboarding` for the same reason as
+  # the guards above: the write path it pins lives in tortoise/hosted_api.py,
+  # which selects the `api` surface — an `onboarding`-only entry would never run
+  # it on a hosted_api.py-only change (the file the CAS exists to fix).
+  - test_onboarding_state_cas.py
   # #3287/#2988/#3243: the selfhost health endpoints must not share fate with
   # work — the readiness probe rides its own daemon pool (a starved readiness
   # probe returned a false 503 for a healthy DB, measured 6020 ms with the probe
@@ -329,6 +352,16 @@ surfaces:
   # is exactly the PR that could silently drop the receipt. Same #2938
   # dual-membership convention as the two entries above.
   - test_capture_secret_redaction_4911.py
+  # #3551: the shared `_write_session_and_turns` primitive (Session MERGE +
+  # turn store). DUAL-REGISTERED (`api` + `core`): the `api` entry is the one
+  # that carries a PR-shape requirement — the primitive is called from
+  # `tortoise/hosted_api.py::_capture_session_impl`, which SELECTS `api`, and a
+  # named-surface match REPLACES the `core` fallback, so a core-only
+  # registration would never run this guard on a hosted_api.py-only PR. The
+  # `core` entry covers the engine path: the primitive also serves
+  # `tortoise/sdk.py::TortoiseSDK.capture_session`, and `tortoise/sdk.py` is a
+  # SHARED_MODULE (so an sdk.py change selects the full matrix regardless).
+  - test_write_session_and_turns_3551.py
   # #3665: pre-spend cohort cost cap. DUAL-REGISTERED (also under `core`): the
   # admission gate, the ledger write, the reader and the RPC wrappers all live
   # in tortoise/hosted_api.py, metering.py and supabase_control.py, which
@@ -336,6 +369,12 @@ surfaces:
   # REPLACES the `core` fallback, so a core-only registration would never run
   # on an api-only PR. Same #2938 dual-membership convention.
   - test_cohort_cost_cap.py
+  # #4493: the fixed/shared SaaS ALLOCATION rule + the revived per-team cost
+  # metric. Dual-registered with `core`: the file pins `tortoise/monitoring.py`
+  # (core) AND the production write path in `tortoise/hosted_api.py`, which
+  # SELECTS `api` — a named-surface match REPLACES the `core` fallback, so a
+  # core-only registration would never run on an api-only PR.
+  - test_cost_allocation.py
   # #4490: hosted-API compute (machine time) per org. Dual-registered with `core`:
   # the middleware + route-class derivation live in tortoise/hosted_api.py (`api`
   # SOURCE_PATTERN) while the metric family/writer/reader live in
@@ -659,11 +698,25 @@ surfaces:
   - test_4716_capture_operator_ref_remap.py
   - test_6131_operator_mutation_vocabulary.py
   - test_comove_dispatch_3627.py
+  - test_heavy_import_guard.py
   # #4971: the `(op_type, src, dst)` idempotency guard hoisted into
   # `commit_ops.apply_payload_operators` — the helper is core engine code, and
   # the re-key regression drives the real embedded capture commit, so this is
   # the `core` surface (same home as test_4716 above).
   - test_operator_idempotency_4971.py
+  # #5361: both halves of the inverted-validity-window guard. Registered under
+  # `core` ALONE, which is the surface that actually selects them: the audit half
+  # guards tortoise/audit.py (no SOURCE_PATTERNS entry → `core` fallback) and the
+  # read-path half tests TortoiseSDK.restore_point_at; both halves' measure is
+  # `_created_sort_key` in tortoise/search_engine.py, also `core`. The registration
+  # is load-bearing rather than cosmetic: without it the files are ABSENT from the
+  # run set selected by `--changed-files "tortoise/audit.py"` (surfaces ['core'],
+  # full=false) — the one diff that can break them.
+  # NOTE `--changed-files` takes a newline-separated string, not a path — a path
+  # argument is read as an unknown changed file and fail-closes to full=true,
+  # which masks exactly this gap.
+  - test_5361_inverted_window_audit.py
+  - test_5361_inverted_window_read_path.py
   - test_ask_eval_only.py
   - test_backfill_ghost_members_guard.py
   - test_backup_ledger_5062.py
@@ -839,6 +892,12 @@ surfaces:
   # no api/engine surface: `core` runs it on engine-wide changes. Its carve-out
   # below keeps a tools/run_reaper.py-only diff out of the tier-1 smoke fallback.
   - test_run_reaper.py
+  # #7017: distinguishes a wedged container engine from a graph outage. Hermetic
+  # (no network, no docker — every probe is injected), so it pins no api/engine
+  # surface: `core` runs it on engine-wide changes. It exists because a wedged
+  # engine presents as `redis.exceptions.TimeoutError`, which names the graph and
+  # sends the diagnosis where the problem is not (#4844, #7017).
+  - test_engine_probe.py
   - test_health_ready_nonblocking.py  # #2988: /health/ready off-loop + bounded probes
   - test_selfhost_health_probe_executor.py  # #3287/#2988/#3243: selfhost health probes (dual-registered)
   - test_server_hygiene_gate.py
@@ -904,6 +963,7 @@ surfaces:
   # Registered beside its sibling capture tests; `tortoise/sdk.py` is a
   # SHARED_MODULE, so an sdk.py-only change already runs the full matrix.
   - test_capture_validfrom_3945.py
+  - test_write_session_and_turns_3551.py  # #3551: the shared _write_session_and_turns primitive (Session MERGE + turn store); dual: api
   # #2006 (W11): onboarding funnel telemetry (seed/decide events gated on the
   # COMPLETED_STEP edge's new creation). Registered under `core` for the
   # `tortoise/analytics.py` seam, which matches no SOURCE_PATTERNS entry — and
@@ -959,6 +1019,15 @@ surfaces:
   - test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan
   - test_session_attribution.py
   - test_ci_selection.py
+  # #6884: pins the `uri_requiring` declaration (re-derived BEHAVIOURALLY — it
+  # runs the failing `pytest --collect-only` with an EMPTY TORTOISE_DB_URI and
+  # compares) and
+  # the tier-2 subtraction that keeps URI-requiring modules out of a URI-less PR
+  # leg. Registered here rather than left unlisted: an unlisted tests/*.py reds
+  # `manifest-integrity` (#2642), and this file is a gate test for the selector,
+  # so it belongs with the other ones — and a `config/`-only edit selects `core`,
+  # so the gate runs on exactly the edits that can break the lane.
+  - test_uri_requiring_selection.py
   # #6142: the last-failed fast-fail pre-phase's shape — that it never narrows
   # the GATING run, is PR-only and fail-open, and keys its cache per
   # (job, half, ref). Hermetic (reads the workflow YAML; no DB, no network).
@@ -1268,6 +1337,9 @@ surfaces:
   # otherwise never run this file. Verified with tools/ci_selection.py:
   # select(["tortoise/monitoring.py"]) -> ["core"] (round-1 review, bug).
   - test_egress_bytes.py
+  # #4493: the allocation rule, the fail-closed basis reader and the revived
+  # per-team Gauge — dual-registered with `api` (see that block).
+  - test_cost_allocation.py
   # #4490: the per-org compute dimension's metric family/writer/reader live in
   # tortoise/monitoring.py — a monitoring.py-only PR (which maps to `core`) must
   # run this file. Dual-registered with `api` (the middleware is in hosted_api.py).
@@ -1670,6 +1742,7 @@ surfaces:
   - test_onboarding_health_flip.py
   - test_onboarding_integration.py
   - test_onboarding_state.py        # #2001 (W5): canonical module unit tests (lane-agnostic)
+  - test_onboarding_state_cas.py    # #3553: jsonb RMW compare-and-set against the REAL registry path (docker-lane)
   - test_onboarding_state_split.py  # #2001 (W5): docker-lane graph-held FLOW-state tests
   - test_onboarding_seed.py         # #1999 (W3): shared seed-core unit tests (lane-agnostic)
   - test_onboarding_seed_endpoint.py  # #1999 (W3): docker-lane seed/decide/completion tests
@@ -2044,6 +2117,71 @@ carve_out:
 # excluded from EVERY docker leg, so this lane is the one that runs all five.
 - test_write_path_unreachable_seam_5148.py
 - bench/test_smoke_embedded.py
+# #6884: modules that REQUIRE the docker lane — each one module-skips at import
+# when `TORTOISE_DB_URI` is not a usable URI — in the tier-2 PR legs that means
+# present and EMPTY (`URI=""`), not absent (`if not _is_db_uri(...): pytest.skip(...)`
+# with `allow_module_level=True`). A module-level skip collects ZERO tests, so
+# `pytest --collect-only` exits 5 and the fail-closed manifest guard in
+# python-ci.yml ('Generate coverage manifest') kills the leg BEFORE any test
+# runs. Because it fails outside the test step there is no `FAILED <nodeid>`
+# line, so the merge rail cannot attribute it and refuses for want of a failure
+# identity (the #6798 shape) — #6390 was `mergeable=true` with a clean review
+# record AT HEAD and still could not be landed.
+#
+# WHY THE FIX IS HERE AND NOT IN THE WORKFLOW: the tier-2 PR legs are URI-EMPTY
+# (present and empty, never unset) BY DESIGN — both the URI and EXPECT_URI are
+# emptied, which is what keeps the E2E-6 tripwire INERT on the tier-2 shape (it
+# arms only when full==true, where both are set; python-ci.yml:600-602 and
+# 1367-1368, epic #1647 Task 9 + cycle-6 P2-8), so 'provision the URI' is a
+# reversal of a recorded decision, not a fix. A file that cannot collect in a
+# URI-less leg must therefore not be handed to one — the exact MIRROR of
+# `carve_out` above, which excludes files that cannot run in a URI-SET leg.
+# tools/ci_selection.py subtracts this list on the tier-2 path ONLY: the `full`
+# path returns earlier and keeps running these files, which is correct because
+# a full leg HAS the URI.
+#
+# Derived, not hand-maintained: tests/test_uri_requiring_selection.py re-derives
+# the set and reds if a module that collects NOTHING in a URI-less leg is not
+# registered here — the #2944 discipline (structural, not name-based).
+#
+# The derivation is BEHAVIOURAL, not syntactic. It runs the failing CI command
+# itself — `pytest --collect-only` over the candidate modules with the leg's own
+# environment shape (`TORTOISE_DB_URI` PRESENT AND EMPTY, not removed; see
+# python-ci.yml:606-624 and :671) — and takes "this module produced no nodeids"
+# as the rule. Four review cycles tried a static predicate (module `if`s, alias
+# renames, local wrappers, class bodies, decorators, lambdas, `**kwargs`
+# forwarding, constructed env names, transitive helpers, default arguments,
+# guard polarity) and every cycle found more shapes: an AST check is an
+# approximation of a question pytest answers exactly. Asking pytest is the
+# invariant itself, not a model of it, and it cannot remove coverage — whatever
+# the reason a module yields no nodeids, it was not going to run a test in that
+# leg.
+#
+# The candidate set is a cheap superset and the bound is a DISJUNCTION, because
+# each half alone was measured to leak under review: (a) the module NAMES the URI
+# (`TORTOISE_DB_URI`/`is_db_uri`) — the property the lane is about, which a
+# mechanism-only filter misses (a module-level `raise unittest.SkipTest(...)`
+# carries no `allow_module_level` literal); and (b) the module CARRIES the abort
+# mechanism — which a URI-only filter misses (a caller that reads the URI through
+# a helper never names it). pytest decides the answer over the union. Two
+# consequences are stated in the guard's module docstring: `pytest.importorskip`
+# is excluded structurally (it spells neither half — and a missing dependency must
+# RED the leg rather than be silently subtracted), and the residual is a
+# collection abort through something neither half spells, e.g. a helper that
+# raises, closed by the tripwire. A module emptied by some other cause (the
+# manifest's own `-m` marker, a collection error — note `pytest.exit`/`sys.exit`
+# give rc=1/3, not this rc=5 shape) is the attribution half of #6884 and is
+# tracked on the issue, not here.
+uri_requiring:
+- test_capabilities_endpoint.py
+- test_eval_ingest_cache.py
+- test_invite_fusion_docker.py
+- test_onboarding_false_completion_repair.py
+- test_onboarding_seed_endpoint.py
+- test_onboarding_state_cas.py
+- test_onboarding_state_split.py
+- test_onboarding_w4_settings.py
+- test_onboarding_w6_capture_disclosure.py
 push_extra: []
 durations:
 # #3395: per-file CI wall time (seconds), swept from the junit artifacts of four
@@ -2179,6 +2317,10 @@ durations:
   test_backup_watcher_health.py: 0.2
   eval/retrieval/test_integration.py: 1523.4
   test_onboarding_state_split.py: 310.7
+  # #3553: this file is NEW on this branch, so main's sweep has no junit measurement for it.
+  # It is NOT presented as a measurement — it carries the branch's local reading under the
+  # `# unmeasured` convention stated above. Refresh from the first post-merge main run that includes it.
+  test_onboarding_state_cas.py: 120.0  # unmeasured
   test_onboarding_truth_surface.py: 4.0
   eval/write_path/test_write_path_benchmark.py: 101.8
   test_tortoise_client.py: 11.9
@@ -2221,6 +2363,7 @@ durations:
   test_write_verb.py: 34.6
   test_index_restore.py: 2.7
   test_capture_session.py: 53.9
+  test_write_session_and_turns_3551.py: 70.8  # #3551: locally measured (10 tests, embedded carve-out lane; the hosted half drives POST /v1/sessions) — refresh from CI junit
   test_battery_setup.py: 67.9
   test_graph_write_loop_responsiveness.py: 19.6
   test_read_routes_loop_responsiveness.py: 6.5
@@ -2334,6 +2477,7 @@ durations:
   test_collision_preflight.py: 13.1
   test_branch_reaper.py: 2.0  # unmeasured — no measurement in the four source runs; flat default
   test_run_reaper.py: 2.0  # unmeasured — new file (#6868); no CI junit yet, flat default
+  test_engine_probe.py: 2.0  # unmeasured — new file (#7017); no CI junit yet, flat default
   test_control_plane_offload_3498.py: 1.4
   test_analytics_offloop_4015.py: 0.6
   test_free_team_entitlement.py: 4.8
@@ -2554,6 +2698,7 @@ durations:
   test_joint_index_ingest.py: 0.5
   test_mcp_telemetry.py: 0.4
   test_monitoring.py: 24.3
+  test_cost_allocation.py: 20.3
   test_operator_source_search.py: 0.6
   test_pack_shipping.py: 0.7
   test_query_suggestions.py: 0.4
