@@ -528,7 +528,10 @@ def classify_query(
 #: {"leg", "ran", "degraded", "reason", "count"}. ``reason`` is never null
 #: when ``degraded`` is true (shape rule). #4999 adds one OPTIONAL key —
 #: ``mechanism`` — present only on an entry whose leg records WHICH path it
-#: took. Legs that do not pass one are byte-identical to the shared shape.
+#: took. #4199 adds a second OPTIONAL key — ``scope``
+#: (:data:`VECTOR_SCOPE_KEY`, value :data:`VECTOR_SCOPE_EMPTY`) — present
+#: only on a vector entry whose ``scope_kinds`` predicate selected NO nodes.
+#: Legs that do not pass either key are byte-identical to the shared shape.
 def _trace_entry(leg: str, *, ran: bool, degraded: bool,
                  reason: str | None, count: int,
                  mechanism: str | None = None) -> dict:
@@ -571,6 +574,43 @@ MECHANISM_SCAN = "scan"
 MECHANISM_SCAN_FALLBACK = "scan_fallback"
 
 
+# ── #4199: the dense leg's material for the READ's own scope ────────────────
+# The vector leg's health used to be judged against the WHOLE entity label:
+# the zero-row guard counted every embedded Point, and a row-returning run was
+# recorded ``ok`` — so a corpus that is embedded only OUTSIDE the requested
+# kind (the measured production state: captured turn Points un-embedded,
+# extracted Points embedded) was reported ``hybrid`` while the dense leg
+# contributed NOTHING to the read's own material. The projection below is the
+# entity_type → kind property mapping the read's KIND filter uses (mirrors
+# ``sdk.recall_state``'s ``kind_field``); a scope-aware count over it is what
+# lets :func:`run_vector_query` declare ``no_embeddings`` for a hollow scope.
+_KIND_FIELD_BY_ENTITY = {
+    "point": "pointKind",
+    "operator": "op_type",
+    "source": "sourceKind",
+    "document": "documentKind",
+    "object": "objectKind",
+    "event": "eventKind",
+    "subject": "subjectKind",
+}
+
+#: #4199 — trace-entry key recording that the arm measured an EMPTY scope
+#: (its ``scope_kinds`` predicate selected NO nodes). The value is
+#: :data:`VECTOR_SCOPE_EMPTY`. Written only by the measurement path: a FAILURE
+#: record is never neutral, so the key is absent there (see the ``failure``
+#: argument of :func:`run_vector_query`). Do not infer a non-empty scope from
+#: the key's ABSENCE — absence is not evidence that the scope was non-empty.
+VECTOR_SCOPE_KEY = "scope"
+#: The arm's ``scope_kinds`` selected no nodes. An empty scope is a category
+#: error for ``no_embeddings`` (#2952's deliberate rule — see
+#: :func:`test_empty_scope_is_not_declared_un_embedded`), so such an entry
+#: neither proves the read hybrid nor declares it degraded: it is NEUTRAL in
+#: the aggregation. It exists so one arm measuring a DIFFERENT (empty) scope
+#: cannot launder another arm's genuine degradation — the ``object_centric``
+#: Point+Object laundering #4199's review found.
+VECTOR_SCOPE_EMPTY = "empty"
+
+
 # ── (C) #2952: declared degraded reads ──────────────────────────────────────
 # The leg trace records WHAT each leg did; a consumer that would otherwise
 # label the result "hybrid" needs an explicit DECLARATION that the vector
@@ -585,10 +625,38 @@ VECTOR_LEG_UNAVAILABLE = "vector_leg_unavailable"
 
 
 def _vector_leg_healthy(entries: list[dict]) -> bool:
-    """True when at least one vector entry did run, undegraded (#2952)."""
+    """True when at least one IN-SCOPE vector entry did run, undegraded (#2952).
+
+    #4199: an entry whose arm measured an EMPTY scope
+    (:data:`VECTOR_SCOPE_EMPTY`) is not evidence the read was served — it is
+    skipped. ``recall_state(object_centric=True)`` submits one vector arm per
+    entity, and an arm whose kind scope holds no nodes scans the whole label
+    and can return out-of-scope rows recorded ``ok``; that healthy entry must
+    not launder another arm's genuine degradation.
+    """
     return any(
         e.get("leg") == "vector" and e.get("ran") and not e.get("degraded")
+        and e.get(VECTOR_SCOPE_KEY) != VECTOR_SCOPE_EMPTY
         for e in entries)
+
+
+def _all_vector_arms_measured_empty_scope(entries: list[dict]) -> bool:
+    """True when EVERY vector entry measured an EMPTY scope (#4199 review P1).
+
+    A FAILURE record is deliberately NOT counted as an empty-scope
+    measurement: it carries no :data:`VECTOR_SCOPE_KEY` and keeps its own
+    ``reason``, so an empty scope cannot neutralise a failed leg (the
+    ``failure`` argument of :func:`run_vector_query`'s ``_record``). A trace
+    whose every arm failed therefore returns ``False`` and still fails
+    closed.
+
+    ``#2952``'s empty-scope rule is shared by C1 and C2. What counts as an
+    empty scope, and the failure carve-out above, are stated once in
+    :func:`run_vector_query`.
+    """
+    vecs = [e for e in entries if e.get("leg") == "vector"]
+    return bool(vecs) and all(
+        e.get(VECTOR_SCOPE_KEY) == VECTOR_SCOPE_EMPTY for e in vecs)
 
 
 def _degraded_read_marker(reason: str, entries: list[dict]) -> dict:
@@ -647,6 +715,13 @@ def declared_degraded_read(leg_trace: list[dict] | None) -> dict | None:
     EMPTY trace, by contrast, reports nothing and is declared
     ``leg_trace_unavailable`` (fail closed). A fallback-only (TF-IDF) trace
     reports a text leg whose vector leg is absent → ``leg_absent``.
+
+    #4199 empty-scope aggregation: ``recall_state(object_centric=True)``
+    submits one vector arm per entity, and an arm whose ``scope_kinds``
+    selected NO nodes (:data:`VECTOR_SCOPE_EMPTY`) is NEUTRAL — it neither
+    proves the read hybrid nor declares it degraded. An arm that measured a
+    different, empty scope therefore cannot launder another arm's genuine
+    degradation.
     """
     if leg_trace is None:
         return None
@@ -662,12 +737,25 @@ def declared_degraded_read(leg_trace: list[dict] | None) -> dict | None:
     # healthy-but-empty vector entry must not launder a fallback read).
     if _results_bearing_fallback(entries) is not None:
         return _degraded_read_marker("tfidf_fallback", entries)
-    vecs = [e for e in entries if e.get("leg") == "vector"]
+    vecs_all = [e for e in entries if e.get("leg") == "vector"]
+    # #4199: an arm that measured an EMPTY scope is NEUTRAL — it neither
+    # proves the read hybrid nor declares it degraded. Drop it before the
+    # aggregation so it cannot launder (or be blamed for) another arm's
+    # coverage: ``recall_state(object_centric=True)`` submits a Point arm and
+    # an Object arm, and the Object arm's kind scope is often empty while its
+    # unscoped scan still returns rows.
+    vecs = [e for e in vecs_all
+            if e.get(VECTOR_SCOPE_KEY) != VECTOR_SCOPE_EMPTY]
     # ``recall_state(object_centric=True)`` appends one entry per query
-    # (Point + Object), so a single healthy vector entry proves the leg ran.
-    # NOTE: stricter than the #3005 battery submission gate (ran AND NOT
-    # degraded) — a degraded vector leg contributes no semantic results.
+    # (Point + Object), so a single healthy IN-SCOPE vector entry proves the
+    # leg ran. NOTE: stricter than the #3005 battery submission gate (ran AND
+    # NOT degraded) — a degraded vector leg contributes no semantic results.
     if _vector_leg_healthy(entries):
+        return None
+    if _all_vector_arms_measured_empty_scope(entries):
+        # EVERY vector arm measured an EMPTY scope: the read's scope holds no
+        # nodes at all, so the dense leg is not to blame (#2952's empty-scope
+        # rule — ``no_embeddings`` would be a category error there).
         return None
     vec = vecs[0] if vecs else None
     if vec is not None:
@@ -686,19 +774,23 @@ def require_hybrid_read(leg_trace: list[dict] | None,
 
     Capability for real-lane measurement (aligns with the #2985 / PR #3005
     fail-loud pattern): returns ``{"hybrid": True, "vector_leg_unavailable":
-    False}`` only when at least one NOT-degraded vector entry RAN, and raises
+    False}`` only when at least one NOT-degraded, IN-SCOPE vector entry RAN
+    (:func:`_vector_leg_healthy` skips an arm that measured an EMPTY scope),
+    or when EVERY vector arm measured an empty scope (#2952's empty-scope
+    rule; ``declared_degraded_read`` is consulted first, so a marker it does
+    return refuses here too). It raises
     :class:`~tortoise.exceptions.HybridReadUnavailableError` otherwise —
     including for ``leg_trace=None`` / empty / structural-only traces (a
     surface that cannot positively prove the vector leg fails closed).
 
     This proves the VECTOR (semantic) leg specifically — the #2952 failure
-    class: at least one vector entry RAN and was NOT degraded (a
+    class: at least one IN-SCOPE vector entry RAN and was NOT degraded (a
     ``degraded=True`` vector leg contributed no semantic results, so the
     read is keyword-only). This is deliberately STRICTER than the #3005
     battery capability gate, which asks only whether the vector strategy was
     SUBMITTED (``ran`` regardless of ``degraded``); a battery lane that
-    records a score should delegate to this predicate so the two gates can
-    never disagree on the same trace. It is not a both-legs health check
+    records a score should delegate to this predicate so the capability it
+    reports cannot be looser than this one. It is not a both-legs health check
     (the fts leg's own degrade is surfaced separately in the trace).
 
     Opt-in only: nothing in the product calls this by default, so healthy-
@@ -713,6 +805,13 @@ def require_hybrid_read(leg_trace: list[dict] | None,
         if declared is not None:
             marker = declared
         elif _vector_leg_healthy(entries):
+            return {"hybrid": True, VECTOR_LEG_UNAVAILABLE: False}
+        elif _all_vector_arms_measured_empty_scope(entries):
+            # #4199 review P1: on THIS trace every vector arm measured an
+            # EMPTY scope, and C1 declared nothing (``declared`` is None
+            # here, or its marker would have been raised above) — applying
+            # the same rule keeps the two gates aligned on this trace: a read
+            # whose dense leg RAN over a scope with no nodes is not a refusal.
             return {"hybrid": True, VECTOR_LEG_UNAVAILABLE: False}
         else:
             # Positive proof required: an absent marker on a non-hybrid trace
@@ -908,6 +1007,7 @@ def run_vector_query(
     vector_index_api: str | None = None, excluded_statuses: tuple | None = None,
     leg_trace: list[dict] | None = None,
     min_similarity: float | None = None,
+    scope_kinds: tuple[str, ...] | None = None,
 ) -> list[tuple[str, float]]:
     """Run vector similarity search via FalkorDB vector index.
 
@@ -957,19 +1057,74 @@ def run_vector_query(
     Operators are Points with is_operator=true — they query the Point label.
     (#172)
 
+    scope_kinds (#4199): the KIND values the READ's own post-retrieval kind
+    filter selects (``sdk.recall_state``'s ``expanded_kinds``). When given
+    and a ``leg_trace`` is being recorded, the leg's material is judged
+    against THAT scope rather than the whole label: a scope that HAS nodes
+    but NONE of them embedded means this read's dense leg can contribute
+    nothing: the record is degraded, with whatever reason the read's own path
+    assigns it (the #2952 vocabulary — no term is minted). The zero-row
+    guard's count is likewise taken over the scope, so
+    a corpus whose only embeddings are out of scope no longer reports
+    ``empty_results`` ("there are embeddings, just no near neighbour").
+    Retrieval itself is UNCHANGED: the rows the unscoped query returns are
+    still returned (the read's kind filter owns dropping them), and a scope
+    with no embedded nodes is still searched. Default None = pre-#4199
+    behavior, byte-identical. A scope that selects NO nodes is recorded
+    NEUTRAL on the trace entry (:data:`VECTOR_SCOPE_KEY` →
+    :data:`VECTOR_SCOPE_EMPTY`): its ``ok``/degraded record stands, but
+    :func:`declared_degraded_read` skips it so it can neither prove the read
+    hybrid nor declare it degraded (the empty-scope rule). ONE EXCEPTION:
+    a FAILURE (:func:`_record` called with ``failure=True`` -
+    ``index_missing``, a raised ``no_embeddings``, ``query_failed``) is
+    never tagged neutral and keeps its own reason, because an empty scope
+    must not launder a failed leg into "no declaration at all" (#4199
+    review P2).
+
     Note: the connection-level `timeout` is passed straight to the FalkorDB
     driver (Graph.query(timeout=...)) so a slow query is killed server-side.
     The post-hoc check remains as a safety net for drivers that ignore the
     timeout, and the per-strategy circuit breaker short-circuits after
     consecutive slow/failed queries. (#249)
     """
+    #: #4199 — the read's OWN scope carries no dense material. Resolved once
+    #: below (before the query) and applied to every HEALTHY outcome record.
+    _scope_hollow = False
+    #: #4199 — the scope probe selected NO nodes. Such an entry is NEUTRAL in
+    #: the declaration (neither healthy nor degraded): an arm measuring a
+    #: different, empty scope must not launder another arm's degradation.
+    _scope_empty = False
+    _scope_embedded: int | None = None
+
     def _record(*, ran: bool, degraded: bool, reason: str | None,
-                count: int, mechanism: str | None = None) -> None:
-        if leg_trace is not None:
-            leg_trace.append(_trace_entry("vector", ran=ran,
-                                          degraded=degraded,
-                                          reason=reason, count=count,
-                                          mechanism=mechanism))
+                count: int, mechanism: str | None = None,
+                failure: bool = False) -> None:
+        if leg_trace is None:
+            return
+        if _scope_hollow and ran and not degraded:
+            # #4199: the leg ran, but the READ's scope holds no dense
+            # material — this record must not present the read as hybrid.
+            if reason == BELOW_RELEVANCE_FLOOR:
+                # #4028 keeps its own reason: the search surface reads it to
+                # distinguish "no relevant neighbour" from a leg FAILURE and
+                # must not answer from the TF-IDF fallback. Flip only the
+                # verdict — the read is still declared degraded.
+                degraded = True
+            else:
+                degraded, reason, count = True, "no_embeddings", 0
+        entry = _trace_entry("vector", ran=ran, degraded=degraded,
+                             reason=reason, count=count,
+                             mechanism=mechanism)
+        if _scope_empty and not failure:
+            # #4199: mark the entry NEUTRAL — the empty-scope rule keeps its
+            # ``ok``/degraded record, but the declaration skips it (see
+            # :func:`declared_degraded_read`).
+            # #4199 review P2: a FAILURE is never neutral. An empty scope
+            # cannot launder ``query_failed`` / ``index_missing`` into "no
+            # scope, nothing to say" — that is the same laundering the
+            # empty-scope rule exists to stop, keyed on scope instead of arm.
+            entry[VECTOR_SCOPE_KEY] = VECTOR_SCOPE_EMPTY
+        leg_trace.append(entry)
 
     if not query_vec:
         return []
@@ -1006,6 +1161,62 @@ def run_vector_query(
         id_field = "eventId"
     else:
         id_field = "id"
+
+    # ── #4199: measure the READ's own dense scope ────────────────────────
+    # One count over the kind predicate the read's kind filter applies, run
+    # ONLY when a trace is being recorded (a default caller sees no extra
+    # query and byte-identical behavior). ``total`` and ``embedded`` are read
+    # together so a scope with NO nodes is not mistaken for an un-embedded
+    # one. The probe applies the SAME kind + per-label status predicate the
+    # retrieval legs apply (``_status_vocab_for``), so the material it counts
+    # is exactly the material the leg may return — #5287: without the status
+    # half, a terminal-but-embedded in-scope Object was counted by the probe
+    # and then excluded by the leg. An UNMEASURABLE scope fails CLOSED: a read
+    # path that cannot prove its dense material must not report itself healthy
+    # (retrieval is unaffected either way — this only decides the declaration).
+    if leg_trace is not None and scope_kinds:
+        try:
+            _scope_field = _KIND_FIELD_BY_ENTITY.get(entity_type, "pointKind")
+            _scope_where = [f"n.{_scope_field} IN $scope_kinds"]
+            # #5287: use the SAME per-label status predicate the retrieval
+            # legs use (:1213 index, :1375 scan) — a terminal Object is
+            # excluded by them, so the probe must exclude it too or an
+            # in-scope-but-terminal embedding is counted as material the leg
+            # then refuses to return (``hybrid`` declared over a keyword-only
+            # read — the #4199 class via the status axis). ``_status_vocab_for``
+            # is the ONE family→vocabulary dispatcher; calling it here (never
+            # re-stating the mapping) is what keeps probe and leg from drifting.
+            if label in ("Point", "Object") and excluded_statuses != ():
+                _vocab, _flag = _status_vocab_for(label)
+                _scope_where.append(_exclude_status_clause(
+                    "n", excluded_statuses or _vocab,
+                    include_outdated_flag=_flag))
+            if entity_type == "operator":
+                _scope_where.append("n.is_operator = true")
+            _scope_rows = graph.query(
+                f"MATCH (n:{label}) WHERE {' AND '.join(_scope_where)} "
+                "RETURN count(*), count(n.embedding)",
+                params={"scope_kinds": list(scope_kinds)},
+                timeout=timeout_ms,
+            ).result_set
+            if _scope_rows:
+                _scope_total = int(_scope_rows[0][0] or 0)
+                _scope_embedded = int(_scope_rows[0][1] or 0)
+                _scope_hollow = _scope_total > 0 and _scope_embedded == 0
+                _scope_empty = _scope_total == 0
+            else:
+                # #5287: an aggregate ``RETURN count(*), count(...)`` always
+                # yields one row, so an EMPTY result set is a probe that
+                # answered nothing — not a measured scope. Treat it exactly
+                # like the raised-probe path below: UNMEASURABLE, fail CLOSED.
+                # Pre-fix it fell through to the unscoped whole-label count
+                # (line ~1427) and could record ``empty_results``/healthy,
+                # contradicting the comment above.
+                _scope_hollow = True
+        except Exception as e:  # noqa: BLE001, RUF100 — fail CLOSED
+            logger.debug("dense scope probe failed (%s) — declaring the "
+                         "scope un-embedded", e)
+            _scope_hollow = True
 
     # #4999: did THIS call attempt an index query? Embedded mode never does
     # (the scan is the design, not a fallback); docker mode always does, and a
@@ -1233,13 +1444,19 @@ def run_vector_query(
         # fires for the real empty case). Cheap count(p.embedding) guard
         # distinguishes no_embeddings (zero embedded points) from
         # empty_results (embedded points present, no matches).
-        try:
-            cnt_rows = graph.query(
-                f"MATCH (n:{label}) WHERE n.embedding IS NOT NULL "
-                "RETURN count(*)", timeout=timeout_ms).result_set
-            embedded = cnt_rows[0][0] if cnt_rows else 0
-        except Exception:  # noqa: BLE001, RUF100
-            embedded = 0
+        # #4199: when the read's SCOPE was measured above, that count IS the
+        # guard — a corpus embedded only outside the requested kind must not
+        # report empty_results ("there are embeddings, no near neighbour").
+        if _scope_embedded is not None:
+            embedded = _scope_embedded
+        else:
+            try:
+                cnt_rows = graph.query(
+                    f"MATCH (n:{label}) WHERE n.embedding IS NOT NULL "
+                    "RETURN count(*)", timeout=timeout_ms).result_set
+                embedded = cnt_rows[0][0] if cnt_rows else 0
+            except Exception:  # noqa: BLE001, RUF100
+                embedded = 0
         _record(ran=True, degraded=(embedded == 0),
                 reason=("no_embeddings" if embedded == 0 else "empty_results"),
                 count=0, mechanism=scan_mechanism)
@@ -1250,17 +1467,17 @@ def run_vector_query(
             logger.info("Vector index not available — skipping vector strategy")
             _breaker_record("vector", True)
             _record(ran=True, degraded=True, reason="index_missing", count=0,
-                    mechanism=scan_mechanism)
+                    mechanism=scan_mechanism, failure=True)
         elif "embedding" in msg and "null" in msg:
             logger.info("No Points with embeddings — skipping vector strategy")
             _breaker_record("vector", True)
             _record(ran=True, degraded=True, reason="no_embeddings", count=0,
-                    mechanism=scan_mechanism)
+                    mechanism=scan_mechanism, failure=True)
         else:
             logger.warning("Vector query failed: %s", e)
             _breaker_record("vector", False)
             _record(ran=True, degraded=True, reason="query_failed", count=0,
-                    mechanism=scan_mechanism)
+                    mechanism=scan_mechanism, failure=True)
         return []
 
 
@@ -1543,6 +1760,7 @@ def degradation_chain(
     keep_numeric: bool = False,
     min_vector_similarity: float | None = None,
     floored_legs: set[str] | None = None,
+    scope_kinds: tuple[str, ...] | None = None,
 ) -> dict[str, list[tuple[str, float]]]:
     """Run retrieval strategies in parallel with per-strategy degradation.
 
@@ -1592,6 +1810,11 @@ def degradation_chain(
         caller distinguish "no relevant neighbour" from "leg failed" (the
         distinction the search surface needs to avoid answering from the
         TF-IDF fallback). Default None = not reported.
+    scope_kinds (#4199): optional KIND values the read's own post-retrieval
+        kind filter selects — forwarded verbatim to
+        :func:`run_vector_query`, which then judges the dense leg's material
+        against that scope instead of the whole entity label.
+        Default None = pre-#4199 behavior.
     """
     import concurrent.futures
 
@@ -1637,6 +1860,11 @@ def degradation_chain(
             _vec_kwargs = _runner_kwargs("vector")
             if min_vector_similarity is not None:
                 _vec_kwargs["min_similarity"] = min_vector_similarity
+            if scope_kinds is not None:
+                # #4199: merged ONLY when supplied — same pinned-contract
+                # posture as ``min_similarity`` above (a default caller sees
+                # byte-identical submit kwargs).
+                _vec_kwargs["scope_kinds"] = scope_kinds
             futures[executor.submit(
                 bind_metering_context(run_vector_query), graph, query_vec,
                 limit=limit, is_embedded=is_embedded,

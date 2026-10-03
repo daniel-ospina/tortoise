@@ -1257,7 +1257,14 @@ def test_connected_screen_states_capture_in_future_tense_after_an_install_probe(
     expect(page.locator(".welcome-title")).to_have_text("You're all set", timeout=10_000)
     done = page.locator("div.done")
     expect(done).to_contain_text("Connected", timeout=10_000)
-    expect(done).to_contain_text("Tortoise will capture your agent's sessions.")
+    # #3661: claude's hook seam is gated on the machine opt-in, so the future
+    # tense must NAME the opt-in it still requires — the bare promise is only
+    # honest for seams whose install IS the opt-in (pi). The STEM plus the
+    # opt-in clause is asserted rather than the whole sentence: the branch and
+    # the condition are this test's contract, exact copy is the snapshot's.
+    expect(done).to_contain_text("Tortoise will capture your agent's sessions")
+    expect(done).to_contain_text(
+        "once this machine opts in (export TORTOISE_CAPTURE=1)")
     assert "Tortoise is capturing your agent's sessions." not in done.inner_text(), \
         "no receipt means the present-tense claim is false"
     assert "not installed yet" not in done.inner_text(), \
@@ -1282,7 +1289,11 @@ def test_connected_screen_without_probe_or_receipt_reports_not_installed(page: P
     text = done.inner_text()
     assert "Tortoise is capturing your agent's sessions." not in text, \
         "#3782: no receipt — the present-tense claim is false"
-    assert "Tortoise will capture your agent's sessions." not in text, \
+    # #3661: the future-tense STEM (no trailing period) is asserted absent, so
+    # the pin still catches the opt-in-gated wording the screen now renders —
+    # the old full-sentence form only matched the pre-#3661 copy and would
+    # wave through a leaked promise.
+    assert "Tortoise will capture your agent's sessions" not in text, \
         "#3782: no probe — the future-tense promise is not server-observed"
 
 
