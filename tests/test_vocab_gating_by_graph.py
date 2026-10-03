@@ -203,12 +203,12 @@ class TestCompileValueBriefGating:
 
         FAIL-ON: the gate leaks into the default path — e.g. `None` starts
         meaning "no packs" — which would narrow the brief to core.
-        REACHABLE: the real ``packs/`` catalog holds 5 namespaced packs, so
+        REACHABLE: the real ``packs/`` catalog holds 6 namespaced packs, so
         ``_pack_namespaces`` is non-trivial and a narrowing is visible.
         """
         brief = compile_value_brief()
         assert _brief_namespaces(brief) == {
-            DEV, MARKETING, "product-strategy", "pm", "agent-ops",
+            DEV, MARKETING, "product-strategy", "pm", "agent-ops", "venture",
         }, "the default brief must still compile the whole catalog"
 
     def test_explicit_none_is_byte_identical_to_the_default(self):
@@ -218,7 +218,7 @@ class TestCompileValueBriefGating:
         existing caller to core), or a default-argument change (e.g. ``[]``
         instead of ``None``) silently gates them.
         REACHABLE: three real compiles — the ungated brief carries the real
-        catalog's 5 namespaces, and the empty-gate brief is genuinely
+        catalog's 6 namespaces, and the empty-gate brief is genuinely
         narrower, so the equality is distinguished from a trivial one. The
         KEY ORDER is asserted too: the brief's order is prompt-visible
         downstream (extractor_v2's pack_kinds keeps the brief's insertion
@@ -233,7 +233,7 @@ class TestCompileValueBriefGating:
         # tautology (None IS the default argument).
         empty_gate = compile_value_brief(installed_namespaces=frozenset())
         assert _brief_namespaces(default) == {
-            DEV, MARKETING, "product-strategy", "pm", "agent-ops",
+            DEV, MARKETING, "product-strategy", "pm", "agent-ops", "venture",
         }, "fixture: the ungated brief must be non-trivially populated"
         assert _brief_namespaces(empty_gate) == set(), \
             "an EMPTY gate must narrow to core — otherwise None gates nothing"
