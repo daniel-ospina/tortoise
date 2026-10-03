@@ -395,6 +395,13 @@ surfaces:
   - test_probe_reset_inflight_4608.py  # #4608: a probe reset/rebuild must not close a handle an in-flight probe still queries (hosted_api + selfhost)
   - test_provisioning_edge_function.py
   - test_quota.py
+  # #4503: the EDGE class is outside every accounting surface. This
+  # file pins the cap's invariance to edge-state growth, so it is
+  # registered under `api` -- the surface `tortoise/quota.py`
+  # selects. A `core`-only entry would leave a quota.py-only PR
+  # selecting `api` with this guard never run (the #1349 class), the
+  # same reason tests/test_quota.py is registered here.
+  - test_4503_edge_relationship_accounting.py
   # #4010: the session-cap removal — drives the hosted capture path + the
   # registry resolver, so it belongs with the quota/api surface.
   - test_issue_4010_sessions_unlimited.py
@@ -674,6 +681,11 @@ surfaces:
   - test_bridge_table.py
   - test_ci_verdict.py
   - test_env_isolation.py
+  # #3595: the unsupported Cypher `=~` operator must FAIL LOUDLY instead of
+  # returning an empty result set. Pure-unit guard pins the guarded-handle seam
+  # (tortoise/cypher_guard.py: guarded_client -> guarded Graph -> exceptions)
+  # plus the projection's own `_GuardedGraph` query entry points.
+  - test_cypher_regex_guard_3595.py
   - test_graph_name_ownership.py
   # #5331: the graph byte meter (tortoise/graph_storage.py + the metering/
   # supabase graph-storage lane). Dual-registered with `api`: a change to the new
@@ -746,6 +758,7 @@ surfaces:
   - test_capture_cost_measurement.py
   - test_eval_reinjection_cap_resume.py
   - test_capture_entity_attachment_3664.py
+  - test_source_kind_runtime_registration.py
   # #1370: write-time subject binding — the confidence-gated, fail-closed
   # Point→aboutSubject producer + its audit/quality-gate tooling. Registered
   # under `core` like its sibling binder guard (test_capture_entity_attachment_
@@ -975,6 +988,11 @@ surfaces:
   # tools/mergify_config_guard.py, which `core` runs on engine-wide changes.
   - test_mergify_config_guard.py
   - test_drift_guard.py  # #4174: the branch-drift gate must FETCH before it measures (a stale `origin/main` is not a pass) and must fail on a conflict-free revert, reporting paths + line counts
+  # #4503: dual-registered -- the file also pins the EP edge-flush /
+  # rebuild behaviour of `tortoise/ep.py` + the projection replay
+  # (no named surface matches `tortoise/projection/entities.py`, so
+  # those fall to the `core` fallback).
+  - test_4503_edge_relationship_accounting.py
   - test_shared_state_concurrency.py
   - test_shared_state_events.py
   - test_shared_state_events_claim.py
@@ -1176,6 +1194,7 @@ surfaces:
   - test_from_uri_userinfo.py
   - test_frontmatter_validator.py
   - test_gate_b_tooling.py
+  - test_graph_delete_guard.py       # #2961: race-safe GRAPH.DELETE guard + poisoned-AOF detection (hermetic, no DB)
   - test_graph_diagnostics.py
   - test_guard.py
   - test_hard_reject.py
@@ -2184,6 +2203,22 @@ durations:
   test_divergence_conformance.py: 4.8
   test_from_uri_userinfo.py: 2.7
   test_export_cli.py: 13.5
+  # #2961: newly-declared fast file. Originally placed at its value-ordered slot
+  # (the map was value-ordered then); main's #3400 refresh re-wrote the block, so
+  # the slot is kept adjacent to the nearest 13.x neighbour rather than at the
+  # map's tail — a tail insert conflicts on every rebase because the refresh
+  # appends there. This PR's base sat ON the #3400 coverage floor (544/604 =
+  # 90.07% PASS), so the one file it adds to the fast pool dropped it to
+  # 544/605 = 89.9% and reddened `manifest-integrity` (tools/ci_selection.py
+  # --integrity) and `test (b)`
+  # (test_ci_selection.py::test_duration_coverage_guard_boundary_and_realistic)
+  # from that single condition. Measured 23 tests / 13.12s local (the file has
+  # since grown to 29 hermetic tests; the 10.0s lock-deadline sleep this note
+  # used to name was removed in #2961 — the contention test now passes
+  # wait_s=0.0, so the figure is conftest setup); the base has no junit for a
+  # file it introduces. Supersede from the first post-merge main run that
+  # includes it (#4817/#4729).
+  test_graph_delete_guard.py: 13.1
   test_github_indexer.py: 50.2
   test_doctor.py: 7.1
   test_onboarding_w6_capture_disclosure.py: 111.3
@@ -2292,6 +2327,12 @@ durations:
   test_capture_phase_d_dedup.py: 4.7
   test_ci_selection.py: 18.8
   test_runner_ports_6673.py: 4.3  # unmeasured (new file, #6673 — no CI junit yet)
+  # A YAML mapping keeps only the LAST duplicate key, and tools/registry_integrity.py refuses
+  # duplicates outright (`manifest-integrity`, a `python-ci-gate` dependency) — keep exactly ONE
+  # entry per file. #4503 reviewer: measured 42 tests; the DURATION below is the docker lane's
+  # ~42.6s wall-pytest (the embedded carve-out runs far higher and is not this field's consumer
+  # — `durations` only feeds fast-matrix sharding, where erring high is correct).
+  test_4503_edge_relationship_accounting.py: 53.0  # unmeasured — #4503: locally measured (42 tests; ~42.6s wall-pytest docker lane; earlier revisions of this file read 14-21s, so the figure is variable and errs high); refresh from CI junit — no leg of the sweep's four source runs carried it (the file did not exist then).
   test_epic903_freshness.py: 3.8
   test_onboarding_integration.py: 4.5
   test_pack_cli.py: 4.5
