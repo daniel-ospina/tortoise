@@ -301,8 +301,13 @@ def test_onboarding_change_selects_onboarding():
     r = _sel(["tortoise/onboarding/SKILL.md"])
     assert r["full"] is False
     assert "onboarding" in r["surfaces"]
+    # #6884: the tier-2 set subtracts `uri_requiring` as well as `carve_out` —
+    # those modules module-skip at import in a URI-less leg, collect zero tests
+    # and red the leg unattributably. The shipped defect and its arm are in
+    # tests/test_uri_requiring_selection.py.
     assert set(r["test_files"]) == ((_tier1() | set(load_manifest()["surfaces"]["onboarding"]))
-                                     - set(load_manifest().get("carve_out", [])))
+                                     - set(load_manifest().get("carve_out", []))
+                                     - set(load_manifest().get("uri_requiring", [])))
 
 
 def test_ep_change_selects_ep():

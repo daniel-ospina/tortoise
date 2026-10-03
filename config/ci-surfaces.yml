@@ -959,6 +959,12 @@ surfaces:
   - test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan
   - test_session_attribution.py
   - test_ci_selection.py
+  # #6884: pins the `uri_requiring` declaration (re-derived from the tree with
+  # ast) and the tier-2 subtraction that keeps URI-requiring modules out of a
+  # URI-less PR leg. Registered here rather than left unlisted: an unlisted
+  # tests/*.py reds `manifest-integrity` (#2642), and this file is a gate test
+  # for the selector, so it belongs with the other ones.
+  - test_uri_requiring_selection.py
   # #6142: the last-failed fast-fail pre-phase's shape — that it never narrows
   # the GATING run, is PR-only and fail-open, and keys its cache per
   # (job, half, ref). Hermetic (reads the workflow YAML; no DB, no network).
@@ -2044,6 +2050,42 @@ carve_out:
 # excluded from EVERY docker leg, so this lane is the one that runs all five.
 - test_write_path_unreachable_seam_5148.py
 - bench/test_smoke_embedded.py
+# #6884: modules that REQUIRE the docker lane — each one module-skips at import
+# when TORTOISE_DB_URI is absent (`if not _is_db_uri(...): pytest.skip(...)`
+# with `allow_module_level=True`). A module-level skip collects ZERO tests, so
+# `pytest --collect-only` exits 5 and the fail-closed manifest guard in
+# python-ci.yml ('Generate coverage manifest') kills the leg BEFORE any test
+# runs. Because it fails outside the test step there is no `FAILED <nodeid>`
+# line, so the merge rail cannot attribute it and refuses for want of a failure
+# identity (the #6798 shape) — #6390 was `mergeable=true` with a clean review
+# record AT HEAD and still could not be landed.
+#
+# WHY THE FIX IS HERE AND NOT IN THE WORKFLOW: the tier-2 PR legs are URI-UNSET
+# BY DESIGN — the empty URI is the E2E-6 tripwire signal (python-ci.yml:600-602
+# and 1367-1368, epic #1647 Task 9 + cycle-6 P2-8), so 'provision the URI' is a
+# reversal of a recorded decision, not a fix. A file that cannot collect in a
+# URI-less leg must therefore not be handed to one — the exact MIRROR of
+# `carve_out` above, which excludes files that cannot run in a URI-SET leg.
+# tools/ci_selection.py subtracts this list on the tier-2 path ONLY: the `full`
+# path returns earlier and keeps running these files, which is correct because
+# a full leg HAS the URI.
+#
+# Derived, not hand-maintained: tests/test_uri_requiring_selection.py re-derives
+# the set from the tree with `ast` and reds if a new module-skipping file is not
+# registered here — the #2944 discipline (structural, not name-based). The
+# derivation is AST-based on purpose: a substring scan over-includes
+# (tests/test_skip_guard.py, tests/test_ci_expected_manifests.py and
+# tests/e2e/hosted/conftest.py reference the strings without being that
+# construct).
+uri_requiring:
+- test_capabilities_endpoint.py
+- test_eval_ingest_cache.py
+- test_invite_fusion_docker.py
+- test_onboarding_false_completion_repair.py
+- test_onboarding_seed_endpoint.py
+- test_onboarding_state_split.py
+- test_onboarding_w4_settings.py
+- test_onboarding_w6_capture_disclosure.py
 push_extra: []
 durations:
 # #3395: per-file CI wall time (seconds), swept from the junit artifacts of four
