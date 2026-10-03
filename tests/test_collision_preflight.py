@@ -355,6 +355,23 @@ CLAIM_CLEAN_CORPUS = {
         "the issue was assigned to another account by a bot"
     ),
     "prose-dispatching-tokens": "The scheduler is dispatching session tokens.",
+    # #4368's verbatim indicator sentences — the red control the issue named
+    # (its target 3), re-expressed on the JEV API. The corpus above carries the
+    # #4665/#4224 repro; these six are the strings the gate actually refused on.
+    # `claim` is the product's core NOUN here (#4341/#4327/#4358), while `on it`
+    # is the pronoun and `dispatching` the polarity-inverted mention (#3713:
+    # "preferable to dispatching" argues AGAINST a dispatch). All six are
+    # ordinary prose and must read CLEAN — never a hard stop on dispatch.
+    "4368-noun-claim-connection": (
+        "mitigation dampening (weakening a claim's connection)"
+    ),
+    "4368-noun-pre-claim": "the pre-#2315 claim — 'EP does not read…'",
+    "4368-noun-false-claim": "the currently-shipped false claim",
+    "4368-noun-parity": "needs rewriting around shared-claim parity",
+    "4368-on-it-rebased": "must land after #3971 merges (or be rebased on it)",
+    "4368-against-dispatching": (
+        "preferable to dispatching a parallel branch that edits the same file"
+    ),
 }
 
 # Distinct markers that select the CLEAN side in the stub's rule table. Chosen
@@ -369,6 +386,14 @@ CLEAN_MARKERS = (
     "a claim about the hour",
     "assigned to another account by a bot",
     "dispatching session tokens",
+    # #4368's verbs — each distinct, and none of them occurs in a COLLISION
+    # body (the invariant this tuple documents).
+    "claim's connection",
+    "pre-#2315 claim",
+    "currently-shipped false claim",
+    "shared-claim parity",
+    "rebased on it",
+    "preferable to dispatching",
 )
 
 CLAIM_COLLISION_CORPUS = {
