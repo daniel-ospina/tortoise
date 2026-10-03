@@ -1541,6 +1541,7 @@ surfaces:
   # change to the module selects `core` — this entry is what makes the guard
   # run on that change rather than only on a tests/ change.
   - test_definite_description_backfill_5059.py
+  - test_uri_username_consumed_3081.py
   - test_wipe_server.py
   - test_wiring_phase01.py
   - test_workflow_secret_interpolation.py
