@@ -104,6 +104,32 @@ test('#3700 / #4896: the row reads its facts through the module bindings', () =>
   }
 })
 
+// #3661: the success screen's capture sentence. The install probe proves an
+// install was OBSERVED, not that capture will happen: a hook seam files nothing
+// until this machine exports TORTOISE_CAPTURE=1, so an unconditional promise is
+// false copy on exactly the seams #3661 is about (Pi is the exception —
+// installing its extension IS the opt-in). Sliced between the two sibling
+// states so the assertions cannot widen to the file.
+const doneStart = code.indexOf("doneCaptureClaim === 'present'")
+assert.notEqual(doneStart, -1, 'the done screen\'s capture sentences must exist')
+const doneEnd = code.indexOf("doneCaptureClaim === 'install-pending'", doneStart)
+assert.notEqual(doneEnd, -1, 'the done screen must keep its three capture states')
+const done = code.slice(doneStart, doneEnd)
+
+test('#3661: the done screen promises capture only where no opt-in gates it', () => {
+  // The gate and its two sentences are pinned as ONE expression, so dropping the
+  // map (which renders the promise unconditionally) or swapping the branches
+  // fails here rather than silently shipping a capture promise that cannot hold.
+  assert.match(
+    done,
+    /HARNESS_CAPTURE_REQUIRES_OPT_IN\[\s*wizardHarness\s*\]\s*\?\s*`[\s\S]*?\$\{\s*CAPTURE_OPT_IN_LINE\s*\}[\s\S]*?`\s*:\s*"Tortoise will capture your agent's sessions\. "/,
+    'the future-capture sentence must be the per-seam map choosing between the opt-in ' +
+    'sentence (naming CAPTURE_OPT_IN_LINE) and the plain promise — never a blanket clause')
+  // The receipt state is deliberately NOT gated: it reports an observed fact.
+  assert.match(done, /doneCaptureClaim === 'present' && "Tortoise is capturing your agent's sessions\. "/,
+    'the present-tense receipt stays unconditional — it states what was observed')
+})
+
 test('#3700 / #4896: the failure line renders only on a supported row', () => {
   // #4896: the per-harness failure sub-line used to render on unsupported rows,
   // where the card states the capability is unavailable — a per-harness claim

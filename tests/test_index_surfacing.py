@@ -255,12 +255,26 @@ def test_e2e6_server_mode_fts_text_disambiguation(tmp_path):
         g.query("MATCH (n) DETACH DELETE n")
         # #3518: the index is already created at boot. Tolerate that (the
         # pre-#3518 shape) and only skip when the engine cannot hold a
-        # fulltext index at all.
-        try:
-            g.query("CALL db.idx.fulltext.createNodeIndex('Source', '_searchText')")
-        except Exception as e:
-            if "already" not in str(e).lower():
-                pytest.skip(f"Source FTS index creation unsupported: {e}")
+        # fulltext index at all. #H05: probe the SAME two forms PRODUCTION
+        # uses -- probing one alone skips engines that register only the
+        # other, which is exactly the class the production fallback exists
+        # for. Skip only when BOTH are genuinely unsupported.
+        unsupported = None
+        for probe in (
+            "CREATE FULLTEXT INDEX FOR (n:Source) ON (n._searchText)",
+            "CALL db.idx.fulltext.createNodeIndex('Source', '_searchText')",
+        ):
+            try:
+                g.query(probe)
+                unsupported = None
+                break
+            except Exception as e:
+                if "already" in str(e).lower():
+                    unsupported = None
+                    break
+                unsupported = e
+        if unsupported is not None:
+            pytest.skip(f"Source FTS index creation unsupported: {unsupported}")
 
         r = sdk.index_directory(str(c), extract_metadata=False)
         assert r["indexed"] == 4
@@ -281,10 +295,15 @@ def test_e2e6_server_mode_fts_text_disambiguation(tmp_path):
             "agentSession": 2, "meeting_summary": 1, "document": 1}
         assert _required_sweep(g) == 0
     finally:
-        try:  # noqa: SIM105
-            sdk._get_proj().g.query("CALL db.idx.fulltext.dropIndex('Source')")
-        except Exception:
-            pass
+        # #5440: drop via BOTH names -- `dropIndex` is unregistered on some
+        # builds (4.20.4, 6.x), so the single hardcoded name left the index
+        # in place and the comment above it was false there.
+        for _drop in ("db.idx.fulltext.drop", "db.idx.fulltext.dropIndex"):
+            try:
+                sdk._get_proj().g.query(f"CALL {_drop}('Source')")
+                break
+            except Exception:
+                continue
         sdk.close()
 
 

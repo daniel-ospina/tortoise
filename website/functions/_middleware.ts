@@ -84,6 +84,14 @@ export const onRequest: PagesFunction = async (context) => {
     "/faq", "/faq.html",
     "/security", "/security.html",
     "/self-hosted", "/self-hosted.html",
+    // The design-partner one-pager. A prospect-facing document linked from
+    // outreach, not from the site nav — but it is a real page on the shared
+    // Pages project, so without this entry premiselabs.co serves its own copy
+    // at a second host. It is noindex, so this is not about an indexed
+    // duplicate: it is that the document has ONE canonical address, and an
+    // outreach link must not land a prospect on a host that serves the same
+    // page under a different URL (the consolidation this block exists for).
+    "/design-partners-intro", "/design-partners-intro.html",
     "/privacy", "/privacy.html",
     "/tos", "/tos.html",
     "/license", "/license.html",

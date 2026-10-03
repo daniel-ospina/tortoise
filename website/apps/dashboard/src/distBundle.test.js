@@ -471,6 +471,43 @@ test('#2865: the built dist no longer carries the beta Request-headers caveat', 
     `${entryName} still diverts users off the connector surfaces — rebuild dist/`)
 })
 
+test('#3661: the shipped bundle states the capture opt-in and never claims capture by default', () => {
+  // main.jsx renders the live Settings sentence and CANNOT be imported by
+  // `node --test` (JSX with no build step), so the only assertions that can reach
+  // it are on the artifact users actually load.
+  const { js, entryName } = shippedBundle()
+  assert.ok(js.includes('TORTOISE_CAPTURE'),
+    `${entryName} must name TORTOISE_CAPTURE — a machine cannot opt in to a variable the page never mentions (#3661)`)
+  // Exact substrings of the RENDERED Settings sentence, which lives in the entry
+  // chunk. A Settings reword must update them, exactly as a wizard copy edit must
+  // update wizardPrompts.snapshot.json — that is the price of pinning a promise
+  // rather than a phrase shape.
+  assert.ok(js.includes('still opt in separately'),
+    `${entryName} must keep the Settings sentence that separates the organization permission from the per-machine opt-in (#3661)`)
+  assert.ok(js.includes('installing the extension is the opt-in'),
+    `${entryName} must keep the Pi exception — the Pi seam reads no TORTOISE_CAPTURE (#3575)`)
+  // The success screen promises capture from an install PROBE, which is not
+  // consent-gated — so on a hook seam the promise must name the remaining
+  // requirement. Pinned exactly because main.jsx is JSX and cannot be imported.
+  assert.ok(js.includes('once this machine opts in'),
+    `${entryName} must not promise capture on a hook seam without naming the per-machine opt-in (#3661)`)
+  // Both the Claude note and the Pi copy must keep the probe disclosure: the
+  // probe reaches the server without consent, so a "nothing is sent" reading
+  // would be false. (This literal is the Claude note's; the Pi copy states its
+  // own wording, pinned by the wizardPrompts snapshot.)
+  assert.ok(js.includes('install probe'),
+    `${entryName} must disclose the ungated install probe (harness + timestamp only, no content)`)
+  // The negative leg runs over EVERY shipped script, not just the entry chunk:
+  // this file's own history (#3428 mutation b) is that an entry-only scan stays
+  // green while the claim lives in a code-split chunk or a `public/`-copied
+  // script. Mutation-checked: adding the old sentence to the copied consent.js
+  // REDs this leg and leaves an entry-only scan green.
+  const offenders = shippedScripts().filter((s) => /recording is\s+ON by default/i.test(s.js))
+  assert.deepEqual(offenders.map((s) => s.name), [],
+    `${offenders.map((s) => s.name).join(', ') || 'a shipped script'} still claims capture ` +
+    'happens by default (#3661) — rebuild dist/ and fix the copy')
+})
+
 test('#2865: every asset dist/index.html references exists in the build (no orphan or missing chunk)', () => {
   const { html, entryName } = shippedBundle()
   const refs = [...new Set([...html.matchAll(/(?:src|href)="\/assets\/([^"]+)"/g)].map((m) => m[1]))]
