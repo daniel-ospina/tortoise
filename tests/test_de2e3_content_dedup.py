@@ -203,7 +203,7 @@ class TestDe2e3:
         assert first == {"filed": 1, "duplicates": 0}
         pid = sdk.query(kind="checkpoint-item")[0]["id"]
 
-        rebuilt = sdk._get_proj().rebuild_all(str(tmp_path))
+        rebuilt = sdk._get_proj().rebuild_all(str(tmp_path), confirm_destructive=True)
         assert rebuilt["events"] > 0
         # Precondition: the hash is ABSENT, the content is intact. A rebuild
         # no longer produces this (main's #2795 D2 recomputes content_hash in

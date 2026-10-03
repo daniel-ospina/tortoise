@@ -165,7 +165,7 @@ def test_4542_fold_and_rebuild_all_agree_on_a_sdk_retract(journaled):
     assert {k: folded.get(k) for k in BELIEF} == VACUITY_LITERAL, (
         f"fold() disagrees with the live graph: {folded}")
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     rebuilt = _graph_belief(sdk, pid)
     assert {k: folded.get(k) for k in BELIEF} == rebuilt, (
         f"fold() != rebuild_all(): fold={folded} rebuild={rebuilt}")
