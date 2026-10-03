@@ -156,25 +156,33 @@ def test_lock_is_held_across_the_drop_and_released():
     assert conn.commands[-1][0] == "EVAL"
     assert conn.commands[-1][3] == g.GRAPH_DELETE_LOCK_KEY, \
         "release must target the delete lock"
-    # The SCRIPT, semantically, not just its arguments (review P3): a substring
-    # check alone accepted an INVERTED compare (`~=`, which deletes the lock
-    # precisely when it is NOT ours — evicting a live peer) and a body with the
-    # delete DROPPED. A blind or inverted release lets an EXPIRED holder evict
-    # the CURRENT holder's lock, so up to three guarded deleters can enter
-    # together. Checks are case-insensitive so a correct uppercase GET is not
-    # false-redded.
+    # The SCRIPT, structurally, not just its arguments (review P3): a substring
+    # check alone accepted an INVERTED compare (`~=`), a body with the delete
+    # DROPPED, a delete AFTER the `end` (which runs unconditionally, evicting a
+    # live peer's lock), and a delete of the WRONG key. A blind or inverted
+    # release lets an EXPIRED holder evict the CURRENT holder, so up to three
+    # guarded deleters can enter together. Case-insensitive, and Lua comments
+    # are stripped, so a correct script written differently is not false-redded.
     script = conn.commands[-1][1]
-    low = script.lower()
-    assert "get" in low, \
-        f"the release must READ the key (compare) — got {script!r}"
-    assert "argv[1]" in low, \
+    code = "\n".join(
+        line.split("--", 1)[0] for line in script.lower().splitlines())
+    assert "get" in code, f"the release must READ the key — got {script!r}"
+    assert "argv[1]" in code, \
         f"the release must compare against OUR token — got {script!r}"
-    assert "del" in low, \
+    assert "del" in code, \
         f"the release must actually DELETE the lock — got {script!r}"
-    assert "~=" not in script and "!=" not in script, \
+    assert "~=" not in code and "!=" not in code, \
         f"an INVERTED compare deletes the lock when it is NOT ours — {script!r}"
-    assert low.index("get") < low.index("del"), \
+    assert code.index("get") < code.index("del"), \
         f"the delete must be GATED by the compare — got {script!r}"
+    assert "then" in code, \
+        f"the release must be conditional, not unconditional — got {script!r}"
+    then_branch = code.split("then", 1)[-1].split("end", 1)[0]
+    assert "del" in then_branch, (
+        f"the delete must sit INSIDE the compare's then-branch — a delete "
+        f"after `end` runs even when the lock is NOT ours — got {script!r}")
+    assert "keys[1]" in code.split("del", 1)[-1][:80], (
+        f"the delete must target the LOCK key (KEYS[1]) — got {script!r}")
     assert conn.commands[-1][4] == acquire[2], \
         "release must be compare-and-delete on OUR token, never a blind DEL"
 

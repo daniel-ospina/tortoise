@@ -1148,6 +1148,32 @@ def test_is_missing_graph_error_matches_real_server_text():
         RuntimeError("connection refused")) is False
 
 
+def test_wipe_server_tolerates_a_graph_dropped_by_an_unguarded_peer():
+    """#2961 review P2: the guard closes the window only against GUARDED peers.
+    An unguarded peer that issues GRAPH.DELETE directly can still win the race
+    between wipe_server's presence read and its delete, and the server answers
+    with the missing-graph error. That is idempotent SUCCESS (cycle-5 P2-3),
+    not a sweep failure — without the tolerance a benign concurrent delete reds
+    the sweep. Contrast test_wipe_server_failure_is_collected, whose injected
+    error is a DIFFERENT shape and must still collect."""
+
+    class _Gone:
+        def __init__(self, name):
+            self._name = name
+
+        def query(self, q, *a, **k):
+            return types.SimpleNamespace(result_set=[])
+
+        def delete(self):
+            raise RuntimeError("Invalid graph operation on empty key")
+
+    db = _FakeDb(graphs=["test_ws_race"])
+    db.select_graph = lambda name: _Gone(name)
+    proj = _FakeProj(db=db)
+    wipe_server(proj, scope={"test_ws_race"}, drop=True)  # must NOT raise
+    assert db.deleted == [], "the peer had already deleted it"
+
+
 def test_sweep_dedupes_journal_entries(tmp_path):
     """Review P2-2: duplicate journal entries (the per-test backup seam
     re-appends the same module-level names every test) drop once — the

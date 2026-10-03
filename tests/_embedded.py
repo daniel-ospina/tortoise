@@ -1081,7 +1081,17 @@ def wipe_server(proj, scope: set[str] | None = None, drop: bool = False) -> None
                     "graph-delete guard REFUSED GRAPH.DELETE: the "
                     "cross-process lock is unavailable")))
         except Exception as e:
-            # Cycle-5 P2-3: only genuine command errors collect.
+            # Cycle-5 P2-3: a graph already dropped by a concurrent suite
+            # (last-suite-standing) or an earlier stale sweep is SUCCESS; only
+            # genuine command errors collect. #2961 review P2: this tolerance
+            # is still REQUIRED even though the call above is now guarded —
+            # the guard closes the window only against GUARDED peers, and an
+            # unguarded peer issuing GRAPH.DELETE directly can still win the
+            # race between our presence read and our delete (see the guard
+            # module's own "An UNGUARDED peer ... can still interleave" note).
+            # Dropping it made a benign concurrent delete red the sweep.
+            if _is_missing_graph_error(e):
+                continue
             failures.append((g, e))
     if failures:
         raise RuntimeError(
