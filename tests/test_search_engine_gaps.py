@@ -358,6 +358,57 @@ class TestFallbackTfidf:
             fallback_tfidf("query", points, limit=3)
             sp.assert_called_once_with("query", points, threshold=0.0, limit=3)
 
+    def test_heavy_imports_are_serialized(self, monkeypatch):
+        """#5718: the sparse sklearn import and the embedder's torch import
+        cannot overlap.
+
+        scipy's array-API dispatch peeks ``sys.modules['torch']`` and then does
+        an UNGUARDED ``getattr(mod, 'Tensor')``, so a torch that is mid-import
+        in another thread breaks a *cold* sklearn import with
+        ``AttributeError: partially initialized module 'torch' ...`` — which
+        ``fallback_tfidf`` then swallows, returning no hits. Both heavy imports
+        take the one lock in ``tortoise.heavy_imports``; this pins that the
+        sparse side AND the load side actually do, which is what closes the
+        race. The lock itself has a single home in that leaf module; the two
+        helpers ``embeddings`` itself calls stay importable from ``embeddings``,
+        and the cross-encoder helper is taken from the leaf.
+        """
+        import sys as _sys
+        import threading as _threading
+        import types as _types
+
+        from tortoise import embeddings as _emb
+        from tortoise import heavy_imports as _hi
+
+        acquired: list[str] = []
+
+        class _SpyLock:
+            def __enter__(self):
+                acquired.append(_threading.current_thread().name)
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        # Keep the load-side call fast and deterministic — only the LOCK
+        # behaviour is pinned here, not the import itself.
+        fake_st = _types.ModuleType("sentence_transformers")
+        fake_st.SentenceTransformer = object
+        fake_st.CrossEncoder = object
+        monkeypatch.setitem(_sys.modules, "sentence_transformers", fake_st)
+        # Patch the LOCK AT ITS ONE HOME (the leaf module): the helpers read
+        # ``heavy_imports._HEAVY_IMPORT_LOCK`` at call time.
+        monkeypatch.setattr(_hi, "_HEAVY_IMPORT_LOCK", _SpyLock())
+
+        assert _emb.import_tfidf_vectorizer() is not None
+        assert _emb.import_sentence_transformer() is fake_st.SentenceTransformer
+        assert _hi.import_cross_encoder() is fake_st.CrossEncoder
+
+        assert acquired == [_threading.current_thread().name] * 3, (
+            "a heavy import ran outside the shared heavy-import lock — the "
+            "cold-sklearn vs mid-import-torch race is open again"
+        )
+
 
 # ── degradation_chain ───────────────────────────────────────────────────────
 
