@@ -470,9 +470,12 @@ def integrity_problems(manifest_text: str) -> list[str]:
     name and the CLI's rc on the clean and skewed manifests, and
     `test_integrity_problems_mirrors_the_listed_integrity_composition` pins
     the composition parity over the validators in its hand-maintained
-    allow-list — both compositions must call the same validators in the same
-    order, and a listed validator that the gate of record no longer calls
-    reds. The list itself is the caveat: a validator absent from it is never
+    allow-list — both compositions must call the same validators (the SET, not
+    the order: #5050 moved five of them behind the shared `ci_manifest`
+    composition, which the two entry points reach at different points, and the
+    test's own note says why that is not a contract), and a listed validator
+    that the gate of record no longer calls reds. The list itself is the
+    caveat: a validator absent from it is never
     wrapped, so a drift touching only unlisted terms is still a review duty at
     the two call sites.
 

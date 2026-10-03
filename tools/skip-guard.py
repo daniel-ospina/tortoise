@@ -865,6 +865,23 @@ def main(argv: list[str]) -> int:
             _i += 1
             continue
         scope = {p for p in _v.split() if p}
+    if scope is not None and not scope:
+        # Fail CLOSED on an EMPTY scope, for the same reason the
+        # `--manifest-only` branch below fails closed without a manifest: the
+        # flag means "assert the frozen set is intact AND that THIS shard
+        # observed its slice", so an empty scope asserts nothing while still
+        # printing success. `--scope` is substituted from the shard matrix
+        # (`--scope "$SCOPE"` built from `${{ matrix.files }}`), so an
+        # unexpanded or empty variable arrives as `--scope ''` rather than as
+        # an absent flag — and absence is the ONLY spelling that legitimately
+        # means "no scope". This is deliberately NARROWER than the check
+        # further down: a scope that names real files which merely do not
+        # intersect the frozen set is still a legitimate pass (announced on
+        # stderr), while a scope naming NO file at all is a caller bug.
+        print("❌ --scope requires at least one file path — an empty scope "
+              "would require no frozen nodeid and report success without "
+              "asserting anything", file=sys.stderr)
+        return 2
     if scope is not None:
         argv = _stripped
     log_path, manifest_path, junit_path = _parse_args(argv)
