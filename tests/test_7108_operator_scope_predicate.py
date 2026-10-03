@@ -29,7 +29,7 @@ a request that names a kind must not be answered with a guaranteed-empty result.
 MUST run against a live FalkorDB (Docker). Uses an isolated ``tortoise_test_*``
 graph so the graph guard permits bulk cleanup.
 """
-from __future__ import annotations  # noqa: I001
+from __future__ import annotations
 
 import os
 import sys
@@ -40,8 +40,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tests import _live_utils  # noqa: E402
-from tortoise.sdk import TortoiseSDK  # noqa: E402
+from tests import _live_utils
+from tortoise.sdk import TortoiseSDK
 
 _DB_URI = _live_utils.docker_uri(f"tortoise_test_7108_{uuid.uuid4().hex[:6]}")
 
