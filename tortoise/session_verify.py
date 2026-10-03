@@ -656,6 +656,38 @@ def _unverifiable_link(harness: str, link: str) -> dict[str, Any]:
         f"{link} not exercised: {UNVERIFIABLE_REASON[harness]}")
 
 
+def _install_static_result(harness: str, root: Path) -> str | None:
+    """What the STATIC install check established, in plain words, or ``None``.
+
+    The ``installed`` link for a harness this command cannot fire stays
+    ``UNVERIFIABLE-IN-CI``: the seam was never executed, and a marker/bytes
+    comparison is not evidence that the extension works, so calling it a pass
+    would be a FABRICATED one
+    (``tests/test_session_verify.py::test_pi_is_honestly_unverifiable``).
+
+    The check, however, *did* run — ``_static_findings`` returning no blocking
+    finding is precisely how the install came to be clean — and the sentence a
+    user then read said only that the seam was "not exercised", which is
+    indistinguishable from "not checked at all".  Naming the static result
+    closes that gap without moving the verdict: the comparison is stated as
+    exactly what it is, and the link's status is unchanged (#4710).
+    """
+    contract = hook_install.ARTIFACT_CONTRACTS.get(harness)
+    if contract is None:
+        return None
+    installed = Path(root) / contract.install_name
+    if not installed.is_file():
+        return None
+    have = hook_install.read_hook_version(installed)
+    want = hook_install.read_hook_version(contract.source)
+    if have is None or have != want:
+        return None
+    return (
+        f"the installed artifact matches the shipped seam "
+        f"({hook_install.HOOK_VERSION_TOKEN} {have}); it was not fired, so "
+        f"this is a static comparison and not a pass.")
+
+
 def verify_session_capture(harness: str,
                            *,
                            api_key: str,
@@ -704,6 +736,11 @@ def verify_session_capture(harness: str,
     if not HEADLESS_FIRABLE[harness]:
         report["links"]["installed"] = _unverifiable_link(harness, "installed")
         report["links"]["installed"]["findings"] = findings
+        static_result = _install_static_result(harness, root)
+        if static_result:
+            report["links"]["installed"]["detail"] = (
+                f"{static_result} "
+                f"{report['links']['installed']['detail']}")
         report["links"]["captured"] = _unverifiable_link(harness, "captured")
         report["links"]["memory"] = _unverifiable_link(harness, "memory")
         report["exit_code"] = _exit_code(report)
