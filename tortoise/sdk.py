@@ -2213,7 +2213,19 @@ def _numeric_alteration_reason(
         # (cycle-3 P2: ``Fraction(2**70)`` was admitted and then clamped).
         if value.denominator == 1:
             return _numeric_alteration_reason(key, int(value), _depth)
-        _fr = float(value)
+        try:
+            _fr = float(value)
+        except OverflowError:
+            # A magnitude beyond the float range. ``float()`` on a non-integral
+            # ``Fraction`` such as ``Fraction(10**400, 3)`` raises BEFORE the
+            # predicate can answer, so the caller got a bare ``OverflowError``
+            # instead of this guard's key-naming ``ValueError`` — the int axis
+            # already names its key at this same boundary (code-review cycle 4,
+            # P2). The store's double domain cannot hold the value either way, so
+            # route it to the same refusal. ``decimal.Decimal`` is NOT affected:
+            # ``float(Decimal('1e400'))`` returns ``inf`` rather than raising, and
+            # the ``isfinite`` arm below already refuses that.
+            _fr = math.inf
         if not math.isfinite(_fr) or fractions.Fraction(_fr) != value:
             return (
                 f"{key!r}: {value} is not exactly representable as a double, "

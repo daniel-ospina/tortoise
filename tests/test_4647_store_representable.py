@@ -284,3 +284,15 @@ class TestFractionTakesTheInt64Path:
         with pytest.raises(ValueError):
             _sanitize_props({"v": fractions.Fraction(1, 3)})
         assert _sanitize_props({"v": fractions.Fraction(1, 2)})["v"] == fractions.Fraction(1, 2)
+
+    def test_a_fraction_too_large_for_a_float_still_names_its_key(self):
+        """Cycle-4 P2: the conversion itself raised ``OverflowError`` before the
+        predicate could answer, so the caller never received this guard's message.
+        (The integral twin, ``Fraction(10**400)``, already refused correctly."""
+        import fractions
+
+        with pytest.raises(ValueError) as exc:
+            _sanitize_props({"v": fractions.Fraction(10**400, 3)})
+        msg = str(exc.value)
+        assert "'v'" in msg, msg
+        assert "OverflowError" not in msg, msg
