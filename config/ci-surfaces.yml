@@ -959,11 +959,13 @@ surfaces:
   - test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan
   - test_session_attribution.py
   - test_ci_selection.py
-  # #6884: pins the `uri_requiring` declaration (re-derived from the tree with
-  # ast) and the tier-2 subtraction that keeps URI-requiring modules out of a
-  # URI-less PR leg. Registered here rather than left unlisted: an unlisted
-  # tests/*.py reds `manifest-integrity` (#2642), and this file is a gate test
-  # for the selector, so it belongs with the other ones.
+  # #6884: pins the `uri_requiring` declaration (re-derived BEHAVIOURALLY — it
+  # runs the failing `pytest --collect-only` with the URI unset and compares) and
+  # the tier-2 subtraction that keeps URI-requiring modules out of a URI-less PR
+  # leg. Registered here rather than left unlisted: an unlisted tests/*.py reds
+  # `manifest-integrity` (#2642), and this file is a gate test for the selector,
+  # so it belongs with the other ones — and a `config/`-only edit selects `core`,
+  # so the gate runs on exactly the edits that can break the lane.
   - test_uri_requiring_selection.py
   # #6142: the last-failed fast-fail pre-phase's shape — that it never narrows
   # the GATING run, is PR-only and fail-open, and keys its cache per
@@ -2071,12 +2073,26 @@ carve_out:
 # a full leg HAS the URI.
 #
 # Derived, not hand-maintained: tests/test_uri_requiring_selection.py re-derives
-# the set from the tree with `ast` and reds if a new module-skipping file is not
-# registered here — the #2944 discipline (structural, not name-based). The
-# derivation is AST-based on purpose: a substring scan over-includes
-# (tests/test_skip_guard.py, tests/test_ci_expected_manifests.py and
-# tests/e2e/hosted/conftest.py reference the strings without being that
-# construct).
+# the set and reds if a module that collects NOTHING in a URI-less leg is not
+# registered here — the #2944 discipline (structural, not name-based).
+#
+# The derivation is BEHAVIOURAL, not syntactic. It runs the failing CI command
+# itself — `pytest --collect-only` over the candidate modules with
+# TORTOISE_DB_URI removed from the environment — and takes "this module produced
+# no nodeids" as the rule. Four review cycles tried a static predicate (module
+# `if`s, alias renames, local wrappers, class bodies, decorators, lambdas,
+# `**kwargs` forwarding, constructed env names, transitive helpers, default
+# arguments, guard polarity) and every cycle found more shapes: an AST check is
+# an approximation of a question pytest answers exactly. Asking pytest is the
+# invariant itself, not a model of it, and it cannot remove coverage — whatever
+# the reason a module yields no nodeids, it was not going to run a test in that
+# leg.
+#
+# The candidate set is a cheap superset (selectable modules mentioning
+# `allow_module_level`, the mechanism a module-level skip needs); pytest decides
+# the answer. A module emptied by some other cause (the manifest's own `-m`
+# marker, a collection error) is the attribution half of #6884 and is tracked on
+# the issue, not here.
 uri_requiring:
 - test_capabilities_endpoint.py
 - test_eval_ingest_cache.py

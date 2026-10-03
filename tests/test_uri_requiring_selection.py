@@ -1,51 +1,51 @@
-"""#6884: URI-requiring modules must not be handed to a URI-LESS (tier-2) leg.
+"""#6884: a module that collects NOTHING must not be handed to a test leg.
 
-The defect this pins: `python-ci.yml`'s tier-2 PR legs are URI-unset BY DESIGN
-(the empty URI is the E2E-6 tripwire signal — `python-ci.yml:600-602` and
-`1367-1368`, epic #1647 Task 9 + cycle-6 P2-8), so "provision the URI" is a
-reversal of a recorded decision, not a fix. A test module that module-skips when
-`TORTOISE_DB_URI` is absent therefore collects ZERO tests in such a leg;
-`pytest --collect-only` exits 5 and the fail-closed manifest guard kills the leg
-BEFORE any test runs. That failure has no `FAILED <nodeid>`, so the merge rail
-cannot attribute it and refuses for want of a failure identity (#6798 shape) —
-#6390 was `mergeable=true` with a clean review record AT HEAD and still could
-not be landed.
+The defect this pins: the tier-2 PR legs run with **`TORTOISE_DB_URI` unset by
+design** — the empty URI *is* the E2E-6 tripwire signal (`python-ci.yml:600-602`
+and `:1367-1368`; epic #1647 Task 9, cycle-6 P2-8), so "provision the URI" is a
+reversal of a recorded decision, not a fix. A selected test module that
+module-skips at import on a missing URI therefore collects ZERO tests in such a
+leg: `pytest --collect-only` exits 5 and the fail-closed manifest step kills the
+leg BEFORE any test runs. That is outside the test step, so the run carries no
+`FAILED <nodeid>` for the merge rail to attribute, and the rail refuses with
+"BLOCKED - 1 of 1 failing PR run(s) yielded NO parseable failure identity". The
+measured harm is not a red leg but an unlandable one: #6390 was
+`mergeable=true`, clean-reviewed AT HEAD, `behind=0`, and still could not land.
 
-The fix is the MIRROR of the existing `files -= carve` subtraction: those files
-cannot run in a URI-SET leg, these cannot run in a URI-UNSET one. Three arms,
-each load-bearing:
+The fix is the MIRROR of the existing `carve_out` subtraction: a `carve_out` file
+cannot run in a URI-SET leg, so it is subtracted; these cannot run in a URI-UNSET
+one, so they must be too.
 
-* the declaration in `config/ci-surfaces.yml` is re-derived from the tree, so a
-  NEW module-skipping file reds here instead of silently reintroducing the
-  defect (the #2944 discipline: structural, not name-based);
-* the selection arms prove the filter actually runs on every tier-2 exit — both
-  the docs-only early return and the main surface path — plus the slow lane;
-* the derivation arms pin the predicate against the shapes that would otherwise
-  slip past it, since a predicate that misses a shape is how this defect returns
-  (see `test_derivation_covers_every_module_skipping_shape`).
+**Why this file runs pytest instead of parsing the tree.** Four review cycles
+tried to decide statically whether a module aborts collection (module-level `if`s,
+alias renames, local wrappers, class bodies, decorators, lambdas, `**_KW`
+forwarding, constructed env names, transitive helpers, default arguments, guard
+polarity...). Each cycle found more shapes: an AST predicate is an approximation
+of a question pytest already answers exactly. So the census now asks pytest —
+the same command the failing CI step runs, with the URI unset — and treats "this
+module produced no nodeids" as the single, shape-independent rule. That is the
+invariant itself, not a model of it:
 
-**Stated limitation — what the census does NOT see.** A skip is resolved only
-when the skip call, or the callable containing it, is defined in the SAME file.
-A module-scope skip routed through a callable imported from another tracked
-module is invisible, and since `declared` is compared against the derived set,
-such a file would be neither declared nor subtracted and the defect would return
-silently. `tests/_live_utils.py` is the one sanctioned shared gate, so
-`test_sanctioned_shared_skip_helper_cannot_gain_a_module_skip` pins the
-precondition that keeps that door shut; any other cross-file helper needs the
-derivation extended (or the file registered by hand).
+    a module that collects NOTHING in a leg's own configuration
+    must not be handed to that leg.
 
-**Non-vacuity** is proven by INJECTION, never from the live tree: each
-selection arm synthesises a victim and injects it into both the lane and the leg
-under test, so no arm depends on the lane being non-empty. A lane that empties is
-the terminal state this file exists to produce — an arm that reds on it would
-block the very change that fixes the last URI-gated module. The predicate's own
-coverage is proven by the shape table.
+It is also strictly safer than the approximation in both directions. It cannot
+under-report (pytest decides, so no spelling escapes), and it cannot remove
+coverage: whatever the reason a module yields no nodeids, it was not going to run
+a test in that leg.
+
+The candidate set is a cheap superset — every selectable module that mentions
+`allow_module_level`, the mechanism a module-level skip needs. A module emptied
+by some other cause (the manifest's own `-m` marker, a collection error) is the
+*attribution* half of #6884, recorded separately on the issue, and is out of
+scope here.
 """
 from __future__ import annotations
 
-import ast
 import copy
 import functools
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -61,12 +61,16 @@ from tools.ci_selection import (  # noqa: I001
 REPO = Path(__file__).resolve().parents[1]
 TESTS = REPO / "tests"
 
+# Must mirror the CI collect step's marker (`python-ci.yml`, the
+# "Generate coverage manifest" run block) or the probe measures a different leg
+# than the one that breaks.
+COLLECT_MARKER = "not track_b and not live and not integration"
+
 # The real vector: #6390 is a one-file dashboard comment change (`+4/-3`) whose
 # tier-2 leg selected `test_onboarding_state_split.py` and died on rc=5. Kept
 # verbatim so the regression is pinned against the input that actually failed.
 DASHBOARD_ONLY_CHANGE = ["website/apps/dashboard/src/harnesses.js"]
 DOCS_ONLY_CHANGE = ["docs/00_index.md"]
-URI_MENTION = "TORTOISE_DB_URI"
 
 
 @functools.lru_cache(maxsize=1)
@@ -80,208 +84,137 @@ def _MANIFEST() -> dict:
 
 
 # --------------------------------------------------------------------------
-# The derivation. It must answer exactly one question: "can importing this
-# module abort collection?" — because that is what turns a leg red with no
-# attributable nodeid. Module-level skip calls abort; a skip inside a function
-# that import never calls does not.
+# The census: ask pytest, don't model pytest
 # --------------------------------------------------------------------------
-def _is_module_level_skip(call: ast.Call) -> bool:
-    """A `skip(..., allow_module_level=True)` call, whatever it is named.
+def _candidate_modules() -> list[str]:
+    """Selectable modules that can contain a module-level skip.
 
-    Name-agnostic on purpose: `from pytest import skip as pskip` must not evade
-    the guard, and neither must a re-exported wrapper.
+    A cheap superset used only to bound the probe's cost: a module-level skip
+    needs `allow_module_level`, so a module without it cannot abort collection
+    this way. The probe below decides the actual answer.
     """
-    return any(
-        kw.arg == "allow_module_level"
-        and isinstance(kw.value, ast.Constant)
-        # any truthy non-string constant: `True` is the normal spelling, but
-        # `allow_module_level=1` aborts collection just the same, so rejecting
-        # it would be a detection gap rather than strictness.
-        and bool(kw.value.value)
-        and not isinstance(kw.value.value, str)
-        for kw in call.keywords
-    )
-
-
-def _has_skip(node: ast.AST) -> bool:
-    return any(
-        isinstance(n, ast.Call) and _is_module_level_skip(n) for n in ast.walk(node)
-    )
-
-
-def _executed_at_import(node: ast.AST):
-    """Every node EVALUATED when this module is imported.
-
-    The distinctions that decide whether a skip can abort collection:
-
-    * a CLASS BODY runs at import, so a skip there aborts — exactly like a
-      module-level one (found the hard way: pruning ClassDef made the census
-      blind to it);
-    * a FUNCTION BODY does not run at import, so a skip there is harmless until
-      something calls it;
-    * a LAMBDA body does not run when the lambda is created;
-    * a DECORATOR does run (`@req` is `req(fn)` at import).
-    """
-    yield node
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        for dec in node.decorator_list:
-            yield from _executed_at_import(dec)
-        return
-    if isinstance(node, ast.Lambda):
-        return
-    for child in ast.iter_child_nodes(node):
-        yield from _executed_at_import(child)
-
-
-def _decorator_target_name(dec: ast.AST) -> str:
-    """The name a decorator INVOKES at import (`@req` runs `req(f)`)."""
-    node = dec.func if isinstance(dec, ast.Call) else dec
-    if isinstance(node, ast.Attribute):
-        return node.attr
-    if isinstance(node, ast.Name):
-        return node.id
-    return ""
-
-
-def _called_at_import(names: set[str], tree: ast.AST) -> bool:
-    """Does import-time code invoke any of `names`?
-
-    Two invocation shapes matter: an explicit call (`req()`) and a bare
-    decorator (`@req`, which is `req(fn)`). Both run before any test is
-    collected.
-    """
-    for node in _executed_at_import(tree):
-        if isinstance(node, ast.Call):
-            fn = node.func
-            name = fn.attr if isinstance(fn, ast.Attribute) else (
-                fn.id if isinstance(fn, ast.Name) else ""
-            )
-            if name in names:
-                return True
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            if any(_decorator_target_name(d) in names for d in node.decorator_list):
-                return True
-    return False
-
-
-def _skipping_callable_names(tree: ast.AST) -> set[str]:
-    """Names bound IN THIS FILE to a callable whose body contains the skip:
-    a `def`, a `lambda` assigned to a name, or a class whose method skips (the
-    last is reached by instantiating it at module scope).
-
-    Cross-file helpers are deliberately OUT of scope — see the module
-    docstring's stated limitation and the tripwire on the sanctioned shared
-    helper.
-    """
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if _has_skip(node):
-                names.add(node.name)
-        elif isinstance(node, ast.ClassDef):
-            if any(
-                _has_skip(n)
-                for n in node.body
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-            ):
-                names.add(node.name)
-        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            if isinstance(node.value, ast.Lambda) and _has_skip(node.value):
-                names.update(t.id for t in targets if isinstance(t, ast.Name))
-    return names
-
-
-def _aborts_collection(tree: ast.AST) -> bool:
-    """True when importing this module can abort collection (pytest rc=5)."""
-    # (a) the skip is EVALUATED at import — directly, inside a module-level
-    #     if/try/with/for, or in a class body
-    if any(
-        isinstance(n, ast.Call) and _is_module_level_skip(n)
-        for n in _executed_at_import(tree)
-    ):
-        return True
-    # (b) the skip lives in a callable this file RUNS at import —
-    #     `if not env: _require()`, `@req`, `Gate()`, `req = lambda: skip`.
-    #     The invocation is what makes it reachable, which is why an UNCALLED
-    #     helper containing a skip must NOT count (that file collects fine).
-    helpers = _skipping_callable_names(tree)
-    return bool(helpers) and _called_at_import(helpers, tree)
-
-
-def _uri_gated_source(src: str) -> bool:
-    """The whole predicate, on a source string (so it is testable directly)."""
-    if URI_MENTION not in src:
-        return False
-    try:
-        tree = ast.parse(src)
-    except SyntaxError:
-        return False
-    return _aborts_collection(tree)
-
-
-@functools.lru_cache(maxsize=1)
-def _derived_uri_requiring() -> frozenset[str]:
-    """Re-derive the declared set from the tree.
-
-    Memoised: the full-tree walk is the expensive part and three tests call it.
-    Unmemoised it cost ~16s of this file's runtime and, being a new file with no
-    measured duration, it packs into a shard at the ~2s default weight.
-    """
-    found: set[str] = set()
-    for path in sorted(TESTS.rglob("*.py")):
+    out: list[str] = []
+    for path in sorted(TESTS.rglob("test_*.py")):
         rel = path.relative_to(TESTS)
         if rel.parts[0] == "e2e":
-            # e2e is exempt from `integrity()` (#1349) and is not selectable, so
-            # an entry here could never do anything.
+            # e2e is exempt from `integrity()` (#1349) and is not selectable.
             continue
         try:
             src = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        if _uri_gated_source(src):
-            found.add(str(rel))
-    return frozenset(found)
+        if "allow_module_level" in src:
+            out.append(str(rel))
+    return out
 
 
-# --------------------------------------------------------------------------
-# Derivation arms
-# --------------------------------------------------------------------------
-def test_sanctioned_shared_skip_helper_cannot_gain_a_module_skip() -> None:
-    """The census resolves skips within ONE file (see the module docstring).
+def _paths_with_no_nodeids(stdout: str, candidates: list[str]) -> set[str]:
+    """Which candidate modules produced NO collected nodeid in this output.
 
-    `tests/_live_utils.py` is the repo's sanctioned shared gate: modules that
-    need to skip on a missing `TORTOISE_DB_URI` are told to use its constant,
-    directly or via `_skip_unless_live_uri`. A cross-file helper is invisible to
-    the census, so the day that helper gained `allow_module_level=True` and a
-    module called it at import, that module would abort collection in a URI-less
-    leg WITHOUT being derived — the defect would return silently. This pins the
-    precondition the census depends on instead of assuming it.
+    Pure parsing, unit-tested below against real pytest output shapes: a
+    collected test prints `tests/x.py::test_name`, while a module-level skip
+    prints only an `-rs` summary line naming the FILE (`SKIPPED [1]
+    tests/x.py:33: reason`) — which must NOT be mistaken for collection.
     """
-    src = (TESTS / "_live_utils.py").read_text(encoding="utf-8")
-    assert "allow_module_level" not in src, (
-        "tests/_live_utils.py now carries `allow_module_level`. The census cannot "
-        "see a cross-file module-level skip, so: register every module that "
-        "calls this helper at import in `uri_requiring`, AND extend "
-        "_derived_uri_requiring to resolve imported helpers — then delete this "
-        "tripwire."
+    collected_prefixes = {
+        line.split("::", 1)[0].strip()
+        for line in stdout.splitlines()
+        if "::" in line
+    }
+    return {f"tests/{c}" for c in candidates if f"tests/{c}" not in collected_prefixes}
+
+
+@functools.lru_cache(maxsize=1)
+def _collect_nothing_uri_less() -> frozenset[str]:
+    """The module set that collects nothing with `TORTOISE_DB_URI` UNSET.
+
+    This is not a model of the CI failure — it IS the failing command, run over
+    the candidate set in one pytest invocation with the URI removed from the
+    environment (and `TORTOISE_TEST_CARVE_OUT=1`, the URI-less opt-in the P4
+    enforcement requires). PROVABLY so: over the tree at the time of writing it
+    flags exactly the eight declared modules, and every other candidate yields
+    nodeids.
+    """
+    candidates = _candidate_modules()
+    if not candidates:
+        return frozenset()
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("TORTOISE_DB_URI", "TORTOISE_TEST_EXPECT_URI", "PYTEST_ADDOPTS")
+    }
+    env["TORTOISE_TEST_CARVE_OUT"] = "1"  # the URI-less lane's required opt-in
+    proc = subprocess.run(
+        [
+            sys.executable, "-m", "pytest",
+            *[f"tests/{c}" for c in candidates],
+            "--collect-only", "-q", "-p", "no:cacheprovider",
+            "-m", COLLECT_MARKER,
+            # One module's collection error must not hide the other modules'
+            # nodeids; without this the whole probe would report "no nodeids".
+            "--continue-on-collection-errors", "-rs",
+        ],
+        cwd=REPO, env=env, capture_output=True, text=True, timeout=1800,
+    )
+    if proc.returncode not in (0, 5):
+        pytest.fail(
+            "the URI-less collect probe could not run — the census is "
+            f"UNOBSERVED, not clean (rc={proc.returncode}).\n"
+            f"stderr tail:\n{proc.stderr[-2000:]}"
+        )
+    return frozenset(_paths_with_no_nodeids(proc.stdout, candidates))
+
+
+# --------------------------------------------------------------------------
+# The probe's own correctness, then the census
+# --------------------------------------------------------------------------
+def test_nodeid_parsing_is_not_fooled_by_skip_summary_lines() -> None:
+    """The parser's one hazard: an `-rs` SKIPPED line names the file.
+
+    A module-level skip prints `SKIPPED [1] tests/x.py:33: reason`, which
+    contains a path but NO `::`, and must not count as collection.
+    """
+    stdout = (
+        "tests/test_a.py::test_one\n"
+        "tests/test_a.py::test_two\n"
+        "SKIPPED [1] tests/test_b.py:33: docker-lane tests require "
+        "TORTOISE_DB_URI (tier-2 embedded legs skip)\n"
+        "106 tests collected in 5.43s\n"
+    )
+    assert _paths_with_no_nodeids(stdout, ["test_a.py", "test_b.py"]) == {
+        "tests/test_b.py"
+    }
+
+
+def test_probe_reproduces_the_shipped_failure() -> None:
+    """The probe must flag the module that actually stranded #6390.
+
+    `test_onboarding_state_split.py` is the file whose zero-collection killed
+    #6390's `test (a)` leg. If the probe ever stops seeing it, the census has
+    gone blind and this file is worthless.
+    """
+    flagged = _collect_nothing_uri_less()
+    assert "tests/test_onboarding_state_split.py" in flagged, (
+        "the URI-less collect probe no longer flags test_onboarding_state_split.py "
+        "— the module that produced #6390's unattributable rc=5. The probe is "
+        "measuring the wrong leg (check TORTOISE_DB_URI is really unset and the "
+        "marker still matches the CI collect step)."
     )
 
 
-def test_declared_list_matches_the_tree() -> None:
-    """A new module-skipping file must be REGISTERED, not discovered in CI."""
+def test_declared_list_matches_the_observation() -> None:
+    """A newly module-skipping file must be REGISTERED, not discovered in CI."""
     declared = uri_requiring_files(_MANIFEST())
-    derived = set(_derived_uri_requiring())
-    assert declared == derived, (
-        "config/ci-surfaces.yml `uri_requiring` has drifted from the tree.\n"
-        f"  declared but NOT derived: {sorted(declared - derived)}\n"
-        f"  derived but NOT declared: {sorted(derived - declared)}\n"
-        "If a name is on the FIRST line the likely cause is a DERIVATION GAP, "
-        "not a stale entry: the file probably still aborts collection in a "
-        "URI-less leg and the predicate simply missed its shape (see "
-        "test_derivation_covers_every_module_skipping_shape). Deleting the "
-        "entry would silently re-leak it. Only a name that genuinely no longer "
-        "module-skips belongs off the declaration."
+    observed = {name.removeprefix("tests/") for name in _collect_nothing_uri_less()}
+    assert declared == observed, (
+        "config/ci-surfaces.yml `uri_requiring` does not match what pytest "
+        "actually collects with TORTOISE_DB_URI unset.\n"
+        f"  declared but collects nothing: {sorted(declared - observed)}\n"
+        f"  collects nothing but NOT declared: {sorted(observed - declared)}\n"
+        "UndecLared modules are handed to a URI-less tier-2 leg, collect zero "
+        "tests there, and red it with no attributable failure (#6884). Add them "
+        "to `uri_requiring`. The reverse direction means an entry is stale: check "
+        "whether the module genuinely collects tests again before removing it."
     )
 
 
@@ -304,8 +237,8 @@ def test_lane_is_disjoint_from_the_uri_unset_only_lanes() -> None:
     """carve-out / tier-1 / on-demand are URI-unset or leg-less by design.
 
     `slow_files` is deliberately NOT asserted disjoint: the slow lane subtracts
-    the lane itself (pinned by test_slow_lane_subtracts_uri_requiring), so a
-    future relocation into `slow_files` is handled rather than forbidden.
+    the lane itself (pinned by test_slow_lane_subtracts_the_lane), so a future
+    relocation into `slow_files` is handled rather than forbidden.
     """
     manifest = _MANIFEST()
     uri = uri_requiring_files(manifest)
@@ -315,8 +248,7 @@ def test_lane_is_disjoint_from_the_uri_unset_only_lanes() -> None:
     )
     assert not (uri & set(manifest.get("tier1", []))), (
         "a uri_requiring file is in the tier-1 smoke set, which every PR "
-        "selection starts from — the guard test itself must not depend on tier1 "
-        "staying URI-free"
+        "selection starts from"
     )
     assert not (uri & on_demand_files(manifest))
 
@@ -332,64 +264,6 @@ def test_empty_lane_does_not_crash_the_changes_job() -> None:
     for changed in (DOCS_ONLY_CHANGE, DASHBOARD_ONLY_CHANGE):
         sel = select(changed, "pull_request", manifest)  # must not raise
         assert isinstance(sel["test_files"], list)
-
-
-# --------------------------------------------------------------------------
-# The predicate's own coverage — the shapes a naive AST check misses
-# --------------------------------------------------------------------------
-_ABORTS = "aborts"
-_CLEAN = "clean"
-_SKIP = 'pytest.skip("needs docker", allow_module_level=True)'
-_URI = f'os.environ.get("{URI_MENTION}")'
-
-
-@pytest.mark.parametrize(
-    "label,src,expected",
-    [
-        # --- must be DERIVED: every one of these aborts collection (rc=5) ---
-        ("literal in the if-test", f"import os, pytest\nif not {_URI}:\n    {_SKIP}\n", _ABORTS),
-        ("helper predicate", f'import os, pytest\ndef absent():\n    return not {_URI}\nif absent():\n    {_SKIP}\n', _ABORTS),
-        ("renamed alias", f'import os\nfrom pytest import skip as pskip\nif not {_URI}:\n    pskip("x", allow_module_level=True)\n', _ABORTS),
-        ("local wrapper called at module scope", f'import os, pytest\ndef req():\n    {_SKIP}\nif not {_URI}:\n    req()\n', _ABORTS),
-        ("nested inner if", f'import os, pytest\nif True:\n    if not {_URI}:\n        {_SKIP}\n', _ABORTS),
-        ("try-wrapped", f'import os, pytest\ntry:\n    if not {_URI}:\n        {_SKIP}\nexcept Exception:\n    pass\n', _ABORTS),
-        ("uri name in a module constant", f'import os, pytest\nK = "{URI_MENTION}"\nif not os.environ.get(K):\n    {_SKIP}\n', _ABORTS),
-        ("else-branch", f'import os, pytest\nif {_URI}:\n    pass\nelse:\n    {_SKIP}\n', _ABORTS),
-        ("truthy 1 for allow_module_level", f'import os, pytest\nif not {_URI}:\n    pytest.skip("x", allow_module_level=1)\n', _ABORTS),
-        # a CLASS BODY executes at import, so a skip there aborts collection
-        # exactly like a module-level one (pruning ClassDef made the census
-        # blind to this — found in review cycle 2)
-        ("class-body skip", f'import os, pytest\nclass Gate:\n    if not {_URI}:\n        {_SKIP}\n', _ABORTS),
-        ("decorator-invoked helper", f'import os, pytest\nU = os.environ.get("{URI_MENTION}")\ndef req(f):\n    {_SKIP}\n@req\ndef test_x():\n    pass\n', _ABORTS),
-        ("lambda helper assigned then called", f'import os, pytest\nreq = lambda: {_SKIP}\nif not {_URI}:\n    req()\n', _ABORTS),
-        ("class __init__ skip reached by instantiation", f'import os, pytest\nclass Gate:\n    def __init__(self):\n        {_SKIP}\nif not {_URI}:\n    Gate()\n', _ABORTS),
-        ("with-block at module scope", f'import os, pytest\nwith open(__file__):\n    if not {_URI}:\n        {_SKIP}\n', _ABORTS),
-        # --- must NOT be derived ---
-        ("no URI mention at all", f'import os, pytest\nif not os.environ.get("OTHER"):\n    {_SKIP}\n', _CLEAN),
-        ("skipif marker collects items (rc=0)", f'import os, pytest\npytestmark = pytest.mark.skipif(not {_URI}, reason="docker")\ndef test_x():\n    assert True\n', _CLEAN),
-        ("importorskip is not URI-gated (fails every leg)", 'import pytest\nmod = pytest.importorskip("nope")\n', _CLEAN),
-        ("UNcalled helper containing a skip", f'import os, pytest\ndef helper():\n    {_SKIP}\nif {_URI}:\n    pass\n', _CLEAN),
-        ("function-level skip (items still collect)", f'import os, pytest\ndef test_x():\n    if not {_URI}:\n        pytest.skip("needs docker")\n', _CLEAN),
-        # A class body that only DEFINES a skipping method, never instantiated:
-        # import never runs the skip, so the file collects fine and must NOT be
-        # subtracted (the mirror of the `class __init__` row above).
-        ("class whose skipping method is never invoked", f'import os, pytest\nclass Gate:\n    def go(self):\n        {_SKIP}\n', _CLEAN),
-    ],
-)
-def test_derivation_covers_every_module_skipping_shape(
-    label: str, src: str, expected: str
-) -> None:
-    """A predicate that misses a shape is HOW this defect returns.
-
-    Each row is a shape the guard must classify correctly; the `aborts` rows all
-    produce the identical unattributable rc=5 failure in a URI-less leg, and the
-    `clean` rows must NOT be subtracted (subtracting them would remove real
-    coverage / hide a file that fails everywhere).
-    """
-    got = _uri_gated_source(src)
-    assert got == (expected == _ABORTS), (
-        f"{label!r}: derived={got}, expected={expected}"
-    )
 
 
 # --------------------------------------------------------------------------
@@ -417,8 +291,8 @@ def test_no_tier2_path_leaks_a_uri_requiring_file(changed: list[str]) -> None:
     leaked = uri & set(sel["test_files"])
     assert not leaked, (
         f"a URI-less tier-2 leg was handed URI-requiring file(s) {sorted(leaked)} "
-        "— each module-skips at import there, collects zero tests, and reds the "
-        "leg with no attributable failure (#6884)"
+        "— each collects zero tests there and reds the leg with no attributable "
+        "failure (#6884)"
     )
     leaked_slow = uri & set(sel["slow_selected"])
     assert not leaked_slow, (
@@ -438,10 +312,13 @@ def test_dashboard_vector_is_load_bearing() -> None:
     victim = "test_dashboard_vector_probe.py"
     manifest = copy.deepcopy(_MANIFEST())
     manifest["uri_requiring"] = sorted(set(uri_requiring_files(manifest)) | {victim})
-    manifest["surfaces"]["onboarding"] = [
-        *manifest["surfaces"]["onboarding"], victim
-    ]
+    manifest["surfaces"]["onboarding"] = [*manifest["surfaces"]["onboarding"], victim]
     sel = select(DASHBOARD_ONLY_CHANGE, "pull_request", manifest)
+    assert sel["full"] is False, (
+        "this vector must stay a tier-2 selection — `test_files` is the sentinel "
+        "`\"ALL\"` on a full selection, against which every membership assertion "
+        "below would pass vacuously"
+    )
     assert "onboarding" in sel["surfaces"], (
         "the #6390 vector no longer selects the onboarding surface, so it no "
         "longer exercises the filter — pick another real vector rather than "
@@ -463,6 +340,7 @@ def test_docs_only_early_return_subtracts_the_lane() -> None:
     manifest["uri_requiring"] = sorted(set(uri_requiring_files(manifest)) | {victim})
     manifest["tier1"] = sorted(set(manifest["tier1"]) | {victim})
     sel = select(DOCS_ONLY_CHANGE, "pull_request", manifest)
+    assert sel["full"] is False, "a docs-only change must stay a tier-2 selection"
     assert victim in set(manifest["tier1"]), "setup: injection must be visible"
     assert victim not in set(sel["test_files"]), (
         "the docs-only early return did not subtract `uri_requiring` — it "
@@ -475,8 +353,7 @@ def test_slow_lane_subtracts_the_lane() -> None:
     `uri_requiring` file must not reach them.
 
     The victim is SYNTHESISED and injected into both `slow_files` and the lane,
-    so this arm survives the lane emptying and does not red when the one real
-    file it used to name gets fixed.
+    so this arm survives the lane emptying.
     """
     victim = "test_slow_lane_probe.py"
     manifest = copy.deepcopy(_MANIFEST())
