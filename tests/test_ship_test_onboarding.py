@@ -1081,6 +1081,68 @@ def test_a_value_that_STARTS_on_a_brace_or_delimiter_is_redacted() -> None:
         assert _mod.scrub(got) == got, (raw, got, _mod.scrub(got))
 
 
+def test_a_delimiter_led_pair_NESTED_inside_a_json_string_is_redacted() -> None:
+    """The positional tell in `_at_json_value_position` only holds at a
+    DOCUMENT's own value position. For a pair nested inside a serialized body
+    the character before the inner key is the `:` that opens the enclosing
+    string, so the pair read as structure and was left VERBATIM — a credential
+    reaching the artifact. It is a REGRESSION, not a gap: measured at the
+    previously reviewed head f8fa0ea9c3fc, the `;`/`:`/`,` forms were already
+    redacted there and `]`/`}` were not.
+
+    The sibling test above exercises the TOP-LEVEL position only — which is why
+    the whole suite stayed green on the leaking code. The fix: a delimiter is
+    structure only when what FOLLOWS it can OPEN A JSON TOKEN, so the body keeps
+    its separators while `;S3CRET` (a secret, not a token start) is redacted.
+    """
+    import json
+
+    secret = "S3CRETCANARY7f3a91d2"
+    for lead in "]},;:":
+        for shape in (f'{{"error": "password:\\"{lead}{secret}\\""}}',
+                      f'{{"detail": "password:\\"{lead}{secret}\\""}}'):
+            got = _mod.scrub(shape)
+            assert secret not in got, (shape, got)
+            assert json.loads(got) is not None, (shape, got)
+            assert _mod.scrub(got) == got, (shape, got, _mod.scrub(got))
+    # The other half: delimiters that ARE structure must keep their body intact
+    # and parseable, and the pass must stay a fixed point — the property the
+    # narrowing could plausibly have broken.
+    for body in ('["?code=", -2, ""]', '{"session":["?token=",""]}',
+                 '{"code":["?token=",true,"x:y"]}', '["?token=" , -2]',
+                 '["?code=", [1, 2]]', '{"a": "?code=", "b": [1, 2]}'):
+        got = _mod.scrub(body)
+        assert json.loads(got) is not None, (body, got)
+        assert _mod.scrub(got) == got, (body, got)
+
+
+def test_the_PRE_EXISTING_plain_string_delimiter_gap_is_pinned() -> None:
+    """A STATED GAP, pinned so it can neither be mistaken for covered nor be
+    silently closed into a structure break.
+
+    Measured on BOTH heads (`f8fa0ea9c3fc` and `da2ce15e2`): a `}`- or `,`-led
+    value inside a PLAIN string value — `{"msg": "token=}S3CRET"}` — is left
+    verbatim. It is NOT the regression above: it predates the reviewed head, it
+    takes a different match path (the prose/URL alternatives, not
+    `_delim_value_is_structure`), and the narrowing that closed the nested-body
+    regression does not reach it. `]`, `;` and `:` in the same position are
+    redacted.
+
+    This assertion is deliberately the LEAKING behaviour. If a later fix closes
+    it, this test must fail and be updated with the new evidence — that is the
+    point, so the gap is recorded in code rather than in prose that can stale.
+    """
+    secret = "S3CRETCANARY7f3a91d2"
+    for lead in ("}", ","):
+        shape = f'{{"msg": "token={lead}{secret}"}}'
+        assert _mod.scrub(shape) == shape, (
+            f"the plain-string {lead!r}-led gap is no longer a gap — "
+            f"re-measure both heads and update this test: {_mod.scrub(shape)!r}")
+    for lead in ("]", ";", ":"):
+        shape = f'{{"msg": "token={lead}{secret}"}}'
+        assert secret not in _mod.scrub(shape), shape
+
+
 def test_an_unmatched_bracket_only_eats_the_string_it_sits_in() -> None:
     """A field that IS a JSON document holds its brackets inside STRINGS, so an
     unmatched one there is prose: the empty may only reach that string's close,

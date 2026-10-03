@@ -791,7 +791,7 @@ _SECRET_KEY_NAMES = ("password", "passwd", "secret", "access_token", "refresh_to
 # whitespace-delimited token — which would leave the credential AFTER our own
 # marker while looking redacted. `Authorization: Bearer <token>` is covered in
 # free text by the central table's bearer rule.
-_SECRET_HEADER_NAMES = ("authorization", "cookie", "x-api-key")
+_SECRET_HEADER_NAMES = ("authorization", "cookie", "set-cookie", "x-api-key")
 _QUERY_ONLY_NAMES = tuple(
     n for n in _QUERY_SECRET_PARAMS if n not in _SECRET_KEY_NAMES)
 
@@ -962,7 +962,18 @@ def _at_json_value_position(match: re.Match) -> bool:
 # enclosing string does not (`_at_json_value_position`). Outside a document the
 # text is prose, where a quoted credential is still a credential — so the caller
 # passes `is_json=False` and the value is redacted.
-_DELIM_VALUE_START_RE = re.compile(r"\s*[\]},;:]")
+# A DELIMITER ALONE IS NOT ENOUGH (review at head da2ce15e2, #5630). The
+# positional tell above goes the wrong way for a pair nested INSIDE a serialized
+# body: in `{"detail": "password:\";S3CRET\""}` the inner key is not at a JSON
+# value position (the character before it is the `:` introducing the enclosing
+# string), so the pair was read as structure and left VERBATIM — a credential
+# reaching the artifact. It is also a REGRESSION: at f8fa0ea9c3fc the `;` and `:`
+# forms were redacted (`]`/`}` never were). The delimiter is structure only when
+# what follows it can OPEN A JSON TOKEN, so require a token start — a quote, a
+# bracket, a number or a literal — and not merely the first character of a
+# secret. `, -2, ` still qualifies; `;S3CRET` does not.
+_DELIM_VALUE_START_RE = re.compile(
+    r"\s*[\]},;:]\s*(?:[\"'\[\]{]|-?\d|null|true|false|$)")
 
 
 def _delim_value_is_structure(match: re.Match, is_json: bool) -> bool:
