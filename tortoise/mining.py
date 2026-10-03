@@ -432,8 +432,13 @@ class ConversationMiner:
           - explicit-replacement cues → replacement candidate; after review
             + promotion the prior is superseded (CORRECTS + outdated:true)
 
-        validFrom = session frontmatter date (R5 — NOT ingest time); fallback
-        ingestedAt (documented).
+        validFrom = session frontmatter date (R5 — NOT ingest time). An
+        **undated** session stamps no ``validFrom`` at all: the valid-time
+        start is left absent, which ``docs/ONTOLOGY.md`` §4.7 defines as an
+        **open/unbounded start** — the honest representation when the date is
+        unknown, and never the write wall clock (transaction time, a
+        different fact). ``createdAt`` still carries the ingest instant on
+        the transaction-time axis (#3654).
 
         Returns {"wired_nand": n, "candidates": n, "replacement_candidates": n}.
         """
@@ -444,7 +449,8 @@ class ConversationMiner:
         # can yield datetime.date objects ('date: 2026-07-01') which crash the
         # SET, and non-ISO strings corrupt ORDER BY chronology (#1080 review).
         if session_date is None:
-            vf = _now()
+            # No valid-time start to write — §4.7 absent ⇒ open start.
+            vf = None
         elif hasattr(session_date, "isoformat"):
             # YAML frontmatter dates arrive as datetime.date/datetime objects
             # ('date: 2026-07-01') — normalize to ISO-8601 (#1080 review).
@@ -463,11 +469,15 @@ class ConversationMiner:
             content, kind, status = rows[0]
             if kind != "decision" or status != "draft" or not content:
                 continue
-            # validFrom: real session date, not ingest time (R5).
-            proj.g.query(
-                "MATCH (n:Point {id:$id}) SET n.validFrom = $vf",
-                params={"id": pid, "vf": vf},
-            )
+            # validFrom: the session date when the frontmatter carries one
+            # (R5 — real session date, not ingest time). An undated session
+            # writes nothing: §4.7 reads an absent validFrom as an open
+            # start, so the NAND/candidate logic below is unchanged (#3654).
+            if vf is not None:
+                proj.g.query(
+                    "MATCH (n:Point {id:$id}) SET n.validFrom = $vf",
+                    params={"id": pid, "vf": vf},
+                )
             low = content.lower()
             if not any(c in low for c in self._TEMPORAL_REFUTE_CUES):
                 continue
@@ -1156,8 +1166,9 @@ def mine_corpus_with_sdk(
         # wiring, wrong per-session event content, re-mine stacking).
         api.current_run = ulid()
         try:
-            # #786: session frontmatter date becomes validFrom (R5 — real
-            # session date, not ingest time); fallback ingestedAt.
+            # #786: session frontmatter date becomes validFrom (R5) when
+            # present; when absent, no validFrom is stamped at all — an
+            # absent start is open/unbounded (§4.7, #3654).
             session_date = None
             try:
                 from .session_indexer import _parse_frontmatter
