@@ -13,7 +13,10 @@ HOME-scoped target directory was unwritable (``HOME=""`` →
 ``|| true`` only rescues the *exit status*, never the already-emitted error.
 
 These tests drive the REAL shipped hook scripts with a hostile environment and
-assert **byte-empty stderr** plus unchanged (empty) stdout.  Each hook is
+assert **byte-empty stderr** and no shell error on stdout.  stdout is NOT
+``""`` for ``session-start.sh``: main's #4041 deliberately RENDERS the
+``install-inert`` breadcrumb there, so that test pins the render's shape rather
+than an empty stream — #5919's own property is stderr hygiene.  Each hook is
 installed where ``../..`` is NOT a checkout — the same trick
 ``tests/test_4314_inert_hooks.py`` uses.  That pins a SPECIFIC inert branch and
 keeps the test independent of the repo layout: running the repo copy in place
@@ -127,7 +130,14 @@ def test_claude_session_start_inert_branches_keep_stderr_empty(tmp_path):
     hook = _install_hook(CLAUDE_START, tmp_path, "session-start.sh")
     proc = _run(hook, tmp_path, python3=False)
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout == "", f"stdout must stay empty: {proc.stdout!r}"
+    # #4041 (on main) deliberately RENDERS this `install-inert` breadcrumb to
+    # stdout so Claude Code injects it into the session context — and this
+    # branch is reached with no interpreter, so the render is pure shell.  So
+    # stdout is NOT empty here; the #5919 property is that it carries no shell
+    # error, and that stderr stays byte-empty.
+    assert proc.stdout.startswith("code:     install-inert"), proc.stdout
+    assert "\nnext:     " in proc.stdout, proc.stdout
+    assert "No such file or directory" not in proc.stdout
     assert proc.stderr == "", (
         "an inert hook leaked to stderr — the writer's redirect order is back")
     assert "No such file or directory" not in proc.stderr

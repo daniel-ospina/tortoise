@@ -3299,9 +3299,6 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # its contract is carried by `hook_install.ARTIFACT_CONTRACTS['pi']`.  Before
 # #4680 the Pi seam carried no marker at all, which is why a two-week-old
 # installed copy read as merely UNVERIFIABLE while capturing the old logic.
-# #4041 (on main) moved claude 7→8: session-start.sh now RENDERS the capture
-# breadcrumb to stdout, so an already-installed copy must read as stale to
-# receive the new behaviour.
 # #5919 moved codex 2→3 and cursor 2→3: each breadcrumb writer's redirection
 # changed (an unwritable target dir no longer leaks the shell's own error onto
 # stderr), so an already-installed copy must read as stale to receive it.
