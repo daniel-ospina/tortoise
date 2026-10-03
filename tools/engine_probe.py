@@ -192,12 +192,23 @@ def probe_graph(host: str, port: int, timeout: float) -> dict:
     started = time.monotonic()
     sock = None
     try:
-        addrinfo = _resolve_within_bound(host, port, timeout)
+        # Resolution failures report `ok=None`, NOT `ok=False`. `ok=False`
+        # asserts a measured endpoint that refused or timed out; none of these
+        # touched the endpoint at all, so they must classify as UNMEASURABLE
+        # rather than becoming a confident GRAPH_DOWN with prose that blames a
+        # port the probe never dialled. `classify` already routes a non-bool
+        # `ok` there.
+        try:
+            addrinfo = _resolve_within_bound(host, port, timeout)
+        except Exception as exc:  # noqa: BLE001 — unmeasured, never a verdict
+            return {"ok": None, "reply": None,
+                    "error": f"resolve-failed: {type(exc).__name__}: {exc}",
+                    "elapsed_s": round(time.monotonic() - started, 3)}
         if addrinfo is None:
-            return {"ok": False, "reply": None, "error": "resolve-timeout",
+            return {"ok": None, "reply": None, "error": "resolve-timeout",
                     "elapsed_s": round(time.monotonic() - started, 3)}
         if not addrinfo:
-            return {"ok": False, "reply": None, "error": "no-addresses",
+            return {"ok": None, "reply": None, "error": "no-addresses",
                     "elapsed_s": round(time.monotonic() - started, 3)}
         # EVERY resolved address is tried, not just the first: a dual-stack host
         # whose AAAA is unreachable while its A answers would otherwise be
@@ -218,6 +229,8 @@ def probe_graph(host: str, port: int, timeout: float) -> dict:
                     sock.close()
                 sock = None
         else:
+            # Every address was dialled and every one failed — a MEASURED
+            # failure, so `ok=False` is right here.
             return {"ok": False, "reply": None,
                     "error": type(last_error).__name__ if last_error else "no-addresses",
                     "elapsed_s": round(time.monotonic() - started, 3)}
@@ -430,7 +443,10 @@ def main(argv: Optional[list] = None) -> int:
     graph = probe_graph(host, port, args.timeout)
     engine = None if args.no_docker else probe_engine(args.timeout)
     verdict = classify(graph, engine)
-    _report(args, verdict, graph, host, port, engine)
+    # A non-bool `ok` means the endpoint was never reached, so the report must
+    # not claim it was probed.
+    _report(args, verdict, graph, host, port, engine,
+            probed=graph.get("ok") is not None)
     if verdict == GRAPH_UP:
         return 0
     if verdict == UNMEASURABLE:

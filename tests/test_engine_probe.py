@@ -769,8 +769,12 @@ def test_a_hanging_resolver_is_bounded(monkeypatch):
     started = _t.monotonic()
     result = e.probe_graph("slow.example.com", 16379, timeout=0.5)
     elapsed = _t.monotonic() - started
-    assert result["ok"] is False, result
+    # `ok is None` — the endpoint was never reached, so this must be
+    # UNMEASURABLE rather than a confident GRAPH_DOWN blaming a port the probe
+    # never dialled.
+    assert result["ok"] is None, result
     assert result["error"] == "resolve-timeout", result
+    assert e.classify(result, {"status": e.ENGINE_OK}) == e.UNMEASURABLE
     assert elapsed < 2.0, f"resolution was not bounded: {elapsed:.2f}s"
 
 
@@ -897,9 +901,29 @@ def test_a_non_oserror_resolver_failure_is_not_reported_as_a_timeout(monkeypatch
     # and probe_graph must not claim a timeout for it — nor raise, which is its
     # documented contract and the whole point of a diagnostic tool
     result = e.probe_graph("x.example.com", 1, timeout=1.0)
-    assert result["ok"] is False, result
+    assert result["ok"] is None, result
     assert result["error"] != "resolve-timeout", result
     assert "RuntimeError" in result["error"], result
+    assert e.classify(result, {"status": e.ENGINE_OK}) == e.UNMEASURABLE
+
+
+def test_a_resolution_failure_exits_three_not_two(monkeypatch, capsys):
+    """(a) FAILS if a resolver failure is reported as a measured graph failure.
+    It exited 2 with "The graph port is unreachable" and `probed: true` for a
+    port that was never dialled — the confident-verdict-from-an-unmeasured-state
+    class this tool exists to remove, and no test pinned it.
+    (b) Reachable: an unresolvable host, a hanging resolver, or a resolver error.
+    """
+    import json as _json
+    monkeypatch.setattr(e.socket, "getaddrinfo",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            socket.gaierror("Name or service not known")))
+    rc = e.main(["--json", "--no-docker", "--host", "nope.invalid",
+                 "--timeout", "1"])
+    payload = _json.loads(capsys.readouterr().out)
+    assert rc == 3, (rc, payload)
+    assert payload["verdict"] == e.UNMEASURABLE, payload
+    assert payload["graph"]["probed"] is False, payload
 
 
 def test_an_empty_address_list_is_reported_not_indexed(monkeypatch):
@@ -909,8 +933,9 @@ def test_an_empty_address_list_is_reported_not_indexed(monkeypatch):
     """
     monkeypatch.setattr(e.socket, "getaddrinfo", lambda *a, **k: [])
     result = e.probe_graph("empty.example.com", 16379, timeout=1.0)
-    assert result["ok"] is False, result
+    assert result["ok"] is None, result
     assert result["error"] == "no-addresses", result
+    assert e.classify(result, {"status": e.ENGINE_OK}) == e.UNMEASURABLE
 
 
 def test_redis_port_comes_from_the_uri_when_present(monkeypatch):
