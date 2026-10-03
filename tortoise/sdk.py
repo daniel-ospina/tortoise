@@ -3090,6 +3090,29 @@ def _derive_graph_name(*, namespace: str | None,
     return uri_graph or "tortoise"
 
 
+class InvertedSupersedeWindow(ValueError):
+    """#5363 — a supersede refused because its successor's window start
+    precedes the predecessor's ``validFrom`` (#4021's inverted-window guard).
+
+    Subclasses ``ValueError`` because that is the contract ``supersede_point``
+    has always published (callers and tests catch ``ValueError``), but it is a
+    NAMED type so a transport boundary can tell this DETERMINISTIC payload
+    refusal from a transient graph failure WITHOUT parsing the message — which
+    the MCP layer rewrites (``_scrub_error``) and two tests pin.
+
+    The conflicting values ride as attributes so the boundary that renders the
+    client-facing error does not have to re-derive them from the prose.
+    """
+
+    def __init__(self, message, *, old_id, new_id, successor_start,
+                 predecessor_valid_from):
+        super().__init__(message)
+        self.old_id = old_id
+        self.new_id = new_id
+        self.successor_start = successor_start
+        self.predecessor_valid_from = predecessor_valid_from
+
+
 def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
                           stored_vf, successor_created_at, now):
     """Resolve the predecessor's window END and refuse an inverted window (#4021).
@@ -3256,7 +3279,7 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
                     # mcp_server._scrub_error, whose `(host=|at |to )[\w.-]+`
                     # rule rewrites any word ending in at/to followed by a
                     # space — a scrubbed hint reaches the caller as `***`.
-                    raise ValueError(
+                    raise InvertedSupersedeWindow(
                         f"supersede_point: refusing supersede {old_id!r} - "
                         f"{new_id!r} - the successor's window start "
                         f"{succ_vf!r} precedes the predecessor's validFrom "
@@ -3264,7 +3287,10 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
                         f"window (validTo < validFrom), which no query "
                         f"instant resolves. Give the successor a validFrom "
                         f"on-or-after {old_vf!r}, or use `retract_point()` "
-                        f"(window-agnostic) for withdrawal of the predecessor"
+                        f"(window-agnostic) for withdrawal of the predecessor",
+                        old_id=old_id, new_id=new_id,
+                        successor_start=succ_vf,
+                        predecessor_valid_from=old_vf,
                     )
     return succ_vf
 
