@@ -173,13 +173,12 @@ SOURCE_TYPE_ESCAPE_HATCH = frozenset({
 #                               meeting_summary, and
 #                               meeting_transcript/meeting_minutes #2726)
 # SOURCE_TYPE_ESCAPE_HATCH is unioned at the call site, not here.
-# This mirrors the commit_schema.CORE_SOURCE_KINDS SEMANTICS (KNOWN_SOURCE_TYPES
-# | set(SOURCE_KIND_DEFAULTS) | {"agentSession"}). Implementation difference to
-# be aware of: this is a LIVE view; CORE_SOURCE_KINDS is an import-time frozenset
-# and compile_vocab()/refresh_vocab() union that frozen snapshot WITHOUT
-# recomputing it, so a kind registered AFTER import is accepted here immediately
-# but stays rejected by the Layer-1 gate until commit_schema recomputes (tracked
-# as #2742 — do not rely on the two diverging silently).
+# commit_schema.compile_vocab() uses THIS function for its core source-kind leg
+# (#2742), so the pack check and the Layer-1 gate read one live definition. There
+# is deliberately no `CORE_SOURCE_KINDS` snapshot: an import-time frozenset over
+# the mutable registry was accepted by this check immediately but stayed rejected
+# by the Layer-1 gate until a process restart — the two validators diverged for
+# every runtime `register_source_kind_default` call.
 # Before #2726 the check used KNOWN_SOURCE_TYPES alone, so a registered kind was
 # valid in create_source/commit_schema but rejected in pack manifests — the
 # drift class this closes. Tier-form registry keys (T0-T4) are accepted too: a
