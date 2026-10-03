@@ -23,6 +23,7 @@ mirroring the SQL semantics the real functions execute
 """
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -1461,7 +1462,7 @@ class FakeControlPlane:
         rows = [dict(r) for r in self.tables.get(table, [])]
         for col, op, value in filters or []:
             if op == "eq":
-                rows = [r for r in rows if r.get(col) == value]
+                rows = [r for r in rows if _col_value(r, col) == value]
             elif op == "neq":
                 # SQL semantics: `col <> value` is NULL (not TRUE) when either
                 # side is NULL, so a NULL column (or a NULL comparison value)
@@ -1471,22 +1472,23 @@ class FakeControlPlane:
                 # filter silently exempting legacy NULL rows — #4140 T4).
                 rows = ([] if value is None else
                         [r for r in rows
-                         if r.get(col) is not None and r.get(col) != value])
+                         if _col_value(r, col) is not None and _col_value(r, col) != value])
             elif op == "is":
-                rows = [r for r in rows if (r.get(col) is None) == (value is None)]
+                rows = [r for r in rows
+                        if (_col_value(r, col) is None) == (value is None)]
             elif op == "gt":
                 # SQL semantics: NULL never matches an ordered comparison
                 rows = [r for r in rows
-                        if r.get(col) is not None and r.get(col) > value]
+                        if _col_value(r, col) is not None and _col_value(r, col) > value]
             elif op == "gte":
                 rows = [r for r in rows
-                        if r.get(col) is not None and r.get(col) >= value]
+                        if _col_value(r, col) is not None and _col_value(r, col) >= value]
             elif op == "lt":
                 rows = [r for r in rows
-                        if r.get(col) is not None and r.get(col) < value]
+                        if _col_value(r, col) is not None and _col_value(r, col) < value]
             elif op == "lte":
                 rows = [r for r in rows
-                        if r.get(col) is not None and r.get(col) <= value]
+                        if _col_value(r, col) is not None and _col_value(r, col) <= value]
             else:
                 raise ValueError(f"unsupported filter op {op!r}")
         if method == "GET":
@@ -1534,22 +1536,65 @@ class FakeControlPlane:
         raise ValueError(f"unsupported method {method!r}")
 
 
+def _col_value(row: dict, col: str) -> object:
+    """#3553: resolve a filter column — a plain column, or a PostgREST JSON path.
+
+    ``organizations.onboarding_state`` is jsonb, and the CAS guard the
+    onboarding write uses is the JSON PATH ``onboarding_state->>state_version``,
+    which is not a column. A bare ``row.get(col)`` reads every such path as
+    ``None``, and that is not a harmless no-match: ``IS NULL`` then matched
+    EVERY row while ``eq`` matched NONE — so a guarded write could never apply,
+    the empty result was read as a lost race, and the caller raised a spurious
+    ``OnboardingStateConflictError`` (measured: the receipt clear on session
+    delete, #4823). The real PostgREST evaluates the path, so the fake must
+    too, or it cannot represent the production shape — the #1719/#4243 class
+    this module exists to close.
+
+    ``->>`` yields TEXT, as Postgres does, so a non-string is rendered as JSON
+    text: the CAS guard compares that against ``str(version)``. ``->`` keeps the
+    JSON type. An absent path is NULL, which is what lets the guard's
+    ``IS NULL`` form (``expected_version == 0``) match a row whose version was
+    never written.
+    """
+    if "->" not in col:
+        return row.get(col)
+    head, rest = col.split("->", 1)
+    cur: object = row.get(head)
+    while True:
+        if rest.startswith(">"):       # ``->>``: the extra '>' is the text op
+            rest = rest[1:]
+            textify = True
+        else:
+            textify = False
+        key, _, rest = rest.partition("->")
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(key)
+        if cur is None:
+            return None
+        if not rest:
+            if not textify:
+                return cur
+            # ``->>`` is TEXT: render a non-string as JSON text, as Postgres does.
+            return cur if isinstance(cur, str) else json.dumps(cur)
+
+
 def _matches(row: dict, filters: list[tuple[str, str, object]]) -> bool:
     for col, op, value in filters:
-        if op == "eq" and row.get(col) != value:
+        cur = _col_value(row, col)
+        if op == "eq" and cur != value:
             return False
-        if op == "neq" and (value is None or row.get(col) is None
-                            or row.get(col) == value):
+        if op == "neq" and (value is None or cur is None or cur == value):
             return False
-        if op == "is" and (row.get(col) is None) != (value is None):
+        if op == "is" and (cur is None) != (value is None):
             return False
-        if op == "gt" and (row.get(col) is None or row.get(col) <= value):
+        if op == "gt" and (cur is None or cur <= value):
             return False
-        if op == "gte" and (row.get(col) is None or row.get(col) < value):
+        if op == "gte" and (cur is None or cur < value):
             return False
-        if op == "lt" and (row.get(col) is None or row.get(col) >= value):
+        if op == "lt" and (cur is None or cur >= value):
             return False
-        if op == "lte" and (row.get(col) is None or row.get(col) > value):
+        if op == "lte" and (cur is None or cur > value):
             # ISO-8601 cutoff (mirrors the GET path — #302 purge).
             return False
         if op not in ("eq", "neq", "is", "gt", "gte", "lt", "lte"):
