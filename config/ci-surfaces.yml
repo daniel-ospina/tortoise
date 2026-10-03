@@ -25,6 +25,14 @@ fast_shards: 9
 
 surfaces:
   api:
+  # #3561/#3359: per-capture graph-op accounting. Dual-registered because NO
+  # single arm covers every file the change touches: `hosted_api.py` and
+  # `metering.py` are SOURCE_PATTERNS["api"], `graph_ops.py` matches no named
+  # surface and falls through to `core`, and a `sdk.py`/`projection/__init__.py`
+  # change selects the FULL matrix. Without this `api` arm a hosted_api-only PR
+  # would never run the emit-site guard; without the `core` arm (below) a
+  # graph_ops.py-only PR would not either.
+  - test_capture_graph_ops.py
   - test_1162_add_operator_local_svbp.py
   - test_3660_session_upload_identity.py
   - test_3926_error_prop_guard.py  # #3926: the MCP error-prop success-path guard; same `api` surface as test_bridge_mcp.py / test_mcp_server_auth_modes.py (tortoise/mcp_server.py is a SHARED_MODULE — full matrix)
@@ -381,6 +389,13 @@ surfaces:
   - test_probe_reset_inflight_4608.py  # #4608: a probe reset/rebuild must not close a handle an in-flight probe still queries (hosted_api + selfhost)
   - test_provisioning_edge_function.py
   - test_quota.py
+  # #4503: the EDGE class is outside every accounting surface. This
+  # file pins the cap's invariance to edge-state growth, so it is
+  # registered under `api` -- the surface `tortoise/quota.py`
+  # selects. A `core`-only entry would leave a quota.py-only PR
+  # selecting `api` with this guard never run (the #1349 class), the
+  # same reason tests/test_quota.py is registered here.
+  - test_4503_edge_relationship_accounting.py
   # #4010: the session-cap removal — drives the hosted capture path + the
   # registry resolver, so it belongs with the quota/api surface.
   - test_issue_4010_sessions_unlimited.py
@@ -635,6 +650,11 @@ surfaces:
   # guards, dry-run is non-destructive, delete verifies 0 remain) and the suite's
   # write/read marker split. No DB, no network — default `core` surface is correct.
   - test_4220_blog_residue_cleanup.py
+  # #3561/#3359: per-capture graph-op accounting. DB-free units (verb
+  # classification, the ContextVar plumbing) plus one embedded capture through
+  # the offline MockModel extractor asserting a NON-ZERO, phase-attributed op
+  # count. No DB, no network — default `core` surface is correct.
+  - test_capture_graph_ops.py
   - test_4542_retract_fold_decay.py
   - test_4716_capture_operator_ref_remap.py
   - test_6131_operator_mutation_vocabulary.py
@@ -727,6 +747,7 @@ surfaces:
   - test_capture_cost_measurement.py
   - test_eval_reinjection_cap_resume.py
   - test_capture_entity_attachment_3664.py
+  - test_source_kind_runtime_registration.py
   # #1370: write-time subject binding — the confidence-gated, fail-closed
   # Point→aboutSubject producer + its audit/quality-gate tooling. Registered
   # under `core` like its sibling binder guard (test_capture_entity_attachment_
@@ -956,6 +977,11 @@ surfaces:
   # tools/mergify_config_guard.py, which `core` runs on engine-wide changes.
   - test_mergify_config_guard.py
   - test_drift_guard.py  # #4174: the branch-drift gate must FETCH before it measures (a stale `origin/main` is not a pass) and must fail on a conflict-free revert, reporting paths + line counts
+  # #4503: dual-registered -- the file also pins the EP edge-flush /
+  # rebuild behaviour of `tortoise/ep.py` + the projection replay
+  # (no named surface matches `tortoise/projection/entities.py`, so
+  # those fall to the `core` fallback).
+  - test_4503_edge_relationship_accounting.py
   - test_shared_state_concurrency.py
   - test_shared_state_events.py
   - test_shared_state_events_claim.py
@@ -2285,6 +2311,12 @@ durations:
   test_capture_phase_d_dedup.py: 4.7
   test_ci_selection.py: 18.8
   test_runner_ports_6673.py: 4.3  # unmeasured (new file, #6673 — no CI junit yet)
+  # A YAML mapping keeps only the LAST duplicate key, and tools/registry_integrity.py refuses
+  # duplicates outright (`manifest-integrity`, a `python-ci-gate` dependency) — keep exactly ONE
+  # entry per file. #4503 reviewer: measured 42 tests; the DURATION below is the docker lane's
+  # ~42.6s wall-pytest (the embedded carve-out runs far higher and is not this field's consumer
+  # — `durations` only feeds fast-matrix sharding, where erring high is correct).
+  test_4503_edge_relationship_accounting.py: 53.0  # unmeasured — #4503: locally measured (42 tests; ~42.6s wall-pytest docker lane; earlier revisions of this file read 14-21s, so the figure is variable and errs high); refresh from CI junit — no leg of the sweep's four source runs carried it (the file did not exist then).
   test_epic903_freshness.py: 3.8
   test_onboarding_integration.py: 4.5
   test_pack_cli.py: 4.5

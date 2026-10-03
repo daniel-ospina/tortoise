@@ -67,6 +67,42 @@ os.environ.setdefault("TORTOISE_FAST_ATEXIT", "1")
 import sys  # noqa: E402, I001
 from pathlib import Path  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# ── #3752: private per-session temp root (FIRST, before anything can write) ─
+# The suite used to scratch directly in the SHARED system temp dir (35k
+# entries; ~2k of them test-owned) and socket/pid discovery then scanned that
+# whole tree — 2 minutes at 53% CPU, and a lookup that could match another
+# test's or another session's socket. `install_session_tmpdir()` creates one
+# private root (a `tt_` dir under a SHORT temp base, so ordinary scratch paths
+# stay under the AF_UNIX sun_path cap and the reaper's `tt_`/ephemeral
+# classification still applies), redirects `tempfile.tempdir` + `$TMPDIR` into
+# it, and registers an atexit teardown that removes it wholesale — the leak
+# class is fixed structurally, not per test file.
+#
+# Placement is load-bearing, exactly like TORTOISE_TEST_SESSION above: this
+# must run at CONFTEST IMPORT and BEFORE the `tortoise.embedded_reaper` import
+# below (transitively via `tests._embedded`), because that module resolves
+# `ACTIVE_SUITES_DIR` and `_LOCK_PATH` from the temp dir ONCE, at import time.
+# `TORTOISE_HOST_TMPDIR` (exported by the same call) keeps the marker dir
+# host-global so a production/cron sweep still sees a live suite (#3752),
+# while `_LOCK_PATH` stays in the sweep domain (the private root).
+# The scan guard is installed unconditionally: any test that discovers files by
+# walking the shared temp dir fails loudly, naming itself.
+from tests._tmpdir_hygiene import (  # noqa: E402
+    install_scan_guard,
+    install_session_tmpdir,
+    sweep_stale_session_roots,
+)
+
+install_session_tmpdir()
+# AFTER the redirect, deliberately: this scans HOST_TMPDIR (the module constant,
+# captured before the redirect) and its pid+start probe lazily imports
+# tortoise.embedded_reaper — which must happen only once the private root is
+# the temp dir, or _LOCK_PATH freezes on the shared temp dir for the whole
+# session.
+sweep_stale_session_roots()  # reclaim a SIGKILLed prior run's root, if any
+install_scan_guard()
+
 from tests._embedded import shared_proj  # noqa: E402, F401, I001
 
 # ── Epic #1647 (D-1=A): the test-session signal + redirect env ────────────
@@ -124,11 +160,29 @@ os.environ.setdefault("TORTOISE_TEST_NO_REDIRECT", ",".join(TEST_NO_REDIRECT_STE
 # guards). The overwrite is paired with a 12-hex shape guard: os.urandom(6)
 # always yields 12 hex chars, so the assert can only fire on a broken
 # platform — fail loudly rather than export a malformed nonce.
+#
+# #6323: the re-roll is scoped to a NEW PROCESS, so re-executing this body in
+# the SAME process is idempotent. pytest loads this file as the top-level
+# `conftest`, so `import tests.conftest` is a SECOND module whose body re-runs
+# mid-session; an unconditional re-roll re-points the journal and makes the
+# session read its OWN pre-import journal as a live peer, so
+# `wipe_server(scope=None)` spares graphs the session minted. The owner-pid
+# marker keeps the decision above intact in every other case: an externally
+# pre-set value carries no marker and is still overwritten, and a forked child
+# (marker pid != its own) still mints a fresh nonce exactly as before.
 import re as _re  # noqa: I001, E402
-_SESSION_NONCE = os.urandom(6).hex()
-assert _re.fullmatch(r"[0-9a-f]{12}", _SESSION_NONCE), \
-    f"TORTOISE_TEST_SESSION must be 12 hex (48 bits), got {_SESSION_NONCE!r}"
-os.environ["TORTOISE_TEST_SESSION"] = _SESSION_NONCE
+_SESSION_OWNER_PID = str(os.getpid())
+_prior_nonce = os.environ.get("TORTOISE_TEST_SESSION")
+if (os.environ.get("TORTOISE_TEST_SESSION_OWNER_PID") == _SESSION_OWNER_PID
+        and _prior_nonce
+        and _re.fullmatch(r"[0-9a-f]{12}", _prior_nonce)):
+    _SESSION_NONCE = _prior_nonce
+else:
+    _SESSION_NONCE = os.urandom(6).hex()
+    assert _re.fullmatch(r"[0-9a-f]{12}", _SESSION_NONCE), \
+        f"TORTOISE_TEST_SESSION must be 12 hex (48 bits), got {_SESSION_NONCE!r}"
+    os.environ["TORTOISE_TEST_SESSION"] = _SESSION_NONCE
+    os.environ["TORTOISE_TEST_SESSION_OWNER_PID"] = _SESSION_OWNER_PID
 
 # ── Epic #1647 Task 2 Step 7: the session created-graph journal ───────────
 # The journal path is resolved at CONFTEST IMPORT (cycle-4 P2-9) — product-
