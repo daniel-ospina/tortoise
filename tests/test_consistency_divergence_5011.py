@@ -930,7 +930,7 @@ def test_terminalizing_events_are_folded_like_the_writer(proj, tmp_path, termina
     # Rebuild from the journal with the writer's own repair path: the graph is
     # then `replay(journal)` by construction, so a red verdict is the check's bug.
     proj.query("MATCH (n) DETACH DELETE n")
-    proj.rebuild_all(str(events_dir))
+    proj.rebuild_all(str(events_dir), confirm_destructive=True)
 
     r = check_consistency(log_path, proj)
     assert r["ok"] is True, (terminal["type"], r["divergent_points"])
@@ -953,7 +953,7 @@ def test_a_tamper_of_the_restored_validity_fields_is_caught(proj, tmp_path):
          "expired_at": "2026-02-01T00:00:00Z"},
     ])
     proj.query("MATCH (n) DETACH DELETE n")
-    proj.rebuild_all(str(events_dir))
+    proj.rebuild_all(str(events_dir), confirm_destructive=True)
     assert check_consistency(log_path, proj)["ok"] is True
 
     proj.g.query("MATCH (n:Point {id:'x'}) SET n.outdated=false, "
@@ -1076,7 +1076,7 @@ def test_a_belief_write_after_a_terminalizer_wins(proj, tmp_path, terminal):
          "confidence": 0.8},
     ])
     proj.query("MATCH (n) DETACH DELETE n")
-    proj.rebuild_all(str(events_dir))
+    proj.rebuild_all(str(events_dir), confirm_destructive=True)
 
     r = check_consistency(log_path, proj)
     assert r["ok"] is True, (terminal["type"], r["divergent_points"])
@@ -1145,7 +1145,7 @@ def test_a_supersede_without_new_id_is_a_no_op_like_the_writer(proj, tmp_path):
          "valid_to": "2026-02-01T00:00:00Z"},
     ])
     proj.query("MATCH (n) DETACH DELETE n")
-    proj.rebuild_all(str(events_dir))
+    proj.rebuild_all(str(events_dir), confirm_destructive=True)
     r = check_consistency(log_path, proj)
     assert r["ok"] is True, r["divergent_points"]
 
@@ -1237,7 +1237,7 @@ def test_a_repair_that_drops_an_uncarried_key_is_not_an_unrecorded_mutation(
     assert "tags" in first["uncarried_journal_fields"]
 
     proj.query("MATCH (n) DETACH DELETE n")
-    proj.rebuild_all(str(events_dir))
+    proj.rebuild_all(str(events_dir), confirm_destructive=True)
     r = check_consistency(log_path, proj)
     assert r["ok"] is True, r["divergent_points"]
     assert r["divergence"] is None

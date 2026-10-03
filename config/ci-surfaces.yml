@@ -1017,6 +1017,7 @@ surfaces:
   - test_onboarding_truth_surface.py  # #3670/#3671/#3681: dual-registered (api+core) — pins tortoise/hosted_api.py
   - test_restore_container_recovery.py
   - test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan
+  - test_destructive_wipe_guard.py
   - test_session_attribution.py
   - test_ci_selection.py
   # #6884: pins the `uri_requiring` declaration (re-derived BEHAVIOURALLY — it
@@ -2453,6 +2454,21 @@ durations:
   eval/retrieval/test_oracle.py: 5.7
   longmem_eval/test_context_assembly_leakage.py: 5.2
   test_ep_directional.py: 5.7
+  # #2944: new file. The row is required. Pair at this commit: 544/605 = 89.92%
+  # without it (below the 90% floor, so the gated `--integrity` step reds) vs
+  # 545/605 = 90.08% with it (545 is the lowest passing count for a 605-file
+  # pool). Each parent passes on its own — branch parent 525/583 = 90.05%,
+  # main parent 544/604 = 90.07% — so the red exists only in the merge: main's
+  # added fast files moved the pool 583 -> 605, and this branch's `core`
+  # registration is the file that lands unweighed.
+  #
+  # The value is a LOCAL measurement (30 tests, 66.7s at fleet load), not a CI
+  # junit artifact — chosen over the flat 2.0s default because a 33x
+  # under-weight would skew the LPT pack for a ~67s file
+  # (this tree's durations map has 548 entries, median 0.85s, so ~78x; the fast
+  # pool's own median is 0.8s). Refresh from the first
+  # post-merge main junit run that includes it.
+  test_destructive_wipe_guard.py: 66.7
   test_extractor_reliability.py: 5.5
   test_acl_graph_users.py: 9.8
   test_battery_exposure_liveness.py: 5.9
