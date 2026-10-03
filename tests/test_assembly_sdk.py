@@ -58,13 +58,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pytest
 
 import tests._assembly_graph as ag
+from tests import _live_utils
 from tortoise.ask_lane import run_ask_assembled, run_ask_lane
 from tortoise.sdk import TortoiseSDK
 
 # ── Live-FalkorDB + FTS availability (same gate as test_assembly_fixtures) ──
 _URI = os.environ.get(
     "TORTOISE_DB_URI",
-    "docker://:falkordb@localhost:6379/tortoise_test_matrix").rstrip("/")
+    _live_utils.docker_uri("tortoise_test_matrix")).rstrip("/")
 FALKORDB_AVAILABLE = False
 _OLD_URI = os.environ.get("TORTOISE_DB_URI")
 _PROBE_GRAPH = f"{_URI}_probe"
@@ -1000,8 +1001,12 @@ def test_long_successor_sdk_object_read_returns_it_verbatim(sdk):
         session_id="s5370_read", warn=warns.append)
     assert applied == 1, f"the fold must apply: {warns}"
 
+    # #3301: the folded Object is SUPERSEDED, and the search lane's default
+    # Object view now excludes the canonical terminal vocabulary — so read it
+    # through the terminal-inclusive view (the documented audit/history
+    # opt-in). This test pins #5370's TRUNCATION contract, not visibility.
     hits = sdk.tortoise_fts_query("read-src", entity_type="object",
-                                  limit=25)
+                                  limit=25, include_terminal=True)
     hit = next((h for h in hits if h.get("content") == "read-src"), None)
     assert hit is not None, (
         "the SDK object read returned no hit for the folded Object: "

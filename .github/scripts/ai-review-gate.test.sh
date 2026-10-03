@@ -279,11 +279,29 @@ fi
 #     banned trigger under a different, VALID spelling (review finding, cycle
 #     2). Token-matching is spelling-agnostic; comments are stripped first so
 #     prose cannot confuse it.
-on_tokens="$(sed 's/#.*//' "$T/on-block.yml" | grep -oE 'pull_request[A-Za-z_-]*' | sort -u | sed '/^$/d')"
+on_tokens="$(sed 's/#.*//' "$T/on-block.yml" | grep -oE 'pull_request[A-Za-z_-]*' | sort -u | sed '/^$/d' || true)"
 if [ "$on_tokens" = "pull_request_target" ]; then
     ok "trigger is pull_request_target only (PR code can never run the gate)"
 else
     bad "trigger is not exactly pull_request_target (pull_request* tokens found: $(printf '%s' "$on_tokens" | tr '\n' ',') ) — a same-repo PR could run its own gate definition"
+fi
+
+# (2b) The `edited` ACTIVITY TYPE must be present. Since #5433 this check is a
+#      REQUIRED context and a queue ENTRY condition, and `record-review.sh` posts
+#      the evidence marker by PATCHing the PR body — an `edited` event. That event
+#      is the only thing that re-runs the gate after a review is recorded, so
+#      dropping `edited` would leave every legitimately-reviewed PR red on its last
+#      pre-record run, with nothing to re-trigger it. Token-matched (dependency-free
+#      — this harness runs on a bare runner, no PyYAML) so `- edited`,
+#      `[opened, edited]` and a nested list all read the same. Deliberately NOT an
+#      assignment + `[ -n ]`: under `set -euo pipefail` a `grep` that finds nothing
+#      makes the ASSIGNMENT exit non-zero, so `set -e` aborts the script and the
+#      `bad` diagnostic below is dead in exactly the case it exists for (the abort
+#      also skips the rest of the suite — 101 assertions ran silently skipped).
+if sed 's/#.*//' "$T/on-block.yml" | grep -qE '\bedited\b'; then
+    ok "trigger includes the 'edited' activity type (body edits re-run the gate)"
+else
+    bad "the pull_request_target trigger does not list 'edited' — record-review.sh posts the marker by editing the PR body, so without it a recorded review never re-runs the gate and every reviewed PR stays red on its pre-record run"
 fi
 
 # (3) No path filter may gate the workflow. A path-filtered workflow simply
@@ -389,10 +407,11 @@ diff_marker() { # <sha> <diff-hash>
     printf '%s sig=%s\n' "$m" "$(sign "$m")"
 }
 
-# Stubbed gh: the gate only ever asks for the PR body or the diff. Every
-# invocation is logged so that a production call-shape change (e.g.
-# `--jq .body` → `--jq .title`) fails loudly instead of silently yielding
-# empty output that the fallback then hides.
+# Stubbed gh: the gate asks for the PR diff, the PR body, and — since #1224 —
+# the PR's issue comments (the second evidence channel). Every invocation is
+# logged so that a production call-shape change (e.g. `--jq .body` →
+# `--jq .title`) fails loudly instead of silently yielding empty output that
+# the fallback then hides.
 mkdir -p "$T/bin"
 cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
@@ -400,6 +419,18 @@ cat > "$T/bin/gh" <<'STUB'
 if printf '%s' "$*" | grep -qF -- "application/vnd.github.v3.diff"; then
     [ "${STUB_DIFF_FAIL:-0}" = "1" ] && exit 1
     cat "${STUB_DIFF_FILE:?}"
+    exit 0
+fi
+# The PR's issue comments — the SECOND evidence channel (#1224). The default is
+# a SUCCESSFUL fetch that returns nothing (no comment-carried evidence), which
+# must stay distinguishable from the failure arm inside.
+if printf '%s' "$*" | grep -qE -- "/issues/[0-9]+/comments"; then
+    if [ "${STUB_COMMENTS_FAIL:-0}" = "1" ]; then
+        # gh's real failure mode: the HTTP error envelope on STDOUT, rc != 0.
+        printf '{"message":"Not Found","documentation_url":"https://docs.github.com/rest","status":404}\n'
+        exit 1
+    fi
+    [ -n "${STUB_COMMENTS_FILE:-}" ] && cat "$STUB_COMMENTS_FILE"
     exit 0
 fi
 if printf '%s' "$*" | grep -qF -- "--jq .body"; then
@@ -437,6 +468,10 @@ run_gate() { # <env-body-file> [<rest-body-file>]
         export GATE_SECRET="${GATE_SECRET_OVERRIDE:-$KEY}"
         export STUB_BODY_FILE="$restfile" STUB_LOG="$T/gh.log"
         export STUB_UNRECOGNISED="$T/gh-unrecognised"
+        # (#1224) The comment channel. A per-case prefix sets these; the defaults
+        # describe a successful fetch that found no comment evidence.
+        export STUB_COMMENTS_FAIL="${STUB_COMMENTS_FAIL:-0}"
+        export STUB_COMMENTS_FILE="${STUB_COMMENTS_FILE:-}"
         rc=0
         bash "$RUN_BLOCK" >"$outfile" 2>&1 || rc=$?
         printf '%s' "$rc" > "$rcfile"
@@ -715,7 +750,15 @@ echo "── (n) a malformed trailing line cannot hijack the repo diagnostic ─
 } > "$T/body-n"
 STUB_DIFF_FILE="$DIFF_FILE" run_gate "$T/body-n"
 assert_rc 1 "(n) gate fails"
-assert_contains "(n) reports the real cause" "latest recorded ${STALE} — expected ${HEAD}"
+# The stale verdict must name the condition it actually established (#4776): no marker in
+# the body is bound to the head, and the marker that IS there is listed as a candidate. The
+# previous assertion pinned `latest recorded ${STALE} — expected ${HEAD}`, a label that
+# overclaimed (it is the LAST sha-bearing line, not the newest record) and that a reader
+# could not re-check once the PR moved on.
+assert_contains "(n) reports the real cause" "NO marker in this PR's body or its admitted comments is bound to ${HEAD}"
+assert_contains "(n) says which bytes it judged" "comments=read"
+assert_contains "(n) lists the candidate marker it did see" "bound to: ${STALE:0:12}"
+assert_contains "(n) keeps the head in the verdict" "head expected: ${HEAD}"
 assert_not_contains "(n) does not misattribute the repo" "was found for some-other/place"
 
 echo "── (o) normalized diff digest (#1362) ─────────────────────────"
@@ -954,6 +997,23 @@ printf 'no marker\n' > "$T/body-r-botbranch"
 PR_AUTHOR_OVERRIDE="mergify[bot]" HEAD_REF_OVERRIDE="feat/author-branch" \
     STUB_DIFF_FILE="$DIFF_FILE" run_gate "$T/body-r-botbranch"
 assert_rc 1 "(r3) mergify[bot] on an ordinary branch is still evaluated (fails with no evidence)"
+
+echo "── (s) the comment channel (#1224) ────────────────────────────"
+# The marker may be carried by a repo-affiliated PR COMMENT instead of the body:
+# the body is a mutable field any later legitimate edit rewrites, so a body-only
+# copy reddens this check on a review that genuinely happened. This pins that the
+# gate PASSES on comment evidence when the body holds none, and that a comment
+# fetch failure still fails closed. (A call-shape drift is caught by case (a)'s
+# $T/gh-unrecognised check, which every case feeds, because the comment fetch is
+# unconditional.)
+printf 'edited body — the marker was removed by the last rewrite\n' > "$T/body-s"
+legacy_marker "$HEAD" > "$T/comments-s"
+STUB_DIFF_FILE="$DIFF_FILE" STUB_COMMENTS_FILE="$T/comments-s" run_gate "$T/body-s"
+assert_rc 0 "(s) gate passes on a comment-carried marker alone"
+assert_contains "(s) names the channel it used" "marker found in PR comment"
+STUB_DIFF_FILE="$DIFF_FILE" STUB_COMMENTS_FAIL=1 run_gate "$T/body-s"
+assert_rc 1 "(s) a failed comment fetch fails closed"
+assert_contains "(s) says the comment evidence could not be examined" "comment-carried evidence could not be examined"
 
 echo ""
 echo "── Summary ───────────────────────────────────────────────────────"

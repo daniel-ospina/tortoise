@@ -3289,12 +3289,17 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # claude 6→7 is the #3797 hook-run observation: the hooks changed behaviour
 # once more — `session-start.sh` now writes the local hook-run record — so an
 # already-installed copy must read as stale, or the record never reaches it.
+# claude 7→8 is #4041: `session-start.sh` now RENDERS the capture breadcrumb to
+# stdout (which Claude Code injects), so the hooks changed behaviour again and
+# an already-installed copy is stale by construction. The sibling scripts carry
+# the same marker because the layout declares ONE generation
+# (`contract_version` returns None when they disagree).
 # pi 1 is the FIRST generation of the Pi seam's contract (#4680): the seam is a
 # TypeScript extension rather than a shell hook, so it has no `HarnessLayout` —
 # its contract is carried by `hook_install.ARTIFACT_CONTRACTS['pi']`.  Before
 # #4680 the Pi seam carried no marker at all, which is why a two-week-old
 # installed copy read as merely UNVERIFIABLE while capturing the old logic.
-_EXPECTED_INSTALL_CONTRACT = {"claude": 7, "codex": 2, "cursor": 2,
+_EXPECTED_INSTALL_CONTRACT = {"claude": 8, "codex": 2, "cursor": 2,
                              "pi": 1}
 
 
@@ -3309,8 +3314,11 @@ def test_shipped_install_contract_generations(harness):
     more (session-start.sh now writes the local hook-run observation that
     lets an installed-but-unconfigured install report that it RAN), so claude
     moved 6→7 — the bump is what carries it to already-installed hosts, whose
-    hook bytes are frozen at install time.  Those numbers are a reviewed
-    decision, not a
+    hook bytes are frozen at install time.  #4041 changed the claude hooks'
+    BEHAVIOUR once more (session-start.sh now RENDERS the capture breadcrumb to
+    stdout, which Claude Code injects into the session context), so claude
+    moved 7→8 — again the bump is what carries the new behaviour to an
+    already-installed copy.  Those numbers are a reviewed decision, not a
     detail, so they are pinned once and explicitly.
 
     `pi` (#4680) reaches the same table through the ARTIFACT half of the
@@ -3676,3 +3684,355 @@ def test_pi_symlinked_install_root_is_noted_as_uninstallable(home):
     res = install_capture("pi", home=home)
     assert not res.ok, res.actions
     assert "symlink" in (res.error or "").lower(), res.error
+
+
+# ── #5351: the drift/repair surface must cover the Pi artifact seam ────────
+#
+# `hooks status`/`hooks upgrade` resolved through `get_layout` alone, so a Pi
+# seam the verifier reports as stale had NO working repair, and `status` could
+# not even name the harness.  These tests pin the ARTIFACT half of the fix:
+# `detect_artifact_install` stays the ONE detector (never a second opinion
+# about the same bytes) and the repair is the installer that already owns them
+# (`install_capture`), never a second writer.  They are the CLI peers of the
+# codex/cursor `..._hooks_status_reports_the_install_as_current` tests above.
+
+
+def _stale_pi_seam(home: Path) -> Path:
+    """Install Pi's seam, then overwrite it with verifiably OLDER bytes.
+
+    Returns the installed artifact path.  The marker is generation 0 — older
+    than whatever the shipped seam declares — so the drift is real whatever
+    the current generation is (a literal generation here goes stale silently
+    on every deliberate bump, the way #4544 left two assertions behind).
+    """
+    assert install_capture("pi", home=home).ok
+    installed = (capture_install.pi_home(home)
+                 / capture_install.PI_EXTENSION_NAME)
+    installed.write_text("// tortoise-hook-version: 0\n// tortoise session\n",
+                         encoding="utf-8")
+    return installed
+
+
+@pytest.mark.parametrize("shape", ["absent", "renameable", "taken", "file_taken",
+                                   "symlink", "symlink_taken"])
+def test_pi_legacy_obstacle_matches_the_installers_own_refusal(shape, home):
+    """The hint predicate is a MIRROR of the installer's own refusal, so pin
+    the mirror to the thing it mirrors.
+
+    Over every legacy shape, the `hooks status`/`doctor` predicate must say
+    "blocked" exactly when `install_capture` refuses with the legacy collision
+    — a mirror that drifts tells the user to run a command that refuses (the
+    #3713 class this predicate exists for).
+
+    Mutation: drop the `not legacy.is_symlink()` exemption (the symlink shapes
+    then block a repair the installer performs), or widen `is_dir()` to
+    `exists()` (a regular FILE at the legacy name — `file_taken` — is IGNORED
+    by the installer, but `exists()` would call it a collision); either REDs.
+    """
+    ext = home / ".pi" / "agent" / "extensions"
+    ext.mkdir(parents=True)
+    legacy = ext / capture_install.LEGACY_PI_DIRNAME
+    disabled = ext / capture_install.PI_DISABLED_DIRNAME
+    target = home / "checkout"
+    target.mkdir()
+    if shape in ("renameable", "taken"):
+        legacy.mkdir()
+    if shape == "file_taken":
+        # A regular file is neither unlinked (not a symlink) nor renamed (not a
+        # directory): `_install_pi` ignores it and never refuses.
+        legacy.write_text("not a directory\n", encoding="utf-8")
+    if shape in ("symlink", "symlink_taken"):
+        legacy.symlink_to(target, target_is_directory=True)
+    if shape in ("taken", "file_taken", "symlink_taken"):
+        disabled.mkdir()
+
+    obstacle = capture_install.legacy_extension_obstacle("pi", ext)
+    # The installer's REAL verdict, write-free: `--dry-run` runs every guard
+    # (`_preflight_probe`, the legacy disable) and writes nothing.
+    res = install_capture("pi", home=home, dry_run=True)
+    installer_refuses = (not res.ok) and "legacy" in (res.error or "")
+
+    assert bool(obstacle) == installer_refuses, (
+        f"shape={shape}: obstacle={obstacle!r} but the installer said "
+        f"ok={res.ok} error={res.error!r}")
+    if obstacle:
+        assert capture_install.PI_DISABLED_DIRNAME in obstacle, obstacle
+    assert capture_install.legacy_extension_obstacle("claude", ext) == ""
+
+
+def test_artifact_home_is_the_inverse_of_artifact_root(home):
+    """`artifact_home` must invert `artifact_root` EXACTLY.
+
+    It is what maps a `--dir` back to the HOME the installer writes under, so
+    a mismatch installs into a different tree than the directory the user
+    named — the silent no-capture class the seam exists to prevent.
+
+    Mutation: return the root itself (or the wrong ancestor depth) — the
+    `--dir` CLI test and this RED."""
+    root = hook_install.artifact_root("pi", home)
+    assert hook_install.artifact_home("pi", root) == home
+    assert hook_install.artifact_home("pi", home / "elsewhere") is None
+    assert hook_install.artifact_home("claude", root) is None
+
+
+def test_pi_hooks_status_reports_the_install_as_current(cli):
+    """`tortoise hooks status --harness pi` names the harness instead of
+    rejecting it, and reads a fresh install as current — the positive control
+    that the new branch is not simply always-failing.
+
+    Mutation: route `pi` back through `get_layout` (the pre-#5351 wiring) —
+    the CLI exits 1 with `unknown harness 'pi'` and this REDs."""
+    run, _root, home = cli
+    assert install_capture("pi", home=home).ok
+
+    r = run("hooks", "status", "--harness", "pi")
+
+    assert r.returncode == 0, r.stderr
+    assert "unknown harness" not in (r.stdout + r.stderr), r.stderr
+    assert "are current" in r.stdout, r.stdout
+
+
+def test_pi_hooks_status_reports_stale_drift_through_the_shared_detector(cli):
+    """A stale Pi seam is REPORTED, with the SAME finding `session verify`
+    grades it with — one detector, two consumers, never a second opinion.
+
+    Mutation: give `hooks status` its own Pi check (or answer "current" for a
+    present artifact) — the printed kinds stop matching
+    `detect_artifact_install` and this REDs."""
+    run, _root, home = cli
+    _stale_pi_seam(home)
+    root = capture_install.pi_home(home)
+
+    r = run("hooks", "status", "--harness", "pi")
+
+    assert r.returncode == 1, r.stdout
+    assert "stale-artifact" in r.stdout, r.stdout
+    expected = {f.kind for f in hook_install.detect_artifact_install(root, "pi")
+                if f.blocking}
+    assert expected == {"stale-artifact"}, expected
+
+
+def test_pi_hooks_upgrade_repairs_a_stale_seam(cli):
+    """The repair path `hooks status` NAMES must actually repair: the hint is
+    only honest if `hooks upgrade --harness pi` re-copies the shipped
+    artifact, and its dry run is write-free.
+
+    Mutation: make the artifact upgrade a no-op (or point at `tortoise install
+    pi` without running it) — the seam stays stale, `status` still exits 1,
+    and this REDs."""
+    run, _root, home = cli
+    installed = _stale_pi_seam(home)
+
+    before = run("hooks", "status", "--harness", "pi")
+    assert before.returncode == 1, before.stdout
+    assert "hooks upgrade --harness pi" in before.stdout, (
+        "a FAIL must name the repair that works:\n" + before.stdout)
+
+    dry = run("hooks", "upgrade", "--harness", "pi", "--dry-run")
+    assert dry.returncode == 0, dry.stderr
+    assert "would install" in dry.stdout, dry.stdout
+    assert installed.read_bytes() != _PI, "the dry run wrote the artifact"
+
+    r = run("hooks", "upgrade", "--harness", "pi")
+
+    assert r.returncode == 0, r.stderr
+    assert installed.read_bytes() == _PI, "upgrade did not restore the shipped seam"
+    after = run("hooks", "status", "--harness", "pi")
+    assert after.returncode == 0, after.stdout + after.stderr
+
+
+def test_pi_hooks_dir_outside_the_contract_root_is_refused(cli, tmp_path):
+    """`--dir` must never be silently ignored for a HOME-scoped artifact seam:
+    the installer writes under `$HOME`, so a `--dir` naming a DIFFERENT
+    directory would be inspected (and "repaired") nowhere the user pointed.
+
+    Mutation: drop the `artifact_home` guard and hand the installer the
+    process HOME — `--dir <other>` installs into `$HOME` and this REDs."""
+    run, _root, home = cli
+    elsewhere = tmp_path / "not-the-artifact-root"
+    elsewhere.mkdir()
+
+    for sub in ("status", "upgrade"):
+        r = run("hooks", sub, "--harness", "pi", "--dir", str(elsewhere))
+        assert r.returncode == 1, r.stdout
+        assert "is not pi's artifact install root" in r.stderr, r.stderr
+        assert "unknown harness" not in (r.stdout + r.stderr), r.stderr
+
+    assert not (home / ".pi" / "agent" / "extensions"
+                / capture_install.PI_EXTENSION_NAME).exists(), (
+        "a refused --dir still installed into $HOME")
+
+
+def test_pi_hooks_status_never_recommends_an_upgrade_that_refuses(cli):
+    """The hint's invariant, on the surface that now owns the artifact repair:
+    a legacy extension already disabled at the backup name makes the installer
+    REFUSE, and no finding kind expresses that collision (#3713) — so
+    recommending `hooks upgrade` would name a command that cannot run.
+
+    Mutation: drop the `legacy_extension_obstacle` branch in `hooks status` —
+    the refusing command is printed and this REDs.  (`doctor`'s peer guard has
+    the same mutation test in tests/test_doctor.py, and both consult the ONE
+    declaration in `capture_install`.)"""
+    run, _root, home = cli
+    _stale_pi_seam(home)
+    root = capture_install.pi_home(home)
+    (root / capture_install.LEGACY_PI_DIRNAME).mkdir()
+    (root / capture_install.PI_DISABLED_DIRNAME).mkdir()
+
+    r = run("hooks", "status", "--harness", "pi")
+
+    assert r.returncode == 1, r.stdout
+    assert capture_install.PI_DISABLED_DIRNAME in r.stdout, r.stdout
+    assert "move one aside" in r.stdout, r.stdout
+    assert "hooks upgrade" not in r.stdout, (
+        "the hint recommends an upgrade that refuses in this state")
+    assert "tortoise install pi" not in r.stdout, (
+        "the finding's OWN detail names the installer, which refuses in this "
+        "state — the second place a refusing recommendation comes from:\n"
+        + r.stdout)
+
+
+def test_pi_hooks_status_with_a_manual_fix_and_a_collision_names_no_refusing_command(
+        cli, tmp_path):
+    """The obstacle and MANUAL arms are independent: a manual step does not
+    clear the legacy collision, so in their COMBINATION the finding's detail
+    still must not be printed raw (it names `tortoise install pi`, which
+    refuses).
+
+    Mutation: render the detail whenever `not manual` (the first, incomplete
+    fix) — this case prints `tortoise install pi` and REDs.
+    """
+    run, _root, home = cli
+    _stale_pi_seam(home)
+    root = capture_install.pi_home(home)
+    (root / capture_install.LEGACY_PI_DIRNAME).mkdir()
+    (root / capture_install.PI_DISABLED_DIRNAME).mkdir()
+    # A MANUAL kind BESIDE the obstacle: a leaf symlink whose target is
+    # OUTSIDE `$HOME` is refused by the installer, so the manual arm fires on
+    # a target the installer really will not write through.  (`home` is
+    # `tmp_path/home`, so `tmp_path` is outside it.)
+    outside = tmp_path / "outside.ts"
+    outside.write_text("// tortoise-hook-version: 0\n// tortoise session\n",
+                       encoding="utf-8")
+    installed = root / capture_install.PI_EXTENSION_NAME
+    installed.unlink()
+    installed.symlink_to(outside)
+    refused = install_capture("pi", home=home, dry_run=True)
+    assert not refused.ok and "install home" in (refused.error or ""), (
+        "the fixture must be a state the installer REFUSES, or the test's "
+        f"premise is false: {refused.error!r}")
+
+    r = run("hooks", "status", "--harness", "pi")
+
+    assert r.returncode == 1, r.stdout
+    assert "tortoise install pi" not in r.stdout, (
+        "a manual step does not clear the legacy collision, so the installer "
+        "this names still refuses:\n" + r.stdout)
+    assert capture_install.PI_DISABLED_DIRNAME in r.stdout, r.stdout
+
+
+def test_pi_hooks_status_hides_the_installer_when_a_manual_kind_refuses(cli,
+                                                                       tmp_path):
+    """The MANUAL arm ALONE also makes the installer refuse: `is_manual_fix`
+    is the declared CONSERVATIVE proxy for refusal, so the unconditional
+    `reinstall with `tortoise install pi`` in a blocking artifact detail must
+    not be printed even with NO legacy collision.
+
+    Mutation: gate the replacement on `obstacle` alone — the blocking
+    `stale-artifact` detail is printed beside a manual `symlinked-artifact`
+    note, and this REDs.
+    """
+    run, _root, home = cli
+    _stale_pi_seam(home)
+    root = capture_install.pi_home(home)
+    outside = tmp_path / "outside.ts"
+    outside.write_text("// tortoise-hook-version: 0\n// tortoise session\n",
+                       encoding="utf-8")
+    installed = root / capture_install.PI_EXTENSION_NAME
+    installed.unlink()
+    installed.symlink_to(outside)
+    refused = install_capture("pi", home=home, dry_run=True)
+    assert not refused.ok and "install home" in (refused.error or ""), (
+        f"the installer must refuse this state: {refused.error!r}")
+    # No legacy collision anywhere in the fixture.
+    assert capture_install.legacy_extension_obstacle("pi", root) == ""
+
+    r = run("hooks", "status", "--harness", "pi")
+
+    assert r.returncode == 1, r.stdout
+    assert "tortoise install pi" not in r.stdout, (
+        "the blocking detail's unconditional `reinstall with tortoise install "
+        "pi` is refused by the installer for this seam:\n" + r.stdout)
+    # The MANUAL finding keeps its own note — it carries the step that
+    # unblocks the installer — and the manual hint still fires, so the user is
+    # told what blocks the repair.
+    assert "re-point or copy it to upgrade" in r.stdout, r.stdout
+    assert "manual fix" in r.stdout, r.stdout
+    assert "hooks upgrade" not in r.stdout, r.stdout
+
+
+def test_pi_hooks_status_keeps_a_non_blocking_note_beside_the_collision(cli):
+    """`ahead-artifact` is a NOTE (`blocking=False`) that names the installer
+    without prescribing it — "`tortoise install pi` would replace it with N".
+
+    It is not the FAIL's repair, and it is the only place the "newer than this
+    CLI" observation is rendered, so the row must print it whole even when the
+    seam is unrepairable.
+
+    Mutation: match the bare command token instead of
+    `hook_install.ARTIFACT_INSTALLER_CLAUSES` — the token now matches, the
+    pointer appears in its place and this REDs.
+    """
+    run, _root, home = cli
+    installed = _stale_pi_seam(home)
+    # NEWER than whatever this CLI ships: the seam's own generation, ahead of
+    # the contract's, which the detector reports as a non-blocking note.
+    installed.write_text("// tortoise-hook-version: 9999\n// tortoise session\n",
+                         encoding="utf-8")
+    root = capture_install.pi_home(home)
+    (root / capture_install.LEGACY_PI_DIRNAME).mkdir()
+    (root / capture_install.PI_DISABLED_DIRNAME).mkdir()
+
+    r = run("hooks", "status", "--harness", "pi")
+
+    assert "ahead-artifact" in r.stdout, r.stdout
+    assert "newer than this CLI" in r.stdout, (
+        "the note names the installer without prescribing it, so it must be "
+        "printed whole:\n" + r.stdout)
+    assert "for the repair path" not in r.stdout, (
+        "a non-blocking note is never the FAIL's repair:\n" + r.stdout)
+
+
+def test_pi_hooks_status_keeps_a_non_blocking_step_that_clears_the_refusal(cli):
+    """`symlinked-install` is a NON-blocking note whose detail DOES embed an
+    installer clause — "replace it with a real directory, then re-run
+    `tortoise install pi`" — so only the `blocking` conjunct keeps it.
+
+    Its first step is the user's and it is the step that clears the refusal, so
+    replacing it with the `session verify` pointer deletes the instruction (the
+    failure the pointer cannot always recover: `session verify` returns before
+    printing a finding when no API key resolves).  A symlinked install ROOT is
+    itself a manual kind, so this holds with or without the legacy collision.
+
+    Mutation: drop the manual-kind exemption from
+    `_artifact_detail_would_refuse` — this note's clause is then read as a bare
+    prescription, the pointer replaces it and this REDs.
+    """
+    run, _root, home = cli
+    real = home / "checkout-extensions"
+    real.mkdir(parents=True)
+    (home / ".pi" / "agent").mkdir(parents=True, exist_ok=True)
+    root = home / ".pi" / "agent" / "extensions"
+    root.symlink_to(real)
+    (real / capture_install.PI_EXTENSION_NAME).write_text(
+        "// tortoise-hook-version: 0\n// tortoise session\n", encoding="utf-8")
+
+    r = run("hooks", "status", "--harness", "pi")
+
+    assert "symlinked-install" in r.stdout, r.stdout
+    assert "replace it with a real directory" in r.stdout, (
+        "the note's first step is the user's and clears the refusal, so it "
+        "must survive:\n" + r.stdout)
+    assert "❌ stale-artifact: run `tortoise session verify --harness pi` "
+    "for the repair path" in r.stdout, (
+        "the BLOCKING finding's command is still withheld:\n" + r.stdout)

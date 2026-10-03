@@ -5,7 +5,7 @@ Triggers FalkorDB BGSAVE, verifies the RDB file exists, and prints the
 exact restore procedure so we can recover if the REMOVE migration goes wrong.
 
 Usage:
-  TORTOISE_DB_URI=docker://:@localhost:16379/tortoise \\
+  TORTOISE_DB_URI=docker://:@127.0.0.1:16379/tortoise \\
     python3 graph-scripts/pre_migration_snapshot.py
 
   # Dry-run (no side effects):
@@ -17,10 +17,20 @@ Usage:
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"graph-scripts/pre_migration_snapshot.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python graph-scripts/pre_migration_snapshot.py`"
+    )
+
 import argparse
 import os
 import subprocess
-import sys
 import time  # noqa: F401
 from datetime import datetime, timezone
 
@@ -200,7 +210,7 @@ RESTORE_PROCEDURE = """
 ║  OPTION C — Replay from event log (slowest, but most complete):         ║
 ║    1. git checkout the commit BEFORE the REMOVE migration               ║
 ║    2. python3 -c "from tortoise.projection import FalkorProjection;     ║
-║       p = FalkorProjection.from_uri('docker://:@localhost:16379/tortoise');
+║       p = FalkorProjection.from_uri('docker://:@127.0.0.1:16379/tortoise');
 ║       p.replay('events.jsonl')"                                          ║
 ║    3. Verify graph state                                                ║
 ║                                                                          ║
@@ -234,7 +244,7 @@ def main() -> int:
     args = parser.parse_args()
 
     uri = args.uri or os.environ.get(
-        "TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise"
+        "TORTOISE_DB_URI", "docker://:@127.0.0.1:16379/tortoise"
     )
     cfg = _parse_uri(uri)
 

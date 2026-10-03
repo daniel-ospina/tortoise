@@ -44,6 +44,7 @@ import os
 
 import pytest
 
+from tortoise.log import EventLog
 from tortoise.sdk import TortoiseSDK
 
 
@@ -563,3 +564,142 @@ def test_invalidate_raw_producer_no_corrected_by_flag_still_folds(sup):
     )
     assert post[2] == "live", "no status write"
     assert _corr_total(proj, a) == 0, "no CORRECTS without corrected_by (by design)"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# #3305 — the apply() replay arm must fold PointInvalidated too
+#
+# ``rebuild(EventLog)`` is the one-record engine behind ``recover_from_log``
+# (DB-loss recovery) and the backup JSONL restore. It had NO branch for
+# PointInvalidated, so the record fell through to the ``unrecognized event
+# type`` warning and an invalidated Point came back with no outdated flag,
+# no window stamps, no CORRECTS and an un-decayed posterior.
+# ══════════════════════════════════════════════════════════════════════
+
+def _apply_replay(sdk, events_dir) -> None:
+    """The ``apply()`` arm: wipe + replay via ``rebuild(EventLog)`` — the
+    canonical apply()-based engine. ``consistency.recover_from_log`` and
+    ``backup.restore`` are independent replay loops wired to the SAME shared
+    plan (``plan_point_restamp_folds`` + ``apply_journal_point_restamp``);
+    they are exercised by their own suites, not here."""
+    sdk._get_proj().rebuild(EventLog(str(events_dir / "events.jsonl")))
+
+
+def test_apply_replay_folds_invalidate(sup):
+    """#3305: an apply()-based replay of an invalidated Point must end with
+    outdated=true and status still 'live' — both asserted as literals."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "old A", status="live")["id"]
+    corr = sdk.create_point("statement", "corrector B", status="live")["id"]
+    sdk.invalidate_point(a, corr)
+    pre = _point_state(sdk, a)
+    assert pre["outdated"] is True and pre["status"] == "live"
+    _apply_replay(sdk, events)
+    post = _point_state(sdk, a)
+    assert post["outdated"] is True, (
+        f"apply() replay dropped the outdated flag (the #2488 ghost): {post}")
+    assert post["status"] == "live", (
+        "invalidate must NOT change status — even on the apply() arm")
+    assert post["validTo"] and post["expiredAt"]
+    assert post == pre, (
+        f"apply() replay drifted from live: {pre} != {post}")
+    assert _corr(sdk._get_proj(), a, corr) == 1, (
+        "CORRECTS edge dropped by the apply() arm")
+
+
+def test_apply_replay_folds_the_invalidate_belief_decay(sup):
+    """#3305: the invalidate record carries the belief decay too — the
+    apply() arm must reproduce it (or the restored claim keeps its
+    pre-invalidate posterior and re-enters EP voting)."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "old A", status="live")["id"]
+    corr = sdk.create_point("statement", "corrector B", status="live")["id"]
+    sdk.invalidate_point(a, corr)
+    _apply_replay(sdk, events)
+    decayed = sdk.get_point(a)
+    assert decayed["confidence"] == 0.5, (
+        f"belief decay not folded by the apply() arm: {decayed.get('confidence')}")
+    assert decayed["posterior_alpha"] == 1.0
+    assert decayed["posterior_beta"] == 1.0
+
+
+def test_apply_replay_matches_rebuild_all_on_invalidate(sup):
+    """#3305: the two replay engines must converge on the same Point state —
+    the shared ``_fold_point_restamp`` dispatch is what keeps them from
+    drifting."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "old A", status="live")["id"]
+    corr = sdk.create_point("statement", "corrector B", status="live")["id"]
+    sdk.invalidate_point(a, corr)
+    live = _point_state(sdk, a)
+    assert live["outdated"] is True and live["status"] == "live"
+
+    _rebuild(sdk, events)
+    via_all = _point_state(sdk, a)
+    _apply_replay(sdk, events)
+    via_apply = _point_state(sdk, a)
+
+    assert via_all == live, f"rebuild_all drifted from live: {via_all}"
+    assert via_apply == via_all, (
+        f"apply() replay != rebuild_all: {via_apply} != {via_all}")
+
+
+def test_apply_replay_keeps_a_clean_point_clean(sup):
+    """#3305 no-over-correction: a Point with no invalidate in the journal
+    stays clean across the apply() arm."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "never touched", status="live")["id"]
+    _apply_replay(sdk, events)
+    post = _point_state(sdk, a)
+    assert post["outdated"] is None
+    assert post["status"] == "live"
+    assert post["validTo"] is None
+
+
+def test_apply_replay_shares_rebuild_all_selection_on_same_id_reemission(sup):
+    """#3305 (review P1): the apply() arm must obey the SAME SELECTION as
+    rebuild_all. A bare same-id ``PointAdded`` re-emit ADVANCES the recreate
+    boundary, so the pre-recreation invalidate fold must be DROPPED — while the
+    belief decay, which is anchored on the real delete→recreate boundary, must
+    STILL fire (#2884 A3). An inline fold that ignores this re-introduces the
+    outdated flag + ghost CORRECTS on the recovery path."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "A v1", status="live")["id"]
+    b = sdk.create_point("statement", "B (corrector)", status="live")["id"]
+    sdk.invalidate_point(a, b)
+    _raw_append(events, sdk, "PointAdded", point={
+        "id": a, "content": "A v2 (recreated)", "status": "live",
+        "pointKind": "statement"})
+
+    _rebuild(sdk, events)
+    via_all = {k: _point_state(sdk, a)[k] for k in ("status", "outdated")}
+    corr_all = _corr_total(sdk._get_proj(), a)
+    belief_all = {k: (sdk.get_point(a) or {}).get(k) for k in
+                  ("confidence", "posterior_alpha", "posterior_beta")}
+    _apply_replay(sdk, events)
+    via_apply = {k: _point_state(sdk, a)[k] for k in ("status", "outdated")}
+    corr_apply = _corr_total(sdk._get_proj(), a)
+    belief_apply = {k: (sdk.get_point(a) or {}).get(k) for k in
+                    ("confidence", "posterior_alpha", "posterior_beta")}
+
+    assert via_all["outdated"] is not True, (
+        "rebuild_all follows the re-emission — the pre-recreation fold drops")
+    # updatedAt is the re-emission's replay-time stamp — each replay runs at a
+    # different wall clock, so the comparison is on the fold's SEMANTIC fields,
+    # not on wall clock.
+    assert via_apply == via_all, (
+        f"apply() replay != rebuild_all on same-id re-emission: "
+        f"{via_apply} != {via_all}")
+    assert corr_apply == corr_all == 0, (
+        "pre-recreation CORRECTS died with the node")
+    # The OTHER half of the selection: the invalidate's BELIEF decay is anchored
+    # on the REAL delete→recreate boundary, so it must STILL fire even though
+    # the stamp half is dropped (#2884 A3) — asserted against literals, on BOTH
+    # engines, because a decay silently dropped on one is exactly the class of
+    # drift this contract exists to catch.
+    vacuous = {"confidence": 0.5, "posterior_alpha": 1.0,
+               "posterior_beta": 1.0}
+    assert belief_all == vacuous, (
+        f"rebuild_all dropped the #2884 A3 belief decay: {belief_all}")
+    assert belief_apply == vacuous, (
+        f"apply() replay dropped the #2884 A3 belief decay: {belief_apply}")

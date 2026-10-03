@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 
+from tests import _live_utils
 from tools.longmem_eval import run as runner
 
 MINI = Path(__file__).resolve().parent / "fixtures" / "longmemeval_mini.json"
@@ -117,7 +118,7 @@ def test_outcome_projection_carries_arm_and_stats():
 def _falkordb_available() -> bool:
     uri = os.environ.get(
         "TORTOISE_DB_URI",
-        "docker://:falkordb@localhost:6379/tortoise_test_matrix").rstrip("/")
+        _live_utils.docker_uri("tortoise_test_matrix")).rstrip("/")
     old = os.environ.get("TORTOISE_DB_URI")
     try:
         os.environ["TORTOISE_DB_URI"] = f"{uri}_probe2520run"

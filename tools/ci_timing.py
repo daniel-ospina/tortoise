@@ -29,13 +29,23 @@ failure, not the exit-1 manifest-gate meaning below. Deterministic output
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/ci_timing.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/ci_timing.py`"
+    )
+
 import argparse
 import glob
 import json
 import os
 import re
 import subprocess
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -424,13 +434,41 @@ def validate_refreshed_manifest(manifest_text: str) -> list[str]:
 def integrity_problems(manifest_text: str) -> list[str]:
     """The FULL problem list `ci_selection.py --integrity` composes.
 
-    Composed by CALLING the same `ci_selection` functions, in the same order,
-    as the `--integrity` entry point — never a re-derived subset, so the two
-    cannot disagree about what a valid manifest is. The duration subset alone
-    is not enough: it is blind to `workflow_halves_issues`, so a refresh that
-    skews a weight hard enough to tilt the push halves (the #3395
-    starved-shard shape) would be accepted here and only surface later, with
-    no diagnosis, as a red `python-ci-gate` with zero test failures.
+    Composed by CALLING the same functions as the `--integrity` entry point —
+    never a re-derived subset, so the two cannot disagree about what a valid
+    manifest is. As of #5050 the durations-map half IS the entry point's own
+    contract: `ci_manifest.check` owns the map's checks (dead keys, malformed
+    values, coverage, the leg partition, any weight the writer could not have
+    rendered — sub-floor, finer precision, or negative — a non-empty map whose
+    every weight is the `0.0` sentinel, and a stale capture date) and both
+    callers compose it, so the invariant is structural rather
+    than a convention each caller has to re-implement. `check` reaches those
+    checks through `ci_manifest.map_issues`, which ALSO carries main's two
+    newer manifest checks (`fast_shard_issues` for the top-level `fast_shards`
+    declaration and `duplicate_entries` for the same-surface `merge=union`
+    gate) — so when main added them beside this change they were folded into
+    the same one place instead of being re-added at this call site. The one
+    UNKNOWN class the
+    enforcing gate promotes to RED — a capture stamp that is PRESENT but
+    unparseable — is likewise one shared decision,
+    `ci_manifest.unparseable_stamp_issue`, composed by BOTH callers (see the
+    note in the body for why a refreshed manifest can carry one at all). The
+    rest of the list is
+    composed here because `ci_manifest` does not own it — most importantly
+    `workflow_halves_issues`: a refresh that skews a weight hard enough to tilt
+    the push halves (the #3395 starved-shard shape) would otherwise be accepted
+    here and surface later, with no diagnosis, as a red `python-ci-gate` with
+    zero test failures.
+
+    ⛔ The list is HAND-MAINTAINED, so it can drift out of that parity
+    silently, and the drift is directional: this is the PRE-WRITE gate of
+    `refresh_durations`, the sole writer of `config/ci-surfaces.yml:durations`,
+    so a term omitted here lets the weekly refresh open a PR carrying a
+    manifest the REQUIRED `manifest-integrity` check immediately reds. #6145
+    caught exactly that for `watchdog_headroom_issues` and
+    `duplicate_entries`. `tests/test_ci_timing.py` pins the headroom term by
+    name and the CLI's rc on the clean and skewed manifests; the rest of the
+    composition is a review duty at the two call sites.
 
     Repo-scoped: `cs.integrity` walks this repo's `tests/` and the matrix
     checks read `python-ci.yml`, so this is defined only over this repo's own
@@ -438,17 +476,36 @@ def integrity_problems(manifest_text: str) -> list[str]:
     """
     import ci_selection as cs
 
+    # The validator is reached through the selector's own accessor, never a bare
+    # `import ci_manifest`: when this module runs as `__main__` a bare import
+    # loaded a SECOND copy of the same file, so the "composed, not duplicated"
+    # invariant was only true on one of the two call paths.
+    ci_manifest = cs._ci_manifest_module()
+
     manifest = _manifest_of(manifest_text)
+    # `red` PLUS the ONE UNKNOWN class the enforcing gate promotes. Parity with
+    # `--integrity` is on the SERVED verdict, and `--integrity` promotes a
+    # PRESENT-but-unparseable stamp to RED; gating on `check`'s `red` alone
+    # would accept exactly that stamp here while the gate rejects it. This is a
+    # REAL gap, not a hypothetical one: `render_refreshed_manifest` writes the
+    # caller's `captured_at` verbatim via `_set_captured_at` (it OVERWRITES any
+    # stamp the input carried, so nothing validates it), the `CI_TIMING_NOW`
+    # override sets it to anything, and this file's own tests render with `"T"`.
+    # Both entry points call the same `ci_manifest.unparseable_stamp_issue`, so
+    # the parity is structural rather than a claim each side re-implements.
+    red, _unknown = ci_manifest.check(manifest)
+    stamp_issue = ci_manifest.unparseable_stamp_issue(manifest)
+    if stamp_issue is not None:
+        red = [*red, stamp_issue]
     problems = (cs.integrity(manifest)
                 + cs.slow_file_issues(manifest)
-                + cs.duration_issues(manifest)
-                + cs.leg_coverage_issues(manifest)
-                + cs.duration_coverage_issues(manifest))
+                + red
+                + cs.watchdog_headroom_issues(manifest))
     wf_issues = cs.workflow_matrix_issues(cs.WORKFLOW, manifest)
     problems += wf_issues
     if not wf_issues:
         legs = cs.push_legs(manifest)
-        halves = {"a": set(legs["half_a"]), "b": set(legs["half_b"])}
+        halves = {s["name"]: set(s["files"]) for s in legs["shards"]}
         problems += cs.workflow_halves_issues(manifest, halves)
     else:
         problems += cs.workflow_halves_issues(

@@ -9,6 +9,7 @@ import uuid
 
 import pytest
 
+from tests import _live_utils
 from tests._embedded import (
     _journal_append,
     _sweep_drop,
@@ -18,14 +19,16 @@ from tests._embedded import (
 )
 
 
-def _docker_reachable(host: str = "localhost", port: int = 6379) -> bool:
+def _docker_reachable(host: str | None = None,
+                      port: int | None = None) -> bool:
     """Live-FalkorDB probe (#1436 skip convention — post-merge-validation
     runs without a docker service; docker-required tests SKIP, never error)."""
+    port = port or _live_utils.docker_port()
     import socket
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(1.0)
     try:
-        s.connect((host, port))
+        s.connect((host or _live_utils.service_host(), port))
         return True
     except OSError:
         return False
@@ -36,8 +39,8 @@ def _docker_reachable(host: str = "localhost", port: int = 6379) -> bool:
 @pytest.fixture
 def uri_env(monkeypatch):
     if not _docker_reachable():
-        pytest.skip("live FalkorDB (localhost:6379) not reachable")
-    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
+        pytest.skip(f"live FalkorDB (localhost:{_live_utils.docker_port()}) not reachable")
+    monkeypatch.setenv("TORTOISE_DB_URI", _live_utils.docker_base_uri())
     yield
 
 
@@ -45,7 +48,7 @@ def uri_env(monkeypatch):
 def server_proj(uri_env):
     from tortoise.projection import FalkorProjection
     proj = FalkorProjection.from_uri(
-        "docker://:falkordb@localhost:6379", graph_name="test_ws_wipe_target")
+        _live_utils.docker_base_uri(), graph_name="test_ws_wipe_target")
     proj.g.query("CREATE (:Point {id:'x'})")
     yield proj
     proj.close()
@@ -366,7 +369,7 @@ def test_wipe_server_localhost_acceptance(uri_env):
     # projection was refused.
     from tortoise.projection import FalkorProjection
     proj = FalkorProjection.from_uri(
-        "docker://:falkordb@localhost:6379", graph_name="test_ws_local_accept")
+        _live_utils.docker_base_uri(), graph_name="test_ws_local_accept")
     try:
         assert proj._host == "localhost"  # recorded on the projection (P0-1)
         proj.g.query("CREATE (:Point {id:'x'})")
@@ -500,7 +503,7 @@ def test_bare_test_graph_wipe_still_raises_on_server(uri_env):
     survive the migration — bulk DETACH on the bare `test` graph raises."""
     from tortoise.projection import FalkorProjection
     proj = FalkorProjection.from_uri(
-        "docker://:falkordb@localhost:6379", graph_name="test")
+        _live_utils.docker_base_uri(), graph_name="test")
     try:
         with pytest.raises(RuntimeError, match="test graph"):
             proj.g.query("MATCH (n) DETACH DELETE n")
@@ -590,7 +593,7 @@ def test_per_test_wipe_or_touches_only_session_set(server_proj, monkeypatch, tmp
     # must SURVIVE a per-test wipe — wipe_server's per-test scope filter
     # skips it, so the shared default is never DETACHed mid-session.
     monkeypatch.setenv("TORTOISE_DB_URI",
-                       "docker://:falkordb@localhost:6379/tortoise_test_matrix")
+                       _live_utils.docker_uri("tortoise_test_matrix"))
     default = _uri_default_graph_name()
     assert default == "tortoise_test_matrix"
     default_g = server_proj.db.select_graph(default)
@@ -660,10 +663,10 @@ def test_sequential_same_path_redirect_mints_are_wiped(monkeypatch, tmp_path):
     journals it (FILE journal only — the tests-side in-memory _JOURNAL never
     sees it). The delta comes from the FILE journal + the persisted cursor."""
     if not _docker_reachable():
-        pytest.skip("live FalkorDB (localhost:6379) not reachable")
+        pytest.skip(f"live FalkorDB (localhost:{_live_utils.docker_port()}) not reachable")
     from tests._embedded import _wipe_or
     from tortoise.projection import FalkorProjection
-    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
+    monkeypatch.setenv("TORTOISE_DB_URI", _live_utils.docker_base_uri())
     monkeypatch.setenv("TORTOISE_TEST_MODE", "1")
     monkeypatch.setenv("TORTOISE_TEST_SESSION", "0123456789ab")
     monkeypatch.setenv("TORTOISE_TEST_JOURNAL_FILE",
@@ -813,13 +816,13 @@ def test_from_uri_append_gated_on_test_frame(monkeypatch, tmp_path):
     env = {**os.environ,
            "TORTOISE_TEST_JOURNAL_FILE": str(journal),
            "TORTOISE_TEST_MODE": "1",
-           "TORTOISE_DB_URI": "docker://:falkordb@localhost:6379"}
+           "TORTOISE_DB_URI": _live_utils.docker_base_uri()}
     if not _docker_reachable():
-        pytest.skip("live FalkorDB (localhost:6379) not reachable")
+        pytest.skip(f"live FalkorDB (localhost:{_live_utils.docker_port()}) not reachable")
     out = subprocess.run(
         [sys.executable, "-c",
          "from tortoise.projection import FalkorProjection; "
-         "FalkorProjection.from_uri('docker://:falkordb@localhost:6379', "
+         f"FalkorProjection.from_uri('{_live_utils.docker_base_uri()}', "
          "graph_name='test_ws_child')"],
         capture_output=True, text=True, env=env)
     assert out.returncode == 0, out.stderr
@@ -830,7 +833,7 @@ def test_from_uri_append_gated_on_test_frame(monkeypatch, tmp_path):
     monkeypatch.setenv("TORTOISE_TEST_JOURNAL_FILE", str(journal))
     monkeypatch.setattr(FalkorProjection, "__init__",
                         lambda self, *a, **k: None)
-    FalkorProjection.from_uri("docker://:falkordb@localhost:6379",
+    FalkorProjection.from_uri(_live_utils.docker_base_uri(),
                               graph_name="test_ws_inproc")
     assert journal.read_text() == "test_ws_inproc\n"
 
@@ -852,7 +855,7 @@ def test_session_end_sweep_drops_file_journal_set(uri_env, monkeypatch, tmp_path
     _journal_append_product(redirect_name)  # product-side, FILE only
     _journal_append("test_ws_tests_side")   # tests-side (in-memory + file)
     proj = FalkorProjection.from_uri(
-        "docker://:falkordb@localhost:6379", graph_name="test_ws_probe")
+        _live_utils.docker_base_uri(), graph_name="test_ws_probe")
     try:
         for g in (redirect_name, "test_ws_tests_side", "test_ws_probe"):
             proj.db.select_graph(g).query("CREATE (:Point {id:'x'})")
@@ -1031,7 +1034,7 @@ def test_sweep_skips_uri_default_graph(monkeypatch, tmp_path):
     failures), the default graph's nodes survive."""
     from tests._embedded import _sweep_drop, _uri_default_graph_name
     monkeypatch.setenv("TORTOISE_DB_URI",
-                       "docker://:falkordb@localhost:6379/tortoise_test_matrix")
+                       _live_utils.docker_uri("tortoise_test_matrix"))
     default = _uri_default_graph_name()
     assert default == "tortoise_test_matrix"
     journal = tmp_path / "session.graphs.jsonl"
@@ -1094,7 +1097,7 @@ def test_stale_sweep_recycled_pid_marker_journal_dead(monkeypatch, tmp_path):
     monkeypatch.setattr("tests._embedded._proj_for_uri",
                         lambda uri: _FakeProj(db))
     assert er.active_suite_markers() == []  # the recycled marker is NOT live
-    _stale_sweep("docker://:x@localhost:6379")
+    _stale_sweep(_live_utils.docker_base_uri(password="x"))
     assert "test_ws_recycled_graph" in db.deleted
     assert not j.exists()
 
@@ -1124,12 +1127,12 @@ def test_concurrent_suite_end_sweep_leaves_other_suite_graphs(monkeypatch, tmp_p
     monkeypatch.setattr(er, "active_suite_markers",
                         lambda: [{"token": "54321-nonce_b",
                                   "pid": 54321, "start": None}])
-    _stale_sweep("docker://:x@localhost:6379")
+    _stale_sweep(_live_utils.docker_base_uri(password="x"))
     assert "test_ws_b_graph" not in db.deleted
     assert j_b.exists()
     # B's marker removed (B crashed) → B's journal DEAD → stale sweep drops it
     monkeypatch.setattr(er, "active_suite_markers", lambda: [])
-    _stale_sweep("docker://:x@localhost:6379")
+    _stale_sweep(_live_utils.docker_base_uri(password="x"))
     assert "test_ws_b_graph" in db.deleted
     assert not j_b.exists()
 
@@ -1190,7 +1193,7 @@ def test_session_end_sweep_drops_journaled_team_graph(uri_env, monkeypatch, tmp_
     org_name = "team_ws_journal_drop"
     _journal_append_product(org_name)  # the #1686 mint-site seam
     proj = FalkorProjection.from_uri(
-        "docker://:falkordb@localhost:6379", graph_name="test_ws_team_probe")
+        _live_utils.docker_base_uri(), graph_name="test_ws_team_probe")
     try:
         proj.db.select_graph(org_name).query("CREATE (:TeamMeta {name:'x'})")
         res = _session_end_own_sweep(os.environ["TORTOISE_DB_URI"], str(journal))
@@ -1222,7 +1225,7 @@ def test_leftover_team_strays_dropped_when_opted_in(uri_env, monkeypatch):
     stray = "org_ws_stray_8f3a"
     legacy_stray = "team_ws_stray_8f3a"
     proj = FalkorProjection.from_uri(
-        "docker://:falkordb@localhost:6379", graph_name="test_ws_leftover_probe")
+        _live_utils.docker_base_uri(), graph_name="test_ws_leftover_probe")
     try:
         for name in (stray, legacy_stray):
             proj.db.select_graph(name).query("CREATE (:TeamMeta {name:'stray'})")
@@ -1250,11 +1253,11 @@ def test_leftover_team_strays_refused_on_shared_docker(uri_env, monkeypatch):
     stray = "org_ws_stray_keep"
     legacy_stray = "team_ws_stray_keep"
     proj = FalkorProjection.from_uri(
-        "docker://:falkordb@localhost:6379", graph_name="test_ws_leftover_probe")
+        _live_utils.docker_base_uri(), graph_name="test_ws_leftover_probe")
     try:
         for name in (stray, legacy_stray):
             proj.db.select_graph(name).query("CREATE (:TeamMeta {name:'keep'})")
-        dropped = _sweep_team_strays(proj, "docker://:falkordb@localhost:6379")
+        dropped = _sweep_team_strays(proj, _live_utils.docker_base_uri())
         assert dropped == [], f"shared-docker sweep must refuse, got {dropped!r}"
         remaining = proj.db.list_graphs() or []
         assert stray in remaining, "product-named graph must survive"
@@ -1281,7 +1284,7 @@ def test_leftover_team_strays_refused_on_test_matrix_uri(uri_env, monkeypatch):
     from tests._embedded import _sweep_team_strays, _team_sweep_allowed
     from tortoise.projection import FalkorProjection
 
-    eval_uri = "docker://:falkordb@localhost:6379/tortoise_test_matrix"
+    eval_uri = _live_utils.docker_uri("tortoise_test_matrix")
     assert "test" in eval_uri.split("/")[-1], \
         "fixture URI must carry the test-named path (the eval's shared container)"
     monkeypatch.delenv("TORTOISE_TEST_SWEEP_TEAM_STRAYS", raising=False)
@@ -1290,7 +1293,7 @@ def test_leftover_team_strays_refused_on_test_matrix_uri(uri_env, monkeypatch):
         "URI-path 'test' inference must be retracted (#1884)"
     stray = f"org_ws_eval_stray_{uuid.uuid4().hex[:8]}"
     proj = FalkorProjection.from_uri(
-        "docker://:falkordb@localhost:6379", graph_name="test_ws_evalsweep_probe")
+        _live_utils.docker_base_uri(), graph_name="test_ws_evalsweep_probe")
     try:
         proj.db.select_graph(stray).query("CREATE (:TeamMeta {name:'eval'})")
         dropped = _sweep_team_strays(proj, eval_uri)
@@ -1449,14 +1452,14 @@ def test_legacy_sweep_reclaims_on_live_server(uri_env, monkeypatch):
 
     monkeypatch.setenv(
         "TORTOISE_DB_URI",
-        "docker://:falkordb@localhost:6379/tortoise_test_matrix")
+        _live_utils.docker_uri("tortoise_test_matrix"))
     monkeypatch.setenv("TORTOISE_TEST_SWEEP_LEGACY", "1")
     residue = f"registry_test_{uuid.uuid4().hex}_control_plane"
     shared = f"registry_ws_{uuid.uuid4().hex}_control_plane"
     assert is_legacy_residue(residue, default_graph="tortoise_test_matrix")
     assert not is_legacy_residue(shared, default_graph="tortoise_test_matrix")
     proj = FalkorProjection.from_uri(
-        "docker://:falkordb@localhost:6379", graph_name="test_ws_legacy_probe")
+        _live_utils.docker_base_uri(), graph_name="test_ws_legacy_probe")
     try:
         for name in (residue, shared):
             proj.db.select_graph(name).query("CREATE (:Registry {id:'probe'})")

@@ -4,6 +4,22 @@
 app = "tortoise-y4mjjq"
 primary_region = "iad"
 
+# ── #3087 item 1: bound the SIGTERM→SIGKILL window explicitly ──
+# Absent, this ran on Fly's default (5s). Disposal of the capture pool happens
+# at THREADING SHUTDOWN via `tortoise/hosted_api._dispose_capture_executor`
+# (a module-level `threading._register_atexit` hook — deliberately NOT in
+# `_lifespan`, which may legally run more than once per process).
+#
+# ⛔ What this window does NOT do: make teardown graph-write-safe. Only QUEUED
+# work is cancellable; a worker already RUNNING an extraction is not
+# interruptible, and the thread-shutdown join still waits for it. With a
+# token-scaled extraction deadline (~800s) far above this value, a running
+# worker is still SIGKILLed mid-write. This window removes the queued-work term
+# and bounds the shutdown; the running-worker term is bounded by that worker's
+# own deadline, which must be kept below this value for the write to be safe.
+kill_signal = "SIGTERM"
+kill_timeout = 30
+
 [build]
   dockerfile = "Dockerfile.hosted"
 
@@ -186,6 +202,23 @@ primary_region = "iad"
   # dir on the persistent volume (entrypoint.sh defaults to this too).
   # Fail-closed: /v1/index/docs refuses to run without it.
   TORTOISE_INGEST_BASE_DIR = "/data/ingest"
+  # #4240: the hosted lane's per-graph JSONL rebuild journal (server-owned, on
+  # the same persistent volume). With it set, every hosted data SDK carries an
+  # `event_log_path`, so the capture's `(Session|Point)-[:aboutObject]->(Object)`
+  # edges (and the rest of the write surface) are journal-backed and
+  # `tortoise rebuild --dir` reconstructs them; unset, the lane journals
+  # nothing (pre-#4240) and a rebuild silently loses the live-only edges.
+  # Record writes are fail-soft (the graph mutation stands), so entrypoint.sh
+  # probes this dir for WRITABILITY at boot — a dir that exists but cannot be
+  # written fails the boot loudly for a NON-ROOT uid (mode bits), and for
+  # EROFS/ENOSPC on ANY uid. Caveat (F1 cycle 2): the image sets no USER, so on
+  # Fly the server is root and a mode-0500 dir PASSES that probe; that case is
+  # covered by the runtime signal instead (ERROR log + journal_write_failures
+  # counter + capture-receipt warning). A journal that starts failing AFTER the
+  # probe (foreseeable trigger: ENOSPC once the journal grows) is counted/logged
+  # and disclosed on the capture receipt, never fatal (#5612).
+  # NOT a durability claim — see docs/durability-posture.md.
+  TORTOISE_EVENT_LOG_BASE_DIR = "/data/events"
   # Hosted backups (#305) — set via fly secrets (deploy workflow syncs from GitHub)
   TORTOISE_BACKUP_KEY = ""
   R2_ACCOUNT_ID = ""

@@ -57,6 +57,122 @@ def _assert_uuid_fidelity(table: str, filters: list[tuple[str, str, object]] | N
             ) from None
 
 
+# #4243: columns whose SQL type is ``timestamptz``. Postgres's timestamptz input
+# function REJECTS a bare JSON number — the number reaches it as text and is not
+# a valid timestamp literal — so PostgREST 400s. Verified against Postgres 18
+# (PGlite 0.5.4, every migration applied):
+# ``json_populate_record(NULL::organizations,
+# '{"current_period_end":1756348800}')`` → `date/time field value out of
+# range: "1756348800"`, and with ``'{"current_period_end":2024}'`` → `invalid
+# input syntax for type timestamp with time zone: "2024"`, and a JSON
+# boolean likewise; JSON null and an ISO-8601 string are accepted. The fake
+# stored ANY JSON value verbatim, so it accepted an epoch int — exactly how
+# #4216 (Stripe delivers the period bounds as Unix epoch ints, PATCHed into
+# ``timestamptz`` columns) passed CI and 400'd in production. Default-on
+# fidelity makes the fake raise the SAME RuntimeError surface the real query()
+# raises, so "a write of a shape the real PostgREST rejects" fails in CI.
+# Extendable registry (mirrors UUID_FILTER_COLUMNS).
+#
+# DERIVED, not hand-copied, from ``supabase/migrations/*.sql``: every column
+# declared ``timestamptz`` in a CREATE TABLE body or an
+# ``ALTER TABLE ... ADD COLUMN``, with the 20260915000001 renames applied
+# transitively (``teams`` → ``organizations``, ``user_teams`` →
+# ``team_memberships`` → ``org_memberships``). Regenerate rather than guess
+# when a migration adds a column; ``tests/test_fake_control_plane.py`` pins the
+# set against the migrations so a forgotten column fails the suite.
+TIMESTAMPTZ_COLUMNS: set[tuple[str, str]] = {
+    ("abuse_events", "created_at"),
+    ("agent_signup_tokens", "created_at"),
+    ("agent_signup_tokens", "last_used_at"),
+    ("agent_signup_tokens", "revoked_at"),
+    ("analytics_events", "created_at"),
+    ("api_keys", "created_at"),
+    ("api_keys", "expires_at"),
+    ("api_keys", "last_used_at"),
+    ("api_keys", "revoked_at"),
+    ("audit_events", "created_at"),
+    ("blog_admins", "created_at"),
+    ("blog_agent_keys", "created_at"),
+    ("blog_posts", "created_at"),
+    ("blog_posts", "published_at"),
+    ("blog_posts", "reviewed_at"),
+    ("blog_posts", "updated_at"),
+    ("graphs", "created_at"),
+    ("graphs", "deleted_at"),
+    ("graphs", "purged_at"),
+    ("invitations", "accepted_at"),
+    ("invitations", "created_at"),
+    ("invitations", "email_sent_at"),
+    ("invitations", "expires_at"),
+    ("invitations", "otp_expires_at"),
+    ("invitations", "otp_sent_at"),
+    ("invitations", "otp_verified_at"),
+    ("link_intents", "consumed_at"),
+    ("link_intents", "created_at"),
+    ("link_intents", "expires_at"),
+    ("metering_records", "graph_storage_measured_at"),
+    ("metering_records", "period_end"),
+    ("metering_records", "period_start"),
+    ("metering_records", "updated_at"),
+    ("metering_unmetered_increments", "first_observed_at"),
+    ("metering_unmetered_increments", "last_observed_at"),
+    ("oauth_access_tokens", "created_at"),
+    ("oauth_access_tokens", "expires_at"),
+    ("oauth_access_tokens", "revoked_at"),
+    ("oauth_clients", "created_at"),
+    ("oauth_clients", "revoked_at"),
+    ("oauth_codes", "created_at"),
+    ("oauth_codes", "expires_at"),
+    ("oauth_codes", "redemption_settled_at"),
+    ("oauth_codes", "used_at"),
+    ("oauth_refresh_tokens", "created_at"),
+    ("oauth_refresh_tokens", "expires_at"),
+    ("oauth_refresh_tokens", "revoked_at"),
+    ("org_memberships", "created_at"),
+    ("org_memberships", "updated_at"),
+    ("organizations", "backup_latest_at"),
+    ("organizations", "backup_restored_at"),
+    ("organizations", "created_at"),
+    ("organizations", "current_period_end"),
+    ("organizations", "current_period_start"),
+    ("organizations", "deleted_at"),
+    ("organizations", "flagged_at"),
+    ("organizations", "grace_until"),
+    ("organizations", "onboarding_email_sent_at"),
+    ("organizations", "suspended_at"),
+    ("user_unlink_permits", "consumed_at"),
+    ("user_unlink_permits", "created_at"),
+    ("waitlist_subscribers", "consented_at"),
+    ("waitlist_subscribers", "created_at"),
+    ("webhook_events", "first_seen"),
+}
+
+
+def _assert_timestamptz_fidelity(table: str, json_body: dict | None) -> None:
+    """Raise RuntimeError("... HTTP 400") when a POST/PATCH body carries a
+    NUMBER on a registered ``timestamptz`` column — mirroring the Postgres
+    ``timestamptz`` input function's rejection (``date/time field value out of
+    range`` / ``invalid input syntax``) that PostgREST surfaces as HTTP 400.
+
+    REJECT, not coerce: #4216 normalised the epoch at the single writer seam
+    (``update_org_billing``) precisely because the control plane cannot bind a
+    epoch; a fake that coerced would be MORE permissive than production and
+    would keep hiding the next writer. ``None`` and every string pass — the fake
+    has no timestamp parser, so only the number shape (``bool`` included, a
+    Python ``int`` subclass, also rejected by Postgres) is provably rejected."""
+    if not json_body:
+        return
+    for col, value in json_body.items():
+        if (table, col) not in TIMESTAMPTZ_COLUMNS:
+            continue
+        if value is None:
+            continue
+        if isinstance(value, (int, float)):
+            raise RuntimeError(
+                f"Supabase control-plane query failed ({table}): HTTP 400"
+            ) from None
+
+
 # #4037: PostgREST's `order` grammar is a comma-separated list of
 # `field[.asc|.desc][.nullsfirst|.nullslast]`. The fake used to speak a private
 # `-col` dialect (`col = order.lstrip("-")`), which ACCEPTED the form PostgREST
@@ -186,7 +302,8 @@ def _as_dt(value):
 class FakeControlPlane:
     def __init__(self, tables: dict[str, list[dict]] | None = None,
                  *, missing_columns: dict[str, set[str]] | None = None,
-                 uuid_fidelity: bool = True):
+                 uuid_fidelity: bool = True,
+                 timestamptz_fidelity: bool = True):
         # rows are stored as dicts keyed by column name
         self.tables: dict[str, list[dict]] = tables or {}
         self.query_count = 0
@@ -196,11 +313,27 @@ class FakeControlPlane:
         # absent column). Default None → behavior identical to before.
         self.missing_columns: dict[str, set[str]] | None = missing_columns
         self.uuid_fidelity = uuid_fidelity
-        # #1709: serializes recover_team_key emulation (the real RPC SELECTs
-        # the token row FOR UPDATE — the fake must be atomic under the
-        # concurrency E2E).
+        # #4243: timestamptz write fidelity — a JSON number on a registered
+        # timestamptz column 400s (see TIMESTAMPTZ_COLUMNS). Opt out for the
+        # registry-lane doubles, which store the raw epoch int the Stripe
+        # webhook wrote (``metering._anchor_instant`` reads both shapes).
+        # Independent of uuid_fidelity — each guard covers its own type.
+        self.timestamptz_fidelity = timestamptz_fidelity
+        # #1709/#1879: per-ORG mint lock — models the SQL `FOR NO KEY UPDATE`
+        # on the `organizations` row that `recover_team_key`,
+        # `session_key_mint` and `provision_api_key` all take. It is acquired
+        # and released WITHIN one `rpc()` call, exactly like a real
+        # transaction's row lock — so a production lane that split its
+        # critical section across TWO rpc() calls would NOT be serialized here
+        # and the concurrency tests would say so.
         import threading
-        self._recover_lock = threading.Lock()
+        self._mint_org_locks: dict[str, threading.Lock] = {}
+        self._mint_org_locks_guard = threading.Lock()
+        # #1879 test hook: invoked INSIDE the emulated mint RPC while the org
+        # lock is held (after the cap read, before the write). A test sets it
+        # to force a DETERMINISTIC interleave instead of a flaky thread race.
+        # None (default) = inert.
+        self.mint_rendezvous = None
         # #1765: auth-side rows for user_identity_inventory/reserve_unlink
         # emulations (mirror auth.users + auth.identities shapes).
         self.auth_users: list[dict] = []
@@ -235,6 +368,38 @@ class FakeControlPlane:
         exactly once in ``rpc_calls``.
         """
         return self.rpc(fn, body)
+
+    def _mint_org_lock(self, org_id: str):
+        """Per-org mint lock (models the SQL `FOR NO KEY UPDATE` row lock)."""
+        with self._mint_org_locks_guard:
+            lock = self._mint_org_locks.get(org_id)
+            if lock is None:
+                import threading
+                lock = threading.Lock()
+                self._mint_org_locks[org_id] = lock
+            return lock
+
+    def _slot_count(self, org_id: str, now, *, exclude_bootstrap: bool = True) -> int:
+        """#1879: the fake's SQL-side cap predicate — `api_key_slot_count`.
+
+        Mirrors `quota._count_resource("api_keys")` / the migration's
+        `public.api_key_slot_count`: non-revoked, non-expired, and (when
+        `exclude_bootstrap`) created_via not bootstrap — NULL-TOLERANT so a
+        legacy row with no created_via still COUNTS.
+        """
+        from datetime import UTC, datetime
+        now_dt = _as_dt(now) or datetime.now(UTC)
+        n = 0
+        for k in self.tables.get("api_keys", []):
+            if k.get("org_id") != org_id or k.get("revoked_at") is not None:
+                continue
+            exp = _as_dt(k.get("expires_at"))
+            if exp is not None and exp <= now_dt:
+                continue
+            if exclude_bootstrap and k.get("created_via") == "bootstrap":
+                continue
+            n += 1
+        return n
 
     def _claim_migrate_created_by(self, org_id: str, user_id: str) -> None:
         """#1765: claim attributes anon-/reg- created_by keys in the team to
@@ -338,18 +503,26 @@ class FakeControlPlane:
                              "ask_tokens_out": tout, "ask_cost_usd": cost})
             return None
         if fn == "metering_increment_capture_cost":
-            # #3665: migration 20260917000001 — additive upsert mirroring
-            # metering_increment_capture_cost (the capture lane's twin),
-            # re-keyed onto the window start by 20260918000001 (#3825).
+            # #3665/#5045: migrations 20260917000001 then 20260926000001 —
+            # additive upsert mirroring metering_increment_capture_cost (the
+            # capture lane's twin), re-keyed onto the window start by
+            # 20260918000001 (#3825) and carrying the extraction TOKEN
+            # counters as of 20260926000001 (#5045).
             p = body or {}
             rows = self.tables.setdefault("metering_records", [])
             row = next((r for r in rows if r["org_id"] == p.get("p_org_id")
                         and r.get("period_start") == p.get("p_period_start")),
                        None)
             calls = int(p.get("p_calls") or 0)
+            tin = int(p.get("p_tokens_in") or 0)
+            tout = int(p.get("p_tokens_out") or 0)
             cost = float(p.get("p_cost_usd") or 0.0)
             if row:
                 row["capture_calls"] = row.get("capture_calls", 0) + calls
+                row["capture_tokens_in"] = (
+                    int(row.get("capture_tokens_in") or 0) + tin)
+                row["capture_tokens_out"] = (
+                    int(row.get("capture_tokens_out") or 0) + tout)
                 row["capture_cost_usd"] = (
                     float(row.get("capture_cost_usd") or 0.0) + cost)
             else:
@@ -359,7 +532,106 @@ class FakeControlPlane:
                              "period": _metering_period_label(
                                  p.get("p_period_start")),
                              "capture_calls": calls,
+                             "capture_tokens_in": tin,
+                             "capture_tokens_out": tout,
                              "capture_cost_usd": cost})
+            return None
+        if fn == "metering_increment_embedding":
+            # #4488: the embed lane's additive upsert on the SAME
+            # ``(org_id, period_start)`` row (migration 20260925000003). The
+            # fake models the sticky/paired/skip-safe mixed rule EXACTLY as the
+            # SQL does, so a test can tell "the window used two encoders" from
+            # "the window used one" and from "a skip-only flush erased it".
+            p = body or {}
+            # Mirror the SQL's degenerate-window guard: the real RPC RAISES
+            # before the INSERT, so without this the fake would accept a window
+            # production refuses, and a test would pass on behaviour that cannot
+            # happen (the SQL never executes in CI — this fake is the only
+            # behavioural proxy for the lane).
+            _ps, _pe = _as_dt(p.get("p_period_start")), _as_dt(
+                p.get("p_period_end"))
+            if _ps is not None and _pe is not None and _pe <= _ps:
+                raise RuntimeError(
+                    "metering_increment_embedding: period_end must be after "
+                    "period_start")
+            rows = self.tables.setdefault("metering_records", [])
+            row = next((r for r in rows if r["org_id"] == p.get("p_org_id")
+                        and r.get("period_start") == p.get("p_period_start")),
+                       None)
+            calls = int(p.get("p_calls") or 0)
+            texts = int(p.get("p_texts") or 0)
+            chars = int(p.get("p_chars") or 0)
+            wall = float(p.get("p_wall_ms") or 0.0)
+            skipped = int(p.get("p_skipped") or 0)
+            model = p.get("p_model")
+            revision = p.get("p_revision")
+            if row:
+                mixed = bool(row.get("embed_identity_mixed"))
+                if p.get("p_identity_mixed"):
+                    mixed = True
+                if (row.get("embed_model") is not None and model is not None
+                        and (row.get("embed_model") != model
+                             or row.get("embed_revision") != revision)):
+                    mixed = True
+                row["embed_identity_mixed"] = mixed
+                row["embed_calls"] = row.get("embed_calls", 0) + calls
+                row["embed_texts"] = row.get("embed_texts", 0) + texts
+                row["embed_chars"] = row.get("embed_chars", 0) + chars
+                row["embed_wall_ms"] = (float(row.get("embed_wall_ms") or 0.0)
+                                       + wall)
+                row["embed_skipped"] = row.get("embed_skipped", 0) + skipped
+                # None must NOT erase the stored identity (skip-safe).
+                if model is not None:
+                    row["embed_model"] = model
+                if revision is not None:
+                    row["embed_revision"] = revision
+            else:
+                rows.append({"org_id": p.get("p_org_id"),
+                             "period_start": p.get("p_period_start"),
+                             "period_end": p.get("p_period_end"),
+                             "period": _metering_period_label(
+                                 p.get("p_period_start")),
+                             "embed_calls": calls, "embed_texts": texts,
+                             "embed_chars": chars, "embed_wall_ms": wall,
+                             "embed_skipped": skipped, "embed_model": model,
+                             "embed_revision": revision,
+                             "embed_identity_mixed": bool(
+                                 p.get("p_identity_mixed"))})
+            return None
+        if fn == "metering_set_graph_storage":
+            # #5331: migration 20260926000002 — a GAUGE SETTER mirroring the SQL
+            # RPC. The fake must OVERWRITE (``= EXCLUDED`` semantics), not add:
+            # a test that cannot tell a gauge from an increment cannot catch the
+            # double-count defect the gauge design exists to avoid.
+            p = body or {}
+            rows = self.tables.setdefault("metering_records", [])
+            row = next((r for r in rows if r["org_id"] == p.get("p_org_id")
+                        and r.get("period_start") == p.get("p_period_start")),
+                       None)
+            total = float(p.get("p_total_mb") or 0.0)
+            values = {
+                "graph_storage_mb": total,
+                "graph_storage_indices_mb": p.get("p_indices_mb"),
+                "graph_storage_samples": int(p.get("p_samples") or 0),
+                "graph_storage_repeats": int(p.get("p_repeats") or 0),
+                "graph_storage_min_mb": (
+                    float(p["p_min_mb"])
+                    if p.get("p_min_mb") is not None else total),
+                "graph_storage_max_mb": (
+                    float(p["p_max_mb"])
+                    if p.get("p_max_mb") is not None else total),
+                "graph_storage_spread_mb": float(p.get("p_spread_mb") or 0.0),
+                "graph_storage_measured_at": p.get("p_measured_at"),
+            }
+            if row:
+                row.update(values)
+            else:
+                rows.append({"org_id": p.get("p_org_id"),
+                             "period_start": p.get("p_period_start"),
+                             "period_end": p.get("p_period_end"),
+                             "period": _metering_period_label(
+                                 p.get("p_period_start")),
+                             **values})
             return None
         if fn == "metering_cohort_spend":
             # #3665/#3825: the SQL aggregate — one scalar, so no row cap can
@@ -670,6 +942,161 @@ class FakeControlPlane:
                 row["last_used_at"] = datetime.now(timezone.utc).isoformat()  # noqa: UP017
                 return row.get("org_id")
             return None
+        if fn == "session_key_mint":
+            # #1879: the whole session-mint critical section in ONE emulated
+            # transaction, under the org lock (released at the end of THIS
+            # call — exactly like the real RPC's commit).
+            from datetime import datetime, timezone
+            p = body or {}
+            org_id = p.get("p_org_id") or ""
+            user_id = p.get("p_user_id") or ""
+            now = p.get("p_created_at")
+            now_dt = _as_dt(now) or datetime.now(timezone.utc)  # noqa: UP017
+            with self._mint_org_lock(org_id):
+                key_rows = self.tables.setdefault("api_keys", [])
+                if not any(o.get("id") == org_id
+                           for o in self.tables.get("organizations", [])):
+                    raise RuntimeError("session_key_mint: org not found")
+                if self.mint_rendezvous is not None:
+                    # Deterministic interleave point: the caller is INSIDE the
+                    # lock here, so a second mint must block on it.
+                    self.mint_rendezvous()
+                rotated = False
+                rotated_prefix = None
+                if p.get("p_purpose") == "bootstrap":
+                    cap = int(p.get("p_bootstrap_cap") or 3)
+                    boot = [k for k in key_rows
+                            if k.get("org_id") == org_id
+                            and k.get("created_via") == "bootstrap"
+                            and k.get("created_by") == user_id
+                            and k.get("revoked_at") is None
+                            and (_as_dt(k.get("expires_at")) is None
+                                 or _as_dt(k.get("expires_at")) > now_dt)]
+                    if len(boot) >= cap:
+                        raise RuntimeError(
+                            "session_key_mint: bootstrap cap reached")
+                else:
+                    max_keys = p.get("p_max_api_keys")
+                    if max_keys is not None and self._slot_count(org_id, now) >= int(max_keys):
+                        # older-OTHER: live, non-bootstrap, non-expired, owned
+                        # by someone else (#750.10 / #1859 P3-1).
+                        others = [k for k in key_rows
+                                  if k.get("org_id") == org_id
+                                  and k.get("revoked_at") is None
+                                  and k.get("created_by") is not None
+                                  and k.get("created_by") != user_id
+                                  and k.get("created_via") != "bootstrap"
+                                  and (_as_dt(k.get("expires_at")) is None
+                                       or _as_dt(k.get("expires_at")) > now_dt)]
+                        others.sort(key=lambda k: k.get("created_at") or "")
+                        if others:
+                            others[0]["revoked_at"] = now
+                            # NO `_trigger_key_create` here: the real trigger is
+                            # `AFTER INSERT ON public.api_keys` only
+                            # (0015_abuse_events.sql), so a REVOKE must never
+                            # emit a key_create abuse event (the rotation branch
+                            # and the recover_team_key emulation don't either).
+                            # Review P2: emitting one inflated key_create
+                            # telemetry for rows that were never created, and
+                            # `_abuse_evaluate_keys` consumes those events.
+                            # FAIL-CLOSED RE-CHECK (#1879): the revoke frees a
+                            # slot only if the target was still live.
+                            if self._slot_count(org_id, now) >= int(max_keys):
+                                raise RuntimeError(
+                                    "session_key_mint: key limit reached")
+                        else:
+                            cands = [k for k in key_rows
+                                     if k.get("org_id") == org_id
+                                     and k.get("revoked_at") is None]
+                            legacy = sorted(
+                                [k for k in cands
+                                 if k.get("created_by") is None
+                                 and k.get("created_via") != "bootstrap"],
+                                key=lambda k: k.get("created_at") or "")
+                            own_recovery = sorted(
+                                [k for k in cands
+                                 if k.get("created_by") == user_id
+                                 and k.get("created_via") == "recovery"],
+                                key=lambda k: (k.get("last_used_at") is not None,
+                                               k.get("last_used_at") or "",
+                                               k.get("created_at") or ""))
+                            own_boot = sorted(
+                                [k for k in cands
+                                 if k.get("created_by") == user_id
+                                 and k.get("created_via") == "bootstrap"],
+                                key=lambda k: k.get("created_at") or "")
+                            rotatable = legacy or own_recovery or own_boot
+                            if not rotatable:
+                                raise RuntimeError(
+                                    "session_key_mint: key limit reached")
+                            rotatable[0]["revoked_at"] = now
+                            rotated_prefix = rotatable[0].get("key_prefix")
+                            if self._slot_count(org_id, now) >= int(max_keys):
+                                raise RuntimeError(
+                                    "session_key_mint: key limit reached")
+                            rotated = True
+                key_rows.append({
+                    "id": p.get("p_key_id"),
+                    "org_id": org_id,
+                    "lookup_hash": p.get("p_lookup_hash"),
+                    "key_prefix": p.get("p_key_prefix"),
+                    "created_via": ("bootstrap" if p.get("p_purpose") == "bootstrap"
+                                    else "recovery"),
+                    "created_by": user_id,
+                    "created_at": now,
+                    "revoked_at": None,
+                    "expires_at": p.get("p_expires_at"),
+                })
+                self._trigger_key_create(
+                    org_id, p.get("p_key_id") or "",
+                    "bootstrap" if p.get("p_purpose") == "bootstrap" else "recovery")
+                return {"rotated": rotated, "rotated_key_prefix": rotated_prefix}
+        if fn == "provision_api_key":
+            # #1879: the atomic provisioned/rotate mint (cap gate + INSERT in
+            # one emulated transaction under the org lock).
+            p = body or {}
+            org_id = p.get("p_org_id") or ""
+            with self._mint_org_lock(org_id):
+                if not any(o.get("id") == org_id
+                           for o in self.tables.get("organizations", [])):
+                    raise RuntimeError("provision_api_key: org not found")
+                if self.mint_rendezvous is not None:
+                    self.mint_rendezvous()
+                max_keys = p.get("p_max_api_keys")
+                credit = int(p.get("p_cap_slot_credit") or 0)
+                if (max_keys is not None
+                        and self._slot_count(org_id, p.get("p_created_at"))
+                        - credit >= int(max_keys)):
+                    raise RuntimeError("provision_api_key: key cap reached")
+                key_rows = self.tables.setdefault("api_keys", [])
+                if any(k.get("lookup_hash") == p.get("p_lookup_hash")
+                       for k in key_rows):
+                    # Mirrors uq_api_keys_lookup_hash: a plain INSERT raises,
+                    # it is NOT an ON CONFLICT no-op (the caller must never
+                    # receive a plaintext for a row it did not insert).
+                    raise RuntimeError(
+                        "provision_api_key: duplicate key value violates unique "
+                        "constraint \"uq_api_keys_lookup_hash\"")
+                key_rows.append({
+                    "id": p.get("p_key_id"),
+                    "org_id": org_id,
+                    "lookup_hash": p.get("p_lookup_hash"),
+                    "key_prefix": p.get("p_key_prefix"),
+                    "created_via": p.get("p_created_via"),
+                    "created_by": p.get("p_created_by"),
+                    "created_at": p.get("p_created_at"),
+                    "revoked_at": None,
+                    "expires_at": p.get("p_expires_at"),
+                    "name": p.get("p_name"),
+                    "graph_id": p.get("p_graph_id"),
+                    "scopes": (p.get("p_scopes") if p.get("p_scopes") is not None
+                               else []),
+                    "created_by_key_id": p.get("p_created_by_key_id"),
+                    "delegation_depth": p.get("p_delegation_depth"),
+                })
+                self._trigger_key_create(org_id, p.get("p_key_id") or "",
+                                         p.get("p_created_via"))
+                return None
         if fn == "recover_team_key":
             # #1709: keyless recovery mint — atomic cap-check + insert under a
             # lock (emulates the RPC's FOR UPDATE row serialization so the
@@ -679,7 +1106,7 @@ class FakeControlPlane:
             th = p.get("p_token_hash") or ""
             tid = p.get("p_org_id") or ""
             lookup = p.get("p_lookup_hash") or ""
-            with self._recover_lock:
+            with self._mint_org_lock(tid):
                 tokens = self.tables.setdefault("agent_signup_tokens", [])
                 row = next((t for t in tokens
                             if t.get("token_hash") == th
@@ -974,6 +1401,12 @@ class FakeControlPlane:
         # 22P02 in prod is method-agnostic.
         if self.uuid_fidelity:
             _assert_uuid_fidelity(table, filters)
+        # #4243: the same fidelity for WRITE bodies — a JSON number bound to a
+        # timestamptz column 400s in prod (method-agnostic: PATCH and POST
+        # both carry json_body). Checked here so the raise precedes any
+        # mutation, exactly as the real seam rejects before the row changes.
+        if self.timestamptz_fidelity:
+            _assert_timestamptz_fidelity(table, json_body)
         # #4037: an order term PostgREST would 400 on (PGRST100) must fail here
         # too — and, like 22P02, that is method-agnostic → parse BEFORE the
         # method dispatch below. `if order:` mirrors the real seam, which drops

@@ -45,6 +45,7 @@ import uuid
 
 import pytest
 
+from tests import _live_utils
 from tortoise.ep import TortoiseEP
 from tortoise.sdk import TortoiseSDK
 from tortoise.weights import (
@@ -56,7 +57,7 @@ from tortoise.weights import (
 # Requires live FalkorDB (Docker). Skip gracefully when unavailable so the
 # no-Docker embedded suite stays green (AGENTS.md). Mirrors
 # tests/test_ep_mitigation.py / tests/test_ep_directional.py.
-_DB_URI = "docker://:falkordb@localhost:6379/tortoise_test_ep_mit3815"
+_DB_URI = _live_utils.docker_uri("tortoise_test_ep_mit3815")
 FALKORDB_AVAILABLE = False
 _OLD_URI = os.environ.get("TORTOISE_DB_URI")
 try:

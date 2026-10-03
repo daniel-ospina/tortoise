@@ -11,14 +11,22 @@
 #      Steps 2+3 are the "single deploy": never run step 3 without step 2
 #      (the app would read Supabase before the Edge Function writes it) and
 #      never let step 2 sit alone (new signups' keys would be unreadable).
+#      Since #3627 that pairing is enforced mechanically, not by operator
+#      discipline — see the last paragraph of this box.
 #      Since #1095, this workflow also runs a fail-closed migration-drift
-#      gate before deploy — the operator waits for step 2's apply to go
-#      GREEN, then dispatches this workflow; the gate blocks the deploy if
-#      repo migrations are still ahead of prod.
+#      gate before deploy; it blocks the deploy while repo migrations are
+#      still ahead of prod, so step 2's apply must be GREEN first. (That is
+#      the same gate the co-move dispatch below satisfies by construction:
+#      it fires only after the apply succeeded.)
 #      Since #1896, the deploy is also gated on Fly fleet health — a
 #      fail-closed orphan + crash-loop machine check runs before the secrets
 #      step (destroyed machines can't be recreated by the workflow; the
 #      incident orphan was destroyed manually).
+#      Since #3627 step 2's dispatch performs step 3 ITSELF: the co-move step
+#      in `supabase-deploy.yml` dispatches this workflow after its applies
+#      succeed. Do not read the two as separate operator actions any more —
+#      dispatching this workflow by hand is now only for a re-deploy or the
+#      manual fallback, and step 2 must never be left to sit alone.
 #   4. Post-flip verification incl. E2E-7 (#766, the next issue).
 #   5. Registry delete (point of no return, owner informed):
 #      TORTOISE_DB_URI=... .github/scripts/delete-registry --confirm
