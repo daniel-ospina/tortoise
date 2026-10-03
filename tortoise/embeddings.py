@@ -36,6 +36,81 @@ def _embedder_warmup_enabled() -> bool:
 
 logger = logging.getLogger(__name__)
 
+# ── serialize the two heavy dependency imports (#5718 CI shard) ─────────────
+# The embedder LOAD thread imports ``sentence_transformers`` → ``transformers``
+# → ``torch`` while the sparse fallback imports
+# ``sklearn.feature_extraction.text``. Those two imports must not overlap.
+#
+# scipy's array-API dispatch decides which namespace an array belongs to by
+# peeking straight at ``sys.modules`` and then doing an UNGUARDED ``getattr``
+# (``scipy/_external/array_api_compat/common/_helpers.py::_issubclass_fast``):
+#
+#     mod = sys.modules["torch"]            # present the instant torch's import begins
+#     parent_cls = getattr(mod, "Tensor")   # AttributeError while torch is mid-import
+#
+# A cold ``sklearn.feature_extraction.text`` import pulls ``scipy.stats`` in,
+# and scipy.stats exercises that dispatch while it builds itself — so a cold
+# sklearn import that overlaps a torch import raises
+#
+#     AttributeError: partially initialized module 'torch' has no attribute
+#     'Tensor' (most likely due to a circular import)
+#
+# That is a race, not a broken install — but it poisons the sklearn/scipy
+# import for the whole process, and the sparse fallback's broad
+# ``except Exception`` then swallows it and returns no hits (measured on the
+# #5718 Python-CI shard, where the shard's import order started an embedder
+# load before the oracle's TF-IDF assertion ran).
+#
+# Both heavy imports belong to this module's stack — the load thread imports
+# torch, the fallback imports sklearn — so ONE lock closes the race by
+# construction: the load thread holds it only for the ``sentence_transformers``
+# import (torch is complete when that returns) and the sparse path holds it
+# only for the ``sklearn`` import. Whichever runs first, the other waits and
+# never observes a half-built module. Every in-process torch importer in this
+# package must take the same lock, or it re-opens the window: the embedder load
+# (``import_sentence_transformer``) and the ask-lane cross-encoder
+# (``import_cross_encoder``) are the two today.
+_HEAVY_IMPORT_LOCK = threading.RLock()
+
+
+def import_tfidf_vectorizer():
+    """Return sklearn's ``TfidfVectorizer``, imported under the heavy-import lock.
+
+    See ``_HEAVY_IMPORT_LOCK``: a cold sklearn import must not overlap the
+    embedder's torch import. Raises ``ImportError`` when the ``[embeddings]``
+    extra is absent, exactly as the bare ``from sklearn...`` did.
+    """
+    with _HEAVY_IMPORT_LOCK:
+        from sklearn.feature_extraction.text import TfidfVectorizer  # lazy: [embeddings] extra
+    return TfidfVectorizer
+
+
+def import_sentence_transformer():
+    """Return sentence-transformers' ``SentenceTransformer`` under the lock.
+
+    Only the import is serialized — torch is fully initialized when
+    ``sentence_transformers`` finishes importing — so the (slow) model
+    construction below stays outside the lock and never blocks the sparse
+    fallback.
+    """
+    with _HEAVY_IMPORT_LOCK:
+        from sentence_transformers import SentenceTransformer
+    return SentenceTransformer
+
+
+def import_cross_encoder():
+    """Return sentence-transformers' ``CrossEncoder`` under the lock.
+
+    The ask-lane reranker (``tortoise/rerank.py``) is a second torch importer
+    (``sentence_transformers`` → ``transformers`` → ``torch``). It must share
+    this lock for the same reason as the embedder load — see
+    ``_HEAVY_IMPORT_LOCK``.
+    """
+    with _HEAVY_IMPORT_LOCK:
+        from sentence_transformers import CrossEncoder
+    return CrossEncoder
+
+
 # The active embedder — single source of truth for the production model id.
 # #1349 embedder-selection swap (2026-08-21): bge-small replaces
 # all-MiniLM-L6-v2 as the default (evidence gate: recall +15.7%, p=0.0005;
@@ -514,7 +589,7 @@ class EmbeddingModel:
 
         def _load():
             try:
-                from sentence_transformers import SentenceTransformer
+                SentenceTransformer = import_sentence_transformer()
                 result["model"] = SentenceTransformer(
                     EMBEDDING_MODEL, revision=EMBEDDING_MODEL_REVISION)
             except ImportError as e:
@@ -805,7 +880,7 @@ def _encode(texts: list[str]) -> tuple[np.ndarray, bool]:
         except Exception:  # noqa: BLE001, RUF100
             logger.warning("embedding encode failed — TF-IDF fallback", exc_info=True)
     try:
-        from sklearn.feature_extraction.text import TfidfVectorizer  # lazy: [embeddings] extra
+        TfidfVectorizer = import_tfidf_vectorizer()
         return TfidfVectorizer().fit_transform(texts).toarray(), True
     except (ValueError, ImportError):
         # Empty / stopword-only vocabulary or sklearn missing — nothing to
@@ -901,7 +976,7 @@ def search_points(
             model = None
     if model is None:
         try:
-            from sklearn.feature_extraction.text import TfidfVectorizer
+            TfidfVectorizer = import_tfidf_vectorizer()
             tv = TfidfVectorizer()
             doc_vecs = tv.fit_transform(texts).toarray()
             query_vec = tv.transform([query]).toarray()[0]

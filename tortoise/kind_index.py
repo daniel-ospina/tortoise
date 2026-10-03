@@ -31,7 +31,11 @@ from pathlib import Path
 
 import numpy as np
 
-from tortoise.embeddings import EMBEDDING_MODEL, EMBEDDING_MODEL_REVISION
+from tortoise.embeddings import (
+    EMBEDDING_MODEL,
+    EMBEDDING_MODEL_REVISION,
+    import_tfidf_vectorizer,
+)
 
 #: The persisted-index directory (gitignored — see .gitignore).
 DEFAULT_CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "kind_index"
@@ -104,7 +108,7 @@ class _DefaultEncoder:
                     return np.asarray(vecs, dtype=np.float64), False
             except Exception:  # degrade path
                 pass
-        from sklearn.feature_extraction.text import TfidfVectorizer  # lazy: [embeddings] extra
+        TfidfVectorizer = import_tfidf_vectorizer()  # lazy + serialized: [embeddings] extra
         with _TFIDF_LOCK:
             if _TFIDF is None:
                 _TFIDF = TfidfVectorizer()

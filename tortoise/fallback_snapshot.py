@@ -148,7 +148,8 @@ def build_snapshot(proj) -> dict | None:
 
     if doc_vecs is None:
         try:
-            from sklearn.feature_extraction.text import TfidfVectorizer
+            from tortoise.embeddings import import_tfidf_vectorizer
+            TfidfVectorizer = import_tfidf_vectorizer()
             tv = TfidfVectorizer()
             # Keep the sparse matrix — densify only the served slice (P2: the
             # dense 50k × vocab array is an OOM risk; csr stays lean).

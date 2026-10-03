@@ -189,7 +189,11 @@ class CrossEncoderScorer:
     def __init__(self, model: str, max_length: int = RERANK_MAX_LENGTH):
         import threading as _t
 
-        from sentence_transformers import CrossEncoder
+        # #5718: take the shared heavy-import lock — this is a torch importer,
+        # and a cold sklearn/scipy import must not overlap it (see
+        # ``tortoise.embeddings._HEAVY_IMPORT_LOCK``).
+        from tortoise.embeddings import import_cross_encoder
+        CrossEncoder = import_cross_encoder()
         self._model = CrossEncoder(model, max_length=max_length)
         self._lock = _t.Lock()   # serializes predict() under threads
 
