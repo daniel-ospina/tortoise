@@ -1748,7 +1748,9 @@ class TestE5PointSupersessions:
 # for it — and because `_execute_commit_writes` created the successor BEFORE
 # calling `supersede_point`, the refusal also left a live orphan successor that
 # no retry could fix. These tests pin both halves: the 422 mapping (A) and the
-# pre-write check that keeps the refusal from writing anything (B).
+# per-action check that keeps the refusal from MINTING the successor it would
+# orphan (B) — scoped to that successor, not to the whole request: the chain
+# writes and any earlier point of the commit have already landed by then.
 
 _PREDECESSOR_ID = "pt_0000000000000000000000000000000000000000000000000000000000000000"
 _SUPERSEDED_CONTENT = "the old 5K claim"
@@ -1781,7 +1783,8 @@ def _inverted_window_commit(client):
 
 class Test5363InvertedSupersedeWindow:
     """#5363 — the #4021 refusal mapped to an actionable 422 and raised before
-    the successor is minted (no partial write a retry cannot complete)."""
+    the point's successor is minted (so the refusal leaves no orphan successor,
+    the partial write a retry could never complete)."""
 
     def test_inverted_window_422s_before_the_successor_is_minted(self, client):
         """(B) + (A) together, on the real write path: the commit 422s naming
@@ -1850,6 +1853,64 @@ class Test5363InvertedSupersedeWindow:
         assert detail["code"] == "supersede_window_inverted"
         assert detail["superseded"] == _PREDECESSOR_ID
         assert "retry" not in json.dumps(detail).lower()
+
+    def test_same_commit_dedup_sibling_is_never_a_false_422(self, client):
+        """#7000 review P2 — a VALID commit must NOT be refused because the
+        pre-check resolved the successor at T0 and could not see the
+        same-commit sibling `create_point` dedups onto.
+
+        Deterministic repro (no timing race): the predecessor's window starts
+        in the FUTURE (`validFrom = now + 30d`); payload point A is `new` with
+        content C and `when = now + 90d`; payload point B carries the
+        predecessor id with the SAME content C and NO `when` (→ reconcile
+        action `supersede`).
+
+        On the write path A is minted first, then B re-keys onto A (same
+        content+kind) and `supersede_point` reads A's stored `validFrom`
+        (`now + 90d` ≥ the predecessor's `now + 30d`) → the window is legal.
+        A T0 pre-check cannot see A, so it measured the successor's fallback
+        start as the hosted `now` (< `now + 30d`) and refused a commit the
+        writer accepts.
+
+        Fails before the fix: `assert 422 == 200` (the refusal body names the
+        hosted `now`, not A's window start)."""
+        from datetime import UTC, datetime, timedelta
+        _now = datetime.now(UTC)
+        pred_vf = (_now + timedelta(days=30)).isoformat()
+        sibling_when = (_now + timedelta(days=90)).isoformat()
+        content = "the 5K claim, restated once"
+        old_pid = _PREDECESSOR_ID
+        _team_sdk()._get_proj().g.query(
+            "MERGE (p:Point {id:$id}) SET p.pointKind='statement', "
+            "    p.content=$c, p.is_operator=false, p.status='live', "
+            "    p.content_hash='seed-dedup', p.validFrom=$vf",
+            params={"id": old_pid, "c": _SUPERSEDED_CONTENT, "vf": pred_vf})
+
+        raw = _raw_payload(0, points=[
+            # A: NEW, content C, a future window start that LEGALLY follows the
+            # predecessor's. Deliberately id 7 — NOT the predecessor id.
+            _point(7, content=content, when=sibling_when),
+            # B: the predecessor id + the SAME content → supersede, whose
+            # successor (content C) already exists by the time B writes.
+            _point(8, id=old_pid, content=content),
+        ])
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+
+        g = _team_sdk()._get_proj().g
+        # the predecessor IS superseded, and its window ended at A's start
+        old = g.query(
+            "MATCH (p:Point {id:$id}) RETURN p.status, p.validTo",
+            params={"id": old_pid}).result_set
+        assert old and old[0][0] == "superseded", f"not superseded: {old}"
+        assert old[0][1] == sibling_when, \
+            f"validTo {old[0][1]!r} != successor window start {sibling_when!r}"
+        # exactly ONE node carries the shared content — B re-keyed onto A
+        # (a second node would mean the dedup path never folded the sibling)
+        dup = g.query(
+            "MATCH (p:Point) WHERE p.content = $c RETURN p.id",
+            params={"c": content}).result_set
+        assert len(dup) == 1, f"expected one deduped successor, got {dup}"
 
 
 class Test6bEntitySupersessionGuards:
