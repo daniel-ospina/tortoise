@@ -9369,6 +9369,42 @@ class TortoiseSDK:
 
     # ── Query ─────────────────────────────────────────────────────
 
+    def _operator_scope_clauses(self, kind: str | None) -> list[str]:
+        """Operator-scope clause for a Point read path (#7108).
+
+        Returns the CANONICAL non-operator predicate —
+        ``(n.is_operator IS NULL OR n.is_operator = false) AND n.op_type IS NULL``,
+        the same one ``summarize_structure`` and ``list_pointkinds`` already use
+        (#2205/#943) — UNLESS the caller explicitly asked for an operator kind, in
+        which case the exclusion is yielded and no clause is added.
+
+        Each half is load-bearing, and both were missing from this path.
+
+        (1) THE BARE FORM LIES. ``query``/``paginated_query`` used a bare
+        ``n.is_operator = false``, which #2205 documented as making per-kind stats
+        lie on imported graphs: Points may carry NO ``is_operator`` property at all
+        (only operators set it), so ``= false`` drops them; and legacy operators
+        carry ``op_type`` without it, so they leak into non-operator results.
+        Measured on the live graph 2026-10-03: 1 Point has ``is_operator IS NULL``
+        and is silently dropped by the bare form.
+
+        (2) THE EXCLUSION CANNOT BE UNCONDITIONAL. Every node with
+        ``pointKind = 'operator'`` also has ``is_operator = true``, so pairing the
+        non-operator predicate with that kind filter is an EMPTY INTERSECTION by
+        construction, on every graph. Measured 2026-10-03: 3,520 operator nodes,
+        20 of them carrying ``pointKind = 'operator'``, and
+        ``sdk.query(kind='operator')`` returning 0. A WRONG-EMPTY is
+        indistinguishable from a true-empty to the caller — the failure read-path
+        invariant #6146 forbids — and it is worst in the one instrument every lane
+        is mandated to read: it manufactures a false ``my write never landed``
+        conclusion, whose rational response is to write the finding AGAIN.
+
+        Both read paths build this clause here so they cannot drift apart.
+        """
+        if kind and "operator" in self._expand_kind(kind):
+            return []
+        return ["(n.is_operator IS NULL OR n.is_operator = false) AND n.op_type IS NULL"]
+
     def query(self, kind: str | None = None,
               *, include_retracted: bool = False,
               **filters) -> list[dict]:
@@ -9388,7 +9424,7 @@ class TortoiseSDK:
         tombstones.
         """
         proj = self._get_proj()
-        clauses = ["n.is_operator = false"]
+        clauses = self._operator_scope_clauses(kind)
         params: dict[str, Any] = {}
         # #1391: terminal-status exclusion — skipped when the caller explicitly
         # filters by status (their filter controls visibility). include_retracted
@@ -9415,7 +9451,7 @@ class TortoiseSDK:
             validate_filter_key(key)
             clauses.append(f"n.`{key}` = ${key}")
             params[key] = val
-        where = " AND ".join(clauses)
+        where = " AND ".join(clauses) if clauses else "true"
         rows = proj.g.query(
             f"MATCH (n:Point) WHERE {where} RETURN properties(n)",
             params=params,
@@ -9443,7 +9479,7 @@ class TortoiseSDK:
         if limit < 1:
             raise ValueError(f"limit must be >= 1, got {limit}")
         proj = self._get_proj()
-        clauses = ["n.is_operator = false"]
+        clauses = self._operator_scope_clauses(kind)
         params: dict[str, Any] = {}
         # #1391: terminal-status exclusion — skipped when the caller explicitly
         # filters by status (their filter controls visibility). include_retracted
@@ -9470,7 +9506,7 @@ class TortoiseSDK:
             validate_filter_key(key)
             clauses.append(f"n.`{key}` = ${key}")
             params[key] = val
-        where = " AND ".join(clauses)
+        where = " AND ".join(clauses) if clauses else "true"
         total = proj.g.query(
             f"MATCH (n:Point) WHERE {where} RETURN count(n)",
             params=params,
