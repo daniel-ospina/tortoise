@@ -638,8 +638,10 @@ class TestR2OrUnionAndSearchKeys:
                 "MATCH (m:Meta {key:'event_fts_v2'}) RETURN m.v").result_set
             assert marker and marker[0][0] is True, (
                 "the Event migration did not run: event_fts_v2 was never "
-                "minted, i.e. the drop used a procedure name this engine "
-                "does not register (the #5440 defect)")
+                "minted. On engines that register `db.idx.fulltext.drop` "
+                "this isolates #5440 (the old hardcoded `dropIndex` is not "
+                "registered there); on 6.x the multi-field procedure create "
+                "fails one step earlier for the same root cause.")
             hits = proj.g.query(
                 "CALL db.idx.fulltext.queryNodes('Event','zeta')"
             ).result_set
