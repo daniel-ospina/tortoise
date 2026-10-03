@@ -16053,7 +16053,8 @@ class TortoiseSDK:
             UNION of the legs (uncapped), not one leg's window — so the residual
             bound is that union, roughly ``DEFAULT_POOL_SIZE`` per live leg: about
             120 with the vector leg unavailable, about twice that in hybrid. It is
-            NOT ``MAX_SESSION_TURNS`` (500); raise ``pool_size`` to widen it.
+            NOT ``MAX_SESSION_TURNS`` (500); raise ``pool_size`` (or
+            ``TORTOISE_POOL_FLOOR``) to widen it.
             Applies wherever the resolved graph label is ``Point`` — so the point
             and operator legs, not only ``entity_type == "point"``;
             default None = no exclusion, byte-identical to pre-#4509 output. Do NOT

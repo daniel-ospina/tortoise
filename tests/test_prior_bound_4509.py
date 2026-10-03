@@ -53,18 +53,32 @@ _POOL = 200
 #: ``_PRIOR_OVERFETCH == 12`` pin used — a declared bound that cannot silently
 #: drift out from under its own documentation.
 #:
-#: It is ONE LEG's window, not the fused set. The ``_no_embedder`` autouse fixture
-#: makes FTS the only live leg, which is what fixes this bound to a single number;
-#: in the hybrid shape the fused set is the UNION of the fts and vector legs (~2x
-#: this), so this literal and the prose that names it both say "per leg".
+#: It is ONE LEG's window, not the fused set. The ``_hermetic_pool_and_legs``
+#: autouse fixture makes FTS the only live leg, which is what fixes this bound to
+#: a single number; in the hybrid shape the fused set is the UNION of the fts and
+#: vector legs (~2x this), so this literal and the prose that names it both say
+#: "per leg". That fixture also deletes ``TORTOISE_POOL_FLOOR``, which widens the
+#: same window from the environment.
 _DOCUMENTED_PROD_POOL = 120
 
 
 @pytest.fixture(autouse=True)
-def _no_embedder(monkeypatch):
-    """Pin the sparse leg: with ``EmbeddingModel.get`` → None the vector
-    strategy is never submitted, so FTS is the only leg and the ordering is
-    deterministic without a model download."""
+def _hermetic_pool_and_legs(monkeypatch):
+    """Pin BOTH knobs this module's bound depends on.
+
+    The sparse leg: with ``EmbeddingModel.get`` → None the vector strategy is
+    never submitted, so FTS is the only leg and the ordering is deterministic
+    without a model download — and the fused set is then one leg's window, which
+    is what makes the residual pin's bound a single number.
+
+    The pool floor: ``resolve_pool_size`` honours ``TORTOISE_POOL_FLOOR``, so an
+    ambient value in a developer's shell moves the very window the residual pin
+    measures — and it reds the pin for a CORRECT product, because a raised floor
+    legitimately lets the prior into the pool. A verdict that depends on the
+    caller's environment is a harness defect (#5049 doctrine), so the module
+    deletes the variable and measures the product default it documents.
+    """
+    monkeypatch.delenv("TORTOISE_POOL_FLOOR", raising=False)
     from tortoise.embeddings import EmbeddingModel
     monkeypatch.setattr(EmbeddingModel, "get",
                         staticmethod(lambda load_timeout=None: None))
@@ -260,7 +274,10 @@ def test_production_pool_bound_still_starves_the_prior(sdk):
     The claim used to be written into the comments in ``extractor_v2.py`` and
     ``sdk.py``; it now states this bound, and this test is what keeps that
     statement honest. Raising the bound means passing an explicit ``pool_size`` on
-    the point prior leg — a retrieval-cost trade-off, deliberately not made here.
+    the point prior leg (or setting ``TORTOISE_POOL_FLOOR``, which widens the same
+    window from the environment — this module deletes it so its verdict does not
+    depend on the caller) — a retrieval-cost trade-off, deliberately not made
+    here.
 
     FALSIFIER — (1) *what value makes this test fail?* Two of them. First,
     whether ``DEFAULT_POOL_SIZE`` is still the bound the comments name — asserted

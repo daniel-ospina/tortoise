@@ -1998,8 +1998,8 @@ def _derive_queries(embed_list: dict, story: str) -> dict:
 # ``test_prior_bound_4509.py::test_production_pool_bound_still_starves_the_prior``
 # so it stays visible and falsifiable instead of being asserted away by an
 # over-claim here. Raising the bound to cover the worst case means passing an
-# explicit ``pool_size`` on this leg, which is a retrieval-cost trade-off and is
-# deliberately not made in this change.
+# explicit ``pool_size`` on this leg (or a raised ``TORTOISE_POOL_FLOOR``), which
+# is a retrieval-cost trade-off and is deliberately not made in this change.
 
 
 def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3, *,
