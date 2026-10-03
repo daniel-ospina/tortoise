@@ -2172,6 +2172,10 @@ class TestFulltextIndexCreationForm:
         assert records, caplog.records
         message = records[0].getMessage()
         assert "Source" in message and "DEGRADED" in message
+        # The CONSEQUENCE is the part an operator acts on, so bind it too --
+        # the presentation was previously unasserted, which is how a wrong
+        # one survived a suite run.
+        assert "empty_results" in message, message
 
     def test_ensure_indexes_reports_at_the_call_site(self, caplog):
         """#H05 review: exercising the helper directly is NOT proof that the
