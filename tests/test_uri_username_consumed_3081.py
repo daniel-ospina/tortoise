@@ -197,6 +197,56 @@ def _assert_delivered(module_file, uri, why):
 
 @pytest.mark.parametrize(
     "module_file",
+    ["context_removal_audit.py", "parity_sample.py"],
+)
+def test_the_seam_is_actually_used_by_main(module_file):
+    """The last hop: `main()` must go THROUGH the seam, not around it.
+
+    Observing `_build_client` in isolation proves the seam is correct but not
+    that anything calls it. Replacing `db = _build_client(cfg)` with an inline
+    `_FalkorDB(...)` that drops the username restores #3081 on the real entry
+    path while the seam — and its test — stay correct and green. The deleted AST
+    matcher was exhaustive over constructor calls and *would* have caught that,
+    so this hop is the price of deleting it.
+
+    The seam call sits before `main()`'s ``try``, so the recorder raises to stop
+    the run as soon as it has captured what it was handed.
+    """
+    mod = _load(module_file)
+    captured = {}
+
+    class _Stop(Exception):
+        pass
+
+    def _recorder(cfg, *args, **kwargs):
+        captured["cfg"] = cfg
+        raise _Stop
+
+    saved = mod._build_client
+    saved_argv = sys.argv
+    mod._build_client = _recorder
+    sys.argv = [module_file, "--uri", NAMED]
+    try:
+        with contextlib.suppress(_Stop, SystemExit):
+            mod.main()
+    finally:
+        mod._build_client = saved
+        sys.argv = saved_argv
+
+    assert "cfg" in captured, (
+        f"{module_file}.main() never called _build_client — it must build its "
+        f"client through the seam, or this file's construction path is not "
+        f"observed by any test (#3081)."
+    )
+    got = captured["cfg"].get("username")
+    assert got == "alice", (
+        f"{module_file}.main() handed the seam username={got!r}, expected "
+        f"'alice' — a named-user URI would authenticate as the default user."
+    )
+
+
+@pytest.mark.parametrize(
+    "module_file",
     [
         "audit_graph.py",
         "audit_graph_deep.py",
