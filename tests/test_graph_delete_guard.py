@@ -156,8 +156,49 @@ def test_lock_is_held_across_the_drop_and_released():
     assert conn.commands[-1][0] == "EVAL"
     assert conn.commands[-1][3] == g.GRAPH_DELETE_LOCK_KEY, \
         "release must target the delete lock"
+    # The SCRIPT, not just its arguments (review P3): asserting only that our
+    # token is passed as ARGV leaves a blind-del Lua body green. A blind
+    # release lets an EXPIRED holder evict the CURRENT holder's lock, so up to
+    # three guarded deleters can enter together.
+    script = conn.commands[-1][1]
+    assert "get" in script, \
+        f"the release must READ the key (compare) — got {script!r}"
+    assert "ARGV[1]" in script, \
+        f"the release must compare against OUR token — got {script!r}"
     assert conn.commands[-1][4] == acquire[2], \
         "release must be compare-and-delete on OUR token, never a blind DEL"
+
+
+def test_lock_WAITS_for_a_contended_lock_and_then_acquires():
+    """Review P3: ``wait_s`` is the lock-acquisition BUDGET — a loser must POLL
+    rather than refuse on the first refusal. Every other lock test uses a
+    first-try-granting connection, so removing the poll loop entirely left the
+    suite green. That is availability, not safety (the loser refuses and
+    `wipe_server` / `purge_owned_namespace` raise instead of serializing), but
+    the budget is what the docstring promises."""
+
+    class _Contended:
+        def __init__(self, refusals: int):
+            self.commands: list[tuple] = []
+            self._refusals = refusals
+
+        def execute_command(self, *args):
+            self.commands.append(args)
+            if args[0] == "SET":
+                if self._refusals > 0:
+                    self._refusals -= 1
+                    return None  # held by a peer
+                return True
+            return 1
+
+    conn = _Contended(3)
+    db = _LockingDb(graphs=["test_here"], connection=conn)
+    assert safe_graph_delete(db, "test_here", detach=False, drop=True,
+                             wait_s=5.0) is True, \
+        "a lock that frees up within wait_s must be acquired, not refused"
+    assert len([c for c in conn.commands if c[0] == "SET"]) == 4, \
+        f"the loser must POLL, not refuse on the first refusal: {conn.commands}"
+    assert db.calls == [("delete", "test_here")]
 
 
 def test_lock_released_when_the_drop_raises():
