@@ -1372,8 +1372,8 @@ def _write_capture_turns(
     in the batched statement (both lanes reach this writer, so the count is
     recorded per session at the ONE chokepoint). The text itself was already
     scrubbed upstream in ``_capture_turn_texts_with_redactions`` (via
-    ``_redact_turn_contents``) — see that function for why the redaction cannot
-    live here — and the count is taken from the SAME
+    ``_redact_turn_contents``) — ``_capture_turn_texts`` carries why the control
+    cannot live here — and the count is taken from the SAME
     window, so it covers the spans the session ``:Source`` sink and the
     extractor scrub over the same stored window. When the Source is handed the
     raw conversation these are different OBJECTS holding the same first

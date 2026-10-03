@@ -11705,9 +11705,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # #4194/#3086: the encode runs OFF the event loop on the capture pool. SDK
     # `capture_session` is synchronous (there is no loop to free) and calls
     # the same helper inline — the two share the helper, not the scheduling.
-    # #4194/#4911: the scrub is part of COMPUTING the stored text, so it runs
-    # HERE, off the event loop, on the capture pool, and the writer below and
-    # the linker further down REUSE this exact result instead of recomputing it.
+    # #4194/#4911: the scrub is part of COMPUTING the stored text, so it is done
+    # inside the off-loop primitive below (capture pool); the embedding batch and
+    # the linker further down REUSE the RETURNED texts instead of recomputing
+    # them.
     # The scrub is ~3 s/MB of client-controlled text (measured: 0.97 s @220k,
     # linear), and a legal-maximum 500x5,000 capture is 2.5 MB. Reuse removes
     # the two passes this lane used to pay for the SAME window — the embedding
