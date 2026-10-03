@@ -41,7 +41,7 @@ def sup(tmp_path):
 
 
 def _rebuild(sdk, events_dir) -> None:
-    sdk._get_proj().rebuild_all(str(events_dir))
+    sdk._get_proj().rebuild_all(str(events_dir), confirm_destructive=True)
 
 
 def _sem_edges(proj, pid: str) -> set:
@@ -944,7 +944,7 @@ def _apply_replay(sdk, events_dir) -> None:
     canonical apply()-based engine. ``consistency.recover_from_log`` and
     ``backup.restore`` are independent replay loops wired to the SAME shared
     plan (``plan_point_restamp_folds`` + ``apply_journal_point_restamp``)."""
-    sdk._get_proj().rebuild(EventLog(str(events_dir / "events.jsonl")))
+    sdk._get_proj().rebuild(EventLog(str(events_dir / "events.jsonl")), confirm_destructive=True)
 
 
 def test_apply_replay_folds_supersede(sup):
@@ -1160,7 +1160,7 @@ def test_apply_replay_matches_rebuild_all_when_a_promote_is_the_only_record(
         # synthetic ``PointAdded`` (#548) — which would restore exactly the
         # ``PointAdded`` for ``b`` this shape removes. Empty the graph first.
         proj.g.query("MATCH (n) DETACH DELETE n")
-        proj.rebuild_all(str(synth_dir))
+        proj.rebuild_all(str(synth_dir), confirm_destructive=True)
         via_all = _point_state(sdk, b)
         assert via_all["status"] == "live", (
             f"{promote_type}: a terminalizer before the node existed must not "
@@ -1212,7 +1212,7 @@ def test_apply_replay_routes_a_type_in_point_terminalizer_through_the_plan(
 
     proj = sdk._get_proj()
     proj.g.query("MATCH (n) DETACH DELETE n")
-    proj.rebuild_all(str(synth_dir))
+    proj.rebuild_all(str(synth_dir), confirm_destructive=True)
     via_all = _point_state(sdk, a)
     assert via_all["status"] == "superseded"
     corr_all = _successors(proj)
@@ -1248,7 +1248,7 @@ def test_apply_replay_matches_rebuild_all_on_a_nested_terminalizer_payload(
 
     proj = sdk._get_proj()
     proj.g.query("MATCH (n) DETACH DELETE n")
-    proj.rebuild_all(str(synth_dir))
+    proj.rebuild_all(str(synth_dir), confirm_destructive=True)
     via_all = _point_state(sdk, a)
     assert via_all["status"] == "superseded"
     assert via_all["outdated"] is True
@@ -1433,7 +1433,7 @@ def test_terminalizer_successor_created_later_folds_the_same_on_every_engine(
 
         # rebuild_all (trailing sweep) — the reference value.
         proj.g.query("MATCH (n) DETACH DELETE n")
-        proj.rebuild_all(str(synth_dir))
+        proj.rebuild_all(str(synth_dir), confirm_destructive=True)
         via_all = _observable()
 
         # rebuild(EventLog) — the chronological apply() arm.
@@ -1487,7 +1487,7 @@ def test_supersede_then_revision_does_not_end_at_the_supersede_ts(sup):
         return out[0], out[1], out[2]
 
     proj.g.query("MATCH (n) DETACH DELETE n")
-    proj.rebuild_all(str(events))
+    proj.rebuild_all(str(events), confirm_destructive=True)
     via_all = _row()
 
     _apply_replay(sdk, events)
@@ -1559,7 +1559,7 @@ def test_deferred_corrects_sweep_does_not_resurrect_a_deleted_successor(sup):
         _synthesize_journal(synth_dir / "events.jsonl", entries)
 
         proj.g.query("MATCH (n) DETACH DELETE n")
-        proj.rebuild_all(str(synth_dir))
+        proj.rebuild_all(str(synth_dir), confirm_destructive=True)
         via_all = _corr(proj, "a", "s2")
 
         _apply_replay(sdk, synth_dir)
@@ -1627,7 +1627,7 @@ def test_terminalizer_successor_field_is_type_scoped_on_every_engine(sup):
                 "RETURN s.id").result_set)
 
         proj.g.query("MATCH (n) DETACH DELETE n")
-        proj.rebuild_all(str(synth_dir))
+        proj.rebuild_all(str(synth_dir), confirm_destructive=True)
         via_all = _edges()
         _apply_replay(sdk, synth_dir)
         via_apply = _edges()

@@ -321,7 +321,7 @@ def test_rebuild_all_loses_edge_messages_while_node_belief_survives(
         f"IMPL edges undressed, so the restored-edge equality below would be "
         f"a proxy that can pass while an edge is genuinely lost")
 
-    proj.rebuild_all(str(events))
+    proj.rebuild_all(str(events), confirm_destructive=True)
 
     edges_after = proj.g.query(
         "MATCH (:Point)-[r:IMPL]->(:Point) RETURN count(r)").result_set[0][0]
