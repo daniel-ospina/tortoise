@@ -61,12 +61,17 @@ Two consequences, both stated rather than implied:
   environment break into a quiet coverage hole. (`importorskip` also aborts on
   every leg, not just the URI-less one.)
 * the residual is a test module that aborts collection through a spelling NEITHER
-  half carries (e.g. an aliased helper). The tripwire below is deliberately
-  BROADER than the candidate filter for exactly that reason — it flags any
-  non-handler `SkipTest` reference, not just the raise-anchored spelling, because
-  nothing else would surface a helper-only abort. An abort via
-  `pytest.exit`/`sys.exit` is a collection ERROR (rc≠5), not this rc=5 shape, and
-  belongs to the attribution half tracked on the issue.
+  half carries, e.g. an ALIASED raise (`_SKIP = unittest.SkipTest`). The tripwire
+  below is deliberately BROADER than the candidate filter for exactly that reason
+  — it flags any non-handler `SkipTest` reference, not just the raise-anchored
+  spelling — so the alias is caught when it lives in a helper, which is where a
+  shared abort mechanism belongs. The same alias written INSIDE a `test_*.py`
+  module that never names the URI is the one unclosed corner, and it is stated
+  rather than implied: the tripwire cannot scan test modules without
+  false-positiving on their string fixtures, so the bound here is "exact over the
+  candidate set, never over the tree". An abort via `pytest.exit`/`sys.exit` is a
+  collection ERROR (rc≠5), not this rc=5 shape, and belongs to the attribution
+  half tracked on the issue.
 
 A module emptied by some other cause (the manifest's own `-m` marker, a
 collection error) is the *attribution* half of #6884, recorded separately on the
@@ -106,8 +111,11 @@ _POSITIONAL_SKIP_RE = re.compile(r"pytest\.skip\(\s*[^,()]+,\s*True\s*[,)]")
 def _carries_module_abort(src: str) -> bool:
     """The abort spellings a module can carry ITSELF, all yielding the rc=5 shape.
 
-    Shared by the candidate filter and the tripwire so the two cannot drift into
-    disagreeing about what an abort mechanism is.
+    This is the CANDIDATE FILTER's list, and it is deliberately narrow: a
+    candidate the filter misses surfaces as a red census over the probe's own
+    output, so a miss is visible. The tripwire does NOT use this — it uses the
+    broader `_references_skip_mechanism`, because the tripwire guards the
+    residual, where nothing else would surface.
     """
     return (
         "allow_module_level" in src
@@ -281,23 +289,26 @@ def test_only_candidate_shaped_files_carry_the_module_skip_mechanism() -> None:
     """The census is exact over its candidate set, so the mechanism may not
     appear outside it.
 
-    `_candidate_modules()` scans `test_*.py` files that READ the URI. A skip
-    living in a shared helper that a test module imports and calls at import is
-    therefore invisible: the caller never names the URI, the census reports
-    "declared == observed" while the module aborts collection in a URI-less leg.
-    Rather than chase mechanism spellings across files, this forbids ANY
-    module-level collection-abort mechanism anywhere under `tests/` that the
-    census does not read — if a helper needs one, the census must be widened
-    deliberately at the same time. (A helper carrying it OUTSIDE `tests/`
-    remains a stated residual: the scan is scoped to the suite because that is
-    where the census and `integrity()` look.)
+    `_candidate_modules()` scans `test_*.py` files that NAME the URI or carry an
+    abort spelling. A skip living in a shared helper that a test module imports
+    and calls at import is therefore invisible: the caller never names the URI,
+    the census reports "declared == observed" while the module aborts collection
+    in a URI-less leg. Rather than chase mechanism spellings across files, this
+    forbids any module-level collection-abort mechanism in a HELPER under
+    `tests/` that the census does not scan — if a helper needs one, the census
+    must be widened deliberately at the same time.
 
-    The offender set is the spellings that abort collection at import with the
-    rc=5 "no tests collected" shape: `allow_module_level` (pytest.skip /
-    pytest.importorskip, which all accept it) and a `raise …SkipTest` (which
-    carries no `allow_module_level` literal at all — the spelling a mechanism
-    filter missed). Both come from `_carries_module_abort`, so the tripwire and
-    the candidate filter cannot drift apart.
+    The scope is `*.py` files that are NOT `test_*.py`, plus the `e2e/`
+    exclusion. Two residuals follow, and both are stated rather than implied:
+    a helper carrying the mechanism OUTSIDE `tests/`, and an abort spelled
+    inside a `test_*.py` module that neither half of the filter covers. The
+    second cannot be closed here: test modules legitimately contain these
+    spellings as string fixtures (this file does), so scanning them would
+    false-positive on unrelated work.
+
+    The offender set is `_references_skip_mechanism` — deliberately BROADER than
+    the filter's `_carries_module_abort` (any non-handler `SkipTest` reference,
+    so an aliased or parenthesised raise in a helper is caught).
     """
     offenders = sorted(
         str(p.relative_to(TESTS))
