@@ -1154,8 +1154,10 @@ def test_wipe_server_tolerates_a_graph_dropped_by_an_unguarded_peer():
     between wipe_server's presence read and its delete, and the server answers
     with the missing-graph error. That is idempotent SUCCESS (cycle-5 P2-3),
     not a sweep failure — without the tolerance a benign concurrent delete reds
-    the sweep. Contrast test_wipe_server_failure_is_collected, whose injected
-    error is a DIFFERENT shape and must still collect."""
+    the sweep. The counterpart — a GENUINE error in this SAME delete loop must
+    still collect — is test_wipe_server_collects_a_genuine_drop_failure; the
+    older test_wipe_server_failure_is_collected injects its failure in the
+    DETACH phase and so never reaches this loop."""
 
     class _Gone:
         def __init__(self, name):
@@ -1171,7 +1173,30 @@ def test_wipe_server_tolerates_a_graph_dropped_by_an_unguarded_peer():
     db.select_graph = lambda name: _Gone(name)
     proj = _FakeProj(db=db)
     wipe_server(proj, scope={"test_ws_race"}, drop=True)  # must NOT raise
-    assert db.deleted == [], "the peer had already deleted it"
+
+
+def test_wipe_server_collects_a_genuine_drop_failure():
+    """Review P3: the COUNTERPART to the tolerance test. The delete loop must
+    still COLLECT a genuine command error — a blanket `except: continue` would
+    silently swallow real GRAPH.DELETE failures, which is exactly why the
+    comment reads "only genuine command errors collect". Without this test the
+    collect branch of that loop is unpinned in either direction."""
+
+    class _Broken:
+        def __init__(self, name):
+            self._name = name
+
+        def query(self, q, *a, **k):
+            return types.SimpleNamespace(result_set=[])
+
+        def delete(self):
+            raise RuntimeError("connection reset by peer")
+
+    db = _FakeDb(graphs=["test_ws_broken"])
+    db.select_graph = lambda name: _Broken(name)
+    proj = _FakeProj(db=db)
+    with pytest.raises(RuntimeError, match=r"GRAPH\.DELETE failed"):
+        wipe_server(proj, scope={"test_ws_broken"}, drop=True)
 
 
 def test_sweep_dedupes_journal_entries(tmp_path):

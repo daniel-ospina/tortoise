@@ -162,7 +162,10 @@ def test_lock_is_held_across_the_drop_and_released():
     # live peer's lock), and a delete of the WRONG key. A blind or inverted
     # release lets an EXPIRED holder evict the CURRENT holder, so up to three
     # guarded deleters can enter together. Case-insensitive, and Lua comments
-    # are stripped, so a correct script written differently is not false-redded.
+    # are stripped. This is a STRUCTURAL check over a frozen constant: it
+    # rejects the shapes above and does not attempt to be a Lua interpreter,
+    # so a correct script using a local key variable, or one carrying an
+    # ADDITIONAL unconditional delete after `end`, is outside what it decides.
     script = conn.commands[-1][1]
     code = "\n".join(
         line.split("--", 1)[0] for line in script.lower().splitlines())
