@@ -1543,6 +1543,27 @@ class TestRecordConstructionReadsTheCanonicalConstants:
         assert set(seen) == {60.0}, f"a call site passed something else: {seen}"
         assert rec["load"]["ceiling"] == 60.0
 
+    def test_an_unusable_sample_does_not_also_claim_to_be_above_the_ceiling(
+        self, monkeypatch
+    ):
+        # The two reasons must be DISJOINT. `-1.0` is the `LOAD_UNMEASURED` sentinel
+        # and `-1.0 <= 60.0` is True, so it is not "above the ceiling" at all.
+        # Re-asserting the sample's usability inside `load-above-ceiling` (the first
+        # version did) recorded BOTH reasons, so `verdict.violations` — persisted, and
+        # printed as the human diagnostic — asserted a contravention that did not
+        # happen, while hiding that it was the SAMPLE check doing the work.
+        files = list(ee.FAMILY_REPRODUCERS)
+        runs = [
+            self._run(files, 1, "unexpected-divergence"),
+            self._run(files, 2, "unexpected-divergence"),
+        ]
+        runs[1]["load"]["before"] = ee.LOAD_UNMEASURED
+        rec = self._record(monkeypatch, runs)
+        rec["load"]["ceiling"] = 60.0
+        _, reasons = ee.closes_issue(rec)
+        assert "load-sample-unusable" in reasons
+        assert "load-above-ceiling" not in reasons
+
     def test_record_rejects_a_red_that_observed_a_different_file_list(self, monkeypatch):
         files = list(ee.FAMILY_REPRODUCERS)
         runs = [

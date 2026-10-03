@@ -1300,9 +1300,18 @@ def closes_issue(rec: dict) -> tuple[bool, list[str]]:
     # unreadable", and a negative load is not a measurement.
     ok &= conj("load-sample-unusable",
                all(b is not None and b >= 0.0 for b in _befores))
-    ok &= conj("load-above-ceiling",
-               _ceiling_usable and all(
-                   b is not None and b >= 0.0 and b <= _ceiling for b in _befores))
+    # "No run began above the declared ceiling." Evaluated ONLY over USABLE samples,
+    # so the two reasons are DISJOINT: a `-1.0` sentinel is not above the ceiling
+    # (`-1.0 <= 60.0`), and re-asserting usability here — which the first version did
+    # — recorded a contravention that did not happen into `verdict.violations`, the
+    # one list a human reads, while hiding that it was the SAMPLE check doing the
+    # work. An unusable sample is not silently admissible: `load-sample-unusable`
+    # refuses the record above.
+    _above_ceiling = [
+        b for b in _befores
+        if b is not None and b >= 0.0 and _ceiling is not None and b > _ceiling
+    ]
+    ok &= conj("load-above-ceiling", not _above_ceiling)
     # `attempted` is deliberately NOT an AND-term here: `main()` rejects `--n < 2`,
     # so the producer could only ever set it True and it supplied no protection. The
     # falsifiable claim is `rate_change` (a red was demonstrated and did not appear
