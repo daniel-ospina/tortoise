@@ -72,6 +72,9 @@ EXIT CONTRACT
     0  GRAPH_UP (and, when probed, the engine answered)
     2  not usable: ENGINE_WEDGED or GRAPH_DOWN — a caller that must not proceed
        on a broken substrate can gate on this without parsing prose
+    3  UNMEASURABLE: the probes returned nothing usable (a malformed result, or
+       a rediss:// target this plaintext probe cannot address). Distinct from 2
+       on purpose: "broken" and "could not tell" are different recoveries.
 
     1  is reserved for a rejected `--timeout` (must be > 0). Note that argparse
        itself exits 2 on a malformed argument (`--timeout abc`), so the two
@@ -125,10 +128,17 @@ UNMEASURABLE = "UNMEASURABLE"
 def probe_graph(host: str, port: int, timeout: float) -> dict:
     """Bounded TCP connect + Redis PING. Never raises; always returns a dict.
 
-    `ok` is True only on a real PONG — a connect that succeeds but yields no
-    reply inside the bound is `ok=False` with `error='read-timeout'`, which is
-    the shape the wedged-engine case produces and which must not be read as a
-    successful probe.
+    `ok` is True only when the endpoint SPEAKS REDIS — a `+PONG`, or any other
+    protocol line. That second half matters: a server that answers
+    `-NOAUTH Authentication required.` is demonstrably UP, and this repo's own
+    canonical URI is credential-bearing (`.env.example`), so requiring `PONG`
+    reported a reachable graph as GRAPH_DOWN — the misdiagnosis inverted. The
+    probe does not AUTH: it is asking whether the substrate answers, not whether
+    this client is authorised.
+
+    A connect that succeeds but yields no reply inside the bound is `ok=False`
+    with `error='timeout'` — the shape a wedged engine produces, which must not
+    be read as a successful probe.
     """
     started = time.monotonic()
     sock = None
@@ -138,10 +148,14 @@ def probe_graph(host: str, port: int, timeout: float) -> dict:
         sock.sendall(b"PING\r\n")
         reply = sock.recv(64)
         elapsed = time.monotonic() - started
-        ok = b"PONG" in reply
+        text = reply.decode("utf-8", "replace").strip()
+        #: Redis replies are one of +, -, :, $, *. Anything else is some other
+        #: service on the port — reachable, but not the graph.
+        speaks_redis = bool(text) and text[0] in "+-:$"
+        ok = b"PONG" in reply or speaks_redis
         return {
             "ok": ok,
-            "reply": reply.decode("utf-8", "replace").strip(),
+            "reply": text,
             "error": None if ok else "unexpected-reply",
             "elapsed_s": round(elapsed, 3),
         }
@@ -233,29 +247,50 @@ def classify(graph: dict, engine: Optional[dict]) -> str:
     return GRAPH_UP if graph["ok"] else GRAPH_DOWN
 
 
-def redis_port_from_env() -> Optional[int]:
-    """The graph port from TORTOISE_DB_URI, when it names a docker:// target.
+def graph_target_from_env() -> Optional[tuple]:
+    """The `(host, port, scheme)` from TORTOISE_DB_URI, or None.
 
-    Parsed with `urlsplit` rather than a `:` split, because a colon in the URI
-    need not be the port separator: `docker://:pw@::1/tortoise` has an IPv6
-    host and NO port, and `rpartition(":")` would read the last `1` of `::1` as
-    a port. `.port` returns None for a missing port and raises for a malformed
-    one, so a typo yields None instead of a confident wrong number; the caller
-    then falls back to DEFAULT_PORT, whose own hazard (`::1` hosts a second,
-    near-empty FalkorDB — #6666) is why this probe defaults to `127.0.0.1`.
+    Every scheme `tortoise.config.SUPPORTED_URI_SCHEMES` declares is honoured —
+    not just `docker://` — and the HOST is returned as well as the port. Reading
+    only the port discarded the host, so a `redis://prod-graph.example.com:16400`
+    URI was silently probed at `127.0.0.1:16379`: a DOWN remote graph read
+    GRAPH_UP on any host with a local graph (a false green, the one direction a
+    caller gating on the exit code cannot detect).
+
+    A port that is absent, non-numeric or out of range yields None rather than a
+    confident wrong number, and `urlsplit` is used rather than a `:` split
+    because a colon in the URI need not be the port separator (an IPv6 host has
+    several). `rediss://` is returned with its scheme so the caller can refuse
+    it: a plaintext PING cannot speak TLS, and a verdict about an endpoint the
+    tool cannot address would be a guess.
     """
     uri = os.environ.get("TORTOISE_DB_URI", "")
-    if not uri.startswith("docker://"):
+    if not uri:
+        return None
+    parts = urlsplit(uri)
+    if parts.scheme not in ("docker", "redis", "rediss"):
         return None
     try:
-        return urlsplit(uri).port
+        port = parts.port
     except ValueError:
         return None
+    if port is None:
+        return None
+    return (parts.hostname or DEFAULT_HOST, port, parts.scheme)
+
+
+#: Kept for callers that only want the port (the module's own history, and the
+#: tests that pin the parsing). Derived, so the two cannot disagree.
+def redis_port_from_env() -> Optional[int]:
+    """The graph port from TORTOISE_DB_URI, when it names a supported target."""
+    target = graph_target_from_env()
+    return target[1] if target else None
 
 
 def main(argv: Optional[list] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--host", default=DEFAULT_HOST)
+    ap.add_argument("--host", default=None,
+                    help=f"graph host (default {DEFAULT_HOST}, or TORTOISE_DB_URI's)")
     ap.add_argument("--port", type=int, default=None,
                     help=f"graph port (default {DEFAULT_PORT}, or TORTOISE_DB_URI's)")
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,
@@ -269,72 +304,97 @@ def main(argv: Optional[list] = None) -> int:
         print("engine_probe: --timeout must be > 0", file=sys.stderr)
         return 1
 
-    port = args.port if args.port is not None else (
-        redis_port_from_env() or DEFAULT_PORT)
-    graph = probe_graph(args.host, port, args.timeout)
+    # The URI supplies host AND port; the flags override it field by field, so
+    # `--port` alone still probes the URI's host and vice versa. Both flags
+    # default to None so "not given" is distinguishable from "given the default".
+    target = graph_target_from_env()
+    if target and target[2] == "rediss":
+        # A plaintext PING cannot speak TLS. Answering GRAPH_DOWN would blame a
+        # graph this tool never reached; UNMEASURABLE is the honest verdict.
+        print(f"engine_probe: TORTOISE_DB_URI names a rediss:// target "
+              f"({target[0]}:{target[1]}); this probe speaks plaintext only, so "
+              f"it cannot tell you whether that graph is up.", file=sys.stderr)
+        return 3
+    env_host = target[0] if target else DEFAULT_HOST
+    env_port = target[1] if target else DEFAULT_PORT
+    host = args.host if args.host is not None else env_host
+    port = args.port if args.port is not None else env_port
+
+    graph = probe_graph(host, port, args.timeout)
     engine = None if args.no_docker else probe_engine(args.timeout)
     verdict = classify(graph, engine)
+    _report(args, verdict, graph, host, port, engine)
+    if verdict == GRAPH_UP:
+        return 0
+    if verdict == UNMEASURABLE:
+        return 3
+    return 2
 
+
+def _report(args, verdict: str, graph: dict, host: str, port: int,
+            engine: Optional[dict]) -> None:
+    """Print the human summary or the JSON. Split out so the rediss refusal and
+    the normal path cannot drift apart in what they report."""
+    sock = docker_socket()
     result = {
         "verdict": verdict,
-        "graph": {"host": args.host, "port": port, **graph},
+        "graph": {"host": host, "port": port, **graph},
         "engine": engine,
-        "docker_socket": str(docker_socket()) if docker_socket() else None,
+        "docker_socket": str(sock) if sock else None,
         "timeout_s": args.timeout,
     }
     if args.json:
         print(json.dumps(result, indent=2))
+        return
+    print(f"graph  {host}:{port} -> "
+          f"{graph.get('reply') or graph.get('error') or graph.get('ok')} "
+          f"({graph.get('elapsed_s')}s)")
+    if engine is None:
+        print("engine not probed (--no-docker)")
     else:
-        sock = result["docker_socket"]
-        print(f"graph  {args.host}:{port} -> "
-              f"{'PONG' if graph['ok'] else graph.get('error')} "
-              f"({graph['elapsed_s']}s)")
+        print(f"engine -> {engine.get('status')} "
+              f"({engine.get('detail')}) ({engine.get('elapsed_s')}s)"
+              + (f" socket={sock}" if sock else ""))
+    print(f"VERDICT: {verdict}")
+    if verdict == ENGINE_WEDGED:
+        # Word this from the MEASURED detail, never from an asserted mechanism:
+        # a timeout, a missing CLI with a live socket, an OSError and an
+        # unrecognised status all arrive here, and only one of them "did not
+        # answer inside the bound". Asserting a cause the probe did not observe
+        # is the misdiagnosis this tool exists to remove.
+        cause = (engine or {}).get("detail", "unknown")
+        print(f"  The container engine is not usable ({cause}), so a graph "
+              f"result cannot be\n  trusted here. Every docker call may hang, "
+              f"and a graph timeout cannot be\n  attributed — this is not "
+              f"necessarily a graph failure. Do NOT stand up a\n  second graph "
+              f"instance and do NOT point at the hosted API (see #7017).")
+    elif verdict == UNMEASURABLE:
+        print("  The probes did not return usable results, so no verdict is "
+              "possible. Re-read the\n  raw output above rather than acting on "
+              "a guess.")
+    elif verdict == GRAPH_DOWN:
         if engine is None:
-            print("engine not probed (--no-docker)")
+            print("  The graph port is unreachable and the engine was NOT "
+                  "probed (--no-docker),\n  so a wedged engine cannot be "
+                  "ruled out. Re-run without --no-docker before\n  treating "
+                  "this as a graph problem.")
+        elif engine.get("status") == ENGINE_ABSENT:
+            print("  No engine is in play (no docker CLI and no engine socket), "
+                  "so the graph port\n  itself is unreachable. Check the graph "
+                  "container and the canonical instance\n  (127.0.0.1, never "
+                  "`localhost` — #6666).")
+        elif engine.get("status") == ENGINE_DAEMON_DOWN:
+            print("  The docker daemon is not running, so docker calls fail "
+                  "fast rather than hang and\n  the graph port itself is "
+                  "unreachable. Check the graph container and the\n  "
+                  "canonical instance (127.0.0.1, never `localhost` — #6666).")
         else:
-            print(f"engine -> {engine['status']} "
-                  f"({engine['detail']}) ({engine['elapsed_s']}s)"
-                  + (f" socket={sock}" if sock else ""))
-        print(f"VERDICT: {verdict}")
-        if verdict == ENGINE_WEDGED:
-            # Word this from the MEASURED detail, never from an asserted
-            # mechanism: a timeout, a missing CLI with a live socket, an OSError
-            # and an unrecognised status all arrive here, and only one of them
-            # "did not answer inside the bound". Asserting a cause the probe did
-            # not observe is the misdiagnosis this tool exists to remove.
-            cause = engine["detail"] if engine else "not probed"
-            print(f"  The container engine is not usable ({cause}), so a graph "
-                  f"result cannot be\n  trusted here. Every docker call may "
-                  f"hang, and a graph timeout cannot be\n  attributed — this "
-                  f"is not necessarily a graph failure. Do NOT stand up a\n  "
-                  f"second graph instance and do NOT point at the hosted API "
-                  f"(see #7017).")
-        elif verdict == UNMEASURABLE:
-            print("  The probes did not return usable results, so no verdict is "
-                  "possible. Re-run and\n  read the raw output above rather "
-                  "than acting on a guess.")
-        elif verdict == GRAPH_DOWN:
-            if engine is None:
-                print("  The graph port is unreachable and the engine was NOT "
-                      "probed (--no-docker),\n  so a wedged engine cannot be "
-                      "ruled out. Re-run without --no-docker before\n  treating "
-                      "this as a graph problem.")
-            elif engine.get("status") == ENGINE_ABSENT:
-                print("  No engine is in play (no docker CLI and no engine socket), "
-                      "so the graph port\n  itself is unreachable. Check the "
-                      "graph container and the canonical instance\n  (127.0.0.1, "
-                      "never `localhost` — #6666).")
-            elif engine.get("status") == ENGINE_DAEMON_DOWN:
-                print("  The docker daemon is not running, so docker calls fail "
-                      "fast rather than hang and\n  the graph port itself is "
-                      "unreachable. Check the graph container and the\n  "
-                      "canonical instance (127.0.0.1, never `localhost` — #6666).")
-            else:
-                print("  The engine answered, so the graph port itself is "
-                      "unreachable. Check the\n  graph container and the "
-                      "canonical instance (127.0.0.1, never `localhost` — "
-                      "#6666).")
-    return 0 if verdict == GRAPH_UP else 2
+            print("  The engine answered, so the graph port itself is "
+                  "unreachable. Check the\n  graph container and the "
+                  "canonical instance (127.0.0.1, never `localhost` — #6666).")
+    if host not in ("127.0.0.1", "localhost") and verdict != GRAPH_UP:
+        print("  NOTE: this probed a non-loopback host from TORTOISE_DB_URI; "
+              "the #6666 warning\n  about `localhost` does not apply.")
 
 
 if __name__ == "__main__":

@@ -193,6 +193,58 @@ def test_probe_graph_bounds_a_silent_peer(monkeypatch):
         server.close()
 
 
+def test_a_credentialed_graph_is_up_not_down(monkeypatch):
+    """(a) FAILS if only `+PONG` counts as up. Redis answers a pre-AUTH PING with
+    `-NOAUTH Authentication required.`, and this repo's canonical URI is
+    credential-bearing (`.env.example`), so requiring PONG reported a REACHABLE
+    graph as GRAPH_DOWN with the prose pointing at the graph container — the
+    #4844/#7017 misdiagnosis inverted.
+    (b) Reachable: the default developer config, and the behaviour is already
+    documented in tests/test_restore_container_recovery.py.
+    """
+    server = _one_shot_server(b"-NOAUTH Authentication required.\r\n")
+    port = server.getsockname()[1]
+    result = e.probe_graph("127.0.0.1", port, timeout=2.0)
+    assert result["ok"] is True, result
+    assert result["reply"].startswith("-NOAUTH"), result
+    assert e.classify(result, {"status": e.ENGINE_OK}) == e.GRAPH_UP
+
+
+def test_a_non_redis_service_on_the_port_is_not_up(monkeypatch):
+    """(a) FAILS if ANY reply is read as a reachable graph. The port-reachable
+    test must not become "any bytes = up"; only the Redis protocol framing does.
+    (b) Reachable: something else (an HTTP server, a proxy) bound on the port.
+    """
+    server = _one_shot_server(b"GET / HTTP/1.0\r\n\r\n")
+    port = server.getsockname()[1]
+    result = e.probe_graph("127.0.0.1", port, timeout=2.0)
+    assert result["ok"] is False, result
+    assert e.classify(result, {"status": e.ENGINE_OK}) == e.GRAPH_DOWN
+
+
+def _one_shot_server(payload: bytes) -> socket.socket:
+    """Accept one connection, reply `payload`, close. Returns the listening
+    socket (its port is already bound)."""
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+
+    def serve():
+        try:
+            conn, _ = server.accept()
+            with conn:
+                conn.recv(64)
+                conn.sendall(payload)
+        except OSError:
+            pass
+        finally:
+            server.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return server
+
+
 def test_probe_graph_reports_a_real_pong(monkeypatch):
     """(a) FAILS if a successful read is not read as success — the happy path
     must be reachable, or the tool can never say GRAPH_UP.
@@ -221,6 +273,26 @@ def test_probe_graph_reports_a_real_pong(monkeypatch):
     t.join(timeout=2.0)
     assert result["ok"] is True, result
     assert result["reply"] == "+PONG"
+
+
+def test_the_connect_bound_is_passed_once_per_call(monkeypatch):
+    """(a) FAILS if the CONNECT bound is dropped — the property the closed-port
+    test cannot see, because a refused connect returns immediately on loopback.
+    It matters for the blackholed-remote case `--timeout` exists to cover: the
+    bound is the only thing between a dropped packet and a hang.
+    (b) Reachable: removal of `timeout=timeout` from create_connection, which the
+    sibling read-bound test does not detect.
+    """
+    seen = []
+    real = socket.create_connection
+
+    def spy(address, timeout=None, **kw):
+        seen.append(timeout)
+        return real(address, timeout=timeout, **kw)
+
+    monkeypatch.setattr(e.socket, "create_connection", spy)
+    e.probe_graph("127.0.0.1", 1, timeout=1.5)
+    assert seen == [1.5], f"connect bound not passed: {seen}"
 
 
 def test_probe_engine_treats_a_slow_answer_as_wedged(monkeypatch):
@@ -307,6 +379,24 @@ def test_a_missing_cli_with_a_live_socket_is_unmeasured_not_absent(monkeypatch):
 # CLI contract
 # ==========================================================================
 
+def test_the_graph_line_shows_the_actual_reply_not_a_literal_pong(capsys):
+    """(a) FAILS if the summary prints the literal `PONG` whenever `ok` is true.
+    It printed `PONG` for a `-NOAUTH` reply, so an operator reading the line
+    would believe the graph was authenticated and answering — the display then
+    contradicts the very distinction the probe was just taught to make.
+    (b) Reachable: measured live — a byte-accurate `-NOAUTH` server produced
+    `graph 127.0.0.1:56848 -> PONG` before this fix.
+    """
+    server = _one_shot_server(b"-NOAUTH Authentication required.\r\n")
+    port = server.getsockname()[1]
+    e.main(["--no-docker", "--port", str(port), "--timeout", "2"])
+    out = capsys.readouterr().out
+    assert "-NOAUTH" in out, out
+    assert "-> PONG" not in out, out
+    # the verdict is still up: the endpoint demonstrably answered
+    assert "VERDICT: GRAPH_UP" in out, out
+
+
 def test_main_exits_two_when_the_graph_is_unreachable(monkeypatch):
     """(a) FAILS if a broken substrate exits 0, which would let a caller gate
     on the exit code and be told everything is fine.
@@ -386,6 +476,53 @@ def test_main_rejects_a_nonpositive_timeout():
     (b) Reachable: `--timeout 0`.
     """
     assert e.main(["--timeout", "0"]) == 1
+
+
+def test_redis_and_docker_schemes_both_supply_host_and_port(monkeypatch):
+    """(a) FAILS if only `docker://` is read or the HOST is discarded. Reading
+    only the port silently probed `127.0.0.1:16379` for a
+    `redis://prod-graph.example.com:16400` URI, so a DOWN remote graph read
+    GRAPH_UP wherever a local graph existed — a false green, the one direction a
+    caller gating on the exit code cannot detect.
+    (b) Reachable: `tortoise.config.SUPPORTED_URI_SCHEMES` declares redis/rediss,
+    so these are product-supported URIs.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "redis://prod-graph.example.com:16400/tortoise")
+    assert e.graph_target_from_env() == (
+        "prod-graph.example.com", 16400, "redis")
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@127.0.0.1:16379/tortoise")
+    assert e.graph_target_from_env() == ("127.0.0.1", 16379, "docker")
+    monkeypatch.setenv("TORTOISE_DB_URI", "rediss://g.example.com:6380/t")
+    assert e.graph_target_from_env() == ("g.example.com", 6380, "rediss")
+    monkeypatch.setenv("TORTOISE_DB_URI", "falkor:///tmp/x")
+    assert e.graph_target_from_env() is None
+
+
+def test_a_rediss_target_is_refused_rather_than_guessed(monkeypatch, capsys):
+    """(a) FAILS if a TLS endpoint is probed with a plaintext PING and its
+    failure is reported as GRAPH_DOWN — that blames a graph this tool never
+    reached. "Could not tell" must not be dressed as "broken".
+    (b) Reachable: `rediss://` is a declared supported scheme.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "rediss://g.example.com:6380/t")
+    rc = e.main(["--no-docker", "--timeout", "1"])
+    assert rc == 3, rc
+    assert "rediss" in capsys.readouterr().err
+
+
+def test_an_unmeasurable_probe_exits_three_not_two(monkeypatch, capsys):
+    """(a) FAILS if UNMEASURABLE is folded into 2. "broken substrate" and "could
+    not tell" have different recoveries, and a caller that treats them alike will
+    act on a guess. Without this test the branch is unreachable from the CLI
+    (probe_graph always sets a bool `ok`), so nothing pins it at all.
+    (b) Reachable: any future probe_graph that stops setting `ok`, or a caller
+    that passes a partial result — simulated here by patching the probe.
+    """
+    monkeypatch.setattr(e, "probe_graph", lambda *a, **k: {"reply": "+PONG"})
+    rc = e.main(["--no-docker", "--port", "1", "--timeout", "1"])
+    assert rc == 3, rc
+    assert "UNMEASURABLE" in capsys.readouterr().out
 
 
 def test_redis_port_comes_from_the_uri_when_present(monkeypatch):
