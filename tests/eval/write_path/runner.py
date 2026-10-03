@@ -942,10 +942,9 @@ def run_benchmark(
                         if "corpus drift" in i
                         or i.startswith("manifest verification failed")]
         origin = "hash_mismatch" if drift_issues else "runner_error"
-        return _failed_report(
+        return summary_failed_report(
             run_id, date, commit, pf["fixtures_hash"], resolved_config,
-            origin=origin,
-            detail="; ".join(pf["issues"][:8]), log=log,
+            pf["issues"], origin=origin, label="preflight issues", log=log,
         )
     baseline = pf["baseline"]
     fixtures_hash = pf["fixtures_hash"]
@@ -1030,8 +1029,7 @@ def run_benchmark(
                 )
                 if capture.get("ok") is not True:
                     runner_errors.append(
-                        f"{session_id}: capture ok=False "
-                        f"(errors={capture.get('errors')})"
+                        capture_failure_detail(session_id, capture)
                     )
                 # REVIEW-FIX (cost honesty): accumulate the extractor's
                 # reported cost when the capture telemetry carries it; a
@@ -1204,11 +1202,10 @@ def run_benchmark(
         runner_errors.append(f"sessions with no graded gold units: {no_gold}")
 
     if runner_errors:
-        report = _failed_report(
+        report = summary_failed_report(
             run_id, date, commit, fixtures_hash, resolved_config,
-            origin="runner_error",
-            detail="; ".join(runner_errors[:8]), log=log,
-            session_results=session_results,
+            runner_errors, origin="runner_error", label="runner_errors",
+            log=log, session_results=session_results,
         )
         report["metrics"] = _safe_metrics(session_results)
         report["judge_pin"] = judge_pin
@@ -1390,6 +1387,82 @@ def _failed_report(
         "notes": [],
         "log": log,
     }
+
+
+#: How many failure items the ``detail`` summary carries.  The remainder is
+#: carried in full by the run log, so no cause depends on fitting this bound.
+SUMMARY_BOUND = 8
+
+
+def failed_run_diagnostics(report: dict) -> list[str]:
+    """The diagnostic log lines a run must echo to stdout.
+
+    A ``completed`` run needs none: its artifact is the receipt.  A FAILED
+    run's ``log`` is the diagnosis, and stdio is the one channel that survives
+    independently of ``--out``.
+    """
+    if report.get("run_status") == "completed":
+        return []
+    return [str(line) for line in (report.get("log") or [])]
+
+
+def capture_failure_detail(session_id: str, capture: dict) -> str:
+    """The diagnostic line for ONE failed capture.
+
+    ``capture["errors"]`` is the customer-facing contract and is deliberately
+    generic: ``sdk._capture_resp_error_split`` maps an ``S1 chunk failed:
+    HTTPError: 403 …`` to *"Part of the extraction failed partway through.
+    Retry the capture — the retry will re-attempt it."*  The raw
+    ``S<t>: <TypeName>: <message>`` strings ride the ADDITIVE ``diagnostics``
+    list (``tortoise/sdk.py``, #2335 WI-2).  Carry BOTH, plus ``error``: the
+    ``capture_session`` result always carries ``diagnostics``, but the
+    lighter ``ok=False`` shapes on other seams put their message under
+    ``error`` alone, and a diagnostic that names nothing is the defect here.
+    """
+    return (
+        f"{session_id}: capture ok=False "
+        f"(errors={capture.get('errors')}; "
+        f"diagnostics={capture.get('diagnostics')}; "
+        f"error={capture.get('error')})"
+    )
+
+
+def summary_overflow_line(items: list, *, label: str) -> list[str]:
+    """The log line carrying what a ``detail`` summary dropped.
+
+    ``_failed_report`` is given a ``SUMMARY_BOUND``-bounded ``detail`` (a
+    concise summary for a human reading a receipt).  Items past the bound
+    would otherwise exist nowhere at all, so they ride the log — which is what
+    reaches stdout.  The bound is read from the one module constant rather
+    than taken as a parameter, so the summary and this tail cannot drift apart
+    and silently lose the items between them.
+    """
+    if len(items) <= SUMMARY_BOUND:
+        return []
+    return [
+        f"{label} (all {len(items)}): "
+        + "; ".join(str(i) for i in items[SUMMARY_BOUND:])
+    ]
+
+
+def summary_failed_report(
+    run_id: str, date: str, commit: str, fixtures_hash: str,
+    resolved_config: dict, items: list, *, origin: str, label: str,
+    log: list[str] | None = None, session_results: list[dict] | None = None,
+) -> dict:
+    """A ``_failed_report`` whose log carries ALL ``items``, not just the bound.
+
+    The single place a failure report is built from a list of causes, so the
+    summary/overflow pairing is exercised by the tests rather than re-derived
+    at each call site.
+    """
+    report = _failed_report(
+        run_id, date, commit, fixtures_hash, resolved_config,
+        origin=origin, detail="; ".join(str(i) for i in items[:SUMMARY_BOUND]),
+        log=log, session_results=session_results,
+    )
+    report["log"].extend(summary_overflow_line(items, label=label))
+    return report
 
 
 def _git_head_short() -> str:
@@ -1806,6 +1879,12 @@ def _main(argv: list[str] | None = None) -> int:
         if report.get("notes"):
             for note in report["notes"]:
                 print(f"  note: {note}")
+        # #4860: a failed run states WHY on stdout, not only inside the
+        # receipt.  `--json` already dumps the whole report, but that is an
+        # opt-in flag, so the default invocation printed the status line and
+        # nothing else while the cause lived only in the `--out` file.
+        for line in failed_run_diagnostics(report):
+            print(f"  log: {line}")
         receipt = build_receipt(report)
         issues = validate_receipt(receipt)
         print(f"receipt valid: {not issues}" + (f" ({'; '.join(issues)})" if issues else ""))
