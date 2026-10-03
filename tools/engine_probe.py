@@ -255,12 +255,12 @@ def probe_graph(host: str, port: int, timeout: float) -> dict:
         return {"ok": False, "reply": None, "error": type(exc).__name__,
                 "elapsed_s": round(time.monotonic() - started, 3)}
     except Exception as exc:  # noqa: BLE001 — "Never raises" is the contract
-        # A resolver that raises something unexpected is an UNMEASURED endpoint,
-        # not a timeout and not a verdict. Reporting it as a cause the probe did
-        # not observe is the defect this whole tool exists to remove, and
-        # crashing out of a diagnostic tool is worse: the operator gets no
-        # verdict at all.
-        return {"ok": False, "reply": None,
+        # An exception before any connect is an UNMEASURED endpoint: `ok=None`,
+        # not a verdict. `ok=False` would become a confident GRAPH_DOWN for an
+        # endpoint that was never dialled. Reporting a cause the probe did not
+        # observe is the defect this tool exists to remove, and crashing out of a
+        # diagnostic tool is worse: the operator gets no verdict at all.
+        return {"ok": None, "reply": None,
                 "error": f"{type(exc).__name__}: {exc}",
                 "elapsed_s": round(time.monotonic() - started, 3)}
     finally:
@@ -465,7 +465,11 @@ def _refuse(args, error: str, exc, message: str,
     """
     print(f"engine_probe: {exc}; {message}", file=sys.stderr)
     _report(args, UNMEASURABLE,
-            {"ok": False, "reply": None, "error": error, "elapsed_s": 0.0},
+            # `ok=None`, not False: this endpoint was never reached either, and
+            # `ok=False` is reserved for a MEASURED failure (every address
+            # dialled and refused). A consumer reading `graph.ok` must not be
+            # told "measured down" for a refusal.
+            {"ok": None, "reply": None, "error": error, "elapsed_s": 0.0},
             host or "(not probed)", port if port is not None else 0, None,
             probed=False)
     return 3
@@ -496,7 +500,9 @@ def _report(args, verdict: str, graph: dict, host: str, port: int,
           f"{graph.get('reply') or graph.get('error') or graph.get('ok')} "
           f"({graph.get('elapsed_s')}s)")
     if engine is None:
-        print("engine not probed (--no-docker)")
+        print("engine not probed"
+              + (" (--no-docker)" if args.no_docker
+                 else " (the probe was refused before the engine was reached)"))
     else:
         print(f"engine -> {engine.get('status')} "
               f"({engine.get('detail')}) ({engine.get('elapsed_s')}s)"

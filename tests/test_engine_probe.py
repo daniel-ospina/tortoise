@@ -18,6 +18,8 @@ from __future__ import annotations
 import socket
 import sys
 import threading
+
+_v4 = socket.AF_INET
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -904,6 +906,58 @@ def test_a_non_oserror_resolver_failure_is_not_reported_as_a_timeout(monkeypatch
     assert result["ok"] is None, result
     assert result["error"] != "resolve-timeout", result
     assert "RuntimeError" in result["error"], result
+    assert e.classify(result, {"status": e.ENGINE_OK}) == e.UNMEASURABLE
+
+
+def test_a_refusal_reports_ok_none_not_a_measured_failure(monkeypatch, capsys):
+    """(a) FAILS if a refusal synthesizes `ok: false`. `ok=False` means "every
+    address was dialled and every one failed"; a refusal never reached the
+    endpoint, and `classify` itself treats `ok` as the tri-state authority, so a
+    JSON consumer would read "measured down" for something never contacted.
+    (b) Reachable: both refusal paths (TLS, unresolvable URI).
+    """
+    import json as _json
+    monkeypatch.setenv("TORTOISE_DB_URI", "rediss://g.example.com:6380/t")
+    e.main(["--json", "--no-docker", "--timeout", "1"])
+    payload = _json.loads(capsys.readouterr().out)
+    assert payload["graph"]["ok"] is None, payload
+    assert payload["verdict"] == e.UNMEASURABLE, payload
+
+
+def test_the_engine_line_does_not_claim_a_flag_that_was_not_passed(monkeypatch,
+                                                                   capsys):
+    """(a) FAILS if the summary prints "engine not probed (--no-docker)" on a
+    refusal, where the engine was skipped because the probe was refused, not
+    because the caller passed the flag — asserting a mechanism the probe did not
+    observe, which is the class the earlier rounds closed for the graph prose.
+    (b) Reachable: a TLS refusal without `--no-docker`.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "rediss://g.example.com:6380/t")
+    e.main(["--timeout", "1"])
+    out = capsys.readouterr().out
+    assert "--no-docker" not in out, out
+    assert "refused" in out, out
+
+
+def test_a_pre_connect_exception_is_unmeasured(monkeypatch):
+    """(a) FAILS if the catch-all returns `ok=False`: an exception before any
+    connect is an endpoint never dialled, so `ok=False` becomes a confident
+    GRAPH_DOWN. Not reachable through `main` today (the timeout is validated
+    first, and a huge value is rejected by `Thread.join` as an OverflowError),
+    but `probe_graph` is public and its contract is the tri-state.
+    (b) Reachable: a caller passing a hostile timeout.
+    """
+    monkeypatch.setattr(e, "_resolve_within_bound",
+                        lambda *a: [(_v4, e.socket.SOCK_STREAM,
+                                     e.socket.IPPROTO_TCP, "", ("127.0.0.1", 1))])
+    real_socket = e.socket.socket
+
+    def broken(*a, **k):
+        raise ValueError("Timeout value out of range")
+
+    monkeypatch.setattr(e.socket, "socket", broken)
+    result = e.probe_graph("x.example.com", 1, timeout=-1.0)
+    assert result["ok"] is None, result
     assert e.classify(result, {"status": e.ENGINE_OK}) == e.UNMEASURABLE
 
 
