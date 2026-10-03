@@ -26893,6 +26893,61 @@ _CONNECTOR_SOURCE_TYPES = frozenset({
 _CONNECTOR_SYNC_STATUSES = frozenset({"idle", "syncing", "error", "completed"})
 
 
+def _reject_non_finite_json(v, field: str):
+    """Refuse NaN/Infinity inside a JSON body field with 422, not a 500.
+
+    Bodies are parsed from the wire, where NaN/Infinity are not JSON — but
+    this is defence in depth for a directly-constructed model. The endpoint
+    path is guarded by ``_reject_non_finite_body`` ABOVE this, because a
+    validator alone is not enough: FastAPI's 422 body echoes the offending
+    input and Starlette renders it with ``allow_nan=False``, so the error
+    response itself raises (#2642 re-review P2).
+    """
+    if v is not None:
+        try:
+            _json.dumps(v, allow_nan=False)
+        except ValueError:
+            raise ValueError(
+                f"{field} must not contain a non-finite number (NaN/Infinity)"
+            ) from None
+    return v
+
+
+async def _reject_non_finite_body(request: Request) -> None:
+    """Refuse a JSON body that contains NaN/Infinity, BEFORE model validation.
+
+    ``json.loads`` accepts the three non-standard constants, and the parsed
+    value would otherwise reach the control-plane call, where httpx serializes
+    with ``allow_nan=False`` and raises — surfacing the client's malformed body
+    as a generic 500.
+
+    Rejecting it in a DEPENDENCY (which FastAPI solves before the body params)
+    rather than in a model validator is deliberate: the 422 body FastAPI builds
+    echoes the offending ``input``, and Starlette's ``JSONResponse`` renders with
+    ``allow_nan=False``, so a NaN-echoing 422 raises during rendering and the
+    client still gets a 500. Nothing non-finite ever reaches the error body this
+    way.
+    """
+    if "application/json" not in request.headers.get("content-type", ""):
+        return
+    body = await request.body()
+    if not body:
+        return
+
+    def _bad(const: str):
+        raise HTTPException(
+            status_code=422,
+            detail=f"request body must not contain the non-finite number {const}")
+
+    try:
+        _json.loads(body, parse_constant=_bad)
+    except HTTPException:
+        raise
+    except ValueError:
+        # Malformed JSON is FastAPI's 422 to report, not ours.
+        return
+
+
 class ConnectorCreateRequest(BaseModel):
     source_type: str
     config: dict | None = None
@@ -26905,6 +26960,11 @@ class ConnectorCreateRequest(BaseModel):
                 f"invalid source_type {v!r} — must be one of "
                 f"{sorted(_CONNECTOR_SOURCE_TYPES)}")
         return v
+
+    @field_validator("config")
+    @classmethod
+    def _validate_config(cls, v):
+        return _reject_non_finite_json(v, "config")
 
 
 class ConnectorUpdateRequest(BaseModel):
@@ -26924,6 +26984,11 @@ class ConnectorUpdateRequest(BaseModel):
                 f"{sorted(_CONNECTOR_SYNC_STATUSES)}")
         return v
 
+    @field_validator("config", "sync_cursor")
+    @classmethod
+    def _validate_json_fields(cls, v, info):
+        return _reject_non_finite_json(v, info.field_name)
+
 
 def _require_uuid_connector_id(connector_id: str) -> str:
     """Reject a non-UUID connector id with 422 BEFORE it reaches the seam.
@@ -26939,7 +27004,11 @@ def _require_uuid_connector_id(connector_id: str) -> str:
     except ValueError:
         raise HTTPException(status_code=422,
                             detail="connector_id must be a UUID") from None
-    return connector_id
+    # Return the CANONICAL form. Postgres normalizes every accepted literal
+    # (32-hex, braces, `urn:uuid:`) before comparing, so production matches the
+    # stored row either way; without this the fake's string compare diverges and
+    # a non-canonical id reads as absent (#2642 re-review P2).
+    return str(_uuid_validate.UUID(connector_id))
 
 
 @app.get("/v1/connectors")
@@ -26974,6 +27043,7 @@ async def list_connectors(
 async def create_connector(
     body: ConnectorCreateRequest,
     org: dict = Depends(get_current_org_session_ungated),  # noqa: B008
+    _finite: None = Depends(_reject_non_finite_body),
 ):
     """Create a new connector (no credential yet — OAuth step follows)."""
     from tortoise.supabase_control import (
@@ -27043,6 +27113,7 @@ async def update_connector(
     connector_id: str,
     body: ConnectorUpdateRequest,
     org: dict = Depends(get_current_org_session_ungated),  # noqa: B008
+    _finite: None = Depends(_reject_non_finite_body),
 ):
     """Update connector config/sync state, scoped to the caller's org."""
     from tortoise.supabase_control import (
@@ -27132,7 +27203,16 @@ async def connector_auth(
         }
         auth_url = f"{_GITHUB_AUTHORIZE_URL}?{urlencode(params)}"
         return {"auth_url": auth_url, "state": state}
-    raise HTTPException(status_code=400, detail=f"Unsupported source type: {source_type}")
+    # A KNOWN source type with no flow yet is "not implemented", not "unknown":
+    # answering 400 for `slack` — a valid, creatable connector type — makes a
+    # false statement about the connector model, the same conflation the list
+    # endpoint's 501 exists to avoid (#2642 re-review P2).
+    if source_type in _CONNECTOR_SOURCE_TYPES:
+        raise HTTPException(
+            status_code=501,
+            detail=f"The {source_type} OAuth flow is not implemented yet",
+        )
+    raise HTTPException(status_code=400, detail=f"Unknown source type: {source_type}")
 
 
 def _cleanup_legacy_docs_corpus(org_id: str,

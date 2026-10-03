@@ -483,6 +483,66 @@ def test_non_uuid_connector_id_is_a_422_not_a_500(client) -> None:
         assert r.json()["detail"] == "connector_id must be a UUID"
 
 
+def test_non_finite_json_is_a_422_not_a_500(client) -> None:
+    """NaN/Infinity in a JSON body is refused, and the refusal RENDERS.
+
+    `json.loads` accepts NaN, httpx then serializes the control-plane call with
+    `allow_nan=False` and raises, so the client's malformed body surfaced as a
+    500. A model validator is not enough on its own: FastAPI's 422 body echoes
+    the offending input and Starlette renders it with `allow_nan=False`, so the
+    error response raises during rendering and the caller STILL sees a 500.
+    Hence the request-body dependency, which never lets the value into the error
+    body.
+
+    REDs on: removing `_reject_non_finite_body` (POST → 500) or, with only the
+    model validator present, a 422 that raises while being rendered.
+    """
+    tc, cp = client
+    for literal in ("NaN", "Infinity"):
+        post = tc.post("/v1/connectors",
+                       content='{"source_type":"slack","config":{"x":' + literal + '}}',
+                       headers={"content-type": "application/json"})
+        assert post.status_code == 422, (literal, post.status_code, post.text)
+        assert "non-finite" in post.json()["detail"]
+        patch = tc.patch(f"/v1/connectors/{CONN_A}",
+                         content='{"config":{"x":' + literal + '}}',
+                         headers={"content-type": "application/json"})
+        assert patch.status_code == 422, (literal, patch.status_code, patch.text)
+        # ...and the value never reached the row.
+        mine = next(x for x in cp.tables["connectors"] if x["id"] == CONN_A)
+        assert mine["config"] == {"repo": "alpha"}
+
+
+def test_connector_auth_distinguishes_unknown_from_unimplemented(client) -> None:
+    """A known source type without a flow is 501; only a bad one is 400.
+
+    `slack` is a valid, creatable connector type, so `400 Unsupported source
+    type: slack` states something false about the model — the same conflation
+    the list endpoint's 501 exists to avoid.
+    """
+    tc, _ = client
+    unimplemented = tc.post("/v1/connectors/slack/auth")
+    assert unimplemented.status_code == 501, unimplemented.text
+    unknown = tc.post("/v1/connectors/bitbucket/auth")
+    assert unknown.status_code == 400, unknown.text
+
+
+def test_non_canonical_uuid_id_resolves_to_the_same_row(client) -> None:
+    """A 32-hex uuid literal addresses the row it names.
+
+    Postgres normalizes every accepted uuid literal before comparing, so
+    production matches; the fake's string compare needed the canonical form.
+    REDs on: `_require_uuid_connector_id` returning the raw string.
+    """
+    tc, _ = client
+    assert tc.get(f"/v1/connectors/{CONN_A}").status_code == 200
+    packed = CONN_A.replace("-", "")
+    assert packed != CONN_A and len(packed) == 32
+    r = tc.get(f"/v1/connectors/{packed}")
+    assert r.status_code == 200, r.text
+    assert r.json()["connector"]["id"] == CONN_A
+
+
 def test_duplicate_source_type_is_a_409_not_a_500(client) -> None:
     """A second connector of the same source type in one org → 409.
 
