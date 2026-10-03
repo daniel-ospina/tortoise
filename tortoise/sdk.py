@@ -1240,11 +1240,11 @@ def _capture_turn_id(session_id: str, index: int, turn_offset: int = 0) -> str:
     (``f"{session_id}_t{i}"``).
 
     The CLIENT's constructor (``session_confirm.turn_point_id``) is deliberately
-    its own copy: ``tests/test_session_confirm.py`` asserts the literal
-    ``f"{session_id}_t{i}"`` is still present in this module AND that
-    ``turn_point_id("abc", 0) == "abc_t0"``, so the format is pinned by a test
-    rather than by an import (a version-bound parity — a client on an older
-    table cannot be made to import this module).
+    its own copy: ``tests/test_session_confirm.py`` re-parses this module, drops
+    this function's docstring, and asserts the unparsed BODY still formats
+    ``{session_id}_t<index>`` — so the module's prose cannot satisfy the pin. It
+    is pinned by a test rather than an import (a version-bound parity — a
+    client on an older table cannot be made to import this module).
     """
     return f"{session_id}_t{index + turn_offset}"
 
@@ -1625,11 +1625,12 @@ def _write_session_and_turns(
     SECOND machine overwrite the first machine's id — the subtle regression this
     extraction exists to prevent.
 
-    Returns the facts the callers need without re-deriving them: the turn ids
-    written (offset-aware), the stored turn texts and their redaction counts
-    (hosted reuses the texts for its entity-link pass instead of re-scrubbing),
-    the total redaction count, the ``Session`` record for a journal emit, and
-    the MERGE params.
+    Returns the write facts the callers READ — the stored turn texts (hosted
+    reuses them for its entity-link pass instead of re-scrubbing) and the total
+    redaction count — plus the full post-write state (the offset-aware turn ids,
+    the per-kind redaction counts, the ``Session`` record and the MERGE params)
+    for tests and future consumers. The journal emit rides the
+    ``on_session_merged`` callback, not the returned ``session_record``.
     """
     turn_count = len(turns)
     # The canonical :Session field list. Order is load-bearing only in that it
