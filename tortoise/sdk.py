@@ -27,6 +27,7 @@ an extractor/indexer, update the catalog reference.
 """
 from __future__ import annotations  # noqa: I001
 
+import decimal
 import hashlib
 import json as _json
 import logging
@@ -2088,6 +2089,65 @@ _RESERVED_ACTOR_PROPS = frozenset(
     {"actor_user_id", "owner", "initiated_by", "agent_id"})
 
 
+#: #4647: FalkorDB stores an integer as INT64 and a number as a double. A
+#: Python `int` is UNBOUNDED and `decimal.Decimal` is arbitrary-precision, so a
+#: value outside those domains is SILENTLY ALTERED by the store — `SET n.v = $v`
+#: reports success and stores a different number:
+#:
+#:     wrote 2**70        -> stored 9223372036854775807   (clamped)
+#:     wrote -(2**70)     -> stored -9223372036854775808  (clamped)
+#:     wrote 2**63        -> stored 9223372036854775807   (clamped: max + 1)
+#:     wrote Decimal('0.12345678901234567890')
+#:                        -> stored 0.123456789012346    (rounded)
+#:
+#: Reproduced against a live FalkorDB (#4647). The store cannot hold the value,
+#: so some information is lost either way; refusing the write is the honest
+#: failure mode, matching this function's existing fail-closed rejects below and
+#: the repo's own `SPAN_OFFSET_MAX = 2**63 - 1` precedent (commit_schema.py).
+#: A caller needing a wider identifier has a correct representation available —
+#: a string — and should choose it deliberately rather than have it inferred.
+_INT64_MIN = -(2 ** 63)
+_INT64_MAX = 2 ** 63 - 1
+#: Significant digits a double can carry (~15-17). A `Decimal` beyond this
+#: cannot round-trip through the store's number type.
+_SIGNIFICANT_DIGITS_MAX = 15
+
+
+def _reject_unrepresentable_number(key: str, value: object) -> None:
+    """#4647: fail closed on a value the store cannot hold without altering it.
+
+    Called from ``_sanitize_props`` for every property value on the tenant props
+    surface. ``bool`` is a subclass of ``int`` and is always representable, so it
+    is excluded explicitly. Any other type is left to the existing boundaries.
+    """
+    if isinstance(value, bool):
+        return
+    if isinstance(value, int):
+        if not (_INT64_MIN <= value <= _INT64_MAX):
+            raise ValueError(
+                f"{key!r}: integer {value} is outside the range FalkorDB can "
+                f"store ({_INT64_MIN}..{_INT64_MAX}) and would be SILENTLY "
+                "clamped to a different number. Store it as a string if the "
+                "full value is needed."
+            )
+        return
+    if isinstance(value, decimal.Decimal):
+        digits = value.as_tuple().digits
+        # Trailing zeros are not significant to the stored value: Decimal('1.50')
+        # and Decimal('1.5') are the same number, and the store keeps neither
+        # beyond a double. Count only the leading run of real digits.
+        significant = len(digits)
+        while significant > 1 and digits[significant - 1] == 0:
+            significant -= 1
+        if significant > _SIGNIFICANT_DIGITS_MAX:
+            raise ValueError(
+                f"{key!r}: Decimal {value} carries {significant} significant "
+                "digits, beyond what FalkorDB's double can hold "
+                f"({_SIGNIFICANT_DIGITS_MAX}) and would be SILENTLY rounded. "
+                "Store it as a string if the full precision is needed."
+            )
+
+
 def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
     """#329: reject server-managed fields on tenant write surfaces.
 
@@ -2116,6 +2176,10 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
             _logger.warning(
                 "ignoring client-supplied %r on tenant props", _reserved)
             props.pop(_reserved)
+    # #4647: a value the store cannot hold without altering it must fail here,
+    # not be silently clamped/rounded by FalkorDB on the way in.
+    for _key, _value in props.items():
+        _reject_unrepresentable_number(_key, _value)
     for key in ("sourcePath", "source_path"):
         if key in props:
             raise ValueError(
