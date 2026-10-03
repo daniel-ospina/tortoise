@@ -125,7 +125,15 @@
 #                               uncomparably large number (18+ digits, past
 #                               bash's 64-bit integer range) is a usage error →
 #                               exit 2, never a pass.
-#   missing/unreadable report → RED: the residue is unaccounted for.
+#   missing/unreadable report → RED: no USABLE measurement, so the count cannot
+#                               be accounted for. Distinct from the residue reds
+#                               below — neither the absence of a report nor an
+#                               unparseable one is evidence of a residue. The red
+#                               carries the pytest exit code (or says it is
+#                               unknown) so a crashed run is distinguishable
+#                               from a leak, and it names which subtype it is:
+#                               `missing` (no report file) vs `unreadable` (a
+#                               report exists but cannot be used) (#6852).
 #
 # WHAT THIS BOUND DOES NOT CATCH — do not read the table above as "a real leak
 #   reds". The bound IS the sweep's own post-sweep measurement (`left`), and
@@ -503,12 +511,37 @@ case "$kind" in
     exit 0
     ;;
   *)
-    # missing / unreadable: no report at all, so the residue is unaccounted for.
-    # A watchdog kill skips the session-end finalizer entirely (#1371).
+    # missing / unreadable: no report at all, so the count cannot be accounted
+    # for. A watchdog kill skips the session-end finalizer entirely (#1371).
     if is_kill_rc; then
       echo "::warning::no redislite-hygiene end-sweep report ($kind) — rc=$RC: a watchdog kill skips the conftest end-sweep, so the count is a kill-path artifact, not a leak (issue #1371)"
       exit 0
     fi
-    red "redislite orphan gate: no usable redislite-hygiene end-sweep report ($kind) — the $COUNT residue is unaccounted for (issue #1005 / epic #1647 E2E-7)"
+    # Not a kill rc. There is no USABLE report, so there is no measurement to
+    # account for the count with — which is NOT the same claim as "a residue was
+    # observed". Say which, and carry the exit that produced it, so a reader
+    # (and the landing rail) can tell a crashed run from a leak (#6852).
+    #
+    # The two subtypes differ and must not share one cause clause: `missing`
+    # means no report file exists (the run may never have reached teardown),
+    # while `unreadable` means the file EXISTS but is malformed or structurally
+    # incomplete — asserting "without writing one" there would be false, since
+    # one was written and the gate could not use it.
+    case "$kind" in
+      missing)
+        if [ -n "${RC:-}" ]; then
+          red "redislite orphan gate: no redislite-hygiene end-sweep report (missing) — the run exited rc=${RC} without writing one, so the $COUNT count is unaccounted for (issue #1005 / epic #1647 E2E-7)"
+        else
+          red "redislite orphan gate: no redislite-hygiene end-sweep report (missing) and the pytest rc is unknown (cancelled/killed?) — the $COUNT count is unaccounted for (issue #1005 / epic #1647 E2E-7)"
+        fi
+        ;;
+      *)
+        if [ -n "${RC:-}" ]; then
+          red "redislite orphan gate: the redislite-hygiene end-sweep report is unreadable ($kind) — the run exited rc=${RC} but its report was unusable, so the $COUNT count is unaccounted for (issue #1005 / epic #1647 E2E-7)"
+        else
+          red "redislite orphan gate: the redislite-hygiene end-sweep report is unreadable ($kind) and the pytest rc is unknown (cancelled/killed?) — the report was unusable, so the $COUNT count is unaccounted for (issue #1005 / epic #1647 E2E-7)"
+        fi
+        ;;
+    esac
     ;;
 esac
