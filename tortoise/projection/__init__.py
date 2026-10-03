@@ -7425,15 +7425,19 @@ class FalkorProjection(
         return out
 
     #: #4465 — the RANGE index set ``_ensure_indexes`` guarantees, as
-    #: ``(label, property, kind)``. Every entry is created unconditionally on
-    #: every backend, so a graph missing any of them is NOT bootstrapped.
+    #: ``(label, property, kind)``. Every entry mirrors an index the sweep
+    #: actually creates, so a graph missing any of them is NOT bootstrapped.
+    #: ⛔ The retired ``:Document`` label has NO entry here: D10 (ONTOLOGY
+    #: v3.15 §4.4) made a document a ``:Source``, and the sweep's own comment
+    #: says "No :Document range index is created". An entry for it could never
+    #: be satisfied, so ``_schema_is_current`` would return False on every
+    #: graph — making the fast path dead code (measured: the whole #4465 guard
+    #: was inert until these two entries were removed).
     _REQUIRED_RANGE_INDEXES = (
         ("Point", "id", "RANGE"),
         ("Point", "pointKind", "RANGE"),
         ("Point", "content_hash", "RANGE"),
         ("Point", "lastDreamedAt", "RANGE"),
-        ("Document", "id", "RANGE"),
-        ("Document", "documentKind", "RANGE"),
         ("Subject", "id", "RANGE"),
         ("Subject", "name", "RANGE"),
         ("Object", "id", "RANGE"),
@@ -7459,7 +7463,12 @@ class FalkorProjection(
         ("Event", "name", "FULLTEXT"),
         ("Subject", "name", "FULLTEXT"),
         ("Object", "name", "FULLTEXT"),
-        ("Document", "_searchText", "FULLTEXT"),
+        # #4465 — the doc-node FTS leg rides ``:Source``, NOT the retired
+        # ``:Document``: the sweep creates ``("Source", ["_searchText"])``
+        # under the comment "#125 Document FTS" (D10: the doc node is a
+        # :Source). Naming the retired label here made the requirement
+        # unsatisfiable for the same reason as the range set above.
+        ("Source", "_searchText", "FULLTEXT"),
     )
 
     def _schema_is_current(self) -> bool:
