@@ -1023,17 +1023,19 @@ def _capture_turn_texts(windowed: list[dict]) -> list[str]:
     ``[:5000]`` is the idempotent re-application of ``_capture_turn_window``'s
     cap (#1532 D1).
 
-    #4911: THIS is where a stored turn's credentials are scrubbed — one place,
-    applied by every writer of every lane, because this function IS the stored
-    text. The control cannot live inside ``_write_capture_turns`` instead: the
-    writer computes ``turn_embs`` from this same stored-text result, before
+    #4911: the scrub lives in ``_capture_turn_texts_with_redactions`` (via
+    ``_redact_turn_contents``) — the ONE stored-text definition every writer
+    reaches through ``_write_session_and_turns``; this function is its read-only
+    projection. The control cannot live inside ``_write_capture_turns`` instead:
+    the writer computes ``turn_embs`` from that same stored-text result, before
     ``_write_capture_turns`` stores the row, so redacting only at the write would
     store
     ``[REDACTED:…]`` while the vector described the raw secret — violating the
     #4194 invariant the docstring above states ("the vector can never describe
-    different text than the node holds"). Redacting here keeps the encoded
-    text, the stored text and the ``content_hash`` the same string by
-    construction. A second, deliberate consequence: the #4675 confirmation
+    different text than the node holds"). Redacting in the stored-text
+    definition keeps the encoded text, the stored text and the ``content_hash``
+    the same string by construction. A second, deliberate consequence: the #4675
+    confirmation
     path (``tortoise/session_confirm.expected_turns``) calls THIS function to
     build what it expects the server to have stored, so the client's
     expectation and the server's stored row cannot drift for the same

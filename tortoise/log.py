@@ -99,7 +99,7 @@ from pathlib import Path
 #     ``embedding`` (re-capture of a deterministic turn id — the
 #     ``f"{session_id}_t{i}"`` form ``sdk._capture_turn_id`` mints — with
 #     changed content and nothing
-#     encoded, whose snapshot journals the read-back ``None``, sdk.py:1130):
+#     encoded, whose snapshot journals the read-back ``None``):
 #     the replay then keeps a stale vector the live write cleared. It is NOT a
 #     first-order path (unlike ``EventRecorded``'s connector leg, which every
 #     connector ingest reaches, or ``SessionRecorded`` above): every arm needs a
