@@ -26882,10 +26882,11 @@ def _clear_github_credentials(org_id: str) -> None:
 
 # The allowed value sets mirror the CHECK constraints in the migration that
 # owns them (supabase/migrations/20260922000001_connectors.sql). Without a
-# boundary check a bad value reaches PostgREST, the seam returns None, and the
-# handler reports a CLIENT error as a 500 "Failed to create connector" — the
-# #2642 re-review P2. Validated at the model boundary (422), following the
-# SessionRequest.harness precedent above.
+# boundary check a bad value reaches PostgREST, whose 4xx raises out of the seam
+# (`SupabaseControlPlane.query` raises on status >= 300, it does not return
+# None) and surfaces as the generic 500 {"detail": "Internal server error"} —
+# a client error reported as a server error (#2642 re-review P2). Validated at
+# the model boundary (422), following the SessionRequest.harness precedent above.
 _CONNECTOR_SOURCE_TYPES = frozenset({
     "github", "slack", "linear", "google_drive", "confluence", "notion", "asana",
 })
@@ -26962,8 +26963,20 @@ async def create_connector(
     )
     org_id = org["org_id"]
     if is_supabase_enabled():
-        row = _sb_conn_create(get_control_plane(), org_id=org_id,
-                              source_type=body.source_type, config=body.config)
+        try:
+            row = _sb_conn_create(get_control_plane(), org_id=org_id,
+                                  source_type=body.source_type, config=body.config)
+        except RuntimeError as e:
+            # The migration declares `idx_connectors_org_source`, one connector
+            # per (org_id, source_type); PostgREST maps the 23505 to HTTP 409.
+            # Surface it as the client error it is instead of letting it fall
+            # through to the generic 500 — the same mapping create_graph uses.
+            if "HTTP 409" in str(e):
+                raise HTTPException(
+                    status_code=409,
+                    detail="A connector for this source type already exists",
+                ) from None
+            raise
         if not row:
             raise HTTPException(status_code=500, detail="Failed to create connector")
         return {"connector": row}

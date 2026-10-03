@@ -25,6 +25,8 @@ turns the ``credential_enc`` tests red.
 from __future__ import annotations
 
 import os
+import re
+from pathlib import Path
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault(
@@ -372,19 +374,18 @@ def test_create_endpoint_returns_no_credential_enc(client) -> None:
 
 
 # ── Boundary validation (#2642 re-review P2) ────────────────────────────────
-# The allowed value sets live in the migration's CHECK constraints, so without
-# a boundary validator a bad value reaches PostgREST, the seam returns None, and
-# the handler reports the caller's mistake as a 500.
+# The allowed value sets live in the migration's CHECK constraints, so without a
+# boundary validator a bad value reaches PostgREST, whose 4xx raises out of the
+# seam and surfaces as the generic 500 `{"detail": "Internal server error"}`.
 
 def test_create_rejects_an_unknown_source_type_at_the_boundary(client) -> None:
-    """Unknown source_type → 422, never a write, never a 500.
+    """Unknown source_type → 422 and no write.
 
-    Observed RED shape (validator stripped, measured): the POST returns 200 and
-    the fake INSERTS the invalid row. The 500 is production's shape — the real
-    PostgREST CHECK rejects the value, the seam returns None, and the handler
-    reports the caller's mistake as ``500 Failed to create connector``. The fake
-    models no CHECK, so it cannot show that half; these assertions pin the half
-    it can: the boundary is what stops the write.
+    Observed RED shape (validator stripped): 200 with the invalid row INSERTED.
+    The fake models no CHECK, so it cannot show the production half — there the
+    PostgREST rejection raises out of the seam and the generic handler turns it
+    into a 500. These assertions pin the half the fake can show: the boundary is
+    what stops the write.
     """
     tc, cp = client
     r = tc.post("/v1/connectors", json={"source_type": "gitlab"})
@@ -416,3 +417,69 @@ def test_list_connectors_501s_on_self_host(client, monkeypatch) -> None:
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: False)
     r = tc.get("/v1/connectors")
     assert r.status_code == 501, r.text
+
+
+# ── the validators' mirror of the migration, and the duplicate-create 409 ────
+# A hand-copied enum list rots on the next migration: a member dropped from the
+# code 422s a value the DB CHECK accepts (the inverse of the defect the
+# validators close), and no test above would notice because they exercise only
+# `gitlab` (invalid) and `slack`/`github` (valid). So the mirror is DERIVED from
+# the SQL and pinned, the same shape as
+# tests/test_fake_control_plane.py::test_registry_matches_the_migrations.
+
+_MIGRATIONS = Path(__file__).resolve().parent.parent / "supabase" / "migrations"
+
+
+def _check_list_from_migration(column: str) -> set[str]:
+    """Extract `CHECK (<column> IN ('a', 'b', ...))` from the connectors SQL."""
+    sql = "".join(p.read_text()
+                  for p in sorted(_MIGRATIONS.glob("*connectors*.sql")))
+    m = re.search(rf"CHECK\s*\(\s*{column}\s+IN\s*\(([^)]*)\)", sql, re.S)
+    assert m, f"no CHECK ({column} IN ...) in the connectors migration"
+    return set(re.findall(r"'([^']+)'", m.group(1)))
+
+
+def test_the_validators_mirror_the_migration_check_lists() -> None:
+    """Set equality with the DECLARED CHECKs, in both directions.
+
+    REDs on: dropping or adding a member on either side — the failure the
+    boundary validators would otherwise hide until a real caller hit it.
+    """
+    from tortoise.hosted_api import (
+        _CONNECTOR_SOURCE_TYPES,
+        _CONNECTOR_SYNC_STATUSES,
+        ConnectorCreateRequest,
+        ConnectorUpdateRequest,
+    )
+    declared_source = _check_list_from_migration("source_type")
+    declared_sync = _check_list_from_migration("sync_status")
+    # Guard the derivation: a collapsed parse would make equality vacuous.
+    assert len(declared_source) >= 7 and len(declared_sync) >= 4, (
+        f"migration CHECK parse collapsed ({declared_source}, {declared_sync})")
+    assert _CONNECTOR_SOURCE_TYPES == declared_source
+    assert _CONNECTOR_SYNC_STATUSES == declared_sync
+    # ...and every declared member actually validates through the models, so a
+    # frozenset that is right but unbound (e.g. a typo'd field name) still fails.
+    for v in sorted(declared_source):
+        assert ConnectorCreateRequest(source_type=v).source_type == v
+    for v in sorted(declared_sync):
+        assert ConnectorUpdateRequest(sync_status=v).sync_status == v
+
+
+def test_duplicate_source_type_is_a_409_not_a_500(client) -> None:
+    """A second connector of the same source type in one org → 409.
+
+    The migration declares `idx_connectors_org_source` (one per org+source_type),
+    so the INSERT is a 23505 that PostgREST reports as HTTP 409. Without the
+    handler's mapping it escapes as the generic 500.
+
+    REDs on: removing the `"HTTP 409"` arm in `create_connector` (the fake's
+    unique parity raises RuntimeError, which then propagates as a 500).
+    """
+    tc, cp = client
+    first = tc.post("/v1/connectors", json={"source_type": "slack"})
+    assert first.status_code == 200, first.text
+    dup = tc.post("/v1/connectors", json={"source_type": "slack"})
+    assert dup.status_code == 409, dup.text
+    assert len([x for x in cp.tables["connectors"]
+                if x["org_id"] == ORG_A and x["source_type"] == "slack"]) == 1

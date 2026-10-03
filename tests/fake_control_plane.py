@@ -1469,6 +1469,19 @@ class FakeControlPlane:
                 numeric = [r.get("id") for r in self.tables.get(table, [])
                            if isinstance(r.get("id"), int)]
                 row["id"] = (max(numeric) + 1) if numeric else 1
+            # #2636 unique parity (migration 20260922000001,
+            # `idx_connectors_org_source`): ONE connector per (org_id,
+            # source_type). Without this the fake silently ACCEPTS a duplicate
+            # the real table rejects with 23505, so the handler's 409 mapping
+            # would have no behavioural proxy and a missing mapping would read
+            # as a green lane.
+            if table == "connectors" and any(
+                    r.get("org_id") == row.get("org_id")
+                    and r.get("source_type") == row.get("source_type")
+                    for r in self.tables.get(table, [])):
+                raise RuntimeError(
+                    'HTTP 409: duplicate key value violates unique constraint '
+                    '"idx_connectors_org_source"')
             self.tables.setdefault(table, []).append(row)
             if table == "api_keys":
                 # migration 0015 trigger emulation (#308)
