@@ -137,8 +137,8 @@ from tortoise.sdk import (
     _capture_redaction_warning,  # #4911: the shared "a secret was redacted" receipt warning
     _capture_resp_error_split,  # #2335 WI-2: customer error contract (headline/diagnostics)
     _capture_turn_embeddings,  # #4194: batched local-embedder call for stored turn Points
+    _capture_turn_id,  # #3551: the ONE offset-aware turn-id derivation
     _capture_turn_role_text,  # #4675: the inverse of the stored turn format
-    _capture_turn_texts_with_redactions,  # #4911: the ONE stored-turn text definition + its redaction count
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
     _derive_graph_name,  # #4240 F2: the ONE namespace/graph_name → graph derivation
     _emit_capture_observation,  # #2335 WI-1d: observation leg (hosted lane tag)
@@ -147,7 +147,7 @@ from tortoise.sdk import (
     _session_extraction_estimate,  # #1532 D4: v2-aware pre-write quota estimate
     _session_llm_transcript,  # P1 #1529: the shared empty/blank conversation gate
     _supersede_window_end,  # #5363: the ONE inverted-window predicate (pre-write check)
-    _write_capture_turns,  # #3086: the ONE batched turn-stream writer (shared with sdk.capture_session)
+    _write_session_and_turns,  # #3551: the ONE :Session + turn store writer (shared with sdk.capture_session)
 )
 from tortoise.security import redact_error  # billing webhook + checkout error logging
 from tortoise.session_auth import get_current_user, verify_session_jwt
@@ -931,16 +931,62 @@ mcp_http_app = create_http_app(
 )
 
 
-def _iter_registered_orgs() -> list[dict]:
+#: #4493: the explicit row bound for the Supabase org enumeration, set EQUAL to
+#: the project's PostgREST ``max_rows`` (``supabase/config.toml`` → ``[api]
+#: max_rows = 1000``). ``SupabaseControlPlane.query`` neither paginates nor
+#: reads ``Content-Range``, and PostgREST silently caps a row LIST at
+#: ``max_rows`` — so a truncated page arrives as a non-empty PARTIAL list with
+#: no error. Requesting ``limit`` equal to the cap is the smallest containment:
+#: a result that FILLS it is treated as possibly-truncated.
+#:
+#: The two callers need opposite things from that signal, so completeness is
+#: EXPLICIT via ``require_complete`` rather than encoded as an empty list
+#: (#5388):
+#:   * ``_refresh_cost_allocation`` passes ``require_complete=True`` — a partial
+#:     fleet must never PRUNE orgs from the published metric, so a filled page
+#:     returns ``None`` and the refresh keeps last-known-good.
+#:   * ``_sweep_events`` uses the default — a partial page is still worth
+#:     sweeping, so it processes the rows it received. Returning ``[]`` here
+#:     (the previous shape) silently skipped fleet-wide event retention at
+#:     >=1000 orgs.
+#:
+#: RESIDUAL LIMITATION (#5388): a genuinely COMPLETE 1000-org fleet is
+#: indistinguishable from a truncated page, so the cost refresh treats it as
+#: unavailable (fail closed — freezing the metric is safer than pruning). The
+#: general fix reads ``Content-Range`` or paginates in ``supabase_control`` (or
+#: uses an ``array_agg`` RPC, the #3665 pattern).
+_ORG_ENUMERATION_MAX_ROWS = 1000
+
+
+def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | None:
     """List registered orgs from the control plane (best-effort).
 
     Used by the event-retention sweep (#432 Task 7) — the boot pass and the
-    hourly interval in _lifespan (this is its only production caller).
+    hourly interval in _lifespan — AND, since #4493, by the fixed-cost
+    allocation refresh (``_refresh_cost_allocation``), which is a second
+    production caller on the same hourly interval. The two share the one
+    offload pool below.
+
+    ⚠️ ``[]`` is returned on ANY failure, so it is NOT proof of an empty
+    fleet; the allocation caller treats a falsy result as "enumeration
+    unavailable" and fails closed rather than reading it as "no orgs, no cost".
     Supabase mode (post-#669 flip): enumerates from Supabase orgs via the
     seam — the registry is DELETED and querying it would auto-recreate the
     empty graph. Registry mode: the Org nodes from the
     registry_control_plane graph via _make_sdk(namespace="registry").
     Returns [] on any failure — the sweep is best-effort.
+
+    #4493/#5388: the Supabase branch requests an explicit ``limit`` and cannot
+    distinguish a complete page from a server-truncated one (no
+    ``Content-Range`` read, no pagination). Completeness is therefore an
+    EXPLICIT contract, not encoded as emptiness:
+
+    * ``require_complete=True`` (the cost-allocation caller) returns ``None``
+      when the page FILLS the limit — "the fleet could not be confirmed",
+      which the caller maps to its unavailable/last-known-good path.
+    * the default returns the rows received even when the page filled — the
+      best-effort retention sweep must process a partial page rather than
+      purge nothing for the whole fleet.
     """
     try:
         from tortoise.supabase_control import (
@@ -951,8 +997,22 @@ def _iter_registered_orgs() -> list[dict]:
             rows = get_control_plane().query(
                 "organizations", select=["id", "name"],
                 filters=[("deleted_at", "is", None)],
+                limit=_ORG_ENUMERATION_MAX_ROWS,
             )
-            return [{"org_id": r["id"], "name": r.get("name")} for r in rows]
+            parsed = [{"org_id": r["id"], "name": r.get("name")} for r in rows]
+            if len(rows) >= _ORG_ENUMERATION_MAX_ROWS:
+                # A filled page may be truncated (#5388): PostgREST caps a row
+                # list silently. Fail CLOSED for a caller that needs the whole
+                # fleet; let a best-effort caller process what it got.
+                _logger.warning(
+                    "org enumeration filled its explicit limit (%d rows) — a "
+                    "possibly-truncated page; require_complete=%s (fail-closed "
+                    "for the cost metric: a truncated page must never prune "
+                    "orgs)",
+                    _ORG_ENUMERATION_MAX_ROWS, require_complete)
+                if require_complete:
+                    return None
+            return parsed
 
         # #2251 (was #2179 follow-up): the old bare TortoiseSDK() read the
         # ns-less control_plane graph on resolve_db_path()'s ~/.tortoise DB
@@ -1223,6 +1283,67 @@ def _sweep_oauth_retention() -> None:
                          total, counts)
     except Exception as exc:  # a GC sweep must never crash the loop
         _logger.warning("oauth retention sweep failed: %s", exc)
+
+
+def _measured_write_ops_basis(orgs: list[str]) -> dict[str, int] | None:
+    """Measured per-org write-ops for the PROPORTIONAL allocation lines (#4493).
+
+    FAIL-CLOSED by construction: the first unreadable org returns ``None``,
+    which makes every proportional line ``unavailable`` for this refresh. A
+    partial map would silently redistribute the unreadable org's share, and a
+    zero would assert a measurement that was never taken — the distinction
+    ``metering.measure_write_ops`` exists to preserve (unlike
+    ``get_current_usage``, which degrades an unreadable read to 0).
+    """
+    from tortoise.metering import measure_write_ops
+    basis: dict[str, int] = {}
+    for org_id in orgs:
+        try:
+            basis[org_id] = measure_write_ops(org_id)
+        except Exception as exc:  # noqa: BLE001, RUF100 — unreadable basis is a state, not a crash
+            _logger.warning(
+                "cost allocation basis unreadable for org %s (%s) — proportional "
+                "lines will report 'unavailable' rather than a silent zero",
+                org_id, exc)
+            return None
+    return basis
+
+
+async def _refresh_cost_allocation() -> None:
+    """#4493: apply the declared fixed/shared SaaS allocation, per org.
+
+    The SINGLE production write path for the per-team cost metric
+    (``tortoise_team_cost_cents``, which had no production caller at all before
+    this). It is module-level ON PURPOSE: the periodic seam that arms it,
+    ``_event_retention_loop``, is a CLOSURE inside ``_lifespan`` and cannot be
+    called from a test, so a test that asserts the PRODUCTION call site needs
+    this half to be directly invocable.
+
+    Best-effort by construction: ``_event_retention_loop`` has NO per-iteration
+    guard, so a raise here would kill event retention AND the deleted-org purge
+    for the process's lifetime. Every non-cancellation exception is swallowed
+    with a warning.
+    """
+    from tortoise.cost_allocation import refresh_and_publish
+
+    def _run() -> None:
+        rows = _iter_registered_orgs(require_complete=True)
+        if rows is None:
+            # The page filled its bound and ``query`` cannot tell a complete
+            # 1000-org fleet from a truncated one (#5388): the fleet is
+            # UNKNOWN, so publish an unavailable snapshot and leave the metric
+            # at last-known-good rather than pruning orgs beyond the page.
+            refresh_and_publish([])
+            return
+        orgs = [o["org_id"] for o in rows if o.get("org_id")]
+        refresh_and_publish(orgs, weights_by_org=_measured_write_ops_basis(orgs))
+
+    try:
+        await run_on_daemon_worker(_run, name="tortoise-cost-allocation")
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001, RUF100 — must never kill the retention loop
+        _logger.warning("cost allocation refresh failed: %s", exc)
 
 
 async def _run_boot_sweeps() -> None:
@@ -1709,6 +1830,10 @@ async def _lifespan(app):
                     # #3036: GC dead OAuth rows (sync DB work off the loop)
                     await run_on_daemon_worker(_sweep_oauth_retention,
                                                name="tortoise-boot-sweep")
+                    # #4493: allocated fixed/shared SaaS cost per org — the
+                    # production write path for tortoise_team_cost_cents.
+                    # Swallows internally (see _refresh_cost_allocation).
+                    await _refresh_cost_allocation()
 
             _retention_task = asyncio.get_event_loop().create_task(_event_retention_loop())
             app.state._event_retention_task = _retention_task
@@ -11631,48 +11756,20 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         context="capture_session",
     )
 
-    # #1727 Slice 2 (Task 11): harness is set set-only-when-present (None
-    # NEVER erases a stored value — a legacy no-harness re-capture must not
-    # wipe a harness that a previous capture stored). The conditional clause
-    # also keeps the parametrized query valid in both embedded and Docker
-    # lanes (no unused param binding). Review PR #1827: created_at uses
-    # coalesce so an idempotent re-POST preserves the ORIGINAL capture time
-    # (mirrors the turn-loop coalesce).
-    _merge_sets = ["s.created_at=coalesce(s.created_at, $now)",
-                   "s.turn_count=$tc", "s.is_episodic=true"]
-    _merge_params = {"sid": session_id, "now": now,
-                     "tc": len(body.conversation)}
-    if capture_harness:
-        _merge_sets.append("s.harness=$harness")
-        _merge_params["harness"] = capture_harness
-    # #2600: actor stamp — set only when a server-resolved human is present
-    # (org dict carries it on REST; the MCP capture tool threads the
-    # middleware ContextVar into its hand-built dict at mcp_server.py).
-    # coalesce = FIRST-writer-wins on idempotent re-POST (a re-POST with a
-    # DIFFERENT actor never overwrites) AND backfills legacy-None on a true
-    # retry (a legacy null-actor session re-POSTed by a member gets the
-    # member — first-writer-wins thereafter). Conditional clause preserves
-    # the embedded/Docker no-unused-param contract (mirrors the harness
-    # clause above).
+    # #3551: the :Session MERGE field list is owned by the shared primitive
+    # called below, not by this lane. This lane still RESOLVES its inputs:
+    # ``capture_harness`` is the server-resolved harness (#3681
+    # first-writer-wins against the stored value, computed above), the actor is
+    # the server-resolved human (#2600 — the org dict carries it on REST; the
+    # MCP capture tool threads the middleware ContextVar into its hand-built
+    # dict at mcp_server.py), and machine_id/model are the #2599 CLIENT-CLAIMED
+    # informational fields. All are set-only-when-present; actor_user_id /
+    # machine_id / model carry a first-writer-wins ``coalesce`` so an idempotent
+    # re-POST never overwrites them, while harness's first-writer-wins is the
+    # #3681 resolution above — its clause is a plain ``SET``, so it is that
+    # RESOLUTION, not the Cypher, that keeps a no-harness re-capture from
+    # erasing a stored value.
     _actor_uid = org.get("actor_user_id") or _current_actor_user_id.get()
-    if _actor_uid:
-        _merge_sets.append(
-            "s.actor_user_id=coalesce(s.actor_user_id, $uid)")
-        _merge_params["uid"] = _actor_uid
-
-    # #2599: machine_id and model are CLIENT-CLAIMED informational fields
-    # (forgeable, never security-trusted) — set only when the body supplies
-    # them. Uses coalesce for first-writer-wins on idempotent re-POST (same
-    # actor_user_id pattern), preserving the embedded/Docker no-unused-param
-    # contract (mirrors the harness clause).
-    if body.machine_id:
-        _merge_sets.append(
-            "s.machine_id=coalesce(s.machine_id, $mid)")
-        _merge_params["mid"] = body.machine_id
-    if body.model:
-        _merge_sets.append(
-            "s.model=coalesce(s.model, $model)")
-        _merge_params["model"] = body.model
 
     # #1727 Slice 2 (Task 11, T2-P2c): idempotency scope = Session + turn
     # Points. A re-POST of the same session_id (Claude Code's real session id
@@ -11683,13 +11780,14 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # 2xx (converges to one Session, one receipt — T1-P3/T1-P12).
     # #1920: a SHORTER payload is NOT the identical re-POST pinned above — the
     # turn ids past the new window are hard-deleted (and journaled) by
-    # ``sdk._write_capture_turns``, so the Session's episodic CONTAINS members
-    # track the LAST capture's window instead of the longest one ever posted.
-    # (session_existed was probed above, before the quota gates.)
-    proj.g.query(
-        f"MERGE (s:Session {{id:$sid}}) SET {', '.join(_merge_sets)}",
-        params=_merge_params,
-    )
+    # `sdk._write_session_and_turns`, so the Session's episodic CONTAINS
+    # members track the LAST capture's window instead of the longest one ever
+    # posted. (session_existed was probed above, before the quota gates.)
+    #
+    # #3551: the :Session MERGE that used to run here is the first half of the
+    # shared primitive called below; it now rides the SAME off-loop submission
+    # as the turn write (the capture pool), so the loop does strictly less
+    # blocking graph work than before.
 
     extracted = []
     # #2002 (W6) delete-during-capture sweep state: track whether THIS
@@ -11699,17 +11797,20 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     minted_event = False
     event_id = None
 
-    # #3086: the episodic turn stream is written by the ONE shared writer
-    # (`sdk._write_capture_turns`), also called by `sdk.capture_session` — so
-    # this lane and the SDK lane can no longer drift (the #1532 duplicated-loop
-    # class). Hosted additionally adds quota/auth bounds + a pre-write
-    # estimate. NOTE the THIRD, still-separate copy:
-    # tools/ask_spotcheck.py::seed_capture_turn_store mirrors the same store
-    # shape to seed the ask fixtures (#3910) — the ONE copy every ask seeder
-    # writes through since #3914. It omits Source/extraction, but since W7A it
+    # #3086/#3551: the :Session MERGE and the episodic turn stream are written
+    # by the ONE shared primitive (`sdk._write_session_and_turns`), also called
+    # by `sdk.capture_session` — so this lane and the SDK lane can no longer
+    # drift (the #1532 duplicated-store class). The primitive delegates the
+    # batched turn write to `sdk._write_capture_turns`. Hosted additionally
+    # adds quota/auth bounds + a pre-write estimate. NOTE the THIRD,
+    # still-separate copy: tools/ask_spotcheck.py::seed_capture_turn_store
+    # mirrors the same store shape to seed the ask fixtures (#3910) — the ONE
+    # copy every ask seeder writes through since #3914. It is a SEEDER, not a
+    # capture writer, and stays out of the primitive (its whole contract is the
+    # capture SHAPE, deliberately without Source/extraction); since W7A it
     # EMBEDS every turn BY DEFAULT through the shared store seam (#4194/#4304)
     # and retains `embed=False` for #4197's un-backfilled backlog.
-    # #3551 tracks collapsing it onto the shared primitive too. The LLM
+    # #3551 tracks collapsing the seeder onto the shared primitive too. The LLM
     # extraction that follows the write is shared via
     # sdk._extract_session_llm/_extract_session_v2 (#822).
     #
@@ -11721,13 +11822,16 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     prior_turn_count = 0
     if session_existed:
         # Best-effort (#3892 cycle 2): this read feeds ONLY the write-op
-        # meter, and it sits AFTER the Session MERGE that already committed —
-        # a transient graph error here must never 500 a committed capture
-        # (the file's posture, and every sibling bookkeeping read in this
-        # function). On failure 0 makes the meter OVER-count
-        # (`len(windowed) > 0`), the documented conservative posture, never a
-        # blind spot. It also must not abort the keyless→keyed upgrade this
-        # PR exists to enable.
+        # meter. Before #3551 it sat AFTER the Session MERGE that had already
+        # committed; the MERGE now runs LATER, inside the pooled
+        # _write_session_and_turns submission below, so nothing is committed
+        # at this point yet. It stays best-effort regardless — a transient
+        # graph error here must never 500 a capture (the file's posture, and
+        # every sibling bookkeeping read in this function), and the Session
+        # node is guaranteed to pre-exist by `session_existed`. On failure 0
+        # makes the meter OVER-count (`len(windowed) > 0`), the documented
+        # conservative posture, never a blind spot. It also must not abort the
+        # keyless→keyed upgrade this PR exists to enable.
         try:
             _prior_turns = proj.g.query(
                 "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
@@ -11753,9 +11857,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # #4194/#3086: the encode runs OFF the event loop on the capture pool. SDK
     # `capture_session` is synchronous (there is no loop to free) and calls
     # the same helper inline — the two share the helper, not the scheduling.
-    # #4194/#4911: the scrub is part of COMPUTING the stored text, so it runs
-    # HERE, off the event loop, on the capture pool, and the writer below and
-    # the linker further down REUSE this exact result instead of recomputing it.
+    # #4194/#4911: the scrub is part of COMPUTING the stored text, so it is done
+    # inside the off-loop primitive below (capture pool); the embedding batch and
+    # the linker further down REUSE the RETURNED texts instead of recomputing
+    # them.
     # The scrub is ~3 s/MB of client-controlled text (measured: 0.97 s @220k,
     # linear), and a legal-maximum 500x5,000 capture is 2.5 MB. Reuse removes
     # the two passes this lane used to pay for the SAME window — the embedding
@@ -11767,24 +11872,25 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # and a scrub issues none). See the scoping doc for the pass COUNT this lane
     # still pays (the extractor and the session `:Source` each scrub the same
     # window for their own consumers; idempotence keeps the count correct).
-    _turn_texts, _redaction_counts = await _run_off_loop(
-        _CAPTURE_EXECUTOR, _capture_turn_texts_with_redactions, windowed)
-    _turn_embs = await _run_off_loop(
-        _CAPTURE_EXECUTOR, _capture_turn_embeddings, _turn_texts,
-        proj.required_embedding_dim)
-    # #3086: the turn WRITE runs OFF the event loop on the capture pool, in ONE
-    # batched `UNWIND $turns` transaction, through the SAME shared writer the
-    # SDK lane calls (`_write_capture_turns`). The per-turn loop this replaced
-    # issued two FalkorDB round-trips per turn straight on the loop (~1000 for
-    # a 500-turn capture — the ~4.75 s single-loop freeze #3086 measures).
-    # Node shape, per-row idempotency (`{session_id}_t{i}`), the stale-vector
-    # guard and the rebuild journal all live in that one definition, so this
-    # lane and `sdk.capture_session` can no longer drift (#1532's drift class).
-    _capture_redactions = await _run_off_loop(
-        _CAPTURE_EXECUTOR, _write_capture_turns, proj, sdk, session_id,
-        windowed, now=now, turn_embs=_turn_embs,
-        session_existed=session_existed,
-        texts_and_counts=(_turn_texts, _redaction_counts))
+    # #3551: ONE off-loop submission writes the :Session MERGE and the turn
+    # store through the shared primitive. It owns the Session field list, the
+    # batched `UNWIND $turns` Cypher (`_write_capture_turns`), the `CONTAINS`
+    # wiring, the offset-aware turn-id derivation, the stale-turn sweep and the
+    # optional `embed_fn` — so this lane and `sdk.capture_session` can no
+    # longer drift (#1532's drift class). It computes the stored text itself
+    # (the #4911 scrub) and RETURNS it, so the linker further down REUSES this
+    # exact result rather than paying a second scrub of the same window. All of
+    # it stays off the event loop: a legal-maximum 500x5,000 capture is 2.5 MB
+    # of client-controlled text.
+    _capture_write = await _run_off_loop(
+        _CAPTURE_EXECUTOR, _write_session_and_turns, proj, sdk, session_id,
+        windowed, now=now, harness=capture_harness,
+        actor_user_id=_actor_uid, machine_id=body.machine_id,
+        model=body.model, session_existed=session_existed,
+        embed_fn=lambda texts: _capture_turn_embeddings(
+            texts, proj.required_embedding_dim))
+    _turn_texts = _capture_write["turn_texts"]
+    _capture_redactions = _capture_write["redacted_total"]
 
     # #1727 Slice 2 (T2-P2c): idempotent re-POST — the Session already
     # existed, so the LLM extraction is SKIPPED (M2/v2-minted points are not
@@ -12262,7 +12368,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         link_texts = _turn_texts
         link_result = link_session_entities(
             proj, session_id, link_texts,
-            turn_ids=[f"{session_id}_t{i}"
+            turn_ids=[_capture_turn_id(session_id, i)
                       for i in range(len(link_texts))],
             sdk=sdk)
         if link_result["attempted"]:
@@ -12327,7 +12433,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         same-session re-capture (MERGE re-absorbs turn ids) self-heal."""
         point_ids: list[str] = []
         if isinstance(windowed, list) and len(windowed) > 0:
-            point_ids = [f"{session_id}_t{i}" for i in range(len(windowed))]
+            point_ids = [_capture_turn_id(session_id, i)
+                         for i in range(len(windowed))]
         if isinstance(extracted, list):
             point_ids += [p.get("id") for p in extracted if p.get("id")]
         point_ids = list(dict.fromkeys(point_ids))
@@ -22423,6 +22530,31 @@ _ONBOARDING_DEFAULT_STATE = {
 
 _ALLOWED_STATE_KEYS = set(_ONBOARDING_DEFAULT_STATE.keys())
 
+# #3553: the onboarding-state optimistic-concurrency version. Deliberately NOT
+# a state key — it is ABSENT from _ONBOARDING_DEFAULT_STATE (and therefore from
+# _ALLOWED_STATE_KEYS), so no PATCH/MCP caller can set it: it is owned by the
+# write primitive only. The two persistence legs store it differently, because
+# their CAS guards read it differently: the Supabase leg keeps it INSIDE the
+# jsonb dict (one column, no schema migration — the guard is a PostgREST jsonb
+# path filter), while the registry leg keeps it as the Team node property
+# ``state_version`` (the guard is a Cypher WHERE, which cannot look inside a
+# JSON string).
+_STATE_VERSION_KEY = "state_version"
+
+# #3553 conflict policy: bounded retry-with-reread. A version mismatch is a
+# DETECTED race (another writer committed between our read and our guarded
+# write) — re-read the whole state so the other writer's keys are MERGED, not
+# overwritten, then re-apply this call's fields. Exhaustion is fail-loud.
+_ONBOARDING_STATE_CAS_ATTEMPTS = 10
+
+
+class OnboardingStateConflictError(RuntimeError):
+    """#3553: the bounded CAS retry budget was exhausted under sustained
+    concurrent writes to one team's onboarding state. Raised rather than
+    silently dropping a write — a vanished receipt/cursor is user-visible
+    (the dashboard flips back to install-pending, the walk regresses), so the
+    contended case must surface, never be swallowed."""
+
 # Epic #529: copy-attribution enums (#235 artifact_copied schema, verbatim).
 # Not state keys — the PATCH handler pops harness/section and emits an
 # analytics event instead of persisting them.
@@ -22445,6 +22577,11 @@ def _get_onboarding_state(org_id: str) -> dict:
     Auto-initializes to defaults if missing. Supabase mode: ``teams`` rows
     default onboarding_state to '{}', so reads return the merged default
     shape without writing (the first patch materializes the full state).
+
+    #3553: the registry materialization is a GUARDED write — the pre-#3553
+    bare whole-dict SET could clobber a concurrent CAS commit (a node present
+    with an unset ``onboarding_state`` is the common SDK/provision creation
+    shape) and leave ``state_version`` lying about the content.
     """
     from tortoise.supabase_control import (
         get_control_plane,
@@ -22457,16 +22594,30 @@ def _get_onboarding_state(org_id: str) -> dict:
         stored = _sb_state(get_control_plane(), org_id)
         # None = org row missing — mirror the registry MATCH-no-op: read as
         # defaults, don't write.
-        return stored if stored is not None else _onboarding_defaults()
+        if stored is None:
+            return _onboarding_defaults()
+        # #3553: `state_version` is the CAS guard, not a state key — never
+        # leak it to a reader/API surface. (`_sb_state` returns a fresh dict,
+        # so this pop cannot mutate the stored row.)
+        stored.pop(_STATE_VERSION_KEY, None)
+        return stored
     import json as _json
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
         "MATCH (t:Team {id: $id}) RETURN t.onboarding_state",
         params={"id": org_id},
     ).result_set
-    if not rows or rows[0][0] is None:
+    if not rows:
+        # Absent node — the pre-#3553 materialize here was a MATCH-no-op;
+        # skip the dead write entirely.
+        return _onboarding_defaults()
+    if rows[0][0] is None:
+        # #3553: guarded materialization (see the docstring). On a guarded-
+        # write refusal a concurrent writer owns the row now — serve ITS
+        # committed state rather than our stale defaults.
         state = _onboarding_defaults()
-        _write_onboarding_state(org_id, state)
+        if not _cas_write_onboarding_state(org_id, state, 0):
+            state, _version = _read_onboarding_state_and_version(org_id)
         return state
     try:
         stored = _json.loads(rows[0][0]) if isinstance(rows[0][0], str) else rows[0][0]
@@ -22474,6 +22625,11 @@ def _get_onboarding_state(org_id: str) -> dict:
         stored = {}
     state = _onboarding_defaults()
     state.update(stored)
+    # #3553: defensive — a hand-seeded/legacy jsonb carrying the CAS guard
+    # must not leak it to a reader/API surface (the Supabase branch pops it
+    # above; the registry leg stores it as a node property and should never
+    # see it here, but the pop costs nothing and closes the asymmetry).
+    state.pop(_STATE_VERSION_KEY, None)
     return state
 
 
@@ -22627,27 +22783,187 @@ def _onboarding_defaults() -> dict:
             for k, v in _ONBOARDING_DEFAULT_STATE.items()}
 
 
+def _strip_flow_state_keys(state: dict) -> dict:
+    """#2001 (W5) belt-and-braces: jsonb NEVER holds FLOW state
+    (fork/status/version/step edges/member_progress/last_decide_attempt/
+    compact). #3821: the drop is REPORTED instead of silent — it was the
+    "defensive" backstop with no observer.
+
+    Shared by the whole-dict writer and the #3553 CAS writer so the two write
+    paths cannot drift on the invariant."""
+    _stripped_flow = {k for k in state
+                      if k in _os.FLOW_KEYS or k in _os.STEP_IDS}
+    if not _stripped_flow:
+        return state
+    _report_unregistered(
+        "onboarding_state", "flow_keys_stripped_at_write", _stripped_flow)
+    return {k: v for k, v in state.items()
+            if k not in _os.FLOW_KEYS and k not in _os.STEP_IDS}
+
+
+def _read_onboarding_state_and_version(org_id: str) -> tuple[dict, int | None]:
+    """#3553: ONE-STATEMENT read of ``(operational_state, state_version)``.
+
+    The state and the version MUST come from the SAME read. Two reads could
+    pair a state observed at version N with a version already advanced to
+    N+1, and the CAS would then apply the STALE state under a guard that
+    already includes another writer's commit — re-introducing exactly the
+    lost update the CAS exists to prevent.
+
+    ``version is None`` means the identity is ABSENT (no Team node / no
+    ``organizations`` row) — the pre-existing silent no-op case, kept distinct from
+    version 0 (identity present, never CAS-written) so the caller can
+    preserve the legacy no-op write. This read NEVER writes.
+    """
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import (
+        org_onboarding_state as _sb_state,
+    )
+    if is_supabase_enabled():
+        # One GET: the whole jsonb comes back in one column, so the version
+        # embedded in it is read atomically with the state.
+        stored = _sb_state(get_control_plane(), org_id)
+        if stored is None:
+            return _onboarding_defaults(), None
+        version = stored.get(_STATE_VERSION_KEY)
+        state = dict(stored)
+        state.pop(_STATE_VERSION_KEY, None)
+        return state, (version if isinstance(version, int) else 0)
+    import json as _json
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (t:Team {id: $id}) "
+        "RETURN t.onboarding_state, coalesce(t.state_version, 0)",
+        params={"id": org_id},
+    ).result_set
+    if not rows:
+        return _onboarding_defaults(), None
+    raw = rows[0][0]
+    try:
+        stored = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+    except (TypeError, ValueError):
+        stored = {}
+    state = _onboarding_defaults()
+    state.update(stored)
+    # Defensive: the registry jsonb never holds the version (it is a node
+    # property), but a hand-seeded/legacy row must not leak it either.
+    state.pop(_STATE_VERSION_KEY, None)
+    stored_version = rows[0][1]
+    return state, (stored_version if isinstance(stored_version, int) else 0)
+
+
+def _cas_write_onboarding_state(org_id: str, state: dict,
+                                expected_version: int) -> bool:
+    """#3553: single-statement GUARDED write — apply ``state`` IFF the stored
+    ``state_version`` equals ``expected_version``. Returns True iff applied.
+
+    ATOMICITY — stated, not implied: the guard and the write are ONE statement
+    on BOTH legs, so the guard cannot interleave with another query's write.
+    - registry: one Cypher ``MATCH ... WHERE coalesce(t.state_version,0) =
+      $expected SET ... RETURN t.id`` — FalkorDB executes a query to
+      completion, so the returned row count is the CAS verdict ([] = mismatch).
+    - Supabase: one PostgREST ``PATCH ... ?id=eq.X&onboarding_state->>state_version=
+      eq.N`` with ``Prefer: return=representation`` — PostgreSQL re-evaluates
+      the WHERE against the latest committed row under READ COMMITTED, so a
+      racing writer's UPDATE cannot also match; an empty body = mismatch.
+
+    This is NOT an atomic read-modify-write: a mismatch is DETECTED and
+    retried by the caller, never prevented. That is why
+    ``_write_jsonb_fields_cas`` carries a bounded retry budget.
+    """
+    state = _strip_flow_state_keys(state)
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        from tortoise.supabase_control import cas_update_onboarding_state
+        return cas_update_onboarding_state(
+            get_control_plane(), org_id, state, expected_version)
+    import json as _json
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (t:Team {id: $id}) "
+        "WHERE coalesce(t.state_version, 0) = $expected "
+        "SET t.onboarding_state = $state, t.state_version = $expected + 1 "
+        "RETURN t.id",
+        params={"id": org_id, "expected": expected_version,
+                "state": _json.dumps(state)},
+    ).result_set
+    return bool(rows)
+
+
+def _write_jsonb_fields_cas(org_id: str, fields: dict) -> None:
+    """#3553: apply OPERATIONAL ``fields`` to the jsonb state under an
+    optimistic compare-and-set on ``state_version``.
+
+    CONFLICT POLICY — bounded retry-with-reread (every writer adopts it: every
+    concurrent writer funnels through ``_update_onboarding_state``, and the
+    registry read-path materialization now routes through the CAS too):
+    on a version mismatch, RE-READ the whole state (so the concurrent writer's
+    keys are merged rather than overwritten) and re-apply this call's fields.
+    The budget is ``_ONBOARDING_STATE_CAS_ATTEMPTS``; on exhaustion raise
+    ``OnboardingStateConflictError`` (fail-loud) — under sustained contention
+    the drop must surface instead of silently losing a receipt or a cursor.
+
+    A version of ``None`` (identity absent) preserves the PRE-#3553 semantics
+    exactly: the write is a MATCH-no-op / PATCH-on-a-missing-row, never an
+    error, and the caller's echo still reflects the ACKed fields.
+
+    ⚠️ **TOCTOU on that fallback — stated, not implied.** It is the one
+    whole-dict write that does not go through the CAS, and it is safe only
+    while the identity STAYS absent. If the Team node / organizations row
+    appears between the read above and ``_write_onboarding_state``, the
+    fallback writes a real row: the registry leg then writes ``onboarding_state``
+    while leaving ``state_version`` at whatever a concurrent CAS writer set (the
+    epoch no longer describes the content), and the Supabase leg PATCHes without
+    the version filter, rewinding the epoch to "never CAS-written" so a later
+    CAS at 0 succeeds. Reachable only when provisioning races an onboarding
+    write. Closing it means re-reading once and CASing when the identity
+    materialized, or carrying a passed-in version into ``_write_onboarding_state``.
+    """
+    last_version: int | None = None
+    for _ in range(_ONBOARDING_STATE_CAS_ATTEMPTS):
+        state, version = _read_onboarding_state_and_version(org_id)
+        for k, v in fields.items():
+            state[k] = v
+        if version is None:
+            _write_onboarding_state(org_id, state)
+            return
+        last_version = version
+        if _cas_write_onboarding_state(org_id, state, version):
+            return
+    raise OnboardingStateConflictError(
+        f"onboarding state for {org_id!r} changed under "
+        f"{_ONBOARDING_STATE_CAS_ATTEMPTS} concurrent CAS attempts "
+        f"(last observed version {last_version}); fields "
+        f"{sorted(fields)}")
+
+
 def _write_onboarding_state(org_id: str, state: dict) -> None:
     """Persist onboarding state — Supabase ``teams.onboarding_state`` (jsonb —
     no string-wrapping, 0006) or the registry Org node (JSON string —
     #498 fix: FalkorDB node properties must be primitives, not dicts).
 
-    #2001 (W5): defensively STRIPS FLOW keys (fork/status/version/step
-    edges/member_progress/last_decide_attempt/compact) before persisting —
-    jsonb NEVER holds FLOW state (the router branches before the allowlist
-    filter; this is the belt-and-braces backstop the registration-split
-    negatives pin)."""
-    _stripped_flow = {k for k in state
-                      if k in _os.FLOW_KEYS or k in _os.STEP_IDS}
-    if _stripped_flow:
-        # #3821: this is the last chance to learn the router leaked a FLOW
-        # key. The strip itself is unchanged (jsonb NEVER holds FLOW state);
-        # the drop is now reported instead of silent — it was the
-        # "defensive" backstop with no observer.
-        _report_unregistered(
-            "onboarding_state", "flow_keys_stripped_at_write", _stripped_flow)
-        state = {k: v for k, v in state.items()
-                 if k not in _os.FLOW_KEYS and k not in _os.STEP_IDS}
+    #2001 (W5): defensively STRIPS FLOW keys before persisting — jsonb NEVER
+    holds FLOW state (the router branches before the allowlist filter; this is
+    the belt-and-braces backstop the registration-split negatives pin).
+
+    #3553 NOTE: this whole-dict writer is UNGUARDED by design; it is NOT a
+    concurrent-path writer. Its remaining production caller is the
+    ``version is None`` fallback in ``_write_jsonb_fields_cas`` (the identity
+    is ABSENT — the write is a MATCH-no-op / PATCH on a missing row), plus
+    test seeding. The registry read-path materialization was moved OFF this
+    writer onto the CAS in #3553. On the registry leg it leaves the
+    ``state_version`` node property untouched, so it cannot rewind the epoch;
+    on the Supabase leg the version lives INSIDE the jsonb, so a caller that
+    passes a dict without it would drop it — callers that write a real row
+    must go through the CAS (``cas_update_onboarding_state``), which always
+    re-embeds the version."""
+    state = _strip_flow_state_keys(state)
     from tortoise.supabase_control import (
         get_control_plane,
         is_supabase_enabled,
@@ -22847,9 +23163,10 @@ def _emit_onboarding_step_events(created_steps, *, distinct_id: str,
 
 def _update_onboarding_state(org_id: str, _echo: bool = True,
                              **fields) -> dict:
-    """Per-key-type router (#2001 W5): OPERATIONAL keys → jsonb RMW (the
-    legacy whole-dict merge — its non-atomicity caveat is pre-existing
-    infra); FLOW step-edge keys → graph keyed MERGE; other FLOW scalar keys
+    """Per-key-type router (#2001 W5): OPERATIONAL keys → jsonb COMPARE-AND-SET
+    (`_write_jsonb_fields_cas`, guarded on `state_version` — the pre-#3553
+    read → mutate → whole-dict write was what lost concurrent writers' keys);
+    FLOW step-edge keys → graph keyed MERGE; other FLOW scalar keys
     → graph writers. Branches BEFORE the allowlist filter so FLOW keys can
     never round-trip into jsonb. Unknown keys are dropped (fail-closed,
     never default-to-FLOW) and the drop is REPORTED (raised instead under
@@ -22899,10 +23216,11 @@ def _update_onboarding_state(org_id: str, _echo: bool = True,
             # unregistered key matched no arm and vanished with no observer.
             _report_unregistered("onboarding_state", "unknown_key", {k})
     if jsonb_fields:
-        state = _get_onboarding_state(org_id)
-        for k, v in jsonb_fields.items():
-            state[k] = v
-        _write_onboarding_state(org_id, state)
+        # #3553: the OPERATIONAL leg is a compare-and-set — the pre-#3553
+        # read→mutate→whole-dict-write lost any key another writer committed
+        # inside the window (dropped receipt → dashboard flips back to
+        # install-pending; dropped cursor → the walk regresses).
+        _write_jsonb_fields_cas(org_id, jsonb_fields)
     if wrote_step:
         _maybe_apply_completion(org_id)
         # #2006 (W11): emit for the edges this call NEWLY created (empty on a

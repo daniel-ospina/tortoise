@@ -523,3 +523,88 @@ def test_every_order_form_used_in_the_repo_is_accepted(order: str) -> None:
     sends ``created_at`` / ``created_at.asc`` / ``deleted_at``; ``abuse.py``
     and ``hosted_api.py`` send ``created_at.desc``."""
     _order_fake().query("events", order=order)  # must not raise
+
+
+# ── #3553/#4823: JSON-path FILTER fidelity ──────────────────────────────────
+# The onboarding-state CAS guards on ``onboarding_state->>state_version`` — a
+# jsonb JSON path, not a column. Resolved with a bare ``row.get(col)`` the fake
+# read EVERY path as NULL, so ``IS NULL`` matched every row and ``eq`` matched
+# none: the guarded write could never apply, ``_write_jsonb_fields_cas`` read
+# the empty result as a lost race, and the receipt clear on session delete
+# raised a spurious OnboardingStateConflictError that its own best-effort
+# ``except`` then swallowed (#4823, measured in the ``test (f)`` shard).
+# These pin the filter semantics the guard depends on, in BOTH the GET path
+# and the PATCH path (``_matches``) — the two places the fake resolves a column.
+_ORG = "org-1"
+
+
+def _cas_fake(version: int | None = None) -> FakeControlPlane:
+    state: dict = {"first_capture": True}
+    if version is not None:
+        state["state_version"] = version
+    return FakeControlPlane(
+        tables={"organizations": [{"id": _ORG, "onboarding_state": state}]})
+
+
+def test_json_path_eq_filter_matches_the_text_form_of_the_version() -> None:
+    """``->>`` yields TEXT, so an int ``state_version`` must answer an ``eq``
+    against ``"3"`` — the exact shape ``cas_update_onboarding_state`` sends."""
+    f = _cas_fake(version=3)
+    rows = f.query("organizations", select=["id"],
+                   filters=[("onboarding_state->>state_version", "eq", "3")])
+    assert rows == [{"id": _ORG}], "the guard must match its own version"
+
+
+def test_json_path_eq_filter_selects_only_the_matching_version() -> None:
+    """The guard must DISCRIMINATE: with two orgs on different versions, only
+    the one whose version matches may come back. The negative alone is not a
+    pin — pre-fix (a JSON path read as NULL) it also returned nothing, so an
+    assertion of `== []` would have passed on the broken fake. Requiring the
+    matching row along with the exclusion is what makes this falsifiable."""
+    f = FakeControlPlane(tables={"organizations": [
+        {"id": "org-a", "onboarding_state": {"state_version": 2}},
+        {"id": "org-b", "onboarding_state": {"state_version": 3}},
+    ]})
+    rows = f.query("organizations", select=["id"],
+                   filters=[("onboarding_state->>state_version", "eq", "3")])
+    assert rows == [{"id": "org-b"}], (
+        "the matching version must be returned and the stale one excluded"
+    )
+
+
+def test_json_path_is_null_matches_only_a_row_with_no_version() -> None:
+    """``expected_version == 0`` is expressed as ``IS NULL``, the only
+    representable form of 0 — so it must match an absent path and NOT a row
+    that carries one."""
+    assert _cas_fake(version=None).query(
+        "organizations", select=["id"],
+        filters=[("onboarding_state->>state_version", "is", None)]) == [{"id": _ORG}]
+    assert _cas_fake(version=1).query(
+        "organizations", select=["id"],
+        filters=[("onboarding_state->>state_version", "is", None)]) == []
+
+
+def test_a_json_path_guard_attenuates_a_patch_in_both_paths() -> None:
+    """The CAS write is ONE guarded PATCH whose non-empty representation means
+    "applied". Both the GET path and ``_matches`` (PATCH/DELETE) must resolve
+    the path, or the fake silently answers a question production answers
+    differently."""
+    f = _cas_fake(version=3)
+    guard = ("onboarding_state->>state_version", "eq", "3")
+    assert f.query("organizations", method="PATCH", select=["id"],
+                   filters=[("id", "eq", _ORG), guard],
+                   json_body={"onboarding_state": {"state_version": 4}}) == [{"id": _ORG}]
+    assert f.tables["organizations"][0]["onboarding_state"]["state_version"] == 4
+    # ...and the same PATCH with a stale guard is a no-op, not a mutation.
+    assert f.query("organizations", method="PATCH", select=["id"],
+                   filters=[("id", "eq", _ORG), guard],
+                   json_body={"onboarding_state": {"state_version": 99}}) == []
+    assert f.tables["organizations"][0]["onboarding_state"]["state_version"] == 4
+
+
+def test_json_path_arrow_keeps_the_json_type() -> None:
+    """``->`` (not ``->>``) returns jsonb, so an ``eq`` against the stored int
+    still matches — the two operators must not be conflated."""
+    f = _cas_fake(version=3)
+    assert f.query("organizations", select=["id"],
+                   filters=[("onboarding_state->state_version", "eq", 3)]) == [{"id": _ORG}]
