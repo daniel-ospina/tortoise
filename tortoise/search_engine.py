@@ -1167,16 +1167,30 @@ def run_vector_query(
     # ONLY when a trace is being recorded (a default caller sees no extra
     # query and byte-identical behavior). ``total`` and ``embedded`` are read
     # together so a scope with NO nodes is not mistaken for an un-embedded
-    # one. An UNMEASURABLE scope fails CLOSED: a read path that cannot prove
-    # its dense material must not report itself healthy (retrieval is
-    # unaffected either way — this only decides the declaration).
+    # one. The probe applies the SAME kind + per-label status predicate the
+    # retrieval legs apply (``_status_vocab_for``), so the material it counts
+    # is exactly the material the leg may return — #5287: without the status
+    # half, a terminal-but-embedded in-scope Object was counted by the probe
+    # and then excluded by the leg. An UNMEASURABLE scope fails CLOSED: a read
+    # path that cannot prove its dense material must not report itself healthy
+    # (retrieval is unaffected either way — this only decides the declaration).
     if leg_trace is not None and scope_kinds:
         try:
             _scope_field = _KIND_FIELD_BY_ENTITY.get(entity_type, "pointKind")
             _scope_where = [f"n.{_scope_field} IN $scope_kinds"]
-            if label == "Point" and excluded_statuses != ():
+            # #5287: use the SAME per-label status predicate the retrieval
+            # legs use (:1213 index, :1375 scan) — a terminal Object is
+            # excluded by them, so the probe must exclude it too or an
+            # in-scope-but-terminal embedding is counted as material the leg
+            # then refuses to return (``hybrid`` declared over a keyword-only
+            # read — the #4199 class via the status axis). ``_status_vocab_for``
+            # is the ONE family→vocabulary dispatcher; calling it here (never
+            # re-stating the mapping) is what keeps probe and leg from drifting.
+            if label in ("Point", "Object") and excluded_statuses != ():
+                _vocab, _flag = _status_vocab_for(label)
                 _scope_where.append(_exclude_status_clause(
-                    "n", excluded_statuses or TERMINAL_EXCLUDED_STATUSES))
+                    "n", excluded_statuses or _vocab,
+                    include_outdated_flag=_flag))
             if entity_type == "operator":
                 _scope_where.append("n.is_operator = true")
             _scope_rows = graph.query(
@@ -1190,6 +1204,15 @@ def run_vector_query(
                 _scope_embedded = int(_scope_rows[0][1] or 0)
                 _scope_hollow = _scope_total > 0 and _scope_embedded == 0
                 _scope_empty = _scope_total == 0
+            else:
+                # #5287: an aggregate ``RETURN count(*), count(...)`` always
+                # yields one row, so an EMPTY result set is a probe that
+                # answered nothing — not a measured scope. Treat it exactly
+                # like the raised-probe path below: UNMEASURABLE, fail CLOSED.
+                # Pre-fix it fell through to the unscoped whole-label count
+                # (line ~1427) and could record ``empty_results``/healthy,
+                # contradicting the comment above.
+                _scope_hollow = True
         except Exception as e:  # noqa: BLE001, RUF100 — fail CLOSED
             logger.debug("dense scope probe failed (%s) — declaring the "
                          "scope un-embedded", e)

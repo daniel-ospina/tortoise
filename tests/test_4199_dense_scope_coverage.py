@@ -271,6 +271,67 @@ def test_an_out_of_scope_object_arm_cannot_launder_the_read(
     assert obj["id"], "sanity: the Object fixture exists"
 
 
+def test_a_terminal_in_scope_object_arm_cannot_launder_the_read(
+        sdk_factory, embedder, monkeypatch):
+    """#5287 P2: the STATUS axis of the Object-arm laundering.
+
+    The sibling of ``test_an_out_of_scope_object_arm_cannot_launder_the_read``
+    with the Object IN scope. With ``kind='event'`` the Object arm's scope is
+    ``objectKind='event'``, so a ``retracted`` Object of that kind IS in scope
+    — but its embedding is excluded by the Object arm's OWN retrieval status
+    clause (``_status_vocab_for("Object")`` -> ``OBJECT_TERMINAL_STATUSES``),
+    so the leg returns nothing.
+
+    Before the fix the scope probe applied the terminal-status predicate ONLY
+    for ``label == "Point"``, so it counted that excluded embedding as
+    material and the Object arm recorded ``empty_results``/healthy.
+    ``_vector_leg_healthy`` then accepted the arm as proof the read was hybrid
+    while the Point arm — the read's own material — had ``no_embeddings`` in
+    scope. The probe must apply the SAME ``_status_vocab_for(label)`` predicate
+    the retrieval legs use, so the two cannot drift (that drift IS the bug).
+    """
+    _offline_llm(monkeypatch)
+    sdk = sdk_factory()
+    try:
+        _capture_unembedded_turns(sdk, monkeypatch, "sess-5287-term")
+        _embedder(monkeypatch, embedder)
+        # An embedded Object IN the read's objectKind scope but TERMINAL: the
+        # Object leg's own status clause excludes it, so it is NOT material
+        # for this read even though it physically holds a dense vector.
+        obj = sdk.create_object("auth dead-end website config",
+                                objectKind="event", status="retracted")
+        rows = sdk._get_proj().g.query(
+            "MATCH (o:Object {id: $i}) "
+            "RETURN o.status, o.embedding IS NOT NULL",
+            params={"i": obj["id"]}).result_set
+        assert rows and rows[0][0] == "retracted" and rows[0][1] is True, rows
+
+        legs = sdk.retrieval_legs("auth dead-end", kind="event", limit=5)
+    finally:
+        sdk.close()
+
+    vecs = _vector_entries(legs["legs"])
+    assert len(vecs) == 2, (
+        f"expected a Point arm and an Object arm, got {vecs}")
+    # The Object arm's scope is IN scope by kind but terminal-only, so its own
+    # status clause leaves a scope with NO material: the probe must see that
+    # and the arm must be a hollow/neutral arm, never a healthy ``ok``.
+    assert not any(
+        v["ran"] and not v["degraded"] and v.get(VECTOR_SCOPE_KEY)
+        != VECTOR_SCOPE_EMPTY for v in vecs), (
+        "a vector arm still reads healthy by counting a terminal embedding "
+        f"its own leg excludes: {vecs}")
+    marker = legs["declared_degraded_read"]
+    assert marker is not None, (
+        "a terminal-in-scope Object arm laundered the Point arm's "
+        f"degradation: {legs['legs']}")
+    assert marker["reason"] == "no_embeddings", marker
+    assert marker["degraded_read"] is True, marker
+    assert marker["hybrid"] is False, marker
+    assert legs["hybrid"] is False, legs
+    assert obj["id"], "sanity: the Object fixture exists"
+
+
 def test_the_returned_material_is_keyword_only_for_the_turns(
         sdk_factory, embedder, monkeypatch):
     """The dense score is absent from every turn hit — the claim being denied.
@@ -660,6 +721,31 @@ def test_unmeasurable_scope_fails_closed():
     vec = _vector_entry(trace)
     assert vec["degraded"] is True and vec["reason"] == "no_embeddings", vec
     assert declared_degraded_read(trace) is not None
+
+
+def test_probe_returning_no_rows_fails_closed():
+    """#5287: an EMPTY probe result set is UNMEASURABLE — fail CLOSED.
+
+    The aggregate ``RETURN count(*), count(...)`` always yields one row, so
+    an empty result set means the probe answered nothing rather than that the
+    scope is empty. Pre-fix ``if _scope_rows:`` skipped the assignment
+    entirely, leaving ``_scope_hollow=False``/``_scope_embedded=None`` so the
+    zero-row guard fell back to the unscoped whole-label count and a healthy
+    record could stand — contradicting the adjacent "an UNMEASURABLE scope
+    fails CLOSED" comment. Only the raised-probe path (the sibling test
+    above) actually failed closed.
+    """
+    graph = _RoutingGraph([
+        ("count(n.embedding)", [], None),
+        ("euclideanDistance", [("ext-1", 0.9)], None),
+    ])
+    trace: list[dict] = []
+    out = _scoped_run(graph, trace)
+
+    assert [pid for pid, _ in out] == ["ext-1"], out
+    vec = _vector_entry(trace)
+    assert vec["degraded"] is True and vec["reason"] == "no_embeddings", vec
+    assert declared_degraded_read(trace) is not None, trace
 
 
 def test_no_scope_and_no_trace_never_pays_for_the_probe():
