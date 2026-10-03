@@ -129,12 +129,16 @@ def test_skipping_the_engine_probe_never_reports_wedged():
 # BOUNDEDNESS — a probe that can hang is not a probe
 # ==========================================================================
 
-def test_probe_graph_refuses_quickly_on_a_closed_port():
+def test_probe_graph_refuses_quickly_on_a_closed_port(monkeypatch):
     """(a) FAILS if `probe_graph` raises instead of returning a result, or
     exceeds its bound.
     (b) Reachable: any unused loopback port. Bind then close to get one that is
     almost certainly free without racing a real service.
     """
+    # The HOST comes from the URI (field-by-field override), so an ambient
+    # non-loopback URI would send this probe elsewhere and the local server
+    # would never be contacted — passing for the wrong reason.
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
@@ -277,19 +281,25 @@ def test_the_connect_bound_is_passed_once_per_call(monkeypatch):
     test cannot see, because a refused connect returns immediately on loopback.
     It matters for the blackholed-remote case `--timeout` exists to cover: the
     bound is the only thing between a dropped packet and a hang.
-    (b) Reachable: removal of `timeout=timeout` from create_connection, which the
-    sibling read-bound test does not detect.
+    (b) Reachable: omission of `sock.settimeout(timeout)` before `connect()`.
     """
     seen = []
-    real = socket.create_connection
+    real_socket = socket.socket
 
-    def spy(address, timeout=None, **kw):
-        seen.append(timeout)
-        return real(address, timeout=timeout, **kw)
+    class Spy:
+        def __init__(self, *a, **k):
+            self._sock = real_socket(*a, **k)
 
-    monkeypatch.setattr(e.socket, "create_connection", spy)
+        def settimeout(self, value):
+            seen.append(value)
+            return self._sock.settimeout(value)
+
+        def __getattr__(self, name):
+            return getattr(self._sock, name)
+
+    monkeypatch.setattr(e.socket, "socket", Spy)
     e.probe_graph("127.0.0.1", 1, timeout=1.5)
-    assert seen == [1.5], f"connect bound not passed: {seen}"
+    assert 1.5 in seen, f"connect bound not applied: {seen}"
 
 
 def test_probe_engine_treats_a_slow_answer_as_wedged(monkeypatch):
@@ -376,7 +386,7 @@ def test_a_missing_cli_with_a_live_socket_is_unmeasured_not_absent(monkeypatch):
 # CLI contract
 # ==========================================================================
 
-def test_the_graph_line_shows_the_actual_reply_not_a_literal_pong(capsys):
+def test_the_graph_line_shows_the_actual_reply_not_a_literal_pong(monkeypatch, capsys):
     """(a) FAILS if the summary prints the literal `PONG` whenever `ok` is true.
     It printed `PONG` for a `-NOAUTH` reply, so an operator reading the line
     would believe the graph was authenticated and answering — the display then
@@ -399,6 +409,10 @@ def test_main_exits_two_when_the_graph_is_unreachable(monkeypatch):
     on the exit code and be told everything is fine.
     (b) Reachable: point at a closed port with --no-docker.
     """
+    # The HOST comes from the URI (field-by-field override), so an ambient
+    # non-loopback URI would send this probe elsewhere and the local server
+    # would never be contacted — passing for the wrong reason.
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
@@ -406,7 +420,7 @@ def test_main_exits_two_when_the_graph_is_unreachable(monkeypatch):
     assert e.main(["--no-docker", "--port", str(port), "--timeout", "1"]) == 2
 
 
-def test_the_graph_down_prose_never_claims_an_unprobed_engine_answered(capsys):
+def test_the_graph_down_prose_never_claims_an_unprobed_engine_answered(monkeypatch, capsys):
     """(a) FAILS if the GRAPH_DOWN prose asserts "The engine answered" when the
     engine was not probed. That sentence sends the operator to the graph
     container on a machine whose engine is the actual problem — the misdiagnosis
@@ -415,6 +429,10 @@ def test_the_graph_down_prose_never_claims_an_unprobed_engine_answered(capsys):
     (b) Reachable: `--no-docker`, the mode that exists precisely so the engine
     is NOT probed.
     """
+    # The HOST comes from the URI (field-by-field override), so an ambient
+    # non-loopback URI would send this probe elsewhere and the local server
+    # would never be contacted — passing for the wrong reason.
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
@@ -432,6 +450,10 @@ def test_the_graph_down_prose_matches_the_engine_state(monkeypatch, capsys):
     (b) Reachable: each branch is produced by a real probe state (measured live
     during review: PATH mutated so docker was missing, socket present).
     """
+    # The HOST comes from the URI (field-by-field override), so an ambient
+    # non-loopback URI would send this probe elsewhere and the local server
+    # would never be contacted — passing for the wrong reason.
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
@@ -532,9 +554,6 @@ def test_an_unresolvable_uri_raises_instead_of_defaulting(monkeypatch):
         except ValueError:
             continue
         raise AssertionError(f"{bad} resolved to {target} instead of refusing")
-    # and redis_port_from_env stays total for callers that only want a port
-    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@127.0.0.1:16x00/t")
-    assert e.redis_port_from_env() is None
 
 
 def test_the_uri_localhost_is_mapped_to_loopback_v4(monkeypatch):
@@ -786,15 +805,127 @@ def test_the_non_loopback_note_is_suppressed_when_nothing_was_probed(monkeypatch
     assert "NOTE: this probed" not in out, out
 
 
+def test_an_ipv6_target_is_connected_not_crashed(monkeypatch):
+    """(a) FAILS if the resolved sockaddr is handed to `create_connection`,
+    which unpacks it as a 2-tuple: an AF_INET6 sockaddr is a 4-tuple
+    (`('::1', port, 0, 0)`), so the call raised `ValueError: too many values to
+    unpack` and the tool produced NO verdict, exit 1 — exactly when an operator
+    is diagnosing a wedge. It also fires for any dual-stack hostname whose AAAA
+    is returned first, the common case for managed hosts.
+    (b) Reachable: `--host ::1`/`localhost`, or a URI such as
+    `redis://[2001:db8::1]:16379/t` (only the literal strings `localhost` and
+    `::1` are remapped, so other IPv6 targets reach the probe).
+    """
+    server = socket.socket(socket.AF_INET6)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("::1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+
+    def serve():
+        try:
+            conn, _ = server.accept()
+            with conn:
+                conn.recv(64)
+                conn.sendall(b"+PONG\r\n")
+        except OSError:
+            pass
+        finally:
+            server.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    result = e.probe_graph("::1", port, timeout=2.0)
+    assert result["ok"] is True, result
+    assert result["reply"] == "+PONG", result
+
+
+def test_every_resolved_address_is_tried_not_just_the_first(monkeypatch):
+    """(a) FAILS if only `addrinfo[0]` is dialled: a dual-stack host whose first
+    (AAAA) address is unreachable while the second (A) answers was reported
+    GRAPH_DOWN for a live graph — the multi-address retry that
+    `create_connection((host, port))` used to perform must be preserved.
+    (b) Reachable: `localhost` here resolves to `::1` FIRST, so a v4-only
+    listener is exactly this shape.
+    """
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+
+    def serve():
+        try:
+            conn, _ = server.accept()
+            with conn:
+                conn.recv(64)
+                conn.sendall(b"+PONG\r\n")
+        except OSError:
+            pass
+        finally:
+            server.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    # IPv6 first (dead), then the live IPv4 entry
+    real_getaddrinfo = socket.getaddrinfo
+    dead_v6 = (socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP, "",
+               ("::1", port, 0, 0))
+    monkeypatch.setattr(e.socket, "getaddrinfo",
+                        lambda *a, **k: [dead_v6]
+                        + real_getaddrinfo("127.0.0.1", port,
+                                           proto=socket.IPPROTO_TCP))
+    result = e.probe_graph("dual.example.com", port, timeout=2.0)
+    assert result["ok"] is True, result
+
+
+def test_a_non_oserror_resolver_failure_is_not_reported_as_a_timeout(monkeypatch):
+    """(a) FAILS if a resolver that raises something other than OSError kills the
+    worker thread, leaving an empty result that the caller reports as
+    `resolve-timeout` — a timeout it never measured.
+    (b) Reachable: any unexpected resolver error.
+    """
+    seen = {}
+
+    def explode(*_a, **_k):
+        raise RuntimeError("resolver exploded")
+
+    monkeypatch.setattr(e.socket, "getaddrinfo", explode)
+    try:
+        e._resolve_within_bound("x.example.com", 1, 1.0)
+        raise AssertionError("must propagate")
+    except RuntimeError:
+        pass
+    # and probe_graph must not claim a timeout for it — nor raise, which is its
+    # documented contract and the whole point of a diagnostic tool
+    result = e.probe_graph("x.example.com", 1, timeout=1.0)
+    assert result["ok"] is False, result
+    assert result["error"] != "resolve-timeout", result
+    assert "RuntimeError" in result["error"], result
+
+
+def test_an_empty_address_list_is_reported_not_indexed(monkeypatch):
+    """(a) FAILS if an empty resolver result reaches `addrinfo[0]`: it raised
+    IndexError out of `probe_graph`, whose contract is "Never raises".
+    (b) Reachable: a resolver returning no addresses.
+    """
+    monkeypatch.setattr(e.socket, "getaddrinfo", lambda *a, **k: [])
+    result = e.probe_graph("empty.example.com", 16379, timeout=1.0)
+    assert result["ok"] is False, result
+    assert result["error"] == "no-addresses", result
+
+
 def test_redis_port_comes_from_the_uri_when_present(monkeypatch):
     """(a) FAILS if the configured port is ignored, so the tool probes 16379
     while the lane's graph is elsewhere and reports a false GRAPH_DOWN.
     (b) Reachable: TORTOISE_DB_URI pointing at a non-default port.
     """
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@127.0.0.1:16400/tortoise")
-    assert e.redis_port_from_env() == 16400
+    assert e.graph_target_from_env()["port"] == 16400
     monkeypatch.setenv("TORTOISE_DB_URI", "falkor:///tmp/x")
-    assert e.redis_port_from_env() is None
+    try:
+        e.graph_target_from_env()
+        raise AssertionError("falkor:// must refuse")
+    except ValueError:
+        pass
 
 
 def test_redis_port_is_not_taken_from_a_colon_that_is_not_a_port(monkeypatch):
@@ -818,7 +949,7 @@ def test_redis_port_is_not_taken_from_a_colon_that_is_not_a_port(monkeypatch):
     except ValueError:
         pass
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@127.0.0.1:16379")
-    assert e.redis_port_from_env() == 16379
+    assert e.graph_target_from_env()["port"] == 16379
 
 
 def test_the_engine_probe_tool_keeps_its_ci_carveout():

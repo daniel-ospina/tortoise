@@ -159,7 +159,7 @@ def _resolve_within_bound(host: str, port: int, timeout: float):
     def resolve():
         try:
             done.append(socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP))
-        except OSError as exc:
+        except Exception as exc:  # noqa: BLE001 — the worker must always report
             done.append(exc)
 
     worker = threading.Thread(target=resolve, daemon=True)
@@ -167,7 +167,7 @@ def _resolve_within_bound(host: str, port: int, timeout: float):
     worker.join(timeout)
     if not done:
         return None
-    if isinstance(done[0], OSError):
+    if isinstance(done[0], BaseException):
         raise done[0]
     return done[0]
 
@@ -196,7 +196,31 @@ def probe_graph(host: str, port: int, timeout: float) -> dict:
         if addrinfo is None:
             return {"ok": False, "reply": None, "error": "resolve-timeout",
                     "elapsed_s": round(time.monotonic() - started, 3)}
-        sock = socket.create_connection(addrinfo[0][4], timeout=timeout)
+        if not addrinfo:
+            return {"ok": False, "reply": None, "error": "no-addresses",
+                    "elapsed_s": round(time.monotonic() - started, 3)}
+        # EVERY resolved address is tried, not just the first: a dual-stack host
+        # whose AAAA is unreachable while its A answers would otherwise be
+        # reported GRAPH_DOWN. And the socket is built from the family's
+        # SOCKADDR — `create_connection` unpacks it as a 2-tuple, which an
+        # AF_INET6 sockaddr (a 4-tuple) makes a ValueError, i.e. a crash instead
+        # of a verdict exactly when an operator is diagnosing a wedge.
+        last_error = None
+        for family, socktype, proto, _canon, sockaddr in addrinfo:
+            try:
+                sock = socket.socket(family, socktype, proto)
+                sock.settimeout(timeout)
+                sock.connect(sockaddr)
+                break
+            except OSError as exc:
+                last_error = exc
+                if sock is not None:
+                    sock.close()
+                sock = None
+        else:
+            return {"ok": False, "reply": None,
+                    "error": type(last_error).__name__ if last_error else "no-addresses",
+                    "elapsed_s": round(time.monotonic() - started, 3)}
         sock.sendall(b"PING\r\n")
         reply = sock.recv(64)
         elapsed = time.monotonic() - started
@@ -216,6 +240,15 @@ def probe_graph(host: str, port: int, timeout: float) -> dict:
                 "elapsed_s": round(time.monotonic() - started, 3)}
     except OSError as exc:
         return {"ok": False, "reply": None, "error": type(exc).__name__,
+                "elapsed_s": round(time.monotonic() - started, 3)}
+    except Exception as exc:  # noqa: BLE001 — "Never raises" is the contract
+        # A resolver that raises something unexpected is an UNMEASURED endpoint,
+        # not a timeout and not a verdict. Reporting it as a cause the probe did
+        # not observe is the defect this whole tool exists to remove, and
+        # crashing out of a diagnostic tool is worse: the operator gets no
+        # verdict at all.
+        return {"ok": False, "reply": None,
+                "error": f"{type(exc).__name__}: {exc}",
                 "elapsed_s": round(time.monotonic() - started, 3)}
     finally:
         if sock is not None:
@@ -337,18 +370,6 @@ def graph_target_from_env() -> Optional[dict]:
     # FalkorDB has been observed there. The canonical instance is 127.0.0.1.
     host = "127.0.0.1" if ep.host in ("localhost", "::1") else ep.host
     return {"host": host, "port": ep.port, "ssl": ep.ssl, "uri": uri}
-
-
-#: Kept for callers that only want the port. Derived, so the two cannot
-#: disagree. Returns None for "no URI" AND for an unresolvable one; callers that
-#: must tell those apart use `graph_target_from_env`.
-def redis_port_from_env() -> Optional[int]:
-    """The graph port from TORTOISE_DB_URI, when it names a supported target."""
-    try:
-        target = graph_target_from_env()
-    except ValueError:
-        return None
-    return target["port"] if target else None
 
 
 def main(argv: Optional[list] = None) -> int:
