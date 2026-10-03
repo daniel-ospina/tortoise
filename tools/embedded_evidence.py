@@ -1307,15 +1307,22 @@ def closes_issue(rec: dict) -> tuple[bool, list[str]]:
     ok &= conj("load-sample-unusable",
                all(b is not None and b >= 0.0 for b in _befores))
     # "No run began above the declared ceiling." Evaluated ONLY over USABLE samples,
-    # so the two reasons are DISJOINT: a `-1.0` sentinel is not above the ceiling
-    # (`-1.0 <= 60.0`), and re-asserting usability here — which the first version did
-    # — recorded a contravention that did not happen into `verdict.violations`, the
-    # one list a human reads, while hiding that it was the SAMPLE check doing the
-    # work. An unusable sample is not silently admissible: `load-sample-unusable`
-    # refuses the record above.
+    # so a single sample can never be reported as BOTH unusable and above the
+    # ceiling. That is PER-SAMPLE disjointness, NOT disjointness of the reason SETS:
+    # one `-1.0` run and one 68.0 run legitimately carry both labels, because each
+    # is a true statement about a different run. A `-1.0` sentinel is
+    # not above the ceiling (`-1.0 <= 60.0`), and re-asserting usability here —
+    # which the first version did — recorded a contravention that did not happen
+    # into `verdict.violations`, the one list a human reads, while hiding that it
+    # was the SAMPLE check doing the work. An unusable sample is not silently
+    # admissible: `load-sample-unusable` refuses the record above. Nor is this
+    # reason emitted against an unusable THRESHOLD: it is gated on
+    # `_ceiling_usable`, so a ceiling of 0 reports `load-ceiling-unusable` alone
+    # rather than attributing a contravention to a value `_validated_ceiling`
+    # itself declares not to be a threshold.
     _above_ceiling = [
         b for b in _befores
-        if b is not None and b >= 0.0 and _ceiling is not None and b > _ceiling
+        if b is not None and b >= 0.0 and _ceiling_usable and b > _ceiling
     ]
     ok &= conj("load-above-ceiling", not _above_ceiling)
     # `attempted` is deliberately NOT an AND-term here: `main()` rejects `--n < 2`,

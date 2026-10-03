@@ -1583,6 +1583,45 @@ class TestRecordConstructionReadsTheCanonicalConstants:
         assert "load-sample-unusable" in reasons
         assert "load-above-ceiling" not in reasons
 
+    def test_an_unusable_ceiling_does_not_also_claim_a_contravention(
+        self, monkeypatch
+    ):
+        # The CEILING half of the same rule. `_above_ceiling` used to test only
+        # `_ceiling is not None`, so a ceiling of 0 — which `_validated_ceiling`
+        # itself declares not to be a threshold — still produced
+        # `load-above-ceiling` for every positive sample, attributing a
+        # contravention to a threshold that does not exist.
+        files = list(ee.FAMILY_REPRODUCERS)
+        runs = [
+            self._run(files, 1, "unexpected-divergence"),
+            self._run(files, 2, "unexpected-divergence"),
+        ]
+        rec = self._record(monkeypatch, runs)
+        rec["load"]["ceiling"] = 0.0
+        _, reasons = ee.closes_issue(rec)
+        assert "load-ceiling-unusable" in reasons
+        assert "load-above-ceiling" not in reasons
+
+    def test_the_two_load_reasons_are_disjoint_per_sample_not_per_record(
+        self, monkeypatch
+    ):
+        # Per-SAMPLE disjointness is the real rule: one unusable run and one run
+        # above the ceiling are two TRUE statements about two DIFFERENT runs, so
+        # both labels belong in the list. Pinned so a future "make the two reasons
+        # disjoint" edit cannot silently drop one of them.
+        files = list(ee.FAMILY_REPRODUCERS)
+        runs = [
+            self._run(files, 1, "unexpected-divergence"),
+            self._run(files, 2, "unexpected-divergence"),
+        ]
+        runs[0]["load"]["before"] = ee.LOAD_UNMEASURED
+        runs[1]["load"]["before"] = 68.0
+        rec = self._record(monkeypatch, runs)
+        rec["load"]["ceiling"] = 60.0
+        _, reasons = ee.closes_issue(rec)
+        assert "load-sample-unusable" in reasons
+        assert "load-above-ceiling" in reasons
+
     def test_record_rejects_a_red_that_observed_a_different_file_list(self, monkeypatch):
         files = list(ee.FAMILY_REPRODUCERS)
         runs = [
