@@ -330,10 +330,16 @@ def test_huge_decimal_suffix_is_not_swept_and_does_not_break_capture(tmp_path):
     :Session MERGE had committed — a benign cleanup turned into a failed
     capture. The sweep now wraps its parse and RETAINS an id it cannot place,
     the same treatment the ``²``-class gets, so no admitted id can make it
-    raise. The suffix is sized from the LIVE limit so the precondition holds on
-    any lane rather than only where the default happens to be in force.
+    raise. The suffix is sized from the LIVE limit, and the test SKIPS when that
+    limit is disabled: with no limit ``int()`` cannot raise the conversion error
+    at all, so the class this test guards is unreachable there and there is
+    nothing to exercise.
     """
-    limit = sys.get_int_max_str_digits() or 4300
+    limit = sys.get_int_max_str_digits()
+    if limit == 0:
+        pytest.skip(
+            "int_max_str_digits is disabled — int() has no length limit to "
+            "exercise, so the conversion-error class is unreachable here")
     sdk = TortoiseSDK(db_path=str(tmp_path / "huge.db"))
     proj = sdk._get_proj()
 
