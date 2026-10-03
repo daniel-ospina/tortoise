@@ -14,6 +14,8 @@ Hermetic: every tree is a scratch directory; the live I1 read is injected.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -514,6 +516,87 @@ def test_clause_vii_nested_gitattributes_is_not_missed(tmp_path: Path) -> None:
     """
     root = make_tree(tmp_path, merge_config())
     _write(root / "docs" / ".gitattributes", UNION_ATTRS)
+    assert clause(root, "vii") == 1
+
+
+def _git(root: Path, *args: str) -> None:
+    """Run git with the AMBIENT configuration removed.
+
+    A global `core.excludesFile`, or a `GIT_DIR`/`GIT_WORK_TREE` left behind by a
+    wrapper, would redirect these calls at the OUTER repository — changing what
+    the fixture tracks (so the test's verdict comes from the machine, #5049) or
+    staging fixture files into a real repo's index. Neither is reachable through
+    an inherited environment.
+    """
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")
+    }
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    proc = subprocess.run(
+        ["git", *args], cwd=root, capture_output=True, text=True, env=env
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+def _own_git_repo(root: Path) -> None:
+    """Make `root` a real work tree — the guard reads the TRACKED set there.
+
+    `.worktrees/` is ignored, exactly as it is in this repository, so a nested
+    worktree is untracked by construction rather than by the guard's guess.
+    """
+    _write(root / ".gitignore", ".worktrees/\n")
+    _git(root, "init", "-q")
+    _git(root, "add", "-A")
+
+
+def test_clause_vii_verdict_does_not_depend_on_nested_worktrees(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A nested worktree is NOT this repository, so it cannot move the verdict.
+
+    Observed 2026-09-28: the hub checkout, carrying
+    `.worktrees/merge-strategy-fix/.gitattributes` (`merge=union` on the two
+    registries), reported clause (vii) DIVERGED naming
+    `.worktrees/merge-strategy-fix/config/ci-surfaces.yml`, while the SAME commit
+    in CI passed. The local verdict is what a lane diagnosing a red `main` reads,
+    so a verdict that tracks which worktrees happen to exist on the machine both
+    misleads the lane that trusts it and discredits the lane that dismisses it.
+
+    The third assertion keeps the fix from being vacuous: the scan must still see
+    the REPOSITORY's own tracked `.gitattributes` at depth, so a clause that was
+    simply switched off would fail here instead of passing. The fourth pins the
+    FAIL-OPEN reading git's view introduces: `GIT_INDEX_FILE` aimed at nothing
+    makes `git ls-files` exit 0 with EMPTY output, which would report "no union"
+    while a tracked union is active — ambient env must not redirect the read.
+    """
+    root = make_tree(tmp_path, merge_config())
+    nested = root / ".worktrees" / "merge-strategy-fix"
+    _write(nested / ".gitattributes", UNION_ATTRS)
+    _write(nested / "config" / "ci-surfaces.yml", "leaked: true\n")
+    _own_git_repo(root)
+
+    with_nested = clause(root, "vii")
+
+    (nested / ".gitattributes").unlink()
+    (nested / "config" / "ci-surfaces.yml").unlink()
+    (nested / "config").rmdir()
+    nested.rmdir()
+    without_nested = clause(root, "vii")
+
+    assert with_nested == without_nested == 0
+
+    # ... and the scoped set is the REPOSITORY's, not "nothing": a TRACKED
+    # `.gitattributes` at depth is still found, and its GLOB is still expanded
+    # against the tracked set (the git-sourced path the walk case never takes).
+    _write(root / "docs" / "product" / ".gitattributes", "config/*.yml merge=union\n")
+    _write(root / "docs" / "product" / "config" / "ci-surfaces.yml", "x: 1\n")
+    _git(root, "add", "-A")
+    assert clause(root, "vii") == 1
+
+    monkeypatch.setenv("GIT_INDEX_FILE", str(tmp_path / "not-an-index"))
     assert clause(root, "vii") == 1
 
 
@@ -1149,15 +1232,40 @@ def test_mutation_gate_definition_change_is_not_silent(tmp_path: Path) -> None:
 def test_static_is_hermetic_head_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """cycle 10: I10 is HEAD-computed — no base ref, no diff, no fetch, no shell.
 
-    Proven by mutation: if any static path shelled out, this would raise.
+    Proven by mutation: every shelled-out call is refused EXCEPT the one
+    sanctioned read.
+
+    Scoped by the nested-worktree fix. Clause (vii) reads the TRACKED set with
+    `git ls-files` — the plan's own cycle-8(a) form
+    (`docs/plans/2026-09-26-5215-merge-throughput.md`:
+    `git ls-files -z '*.gitattributes' '.gitattributes'` plus
+    `$GIT_DIR/info/attributes`) — and that is why the scan stopped being a
+    filesystem walk: the walk descended into other lanes' worktrees under
+    `.worktrees/` and made clause (vii)'s verdict depend on the machine. The read
+    is of THIS tree's index: not a ref, not a diff, not a fetch. I10 is the clause
+    cycle 10 argued the no-shell property FOR (every diff-based form was defeated
+    and the fetch machinery deleted), so the ceiling is kept exact rather than
+    abandoned: only `git ls-files` is allowed, and a NEW `subprocess.run` call
+    anywhere on the static path still raises. (The primitive is `subprocess.run`
+    because that is what the static path uses; a future `Popen`/`check_output`
+    would need its own pin.)
     """
     root = make_tree(tmp_path, merge_config())
+    _own_git_repo(root)  # a real work tree, so the one sanctioned read succeeds
+    real_run = subprocess.run
+    shells: list[list[str]] = []
 
-    def boom(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("the static clauses must not shell out")
+    def recording_run(*args: object, **kwargs: object) -> object:
+        words = args[0]
+        assert isinstance(words, list), words
+        if words[:3] != ["git", "-C", str(root)] or words[3] != "ls-files":
+            raise AssertionError(f"the static clauses must not shell out: {words!r}")
+        shells.append(list(words))
+        return real_run(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(mcg.subprocess, "run", boom)
+    monkeypatch.setattr(mcg.subprocess, "run", recording_run)
     assert mcg.run_static(root)[0] == 0
+    assert len(shells) == 1
 
 
 # ---------------------------------------------------------------------------
