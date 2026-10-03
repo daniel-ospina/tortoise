@@ -309,9 +309,9 @@ def test_an_open_call_without_a_mode_is_a_read_and_not_a_declared_output():
     """(a) FAILS if `open(x)` is treated as a write whatever its mode — the
     regression that classified the hand-written `.github/workflows/python-ci.yml`
     as a generated artifact.
-    (b) Reachable: `tools/ci_selection.py` line 1292 reads the workflow through
-    `yaml.safe_load(open(workflow_path))`, which is `open(x)` with the default
-    `'r'` mode. Nothing writes that file.
+    (b) `tools/ci_selection.py` reads that workflow through
+    `yaml.safe_load(open(workflow_path))` in `workflow_matrix_issues`, which is
+    `open(x)` with the default `'r'` mode. Nothing writes that file.
     """
     source = (
         'def wf_issues(path, manifest):\n'
@@ -372,9 +372,9 @@ def test_the_workflow_python_ci_is_not_a_declared_output_of_ci_selection():
     2026-10-03 reports `.github/workflows/python-ci.yml` as
     'declared output of tools/ci_selection.py' and puts it in the top-N, which
     would send a fixer to regenerate a hand-written workflow.
-    (b) Reachable: `tools/ci_selection.py` READS that workflow (line 2360 via
-    `WORKFLOW.read_text()`, line 1292 via `open(workflow_path)`) and never writes
-    it; the basename lookup is what joins the two.
+    (b) `tools/ci_selection.py` READS that workflow (via `WORKFLOW.read_text()`
+    and `open(workflow_path)` in `workflow_matrix_issues`) and never writes it;
+    the basename lookup is what joins the two.
     """
     text = (REPO / "tools" / "ci_selection.py").read_text()
     outputs = q.declared_outputs(text)
