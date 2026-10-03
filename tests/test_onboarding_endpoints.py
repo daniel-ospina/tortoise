@@ -639,6 +639,10 @@ _STATE_KEY_TABLE: dict[str, tuple[str, object]] = {
     "github_docs_indexed_at": ("github_docs_indexed_at", "2026-08-25T00:00:00Z"),
     "capture_revised": ("capture_revised", True),
     "capture_ask_shown": ("capture_ask_shown", True),
+    # #4258: the per-org "capture also extracts into memory" user setting.
+    # The sample is the NON-default (False) — with the default True a dropped
+    # write would be masked by the GET merge, so the round-trip could not fail.
+    "capture_extract": ("capture_extract", False),
     "session_capture_receipt": ("session_capture_receipt", "2026-08-25T00:00:00Z"),
     "session_capture_receipt_claude": ("session_capture_receipt_claude", "2026-08-25T00:00:00Z"),
     "session_capture_receipt_claude-desktop": ("session_capture_receipt_claude_desktop", "2026-08-25T00:00:00Z"),
