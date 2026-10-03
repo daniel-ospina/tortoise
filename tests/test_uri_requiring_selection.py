@@ -13,7 +13,7 @@ measured harm is not a red leg but an unlandable one: #6390 was
 `mergeable=true`, clean-reviewed AT HEAD, `behind=0`, and still could not land.
 
 The fix is the MIRROR of the existing `carve_out` subtraction: a `carve_out` file
-cannot run in a URI-SET leg, so it is subtracted; these cannot run in a URI-UNSET
+cannot run in a URI-SET leg, so it is subtracted; these cannot run in a URI-EMPTY
 one, so they must be too.
 
 **Why this file runs pytest instead of parsing the tree.** Four review cycles
@@ -272,7 +272,7 @@ def test_declared_list_matches_the_observation() -> None:
         "actually collects with an EMPTY TORTOISE_DB_URI.\n"
         f"  declared but DOES collect (stale entry): {sorted(declared - observed)}\n"
         f"  collects nothing but NOT declared: {sorted(observed - declared)}\n"
-        "UndecLared modules are handed to a URI-less tier-2 leg, collect zero "
+        "Undeclared modules are handed to a URI-less tier-2 leg, collect zero "
         "tests there, and red it with no attributable failure (#6884). Add them "
         "to `uri_requiring`. The reverse direction means an entry is stale: check "
         "whether the module genuinely collects tests again before removing it."
@@ -410,7 +410,9 @@ def test_docs_only_early_return_subtracts_the_lane() -> None:
 
 
 def test_slow_lane_subtracts_the_lane() -> None:
-    """The test-slow legs are URI-unset on a tier-2 PR too, so a relocated
+    """The test-slow legs get an EMPTY `TORTOISE_DB_URI` on a tier-2 PR too (not
+    an unset one — `python-ci.yml:1384-1390` writes `URI=""` into `$GITHUB_ENV`,
+    the same shape as the fast job), so a relocated
     `uri_requiring` file must not reach them.
 
     The victim is SYNTHESISED and injected into both `slow_files` and the lane,
