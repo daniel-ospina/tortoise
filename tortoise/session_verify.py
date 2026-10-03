@@ -656,6 +656,44 @@ def _unverifiable_link(harness: str, link: str) -> dict[str, Any]:
         f"{link} not exercised: {UNVERIFIABLE_REASON[harness]}")
 
 
+def _install_static_result(harness: str,
+                           findings: list[dict[str, Any]]) -> str | None:
+    """What the STATIC install check established, in plain words, or ``None``.
+
+    The ``installed`` link for a harness this command cannot fire stays
+    ``UNVERIFIABLE-IN-CI``: the seam was never executed, and a static
+    comparison is not evidence that the extension works, so calling it a pass
+    would be a FABRICATED one
+    (``tests/test_session_verify.py::test_pi_is_honestly_unverifiable``).
+
+    The check, however, *did* run — ``_static_findings`` returning no blocking
+    finding is precisely how the install came to be clean — and the sentence a
+    user then read said only that the seam was "not exercised", which is
+    indistinguishable from "not checked at all".  Naming the static result
+    closes that gap without moving the verdict (#4710).
+
+    ``findings`` is the list :func:`_static_findings` already returned for this
+    harness: this CONSUMES the detector's result rather than re-deriving the
+    predicate, so the sentence cannot claim more than the detector established.
+    That distinction is load-bearing — an empty ``findings`` is the detector's
+    own clean arm (installed bytes equal the shipped bytes), whereas testing
+    the marker alone would be a WEAKER condition: a byte-different artifact
+    whose marker matches is reported as ``modified-artifact`` and is blocking
+    today, but that is a reclassification away from this sentence asserting a
+    match that is false.  ANY finding — blocking or not, including an
+    ahead-artifact or a symlinked install — withholds it.
+    """
+    if harness not in hook_install.ARTIFACT_CONTRACTS or findings:
+        return None
+    generation = hook_install.contract_version_for(harness)
+    if generation is None:
+        return None
+    return (
+        f"the installed artifact matches the shipped seam "
+        f"({hook_install.HOOK_VERSION_TOKEN} {generation}); it was not fired, "
+        f"so this is a static comparison and not a pass.")
+
+
 def verify_session_capture(harness: str,
                            *,
                            api_key: str,
@@ -704,6 +742,11 @@ def verify_session_capture(harness: str,
     if not HEADLESS_FIRABLE[harness]:
         report["links"]["installed"] = _unverifiable_link(harness, "installed")
         report["links"]["installed"]["findings"] = findings
+        static_result = _install_static_result(harness, findings)
+        if static_result:
+            report["links"]["installed"]["detail"] = (
+                f"{static_result} "
+                f"{report['links']['installed']['detail']}")
         report["links"]["captured"] = _unverifiable_link(harness, "captured")
         report["links"]["memory"] = _unverifiable_link(harness, "memory")
         report["exit_code"] = _exit_code(report)

@@ -21,7 +21,9 @@ These tests pin BOTH paths of that helper:
 
   (a) terminal + NULL hash      -> found via the fallback,
   (b) terminal + hash present   -> found exactly as before (unchanged path),
-  (c) non-terminal + NULL hash  -> NOT returned (terminal scoping preserved),
+  (c) non-terminal + NULL hash  -> NOT returned (terminal scoping preserved)
+      UNLESS it carries the legacy ``outdated=true`` flag (#3142 — the flag
+      IS terminal; see ``test_outdated_flag_is_terminal``),
   (d) end-to-end: after ``rebuild_all`` the ingest guard still rejects a
       bundle-local ref that resolves to a terminal point, via the PRIMARY
       hash path (the rebuild re-derives the hash — issue Indicator 2),
@@ -111,15 +113,56 @@ class TestFindTerminalDedupHitFallback:
         _make_point(sdk, "still draft", null_hash=True)
         assert sdk._find_terminal_dedup_hit("still draft", "statement") is None
 
-    def test_outdated_flag_scoping_preserved(self, sdk):
-        """The pre-existing ``coalesce(n.outdated, false) = false`` scoping is
-        preserved on the fallback path: a terminal-status point carrying the
-        legacy ``outdated=true`` flag is not a dedup hit."""
-        pid = _make_point(sdk, "flagged stale", status="superseded",
-                          null_hash=True)
+    def test_outdated_flag_is_terminal(self, sdk):
+        """#3142: the legacy ``outdated=true`` flag IS terminal — it is not an
+        escape hatch from the filter.
+
+        The old filter was ``coalesce(n.outdated,false) = false``, i.e. the
+        AND of "not outdated" with "terminal status". That is satisfiable
+        only by a terminal point that is NOT flagged — a shape neither
+        lifecycle transition produces, since ``supersede_point`` stamps the
+        status AND the flag together and ``invalidate_point`` sets only the
+        flag. (It IS producible by a direct status write — ``retract_point``
+        and ``create_point(status=...)`` leave the flag unset, and those are
+        the shapes the sibling tests above cover — so those are NOT the
+        shapes that were missed.) So the guard missed BOTH lifecycle shapes,
+        and Phase-2 ``_check_endpoint_race`` raised mid-write instead.
+
+        MUTATION THAT REDS THIS TEST — measured, and attributed per test; the
+        naive "either conjunct alone is equally fatal" reading is wrong:
+          * the pre-#3142 AND filter  -> reds this test;
+          * the ``status`` limb alone -> reds this test (via limb (ii));
+          * the ``flag`` limb alone   -> does NOT red this test (both points
+            here carry the flag); it reds the pre-existing status-only tests
+            instead, e.g. ``test_terminal_point_with_hash_found``;
+          * no filter at all          -> reds the negative controls.
+        """
+        # (i) terminal status AND the flag — the supersede_point shape.
+        flagged_terminal = _make_point(sdk, "superseded and flagged",
+                                       status="superseded", null_hash=True)
         sdk._get_proj().g.query(
-            "MATCH (n:Point {id:$id}) SET n.outdated = true", params={"id": pid})
-        assert sdk._find_terminal_dedup_hit("flagged stale", "statement") is None
+            "MATCH (n:Point {id:$id}) SET n.outdated = true",
+            params={"id": flagged_terminal})
+        assert sdk._find_terminal_dedup_hit(
+            "superseded and flagged", "statement") == flagged_terminal
+
+        # (ii) LIVE status AND the flag — the invalidate_point shape, which
+        # satisfied NEITHER conjunct of the old filter.
+        flagged_live = _make_point(sdk, "live but stale", null_hash=True)
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) SET n.outdated = true",
+            params={"id": flagged_live})
+        assert sdk._find_terminal_dedup_hit(
+            "live but stale", "statement") == flagged_live
+
+    def test_live_point_without_the_flag_is_still_not_a_hit(self, sdk):
+        """NEGATIVE CONTROL for the test above: widening the filter must not
+        make a genuinely live point a terminal hit. Without this, the two
+        assertions above would also pass if the filter had been dropped
+        entirely — the test would pin nothing."""
+        _make_point(sdk, "genuinely live", null_hash=True)
+        assert sdk._find_terminal_dedup_hit(
+            "genuinely live", "statement") is None
 
     def test_kind_scoping_preserved(self, sdk):
         """The fallback keeps the ``pointKind`` scope: same content, different
@@ -221,6 +264,105 @@ class TestIngestGuardAfterRebuild:
             assert row[1] == "retracted"
 
             self._assert_bundle_local_ref_rejected(sdk, content)
+        finally:
+            sdk.close()
+
+    def test_bundle_local_ref_to_superseded_point_rejected(self, tmp_path):
+        """(f) Indicator 1, REAL flow: ``supersede_point`` stamps
+        ``status='superseded'`` AND ``outdated=true`` — the pair the guard
+        existed for and, pre-#3142, could not see. Uses the real lifecycle
+        call and a real ``rebuild_all``, not the hand-stamped stand-in the
+        unit tests above use.
+
+        MUTATION THAT REDS THIS TEST: restore the old filter. Note this test
+        cannot pass by accident on the hash-less path — ``rebuild_all``
+        re-derives the hash (#2795), so the PRIMARY hash MATCH is the path
+        under test, and that MATCH is the one carrying ``status_clauses``."""
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "superseded.db"),
+                          event_log_path=str(events / "events.jsonl"))
+        try:
+            content = "the superseded claim"
+            old_id = sdk.create_point("statement", content)["id"]
+            new_id = sdk.create_point("statement", "its successor")["id"]
+            sdk.supersede_point(old_id, new_id)
+
+            # Premise: the canonical pair — status AND flag together, which is
+            # precisely the state the old AND-of-two-conjuncts filter missed.
+            row = sdk._get_proj().g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.status, "
+                "coalesce(n.outdated, false)", params={"id": old_id}
+            ).result_set[0]
+            assert row == ["superseded", True], (
+                "supersede_point must stamp status AND the flag (#3142)")
+
+            sdk._get_proj().rebuild_all(str(events))
+            # The rebuild preserves both the status and the hash (#2795), so
+            # the primary MATCH is exercised.
+            row = sdk._get_proj().g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.content_hash, n.status",
+                params={"id": old_id}).result_set[0]
+            assert row[0] is not None, (
+                "rebuild_all must re-derive content_hash (#2795)")
+            assert row[1] == "superseded"
+
+            self._assert_bundle_local_ref_rejected(sdk, content)
+        finally:
+            sdk.close()
+
+    def test_bundle_local_ref_to_invalidated_live_point_rejected(self, tmp_path):
+        """(g) Indicator 2, REAL flow: ``invalidate_point`` leaves ``status``
+        untouched and sets ONLY the terminal marker ``outdated=true`` (status
+        unmodified; its other writes — ``updatedAt``/``validTo``/``expiredAt``
+        and the vacuity decay — are not terminal markers). Under the old filter that
+        satisfied NEITHER conjunct, so the guard missed it on both paths —
+        this is the half of #3142 no test covered even indirectly.
+
+        MUTATION THAT REDS THIS TEST: keep only the ``status IN $terminal``
+        limb of the predicate (the flag limb is what this leg pins)."""
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "invalidated.db"),
+                          event_log_path=str(events / "events.jsonl"))
+        try:
+            content = "the invalidated live claim"
+            old_id = sdk.create_point("statement", content)["id"]
+            new_id = sdk.create_point("statement", "its correction")["id"]
+            sdk.invalidate_point(old_id, new_id)
+
+            # Premise: status UNTOUCHED (still live) and ONLY the flag set.
+            row = sdk._get_proj().g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.status, "
+                "coalesce(n.outdated, false)", params={"id": old_id}
+            ).result_set[0]
+            assert row[0] not in ("superseded", "retracted", "archived"), (
+                "invalidate_point must NOT terminalize the status")
+            assert row[1] is True, "invalidate_point must set the flag"
+
+            sdk._get_proj().rebuild_all(str(events))
+            self._assert_bundle_local_ref_rejected(sdk, content)
+        finally:
+            sdk.close()
+
+    def test_bundle_local_ref_to_live_point_still_allowed(self, tmp_path):
+        """NEGATIVE CONTROL for (f)/(g): a genuinely live point (no flag, live
+        status) must still be an ALLOWED bundle-local endpoint. Without this,
+        (f)/(g) would also pass if the guard had been made to reject
+        everything."""
+        sdk = TortoiseSDK(str(tmp_path / "live.db"))
+        try:
+            content = "a perfectly live claim"
+            sdk.create_point("statement", content)
+            bundle = {
+                "points": [
+                    {"ref": "pLive", "kind": "statement", "content": content},
+                    {"ref": "pB", "kind": "statement", "content": "another"},
+                ],
+                "connections": [{"from": "pLive", "to": "pB",
+                                 "operator": "IMPL"}],
+            }
+            sdk.ingest(bundle)  # must NOT raise
         finally:
             sdk.close()
 

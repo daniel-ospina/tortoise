@@ -49,6 +49,7 @@ from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contra
 from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
+from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
 from .embedded_lifecycle import atexit_fast_close  # #1371: the fast-close seam
 from .retrieval import (DEFAULT_POOL_SIZE, _safe_session_tag,
@@ -10343,26 +10344,35 @@ class TortoiseSDK:
         ANY candidate is terminal — over-rejecting an ambiguous duplicate pair
         is the safe direction.
 
-        Residual gap (pre-existing, tracked in #3142): the terminal filter is
-        ``status IN $terminal AND coalesce(outdated,false) = false``, so a
-        point superseded through ``supersede_point`` (which stamps BOTH
-        ``status='superseded'`` and ``outdated=true``) is not matched — the
-        guard never fired for canonically-superseded points even with the
-        hash present, and Phase-2 ``_check_endpoint_race`` is what catches
-        them. Aligning the filter with that check (``status IN $terminal OR
-        outdated = true``) is follow-up #3142, deliberately out of this
-        fix's scope."""
+        #3142: the terminal filter is ``live._terminal_expression`` — the shared
+        Cypher builder for the predicate the direct-edge leg of
+        ``_check_endpoints`` and Phase-2 ``_check_endpoint_race`` both express
+        in Python as ``status in TERMINAL_EXCLUDED_STATUSES or outdated``
+        (that composition is ``live.is_terminal_status``). The builder emits the
+        expanded OR-chain under a NULL guard —
+        ``((n.status IS NOT NULL AND (n.status = '…' OR …)) OR
+        coalesce(n.outdated,false) = true)`` — i.e. the POSITIVE direction of
+        the vocabulary ``_terminal_excluded`` filters on. It assumes
+        ``outdated`` is a boolean; every in-repo writer emits the literal
+        ``true`` (see #7075 for the hand-edited/legacy-graph case). Before #3142 this site carried its own
+        forked ``status IN $terminal AND coalesce(outdated,false) = false``,
+        which is the AND of the two halves and so matched NEITHER: a point
+        superseded through ``supersede_point`` (which stamps BOTH
+        ``status='superseded'`` and ``outdated=true``) satisfied only the
+        first conjunct, and an ``invalidate_point`` node (status untouched,
+        ``outdated=true``) satisfied neither — so the guard returned None for
+        both, Phase-1 passed the bundle, and Phase-2 ``_check_endpoint_race``
+        raised mid-write on a partially-mutated graph, leaving an orphan.
+        Composing the predicate here rather than re-listing it is the point:
+        the fork is what let the three sites disagree (#2062/#2971/#2422)."""
         proj = self._get_proj()
-        terminal = sorted(self._INGEST_TERMINAL_STATUSES)
         base_clauses, base_params = self._dedup_match_clauses(point_kind=kind)
-        status_clauses = ("n.status IN $terminal",
-                          "coalesce(n.outdated, false) = false")
+        status_clauses = (_terminal_expression("n"),)
         rows = proj.g.query(
             "MATCH (n:Point {content_hash:$ch}) WHERE "
             f"{' AND '.join([*base_clauses, *status_clauses])} "
             "RETURN n.id LIMIT 1",
-            params={**base_params, "ch": _content_hash(content),
-                    "terminal": terminal},
+            params={**base_params, "ch": _content_hash(content)},
         ).result_set
         if not rows:
             # #2971 A10 CONTENT+KIND FALLBACK SCAN, gated on the WRITER's own
@@ -10395,8 +10405,7 @@ class TortoiseSDK:
                 rows = proj.g.query(
                     "MATCH (n:Point) WHERE "
                     f"{' AND '.join(fallback_clauses)} RETURN n.id LIMIT 1",
-                    params={**fallback_params, "content": content,
-                            "terminal": terminal},
+                    params={**fallback_params, "content": content},
                 ).result_set
         return rows[0][0] if rows else None
 
