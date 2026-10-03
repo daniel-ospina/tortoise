@@ -244,14 +244,45 @@ def test_the_default_budget_fits_inside_a_hook_that_already_waited_on_the_post()
 
 def test_the_turn_id_matches_the_servers_own_writer_format():
     """Drift guard. `{session_id}_t{i}` is the writer's per-row idempotency key;
-    if it changes server-side, every confirmation would silently defer."""
-    src = (__import__("pathlib").Path(__file__).resolve().parents[1]
-           / "tortoise" / "sdk.py").read_text(encoding="utf-8")
-    assert 'f"{session_id}_t{i}"' in src, (
-        "sdk._write_capture_turns no longer builds its ids that way — "
-        "session_confirm.turn_point_id must follow it")
+    if the server's derivation changes, every confirmation silently defers.
+
+    Asserted against the LIVE symbol and the writer's CODE, not the module
+    text. The previous version grepped `tortoise/sdk.py` for the literal
+    ``f"{session_id}_t{i}"``, which that module now carries only inside
+    DOCSTRINGS — so it passed on prose and could not red when the derivation
+    changed. The AST half below strips the matched function's own leading
+    docstring before matching, so only its executable text can satisfy it.
+    """
+    import ast
+    import pathlib
+
+    from tortoise.sdk import _capture_turn_id
+
+    # 1. The live derivation, compared value-for-value with the client's copy.
     assert turn_point_id("abc", 0) == "abc_t0"
     assert turn_point_id("abc", 12) == "abc_t12"
+    for i in (0, 1, 12, 999):
+        assert _capture_turn_id("abc", i) == turn_point_id("abc", i), (
+            "sdk._capture_turn_id and session_confirm.turn_point_id have "
+            "drifted — every confirmation would silently defer")
+
+    # 2. The writer's CODE still formats `{session_id}_t<index>`. Docstrings are
+    #    stripped, so the module's own prose cannot satisfy this (the vacuity
+    #    the old grep had).
+    tree = ast.parse(
+        (pathlib.Path(__file__).resolve().parents[1]
+         / "tortoise" / "sdk.py").read_text(encoding="utf-8"))
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+              and n.name == "_capture_turn_id")
+    if (fn.body and isinstance(fn.body[0], ast.Expr)
+            and isinstance(fn.body[0].value, ast.Constant)
+            and isinstance(fn.body[0].value.value, str)):
+        fn.body = fn.body[1:] or [ast.Pass()]
+    code = ast.unparse(fn)
+    assert "session_id}_t" in code, (
+        "sdk._capture_turn_id no longer formats `{session_id}_t<index>` — "
+        "session_confirm.turn_point_id must follow it")
 
 
 def test_the_stored_text_matches_the_servers_own_writer_definition():

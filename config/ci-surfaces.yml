@@ -23,6 +23,23 @@ version: 1
 # trying to enlarge), so it is a wall-clock lever, not a free win.
 fast_shards: 9
 
+# W37: the CARVE-OUT pool. `test-carve-out` was the CI critical path as ONE
+# unsharded job — measured 2026-09-30 over 23 PR runs and 3 successful main
+# runs: work p50 16.9m against a median run wall of 18.6m, i.e. 91% of the wall,
+# while the fast band is already split nine ways. Sharding it is the demand
+# reduction that has to land BEFORE any capacity argument, because the wall was
+# `max(9 fast shards, 1 carve-out)` and the carve-out was the pole in every run
+# examined.
+#
+# Absence means 1 — the unsharded job this repo ran until now — so deleting this
+# key is a complete rollback (unlike `fast_shards`, where absence means 2).
+# 3 is chosen from the measured distribution: the carve-out's work is BROAD —
+# its slowest single test is a small share of the suite's total test time — so
+# it packs evenly and each shard lands near a third of the suite's test time,
+# level with the fast band instead of 16.9m above it. Raising this trades wall
+# clock for aggregate runner-minutes, exactly like `fast_shards`.
+carve_shards: 3
+
 surfaces:
   api:
   # #3561/#3359: per-capture graph-op accounting. Dual-registered because NO
@@ -164,6 +181,12 @@ surfaces:
   # surface, and `core` is only matched when nothing else matched — so `api`
   # is what makes these run on an api-only change to the file they guard.
   - test_onboarding_truth_surface.py
+  # #3553: the onboarding-state jsonb read-modify-write CAS (docker-lane).
+  # Dual-registered under `api` as well as `onboarding` for the same reason as
+  # the guards above: the write path it pins lives in tortoise/hosted_api.py,
+  # which selects the `api` surface — an `onboarding`-only entry would never run
+  # it on a hosted_api.py-only change (the file the CAS exists to fix).
+  - test_onboarding_state_cas.py
   # #3287/#2988/#3243: the selfhost health endpoints must not share fate with
   # work — the readiness probe rides its own daemon pool (a starved readiness
   # probe returned a false 503 for a healthy DB, measured 6020 ms with the probe
@@ -329,6 +352,16 @@ surfaces:
   # is exactly the PR that could silently drop the receipt. Same #2938
   # dual-membership convention as the two entries above.
   - test_capture_secret_redaction_4911.py
+  # #3551: the shared `_write_session_and_turns` primitive (Session MERGE +
+  # turn store). DUAL-REGISTERED (`api` + `core`): the `api` entry is the one
+  # that carries a PR-shape requirement — the primitive is called from
+  # `tortoise/hosted_api.py::_capture_session_impl`, which SELECTS `api`, and a
+  # named-surface match REPLACES the `core` fallback, so a core-only
+  # registration would never run this guard on a hosted_api.py-only PR. The
+  # `core` entry covers the engine path: the primitive also serves
+  # `tortoise/sdk.py::TortoiseSDK.capture_session`, and `tortoise/sdk.py` is a
+  # SHARED_MODULE (so an sdk.py change selects the full matrix regardless).
+  - test_write_session_and_turns_3551.py
   # #3665: pre-spend cohort cost cap. DUAL-REGISTERED (also under `core`): the
   # admission gate, the ledger write, the reader and the RPC wrappers all live
   # in tortoise/hosted_api.py, metering.py and supabase_control.py, which
@@ -659,6 +692,7 @@ surfaces:
   - test_4716_capture_operator_ref_remap.py
   - test_6131_operator_mutation_vocabulary.py
   - test_comove_dispatch_3627.py
+  - test_heavy_import_guard.py
   # #4971: the `(op_type, src, dst)` idempotency guard hoisted into
   # `commit_ops.apply_payload_operators` — the helper is core engine code, and
   # the re-key regression drives the real embedded capture commit, so this is
@@ -904,6 +938,7 @@ surfaces:
   # Registered beside its sibling capture tests; `tortoise/sdk.py` is a
   # SHARED_MODULE, so an sdk.py-only change already runs the full matrix.
   - test_capture_validfrom_3945.py
+  - test_write_session_and_turns_3551.py  # #3551: the shared _write_session_and_turns primitive (Session MERGE + turn store); dual: api
   # #2006 (W11): onboarding funnel telemetry (seed/decide events gated on the
   # COMPLETED_STEP edge's new creation). Registered under `core` for the
   # `tortoise/analytics.py` seam, which matches no SOURCE_PATTERNS entry — and
@@ -1680,6 +1715,7 @@ surfaces:
   - test_onboarding_health_flip.py
   - test_onboarding_integration.py
   - test_onboarding_state.py        # #2001 (W5): canonical module unit tests (lane-agnostic)
+  - test_onboarding_state_cas.py    # #3553: jsonb RMW compare-and-set against the REAL registry path (docker-lane)
   - test_onboarding_state_split.py  # #2001 (W5): docker-lane graph-held FLOW-state tests
   - test_onboarding_seed.py         # #1999 (W3): shared seed-core unit tests (lane-agnostic)
   - test_onboarding_seed_endpoint.py  # #1999 (W3): docker-lane seed/decide/completion tests
@@ -2190,6 +2226,10 @@ durations:
   test_backup_watcher_health.py: 0.2
   eval/retrieval/test_integration.py: 1523.4
   test_onboarding_state_split.py: 310.7
+  # #3553: this file is NEW on this branch, so main's sweep has no junit measurement for it.
+  # It is NOT presented as a measurement — it carries the branch's local reading under the
+  # `# unmeasured` convention stated above. Refresh from the first post-merge main run that includes it.
+  test_onboarding_state_cas.py: 120.0  # unmeasured
   test_onboarding_truth_surface.py: 4.0
   eval/write_path/test_write_path_benchmark.py: 101.8
   test_tortoise_client.py: 11.9
@@ -2232,6 +2272,7 @@ durations:
   test_write_verb.py: 34.6
   test_index_restore.py: 2.7
   test_capture_session.py: 53.9
+  test_write_session_and_turns_3551.py: 70.8  # #3551: locally measured (10 tests, embedded carve-out lane; the hosted half drives POST /v1/sessions) — refresh from CI junit
   test_battery_setup.py: 67.9
   test_graph_write_loop_responsiveness.py: 19.6
   test_read_routes_loop_responsiveness.py: 6.5
