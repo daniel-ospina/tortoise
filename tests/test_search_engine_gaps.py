@@ -367,14 +367,18 @@ class TestFallbackTfidf:
         in another thread breaks a *cold* sklearn import with
         ``AttributeError: partially initialized module 'torch' ...`` — which
         ``fallback_tfidf`` then swallows, returning no hits. Both heavy imports
-        take ``embeddings._HEAVY_IMPORT_LOCK``; this pins that the sparse side
-        AND the load side actually do, which is what closes the race.
+        take the one lock in ``tortoise.heavy_imports``; this pins that the
+        sparse side AND the load side actually do, which is what closes the
+        race. The lock itself has a single home in that leaf module; the two
+        helpers ``embeddings`` itself calls stay importable from ``embeddings``,
+        and the cross-encoder helper is taken from the leaf.
         """
         import sys as _sys
         import threading as _threading
         import types as _types
 
         from tortoise import embeddings as _emb
+        from tortoise import heavy_imports as _hi
 
         acquired: list[str] = []
 
@@ -392,15 +396,17 @@ class TestFallbackTfidf:
         fake_st.SentenceTransformer = object
         fake_st.CrossEncoder = object
         monkeypatch.setitem(_sys.modules, "sentence_transformers", fake_st)
-        monkeypatch.setattr(_emb, "_HEAVY_IMPORT_LOCK", _SpyLock())
+        # Patch the LOCK AT ITS ONE HOME (the leaf module): the helpers read
+        # ``heavy_imports._HEAVY_IMPORT_LOCK`` at call time.
+        monkeypatch.setattr(_hi, "_HEAVY_IMPORT_LOCK", _SpyLock())
 
         assert _emb.import_tfidf_vectorizer() is not None
         assert _emb.import_sentence_transformer() is fake_st.SentenceTransformer
-        assert _emb.import_cross_encoder() is fake_st.CrossEncoder
+        assert _hi.import_cross_encoder() is fake_st.CrossEncoder
 
         assert acquired == [_threading.current_thread().name] * 3, (
-            "a heavy import ran outside _HEAVY_IMPORT_LOCK — the cold-sklearn "
-            "vs mid-import-torch race is open again"
+            "a heavy import ran outside the shared heavy-import lock — the "
+            "cold-sklearn vs mid-import-torch race is open again"
         )
 
 

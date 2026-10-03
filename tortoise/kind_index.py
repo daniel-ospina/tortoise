@@ -34,8 +34,8 @@ import numpy as np
 from tortoise.embeddings import (
     EMBEDDING_MODEL,
     EMBEDDING_MODEL_REVISION,
-    import_tfidf_vectorizer,
 )
+from tortoise.heavy_imports import import_tfidf_vectorizer  # #5718 lock-taking helper
 
 #: The persisted-index directory (gitignored — see .gitignore).
 DEFAULT_CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "kind_index"

@@ -148,7 +148,7 @@ def build_snapshot(proj) -> dict | None:
 
     if doc_vecs is None:
         try:
-            from tortoise.embeddings import import_tfidf_vectorizer
+            from tortoise.heavy_imports import import_tfidf_vectorizer  # #5718
             TfidfVectorizer = import_tfidf_vectorizer()
             tv = TfidfVectorizer()
             # Keep the sparse matrix — densify only the served slice (P2: the
