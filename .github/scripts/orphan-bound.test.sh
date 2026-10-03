@@ -357,13 +357,36 @@ assert_eq "$RC" "0" "exits 0 under rc=124"
 assert_contains "$OUT" "::warning::" "emits a warning"
 assert_contains "$OUT" "#1371" "cites the kill-aware rationale"
 
-echo "17. a missing report REDs (residue unaccounted, NOT the no-pytest path)"
+echo "17. a missing report REDs (no measurement was produced, NOT the no-pytest path)"
 run_gate 4 0 does-not-exist.json
 assert_eq "$RC" "1" "exits 1"
 assert_contains "$OUT" "unaccounted" "names the missing accounting"
-assert_contains "$OUT" "::error::redislite orphan gate: no usable redislite-hygiene end-sweep report (missing) — the 4 residue is unaccounted for (issue #1005 / epic #1647 E2E-7)" \
-  "the missing-report red is VERBATIM, naming kind=missing and COUNT=4"
+assert_contains "$OUT" "::error::redislite orphan gate: no redislite-hygiene end-sweep report (missing) — the run exited rc=0 without writing one, so the 4 count is unaccounted for (issue #1005 / epic #1647 E2E-7)" \
+  "the missing-report red is VERBATIM, naming kind=missing, the exit, and COUNT=4"
 assert_not_contains "$OUT" "no-pytest" "a real missing report is not excused"
+assert_not_contains "$OUT" "residue" \
+  "does NOT call it a residue — the report's ABSENCE is not evidence of one (#6852)"
+
+# The #5288 shape: the collect-only step died at rc=250 with a clean collection,
+# so pytest never ran and no report could exist. A non-kill exit must not be read
+# as a kill (that would be a fail-open: is_kill_rc's `exit 0` is justified only
+# because the kill ALREADY reddened the run), and it must not be reported as a
+# residue.
+echo "17b. a MISSING report at the collect-only crash rc (250) carries the exit, not a residue (#6852)"
+run_gate 0 250 does-not-exist.json
+assert_eq "$RC" "1" "exits 1 — a crash rc is NOT a kill rc (no silent pass)"
+assert_contains "$OUT" "exited rc=250 without writing one" "carries the crashing exit code into the red"
+assert_contains "$OUT" "the 0 count is unaccounted for" "names the count, since 0 is not a residue"
+assert_not_contains "$OUT" "residue" "does NOT assert a residue the absent report cannot show"
+assert_not_contains "$OUT" "::warning::" "no downgrade for a non-kill rc"
+
+# The other half of the same fork: an empty rc (the step never wrote one) must say
+# so rather than emit a red with no cause on it.
+echo "17c. a MISSING report with an unknown rc says so instead of naming a bare residue"
+run_gate 0 "" does-not-exist.json
+assert_eq "$RC" "1" "exits 1"
+assert_contains "$OUT" "the pytest rc is unknown" "names the unknown rc as the cause"
+assert_not_contains "$OUT" "residue" "no residue claim on the unknown-rc path either"
 
 echo "18. a missing report under a kill downgrades to a warning"
 run_gate 4 2 does-not-exist.json
@@ -376,6 +399,27 @@ echo "19. an unreadable report REDs"
 run_gate 4 0 unreadable.json
 assert_eq "$RC" "1" "exits 1 on invalid JSON"
 assert_contains "$OUT" "unreadable" "names the unreadable report"
+assert_contains "$OUT" "::error::redislite orphan gate: the redislite-hygiene end-sweep report is unreadable (unreadable) — the run exited rc=0 but its report was unusable, so the 4 count is unaccounted for (issue #1005 / epic #1647 E2E-7)" \
+  "the unreadable red is VERBATIM and carries the exit that wrote the unusable file"
+assert_not_contains "$OUT" "without writing one" \
+  "does NOT claim no report was written — for `unreadable` one WAS, it was unusable (#6852)"
+assert_not_contains "$OUT" "residue" "does not call it a residue either"
+
+# The `*)` arm serves missing AND unreadable. They differ in the one clause that
+# matters: `missing` = no file, `unreadable` = a file that cannot be used. A test
+# that only asserted the `(unreadable)` token left that clause unpinned, so a
+# future edit could make one subtype claim the other's cause (review finding on
+# #6852).
+echo "19b. the unreadable subtype does NOT borrow the missing subtype's cause clause"
+run_gate 4 0 unreadable.json
+assert_contains "$OUT" "but its report was unusable" "names the usable-ness, not the absence"
+assert_not_contains "$OUT" "the run exited rc=0 without writing one" \
+  "asserts no absence it cannot show"
+
+run_gate 4 "" unreadable.json
+assert_eq "$RC" "1" "an unreadable report with an unknown rc still reds"
+assert_contains "$OUT" "the report was unusable" "carries the unusable-report cause"
+assert_not_contains "$OUT" "without writing one" "no absence claim on the unknown-rc unreadable path"
 
 echo "20. an unreadable report under a kill downgrades to a warning"
 run_gate 4 124 unreadable.json
@@ -386,6 +430,10 @@ echo "21. a report missing the left field REDs (fail-closed on an incomplete rep
 run_gate 4 0 noleft.json
 assert_eq "$RC" "1" "exits 1"
 assert_contains "$OUT" "unreadable" "treats the incomplete report as unusable"
+assert_contains "$OUT" "but its report was unusable" \
+  "an incomplete report also names usable-ness, not absence (it too EXISTS on disk)"
+assert_not_contains "$OUT" "without writing one" \
+  "a structurally incomplete file was still written — no absence claim"
 
 echo "22. an empty rc reds on a leak with the rc-unknown message"
 run_gate 3 "" none.json
@@ -776,7 +824,7 @@ assert_contains "$OUT" "::error::redislite orphan gate: the sweep does not accou
 echo
 # A LOST case must not be indistinguishable from success: deleting a case
 # leaves FAIL=0 and merely a LOWER count, so the count is pinned too.
-expected_assertions=196
+expected_assertions=215
 if [ "$PASS" -eq "$expected_assertions" ]; then
   PASS=$((PASS + 1))
   echo "  ✅ assertion count pinned at $expected_assertions (a lost case is not a green run)"

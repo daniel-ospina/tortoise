@@ -24,13 +24,19 @@ a model change is a RECORDED decision point, never a silent re-encode.
 SCOPE — an EXPLICIT exemption, field by field (not class by class)
 ------------------------------------------------------------------
 The **`PointRevised`** path is deliberately NOT covered here. Measured on the
-base tree: live ``update_point(content=...)`` does not change the node's vector
-at all, while the replay's ``_revise_point`` re-encodes — the divergence runs
-the OTHER way and its root is the LIVE writer, not the journal. That is the
+original base tree: live ``update_point(content=...)`` did not change the node's
+vector at all, while the replay's ``_revise_point`` re-encodes — the divergence
+ran the OTHER way and its root is the LIVE writer, not the journal. That is the
 content-edit-staleness class (#4206 / #4208 / #4302), which #5004 itself lists
-as *related, not duplicate*. This module does not claim coverage of it; the
-last test below PINS the exemption so it cannot be mistaken for a gap nobody
-noticed.
+as *related, not duplicate*.
+
+**#4208 has since fixed the LIVE content-edit arm**: ``update_point(content=…)``
+now re-encodes (and wipes on an unavailable embedder), so live == rebuild. This
+module STILL does not claim the revise path: its embedding is *re-encoded by the
+writer*, not restored from the journal, and the remaining unclaimed shape is the
+CALLER-supplied vector on a revise (live writes it and the record carries it,
+but the replay re-encodes — **#5046**). The test below PINS the residual
+exemption so it cannot be mistaken for a gap nobody noticed.
 
 Run (docker lane):
   TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' \\
@@ -169,7 +175,7 @@ def test_replay_restores_the_journalled_vector_verbatim_under_a_changed_embedder
     assert live_a == _embed_a("verbatim restore probe")
 
     with mock.patch(_EMBED_PATCH, _embed_b):
-        sdk._get_proj().rebuild_all(str(events))
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     rebuilt = _vector(sdk, pid)
     assert rebuilt == live_a, (
@@ -194,7 +200,7 @@ def test_replay_records_the_embedder_identity_mismatch(sup, caplog, monkeypatch)
     monkeypatch.setattr("tortoise.embeddings.EMBEDDING_MODEL", "other/model-v9")
     monkeypatch.setattr("tortoise.embeddings.EMBEDDING_MODEL_REVISION", "deadbeef")
     with caplog.at_level(logging.WARNING), mock.patch(_EMBED_PATCH, _embed_b):
-        sdk._get_proj().rebuild_all(str(events))
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     assert _vector(sdk, pid) == live_a, "still must restore the journal's vector"
     text = caplog.text
@@ -222,7 +228,7 @@ def test_legacy_journal_without_a_vector_still_recomputes(tmp_path):
     with mock.patch(_EMBED_PATCH, _embed_b):
         sdk = TortoiseSDK(str(tmp_path / "legacy.db"))
         try:
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             assert _vector(sdk, pid) == _embed_b(content), (
                 "a legacy record with no journalled vector must fall back to "
                 "recomputation"
@@ -252,7 +258,7 @@ def test_graph_only_point_vector_still_comes_from_the_prewipe_capture(tmp_path):
                 {"id": pid, "content": "graph only seed", "pointKind": "statement"})
             before = _vector(sdk, pid)
             assert before == _embed_a("graph only seed")
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             assert _vector(sdk, pid) == before, (
                 "the graph-only pre-wipe-capture restoration regressed (#4305)"
             )
@@ -298,7 +304,7 @@ def test_a_nonfinite_or_oversized_journal_vector_degrades_and_never_raises(tmp_p
         try:
             # MUST NOT raise — the rebuild wipes first, so an exception here
             # leaves the graph destroyed and every retry equally broken.
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             for pid, _content in (("1a0d0000000-nanvec00000001", "nan probe"),
                                   ("1a0d0000000-bigint0000001", "huge probe")):
                 vec = _vector(sdk, pid)
@@ -319,7 +325,7 @@ def test_identity_keys_are_never_node_properties(sup):
     """
     events, sdk = sup
     pid = sdk.create_point("statement", "identity prop probe").get("id")
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     props = sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) RETURN properties(n)", params={"id": pid},
     ).result_set[0][0]
@@ -353,7 +359,7 @@ def test_a_wrong_width_journal_vector_is_refused_and_recorded(tmp_path, caplog):
                                    new_callable=mock.PropertyMock,
                                    return_value=_DIM), \
                     caplog.at_level(logging.WARNING):
-                proj.rebuild_all(str(events))
+                proj.rebuild_all(str(events), confirm_destructive=True)
             assert _vector(sdk, pid) is None, (
                 "a wrong-width journal vector must not be written")
             assert "leaving it unset" in caplog.text
@@ -451,7 +457,7 @@ def test_a_refused_width_is_not_resurrected_by_the_prewipe_snapshot(tmp_path):
             with mock.patch.object(type(proj), "required_embedding_dim",
                                    new_callable=mock.PropertyMock,
                                    return_value=_DIM):
-                proj.rebuild_all(str(events))
+                proj.rebuild_all(str(events), confirm_destructive=True)
             assert _vector(sdk, pid) is None, (
                 "the pre-wipe snapshot resurrected a refused vector")
         finally:
@@ -465,7 +471,7 @@ def test_a_refused_width_is_not_resurrected_by_the_prewipe_snapshot(tmp_path):
             with mock.patch.object(type(fresh_proj), "required_embedding_dim",
                                    new_callable=mock.PropertyMock,
                                    return_value=_DIM):
-                fresh_proj.rebuild_all(str(events))
+                fresh_proj.rebuild_all(str(events), confirm_destructive=True)
             assert _vector(fresh, pid) is None, (
                 "populated-store and fresh-store rebuilds disagree")
         finally:
@@ -510,7 +516,7 @@ def test_session_turn_producer_journals_the_vector(tmp_path, monkeypatch):
                 "the live turn vector is not the batch embedder's output")
 
             with mock.patch(_EMBED_PATCH, _embed_b):
-                sdk._get_proj().rebuild_all(str(events))
+                sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             assert _vector(sdk, pid) == before, (
                 "a captured turn's vector changed on replay")
         finally:
@@ -536,36 +542,45 @@ def test_identity_keys_cannot_be_set_through_props(tmp_path):
 # ── 8. the declared exemption, pinned so it cannot be mistaken for coverage ─
 
 def test_revise_path_is_explicitly_out_of_scope_for_5004(sup):
-    """#5004 does NOT cover `PointRevised` — pin BOTH shapes, don't hide it.
+    """#5004 does NOT cover `PointRevised` — pin the residual shape.
 
-    TWO shapes live on this path and #5004 covers NEITHER:
+    TWO shapes lived on this path; only ONE is still an exemption:
 
-    1. **Content edit** (measured here): live ``update_point(content=...)``
-       leaves the vector UNCHANGED, while the replay's ``_revise_point``
-       re-encodes — so the divergence runs the other way and its root is the
-       LIVE writer, not the journal (#4206/#4208/#4302). This is the shape
-       #5004's own text lists as *related, not duplicate*.
+    1. **Content edit** — FIXED by **#4208**. Live ``update_point(content=…)``
+       now re-encodes from the new content (and wipes the vector when the
+       embedder is unavailable, mirroring `_revise_point`'s own `except … =
+       None`), so live == rebuild. The re-encoded vector is DERIVED and is
+       stripped from the record exactly like `content_hash`, because the
+       replay re-encodes from `new_content`. This half is now a POSITIVE pin:
+       it fails if the fix is reverted.
     2. **Caller-supplied vector** (``update_point(id, embedding=[...])``): live
        writes the caller's vector AND the record carries it, but the replay
-       ignores it and re-encodes. Here the journal is SUFFICIENT and is simply
-       not read — shape 1's rationale ("the root is the live writer") does not
-       reach it. Verified present on `origin/main`; filed as **#5046**.
+       ignores it and re-encodes. The journal is SUFFICIENT and simply not
+       read — shape 1's rationale ("the root is the live writer") does not
+       reach it. STILL an exemption, filed as **#5046**.
 
-    This test records the state #5004 leaves behind so a later lane sees it was
-    deliberate. When those issues land, this pin must be INVERTED, not deleted.
+    When #5046 lands, INVERT the second half too, not delete it.
     """
     events, sdk = sup
     pid = sdk.create_point("statement", "original").get("id")
     v_created = _vector(sdk, pid)
+    assert v_created is not None
 
     with mock.patch(_EMBED_PATCH, _embed_a):
         sdk.update_point(pid, content="a substantially longer replacement")
-    assert _vector(sdk, pid) == v_created, (
-        "exemption premise changed: live update_point now recomputes the "
-        "vector — revisit whether #5004 must extend to PointRevised"
+    # #4208: the vector now moves WITH the content — the old pin (
+    # `assert _vector(...) == v_created`) recorded the defect.
+    v_edited = _vector(sdk, pid)
+    assert v_edited != v_created, (
+        "#4208 regression: live update_point(content=…) left the vector STALE"
+    )
+    assert v_edited == _embed_a("a substantially longer replacement"), (
+        "the re-encoded vector must come from the NEW content"
     )
 
-    # And no vector is journalled on the content-edit revise record itself.
+    # The re-encoded vector stays OFF the record (DERIVED, like content_hash):
+    # the replay re-encodes from `new_content`, so a copy would be dead weight
+    # and a false presence-is-ownership claim under #5004.
     revises = [e for e in _events(events) if e.get("type") == "PointRevised"]
     assert revises, "expected a PointRevised record"
     assert all("embedding" not in (e.get("point") or {})
@@ -586,7 +601,7 @@ def test_revise_path_is_explicitly_out_of_scope_for_5004(sup):
         "vector — #5046 may be fixed; INVERT this pin"
     )
     with mock.patch(_EMBED_PATCH, _embed_b):
-        sdk._get_proj().rebuild_all(str(events))
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert _vector(sdk, pid) != caller_vec, (
         "#5046 appears FIXED on this tree — the PointRevised replay now "
         "restores the journalled vector. Invert this pin and drop it from "
@@ -669,7 +684,7 @@ def test_turn_recapture_with_the_embedder_down_keeps_the_journalled_vector(
             assert snapshots[-1]["embedding"] is not None
 
             with mock.patch(_EMBED_PATCH, _embed_b):
-                sdk._get_proj().rebuild_all(str(events))
+                sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             assert _vector(sdk, pid) == live_before, (
                 "replay overwrote a PRESERVED vector with the active "
                 "embedder's output (round-3 P2)")
@@ -711,7 +726,7 @@ def test_point_created_with_the_embedder_down_gains_no_vector_on_replay(tmp_path
 
             # A replay under a WORKING embedder must still leave it unset.
             with mock.patch(_EMBED_PATCH, _embed_a):
-                sdk._get_proj().rebuild_all(str(events))
+                sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             assert _vector(sdk, pid) is None, (
                 "replay invented a vector the live node never had (round-3)")
         finally:
@@ -750,7 +765,7 @@ def test_a_caller_supplied_vector_is_restored_verbatim(tmp_path):
                 "a caller-owned vector must not be attested as server-computed")
 
             with mock.patch(_EMBED_PATCH, _embed_b):
-                sdk._get_proj().rebuild_all(str(events))
+                sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             assert _vector(sdk, pid) == caller_vec, (
                 "the caller-supplied vector was narrowed to float32 (or "
                 "recomputed) on replay")
@@ -805,7 +820,7 @@ def test_a_promoted_caller_vectored_point_keeps_its_raw_vector(tmp_path):
                 "premise: the live promote leaves the caller vector alone")
 
             with mock.patch(_EMBED_PATCH, _embed_b):
-                sdk._get_proj().rebuild_all(str(events))
+                sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             assert _vector(sdk, pid) == live_after, (
                 "a promoted caller-supplied vector was narrowed to float32 on "
                 "replay — the verbatim marker did not survive the promote "
@@ -942,7 +957,7 @@ def test_a_recreated_point_does_not_inherit_the_verbatim_marker(tmp_path):
             assert not live_props.get("embedding_verbatim"), (
                 "premise: the live re-create carries no marker")
 
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             re_props = sdk._get_proj().g.query(
                 "MATCH (n:Point {id:$id}) RETURN properties(n)",
                 params={"id": pid}).result_set[0][0]
@@ -979,7 +994,7 @@ def test_update_point_with_a_caller_vector_marks_the_node(tmp_path):
             live = _vector(sdk, pid)
 
             with mock.patch(_EMBED_PATCH, _embed_b):
-                sdk._get_proj().rebuild_all(str(events))
+                sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             assert _vector(sdk, pid) == live, (
                 "a caller vector supplied via `update_point` was narrowed to "
                 "float32 by the promote re-emit (round-5 P2)")
@@ -1026,7 +1041,7 @@ def test_a_cleared_turn_vector_is_cleared_on_replay_too(tmp_path, monkeypatch):
             assert _vector(sdk, pid) is None, (
                 "premise: the live write clears the vector for changed text")
 
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             assert _vector(sdk, pid) is None, (
                 "the replay RESURRECTED a vector the live write CLEARED — an "
                 "owned `None` must be a clear, not a no-op (round-6 P1)")
@@ -1056,7 +1071,7 @@ def test_a_wrong_width_caller_vector_is_not_written_on_either_side(tmp_path):
                                        embedding=[0.1] * 10).get("id")
                 assert _vector(sdk, pid) is None, (
                     "a wrong-width caller vector must not be stored live")
-                proj.rebuild_all(str(events))
+                proj.rebuild_all(str(events), confirm_destructive=True)
                 assert _vector(sdk, pid) is None, (
                     "live and replay disagree on a wrong-width caller vector")
         finally:
@@ -1090,7 +1105,7 @@ def test_a_graph_only_caller_vectored_point_keeps_its_raw_vector_and_marker(tmp_
             # Lose the journal: this id becomes GRAPH-ONLY on the next rebuild,
             # so it is reconstructed by the SYNTHETIC event + the pass-1b tail.
             (events / "events.jsonl").write_text("")
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
             rows = sdk._get_proj().g.query(
                 "MATCH (n:Point {id:$id}) RETURN properties(n)",
@@ -1189,7 +1204,7 @@ def test_update_entity_point_branch_is_a_declared_exemption(tmp_path):
                 f"be fixed; INVERT this pin")
 
             with mock.patch(_EMBED_PATCH, _embed_b):
-                sdk._get_proj().rebuild_all(str(events))
+                sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             assert _vector(sdk, pid) == v_created, (
                 "`_update_entity`'s Point-branch embedding write is now "
                 "journalled and replayed — INVERT this pin and drop the #4094 "
@@ -1256,7 +1271,7 @@ def test_update_entity_caller_vector_rides_a_re_emit_verbatim(tmp_path):
             # Different embedder on the replay: only a VERBATIM restore can
             # reproduce `0.3` exactly; a `vecf32` narrowing cannot.
             with mock.patch(_EMBED_PATCH, _embed_b):
-                sdk._get_proj().rebuild_all(str(events))
+                sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             replayed = _vector(sdk, pid)
             replayed_props = sdk._get_proj().g.query(
                 "MATCH (n:Point {id:$id}) RETURN properties(n)",
@@ -1313,7 +1328,7 @@ def test_fresh_mitigate_operator_journals_an_owned_none_and_replays_it(tmp_path)
             assert _vector(sdk, mid) is None, "premise: live has no vector"
 
             with mock.patch(_EMBED_PATCH, _embed_b):
-                sdk._get_proj().rebuild_all(str(events))
+                sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             assert _vector(sdk, mid) is None, (
                 "the replay INVENTED a vector for the mitigation Point — #5037 "
                 "is back")
@@ -1374,7 +1389,7 @@ def test_clearing_the_vector_clears_the_marker_too(tmp_path):
             # exempted `PointRevised` from #5004, which the contradiction test
             # forbids. This pin asserts the CURRENT, documented divergence so it
             # cannot drift unnoticed, and so the exemption is covered by a test.
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             replayed = sdk._get_proj().g.query(
                 "MATCH (n:Point {id:$id}) RETURN properties(n)",
                 params={"id": pid}).result_set[0][0]
@@ -1413,7 +1428,7 @@ def test_a_stale_promote_after_recreate_is_a_declared_exemption(tmp_path):
             assert not live.get("embedding_verbatim"), (
                 "premise: the live re-creation is server-vectored and marker-free")
 
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             replay = sdk._get_proj().g.query(
                 "MATCH (n:Point {id:$id}) RETURN properties(n)",
                 params={"id": pid}).result_set[0][0]

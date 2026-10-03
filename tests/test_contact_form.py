@@ -59,6 +59,7 @@ import shutil
 import subprocess
 import tempfile
 from html import unescape
+from html.parser import HTMLParser
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1126,11 +1127,124 @@ def test_hello_is_visible_plainly_on_the_outside_surface() -> None:
     assert "support@" not in html
 
 
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+class _AddressProbe(HTMLParser):
+    """Collect the addresses a visitor could actually SEE or ACT on.
+
+    Regexes over raw HTML were tried twice and were wrong in both directions:
+    the `placeholder=` strip was quote-shaped, so it missed unquoted attributes
+    (valid HTML5) and values containing `&quot;` — and `url(logo@2x.png)` in a
+    `style` attribute matched the email pattern outright. So this parses
+    instead: quoting, entity decoding, comments and script/style blocks are the
+    parser's job, not a fourth pattern's.
+
+    Attributes are skipped when they describe a RESOURCE or an EXAMPLE rather
+    than a channel: `placeholder` (form hints like `you@company.com`), and
+    `style`/`src`/`srcset` (resource references). `href` is skipped because the
+    `mailto:` scan below already reads it, and reads it more strictly — this
+    probe only adds what that scan cannot see.
+    """
+
+    SKIP_ATTRS = frozenset(
+        {"placeholder", "style", "src", "srcset", "href", "data-placeholder"}
+    )
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.chunks: list[str] = []
+        self._skipping = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in ("script", "style"):
+            self._skipping += 1
+            return
+        for name, value in attrs:
+            if value and name.lower() not in self.SKIP_ATTRS:
+                self.chunks.append(value)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in ("script", "style") and self._skipping:
+            self._skipping -= 1
+
+    def handle_data(self, data: str) -> None:
+        if not self._skipping:
+            self.chunks.append(data)
+
+
 def test_hello_is_the_address_other_surfaces_show() -> None:
     """`docs.html` names a contact channel — it must show `hello@`, and no
-    outside surface may show a competing address."""
+    outside surface may show a competing address.
+
+    DERIVED, not enumerated. This check used to walk a hard-coded tuple of five
+    files looking for the literal string `support@` — so its body enforced less
+    than the sentence above it claims: a NEW public page could display a
+    different address entirely and still pass. `design-partners-intro.html` did
+    exactly that (it printed the founder's `daniel@`), and the rule this
+    docstring states never fired.
+
+    The scan is now derived from the directory and reads BOTH the `mailto:`
+    target and any address DISPLAYED on the page (a page can show one while
+    linking to another). Three review cycles each found the body enforcing less
+    than this sentence claims — so the sentence is now the specification the
+    body is held to.
+
+    Addresses are collected with an HTMLParser rather than by pattern-matching
+    raw source. Two review cycles showed the regex route was wrong in both
+    directions: a quote-shaped `placeholder=` strip missed unquoted attribute
+    values (valid HTML5) and values containing `&quot;`, while `url(logo@2x.png)`
+    in a `style` attribute matched the email pattern — so the guard failed on
+    correct markup. Parsing removes the class of problem instead of adding a
+    fourth pattern: quoting, entity decoding, comments and script/style blocks
+    are the parser's job.
+    """
     docs = _src(WEBSITE_DIR / "docs.html")
     assert f"mailto:{CONTACT_TO}" in docs
+
+    pages = sorted(WEBSITE_DIR.glob("*.html"))
+    # Guard against a vacuous pass: if the glob ever found nothing, the loop
+    # below would trivially succeed and the check would silently stop existing.
+    assert pages, "no top-level website/*.html found — scan would pass vacuously"
+
+    competing: dict[str, list[str]] = {}
+    for page in pages:
+        # `html.unescape` + `re.I` matter: the SCHEME is case-insensitive per
+        # RFC 3986 and an attribute value can spell the colon as `&#58;`, so a
+        # case-sensitive, raw-source match lets `MAILTO:founder@gmail.com` and
+        # `mailto&#58;founder@gmail.com` through.
+        src = unescape(_src(page))
+        for addr in sorted(set(
+            re.findall(r"mailto:([^\"'?\s>]+)", src, flags=re.I)
+        )):
+            # EVERY mailto on a public page, not just the premiselabs.co ones.
+            # Scoping this to `endswith("@premiselabs.co")` was the first attempt
+            # and it was too narrow for the sentence above: a page whose only
+            # contact was `founder@gmail.com` passed, as did a differently-cased
+            # `Daniel@PremiseLabs.co` (`endswith` is case-sensitive). The rule is
+            # "outside surfaces show hello@" — so the comparison is against the
+            # whole address, lower-cased.
+            if addr.lower() != CONTACT_TO:
+                competing.setdefault(page.name, []).append(addr)
+
+        # The docstring above says no outside surface may SHOW a competing
+        # address — and a `mailto:` target is not the only way to show one. A
+        # page can display an address as plain text while linking elsewhere;
+        # the scan above passed that. Closed here rather than by weakening the
+        # sentence to match the body.
+        shown = _AddressProbe()
+        shown.feed(src)
+        for addr in sorted(set(re.findall(_EMAIL_RE, "\n".join(shown.chunks)))):
+            if addr.lower() != CONTACT_TO:
+                competing.setdefault(page.name, []).append(addr)
+
+    assert not competing, (
+        f"outside surfaces must show only {CONTACT_TO} — "
+        f"competing addresses found: {competing}"
+    )
+
+    # Retained from the original check: these pages must not mention the
+    # in-product address in prose either.
     for rel in ("index.html", "product.html", "faq.html", "docs.html", "contact.html"):
         assert "support@" not in _src(WEBSITE_DIR / rel), f"{rel} shows a non-hello@ address"
 

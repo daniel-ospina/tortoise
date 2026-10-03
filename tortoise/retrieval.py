@@ -210,10 +210,12 @@ ASK_CONTEXT_TOKEN_CAP_ENV = "TORTOISE_ASK_CONTEXT_TOKEN_CAP"
 ASK_CONTEXT_BYTE_CAP_ENV = "TORTOISE_ASK_CONTEXT_BYTE_CAP"
 ASK_POOL_SIZE_ENV = "TORTOISE_ASK_POOL_SIZE"
 
-#: A1/A4/A5 (#2070): ask-lane lever env names (all default ON for the ask
-#: lane — each is a quality fix, not a gated experiment; "0"/"false"/
-#: "no"/"off" opts out). A7's rerank is the exception (env-gated OFF,
-#: tortoise/rerank.py).
+#: A1/A4/A5 (#2070): ask-lane lever env names. A1 and A5 default ON for the
+#: ask lane (each is a quality fix, not a gated experiment); A4 defaults OFF
+#: until its delta is measured (#4593 — the library parameter default was
+#: already ``False``, so the lane is now the fail-safe side too). "0"/"false"/
+#: "no"/"off" opts out, "1"/"true"/"yes"/"on" opts in. A7's rerank is the
+#: other exception (env-gated OFF, tortoise/rerank.py).
 ASK_NUMERIC_TOKENS_ENV = "TORTOISE_ASK_NUMERIC_TOKENS"
 ASK_SEARCH_KEYS_PRF_ENV = "TORTOISE_ASK_SEARCH_KEYS_PRF"
 ASK_EVIDENCE_BOOST_ENV = "TORTOISE_ASK_EVIDENCE_BOOST"
@@ -1536,6 +1538,54 @@ DEFAULT_PACKAGE_SAME_TURN_OVERLAP = 0.75
 #: the turn point "[role] …").
 _ROLE_PREFIX_RE = re.compile(r"^\[(user|assistant|system|tool|unknown)\]\s*",
                              re.IGNORECASE)
+
+
+def is_turn_echo_id(session_id, point_id) -> bool:
+    r"""True for one of ``session_id``'s own turn echoes (``{session_id}_t{i}``).
+
+    #4509: the CANONICAL session-turn identity predicate — one home, consumed
+    by the retrieval-layer pre-truncation exclusion (``tortoise/sdk.py::
+    tortoise_fts_query(exclude_turn_echo_session=…)``), which the S3
+    link-before-create prior lookup opts into (``tortoise/extractor_v2.py``).
+    The match is
+    ``\A{session_id}_t\d+\Z`` (``re.fullmatch``) — NOT a shape test, and NOT
+    ``str.isdigit`` (``isdigit()`` also accepts category-No numerics such as
+    ``²``);
+    ``fullmatch`` is deliberately stricter than the graded layer's
+    ``_turn_id_pattern`` + ``.match`` (whose ``$`` accepts one trailing
+    newline). Stricter can only MISS a drop, never lose a real prior. False
+    whenever the session id is unknown, so a caller that cannot name its
+    session never drops a row (``retrieval.py``'s D3 decision: the shape of an
+    id is not evidence that a capture happened)."""
+    if not session_id or not point_id:
+        return False
+    return bool(re.fullmatch(
+        rf"{re.escape(str(session_id))}_t\d+", str(point_id)))
+
+
+def is_turn_echo_row(session_id, row: dict) -> bool:
+    """This session's turn ID **and** a turn marker on the row (#4509).
+
+    The id is the reliable turn/claim discriminator (``runner._turn_id_pattern``'s
+    identity). The marker is EITHER the production turn kind
+    (``point_kind == "event"`` — what ``capture_session`` stamps on every turn
+    Point, ``tortoise/sdk.py``) OR the ``[role] …`` transcript prefix
+    (``_ROLE_PREFIX_RE``, :func:`_is_turn_point`'s content leg). The kind leg is
+    what keeps a capture whose role is not in the prefix allowlist from
+    silently retaining its own echoes: ``_normalize_turn_role`` passes ANY role
+    string through, so a ``[developer] …`` / ``[human] …`` turn matches no
+    alternation.
+
+    Requiring a marker at all is what keeps a caller-minted Point — whose id
+    merely sits in the session's turn namespace, the class
+    ``tests/test_d3_session_identity.py`` documents as reachable — in the
+    prior set."""
+    if not is_turn_echo_id(session_id, row.get("id")):
+        return False
+    if row.get("point_kind") == TURN_POINT_KIND:
+        return True
+    content = row.get("content")
+    return bool(_ROLE_PREFIX_RE.match(str(content or "").strip()))
 
 
 _PACKAGE_STOPWORDS = frozenset({

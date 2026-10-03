@@ -62,6 +62,14 @@ def state_seams(monkeypatch):
     """Route the registry legs of `_update_onboarding_state` to a dict."""
     monkeypatch.setattr(ha, "_get_onboarding_state", lambda org_id: {})
     monkeypatch.setattr(ha, "_get_onboarding_projection", lambda org_id: {})
+    # #3553: the OPERATIONAL write is now a compare-and-set whose read is
+    # `_read_onboarding_state_and_version` (state + version from ONE read).
+    # Stub it to the absent-identity shape (version None) so the router keeps
+    # taking the legacy whole-dict path this fixture observes — and so the
+    # fixture does not hit the real registry graph.
+    monkeypatch.setattr(
+        ha, "_read_onboarding_state_and_version",
+        lambda org_id: ({}, None))
     written: dict = {}
 
     def fake_write(org_id, state):
@@ -740,8 +748,18 @@ def test_every_emitted_prop_key_is_allowlisted():
     # #4015: routing the five analytics sites through ``_emit_analytics_off_loop``
     # does NOT change the count — the collector resolves that helper's args
     # exactly like the direct calls it replaced. main's #3773 added a sixth
-    # emitter, hence 12 here (11 before it).
-    assert len(calls) == 12, (
+    # emitter, hence 12 here (11 before it). Two sites landed in parallel and
+    # the merge is their UNION: main's #3944 absence canary emits `_sink_canary`
+    # through ``_emit_analytics_off_loop`` with NO props, so it resolves to
+    # ``keys=None`` and is deliberately excluded from the subset check below
+    # (there is no new prop key to register — the allowlist is props-only, and
+    # the canary ships an empty dict); and #3359/#3561's ``capture_graph_ops``
+    # per-session row emits the physical graph-op count beside the
+    # ``capture_cost`` row, with its props (``graph_ops_total``/
+    # ``graph_ops_read``/``graph_ops_write``/``graph_ops_turns``/
+    # ``graph_ops_by_phase``) registered in ``_ALLOWED_ANALYTICS_PROPS``. The
+    # union is 14, not 13: each side incremented the SAME 12 independently.
+    assert len(calls) == 14, (
         f"emit-site inventory changed — {len(calls)} calls found: {calls}")
     resolved = [c for c in calls if c.keys]
     assert len(resolved) >= 10, (

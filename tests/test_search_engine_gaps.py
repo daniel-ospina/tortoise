@@ -358,6 +358,57 @@ class TestFallbackTfidf:
             fallback_tfidf("query", points, limit=3)
             sp.assert_called_once_with("query", points, threshold=0.0, limit=3)
 
+    def test_heavy_imports_are_serialized(self, monkeypatch):
+        """#5718: the sparse sklearn import and the embedder's torch import
+        cannot overlap.
+
+        scipy's array-API dispatch peeks ``sys.modules['torch']`` and then does
+        an UNGUARDED ``getattr(mod, 'Tensor')``, so a torch that is mid-import
+        in another thread breaks a *cold* sklearn import with
+        ``AttributeError: partially initialized module 'torch' ...`` — which
+        ``fallback_tfidf`` then swallows, returning no hits. Both heavy imports
+        take the one lock in ``tortoise.heavy_imports``; this pins that the
+        sparse side AND the load side actually do, which is what closes the
+        race. The lock itself has a single home in that leaf module; the two
+        helpers ``embeddings`` itself calls stay importable from ``embeddings``,
+        and the cross-encoder helper is taken from the leaf.
+        """
+        import sys as _sys
+        import threading as _threading
+        import types as _types
+
+        from tortoise import embeddings as _emb
+        from tortoise import heavy_imports as _hi
+
+        acquired: list[str] = []
+
+        class _SpyLock:
+            def __enter__(self):
+                acquired.append(_threading.current_thread().name)
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        # Keep the load-side call fast and deterministic — only the LOCK
+        # behaviour is pinned here, not the import itself.
+        fake_st = _types.ModuleType("sentence_transformers")
+        fake_st.SentenceTransformer = object
+        fake_st.CrossEncoder = object
+        monkeypatch.setitem(_sys.modules, "sentence_transformers", fake_st)
+        # Patch the LOCK AT ITS ONE HOME (the leaf module): the helpers read
+        # ``heavy_imports._HEAVY_IMPORT_LOCK`` at call time.
+        monkeypatch.setattr(_hi, "_HEAVY_IMPORT_LOCK", _SpyLock())
+
+        assert _emb.import_tfidf_vectorizer() is not None
+        assert _emb.import_sentence_transformer() is fake_st.SentenceTransformer
+        assert _hi.import_cross_encoder() is fake_st.CrossEncoder
+
+        assert acquired == [_threading.current_thread().name] * 3, (
+            "a heavy import ran outside the shared heavy-import lock — the "
+            "cold-sklearn vs mid-import-torch race is open again"
+        )
+
 
 # ── degradation_chain ───────────────────────────────────────────────────────
 
@@ -2089,3 +2140,220 @@ def test_source_document_partition_every_leg():
         assert [h[0] for h in s_src] == [PROV_URL], s_src
     finally:
         proj.close()
+
+
+# ── #H05: the FTS creation FORM is engine-version-dependent ────────────────
+# FalkorDB 6.0.0 (what `falkordb-server:latest` resolves to, module ver 60000)
+# rejects the historical multi-field procedure:
+#     Received 3 arguments to procedure 'db.idx.fulltext.createNodeIndex',
+#     expected at most 1
+# and the old code swallowed that into a WARNING and continued — the index was
+# simply absent and full-text search degraded silently (observed on PR #6266,
+# run 36517265610, job test-slow (b)). `CREATE FULLTEXT INDEX FOR (n:Label)
+# ON (n.f1, n.f2)` is accepted by 4.16.7 / 4.20.4 / 4.20.6 / 6.0.0, so it is
+# the primary form and the procedure stays as the fallback. These are DB-free
+# guards for that order and for the reporting level.
+
+
+class _FakeProjection:
+    """Just enough projection for the index-creation helpers."""
+
+    def __init__(self, graph):
+        self.g = graph
+
+
+class TestFulltextIndexCreationForm:
+    """#H05: DDL-first, procedure-fallback, and no silent skip."""
+
+    @staticmethod
+    def _proj(graph):
+        from tortoise.projection import FalkorProjection
+        return FalkorProjection, _FakeProjection(graph)
+
+    def test_ddl_form_is_tried_first(self):
+        proj_cls, proj = self._proj(MultiCallGraph([([], None)]))
+        proj_cls._create_fulltext_index(proj, "Point", ["content", "search_keys"])
+        assert [c[0] for c in proj.g.query_calls] == [
+            "CREATE FULLTEXT INDEX FOR (n:Point) ON (n.content, n.search_keys)",
+        ]
+
+    def test_procedure_fallback_on_the_6_0_arity_rejection(self):
+        """6.0.0's exact error must fall back to the procedure form."""
+        arity = Exception(
+            "Received 3 arguments to procedure "
+            "'db.idx.fulltext.createNodeIndex', expected at most 1")
+        proj_cls, proj = self._proj(MultiCallGraph([([], arity), ([], None)]))
+        proj_cls._create_fulltext_index(proj, "Event", ["subject", "name"])
+        assert [c[0] for c in proj.g.query_calls] == [
+            "CREATE FULLTEXT INDEX FOR (n:Event) ON (n.subject, n.name)",
+            "CALL db.idx.fulltext.createNodeIndex('Event', 'subject', 'name')",
+        ]
+
+    def test_already_indexed_re_raises_verbatim_and_skips_fallback(self):
+        """The one-time migration branches match on the 'already' text."""
+        already = Exception("Attribute 'content' is already indexed")
+        proj_cls, proj = self._proj(MultiCallGraph([([], already)]))
+        with pytest.raises(Exception, match="already indexed"):
+            proj_cls._create_fulltext_index(
+                proj, "Point", ["content", "search_keys"])
+        assert len(proj.g.query_calls) == 1
+
+    def test_both_forms_failing_raises_with_both_causes(self):
+        proj_cls, proj = self._proj(MultiCallGraph([
+            ([], Exception("Invalid input 'CREATE FULLTEXT'")),
+            ([], Exception("Unknown function 'db.idx.fulltext.createNodeIndex'")),
+        ]))
+        with pytest.raises(RuntimeError) as ei:
+            proj_cls._create_fulltext_index(proj, "Source", ["_searchText"])
+        msg = str(ei.value)
+        assert "no supported FULLTEXT index creation form" in msg
+        # BOTH causes must survive: the RuntimeError carries the per-form
+        # errors so an operator can tell which engine failed and how.
+        assert "Invalid input" in msg, msg
+        assert "Unknown function" in msg, msg
+
+    def test_failure_is_reported_at_error_not_warning(self, caplog):
+        """#H05: the swallow was a WARNING; it must be an ERROR naming the
+        consequence, so a missing index is visible at the point of failure."""
+        from tortoise.projection import FalkorProjection
+        with caplog.at_level(logging.ERROR, logger="tortoise.projection"):
+            FalkorProjection._report_fulltext_index_failure(
+                "Source", ["_searchText"], RuntimeError("no such procedure"))
+        records = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert records, caplog.records
+        message = records[0].getMessage()
+        assert "Source" in message and "DEGRADED" in message
+        # The CONSEQUENCE is the part an operator acts on, so bind it too --
+        # the presentation was previously unasserted, which is how a wrong
+        # one survived a suite run.
+        assert "empty_results" in message, message
+
+    def test_ensure_indexes_reports_at_the_call_site(self, caplog):
+        """#H05 review: exercising the helper directly is NOT proof that the
+        CALL SITE reports.
+
+        Regression guard for the gap the reviewer found: revert
+        ``_ensure_indexes``'s non-`already` branch to the old WARNING and THIS
+        test reds, while every other test in this class stays green (they only
+        ever call ``_create_fulltext_index`` / ``_report_...`` directly). Drives
+        the real ``_ensure_indexes`` with a graph whose BOTH creation forms fail
+        for the Source label, i.e. the branch that decides whether a missing
+        index is visible at the point of failure.
+        """
+        from tortoise.projection import FalkorProjection
+        graph = StrategyControlledGraph({
+            # The DDL is tried first and the procedure second because
+            # _create_fulltext_index iterates its OWN `forms` tuple in that
+            # order -- NOT because of this dict's ordering: each query below
+            # contains exactly one key, so map order is irrelevant here.
+            # (2nd review: the earlier comment credited first-match-wins,
+            # which would mislead a maintainer into thinking reordering this
+            # dict changes the production order.)
+            "CREATE FULLTEXT INDEX": (
+                [], RuntimeError("Invalid input 'CREATE FULLTEXT'")),
+            "db.idx.fulltext.createNodeIndex": (
+                [], RuntimeError("Unknown function 'db.idx.fulltext.createNodeIndex'")),
+        })
+        proj = object.__new__(FalkorProjection)
+        proj.g = graph
+        proj._falkordb_version = (6, 0, 0)
+        proj._is_embedded = False
+        with caplog.at_level(logging.ERROR, logger="tortoise.projection"):
+            proj._ensure_indexes()
+        messages = [r.getMessage() for r in caplog.records
+                    if r.levelno == logging.ERROR]
+        assert any("Source" in m and "DEGRADED" in m for m in messages), messages
+
+    def test_migration_without_a_drop_procedure_warns_not_errors(self, caplog):
+        """#H05 2nd review: the migration branch has TWO outcomes and they are
+        not equivalent, so they must not share a level.
+
+        When the drop procedure is absent (embedded FalkorDBLite -- the case
+        the drop loop's own comment calls covered), the legacy content-only
+        index REMAINS and nothing is degraded; logging that as ERROR on every
+        boot would dilute the very #H05 signal this PR exists to sharpen. It
+        must be a WARNING, and the ERROR arm must NOT fire.
+        """
+        from tortoise.projection import FalkorProjection
+        already = RuntimeError("Attribute 'content' is already indexed")
+        graph = StrategyControlledGraph({
+            # both drop forms fail -> `dropped` stays False
+            "CALL db.idx.fulltext.drop": ([], RuntimeError("unknown procedure")),
+            # the DDL re-raises 'already' verbatim (no fallback attempted),
+            # which is what routes into the migration branch at all
+            "CREATE FULLTEXT INDEX": ([], already),
+        })
+        proj = object.__new__(FalkorProjection)
+        proj.g = graph
+        proj._falkordb_version = (6, 0, 0)
+        proj._is_embedded = True
+        with caplog.at_level(logging.WARNING, logger="tortoise.projection"):
+            proj._ensure_indexes()
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("MIGRATION could not run for Point" in m for m in msgs), msgs
+        assert not any(
+            "MIGRATION for Point" in m and "DROPPED" in m for m in msgs
+        ), msgs
+        # ...and the LEVEL is what this test is actually about: the benign
+        # path must not be ERROR. Asserting the message text alone is not
+        # enough -- caplog captures ERROR records under the same text, so the
+        # text assertion survives a warning->error mutation (proved).
+        skipped = [r for r in caplog.records
+                   if "MIGRATION could not run for Point" in r.getMessage()]
+        assert skipped, msgs
+        assert all(r.levelno == logging.WARNING for r in skipped), [
+            (r.levelno, r.getMessage()) for r in skipped
+        ]
+
+    @pytest.mark.parametrize(
+        "created,dropped,exc,level,fragment",
+        [
+            # The index IS in place; only the one-time marker failed to
+            # persist. Reporting this at ERROR would dilute the signal.
+            (
+                True, True, RuntimeError("marker write failed"),
+                logging.WARNING, "the index IS in place",
+            ),
+            # The drop reported success, yet the recreate still answers
+            # "already": an index EXISTS, just not the intended form. The
+            # engine's own words refute an absence claim here.
+            (
+                False, True,
+                RuntimeError("Attribute 'content' is already indexed"),
+                logging.WARNING, "an index IS present, but NOT the intended",
+            ),
+            # The ONLY case where the label is genuinely left without the
+            # intended index: the drop returned without error, the recreate
+            # failed. (The message must not claim more: `dropped` records that
+            # the drop call did not raise, not that it removed anything.)
+            (
+                False, True, RuntimeError("boom"),
+                logging.ERROR, "is left without the intended",
+            ),
+            # The drop never ran at all -> the legacy index REMAINS. Note
+            # the cause here is a marker-read failure, NOT a missing drop
+            # procedure, so the message must not blame the drop procedure.
+            (
+                False, False, RuntimeError("marker read failed"),
+                logging.WARNING, "legacy content-only index REMAINS",
+            ),
+        ],
+    )
+    def test_classify_fts_migration_failure_levels(
+        self, created, dropped, exc, level, fragment
+    ):
+        """#H05 3rd review: the migration report must state what is TRUE.
+
+        The drop -> recreate -> marker sequence produces four distinct
+        outcomes; the round-2 code keyed the level on `dropped` alone and so
+        asserted "NO full-text index" even when the recreate had succeeded
+        and only the marker write failed (reproduced by that review), and
+        blamed a missing drop procedure even when the failure preceded the
+        drop loop. The decision is pure, so all four arms are asserted here.
+        """
+        from tortoise.projection import FalkorProjection
+        got_level, msg = FalkorProjection._classify_fts_migration_failure(
+            "Point", created, dropped, exc
+        )
+        assert got_level == level, (got_level, msg)
+        assert fragment in msg, msg

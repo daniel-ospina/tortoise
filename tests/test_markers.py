@@ -69,8 +69,14 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # resolves. Same class as test_quota/test_commit_endpoint.
     "test_cohort_cost_cap.py": {"registry": "prod-coupled"},
     "test_cross_tenant_read_isolation.py": {"registry": "prod-coupled"},  # #3663 — registry control-plane seeding for the cross-tenant read proof
+    "test_graph_storage.py": {"registry": "prod-coupled"},  # #5331 — the byte-meter fixture seeds an org through the registry namespace (the literal is the namespace PROD resolves; same class as test_cross_tenant_read_isolation)
     "test_3926_error_prop_guard.py": {"registry": "prod-coupled"},  # #3926 — the literal IS the canonical namespace PROD code resolves
     "test_index_docs_api.py": {"registry": "index-docs"},
+    # #3553: the CAS concurrency tests provision + tear down REAL Team nodes in
+    # the registry control-plane graph (the same graph `_get_registry()` and the
+    # production onboarding-state reader/writer resolve), so the literal IS the
+    # canonical namespace the code under test uses.
+    "test_onboarding_state_cas.py": {"registry": "prod-coupled"},
     "test_session_extraction_modes.py": {"registry": "session-extraction"},
     "test_agent_signup.py": {"registry": "prod-coupled"},
     "test_agent_signup_idempotency.py": {"registry": "prod-coupled"},
@@ -106,6 +112,11 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # ``:Team`` node and drive the ledger through the production writer; the
     # registry store IS the coupling under test (same class as test_metering).
     "test_metering_period_window.py": {"registry": "prod-coupled"},
+    # #4488: same class as test_metering — the fixture pins TORTOISE_DB_PATH so
+    # the embedding writer resolves the SAME store the fixture seeded, and the
+    # canonical registry namespace IS that coupling. A test_* rename would seed
+    # a different graph than the writer resolves.
+    "test_embed_metering.py": {"registry": "prod-coupled"},
     "test_namespace_uri_mode.py": {"registry": "assertion",
                                    "team-abc123": "assertion"},
     "test_onboarding_endpoints.py": {"registry": "prod-coupled"},

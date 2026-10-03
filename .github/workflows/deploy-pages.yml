@@ -138,6 +138,14 @@ jobs:
       # network, no third-party deps (stdlib + git) — ~1s.
       - name: Preflight — every website/ top-level entry is classified (#3620)
         run: python3 tools/check_pages_upload_root.py
+      - name: Provide rsync for the deploy itself (#7026)
+        # This job stages the upload with `rsync -a` below, so it needs the tool
+        # for real — not only because a test executes this step. Without it a
+        # main push that lands on a divergent runner fails rc=127 BEFORE
+        # `wrangler pages deploy`, i.e. the website change silently never ships.
+        # Placed ABOVE the deploy step's design comment so that block stays
+        # attached to the step it documents.
+        uses: ./.github/actions/ensure-rsync
       # #3620: `wrangler pages deploy .` uploaded EVERY file under `website/`.
       # There is no ignore mechanism on the Pages upload path — wrangler uses a
       # hardcoded IGNORE_LIST and the string `wranglerignore` appears in 0 files

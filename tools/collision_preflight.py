@@ -259,11 +259,21 @@ import sys
 # #5128: refuse a <3.12 interpreter before the imports below — a module-level
 # 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
-    raise SystemExit(
-        f"tools/collision_preflight.py requires Python >= 3.12 (got "
+    # #4053: this is an ENVIRONMENT/USAGE failure, not a collision. `SystemExit(<str>)`
+    # exits 1, which is EXIT_COLLISION — so a check that never ran read as "another lane
+    # is on it", with no `VERDICT:` line to contradict it and nothing saying no surface
+    # was queried. That is the same defect class as
+    # `COLLISION_PREFLIGHT_TIMEOUT=abc` (#3619), which is now EXIT_USAGE. Emit the
+    # message on stderr and exit EXIT_USAGE. The constant is defined below; this guard
+    # necessarily runs before it (and before the imports, #5128), so the value is
+    # spelled out with the name in this comment rather than referenced.
+    print(
+        f"collision-preflight: requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        f"`uv run python tools/collision_preflight.py`"
+        f"`uv run python tools/collision_preflight.py`",
+        file=sys.stderr,
     )
+    raise SystemExit(3)  # EXIT_USAGE
 
 import argparse
 import contextlib
@@ -1526,6 +1536,280 @@ def closing_reference(text: str, issue: int) -> bool:
 
 # ── git surfaces ─────────────────────────────────────────────────────────────
 
+# ── #6622: a RECORD of work is not a WORKER ─────────────────────────────────
+# Both gates below exist because a blocking surface was counting a *record* as a
+# holder, and exit 1 is a hard "do not dispatch" in every enforcement site
+# (epic-executor, issue-workflow, executing-plans, subagent-driven-development).
+# So a record of work that no longer exists blocked the item INDEFINITELY: the
+# lane is told somebody holds it, takes the next item, and nobody ever picks
+# this one up. The measured instances (2026-09-29) were two worktree
+# directories that did not exist and a `.worktrees/` entry with no index.
+#
+# ⛔ THE SURFACES ARE MADE EVIDENCE-AWARE, NOT DELETED. `[local worktrees]`
+# prevents REAL duplicate work (#2985 vs #3005), so removing it would be the
+# over-correction the issue warns against. The defect is narrower: the surface
+# could not tell a record from a worker.
+#
+# ⚠️ The asymmetry is deliberate, and matches this tool's stated posture — a
+# missed duplicate is worse than a false alarm. Only conditions that make work
+# IMPOSSIBLE downgrade a hit (`exists=no`, `index=no`, a remote that is not a
+# configured remote). Recency is REPORTED (`age=`) but never applied: an agent
+# editing files makes no git call, so a live worktree's index mtime goes stale
+# while it still holds the work, and that false-negative direction is the
+# dangerous one.
+
+
+def _remote_tracking_namespaces(
+    git_bin: str, repo: str, timeout: float,
+) -> set[str] | None:
+    """The `refs/remotes/…` PREFIXES the configured remotes actually fetch into.
+
+    ⛔ THE REFSPEC IS THE DISCRIMINATOR, NOT THE REMOTE'S NAME (#6622). A
+    `refs/remotes/<x>/…` ref is a remote-tracking BRANCH only when some
+    configured remote's FETCH REFSPEC targets that namespace. Any other
+    namespace is a one-shot fetch TARGET: `git fetch <url>
+    refs/pull/N/head:refs/remotes/pr/N` writes a ref that names the CACHE KEY.
+
+    READING THE NAME INSTEAD GOT THIS WRONG IN THREE WAYS, and all three are in
+    the FAIL-OPEN direction on a blocking surface:
+      * a remote whose name contains a slash (`git remote add foo/bar <url>`)
+        fetches into `refs/remotes/foo/bar/*`, so comparing the FIRST path
+        segment against the full name set never matched;
+      * a non-standard refspec (`remote.origin.fetch
+        +refs/heads/*:refs/remotes/upstream/*`) declares a namespace that is not
+        the remote's name at all;
+      * a SINGLE-SEGMENT cache key (`refs/remotes/pr5343`) has no third segment,
+        so a "namespace + tail" split missed it and the false COLLISION this
+        issue is about survived for it;
+      * a NON-GLOB destination is not exotic — `git remote set-branches origin
+        main` writes `+refs/heads/main:refs/remotes/origin/main` with no `*` at
+        all. Skipping the non-glob form leaves the set EMPTY, and an empty set
+        demoted every `refs/remotes/…` ref. The PARENT of each destination is
+        taken instead, which covers both forms (`refs/remotes/origin/*` and
+        `refs/remotes/origin/main` both yield `refs/remotes/origin/`) and errs
+        WIDE — the safe direction on a blocking surface.
+
+    ⛔ AND THE CONFIGURED REMOTES' NAMES ARE ADDED, NOT SUBSTITUTED. A remote can
+    be configured with NO fetch refspec at all, in which case the refspec arm
+    contributes nothing for it; `refs/remotes/<name>/` can only make MORE refs
+    block, so this arm cannot reopen the hole the refspec arm closes. The two are
+    combined rather than chosen between.
+
+    Measured on this repo (2026-10-02): the only refspec is
+    `+refs/heads/*:refs/remotes/origin/*`, so the only live namespace is
+    `refs/remotes/origin/`, while `refs/remotes/pr/*` alone holds 2,810 refs
+    named `pr/1 … pr/2810` and `refs/remotes/pr5343` … `refs/remotes/pr2996`
+    hold ten more, every one a PR number.
+
+    None is fail-CLOSED: an unreadable refspec list leaves every ref blocking,
+    exactly as before this change.
+    """
+    try:
+        rc, out, _err, timed_out = _run(
+            [git_bin, "config", "--get-regexp", r"^remote\..*\.fetch$"],
+            repo, timeout,
+        )
+    except Exception:  # pragma: no cover - _run raises only on programmer error
+        return None
+    # ⛔ `git config --get-regexp` exits 1 when there is NO MATCH, which is a
+    # SUCCESSFUL read of an empty configuration — not a read failure. Collapsing
+    # the two would leave every ref blocking forever in a repo with no configured
+    # remote, while a real error (128, 127) must still answer None. Both
+    # directions are pinned by tests.
+    if timed_out or rc not in (0, 1):
+        return None
+    namespaces: set[str] = set()
+    for line in out.splitlines():
+        _key, _sep, value = line.partition(" ")
+        _src, colon, dest = value.strip().partition(":")
+        if not colon:
+            continue
+        dest = dest.strip().lstrip("+")
+        if not dest.startswith("refs/remotes/"):
+            continue
+        # ⛔ NON-GLOB DESTINATIONS AND MID-PATH `*` ARE THE TWO TRAPS, AND
+        # NEITHER IS EXOTIC.
+        #
+        # (i) NON-GLOB. `git remote set-branches origin main` writes
+        # `+refs/heads/main:refs/remotes/origin/main` — no `*` at all. Skipping
+        # the non-glob form (the first cut of this fix did exactly that) yields
+        # an EMPTY namespace set, and an empty set demotes EVERY `refs/remotes/…`
+        # ref — so a configured remote's genuine remote-tracking branch became a
+        # false CLEAN. Taking the PARENT errs WIDE (it also covers siblings that
+        # refspec does not fetch), and on this surface wide is SAFE.
+        #
+        # (ii) A `*` IS NOT ALWAYS THE LAST SEGMENT. Git accepts
+        # `+refs/heads/*:refs/remotes/x/*/y` and creates real tracking refs like
+        # `refs/remotes/x/<branch>/y`. A prefix taken as the PARENT of that
+        # destination keeps the literal `*` (`refs/remotes/x/*/`), which prefixes
+        # NO real ref, so the branch was demoted — a fail-open, and the reason the
+        # rule is not simply "parent of the destination".
+        #
+        # The rule that covers both: stop at the FIRST `*` when there is one,
+        # else take the parent of the exact target. The two agree on the common
+        # forms (`refs/remotes/origin/*` and `refs/remotes/origin/main` both yield
+        # `refs/remotes/origin/`) and both err WIDE.
+        star = dest.find("*")
+        prefix = dest[:star] if star != -1 else dest.rsplit("/", 1)[0] + "/"
+        if prefix.startswith("refs/remotes/"):
+            namespaces.add(prefix)
+    # ⛔ THE REMOTE NAMES ARE A FAIL-CLOSED ADDITION, NOT A REPLACEMENT. A remote
+    # can be configured with NO fetch refspec at all, and its namespace would
+    # then never appear above. Adding `refs/remotes/<name>/` can only make MORE
+    # refs block, so this arm can never open the fail-open hole the refspec arm
+    # exists to close — which is why the two are combined rather than chosen
+    # between. (It is also what a slash-named remote needs: `git remote add
+    # foo/bar <url>` fetches into `refs/remotes/foo/bar/*`, covered by both.)
+    try:
+        rc_remotes, out_remotes, _err2, timed_out2 = _run(
+            [git_bin, "remote"], repo, timeout,
+        )
+    except Exception:  # pragma: no cover - _run raises only on programmer error
+        return None
+    if rc_remotes != 0 or timed_out2:
+        return None
+    for name in out_remotes.splitlines():
+        name = name.strip()
+        if name:
+            namespaces.add(f"refs/remotes/{name}/")
+    return namespaces
+
+
+def _fetch_cache_remote(
+    refname: str, remote_namespaces: set[str] | None,
+) -> str | None:
+    """The namespace segment of a fetch-cache ref, else None (the BLOCKING answer).
+
+    Returns a segment only when the ref is under `refs/remotes/` and NO
+    configured remote's refspec targets it. None — the blocking answer — is
+    returned for a local branch, for a ref inside a live namespace, and whenever
+    the namespace set is UNREADABLE ***or EMPTY***, so every uncertain case stays
+    exactly as strict as it was.
+
+    ⛔ AN EMPTY SET IS NOT "EVERYTHING IS A CACHE" — it is an INABILITY TO TELL,
+    AND IT FAILS CLOSED. The set is empty when the repo configures no remote (and
+    no fetch refspec) at all. A `refs/remotes/origin/…` ref can then be a
+    leftover of an earlier configuration or a deliberately created one, and the
+    tool can affirm neither. Reading an empty set as a cache demoted EVERY remote
+    ref in such a repo — the fail-open direction on a blocking surface, and the
+    shape this suite's own fixture (which configures no remote) would have hit.
+    """
+    if not remote_namespaces:
+        return None
+    if not refname.startswith("refs/remotes/"):
+        return None
+    if any(refname.startswith(ns) for ns in remote_namespaces):
+        return None
+    rest = refname[len("refs/remotes/"):]
+    return rest.split("/", 1)[0] or None
+
+
+def _worktree_liveness(
+    path: str, locked: str | None = None, prunable: str | None = None,
+) -> tuple[bool, str]:
+    """(can this registered record still hold work?, the basis, rendered).
+
+    ⛔ PATH-ABSENCE ALONE IS NOT EVIDENCE OF DEATH — it is evidence of a
+    REGISTRATION git no longer matches, and those come apart in the direction
+    that matters. `mv <worktree> <elsewhere>` leaves a fully working worktree:
+    a linked worktree's `.git` is a pointer holding an ABSOLUTE `gitdir:`, so
+    git keeps working from the new location — while `git worktree list` goes on
+    reporting the OLD path and tags the record `prunable gitdir file points to
+    non-existent location`. Demoting on `exists=no` alone therefore reported a
+    LIVE lane as `non-blocking` and let this gate exit 0, which is the exact
+    false-CLEAN the pre-dispatch check exists to prevent (the duplicate-ownership
+    defect #3061 was filed for).
+
+    The discriminator is git's ABORTED-ADD marker, `initializing`, which is the
+    only value that means "cannot hold work": it is the shape MEASURED for both
+    dead records in this repo. A LOCK IS PRUNE-PROTECTION, NOT LIVENESS —
+    `git worktree lock` is documented for a worktree "on a portable device or
+    network share which is not always mounted", i.e. one whose path is EXPECTED
+    to be absent — and `--porcelain` emits `locked` INSTEAD OF `prunable`, so a
+    moved worktree its owner also locked reports only `locked portable`. Every
+    other lock, a lock-free `prunable`, and a bare absence FAIL CLOSED.
+
+    `exists=no` and `gitdir=no` remain EVIDENCE and are always reported, so a
+    false hold is visible at a glance instead of having to be re-derived by hand.
+    The age is reported for the same reason.
+
+    ⛔ UNREADABLE IS NOT ABSENT. `os.path.isdir` answers False for EACCES and
+    ESTALE as well as for a missing directory, so demoting on it would turn a
+    live-but-unreadable worktree (a stale mount, a directory owned by another
+    user) into a false CLEAN on a BLOCKING surface — the dangerous direction.
+    The probes therefore separate the two and FAIL CLOSED on everything except
+    FileNotFoundError, the same polarity `age` already uses.
+
+    ⛔ `gitdir=` IS DELIBERATELY NOT AN INDEX TEST, and the label says what is
+    MEASURED rather than what was hoped for. For a LINKED worktree `<path>/.git`
+    is a one-time gitdir POINTER; the index lives in the main repo's
+    `.git/worktrees/<name>/index` — and a worktree created with `--no-checkout`
+    has no index BY DESIGN while still being a worktree a lane holds, which is
+    exactly the shape this repo's own test fixtures create. An `index=` label
+    there asserted `index=yes` about a tree with no index: the opposite of the
+    evidence this fix exists to surface.
+    """
+    def _shape(basis: str) -> tuple[bool, str]:
+        """Demote ONLY on git's ABORTED-ADD marker; otherwise FAIL CLOSED.
+
+        ⛔ A LOCK IS PRUNE-PROTECTION, NOT A LIVENESS SIGNAL. `git worktree
+        lock` exists for a worktree "on a portable device or network share which
+        is not always mounted" — i.e. precisely a worktree whose PATH is EMPTY
+        EXPECTED TO BE ABSENT. Reading any lock as "cannot hold work" therefore
+        demotes a live lane, and `--porcelain` emits `locked` INSTEAD OF
+        `prunable` (git's own if/else-if), so the prunable guard below never sees
+        it: a MOVED worktree that its owner also LOCKED reports only
+        `locked portable` and was read as non-blocking — a false CLEAN on this
+        gate, the duplicate-ownership direction (#3061).
+
+        The one value that does mean "cannot hold work" is `initializing`, the
+        marker an ABORTED `git worktree add` leaves behind — the shape MEASURED
+        for both dead records in this repo. Every other lock, and a lock-free
+        `prunable`, and a bare absence, keeps blocking.
+        """
+        lock = f"locked={locked}" if locked else "locked=no"
+        if locked == "initializing":
+            return False, (
+                f"{basis} {lock} — aborted `git worktree add`; cannot hold work"
+            )
+        if locked:
+            return True, (
+                f"{basis} {lock} — a lock is prune-protection, NOT a liveness "
+                "signal — NOT demoted (fail-closed)"
+            )
+        if prunable:
+            return True, (
+                f"{basis} {lock} prunable={prunable} — a moved worktree and a "
+                "deleted one are indistinguishable here, and a moved one is "
+                "LIVE (its .git holds an absolute gitdir) — NOT demoted "
+                "(fail-closed; run `git worktree prune` if genuinely dead)"
+            )
+        return True, f"{basis} {lock} — no lock, NOT demoted (fail-closed)"
+
+    if not path:
+        return _shape("exists=no (record carries no path)")
+    try:
+        os.stat(path)
+    except FileNotFoundError:
+        return _shape("exists=no (registered directory is not on disk)")
+    except OSError as exc:
+        return True, f"exists=unreadable ({exc.__class__.__name__}) — not demoted"
+    if not os.path.isdir(path):
+        return _shape("exists=no (registered path is not a directory)")
+    marker = os.path.join(path, ".git")
+    try:
+        os.stat(marker)
+    except FileNotFoundError:
+        return _shape("gitdir=no (no .git marker: not a usable worktree)")
+    except OSError as exc:
+        return True, f"exists=yes gitdir=unreadable ({exc.__class__.__name__})"
+    try:
+        age_hours = max(0.0, (time.time() - os.path.getmtime(marker)) / 3600.0)
+    except OSError:
+        return True, "exists=yes gitdir=yes age=unreadable"
+    return True, f"exists=yes gitdir=yes age={age_hours:.1f}h"
+
+
 def _git_refs(
     git_bin: str, repo: str, namespace: str, timeout: float,
 ) -> list[tuple[str, str]]:
@@ -1831,6 +2115,7 @@ def scan_branch_surface(
     identity: Identity, merged_head_shas: set[str],
     ancestor_merged: set[str] | None, main_tip: str | None,
     first_parent: set[str] | None,
+    remote_namespaces: set[str] | None = None,
 ) -> None:
     """NUMBER matching only — the lexical arm is gone (#3504).
 
@@ -1870,6 +2155,23 @@ def scan_branch_surface(
                 ref,
                 f"branch is {terminal} — immutable history, not in-flight work "
                 "(non-blocking)",
+                "weak",
+            )
+            continue
+        # #6622: a fetch-cache ref names a CACHE KEY, not a holder. A
+        # `refs/remotes/…` ref that NO configured remote's refspec targets was
+        # written by a one-shot `git fetch <url> <spec>:refs/remotes/<x>/N`. This
+        # is the tool's OWN stated model of that surface — its note says a
+        # remote-tracking ref "is a local fetch cache", and
+        # `_branch_terminal_state` already refuses to judge one — so counting it
+        # as a strong holder contradicted the model the surface documents.
+        cache_remote = _fetch_cache_remote(ref, remote_namespaces)
+        if cache_remote is not None:
+            surface.add(
+                ref,
+                f"fetch-cache ref ('{cache_remote}' under refs/remotes/, which no "
+                "configured remote's fetch refspec targets) — a cache KEY written "
+                "by a one-shot git fetch, not a branch a lane holds (non-blocking)",
                 "weak",
             )
             continue
@@ -1915,7 +2217,24 @@ def _worktree_blocks(porcelain: str) -> list[dict]:
         elif line == "bare":
             cur["bare"] = True
         elif line.startswith("locked") or line.startswith("prunable"):
-            pass
+            # #6622: CAPTURE git's OWN signal that a registration cannot be used.
+            # Dropping these (a bare `pass`) left the liveness decision with
+            # path-absence ALONE — which is a FALSE CLEAN for a worktree that was
+            # MOVED: `mv` leaves a fully working worktree behind (its `.git`
+            # holds an absolute `gitdir:`), while `git worktree list` keeps
+            # reporting the OLD path and marks it `prunable`. A lane can be live
+            # in the moved directory and the gate would exit 0. See
+            # `_worktree_liveness`.
+            #
+            # The VALUE is kept, not a bool: `locked initializing` names the
+            # aborted `git worktree add` that produced it and `prunable gitdir
+            # file points to non-existent location` names the moved record, and
+            # both ride into the reported basis so a reader can tell the two
+            # apart without re-deriving them by hand.
+            if line.startswith("locked"):
+                cur["locked"] = line[len("locked"):].strip() or "yes"
+            else:
+                cur["prunable"] = line[len("prunable"):].strip() or "yes"
         elif line.startswith("HEAD "):
             # The worktree's checked-out commit, carried free by --porcelain.
             #
@@ -2025,7 +2344,25 @@ def scan_worktree_surface(
                 "weak",
             )
             continue
-        surface.add(label, f"matched issue-number ({issue})", "strong")
+        # #6622: a RECORD is not a WORKER — but a missing DIRECTORY is not proof
+        # that the record is dead, because `mv` moves a worktree that keeps
+        # working (its `.git` holds an absolute `gitdir:`) while this listing goes
+        # on reporting the old path. Only git's own `locked` signal demotes; a
+        # lock-free `prunable` and a bare absence keep blocking. The branch was
+        # checked first (above), so a live BRANCH that names this issue still
+        # blocks even when the worktree record is dead (#3611).
+        live, basis = _worktree_liveness(
+            path, block.get("locked"), block.get("prunable"),
+        )
+        if not live:
+            surface.add(
+                label,
+                f"matched issue-number ({issue}) but {basis} — a record that "
+                "cannot be live work (non-blocking)",
+                "weak",
+            )
+            continue
+        surface.add(label, f"matched issue-number ({issue}) ({basis})", "strong")
 
 
 # ── GitHub surfaces ──────────────────────────────────────────────────────────
@@ -3206,6 +3543,13 @@ def run_preflight(
     first_parent: set[str] | None = None
     if target.path is not None:
         first_parent = _first_parent_shas(git_bin, cwd, timeout)
+    # #6622: read the remote-tracking NAMESPACES once (ONE `git config` call).
+    # ONLY a namespace some configured remote's fetch refspec actually populates
+    # can hold a remote-tracking BRANCH; every other `refs/remotes/…` ref is a
+    # one-shot fetch TARGET, so its name is a cache key rather than a holder.
+    # None (unreadable) leaves all refs blocking, which is the pre-existing
+    # behaviour.
+    remote_namespaces = _remote_tracking_namespaces(git_bin, cwd, timeout)
     for surface_name, namespace in (
         (SURFACE_LOCAL_BRANCHES, "refs/heads"),
         (SURFACE_REMOTE_BRANCHES, "refs/remotes"),
@@ -3242,6 +3586,7 @@ def run_preflight(
             scan_branch_surface(
                 surface, refs, issue, identity, merged_head_shas,
                 ancestor_merged, main_tip, first_parent,
+                remote_namespaces=remote_namespaces,
             )
             surface.note = f"{len(refs)} ref(s) enumerated"
             if namespace != "refs/heads":
@@ -3250,6 +3595,16 @@ def run_preflight(
                     "is a local fetch cache, so judging it terminal could call a "
                     "reused live branch merged)"
                 )
+                if remote_namespaces is None:
+                    # #6622: report the INABILITY rather than presenting a strict
+                    # answer as a measured one. Nothing was demoted, so this row
+                    # is exactly as strict as it was before the change — but a
+                    # reader cannot tell that from the rows alone.
+                    surface.note += (
+                        "; ⚠ the configured remotes' fetch refspecs could not be "
+                        "read, so NO fetch-cache ref was demoted — every ref here "
+                        "blocks (fail-closed)"
+                    )
             elif ancestor_merged is None:
                 surface.note += (
                     "; ⚠ 'merged into main' detection UNAVAILABLE (for-each-ref "
@@ -3493,8 +3848,11 @@ def format_report(
         rest = len(weak) - len(prose_only)
         if rest:
             lines.append(
-                f"  {rest} further non-blocking hit(s) that are NOT prose — your "
-                "own work, a terminal branch/PR, or the shared fleet account."
+                f"  {rest} further non-blocking hit(s) that are NOT prose — "
+                "your own work, a terminal branch/PR, the shared fleet account, "
+                "a fetch-cache ref under a namespace no configured remote "
+                "fetches into, or a worktree RECORD that cannot be live work "
+                "(#6622)."
             )
         lines.append("  These do NOT block a dispatch.")
     if incomplete:
