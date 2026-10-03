@@ -19,6 +19,12 @@ from pathlib import Path
 
 import pytest
 
+# #3752: discovery must target the PRIVATE per-session temp root, never the
+# shared system temp dir. `scan_root()` asserts the isolation is installed and
+# refuses to hand back the shared tree, so the delta-sweep fixtures below can
+# no longer silently degrade into an O(whole-host) scan that also matches
+# another test's (or another session's) redis.socket / redis.pid.
+from tests._tmpdir_hygiene import scan_root
 from tortoise.embedded_reaper import (
     _parse_min_uptime,
     discover,
@@ -58,7 +64,7 @@ def _clean_redislite_residue():
         except Exception:
             pass
         dirs: set[str] = set()
-        tmp = tempfile.gettempdir()
+        tmp = scan_root()  # #3752: private root, never the shared temp dir
         try:
             for entry in os.scandir(tmp):
                 if entry.is_dir() and (
@@ -110,7 +116,7 @@ def _sweep_stale_residue():
     definition (crashed run, killed server) — remove it so later tests in
     this module see the same clean state a fresh CI runner would.
     """
-    tmp = tempfile.gettempdir()
+    tmp = scan_root()  # #3752: private root, never the shared temp dir
     try:
         for entry in os.scandir(tmp):
             if not entry.is_dir():

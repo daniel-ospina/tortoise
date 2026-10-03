@@ -7,7 +7,22 @@ import sys
 import pytest
 
 from tests import _live_utils
+from tests._tmpdir_hygiene import scan_root
 from tortoise.projection import FalkorProjection
+
+
+def _tmp_db(name: str) -> str:
+    """A DB path inside the PRIVATE session temp root (#3752).
+
+    These tests used a hardcoded path in the SHARED temp dir. On the Linux CI
+    ``$TMPDIR`` is unset, so ``/tmp`` IS the shared temp base: constructing an
+    embedded projection there makes the process enumerate that base, which the
+    #3752 scan guard forbids — correctly, since that enumeration can match
+    another session's ``redis.pid``/``redis.socket``. ``scan_root()`` returns
+    the private per-session root (and raises rather than falling back to the
+    shared dir, which is the whole point).
+    """
+    return os.path.join(scan_root(), name)
 
 # Cycle-5 P2-14: import-time snapshot of the session nonce — the stability
 # probe below asserts the runtime value never mutated mid-session (a mutation
@@ -49,7 +64,7 @@ def test_unset_uri_constructs_embedded(monkeypatch):
     # with a URI set must not flip this to the server lane (the P2 half-b
     # docker job would red it).
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
-    proj = FalkorProjection("/tmp/seam-test-a.db")
+    proj = FalkorProjection(_tmp_db("seam-test-a.db"))
     try:
         assert proj._is_embedded is True
     finally:
@@ -57,7 +72,7 @@ def test_unset_uri_constructs_embedded(monkeypatch):
 
 
 def test_uri_set_redirects_to_server(uri_env):
-    proj = FalkorProjection("/tmp/seam-test-b.db")
+    proj = FalkorProjection(_tmp_db("seam-test-b.db"))
     try:
         assert proj._is_embedded is False
         # graph name derived: test_<stem_sanitized>_<hash12(session+path)>
@@ -73,7 +88,7 @@ def test_uri_set_redirects_to_server(uri_env):
 def test_explicit_graph_name_honored(uri_env):
     # Cycle-2 P0-1b rule: a TEST-PREFIXED explicit name is the shared opt-in
     # — honored verbatim (seam fixtures use test_suite_<uuid> this way).
-    proj = FalkorProjection("/tmp/seam-test-c.db", graph_name="test_explicit")
+    proj = FalkorProjection(_tmp_db("seam-test-c.db"), graph_name="test_explicit")
     try:
         assert proj.graph_name == "test_explicit"
         assert proj._is_embedded is False
@@ -88,9 +103,9 @@ def test_explicit_nondefault_name_derives_per_path(uri_env):
     # one server graph and the apply-vs-rebuild comparison would be a graph
     # compared to itself (vacuous pass, #942 class). Same path + same
     # explicit name must still share (the embedded same-file analog).
-    a = FalkorProjection("/tmp/seam-parity-a.db", graph_name="test")
-    b = FalkorProjection("/tmp/seam-parity-b.db", graph_name="test")
-    a2 = FalkorProjection("/tmp/seam-parity-a.db", graph_name="test")
+    a = FalkorProjection(_tmp_db("seam-parity-a.db"), graph_name="test")
+    b = FalkorProjection(_tmp_db("seam-parity-b.db"), graph_name="test")
+    a2 = FalkorProjection(_tmp_db("seam-parity-a.db"), graph_name="test")
     try:
         assert a.graph_name != b.graph_name, "distinct paths must yield distinct server graphs"
         # cycle-3 P2-5: path-derived stems are sanitized (hyphens → "_")
@@ -124,7 +139,7 @@ def test_no_redirect_env_exempts_caller_test_module(monkeypatch):
     # — no server contact — so it must run on docker-absent lanes too.
     monkeypatch.setenv("TORTOISE_DB_URI", _live_utils.docker_base_uri())
     monkeypatch.setenv("TORTOISE_TEST_NO_REDIRECT", "test_redirect_seam")
-    proj = FalkorProjection("/tmp/seam-test-d.db")
+    proj = FalkorProjection(_tmp_db("seam-test-d.db"))
     try:
         assert proj._is_embedded is True  # exempted caller module stays embedded
     finally:
@@ -137,7 +152,7 @@ def test_db_file_stem_never_exempts(uri_env, monkeypatch):
     # fresh.db, solo.db...) that never match their file stems, so the
     # exemption never fired. Listing a DB-file stem must NOT exempt.
     monkeypatch.setenv("TORTOISE_TEST_NO_REDIRECT", "seam-test-d")
-    proj = FalkorProjection("/tmp/seam-test-d.db")
+    proj = FalkorProjection(_tmp_db("seam-test-d.db"))
     try:
         assert proj._is_embedded is False  # DB basename ≠ test module → redirects
     finally:
@@ -154,8 +169,10 @@ def test_no_test_frame_in_stack_no_redirect(monkeypatch):
     monkeypatch.setenv("TORTOISE_TEST_MODE", "1")
     out = subprocess.run(
         [sys.executable, "-c",
+         "import os, tempfile; "
          "from tortoise.projection import FalkorProjection; "
-         "p = FalkorProjection('/tmp/seam-child.db', skip_health_check=True); "
+         "p = FalkorProjection(os.path.join(tempfile.gettempdir(), "
+         "'seam-child.db'), skip_health_check=True); "
          "print(p._is_embedded); p.close()"],
         capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
@@ -207,7 +224,7 @@ def test_no_redirect_without_test_mode(monkeypatch):
     # prod path constructions are preserved byte-for-byte.
     monkeypatch.setenv("TORTOISE_DB_URI", _live_utils.docker_base_uri())
     monkeypatch.delenv("TORTOISE_TEST_MODE", raising=False)
-    proj = FalkorProjection("/tmp/seam-test-f.db", skip_health_check=True)
+    proj = FalkorProjection(_tmp_db("seam-test-f.db"), skip_health_check=True)
     try:
         assert proj._is_embedded is True  # prod-style construction unaffected
     finally:
@@ -221,7 +238,7 @@ def test_uri_set_refuses_non_loopback_host(monkeypatch):
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@db.internal.example.com:6379")
     monkeypatch.setenv("TORTOISE_TEST_MODE", "1")
     with pytest.raises(RuntimeError, match="loopback"):
-        FalkorProjection("/tmp/seam-remote.db", skip_health_check=True)
+        FalkorProjection(_tmp_db("seam-remote.db"), skip_health_check=True)
 
 
 def test_uri_hostless_refuses(monkeypatch):
@@ -233,7 +250,7 @@ def test_uri_hostless_refuses(monkeypatch):
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@:6379")
     monkeypatch.setenv("TORTOISE_TEST_MODE", "1")
     with pytest.raises(RuntimeError, match="loopback"):
-        FalkorProjection("/tmp/seam-hostless.db", skip_health_check=True)
+        FalkorProjection(_tmp_db("seam-hostless.db"), skip_health_check=True)
 
 
 def test_allow_remote_escape_lets_non_loopback_through(monkeypatch):
@@ -280,7 +297,7 @@ def test_allow_remote_escape_lets_non_loopback_through(monkeypatch):
             pass
 
     monkeypatch.setattr("falkordb.FalkorDB", _FakeFalkorDB)
-    proj = FalkorProjection("/tmp/seam-remote.db", skip_health_check=True)
+    proj = FalkorProjection(_tmp_db("seam-remote.db"), skip_health_check=True)
     try:
         assert proj._is_embedded is False
         assert proj.graph_name.startswith("test_seam_remote_")  # sanitized stem (P2-5)
@@ -329,7 +346,7 @@ def test_redirect_connection_boundedness(uri_env):
     _info_leg_runs = not _other_pids
     pools = []
     for i in range(20):
-        p = FalkorProjection(f"/tmp/seam-conn-{i}.db")
+        p = FalkorProjection(_tmp_db(f"seam-conn-{i}.db"))
         conn = p.db.connection  # redis.Redis client
         pools.append(weakref.ref(conn.connection_pool))
         assert isinstance(conn, redis.Redis), "host branch is the raw redis client"
@@ -346,7 +363,7 @@ def test_redirect_connection_boundedness(uri_env):
     finally:
         probe.close()
     for i in range(20):
-        p = FalkorProjection(f"/tmp/seam-conn-{i}.db")
+        p = FalkorProjection(_tmp_db(f"seam-conn-{i}.db"))
         p.close()
     probe = redis.Redis(host=_live_utils.service_host(),
                     port=_live_utils.docker_port(), password="falkordb",
@@ -362,7 +379,7 @@ def test_redirect_connection_boundedness(uri_env):
 
 def test_unsupported_uri_scheme_stays_embedded(monkeypatch):
     monkeypatch.setenv("TORTOISE_DB_URI", "postgres://x@localhost/y")
-    proj = FalkorProjection("/tmp/seam-test-e.db")
+    proj = FalkorProjection(_tmp_db("seam-test-e.db"))
     try:
         assert proj._is_embedded is True
     finally:
@@ -459,7 +476,7 @@ def test_worker_thread_carve_out_stays_embedded(monkeypatch):
 
     results: list = []
     t = threading.Thread(
-        target=_worker_stem_embedded_probe, args=(results, "/tmp/seam-worker-a.db"))
+        target=_worker_stem_embedded_probe, args=(results, _tmp_db("seam-worker-a.db")))
     t.start()
     t.join(timeout=20)
     assert not t.is_alive(), "worker thread hung — stamp/construction deadlock"
@@ -502,7 +519,7 @@ def test_worker_thread_non_exempt_redirects(monkeypatch):
 
     results: list = []
     t = threading.Thread(
-        target=_worker_stem_embedded_probe, args=(results, "/tmp/seam-worker-b.db"))
+        target=_worker_stem_embedded_probe, args=(results, _tmp_db("seam-worker-b.db")))
     t.start()
     t.join(timeout=20)
     assert not t.is_alive(), "worker thread hung"

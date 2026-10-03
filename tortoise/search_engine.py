@@ -36,6 +36,11 @@ from .env_truthy import is_truthy
 # `draft`); `_status_vocab_for` below is the ONE dispatcher between the two
 # families, so neither leg re-states the mapping.
 from .commit_ops import OBJECT_TERMINAL_STATUSES
+# #3359: the capture-level graph-op meter is a ContextVar, and ContextVars do
+# not cross into the ThreadPoolExecutor this module runs its retrieval legs on
+# — without binding the legs to the caller's metering context, a capture's
+# off-thread FTS/vector/structural reads are never counted.
+from .graph_ops import bind_metering_context
 from .live import (
     TERMINAL_EXCLUDED_STATUSES,
     _terminal_excluded,
@@ -1817,7 +1822,8 @@ def degradation_chain(
         # structure surface) opt in via excluded_statuses=() (include_terminal).
         if strategies.get("fts") and query:
             futures[executor.submit(
-                run_fts_query, graph, query, entity_type=entity_type, limit=limit,
+                bind_metering_context(run_fts_query), graph, query,
+                entity_type=entity_type, limit=limit,
                 timeout_ms=runner_timeout, excluded_statuses=excluded_statuses,
                 keep_numeric=keep_numeric,
                 **_runner_kwargs("fts"),
@@ -1837,7 +1843,8 @@ def degradation_chain(
                 # byte-identical submit kwargs).
                 _vec_kwargs["scope_kinds"] = scope_kinds
             futures[executor.submit(
-                run_vector_query, graph, query_vec, limit=limit, is_embedded=is_embedded,
+                bind_metering_context(run_vector_query), graph, query_vec,
+                limit=limit, is_embedded=is_embedded,
                 entity_type=entity_type, timeout_ms=runner_timeout,
                 vector_index_api=vector_index_api, excluded_statuses=excluded_statuses,
                 **_vec_kwargs,
@@ -1845,7 +1852,8 @@ def degradation_chain(
 
         if strategies.get("structural"):
             futures[executor.submit(
-                run_structural_query, graph, kind, entity_type=entity_type, limit=limit,
+                bind_metering_context(run_structural_query), graph, kind,
+                entity_type=entity_type, limit=limit,
                 timeout_ms=runner_timeout, excluded_statuses=excluded_statuses,
                 **_runner_kwargs("structural"),
             )] = "structural"
