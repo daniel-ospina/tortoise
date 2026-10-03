@@ -361,6 +361,195 @@ def test_runner_error_when_session_unknown(tmp_path):
     assert "unknown sessions" in report["log"][-1]
 
 
+def test_failed_run_surfaces_its_log_on_stdout(capsys):
+    """#4860: a failed run states WHY on stdout, not only inside the receipt.
+
+    The 7/7 capture failure was undiagnosable for nine days because the
+    per-session stage errors existed ONLY in the receipt, and the invocation
+    wrote that receipt to ``/tmp`` — which was then reaped. Every paid retry
+    reproduced the failure and destroyed the same evidence. stdio is the one
+    channel that survives independently of ``--out``, so the cause must
+    reach it.
+    """
+    exit_code = runner._main([
+        "run", "--root", str(corpus.WRITE_PATH_DIR), "--session", "nope_1",
+    ])
+    out = capsys.readouterr().out
+    assert exit_code == runner.EXIT_RUNNER_ERROR
+    assert "failure_origin=runner_error" in out
+    # The CAUSE, not merely the status: this line lives in report["log"],
+    # which previously reached stdout only under the opt-in --json flag.
+    assert "unknown sessions" in out
+
+
+def test_completed_run_is_not_echoed():
+    """Polarity guard: a completed run's artifact is the receipt, so its log
+    is NOT dumped to stdout — the echo exists for FAILED runs only."""
+    assert runner.failed_run_diagnostics(
+        {"run_status": "completed", "log": ["metrics: {}"]}
+    ) == []
+
+
+def test_failed_run_diagnostics_tolerates_a_log_less_report():
+    """A failure path that produced no log must not crash the echo — losing
+    the run to an AttributeError/TypeError would be strictly worse than the
+    bare headline this exists to replace."""
+    assert runner.failed_run_diagnostics({"run_status": "failed"}) == []
+
+
+def test_capture_failure_detail_carries_the_raw_diagnostic():
+    """#4860 (P1): the recorded detail must hold the CAUSE, not the headline.
+
+    ``errors`` is the customer-facing contract and is deliberately generic;
+    the raw ``S<t>: <TypeName>: <message>`` string rides ``diagnostics``.  A
+    detail built from ``errors`` alone is why nine days of receipts said
+    "Retry the capture" and named nothing.
+    """
+    from tortoise.sdk import _capture_resp_error_split
+
+    raw = (
+        "S1 chunk failed: HTTPError: 403 Client Error: Forbidden for url: "
+        "https://openrouter.ai/api/v1/chat/completions"
+    )
+    headline, diagnostics = _capture_resp_error_split([raw])
+    # The contract this depends on — assert it rather than assume it: the
+    # headline is NOT the cause, so a detail carrying only `errors` is blind.
+    assert "403" not in headline[0]
+    assert "Retry the capture" in headline[0]
+    assert diagnostics == [raw]
+
+    detail = runner.capture_failure_detail(
+        "wp01_quarry_debug", {"errors": headline, "diagnostics": diagnostics}
+    )
+    assert "403 Client Error: Forbidden" in detail, (
+        "the raw cause must reach the log, not only the headline"
+    )
+
+
+def test_failed_report_log_carries_the_raw_stage_error():
+    """The report's log must hold the RAW stage error, not the headline — it
+    is the log that reaches stdout, so a headline-only log is still blind."""
+    report = runner.summary_failed_report(
+        "w2b-test", "2026-10-03", "deadbeef", "hash", {"posture": "llm"},
+        [
+            runner.capture_failure_detail(
+                "wp02_lumen_refactor",
+                {
+                    "errors": [
+                        "The first pass of extraction failed partway through. "
+                        "Retry the capture — the retry will re-attempt it."
+                    ],
+                    "diagnostics": ["S2 failed: HTTPError: 403 limit exceeded"],
+                },
+            )
+        ],
+        origin="runner_error", label="runner_errors",
+    )
+    lines = runner.failed_run_diagnostics(report)
+    assert any("S2 failed: HTTPError: 403 limit exceeded" in ln for ln in lines), (
+        "the raw stage error must reach stdout, where a reaped receipt cannot"
+    )
+
+
+def test_run_benchmark_records_the_raw_capture_diagnostic(monkeypatch):
+    """THE CALL SITE, not just the helper: a capture that fails must record
+    the RAW diagnostic, not only the customer-facing headline.
+
+    Without this the one line this issue exists for — the runner reading
+    ``capture["diagnostics"]`` — has no regression guard: reverting it to
+    ``errors`` alone leaves every other test green while the receipts go back
+    to saying "Retry the capture" and naming no cause.
+    """
+    raw = "S1 chunk failed: HTTPError: 403 Client Error: Forbidden"
+    headline = (
+        "Part of the extraction failed partway through. "
+        "Retry the capture — the retry will re-attempt it."
+    )
+
+    class _FakeCaptureSDK:
+        def capture_session(self, conversation, session_id=None, harness=None):
+            return {
+                "ok": False,
+                "errors": [headline],
+                "diagnostics": [raw],
+                "telemetry": {"llm_cost_usd": 0.0},
+            }
+
+    # The graph read is not what this test is about; stub the snapshot so the
+    # run reaches the capture-failure path with no DB.
+    monkeypatch.setattr(
+        runner, "snapshot_session",
+        lambda sdk, sid: {
+            "points": [], "rephrase_edges": [], "turn_ids": [],
+            "operator_counts": {},
+        },
+    )
+    report = runner.run_benchmark(
+        root=corpus.WRITE_PATH_DIR,
+        session_ids=["wp01_quarry_debug"],
+        sdk=_FakeCaptureSDK(),
+        ep_pass=False,
+        run_id="w2b-4860-test",
+    )
+    assert report["run_status"] == "failed"
+    assert raw in "\n".join(report["log"]), (
+        "the raw cause must be RECORDED, not only the headline"
+    )
+    # ...and it reaches stdout via the echo that makes it survive a reaped --out.
+    assert any(raw in ln for ln in runner.failed_run_diagnostics(report))
+
+
+def test_capture_failure_detail_keeps_the_error_key():
+    """Lighter ``ok=False`` shapes put their message under ``error`` alone
+    (``capture_session`` always sets ``diagnostics``, other seams do not), so
+    a detail that reads only ``errors``/``diagnostics`` would be blind there.
+    """
+    detail = runner.capture_failure_detail("wp03_ember_design", {
+        "error": "HTTPError: 403 limit exceeded",
+    })
+    assert "HTTPError: 403 limit exceeded" in detail
+
+
+def test_summary_failed_report_carries_the_overflow_in_its_log():
+    """The WIRING, not just the helper: the report a caller actually builds
+    must carry items past the summary bound in its log, or a run with more
+    failures than the bound loses their causes entirely.
+
+    This drives the same function both run_benchmark failure paths call, so a
+    deleted/renamed tail (or a summary slice that drifts from the helper's
+    default) fails here rather than silently truncating.
+    """
+    errors = [
+        f"s{i}: capture ok=False (diagnostics=['S1 failed: E{i}'])"
+        for i in range(runner.SUMMARY_BOUND + 4)
+    ]
+    report = runner.summary_failed_report(
+        "w2b-test", "2026-10-03", "deadbeef", "hash", {"posture": "llm"},
+        errors, origin="runner_error", label="runner_errors",
+    )
+    # The summary is bounded: it holds the last item INSIDE the bound and none
+    # of the first item past it.
+    summary = report["log"][-2]
+    assert f"E{runner.SUMMARY_BOUND - 1}" in summary
+    assert f"E{runner.SUMMARY_BOUND}" not in summary
+    # ...and the tail past it is present in the log, which is what reaches stdout.
+    overflow = report["log"][-1]
+    assert f"all {len(errors)}" in overflow
+    assert errors[-1] in overflow
+    assert any(errors[-1] in ln for ln in runner.failed_run_diagnostics(report))
+
+
+def test_summary_overflow_line_is_silent_within_the_bound():
+    """The bound is not a floor: at or under it there is no overflow line, so
+    an ordinary failed run's log stays exactly as long as it was."""
+    assert runner.summary_overflow_line([], label="x") == []
+    at_bound = [f"e{i}" for i in range(runner.SUMMARY_BOUND)]
+    assert runner.summary_overflow_line(at_bound, label="x") == []
+    assert runner.summary_overflow_line(
+        at_bound + ["overflow"], label="x"
+    ) == [f"x (all {runner.SUMMARY_BOUND + 1}): overflow"]
+
+
 def test_cli_corpus_bless_refreshes_published_baseline(tmp_path, capsys):
     """REVIEW-FIX (PR #2183 finding 2): --corpus-bless accepts an INTENTIONAL
     corpus regeneration against a PUBLISHED baseline — re-pins the new hash,
