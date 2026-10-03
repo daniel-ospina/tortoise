@@ -137,8 +137,8 @@ from tortoise.sdk import (
     _capture_redaction_warning,  # #4911: the shared "a secret was redacted" receipt warning
     _capture_resp_error_split,  # #2335 WI-2: customer error contract (headline/diagnostics)
     _capture_turn_embeddings,  # #4194: batched local-embedder call for stored turn Points
+    _capture_turn_id,  # #3551: the ONE offset-aware turn-id derivation
     _capture_turn_role_text,  # #4675: the inverse of the stored turn format
-    _capture_turn_texts_with_redactions,  # #4911: the ONE stored-turn text definition + its redaction count
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
     _derive_graph_name,  # #4240 F2: the ONE namespace/graph_name → graph derivation
     _emit_capture_observation,  # #2335 WI-1d: observation leg (hosted lane tag)
@@ -147,7 +147,7 @@ from tortoise.sdk import (
     _session_extraction_estimate,  # #1532 D4: v2-aware pre-write quota estimate
     _session_llm_transcript,  # P1 #1529: the shared empty/blank conversation gate
     _supersede_window_end,  # #5363: the ONE inverted-window predicate (pre-write check)
-    _write_capture_turns,  # #3086: the ONE batched turn-stream writer (shared with sdk.capture_session)
+    _write_session_and_turns,  # #3551: the ONE :Session + turn store writer (shared with sdk.capture_session)
 )
 from tortoise.security import redact_error  # billing webhook + checkout error logging
 from tortoise.session_auth import get_current_user, verify_session_jwt
@@ -11631,48 +11631,20 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         context="capture_session",
     )
 
-    # #1727 Slice 2 (Task 11): harness is set set-only-when-present (None
-    # NEVER erases a stored value — a legacy no-harness re-capture must not
-    # wipe a harness that a previous capture stored). The conditional clause
-    # also keeps the parametrized query valid in both embedded and Docker
-    # lanes (no unused param binding). Review PR #1827: created_at uses
-    # coalesce so an idempotent re-POST preserves the ORIGINAL capture time
-    # (mirrors the turn-loop coalesce).
-    _merge_sets = ["s.created_at=coalesce(s.created_at, $now)",
-                   "s.turn_count=$tc", "s.is_episodic=true"]
-    _merge_params = {"sid": session_id, "now": now,
-                     "tc": len(body.conversation)}
-    if capture_harness:
-        _merge_sets.append("s.harness=$harness")
-        _merge_params["harness"] = capture_harness
-    # #2600: actor stamp — set only when a server-resolved human is present
-    # (org dict carries it on REST; the MCP capture tool threads the
-    # middleware ContextVar into its hand-built dict at mcp_server.py).
-    # coalesce = FIRST-writer-wins on idempotent re-POST (a re-POST with a
-    # DIFFERENT actor never overwrites) AND backfills legacy-None on a true
-    # retry (a legacy null-actor session re-POSTed by a member gets the
-    # member — first-writer-wins thereafter). Conditional clause preserves
-    # the embedded/Docker no-unused-param contract (mirrors the harness
-    # clause above).
+    # #3551: the :Session MERGE field list is owned by the shared primitive
+    # called below, not by this lane. This lane still RESOLVES its inputs:
+    # ``capture_harness`` is the server-resolved harness (#3681
+    # first-writer-wins against the stored value, computed above), the actor is
+    # the server-resolved human (#2600 — the org dict carries it on REST; the
+    # MCP capture tool threads the middleware ContextVar into its hand-built
+    # dict at mcp_server.py), and machine_id/model are the #2599 CLIENT-CLAIMED
+    # informational fields. All are set-only-when-present; actor_user_id /
+    # machine_id / model carry a first-writer-wins ``coalesce`` so an idempotent
+    # re-POST never overwrites them, while harness's first-writer-wins is the
+    # #3681 resolution above — its clause is a plain ``SET``, so it is that
+    # RESOLUTION, not the Cypher, that keeps a no-harness re-capture from
+    # erasing a stored value.
     _actor_uid = org.get("actor_user_id") or _current_actor_user_id.get()
-    if _actor_uid:
-        _merge_sets.append(
-            "s.actor_user_id=coalesce(s.actor_user_id, $uid)")
-        _merge_params["uid"] = _actor_uid
-
-    # #2599: machine_id and model are CLIENT-CLAIMED informational fields
-    # (forgeable, never security-trusted) — set only when the body supplies
-    # them. Uses coalesce for first-writer-wins on idempotent re-POST (same
-    # actor_user_id pattern), preserving the embedded/Docker no-unused-param
-    # contract (mirrors the harness clause).
-    if body.machine_id:
-        _merge_sets.append(
-            "s.machine_id=coalesce(s.machine_id, $mid)")
-        _merge_params["mid"] = body.machine_id
-    if body.model:
-        _merge_sets.append(
-            "s.model=coalesce(s.model, $model)")
-        _merge_params["model"] = body.model
 
     # #1727 Slice 2 (Task 11, T2-P2c): idempotency scope = Session + turn
     # Points. A re-POST of the same session_id (Claude Code's real session id
@@ -11683,13 +11655,14 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # 2xx (converges to one Session, one receipt — T1-P3/T1-P12).
     # #1920: a SHORTER payload is NOT the identical re-POST pinned above — the
     # turn ids past the new window are hard-deleted (and journaled) by
-    # ``sdk._write_capture_turns``, so the Session's episodic CONTAINS members
-    # track the LAST capture's window instead of the longest one ever posted.
-    # (session_existed was probed above, before the quota gates.)
-    proj.g.query(
-        f"MERGE (s:Session {{id:$sid}}) SET {', '.join(_merge_sets)}",
-        params=_merge_params,
-    )
+    # `sdk._write_session_and_turns`, so the Session's episodic CONTAINS
+    # members track the LAST capture's window instead of the longest one ever
+    # posted. (session_existed was probed above, before the quota gates.)
+    #
+    # #3551: the :Session MERGE that used to run here is the first half of the
+    # shared primitive called below; it now rides the SAME off-loop submission
+    # as the turn write (the capture pool), so the loop does strictly less
+    # blocking graph work than before.
 
     extracted = []
     # #2002 (W6) delete-during-capture sweep state: track whether THIS
@@ -11699,17 +11672,20 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     minted_event = False
     event_id = None
 
-    # #3086: the episodic turn stream is written by the ONE shared writer
-    # (`sdk._write_capture_turns`), also called by `sdk.capture_session` — so
-    # this lane and the SDK lane can no longer drift (the #1532 duplicated-loop
-    # class). Hosted additionally adds quota/auth bounds + a pre-write
-    # estimate. NOTE the THIRD, still-separate copy:
-    # tools/ask_spotcheck.py::seed_capture_turn_store mirrors the same store
-    # shape to seed the ask fixtures (#3910) — the ONE copy every ask seeder
-    # writes through since #3914. It omits Source/extraction, but since W7A it
+    # #3086/#3551: the :Session MERGE and the episodic turn stream are written
+    # by the ONE shared primitive (`sdk._write_session_and_turns`), also called
+    # by `sdk.capture_session` — so this lane and the SDK lane can no longer
+    # drift (the #1532 duplicated-store class). The primitive delegates the
+    # batched turn write to `sdk._write_capture_turns`. Hosted additionally
+    # adds quota/auth bounds + a pre-write estimate. NOTE the THIRD,
+    # still-separate copy: tools/ask_spotcheck.py::seed_capture_turn_store
+    # mirrors the same store shape to seed the ask fixtures (#3910) — the ONE
+    # copy every ask seeder writes through since #3914. It is a SEEDER, not a
+    # capture writer, and stays out of the primitive (its whole contract is the
+    # capture SHAPE, deliberately without Source/extraction); since W7A it
     # EMBEDS every turn BY DEFAULT through the shared store seam (#4194/#4304)
     # and retains `embed=False` for #4197's un-backfilled backlog.
-    # #3551 tracks collapsing it onto the shared primitive too. The LLM
+    # #3551 tracks collapsing the seeder onto the shared primitive too. The LLM
     # extraction that follows the write is shared via
     # sdk._extract_session_llm/_extract_session_v2 (#822).
     #
@@ -11721,13 +11697,16 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     prior_turn_count = 0
     if session_existed:
         # Best-effort (#3892 cycle 2): this read feeds ONLY the write-op
-        # meter, and it sits AFTER the Session MERGE that already committed —
-        # a transient graph error here must never 500 a committed capture
-        # (the file's posture, and every sibling bookkeeping read in this
-        # function). On failure 0 makes the meter OVER-count
-        # (`len(windowed) > 0`), the documented conservative posture, never a
-        # blind spot. It also must not abort the keyless→keyed upgrade this
-        # PR exists to enable.
+        # meter. Before #3551 it sat AFTER the Session MERGE that had already
+        # committed; the MERGE now runs LATER, inside the pooled
+        # _write_session_and_turns submission below, so nothing is committed
+        # at this point yet. It stays best-effort regardless — a transient
+        # graph error here must never 500 a capture (the file's posture, and
+        # every sibling bookkeeping read in this function), and the Session
+        # node is guaranteed to pre-exist by `session_existed`. On failure 0
+        # makes the meter OVER-count (`len(windowed) > 0`), the documented
+        # conservative posture, never a blind spot. It also must not abort the
+        # keyless→keyed upgrade this PR exists to enable.
         try:
             _prior_turns = proj.g.query(
                 "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
@@ -11753,9 +11732,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # #4194/#3086: the encode runs OFF the event loop on the capture pool. SDK
     # `capture_session` is synchronous (there is no loop to free) and calls
     # the same helper inline — the two share the helper, not the scheduling.
-    # #4194/#4911: the scrub is part of COMPUTING the stored text, so it runs
-    # HERE, off the event loop, on the capture pool, and the writer below and
-    # the linker further down REUSE this exact result instead of recomputing it.
+    # #4194/#4911: the scrub is part of COMPUTING the stored text, so it is done
+    # inside the off-loop primitive below (capture pool); the embedding batch and
+    # the linker further down REUSE the RETURNED texts instead of recomputing
+    # them.
     # The scrub is ~3 s/MB of client-controlled text (measured: 0.97 s @220k,
     # linear), and a legal-maximum 500x5,000 capture is 2.5 MB. Reuse removes
     # the two passes this lane used to pay for the SAME window — the embedding
@@ -11767,24 +11747,25 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # and a scrub issues none). See the scoping doc for the pass COUNT this lane
     # still pays (the extractor and the session `:Source` each scrub the same
     # window for their own consumers; idempotence keeps the count correct).
-    _turn_texts, _redaction_counts = await _run_off_loop(
-        _CAPTURE_EXECUTOR, _capture_turn_texts_with_redactions, windowed)
-    _turn_embs = await _run_off_loop(
-        _CAPTURE_EXECUTOR, _capture_turn_embeddings, _turn_texts,
-        proj.required_embedding_dim)
-    # #3086: the turn WRITE runs OFF the event loop on the capture pool, in ONE
-    # batched `UNWIND $turns` transaction, through the SAME shared writer the
-    # SDK lane calls (`_write_capture_turns`). The per-turn loop this replaced
-    # issued two FalkorDB round-trips per turn straight on the loop (~1000 for
-    # a 500-turn capture — the ~4.75 s single-loop freeze #3086 measures).
-    # Node shape, per-row idempotency (`{session_id}_t{i}`), the stale-vector
-    # guard and the rebuild journal all live in that one definition, so this
-    # lane and `sdk.capture_session` can no longer drift (#1532's drift class).
-    _capture_redactions = await _run_off_loop(
-        _CAPTURE_EXECUTOR, _write_capture_turns, proj, sdk, session_id,
-        windowed, now=now, turn_embs=_turn_embs,
-        session_existed=session_existed,
-        texts_and_counts=(_turn_texts, _redaction_counts))
+    # #3551: ONE off-loop submission writes the :Session MERGE and the turn
+    # store through the shared primitive. It owns the Session field list, the
+    # batched `UNWIND $turns` Cypher (`_write_capture_turns`), the `CONTAINS`
+    # wiring, the offset-aware turn-id derivation, the stale-turn sweep and the
+    # optional `embed_fn` — so this lane and `sdk.capture_session` can no
+    # longer drift (#1532's drift class). It computes the stored text itself
+    # (the #4911 scrub) and RETURNS it, so the linker further down REUSES this
+    # exact result rather than paying a second scrub of the same window. All of
+    # it stays off the event loop: a legal-maximum 500x5,000 capture is 2.5 MB
+    # of client-controlled text.
+    _capture_write = await _run_off_loop(
+        _CAPTURE_EXECUTOR, _write_session_and_turns, proj, sdk, session_id,
+        windowed, now=now, harness=capture_harness,
+        actor_user_id=_actor_uid, machine_id=body.machine_id,
+        model=body.model, session_existed=session_existed,
+        embed_fn=lambda texts: _capture_turn_embeddings(
+            texts, proj.required_embedding_dim))
+    _turn_texts = _capture_write["turn_texts"]
+    _capture_redactions = _capture_write["redacted_total"]
 
     # #1727 Slice 2 (T2-P2c): idempotent re-POST — the Session already
     # existed, so the LLM extraction is SKIPPED (M2/v2-minted points are not
@@ -12262,7 +12243,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         link_texts = _turn_texts
         link_result = link_session_entities(
             proj, session_id, link_texts,
-            turn_ids=[f"{session_id}_t{i}"
+            turn_ids=[_capture_turn_id(session_id, i)
                       for i in range(len(link_texts))],
             sdk=sdk)
         if link_result["attempted"]:
@@ -12327,7 +12308,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         same-session re-capture (MERGE re-absorbs turn ids) self-heal."""
         point_ids: list[str] = []
         if isinstance(windowed, list) and len(windowed) > 0:
-            point_ids = [f"{session_id}_t{i}" for i in range(len(windowed))]
+            point_ids = [_capture_turn_id(session_id, i)
+                         for i in range(len(windowed))]
         if isinstance(extracted, list):
             point_ids += [p.get("id") for p in extracted if p.get("id")]
         point_ids = list(dict.fromkeys(point_ids))
