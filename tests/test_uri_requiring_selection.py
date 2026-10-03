@@ -34,11 +34,12 @@ silently. `tests/_live_utils.py` is the one sanctioned shared gate, so
 precondition that keeps that door shut; any other cross-file helper needs the
 derivation extended (or the file registered by hand).
 
-**Non-vacuity** is proven by the shape table, NOT by the tree: an arm asserting
-"the tree still contains a module-skipping file" would red on the lane's own
-terminal state — the day the last URI-gated module is fixed, which is the
-outcome this file exists to produce — and would tell the author to restore a
-skip that no longer belongs there.
+**Non-vacuity** is proven by INJECTION, never from the live tree: each
+selection arm synthesises a victim and injects it into both the lane and the leg
+under test, so no arm depends on the lane being non-empty. A lane that empties is
+the terminal state this file exists to produce — an arm that reds on it would
+block the very change that fixes the last URI-gated module. The predicate's own
+coverage is proven by the shape table.
 """
 from __future__ import annotations
 
@@ -428,26 +429,38 @@ def test_no_tier2_path_leaks_a_uri_requiring_file(changed: list[str]) -> None:
 def test_dashboard_vector_is_load_bearing() -> None:
     """The #6390 vector must really exercise the filter.
 
-    Without this, `test_no_tier2_path_leaks_a_uri_requiring_file` could pass
-    vacuously the day this change stops selecting the onboarding surface.
+    Otherwise `test_no_tier2_path_leaks_a_uri_requiring_file` could pass
+    vacuously the day this vector stops selecting the onboarding surface. The
+    victim is SYNTHESISED and injected into both the lane and the surface, so
+    this arm never depends on the live lane's contents — a lane that empties is
+    the success state (#6884's terminal state), not a reason to red.
     """
-    sel = select(DASHBOARD_ONLY_CHANGE, "pull_request", _MANIFEST())
-    owned: set[str] = set()
-    for surface in sel["surfaces"]:
-        owned.update(_MANIFEST()["surfaces"].get(surface, []) or [])
-    assert uri_requiring_files(_MANIFEST()) & owned, (
-        "the #6390 vector no longer selects a surface owning a URI-requiring "
-        "file, so the filter is no longer exercised here — pick another real "
-        "vector rather than deleting the assertion"
+    victim = "test_dashboard_vector_probe.py"
+    manifest = copy.deepcopy(_MANIFEST())
+    manifest["uri_requiring"] = sorted(set(uri_requiring_files(manifest)) | {victim})
+    manifest["surfaces"]["onboarding"] = [
+        *manifest["surfaces"]["onboarding"], victim
+    ]
+    sel = select(DASHBOARD_ONLY_CHANGE, "pull_request", manifest)
+    assert "onboarding" in sel["surfaces"], (
+        "the #6390 vector no longer selects the onboarding surface, so it no "
+        "longer exercises the filter — pick another real vector rather than "
+        "deleting this arm"
+    )
+    assert victim not in set(sel["test_files"]), (
+        "a lane member owned by a selected surface survived the tier-2 "
+        "subtraction on the #6390 vector (#6884)"
     )
 
 
 def test_docs_only_early_return_subtracts_the_lane() -> None:
     """A plain docs-only vector cannot fail: `tier1 ∩ uri_requiring == []`, so
     the output is byte-identical with and without the early return's
-    subtraction. Inject one into tier-1 to make the exit provable."""
+    subtraction. Inject a SYNTHESISED victim into both tier-1 and the lane to
+    make the exit provable without depending on the live lane being non-empty."""
+    victim = "test_early_return_probe.py"
     manifest = copy.deepcopy(_MANIFEST())
-    victim = sorted(uri_requiring_files(manifest))[0]
+    manifest["uri_requiring"] = sorted(set(uri_requiring_files(manifest)) | {victim})
     manifest["tier1"] = sorted(set(manifest["tier1"]) | {victim})
     sel = select(DOCS_ONLY_CHANGE, "pull_request", manifest)
     assert victim in set(manifest["tier1"]), "setup: injection must be visible"
@@ -459,10 +472,15 @@ def test_docs_only_early_return_subtracts_the_lane() -> None:
 
 def test_slow_lane_subtracts_the_lane() -> None:
     """The test-slow legs are URI-unset on a tier-2 PR too, so a relocated
-    `uri_requiring` file reproduces the identical unattributable rc=5."""
+    `uri_requiring` file must not reach them.
+
+    The victim is SYNTHESISED and injected into both `slow_files` and the lane,
+    so this arm survives the lane emptying and does not red when the one real
+    file it used to name gets fixed.
+    """
+    victim = "test_slow_lane_probe.py"
     manifest = copy.deepcopy(_MANIFEST())
-    victim = "test_eval_ingest_cache.py"
-    assert victim in uri_requiring_files(manifest), "setup: known lane member"
+    manifest["uri_requiring"] = sorted(set(uri_requiring_files(manifest)) | {victim})
     manifest["slow_files"] = sorted(set(manifest["slow_files"]) | {victim})
     assert victim in (set(manifest["slow_files"]) - set(manifest["carve_out"])), (
         "setup: the file must otherwise reach the slow leg"
