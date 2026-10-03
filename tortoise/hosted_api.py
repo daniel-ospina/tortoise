@@ -26925,6 +26925,23 @@ class ConnectorUpdateRequest(BaseModel):
         return v
 
 
+def _require_uuid_connector_id(connector_id: str) -> str:
+    """Reject a non-UUID connector id with 422 BEFORE it reaches the seam.
+
+    ``connectors.id`` is a uuid column, so PostgREST casts the filter literal
+    and a non-UUID one is a 22P02 → HTTP 400 → a RuntimeError out of the seam →
+    the generic 500: a malformed id reported as a server error. Same shape as
+    the #1765 non-UUID ``identity_id`` arm (#2642 re-review P2).
+    """
+    import uuid as _uuid_validate
+    try:
+        _uuid_validate.UUID(connector_id)
+    except ValueError:
+        raise HTTPException(status_code=422,
+                            detail="connector_id must be a UUID") from None
+    return connector_id
+
+
 @app.get("/v1/connectors")
 async def list_connectors(
     org: dict = Depends(get_current_org_session_ungated),  # noqa: B008
@@ -27008,6 +27025,7 @@ async def get_connector(
     )
     org_id = org["org_id"]
     if is_supabase_enabled():
+        connector_id = _require_uuid_connector_id(connector_id)
         # org_id is passed INTO the seam: the query runs on the service-role
         # key (RLS bypassed), so the filter is the only tenancy boundary.
         # #4350: the seam blocks on HTTP — one thread hop, off the loop.
@@ -27036,6 +27054,7 @@ async def update_connector(
     )
     org_id = org["org_id"]
     if is_supabase_enabled():
+        connector_id = _require_uuid_connector_id(connector_id)
         updates = body.model_dump(exclude_none=True)
         # #4350: off-loop — the seam blocks on HTTP against the control plane.
         if not await _cp_offload(
@@ -27065,6 +27084,7 @@ async def delete_connector(
     )
     org_id = org["org_id"]
     if is_supabase_enabled():
+        connector_id = _require_uuid_connector_id(connector_id)
         # #4350: off-loop — the seam blocks on HTTP against the control plane.
         if not await _cp_offload(
                 lambda: _sb_conn_delete(get_control_plane(), org_id, connector_id),

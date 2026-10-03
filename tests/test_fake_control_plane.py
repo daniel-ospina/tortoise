@@ -341,6 +341,20 @@ def test_user_id_is_null_filter_ok() -> None:
     assert rows == [{"role": "member"}]
 
 
+def test_non_uuid_connector_id_eq_filter_raises() -> None:
+    """A non-UUID literal on `connectors.id` raises the PostgREST 400 shape.
+
+    REDs on: dropping `("connectors", "id")` from `UUID_FILTER_COLUMNS` — the
+    per-id connector endpoints would then read a malformed path id as a plain
+    miss (404 in the fake) while production raises out of the seam (#2642
+    re-review P2).
+    """
+    f = FakeControlPlane(tables={"connectors": []})
+    with pytest.raises(RuntimeError, match="HTTP 400"):
+        f.query("connectors", select=["id"],
+                filters=[("id", "eq", "not-a-uuid")])
+
+
 def test_non_uuid_on_unregistered_column_ok() -> None:
     """Only registered uuid columns are checked — other columns (text) are
     untouched by fidelity."""

@@ -466,6 +466,23 @@ def test_the_validators_mirror_the_migration_check_lists() -> None:
         assert ConnectorUpdateRequest(sync_status=v).sync_status == v
 
 
+def test_non_uuid_connector_id_is_a_422_not_a_500(client) -> None:
+    """A malformed path id is 422 on GET / PATCH / DELETE, never a 500.
+
+    `connectors.id` is uuid, so PostgREST casts the filter literal and a
+    non-UUID one is a 22P02 → HTTP 400 → a RuntimeError out of the seam → the
+    generic 500. The fake now raises that same 400 for a registered uuid column
+    (`UUID_FILTER_COLUMNS`), so this fails RED without the boundary check and
+    green with it — the same class as the source_type/sync_status validators.
+    """
+    tc, _ = client
+    for method in ("get", "patch", "delete"):
+        kw = {"json": {"config": {"x": 1}}} if method == "patch" else {}
+        r = getattr(tc, method)("/v1/connectors/not-a-uuid", **kw)
+        assert r.status_code == 422, (method, r.status_code, r.text)
+        assert r.json()["detail"] == "connector_id must be a UUID"
+
+
 def test_duplicate_source_type_is_a_409_not_a_500(client) -> None:
     """A second connector of the same source type in one org → 409.
 

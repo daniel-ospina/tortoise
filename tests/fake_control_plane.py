@@ -34,7 +34,14 @@ from typing import Any
 # the fake raise the SAME RuntimeError surface the real query() raises, so
 # a future unsanitized call site fails CI instead of silently no-matching
 # ("CI green while prod 500s"). Extendable registry (mirrors missing_columns).
-UUID_FILTER_COLUMNS: set[tuple[str, str]] = {("org_memberships", "user_id")}
+UUID_FILTER_COLUMNS: set[tuple[str, str]] = {
+    ("org_memberships", "user_id"),
+    # #2636: `connectors.id` is uuid, and the per-id connector endpoints filter
+    # it with the raw client path param — so the fake must reject a non-UUID
+    # literal exactly as PostgREST does, or it stays green against the
+    # production 500 (#2642 re-review P2).
+    ("connectors", "id"),
+}
 
 
 def _assert_uuid_fidelity(table: str, filters: list[tuple[str, str, object]] | None) -> None:
