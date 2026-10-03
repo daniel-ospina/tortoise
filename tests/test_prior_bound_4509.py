@@ -52,6 +52,11 @@ _POOL = 200
 #: comments to be updated with it. This is the same convention the deleted
 #: ``_PRIOR_OVERFETCH == 12`` pin used — a declared bound that cannot silently
 #: drift out from under its own documentation.
+#:
+#: It is ONE LEG's window, not the fused set. The ``_no_embedder`` autouse fixture
+#: makes FTS the only live leg, which is what fixes this bound to a single number;
+#: in the hybrid shape the fused set is the UNION of the fts and vector legs (~2x
+#: this), so this literal and the prose that names it both say "per leg".
 _DOCUMENTED_PROD_POOL = 120
 
 

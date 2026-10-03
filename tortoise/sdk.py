@@ -16049,9 +16049,11 @@ class TortoiseSDK:
             already-filtered set — a session whose echoes consume every slot can
             otherwise hide a real prior ranked below them (the defect #4509
             fixes; a caller-side drop after the cut cannot be made sound). The
-            exclusion reaches only candidates already in the fused pool, so the
-            residual bound is the POOL, not ``MAX_SESSION_TURNS`` (500):
-            ``DEFAULT_POOL_SIZE`` (120) unless the caller raises ``pool_size``.
+            exclusion reaches only candidates already in the fused pool — the
+            UNION of the legs (uncapped), not one leg's window — so the residual
+            bound is that union, roughly ``DEFAULT_POOL_SIZE`` per live leg: about
+            120 with the vector leg unavailable, about twice that in hybrid. It is
+            NOT ``MAX_SESSION_TURNS`` (500); raise ``pool_size`` to widen it.
             Applies wherever the resolved graph label is ``Point`` — so the point
             and operator legs, not only ``entity_type == "point"``;
             default None = no exclusion, byte-identical to pre-#4509 output. Do NOT

@@ -1985,14 +1985,18 @@ def _derive_queries(embed_list: dict, story: str) -> dict:
 # merely widened.
 #
 # RESIDUAL — measured, not assumed: the exclusion can only drop echoes that are
-# already IN the fused candidate pool, and ``_fts_rows`` passes no ``pool_size``,
-# so that pool is the callee's product default (``retrieval.DEFAULT_POOL_SIZE``,
-# 120) rather than ``MAX_SESSION_TURNS`` (500). The bound this fix moves is
-# therefore 15 -> 120: a session whose echoes fill the pool still starves a real
-# prior ranked below them. That residual is pinned, with the production call
-# shape, by
+# already IN the fused candidate set, and that set is the UNION of the legs, not
+# any one leg's window. ``_fts_rows`` passes no ``pool_size``, so each leg's own
+# window is the callee's product default (``retrieval.DEFAULT_POOL_SIZE``, 120) —
+# and with both the fts and vector legs live (the kind-less point prior query;
+# the structural leg returns ``[]`` without a ``kind``) the fused set reaches
+# roughly 2 x 120, while a capture can hold ``MAX_SESSION_TURNS`` (500). The
+# bound this fix moves is therefore 15 -> that fused set (~120 keyword-only,
+# ~240 hybrid), NOT to 500: a session whose echoes fill the set still starves a
+# real prior ranked below them. That residual is pinned — in the single-leg
+# (no-embedder) shape, because that is what fixes the bound to one number — by
 # ``test_prior_bound_4509.py::test_production_pool_bound_still_starves_the_prior``
-# — so it stays visible and falsifiable instead of being asserted away by an
+# so it stays visible and falsifiable instead of being asserted away by an
 # over-claim here. Raising the bound to cover the worst case means passing an
 # explicit ``pool_size`` on this leg, which is a retrieval-cost trade-off and is
 # deliberately not made in this change.
