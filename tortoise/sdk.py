@@ -1267,13 +1267,16 @@ def _capture_turn_ids(proj, session_id: str) -> list[str]:
     ).result_set
     # str-only: a non-string id would make the suffix slice raise, and no
     # writer ever stores one (the same str-only posture the replay folds take).
-    # ``isdecimal()`` — NOT ``isdigit()`` — is the predicate whose True set is
-    # a SUBSET of what the ``int()`` the stale sweep applies below parses:
-    # ``'²'.isdigit()`` is True while ``int('²')`` raises, so an ``isdigit()``
-    # guard admitted an id the sweep then could not index (#3551 review). The
-    # implication that matters runs ONE way — no input is ``isdecimal()`` True
-    # and ``int()``-unparseable — so every id returned here is guaranteed
-    # parseable. (``int()`` also parses suffixes ``isdecimal()`` rejects, e.g.
+    # ``isdecimal()`` — NOT ``isdigit()`` — is the right guard for the class it
+    # was introduced for: ``'²'.isdigit()`` is True while ``int('²')`` raises,
+    # so an ``isdigit()`` guard admitted an id the sweep then could not index
+    # (#3551 review). It is NOT by itself sufficient for ``int()``: ``int()``
+    # refuses a decimal string longer than its conversion limit (4300 digits by
+    # default), so ``isdecimal()`` being True does not imply parseable. The
+    # sweep therefore does not ASSUME a total parse — it wraps its own and
+    # RETAINS an id it cannot place, the same treatment the ``²``-class gets,
+    # so no id returned here can make the sweep raise. (``int()`` also parses
+    # suffixes ``isdecimal()`` rejects, e.g.
     # ``'-1'``/``' 3'``/``'3_0'``; those are not ids this writer mints —
     # ``_capture_turn_id`` formats an ``int`` — so they are left untouched
     # rather than swept, never deleted where we cannot place them.)
@@ -1309,12 +1312,13 @@ def _write_capture_turns(
 
     ``texts_and_counts`` lets a caller that has ALREADY computed
     ``_capture_turn_texts_with_redactions(windowed)`` hand the result in rather
-    than pay for a second scrub of the same client-controlled text. The hosted
-    lane passes it because its embeddings and its entity-linking pass both need
-    the same stored texts: the scrub is ~3 s/MB, so re-deriving it per consumer
-    cost seconds of CPU per legal-maximum capture (#4911 cycle 1). Defaults to
-    ``None`` — recompute — so the sync SDK lane and every test are unchanged,
-    and the count is always taken from the same window either way.
+    than pay for a second scrub of the same client-controlled text (the scrub is
+    ~3 s/MB, so a second consumer of the same texts costs seconds of CPU per
+    legal-maximum capture — #4911 cycle 1). Its ONE caller is
+    ``_write_session_and_turns``, which derives the pair from this same window
+    and always forwards it, so the ``None`` branch is retained for direct
+    callers and is currently unreached. Either way the count is read from this
+    same window, so a donation cannot make the two disagree.
 
     ``turn_offset`` (#3551) shifts the id window: row ``i`` MERGEs
     ``_capture_turn_id(session_id, i, turn_offset)``. At the capture lanes'
@@ -1434,12 +1438,20 @@ def _write_capture_turns(
         # ``isdigit()`` restored.
         _prefix = f"{session_id}_t"
         _first_live = turn_offset + len(turn_rows)
-        # Every id ``_capture_turn_ids`` returns is ``int()``-parseable by
-        # construction (its guard is the same decimal predicate), so this parse
-        # is total: the sweep can never raise on an id its own guard admitted.
-        stale = [tid for tid in _capture_turn_ids(proj, session_id)
-                 if tid not in keep
-                 and int(tid[len(_prefix):]) >= _first_live]
+        # The parse is DEFENDED, not assumed total: ``_capture_turn_ids``'s
+        # ``isdecimal()`` guard cannot imply ``int()``-parseable (the 4300-digit
+        # conversion limit), so an id we cannot place is RETAINED — never
+        # deleted where we cannot place it — and the sweep can never raise.
+        stale = []
+        for _tid in _capture_turn_ids(proj, session_id):
+            if _tid in keep:
+                continue
+            try:
+                _index = int(_tid[len(_prefix):])
+            except ValueError:
+                continue
+            if _index >= _first_live:
+                stale.append(_tid)
         if stale:
             proj.g.query(
                 "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
@@ -1646,9 +1658,10 @@ def _write_session_and_turns(
 
     # The stored text is the WRITER'S OWN definition (#4911's scrubber runs
     # there), and the vector is derived from it, so the two cannot describe
-    # different strings (#4194). A caller that already computed the pair (the
-    # hosted lane, for its entity-link pass) hands it in rather than paying for
-    # a second scrub of the same client-controlled text.
+    # different strings (#4194). ``texts_and_counts`` is an OPTIONAL donation for
+    # a caller that has already computed the pair. NO caller passes it today —
+    # the sync SDK lane and the hosted lane both take the recompute branch below
+    # — so that branch is the live path for every caller.
     if texts_and_counts is None:
         turn_texts, redaction_counts = _capture_turn_texts_with_redactions(turns)
     else:

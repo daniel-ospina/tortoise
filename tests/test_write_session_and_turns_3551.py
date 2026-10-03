@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import inspect
+import sys
 
 import pytest
 
@@ -276,10 +277,11 @@ def test_non_int_parseable_suffix_does_not_break_capture(tmp_path):
     True yet ``int('²')`` raises — so an id shaped ``<sid>_t²`` used to be
     admitted by ``_capture_turn_ids`` and then blow up the sweep's parse AFTER
     the caller's :Session MERGE had committed, turning a benign cleanup into a
-    failed capture. The guard now uses ``isdecimal()``, whose True set is a
-    SUBSET of what ``int()`` parses (``int()`` also parses ``'-1'``/``' 3'``,
-    which ``isdecimal()`` rejects), so any suffix the guard admits is
-    guaranteed parseable and the wide id is left untouched instead.
+    failed capture. The guard now uses ``isdecimal()``, which excludes the
+    ``²``-class — but ``isdecimal()`` is NECESSARY, not SUFFICIENT, for
+    ``int()`` (see the huge-suffix test below for the length limit that
+    separates them), so the sweep also wraps its parse and RETAINS any id it
+    cannot place instead of assuming the guard guaranteed one.
     """
     sdk = TortoiseSDK(db_path=str(tmp_path / "wide.db"))
     proj = sdk._get_proj()
@@ -299,6 +301,13 @@ def test_non_int_parseable_suffix_does_not_break_capture(tmp_path):
         "CREATE (s)-[:CONTAINS]->(t)",
         params={"sid": "wide", "tid": weird})
 
+    # The guard is the FIRST layer and does not admit the wide id at all; the
+    # sweep's retain (below) is the SECOND. Either alone keeps the capture safe,
+    # so pin the guard's exclusion SPECIFICALLY — without this the test would
+    # still pass through the sweep's retain even if the guard were widened back
+    # to ``isdigit()``, and the guard would be untested.
+    assert weird not in set(sdk_mod._capture_turn_ids(proj, "wide"))
+
     # Re-capture: this drives the stale sweep. Pre-fix, `int('²')` raised.
     sdk_mod._write_session_and_turns(
         proj, sdk, "wide", _CONV[:2], now="2026-01-01T00:01:00+00:00")
@@ -308,6 +317,63 @@ def test_non_int_parseable_suffix_does_not_break_capture(tmp_path):
         "MATCH (t:Point {id:$tid}) RETURN t.id",
         params={"tid": weird}).result_set
     assert rows, "the non-parseable id was wrongly swept"
+
+
+def test_huge_decimal_suffix_is_not_swept_and_does_not_break_capture(tmp_path):
+    """An ``isdecimal()``-True suffix past ``int()``'s conversion limit must not
+    break the sweep either (#3551 review).
+
+    ``isdecimal()`` is NECESSARY but not SUFFICIENT for ``int()``: ``int()``
+    refuses a decimal string longer than its conversion limit (4300 digits by
+    default), so a ``<sid>_t<many nines>`` id PASSES the guard and used to reach
+    ``int()`` in the sweep, which raised ``ValueError`` AFTER the caller's
+    :Session MERGE had committed — a benign cleanup turned into a failed
+    capture. The sweep now wraps its parse and RETAINS an id it cannot place,
+    the same treatment the ``²``-class gets, so no admitted id can make it
+    raise. The suffix is sized from the LIVE limit so the precondition holds on
+    any lane rather than only where the default happens to be in force.
+    """
+    limit = sys.get_int_max_str_digits() or 4300
+    sdk = TortoiseSDK(db_path=str(tmp_path / "huge.db"))
+    proj = sdk._get_proj()
+
+    # Seed a real capture so the :Session node exists for the sweep to read.
+    sdk_mod._write_session_and_turns(
+        proj, sdk, "huge", _CONV[:2], now="2026-01-01T00:00:00+00:00")
+
+    weird = "huge_t" + "9" * (limit + 100)
+    suffix = weird[len("huge_t"):]
+    assert suffix.isdecimal()          # admitted by the guard ...
+    with pytest.raises(ValueError):
+        int(suffix)                     # ... yet int() refuses it
+    proj.g.query(
+        "MATCH (s:Session {id:$sid}) "
+        "CREATE (t:Point {id:$tid, is_episodic:true, pointKind:'event'}) "
+        "CREATE (s)-[:CONTAINS]->(t)",
+        params={"sid": "huge", "tid": weird})
+
+    def _wired():
+        """The session's turn-shaped ids, read the way the guard itself reads
+        them — through CONTAINS, not a property literal (see below)."""
+        return {r[0] for r in proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
+            "WHERE t.id STARTS WITH $prefix RETURN t.id",
+            params={"sid": "huge", "prefix": "huge_t"}).result_set}
+
+    # Non-vacuity: the huge id really is wired to the session, so the sweep
+    # below has something it could wrongly delete.
+    assert weird in _wired(), "the injected id was never wired to the session"
+
+    # Re-capture: this drives the stale sweep. Pre-fix, `int()` raised here.
+    sdk_mod._write_session_and_turns(
+        proj, sdk, "huge", _CONV[:2], now="2026-01-01T00:01:00+00:00")
+
+    # The unplaceable id was retained: neither swept nor allowed to raise.
+    # Read through the CONTAINS traversal, NOT `MATCH (t:Point {id:$tid})`: an
+    # embedded server does not resolve a ~4400-char id as a property literal, so
+    # a property match reports "absent" for an id that is present — which is
+    # also why the CREATE above is only observable through this read.
+    assert weird in _wired(), "the unplaceable id was wrongly swept"
 
 
 # ── neither caller holds independent MERGE text ────────────────────────────
