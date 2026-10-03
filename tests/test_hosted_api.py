@@ -3256,11 +3256,24 @@ class TestSessionCaptureWriteVerb:
             pass
         _orig_query = {cls: cls.query for cls in _graph_classes}
 
+        # #6072: dispatch through the PUBLISHED contract, not `type(self)`.
+        # The cypher guard subclasses the vendor graph class so no un-guarded
+        # query verb is reachable through the MRO — deliberately, and that
+        # isolation stays. The consequence is that `type(self)` here is a
+        # GENERATED SUBCLASS, so `_orig_query[type(self)]` raised KeyError and
+        # this test failed the REQUIRED python-ci-gate leg. Asking the guard for
+        # the vendor class is the supported way and does not depend on how the
+        # guard isolates the verbs.
+        from tortoise.cypher_guard import unguarded_graph_class
+
         def _selective_boom(self, cypher, params=None, timeout=None):
             if "posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL" in cypher:
                 raise RuntimeError("transient graph failure")
-            return _orig_query[type(self)](self, cypher, params=params,
-                                           timeout=timeout)
+            # The guard's overridden verb delegates via super(), so the patched
+            # vendor method still receives the call — the only thing that broke
+            # was resolving WHICH vendor class to dispatch to.
+            return _orig_query[unguarded_graph_class(type(self))](
+                self, cypher, params=params, timeout=timeout)
 
         for cls in _graph_classes:
             monkeypatch.setattr(cls, "query", _selective_boom)
