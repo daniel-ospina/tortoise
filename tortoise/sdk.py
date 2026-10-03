@@ -16242,7 +16242,10 @@ class TortoiseSDK:
             tokens (slots reserved) PLUS additive aliases harvested from the
             retrieved pool's top-5 hits' ``search_keys`` (never replacing
             original tokens; bounded raise to 12 + 8 terms). Default False =
-            single pass, byte-identical. Ask lane passes True.
+            single pass, byte-identical. The ask lane resolves the lever from
+            ``TORTOISE_ASK_SEARCH_KEYS_PRF`` — itself default OFF until the
+            delta is measured (#4593), so this parameter default and the ask
+            lane agree.
         entity_key_expansion (C2 #2518, #2513): entity/fact-augmented key
             expansion — the multi-session evidence-surface lever. The query's
             own entities are resolved THROUGH THE INDEX (bounded FTS over the
