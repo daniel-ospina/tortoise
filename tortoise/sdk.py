@@ -52,7 +52,7 @@ from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + term
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
 from .embedded_lifecycle import atexit_fast_close  # #1371: the fast-close seam
 from .retrieval import (DEFAULT_POOL_SIZE, _safe_session_tag,
-                        resolve_pool_size)
+                        is_turn_echo_row, resolve_pool_size)
 from . import monitoring
 from . import file_indexer  # noqa: F401 — binds the classifier/identity module (§4.4); sourceKind registration is registry-owned (source_credibility.SOURCE_KIND_DEFAULTS)
 from .projection import FalkorProjection
@@ -3348,6 +3348,63 @@ class InvertedSupersedeWindow(ValueError):
         self.predecessor_valid_from = predecessor_valid_from
 
 
+def _refuse_inverted_point_window(g, props: dict, *,
+                                  point_id: str | None = None) -> None:
+    """#5359: refuse an INVERTED validity window at a Point write boundary.
+
+    ``create_point`` / ``update_point`` accept ``validFrom``/``validTo`` as
+    caller props, and ``mining._temporal_wire`` stamps ``validFrom`` on a draft
+    decision point. None of those writers read the OPPOSITE bound, so a caller
+    (or the miner's session date, read against a stored end) could persist
+    ``validTo < validFrom`` directly — bypassing the refusal #4021 added inside
+    ``supersede_point``. ``restore_point_at``'s ``_covers`` then covers NO
+    instant and the point vanishes from every temporal query while every read
+    reports honest absence.
+
+    The PREDICATE is delegated, never re-implemented:
+    ``commit_schema.validate_validity_window`` is the ONE HOME for the measure
+    (``_created_sort_key``) and the presence gate (``is not None``) — the same
+    predicate ``_covers`` assumes. This function owns only what the declaration
+    explicitly does NOT (its own scope note): resolving the pair a PARTIAL
+    write will actually persist. ``point_id is None`` is a fresh create, where
+    both bounds are the caller's; otherwise the caller's bound is merged with
+    the STORED opposite bound.
+
+    EVERY matching node is examined, not just the first: point ids are not
+    unique (the duplicate fan-out is a tested shape) and these writers MATCH
+    every node carrying the id, so a first-row-only read could pass the guard
+    and still leave an inverted window on a sibling — the verdict would then
+    depend on server row order. Same fan-out discipline as
+    ``TortoiseSDK._assert_window_start_not_inverted`` (#5358).
+
+    Absent bounds are legal (a lone ``validFrom`` is an open-ended window), and
+    a bound ``_created_sort_key`` cannot order is deliberately not refused
+    (#5360). A key PRESENT with value ``None`` is a CLEAR, not an absence:
+    ``SET n += $props`` removes the property, so the effective bound is
+    ``None`` and the window is open-ended — hence the key-presence test rather
+    than a truthiness test.
+    """
+    if "validFrom" not in props and "validTo" not in props:
+        return
+    from tortoise.commit_schema import validate_validity_window
+    if point_id is None:
+        validate_validity_window(props.get("validFrom"), props.get("validTo"))
+        return
+    rows = g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.validFrom, n.validTo",
+        params={"id": point_id},
+    ).result_set
+    if not rows:
+        return
+    for stored_vf, stored_vt in rows:
+        # ``get(key, default)`` uses the default only when the key is ABSENT,
+        # so a key present with value None still clears the bound (matching
+        # `SET n += $props`), while an absent key keeps the stored one.
+        effective_vf = props.get("validFrom", stored_vf)
+        effective_vt = props.get("validTo", stored_vt)
+        validate_validity_window(effective_vf, effective_vt)
+
+
 def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
                           stored_vf, successor_created_at, now):
     """Resolve the predecessor's window END and refuse an inverted window (#4021).
@@ -4262,6 +4319,16 @@ class TortoiseSDK:
         if "span_start" in props or "span_end" in props:
             from tortoise.commit_schema import validate_span
             validate_span(props.get("span_start"), props.get("span_end"))
+        # #5359: the validity window is a CLOSED interval. A caller-supplied
+        # inverted pair (`validTo < validFrom`) used to persist verbatim, cover
+        # NO instant, and make the point unreachable from every temporal query
+        # (`restore_point_at`) while every read reported honest absence —
+        # bypassing the refusal #4021 put inside `supersede_point`. Delegate
+        # the predicate to the ONE HOME (`commit_schema.
+        # validate_validity_window`, shared with `invalidate_point`'s #5358
+        # guard and the read path's `_covers`) instead of re-implementing it.
+        # No `point_id`: a fresh CREATE has no stored opposite bound to merge.
+        _refuse_inverted_point_window(self._get_proj().g, props)
         # #3263: provenance is INFERRED from the write context, never demanded.
         # A write that carries a session context has a derivable Source — the
         # same `session:<id>` ref the capture path wires explicitly (#1350).
@@ -7017,6 +7084,14 @@ class TortoiseSDK:
         if "span_start" in props or "span_end" in props:
             from tortoise.commit_schema import validate_span
             validate_span(props.get("span_start"), props.get("span_end"))
+        # #5359: refuse an inverted validity window BEFORE the write. An update
+        # may move only ONE edge, so the caller's bound is merged with the
+        # STORED opposite bound first (the declaration's own scope note,
+        # `commit_schema.validate_validity_window`) — without that merge,
+        # `update_point(id, validTo=EARLY)` on a future-`validFrom` point would
+        # be checked as (None, EARLY) and pass, persisting the inversion. The
+        # predicate itself is the ONE HOME, never a second copy.
+        _refuse_inverted_point_window(proj.g, props, point_id=id)
         # #1904 (bug-hunt 2026-08-28 P1-3): a content edit MUST recompute
         # content_hash in the same round trip — every dedup surface matches
         # on the stored hash (create_point dedup, ingest, _content_exists),
@@ -7391,8 +7466,10 @@ class TortoiseSDK:
         own: the every-matching-node scan (point ids are not unique) and the
         ``retract_point`` refusal message. The other live Point writers that
         persist a window — ``create_point`` / ``update_point`` (caller props)
-        and ``mining._temporal_wire`` — are wired by their own issue (#5359),
-        and ``supersede_point`` by #4021.
+        and ``mining._temporal_wire`` — are wired to the same declaration by
+        #5359 through ``_refuse_inverted_point_window``, which merges a caller's
+        partial bound with the stored opposite bound before delegating, and
+        ``supersede_point`` by #4021.
         """
         proj = self._get_proj()
         vf_rows = proj.g.query(
@@ -15961,6 +16038,12 @@ class TortoiseSDK:
         relationship_filter: str | None = None,
         traversal_path: str | None = None,
         exclude_status: list[str] | None = None,
+        # #4509: the OPT-IN pre-truncation turn-echo exclusion. A caller that
+        # names the capture session it is extracting for (the S3
+        # link-before-create prior lookup) drops that session's own turn
+        # echoes from the candidate set BEFORE ``limit`` — same seam as
+        # ``exclude_status``. Default None = byte-identical to pre-#4509.
+        exclude_turn_echo_session: str | None = None,
         include_terminal: bool = False,
         _elevated_timeout_ms: int | None = None,
         pool_size: int | None = None,
@@ -16035,6 +16118,25 @@ class TortoiseSDK:
             silently shrink the result count — epic #898 recall_state). Default None =
             no filtering (existing behavior unchanged; retracted is already excluded at
             the retrieval layer, #689). Points with no status property are kept.
+        exclude_turn_echo_session (#4509): the OPT-IN turn-echo exclusion — the
+            capture session whose OWN transcript echoes (``{session_id}_t{i}`` turn
+            Points; ``retrieval.is_turn_echo_row``) must NOT be treated as memory
+            priors. Applied to the fused Point candidate set at the SAME
+            pre-truncation point as ``exclude_status``, so ``limit`` applies to the
+            already-filtered set — a session whose echoes consume every slot can
+            otherwise hide a real prior ranked below them (the defect #4509
+            fixes; a caller-side drop after the cut cannot be made sound). The
+            exclusion reaches only candidates already in the fused pool — the
+            UNION of the legs (uncapped), not one leg's window — so the residual
+            bound is that union, roughly ``DEFAULT_POOL_SIZE`` per live leg: about
+            120 with the vector leg unavailable, about twice that in hybrid. It is
+            NOT ``MAX_SESSION_TURNS`` (500); raise ``pool_size`` (or
+            ``TORTOISE_POOL_FLOOR``) to widen it.
+            Applies wherever the resolved graph label is ``Point`` — so the point
+            and operator legs, not only ``entity_type == "point"``;
+            default None = no exclusion, byte-identical to pre-#4509 output. Do NOT
+            pass the retrieval-pool session when you WANT the session's transcript
+            (audit/history reads) — this is a memory-prior seam.
         _elevated_timeout_ms: PRIVATE — benchmark-only (#316). Threads an elevated
             collective-cap override into degradation_chain to measure uncensored
             true-completion latency. Default None = production 500ms cap. Never
@@ -16404,6 +16506,10 @@ class TortoiseSDK:
                         query, _snap, limit=limit, kind=kind,
                         exclude_status=exclude_status,
                         include_terminal=include_terminal,
+                        # #4509: parity with the primary path's pre-truncation
+                        # turn-echo exclusion — a degraded read must not leak a
+                        # capture's own transcript echoes as S3 priors.
+                        exclude_turn_echo_session=exclude_turn_echo_session,
                     )
                     if status_trace is not None:
                         status_trace.append(_trace_entry(
@@ -16420,6 +16526,15 @@ class TortoiseSDK:
                     # dicts carrying the status property.
                     points = [p for p in points
                               if (p.get("status") or "") not in set(exclude_status)]
+                if exclude_turn_echo_session and points:
+                    # #4509 parity (same reasoning as the snapshot tier above):
+                    # drop the session's own echoes BEFORE ``fallback_tfidf``
+                    # truncates to ``limit``.
+                    points = [p for p in points if not is_turn_echo_row(
+                        exclude_turn_echo_session,
+                        {"id": p.get("id"),
+                         "point_kind": p.get("pointKind"),
+                         "content": p.get("content")})]
                 legacy_hits = fallback_tfidf(query, points, limit=limit)
                 if status_trace is not None:
                     status_trace.append(_trace_entry(
@@ -16674,6 +16789,39 @@ class TortoiseSDK:
                     result_ids = [pid for pid in result_ids if pid not in status_excluded_ids]
             except Exception:
                 _logger.warning("exclude_status filter failed — pass-through", exc_info=True)
+
+        # 5d-bis (#4509). Apply the OPT-IN turn-echo exclusion at the SAME
+        #     pre-truncation seam as exclude_status (#898): a caller that names
+        #     its capture session drops that session's own transcript echoes
+        #     from the fused Point candidate set BEFORE ``result_ids[:limit]``,
+        #     so ``limit`` counts already-filtered candidates. Doing this
+        #     AFTER the cut (the previous caller-side drop) could not be made
+        #     sound — up to ``MAX_SESSION_TURNS`` (500) echoes could outnumber
+        #     any caller-side refill window and starve a real prior ranked
+        #     below them, ADDing a duplicate memory Point instead of folding.
+        #     Opt-in by construction: the branch is not entered when the
+        #     parameter is None, so every existing caller is byte-identical.
+        if (exclude_turn_echo_session and result_ids
+                and graph_label == "Point"):
+            try:
+                echo_rows = graph.query(
+                    "MATCH (n:Point) WHERE n.id IN $ids "
+                    "RETURN n.id, n.pointKind, n.content",
+                    params={"ids": result_ids},
+                ).result_set
+                echo_ids = {
+                    row[0] for row in echo_rows
+                    if is_turn_echo_row(exclude_turn_echo_session, {
+                        "id": row[0],
+                        "point_kind": row[1] if len(row) > 1 else None,
+                        "content": row[2] if len(row) > 2 else None,
+                    })
+                }
+                if echo_ids:
+                    result_ids = [pid for pid in result_ids if pid not in echo_ids]
+            except Exception:
+                _logger.warning(
+                    "turn-echo exclusion failed — pass-through", exc_info=True)
 
         # Truncate AFTER filtering
         result_ids = result_ids[:limit]

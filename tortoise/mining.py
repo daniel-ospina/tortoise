@@ -453,6 +453,14 @@ class ConversationMiner:
             vf = str(session_date)
         report = {"wired_nand": 0, "candidates": 0, "replacement_candidates": 0}
         wired_pairs: set[tuple[str, str]] = set()  # (newer, older) — one NAND per pair
+        # #5359: the miner writes only the START, so the effective window is
+        # (session date, STORED validTo). Refuse when that would INVERT the
+        # window — routed through the same one-home guard the caller-prop
+        # writers use (the predicate is
+        # `commit_schema.validate_validity_window`). Lazy import: `sdk` imports
+        # this module lazily in turn, so neither may import the other at module
+        # load.
+        from .sdk import _refuse_inverted_point_window
         for pid in point_ids:
             rows = proj.g.query(
                 "MATCH (n:Point {id:$id}) RETURN n.content, n.pointKind, n.status",
@@ -464,6 +472,8 @@ class ConversationMiner:
             if kind != "decision" or status != "draft" or not content:
                 continue
             # validFrom: real session date, not ingest time (R5).
+            _refuse_inverted_point_window(
+                proj.g, {"validFrom": vf}, point_id=pid)
             proj.g.query(
                 "MATCH (n:Point {id:$id}) SET n.validFrom = $vf",
                 params={"id": pid, "vf": vf},
