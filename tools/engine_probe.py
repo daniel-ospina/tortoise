@@ -217,10 +217,15 @@ def probe_graph(host: str, port: int, timeout: float) -> dict:
         # AF_INET6 sockaddr (a 4-tuple) makes a ValueError, i.e. a crash instead
         # of a verdict exactly when an operator is diagnosing a wedge.
         last_error = None
+        attempted = False
         for family, socktype, proto, _canon, sockaddr in addrinfo:
             try:
                 sock = socket.socket(family, socktype, proto)
                 sock.settimeout(timeout)
+                # From here we are actually DIAL; a failure above this line
+                # (fd exhaustion, a sandbox refusing the family) means no
+                # address was ever tried, which is unmeasured, not a verdict.
+                attempted = True
                 sock.connect(sockaddr)
                 break
             except OSError as exc:
@@ -229,10 +234,14 @@ def probe_graph(host: str, port: int, timeout: float) -> dict:
                     sock.close()
                 sock = None
         else:
+            detail = (f"{type(last_error).__name__}: {last_error}"
+                      if last_error else "no-addresses")
+            if not attempted:
+                return {"ok": None, "reply": None, "error": detail,
+                        "elapsed_s": round(time.monotonic() - started, 3)}
             # Every address was dialled and every one failed — a MEASURED
             # failure, so `ok=False` is right here.
-            return {"ok": False, "reply": None,
-                    "error": type(last_error).__name__ if last_error else "no-addresses",
+            return {"ok": False, "reply": None, "error": detail,
                     "elapsed_s": round(time.monotonic() - started, 3)}
         sock.sendall(b"PING\r\n")
         reply = sock.recv(64)

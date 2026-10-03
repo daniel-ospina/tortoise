@@ -630,25 +630,29 @@ def test_the_endpoint_main_probes_is_the_one_the_uri_names(monkeypatch):
     """
     seen = {}
     monkeypatch.setattr(e, "probe_graph",
-                        lambda h, p, t: seen.update(host=h, port=p) or {"ok": True})
+                        lambda h, p, t: seen.update(host=h, port=p, timeout=t)
+                        or {"ok": True})
 
-    # URI only -> the URI's endpoint
+    # URI only -> the URI's endpoint, and --timeout is plumbed through.
+    # A refactor that dropped the timeout here would silently restore the
+    # 900s-burn class the bound exists to prevent (#7017).
     monkeypatch.setenv("TORTOISE_DB_URI", "redis://g.example.com:16400/t")
     assert e.main(["--no-docker", "--timeout", "1"]) == 0
-    assert seen == {"host": "g.example.com", "port": 16400}, seen
+    assert seen == {"host": "g.example.com", "port": 16400, "timeout": 1.0}, seen
 
     # URI + --port -> the URI's host, the flag's port
-    e.main(["--no-docker", "--timeout", "1", "--port", "2222"])
-    assert seen == {"host": "g.example.com", "port": 2222}, seen
+    e.main(["--no-docker", "--timeout", "2.5", "--port", "2222"])
+    assert seen == {"host": "g.example.com", "port": 2222,
+                    "timeout": 2.5}, seen
 
     # URI + --host -> the flag's host, the URI's port
     e.main(["--no-docker", "--timeout", "1", "--host", "10.0.0.9"])
-    assert seen == {"host": "10.0.0.9", "port": 16400}, seen
+    assert seen == {"host": "10.0.0.9", "port": 16400, "timeout": 1.0}, seen
 
     # no URI -> the documented defaults
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     e.main(["--no-docker", "--timeout", "1"])
-    assert seen == {"host": "127.0.0.1", "port": 16379}, seen
+    assert seen == {"host": "127.0.0.1", "port": 16379, "timeout": 1.0}, seen
 
 
 def test_a_non_finite_timeout_is_rejected_not_crashed(monkeypatch):
@@ -750,6 +754,13 @@ def test_an_unresolvable_uri_still_yields_to_both_flags(monkeypatch):
                  "--timeout", "1"])
     assert rc == 0, rc
     assert seen == {"host": "10.0.0.9", "port": 2222}, seen
+
+    # a flag-named endpoint is probed even when the URI cannot be resolved, and
+    # the bound still reaches the probe
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@127.0.0.1:16x00/t")
+    e.main(["--no-docker", "--host", "10.0.0.9", "--port", "2222",
+            "--timeout", "1"])
+    assert seen["host"] == "10.0.0.9"
 
 
 def test_a_hanging_resolver_is_bounded(monkeypatch):
@@ -937,6 +948,28 @@ def test_the_engine_line_does_not_claim_a_flag_that_was_not_passed(monkeypatch,
     out = capsys.readouterr().out
     assert "--no-docker" not in out, out
     assert "refused" in out, out
+
+
+def test_a_socket_that_cannot_even_be_created_is_unmeasured(monkeypatch):
+    """(a) FAILS if a failure BEFORE any `connect()` is reported as `ok=False`.
+    That asserts the documented meaning of False — "every address was dialled
+    and every one refused" — for addresses that were never dialled, and
+    `classify` turns it into a confident GRAPH_DOWN. Reachable via fd
+    exhaustion, a sandbox refusing the family, or EPERM.
+    (b) Reachable: `socket.socket()` raising for every resolved address.
+    """
+    monkeypatch.setattr(e, "_resolve_within_bound",
+                        lambda *a: [(e.socket.AF_INET, e.socket.SOCK_STREAM,
+                                     e.socket.IPPROTO_TCP, "", ("127.0.0.1", 1))])
+
+    def refuse(*_a, **_k):
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr(e.socket, "socket", refuse)
+    result = e.probe_graph("x.example.com", 1, timeout=1.0)
+    assert result["ok"] is None, result
+    assert "Too many open files" in result["error"], result
+    assert e.classify(result, {"status": e.ENGINE_OK}) == e.UNMEASURABLE
 
 
 def test_a_pre_connect_exception_is_unmeasured(monkeypatch):
