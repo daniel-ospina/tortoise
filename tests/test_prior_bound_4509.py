@@ -15,9 +15,17 @@ Fix: the exclusion is a caller-supplied, OPT-IN pre-truncation filter in the
 retrieval layer (``exclude_turn_echo_session``, same seam as
 ``exclude_status``), and ``_PRIOR_OVERFETCH`` / the manual refill are deleted.
 
+The fix is PARTIAL, and the residual is pinned rather than asserted away: the
+filter only reaches candidates already in the fused candidate set, so the
+starved-prior bound MOVES to that set (each leg's ``DEFAULT_POOL_SIZE``, times the
+live legs) instead of disappearing at 500 turns. See ``_DOCUMENTED_PROD_POOL``
+and ``test_production_pool_bound_still_starves_the_prior`` below.
+
 These tests are HERMETIC (per-test embedded store, no provider keys, no
-network): the query embedder is pinned to None so the sparse leg is the only
-one submitted and ranking is a pure FTS ordering.
+network): the query embedder is pinned to None so the sparse leg is the only one
+submitted and ranking is a pure FTS ordering, and ``TORTOISE_POOL_FLOOR`` is
+deleted so a caller's environment cannot move the window these bounds are
+measured against.
 """
 from __future__ import annotations
 
@@ -263,12 +271,15 @@ def test_production_pool_bound_still_starves_the_prior(sdk):
     """RESIDUAL PIN (#4509) — this test asserts the LIMIT of the fix, on purpose.
 
     The seam is sound (the filter really does run before the cut), but it can
-    only drop echoes that are already IN the fused candidate pool. ``_fts_rows``
-    passes no ``pool_size``, so in the production call shape that pool is
-    ``retrieval.DEFAULT_POOL_SIZE`` (120) — NOT ``MAX_SESSION_TURNS`` (500),
-    which is what a capture can hold. The bound this fix moves is 15 -> 120, so a
-    session whose echoes fill the pool still starves a real prior ranked below
-    them.
+    only drop echoes that are already IN the fused candidate set, and that set is
+    the UNION of the live legs rather than one leg's window. ``_fts_rows`` passes
+    no ``pool_size``, so each leg's window is ``retrieval.DEFAULT_POOL_SIZE``
+    (120) — NOT ``MAX_SESSION_TURNS`` (500), which is what a capture can hold.
+    This module pins FTS as the only live leg, so the fused set under test is
+    that one window; in the hybrid shape it is the union of the fts and vector
+    legs, about twice as wide. The bound this fix moves is 15 -> that fused set
+    (~120 keyword-only, ~240 hybrid), NOT to 500 — so a session whose echoes fill
+    it still starves a real prior ranked below them.
 
     This is the falsifier for any claim that #4509 removes starvation outright.
     The claim used to be written into the comments in ``extractor_v2.py`` and
