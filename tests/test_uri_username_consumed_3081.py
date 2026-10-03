@@ -151,13 +151,34 @@ def _patched(mod):
     real socket be opened (or miss the spelling entirely), so every attribute the
     module actually holds is patched.
     """
+    import types
+
     import falkordb
 
+    # Discover the bindings by IDENTITY, not from a fixed name list (#7053).
+    # ANY attribute of the module — or of the `falkordb` package and the
+    # submodule that DEFINES the class — that IS the `falkordb.FalkorDB` object
+    # is a construction path, whatever it is called. The hard-coded
+    # `(mod, "FalkorDB"), (mod, "_FalkorDB")` pair silently missed a
+    # module-level alias such as `from falkordb import FalkorDB as _F`, leaving
+    # a real socket open. Function-level imports need no per-name entry: they
+    # resolve `falkordb.FalkorDB` (or `falkordb.falkordb.FalkorDB`) at call
+    # time, so patching the OBJECT covers every alias they bind.
+    target = falkordb.FalkorDB
+    owners = [falkordb, mod]
+    submodule = getattr(falkordb, "falkordb", None)
+    if isinstance(submodule, types.ModuleType):
+        owners.append(submodule)
     saved = {}
-    for owner, attr in ((falkordb, "FalkorDB"), (mod, "FalkorDB"), (mod, "_FalkorDB")):
-        if hasattr(owner, attr):
-            saved[(id(owner), attr)] = (owner, attr, getattr(owner, attr))
-            setattr(owner, attr, _RecordingClient)
+    targets = [
+        (owner, name, value)
+        for owner in owners
+        for name, value in list(vars(owner).items())
+        if value is target
+    ]
+    for owner, attr, original in targets:
+        saved[(id(owner), attr)] = (owner, attr, original)
+        setattr(owner, attr, _RecordingClient)
     _RecordingClient.calls = []
     _RecordingClient.used = []
     try:
@@ -267,6 +288,132 @@ def test_the_client_gets_none_for_the_anonymous_form(module_file):
     )
 
 
+def _count_client_sites(source: str) -> int:
+    """Count calls whose callee IS the `falkordb.FalkorDB` object.
+
+    Every import in the source is imported FOR REAL and its binding compared
+    with `is` against `falkordb.FalkorDB` — the callee is never matched by
+    identifier spelling. `endswith("FalkorDB")` counted `_FalkorDB` but was
+    blind to a novel alias (#7053); enumerating import spellings instead only
+    moves the hole, and review found a new one per round (`from
+    falkordb.falkordb import FalkorDB`, then `from falkordb import falkordb`).
+    Identity closes the class instead of re-spelling it, which is the form this
+    file's docstring says four review rounds failed to reach.
+
+    Residual (unchanged from the suffix counter): indirection that never names
+    the object at an import — `getattr(falkordb, "FalkorDB")`, a factory, or
+    `FDB = falkordb.FalkorDB` assigned to a new name — is not a callee this can
+    resolve, and was already invisible before.
+    """
+    import ast
+    import importlib
+
+    from falkordb import FalkorDB
+
+    tree = ast.parse(source)
+    local_names: set[str] = set()  # names bound directly to the class
+    module_names: set[str] = set()  # names bound to a module exporting it
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            try:
+                owner = importlib.import_module(node.module or "")
+            except Exception:  # pragma: no cover - unresolvable import
+                continue
+            exported = getattr(owner, "__all__", None)
+            for alias in node.names:
+                if alias.name == "*":
+                    # Whether a star import binds `FalkorDB` is itself an
+                    # identity question, so ask the module rather than guess.
+                    if (exported is None or "FalkorDB" in exported) and (
+                        getattr(owner, "FalkorDB", None) is FalkorDB
+                    ):
+                        local_names.add("FalkorDB")
+                    continue
+                value = getattr(owner, alias.name, None)
+                if value is None and node.module:
+                    # `from pkg import sub` also binds a SUBMODULE, which the
+                    # import system supplies even though `getattr(pkg, sub)` is
+                    # absent until something imports it. Resolving only by
+                    # attribute made the count depend on whether an earlier
+                    # import had happened to run — order-dependent, and wrong.
+                    try:
+                        value = importlib.import_module(f"{node.module}.{alias.name}")
+                    except Exception:  # pragma: no cover - not a submodule
+                        value = None
+                if value is FalkorDB:
+                    local_names.add(alias.asname or alias.name)
+                elif getattr(value, "FalkorDB", None) is FalkorDB:
+                    module_names.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                try:
+                    value = importlib.import_module(alias.name)
+                except Exception:  # pragma: no cover - unresolvable import
+                    continue
+                if getattr(value, "FalkorDB", None) is FalkorDB:
+                    module_names.add(alias.asname or alias.name.split(".")[0])
+
+    n = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        if isinstance(fn, ast.Name):
+            n += fn.id in local_names
+        elif isinstance(fn, ast.Attribute) and fn.attr == "FalkorDB":
+            # Resolve the ROOT of the chain, so `falkordb.FalkorDB`,
+            # `f.FalkorDB` and `falkordb.falkordb.FalkorDB` all count — while a
+            # same-named attribute on any other object does not.
+            root = fn.value
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            n += isinstance(root, ast.Name) and root.id in module_names
+    return n
+
+
+def test_a_novel_alias_does_not_escape_the_count():
+    """#7053 — the anti-vacuity counter must not depend on the alias SPELLING.
+
+    The previous counter matched `called.endswith("FalkorDB")`, so
+    `from falkordb import FalkorDB as _F` plus `_F(...)` was invisible: the site
+    was neither observed by the behavioural tests nor counted, so the coverage
+    claim went silently stale and a reintroduced #3081 would ship GREEN. This is
+    the issue's own repro, run against the counter instead of a live module.
+    """
+    canonical = "from falkordb import FalkorDB\nclient = FalkorDB(host='h')\n"
+    aliased = "from falkordb import FalkorDB as _F\nclient = _F(host='h')\n"
+    module_attr = "import falkordb as f\nclient = f.FalkorDB(host='h')\n"
+    assert _count_client_sites(canonical) == 1
+    assert _count_client_sites(aliased) == 1, (
+        "a novel alias must still be counted — this is exactly the #7053 gap"
+    )
+    assert _count_client_sites(module_attr) == 1
+    # Spellings the REMOVED suffix matcher already caught, each of which a
+    # name-resolution rewrite can silently lose (caught in review on #7053):
+    # the submodule that defines the class, and a star import.
+    submodule = (
+        "from falkordb.falkordb import FalkorDB\nclient = FalkorDB(host='h')\n"
+    )
+    star = "from falkordb import *\nclient = FalkorDB(host='h')\n"
+    submodule_binding = "from falkordb import falkordb\nclient = falkordb.FalkorDB(host='h')\n"
+    assert _count_client_sites(submodule) == 1, (
+        "`from falkordb.falkordb import ...` is the class's own definition site"
+    )
+    assert _count_client_sites(star) == 1
+    assert _count_client_sites(submodule_binding) == 1, (
+        "a submodule binding is an identity question, not a spelling one"
+    )
+    # The other direction: a same-named callable from ANY other module is not a
+    # FalkorDB client. The suffix matcher counted it (a false red the previous
+    # AST matcher class was deleted for).
+    other_module = "from elsewhere import FalkorDB\nclient = FalkorDB(host='h')\n"
+    other_attr = "import elsewhere\nclient = elsewhere.FalkorDB(host='h')\n"
+    assert _count_client_sites(other_module) == 0, (
+        "only falkordb's own object may be counted, never a same-named import"
+    )
+    assert _count_client_sites(other_attr) == 0
+
+
 def test_every_known_constructor_site_is_driven():
     """Anti-vacuity for the coverage claim, not a spelling check.
 
@@ -279,19 +426,10 @@ def test_every_known_constructor_site_is_driven():
     first ``select_graph`` on a driven path (which truncates the drive, but not
     the count). A deliberate new site therefore forces a reviewed update here.
     """
-    import ast
-
-    discovered = {}
-    for module_file in [m for m, _ in PARSERS]:
-        tree = ast.parse((GS / module_file).read_text(encoding="utf-8"))
-        n = 0
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
-                fn = node.func
-                called = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
-                if isinstance(called, str) and called.endswith("FalkorDB"):
-                    n += 1
-        discovered[module_file] = n
+    discovered = {
+        module_file: _count_client_sites((GS / module_file).read_text(encoding="utf-8"))
+        for module_file, _ in PARSERS
+    }
 
     # EXACT counts, not `>= 1`. With `>= 1` this test could not fail when a
     # second client appeared — it computed the count and then asserted nothing
