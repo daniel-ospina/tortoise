@@ -63,10 +63,12 @@ def _parse_uri(uri: str) -> dict:
     from tortoise.config import parse_uri_userinfo
     parsed = urlparse(uri)
     # #3039: decode userinfo through the single shared rule.
-    _username, password = parse_uri_userinfo(uri)
+    username, password = parse_uri_userinfo(uri)
     return {
         "host": parsed.hostname or "localhost",
         "port": parsed.port or 16379,
+        # #3081: the username MUST travel with the password — see audit_graph.py.
+        "username": username or "",
         "password": password or "",
         "graph": parsed.path.lstrip("/") or "tortoise",
     }
@@ -264,6 +266,7 @@ def main() -> int:
     from falkordb import FalkorDB as _FalkorDB
     db = _FalkorDB(
         host=cfg["host"], port=cfg["port"],
+        username=cfg["username"] or None,
         password=cfg["password"] or None,
         socket_connect_timeout=5, socket_timeout=120,
     )
