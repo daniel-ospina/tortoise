@@ -44,6 +44,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tortoise import live, volunteer
+from tortoise.commit_ops import OBJECT_TERMINAL_STATUSES
 from tortoise.indexer import github_indexer
 from tortoise.live import (
     CURRENT_POINT_STATUS_VALUES,
@@ -52,7 +53,7 @@ from tortoise.live import (
     TERMINAL_STATUS_VALUES,
     is_terminal_status,
 )
-from tortoise.sdk import POINT_STATUS_VALUES
+from tortoise.sdk import POINT_STATUS_VALUES, TortoiseSDK
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _GRAPH_SCRIPTS = _REPO_ROOT / "graph-scripts"
@@ -331,6 +332,53 @@ def test_dedup_observation_ignores_non_current_statement_twin(sdk) -> None:
     pairs = DEDUP_OBSERVATION.scan_observation_duplicates(sdk._get_proj())
     assert url in pairs
     assert live_twin in pairs[url]["statements"]
+
+
+# ── 5. the OBJECT vocabulary is BOUND to the Point one (#3308) ───────────────
+
+#: ``archived`` is excluded from the state view's exclude-set on purpose: an
+#: archived Object stays VISIBLE unless ``include_superseded`` asks for the
+#: rest (#1350 decision 2a). Named here so the derivation below is readable.
+_ARCHIVED_VISIBLE_ON_READ = frozenset({"archived"})
+
+
+def test_object_vocabulary_is_a_subset_of_the_point_vocabulary() -> None:
+    """#3308: a reader filtering OBJECT hits with the POINT set is safe IFF the
+    Object vocabulary stays inside it.
+
+    The defect this pins: such a reader is *correct today only because*
+    ``OBJECT_TERMINAL_STATUSES`` happens to be a subset of
+    ``TERMINAL_EXCLUDED_STATUSES``. That is an accident of current membership,
+    not a stated contract. Add a status to the Object family without adding it
+    to the Point family and that reader silently serves a non-current Object as
+    current. The two declarations live in different modules with different
+    consumers, and nothing else binds them — this assertion IS the binding.
+    """
+    leaked = OBJECT_TERMINAL_STATUSES - TERMINAL_EXCLUDED_STATUSES
+    assert not leaked, (
+        "the OBJECT vocabulary has a member the POINT set does not exclude, so "
+        "a reader parameterised by the Point set would serve it as current: "
+        f"{sorted(leaked)}"
+    )
+
+
+def test_read_surface_exclude_set_is_derived_from_the_object_vocabulary() -> None:
+    """#3308: ``TortoiseSDK.STATE_EXCLUDED_STATUS`` must not drift from the
+    canonical OBJECT declaration.
+
+    It is a hand-written literal in ``sdk.py``, and the read surface's own
+    comment forbids re-literalising a vocabulary ("a copy is how the read
+    surface drifts from search"). The literal is deliberately the Object set
+    MINUS ``archived``, so the expectation is *computed* from
+    ``OBJECT_TERMINAL_STATUSES`` — never restated, so re-typing it cannot pass.
+    """
+    expected = OBJECT_TERMINAL_STATUSES - _ARCHIVED_VISIBLE_ON_READ
+    assert expected == TortoiseSDK.STATE_EXCLUDED_STATUS, (
+        "STATE_EXCLUDED_STATUS drifted from the canonical OBJECT vocabulary, so "
+        "the read surface now excludes a different set than search: "
+        f"only-in-SDK={sorted(TortoiseSDK.STATE_EXCLUDED_STATUS - expected)}, "
+        f"only-in-canonical={sorted(expected - TortoiseSDK.STATE_EXCLUDED_STATUS)}"
+    )
 
 
 def test_live_predicate_and_set_agree_on_both_axes() -> None:

@@ -23,6 +23,10 @@ import numpy as np
 
 from .env_truthy import env_flag  # #4097: the declared truthy contract
 from .exceptions import EmbedderUnavailableError  # #4861: the REQUIRED contract
+from .heavy_imports import (  # #5718: the ONE heavy-import lock + its helpers
+    import_sentence_transformer,
+    import_tfidf_vectorizer,
+)
 from .ids import content_hash
 
 
@@ -35,6 +39,13 @@ def _embedder_warmup_enabled() -> bool:
     return env_flag("TORTOISE_EMBEDDER_WARMUP", True)
 
 logger = logging.getLogger(__name__)
+
+# #5718: the ONE lock that serializes the heavy torch / sklearn / scipy imports,
+# and the lock-taking helpers that own every heavy import in this package, live
+# in ``tortoise.heavy_imports`` (a leaf module — see its docstring for the race,
+# for why the invariant is symmetric, and for its machine check). The two
+# helpers this module calls are imported above; every other call site imports
+# its helper directly from ``tortoise.heavy_imports``.
 
 # The active embedder — single source of truth for the production model id.
 # #1349 embedder-selection swap (2026-08-21): bge-small replaces
@@ -514,7 +525,7 @@ class EmbeddingModel:
 
         def _load():
             try:
-                from sentence_transformers import SentenceTransformer
+                SentenceTransformer = import_sentence_transformer()
                 result["model"] = SentenceTransformer(
                     EMBEDDING_MODEL, revision=EMBEDDING_MODEL_REVISION)
             except ImportError as e:
@@ -805,7 +816,7 @@ def _encode(texts: list[str]) -> tuple[np.ndarray, bool]:
         except Exception:  # noqa: BLE001, RUF100
             logger.warning("embedding encode failed — TF-IDF fallback", exc_info=True)
     try:
-        from sklearn.feature_extraction.text import TfidfVectorizer  # lazy: [embeddings] extra
+        TfidfVectorizer = import_tfidf_vectorizer()
         return TfidfVectorizer().fit_transform(texts).toarray(), True
     except (ValueError, ImportError):
         # Empty / stopword-only vocabulary or sklearn missing — nothing to
@@ -901,7 +912,7 @@ def search_points(
             model = None
     if model is None:
         try:
-            from sklearn.feature_extraction.text import TfidfVectorizer
+            TfidfVectorizer = import_tfidf_vectorizer()
             tv = TfidfVectorizer()
             doc_vecs = tv.fit_transform(texts).toarray()
             query_vec = tv.transform([query]).toarray()[0]
