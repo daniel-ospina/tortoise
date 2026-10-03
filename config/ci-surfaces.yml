@@ -960,7 +960,8 @@ surfaces:
   - test_session_attribution.py
   - test_ci_selection.py
   # #6884: pins the `uri_requiring` declaration (re-derived BEHAVIOURALLY — it
-  # runs the failing `pytest --collect-only` with the URI unset and compares) and
+  # runs the failing `pytest --collect-only` with an EMPTY TORTOISE_DB_URI and
+  # compares) and
   # the tier-2 subtraction that keeps URI-requiring modules out of a URI-less PR
   # leg. Registered here rather than left unlisted: an unlisted tests/*.py reds
   # `manifest-integrity` (#2642), and this file is a gate test for the selector,
@@ -2077,22 +2078,26 @@ carve_out:
 # registered here — the #2944 discipline (structural, not name-based).
 #
 # The derivation is BEHAVIOURAL, not syntactic. It runs the failing CI command
-# itself — `pytest --collect-only` over the candidate modules with
-# TORTOISE_DB_URI removed from the environment — and takes "this module produced
-# no nodeids" as the rule. Four review cycles tried a static predicate (module
-# `if`s, alias renames, local wrappers, class bodies, decorators, lambdas,
-# `**kwargs` forwarding, constructed env names, transitive helpers, default
-# arguments, guard polarity) and every cycle found more shapes: an AST check is
-# an approximation of a question pytest answers exactly. Asking pytest is the
+# itself — `pytest --collect-only` over the candidate modules with the leg's own
+# environment shape (`TORTOISE_DB_URI` PRESENT AND EMPTY, not removed; see
+# python-ci.yml:606-624 and :671) — and takes "this module produced no nodeids"
+# as the rule. Four review cycles tried a static predicate (module `if`s, alias
+# renames, local wrappers, class bodies, decorators, lambdas, `**kwargs`
+# forwarding, constructed env names, transitive helpers, default arguments,
+# guard polarity) and every cycle found more shapes: an AST check is an
+# approximation of a question pytest answers exactly. Asking pytest is the
 # invariant itself, not a model of it, and it cannot remove coverage — whatever
 # the reason a module yields no nodeids, it was not going to run a test in that
 # leg.
 #
-# The candidate set is a cheap superset (selectable modules mentioning
-# `allow_module_level`, the mechanism a module-level skip needs); pytest decides
-# the answer. A module emptied by some other cause (the manifest's own `-m`
-# marker, a collection error) is the attribution half of #6884 and is tracked on
-# the issue, not here.
+# The candidate set is a superset bounded by a mechanism (selectable modules
+# mentioning `allow_module_level`); pytest decides the answer over it. Two
+# deliberate exclusions are stated in the guard's module docstring — a skip
+# living in a SHARED helper, and module-level `pytest.importorskip` (which means
+# a missing dependency and must RED the leg rather than be silently subtracted).
+# A module emptied by some other cause (the manifest's own `-m` marker, a
+# collection error) is the attribution half of #6884 and is tracked on the
+# issue, not here.
 uri_requiring:
 - test_capabilities_endpoint.py
 - test_eval_ingest_cache.py

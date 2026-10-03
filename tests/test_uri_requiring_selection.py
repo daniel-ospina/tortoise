@@ -1,7 +1,7 @@
 """#6884: a module that collects NOTHING must not be handed to a test leg.
 
-The defect this pins: the tier-2 PR legs run with **`TORTOISE_DB_URI` unset by
-design** — the empty URI *is* the E2E-6 tripwire signal (`python-ci.yml:600-602`
+The defect this pins: the tier-2 PR legs run with an **EMPTY `TORTOISE_DB_URI`**
+by design — the empty value *is* the E2E-6 tripwire signal (`python-ci.yml:600-602`
 and `:1367-1368`; epic #1647 Task 9, cycle-6 P2-8), so "provision the URI" is a
 reversal of a recorded decision, not a fix. A selected test module that
 module-skips at import on a missing URI therefore collects ZERO tests in such a
@@ -32,16 +32,23 @@ invariant itself, not a model of it:
 It also cannot remove coverage: whatever the reason a module yields no nodeids in
 that leg, it was not going to run a test there.
 
-**Exact over the candidate set, not over the tree.** The probe is authoritative
-for every file it is given, but the candidate set is a SUPERSET defined by a
-mechanism: selectable modules whose own source contains `allow_module_level`.
-That is complete for a module-level skip written in the module itself, and it is
-deliberately not a widening race (past cycles showed each new spelling invites
-the next). The residual is a module-level skip living in a SHARED helper that a
-test module imports and calls at import: the caller's text has no literal, so it
-is not a candidate. `test_only_candidate_shaped_files_carry_the_module_skip_mechanism`
-closes that route by forbidding the mechanism outside the files the census
-scans.
+**Exact over the candidate set, never over the tree.** The probe is authoritative
+for every file it is given, but the set it is given is bounded by a mechanism:
+selectable modules whose own source contains `allow_module_level`. Two deliberate
+exclusions follow, and both are stated rather than implied:
+
+* a module-level skip living in a SHARED helper that a test module imports and
+  calls at import — the caller's text has no literal, so it is not a candidate.
+  `test_only_candidate_shaped_files_carry_the_module_skip_mechanism` closes that
+  route by forbidding the mechanism outside the files the census scans.
+* module-level `pytest.importorskip(...)` — a second collection-time mechanism
+  with no literal in the caller's source, already used at module scope by several
+  selectable modules (`tests/test_guard.py`, `tests/test_embedded_lifecycle.py`,
+  ...). It is excluded ON PURPOSE and must not be folded in: that skip means a
+  MISSING DEPENDENCY, so the leg should go RED and say so, not have the module
+  silently subtracted into this lane — folding it in would convert an environment
+  break into a quiet coverage hole. (`importorskip` also aborts on every leg, not
+  just the URI-less one.)
 
 A module emptied by some other cause (the manifest's own `-m` marker, a
 collection error) is the *attribution* half of #6884, recorded separately on the
@@ -133,14 +140,21 @@ def _paths_with_no_nodeids(stdout: str, candidates: list[str]) -> set[str]:
 
 @functools.lru_cache(maxsize=1)
 def _collect_nothing_uri_less() -> frozenset[str]:
-    """The module set that collects nothing with `TORTOISE_DB_URI` UNSET.
+    """The module set that collects nothing when `TORTOISE_DB_URI` is EMPTY.
 
     This is not a model of the CI failure — it IS the failing command, run over
-    the candidate set in one pytest invocation with the URI removed from the
-    environment (and `TORTOISE_TEST_CARVE_OUT=1`, the URI-less opt-in the P4
-    enforcement requires). PROVABLY so: over the tree at the time of writing it
-    flags exactly the eight declared modules, and every other candidate yields
-    nodeids.
+    the candidate set in one pytest invocation, with the leg's own environment
+    shape: `TORTOISE_DB_URI` PRESENT AND EMPTY (`URI=""` is written into
+    `$GITHUB_ENV` and exported by the manifest step, `python-ci.yml:606-624` and
+    `:671`), not removed. The distinction is load-bearing — a module gating on
+    `"TORTOISE_DB_URI" not in os.environ` collects under one shape and aborts
+    under the other — so a maintainer must not "restore" this to `env -u`.
+    `TORTOISE_TEST_EXPECT_URI=""` and `TORTOISE_TEST_CARVE_OUT="1"` are also set
+    to match the leg's broader shape; they are provably inert under
+    `--collect-only` (removing them flags the same set).
+
+    PROVABLY faithful: over the tree at the time of writing it flags exactly the
+    eight declared modules, and every other candidate yields nodeids.
     """
     candidates = _candidate_modules()
     if not candidates:
@@ -190,8 +204,11 @@ def test_only_candidate_shaped_files_carry_the_module_skip_mechanism() -> None:
     imports and calls at import is therefore invisible: the caller has no
     literal, the census reports "declared == observed" while the module aborts
     collection in a URI-less leg. Rather than chase spellings across files, this
-    forbids the mechanism anywhere the census does not look — if a helper needs
-    it, the census must be widened deliberately at the same time.
+    forbids the mechanism anywhere under `tests/` that the census does not read —
+    if a helper needs it, the census must be widened deliberately at the same
+    time. (A helper carrying it OUTSIDE `tests/` remains a stated residual: the
+    scan is scoped to the suite because that is where the census and
+    `integrity()` look.)
     """
     offenders = sorted(
         str(p.relative_to(TESTS))
@@ -241,8 +258,8 @@ def test_probe_reproduces_the_shipped_failure() -> None:
     assert "tests/test_onboarding_state_split.py" in flagged, (
         "the URI-less collect probe no longer flags test_onboarding_state_split.py "
         "— the module that produced #6390's unattributable rc=5. The probe is "
-        "measuring the wrong leg (check TORTOISE_DB_URI is really unset and the "
-        "marker still matches the CI collect step)."
+        "measuring the wrong leg (check TORTOISE_DB_URI is really EMPTY, present "
+        "not absent, and the marker still matches the CI collect step)."
     )
 
 
@@ -252,8 +269,8 @@ def test_declared_list_matches_the_observation() -> None:
     observed = {name.removeprefix("tests/") for name in _collect_nothing_uri_less()}
     assert declared == observed, (
         "config/ci-surfaces.yml `uri_requiring` does not match what pytest "
-        "actually collects with TORTOISE_DB_URI unset.\n"
-        f"  declared but collects nothing: {sorted(declared - observed)}\n"
+        "actually collects with an EMPTY TORTOISE_DB_URI.\n"
+        f"  declared but DOES collect (stale entry): {sorted(declared - observed)}\n"
         f"  collects nothing but NOT declared: {sorted(observed - declared)}\n"
         "UndecLared modules are handed to a URI-less tier-2 leg, collect zero "
         "tests there, and red it with no attributable failure (#6884). Add them "
