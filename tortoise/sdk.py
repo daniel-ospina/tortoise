@@ -10354,7 +10354,7 @@ class TortoiseSDK:
         coalesce(n.outdated,false) = true)`` — i.e. the POSITIVE direction of
         the vocabulary ``_terminal_excluded`` filters on. It assumes
         ``outdated`` is a boolean; every in-repo writer emits the literal
-        ``true`` (see #7075 for the hand-edited-graph case). Before #3142 this site carried its own
+        ``true`` (see #7075 for the hand-edited/legacy-graph case). Before #3142 this site carried its own
         forked ``status IN $terminal AND coalesce(outdated,false) = false``,
         which is the AND of the two halves and so matched NEITHER: a point
         superseded through ``supersede_point`` (which stamps BOTH

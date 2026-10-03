@@ -313,7 +313,9 @@ class TestIngestGuardAfterRebuild:
 
     def test_bundle_local_ref_to_invalidated_live_point_rejected(self, tmp_path):
         """(g) Indicator 2, REAL flow: ``invalidate_point`` leaves ``status``
-        untouched and sets ONLY ``outdated=true``. Under the old filter that
+        untouched and sets ONLY the terminal marker ``outdated=true`` (status
+        unmodified; its other writes — ``updatedAt``/``validTo``/``expiredAt``
+        and the vacuity decay — are not terminal markers). Under the old filter that
         satisfied NEITHER conjunct, so the guard missed it on both paths —
         this is the half of #3142 no test covered even indirectly.
 
