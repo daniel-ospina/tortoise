@@ -1795,6 +1795,13 @@ def measure_write_ops(org_id: str) -> int:
 
     * **no row for the window** — a genuine, MEASURED zero (the org simply
       wrote nothing this period) → returns ``0``;
+    * **a row whose ``write_ops`` is unset** — also a MEASURED zero, and NOT a
+      read failure. A ``MeteringRecord`` says nothing about *which* lane wrote
+      it: in the registry lane the ask, embed and graph-storage writers MERGE
+      their own row and set only their own columns, so an org whose FIRST event
+      in the window was an ask/embed call carries a row with no ``write_ops``
+      property at all. Reading that as a failure would freeze the whole
+      allocation snapshot on the most ordinary multi-lane org;
     * **the window or the read failed** — unreadable → raises, never ``0``.
 
     ``get_current_usage`` cannot express that distinction: its read-failure
@@ -1815,7 +1822,7 @@ def measure_write_ops(org_id: str) -> int:
             "RETURN m.write_ops",
             params={"tid": org_id, "pstart": period.start_iso},
         ).result_set
-        ops_used = int(rows[0][0]) if rows else 0
+        ops_used = int(rows[0][0]) if rows and rows[0][0] is not None else 0
     if int(ops_used) < 0:
         raise ValueError(
             f"negative write_ops for org={org_id} period={period.label}: {ops_used}")

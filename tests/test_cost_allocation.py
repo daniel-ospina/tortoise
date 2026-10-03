@@ -303,6 +303,22 @@ def test_measure_write_ops_absent_row_is_a_measured_zero(monkeypatch):
     assert metering.measure_write_ops("org_a") == 0
 
 
+def test_measure_write_ops_row_without_a_write_ops_column_is_a_measured_zero(
+        monkeypatch):
+    """A row merged by ANOTHER lane carries no ``write_ops`` — measured zero.
+
+    The ask, embed and graph-storage writers MERGE their own
+    ``MeteringRecord`` and set only their own columns, so an org whose first
+    event in the window was an ask/embed call has a row whose ``write_ops`` is
+    unset. That is "wrote nothing", not an unreadable read: reading it as a
+    failure made ``measure_write_ops`` raise, which fails the WHOLE allocation
+    snapshot closed and left ``tortoise_team_cost_cents`` unpublished — the
+    exact dead-hook state #4493 exists to fix.
+    """
+    _wire_registry_read(monkeypatch, [(None,)])
+    assert metering.measure_write_ops("org_a") == 0
+
+
 def test_measure_write_ops_returns_the_measured_count(monkeypatch):
     _wire_registry_read(monkeypatch, [("42",)])
     assert metering.measure_write_ops("org_a") == 42
