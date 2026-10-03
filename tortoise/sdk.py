@@ -1015,9 +1015,10 @@ def _capture_turn_texts(windowed: list[dict]) -> list[str]:
 
     #4911: THIS is where a stored turn's credentials are scrubbed — one place,
     applied by every writer of every lane, because this function IS the stored
-    text. The control cannot live inside ``_write_capture_turns`` instead: both
-    callers compute ``turn_embs`` from ``_capture_turn_texts(windowed)`` BEFORE
-    calling the writer, so redacting only at the write would store
+    text. The control cannot live inside ``_write_capture_turns`` instead: the
+    writer computes ``turn_embs`` from this same stored-text result, before
+    ``_write_capture_turns`` stores the row, so redacting only at the write would
+    store
     ``[REDACTED:…]`` while the vector described the raw secret — violating the
     #4194 invariant the docstring above states ("the vector can never describe
     different text than the node holds"). Redacting here keeps the encoded
@@ -1307,10 +1308,13 @@ def _write_capture_turns(
 
     ``turn_embs`` must be the batch from ``_capture_turn_embeddings`` over
     ``_capture_turn_texts(windowed)``. The stored text is the caller-supplied
-    pair (``texts_and_counts``), never re-derived here, so the vector can never
-    describe different text than the node holds (#4194); a length mismatch
-    (unreachable from the caller) drops the whole batch's vectors with an error
-    log rather than misaligning them.
+    pair (``texts_and_counts``) on the live path; when it is ``None`` this
+    function re-derives it with
+    ``_capture_turn_texts_with_redactions(windowed)`` (the retained branch below,
+    currently unreached) — either way the vector is derived from the same text,
+    so it can never describe different text than the node holds (#4194); a
+    length mismatch (unreachable from the caller) drops the whole batch's
+    vectors with an error log rather than misaligning them.
 
     ``texts_and_counts`` lets a caller that has ALREADY computed
     ``_capture_turn_texts_with_redactions(windowed)`` hand the result in rather
@@ -1369,8 +1373,9 @@ def _write_capture_turns(
     if not turn_texts:
         return redacted_total
     if len(turn_embs) != len(turn_texts):
-        # Unreachable from the caller (each lane derives `turn_embs` from this
-        # same helper over this same `windowed`) and deliberately NOT a raise:
+        # Unreachable from the caller (it derives `turn_embs` from the same
+        # `_capture_turn_texts_with_redactions(windowed)` result it passes as
+        # `texts_and_counts`) and deliberately NOT a raise:
         # this helper runs after the caller's Session MERGE, so raising would
         # 500 a capture whose Session is already committed. Drop the whole
         # batch's vectors rather than misaligning them — the turns are still
