@@ -27,7 +27,7 @@ import tempfile
 
 import pytest
 
-from tortoise.retrieval import is_turn_echo_row
+from tortoise.retrieval import DEFAULT_POOL_SIZE, is_turn_echo_row
 from tortoise.sdk import TortoiseSDK
 
 QUERY = "zephyr launch date"
@@ -45,6 +45,14 @@ _ECHOES = _HOT + _COLD
 #: A pool wide enough that the real prior is provably a CANDIDATE — so what the
 #: test measures is the pre-truncation exclusion, never pool depth.
 _POOL = 200
+
+#: The PRODUCTION pool bound this residual is documented against. A literal on
+#: purpose: the comments in ``extractor_v2.py`` and ``sdk.py`` name this bound, so
+#: a change to ``DEFAULT_POOL_SIZE`` must fail the pin below and force those
+#: comments to be updated with it. This is the same convention the deleted
+#: ``_PRIOR_OVERFETCH == 12`` pin used — a declared bound that cannot silently
+#: drift out from under its own documentation.
+_DOCUMENTED_PROD_POOL = 120
 
 
 @pytest.fixture(autouse=True)
@@ -215,3 +223,82 @@ def test_caller_minted_point_in_the_turn_namespace_survives(sdk):
     assert "s1_t9" in rows, rows
     assert "s1_t0" not in rows, rows
     assert "pt_real" in rows, rows
+
+
+# ── The RESIDUAL bound: the exclusion cannot reach past the fused pool ──────
+
+
+def _seed_echo_wall_production(sdk, session_id: str, prior_id: str,
+                               n_echoes: int) -> None:
+    """The PRODUCTION call shape's fixture: ``n_echoes`` echoes that each
+    outrank ONE real prior, and — unlike ``_seed_echo_wall`` — no ``pool_size``
+    is passed by the caller under test, so the fused pool is the product
+    default. The echoes carry three copies of the query and the prior two, so
+    the ordering is forced without relying on tie-breaks."""
+    for i in range(n_echoes):
+        _seed_echo(sdk, session_id, i, f"[user] {QUERY} {QUERY} {QUERY} turn {i}")
+    sdk.create_point("statement", f"{QUERY} {QUERY}", id=prior_id)
+
+
+def test_production_pool_bound_still_starves_the_prior(sdk):
+    """RESIDUAL PIN (#4509) — this test asserts the LIMIT of the fix, on purpose.
+
+    The seam is sound (the filter really does run before the cut), but it can
+    only drop echoes that are already IN the fused candidate pool. ``_fts_rows``
+    passes no ``pool_size``, so in the production call shape that pool is
+    ``retrieval.DEFAULT_POOL_SIZE`` (120) — NOT ``MAX_SESSION_TURNS`` (500),
+    which is what a capture can hold. The bound this fix moves is 15 -> 120, so a
+    session whose echoes fill the pool still starves a real prior ranked below
+    them.
+
+    This is the falsifier for any claim that #4509 removes starvation outright.
+    The claim used to be written into the comments in ``extractor_v2.py`` and
+    ``sdk.py``; it now states this bound, and this test is what keeps that
+    statement honest. Raising the bound means passing an explicit ``pool_size`` on
+    the point prior leg — a retrieval-cost trade-off, deliberately not made here.
+
+    FALSIFIER — (1) *what value makes this test fail?* Two of them. First,
+    whether ``DEFAULT_POOL_SIZE`` is still the bound the comments name — asserted
+    literally below, so a moved default reddens here and forces the documentation
+    to move with it. Second, whether ``pt_real`` is returned by the call that
+    passes NO ``pool_size``; the echoes outrank the prior and outnumber the pool,
+    so the prior is outside the candidate set before any filter runs and no
+    post-fetch exclusion can reach it.
+    """
+    assert DEFAULT_POOL_SIZE == _DOCUMENTED_PROD_POOL, (
+        f"the production pool default moved ({DEFAULT_POOL_SIZE!r}, documented "
+        f"as {_DOCUMENTED_PROD_POOL}) — the residual bound in "
+        "tortoise/extractor_v2.py and tortoise/sdk.py names the old number, so "
+        "update those comments (and this literal) together")
+    _seed_echo_wall_production(sdk, "s1", "pt_real", _DOCUMENTED_PROD_POOL + 10)
+
+    prod = _ids(sdk.tortoise_fts_query(
+        QUERY, entity_type="point", limit=_OLD_LIMIT,
+        exclude_turn_echo_session="s1"))
+    assert "pt_real" not in prod, (
+        "this residual pin no longer holds — the prior came back through the "
+        "PRODUCTION call shape, so either the fix now covers the worst case or "
+        f"DEFAULT_POOL_SIZE changed. Update the bound documented in "
+        f"tortoise/extractor_v2.py and tortoise/sdk.py. rows={prod}")
+    assert prod == [], prod
+
+
+def test_within_the_pool_the_exclusion_recovers_the_prior_in_production_shape(sdk):
+    """The other half of the residual pin: with the SAME production call shape
+    (no ``pool_size``) but an echo count BELOW the pool bound, the prior comes
+    back. That is what makes the pin above a measurement of the POOL rather than
+    of the exclusion — if the seam were broken, this test would fail too.
+
+    FALSIFIER — (1) *what value makes this test fail?* ``pt_real``'s absence. (2)
+    *reachable?* Yes: half the default pool, all outranking the prior, so the
+    prior is a pool candidate and only the exclusion can surface it.
+    """
+    n_echoes = _DOCUMENTED_PROD_POOL // 2
+    _seed_echo_wall_production(sdk, "s1", "pt_real", n_echoes)
+
+    rows = _ids(sdk.tortoise_fts_query(
+        QUERY, entity_type="point", limit=_OLD_LIMIT,
+        exclude_turn_echo_session="s1"))
+    assert "pt_real" in rows, (
+        f"within the pool the exclusion must surface the prior, got {rows}")
+    assert not any(i.startswith("s1_t") for i in rows), rows

@@ -16046,10 +16046,14 @@ class TortoiseSDK:
             Points; ``retrieval.is_turn_echo_row``) must NOT be treated as memory
             priors. Applied to the fused Point candidate set at the SAME
             pre-truncation point as ``exclude_status``, so ``limit`` applies to the
-            already-filtered set — a session holding up to ``MAX_SESSION_TURNS``
-            (500) echoes can otherwise consume every slot and hide a real prior
-            ranked below them (the defect #4509 fixes; a caller-side drop after the
-            cut cannot be made sound). Only ``entity_type == "point"`` is affected;
+            already-filtered set — a session whose echoes consume every slot can
+            otherwise hide a real prior ranked below them (the defect #4509
+            fixes; a caller-side drop after the cut cannot be made sound). The
+            exclusion reaches only candidates already in the fused pool, so the
+            residual bound is the POOL, not ``MAX_SESSION_TURNS`` (500):
+            ``DEFAULT_POOL_SIZE`` (120) unless the caller raises ``pool_size``.
+            Applies wherever the resolved graph label is ``Point`` — so the point
+            and operator legs, not only ``entity_type == "point"``;
             default None = no exclusion, byte-identical to pre-#4509 output. Do NOT
             pass the retrieval-pool session when you WANT the session's transcript
             (audit/history reads) — this is a memory-prior seam.

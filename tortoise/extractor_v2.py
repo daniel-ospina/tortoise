@@ -1980,10 +1980,22 @@ def _derive_queries(embed_list: dict, story: str) -> dict:
 # retrieval layer's OWN pre-truncation seam (``exclude_turn_echo_session``,
 # alongside ``exclude_status``; the predicate is
 # ``retrieval.is_turn_echo_row``): ``limit`` now counts the ALREADY-FILTERED
-# candidate set, so no over-fetch and no refill are needed — a session holding
-# up to ``MAX_SESSION_TURNS`` (500) echoes can no longer starve a real prior
-# ranked below them. The ``_PRIOR_OVERFETCH`` window this comment used to
-# document is DELETED, not merely widened.
+# candidate set, so no over-fetch and no refill are needed. The
+# ``_PRIOR_OVERFETCH`` window this comment used to document is DELETED, not
+# merely widened.
+#
+# RESIDUAL — measured, not assumed: the exclusion can only drop echoes that are
+# already IN the fused candidate pool, and ``_fts_rows`` passes no ``pool_size``,
+# so that pool is the callee's product default (``retrieval.DEFAULT_POOL_SIZE``,
+# 120) rather than ``MAX_SESSION_TURNS`` (500). The bound this fix moves is
+# therefore 15 -> 120: a session whose echoes fill the pool still starves a real
+# prior ranked below them. That residual is pinned, with the production call
+# shape, by
+# ``test_prior_bound_4509.py::test_production_pool_bound_still_starves_the_prior``
+# — so it stays visible and falsifiable instead of being asserted away by an
+# over-claim here. Raising the bound to cover the worst case means passing an
+# explicit ``pool_size`` on this leg, which is a retrieval-cost trade-off and is
+# deliberately not made in this change.
 
 
 def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3, *,
