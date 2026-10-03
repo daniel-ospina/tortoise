@@ -283,6 +283,13 @@ surfaces:
   - test_client_ip_middleware.py
   - test_commit_endpoint.py
   - test_commit_schema.py
+  # #2642/#2636 (epic #2632): the connector CRUD surface. Load-bearing here for
+  # the same reason as test_hosted_api.py below — every assertion drives an
+  # `@app.*` route in tortoise/hosted_api.py plus the org-scoped filters in
+  # tortoise/supabase_control.py, and `hosted_api.py` selects `api`. Without
+  # this entry the cross-tenant IDOR pins (and the #2642 boundary tests) never
+  # run on a diff-based lane at all.
+  - test_connector_scope.py
   # #1370: dual-registered with `core` — the same test file covers the hosted
   # commit seam (tortoise/hosted_api.py), so a hosted-only change must run it too.
   - test_subject_binding_1370.py

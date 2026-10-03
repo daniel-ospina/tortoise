@@ -210,10 +210,12 @@ ASK_CONTEXT_TOKEN_CAP_ENV = "TORTOISE_ASK_CONTEXT_TOKEN_CAP"
 ASK_CONTEXT_BYTE_CAP_ENV = "TORTOISE_ASK_CONTEXT_BYTE_CAP"
 ASK_POOL_SIZE_ENV = "TORTOISE_ASK_POOL_SIZE"
 
-#: A1/A4/A5 (#2070): ask-lane lever env names (all default ON for the ask
-#: lane — each is a quality fix, not a gated experiment; "0"/"false"/
-#: "no"/"off" opts out). A7's rerank is the exception (env-gated OFF,
-#: tortoise/rerank.py).
+#: A1/A4/A5 (#2070): ask-lane lever env names. A1 and A5 default ON for the
+#: ask lane (each is a quality fix, not a gated experiment); A4 defaults OFF
+#: until its delta is measured (#4593 — the library parameter default was
+#: already ``False``, so the lane is now the fail-safe side too). "0"/"false"/
+#: "no"/"off" opts out, "1"/"true"/"yes"/"on" opts in. A7's rerank is the
+#: other exception (env-gated OFF, tortoise/rerank.py).
 ASK_NUMERIC_TOKENS_ENV = "TORTOISE_ASK_NUMERIC_TOKENS"
 ASK_SEARCH_KEYS_PRF_ENV = "TORTOISE_ASK_SEARCH_KEYS_PRF"
 ASK_EVIDENCE_BOOST_ENV = "TORTOISE_ASK_EVIDENCE_BOOST"

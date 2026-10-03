@@ -120,6 +120,27 @@ routes:
   - method: GET
     path: /v1/claim/status
     class: tenant
+  # #2636 (epic #2632): the connector CRUD surface. Declared here because
+  # #3875's check reads the SOURCE — these `@app.*` routes would otherwise
+  # expand the public API with every other #3863 check green.
+  - method: GET
+    path: /v1/connectors
+    class: tenant
+  - method: POST
+    path: /v1/connectors
+    class: tenant
+  - method: GET
+    path: /v1/connectors/{connector_id}
+    class: tenant
+  - method: PATCH
+    path: /v1/connectors/{connector_id}
+    class: tenant
+  - method: DELETE
+    path: /v1/connectors/{connector_id}
+    class: tenant
+  - method: POST
+    path: /v1/connectors/{source_type}/auth
+    class: tenant
   - method: GET
     path: /v1/context
     class: tenant
