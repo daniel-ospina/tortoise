@@ -6,6 +6,7 @@ Phase 0 (#7748): Foundation — FalkorDB indexes, RRF fusion, degradation chain,
 from __future__ import annotations  # noqa: I001
 
 import logging
+import math
 import os
 import re
 import threading
@@ -882,7 +883,10 @@ def run_fts_query(
                    else f" AND {_exclude_status_clause('n', excluded_statuses or TERMINAL_EXCLUDED_STATUSES)}")
                 + "  AND toLower(n.label) CONTAINS toLower($query) "
                 "RETURN n.id, 1.0 AS score "
-                "ORDER BY score DESC "
+                # #3019: every row scores a constant 1.0, so this leg is ONE giant
+                # tie and DB row order would otherwise decide each document's RRF
+                # rank. The secondary key makes the order a function of the data.
+                "ORDER BY score DESC, n.id ASC "
                 "LIMIT $limit"
             )
             rows = graph.query(
@@ -963,7 +967,9 @@ def run_fts_query(
             "YIELD node, score "
             + status_filter +
             f"RETURN node.{id_field}, score "
-            "ORDER BY score DESC "
+            # #3019: rank alone does not order a tie, and RRF is rank-based — see
+            # the operator path above.
+            f"ORDER BY score DESC, node.{id_field} ASC "
             "LIMIT $limit"
         )
         rows = graph.query(
@@ -1306,6 +1312,16 @@ def run_vector_query(
                 # #561: latency warning only — keep the rows.
                 logger.warning("Vector query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
             _breaker_record("vector", True)
+            # #3019 KNOWN RESIDUAL: this index-accelerated path preserves the
+            # engine's returned order, so two rows with EQUAL distances keep
+            # whatever order the engine gave them, and rank-based fusion can see
+            # a tie-order flip. It is deliberately NOT re-sorted here. Signature
+            # B's distance could be sorted losslessly, but signature A's score IS
+            # its row POSITION, and two existing tests pin this path's
+            # order-preservation (`test_docker_mode_signature_b_scores_clamped_to
+            # _non_negative`, `test_none_api_keeps_probe_behavior`) — so changing
+            # it is its own unit of work, not a mechanical edit. Tracked as a
+            # follow-up issue rather than papered over by the source pin.
             if sig == "B":
                 # #5583: the engine's value here is a DISTANCE (lower is
                 # better), NOT a similarity. `db.idx.vector.queryNodes`
@@ -1412,7 +1428,9 @@ def run_vector_query(
             "WITH n, vec.euclideanDistance(n.embedding, _qv) AS distance "
             "WHERE distance IS NOT NULL "
             f"RETURN n.{id_field}, 1.0 / (1.0 + distance) AS score "
-            "ORDER BY score DESC "
+            # #3019: a distance tie (equal values, or repeated rows) must not fall
+            # through to DB row order.
+            f"ORDER BY score DESC, n.{id_field} ASC "
             "LIMIT $limit"
         )
         rows = graph.query(
@@ -1580,6 +1598,10 @@ def run_structural_query(
             f"MATCH (n:{label_str}) "
             f"WHERE {where_clause} "
             f"RETURN n.{id_field} "
+            # #3019: this leg scores every row a CONSTANT (1.0 / 0.5, below), so
+            # with no secondary key the WHOLE leg is an unordered tie and the
+            # caller's rank — hence the fused top-k — is DB row order.
+            f"ORDER BY n.{id_field} ASC "
             f"LIMIT $limit"
         )
         params["limit"] = limit
@@ -1646,7 +1668,10 @@ def expand_structural_hops(
                else f" AND {_exclude_status_clause('n', excluded_statuses or TERMINAL_EXCLUDED_STATUSES)}")
             + " WITH n, min(length(path)) AS hops "
             "RETURN n.id AS id, hops "
-            "ORDER BY hops ASC "
+            # #3019: `hops ASC` alone leaves equal-hop candidates in engine row
+            # order, so with more candidates than `limit` both MEMBERSHIP and
+            # rank are DB-order dependent.
+            "ORDER BY hops ASC, n.id ASC "
             "LIMIT $limit"
         )
         rows = graph.query(
@@ -1719,6 +1744,24 @@ def rrf_fusion(
         w = 1.0
         if strategy_names is not None and weights:
             w = weights.get(strategy_names[i], 1.0)
+            # #3019 part 2: a non-finite weight makes EVERY fused score NaN, and
+            # tuple comparison against NaN is False in BOTH directions, so the
+            # ``(-score, id)`` key below silently degrades to insertion order —
+            # losing the determinism #2952 established. ``json.loads`` accepts
+            # bare ``NaN``/``Infinity``, so TORTOISE_FUSION_WEIGHTS can carry one,
+            # and a kwarg caller can pass one. Guarded at the ROOT so every entry
+            # point is covered, not just the env parse.
+            if not math.isfinite(w):
+                # #3019: `json.loads` accepts bare NaN/Infinity, and a NaN weight
+                # makes EVERY fused score NaN — the `(-score, id)` tie-break then
+                # compares False both ways and degrades to insertion order. Warn
+                # rather than substitute silently: the recorded default is not
+                # equal weighting (PRODUCTION DEFAULT, tortoise/sdk.py).
+                logger.warning(
+                    "non-finite RRF weight for %r (%r) — using 1.0",
+                    strategy_names[i] if i < len(strategy_names) else i, w,
+                )
+                w = 1.0
         for rank, (pid, _score) in enumerate(ranked):
             rrf_score = w / (k + rank + 1)
             scores[pid] = scores.get(pid, 0.0) + rrf_score

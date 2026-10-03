@@ -1432,6 +1432,7 @@ surfaces:
   - test_search_engine.py
   - test_search_engine_gaps.py
   - test_search_engine_nameerror.py
+  - test_determinism_tie_order_3019.py
   # #4999: the vector leg's trace must report WHICH path it took (index vs
   # brute-force scan). Pins the unpatterned engine module
   # `tortoise/search_engine.py` (run_vector_query), which falls to the `core`
