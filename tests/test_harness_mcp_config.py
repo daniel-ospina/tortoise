@@ -417,6 +417,7 @@ class TestDocsPageAndSkillConfig:
 
     DOCS = REPO_ROOT / "website" / "docs.html"
     SKILL = REPO_ROOT / "tortoise" / "onboarding" / "SKILL.md"
+    QUICKSTART = REPO_ROOT / "docs" / "quickstart-cloud.md"
 
     # Per-harness headings in the docs #mcp section. Rows are pinned by
     # heading (not a bare "Codex"/"Pi" substring) so deleting a row fails.
@@ -424,6 +425,67 @@ class TestDocsPageAndSkillConfig:
                     "<h4>Codex CLI</h4>", "<h4>Codex Desktop (no terminal)</h4>",
                     "<h4>Claude Desktop</h4>", "<h4>Claude Web</h4>",
                     '<h4 id="chatgpt">ChatGPT (Developer mode)</h4>')
+
+    def test_quickstart_cloud_teaches_the_http_shape_indirectly(self):
+        """#4674: the cloud quickstart taught `streamable-http` plus a literal
+        `Bearer tt_...` key -- the exact anti-pattern this module forbids -- and
+        nothing pinned it, so it re-drifted (its own guard comment at the
+        `.mcp.json` http-type test only *mentions* the divergence).
+
+        The prose deliberately NAMES the legacy value, because a first-time
+        reader needs to recognise it; so the assertions target the
+        copy-pasteable SHAPE. The per-harness checks PARSE the blocks, so a bare
+        string sitting in prose cannot satisfy them, and the Cursor block is
+        pinned because a single block labelled for Cursor while carrying the
+        Claude form is the same silent-drop defect one layer down.
+        """
+        text = self.QUICKSTART.read_text(encoding="utf-8")
+        assert '"Bearer tt_' not in text, (
+            "#4674: docs/quickstart-cloud.md shows a literal key on a commit "
+            "surface; it must read ${TORTOISE_API_KEY}"
+        )
+        for cfg in self._quickstart_json_blocks():
+            for entry in cfg.get("mcpServers", {}).values():
+                assert entry.get("type") != "streamable-http", (
+                    "#4674: docs/quickstart-cloud.md is teaching the banned "
+                    "streamable-http entry again -- Cursor CLI drops it silently"
+                )
+        claude = self._quickstart_block("**Claude Code**")
+        assert claude["type"] == "http", (
+            "#4674: the quickstart's Claude Code block must use type=http"
+        )
+        assert claude["headers"]["Authorization"] == "Bearer ${TORTOISE_API_KEY}", (
+            "#4674: the quickstart's Claude Code header must be env-indirect"
+        )
+        cursor = self._quickstart_block("**Cursor**")
+        assert "type" not in cursor, (
+            "#4674: the quickstart's Cursor block must omit `type` -- Cursor "
+            "infers the transport from url, and a `type` there is the shape "
+            "its CLI can silently drop"
+        )
+        assert cursor["headers"]["Authorization"] == "Bearer ${env:TORTOISE_API_KEY}", (
+            "#4674: the quickstart's Cursor block must use the tested "
+            "${env:...} expansion"
+        )
+
+    def _quickstart_json_blocks(self) -> list[dict]:
+        """Every ```json config block in the quickstart, parsed."""
+        text = self.QUICKSTART.read_text(encoding="utf-8")
+        return [json.loads(b) for b in re.findall(r"```json\s*(\{.*?\})\s*```", text, re.S)]
+
+    def _quickstart_block(self, label: str) -> dict:
+        """The parsed `tortoise` entry of the JSON block following `label`.
+
+        Parsed, not substring-matched, so the harness labels and the block
+        contents are pinned together (a bare string in prose cannot pass).
+        """
+        text = self.QUICKSTART.read_text(encoding="utf-8")
+        assert label in text, f"quickstart harness label missing: {label}"
+        m = re.search(r"```json\s*(\{.*?\})\s*```", text.split(label, 1)[1], re.S)
+        assert m, f"no JSON config block after {label!r} in quickstart"
+        cfg = json.loads(m.group(1))["mcpServers"]["tortoise"]
+        assert "tt_" not in json.dumps(cfg), f"literal key in config block: {cfg}"
+        return cfg
 
     def _mcp_section(self) -> str:
         text = self.DOCS.read_text(encoding="utf-8")
@@ -948,8 +1010,10 @@ class TestCommittedRepoMcpJson:
     def test_tortoise_entry_keeps_http_type(self):
         # This root file also serves Claude Code, whose schema treats `type` as
         # load-bearing for a url entry; pi ignores `type` and picks the
-        # transport from url-vs-command. Pinned because nothing else pins this
-        # field for the same object; docs/quickstart-cloud.md agrees with it.
+        # transport from url-vs-command. Pinned because docs/quickstart-cloud.md
+        # teaches the same object and could drift silently; since #4674 it shows
+        # the same `http` value and is pinned by
+        # `TestDocsPageAndSkillConfig::test_quickstart_cloud_teaches_the_http_shape_indirectly`.
         assert self._tortoise().get("type") == "http", (
             f"committed .mcp.json tortoise entry must keep type='http' -- got "
             f"{self._tortoise().get('type')!r}"

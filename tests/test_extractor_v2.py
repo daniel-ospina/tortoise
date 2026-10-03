@@ -979,7 +979,7 @@ class TestS3:
             def __init__(self):
                 self.calls = []
 
-            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+            def tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False):
                 self.calls.append((query, entity_type))
                 if entity_type == "object":
                     return [{"id": "obj-1", "content": "single-flash pipeline",
@@ -1107,7 +1107,7 @@ class TestS3:
             def __init__(self):
                 self.calls = []
 
-            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+            def tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False):
                 self.calls.append((query, entity_type))
                 # the REAL callee row shape: ``SearchResult.to_dict()`` keys
                 # the kind as ``point_kind`` (#4511) — never ``kind``.
@@ -1145,7 +1145,7 @@ class TestS3:
         """
 
         class MockSDK:
-            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+            def tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False):
                 return {
                     "point": [{"id": "pt-1", "content": "flash is the path",
                                "point_kind": "statement"}],
@@ -1181,7 +1181,7 @@ class TestS3:
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
 
         class MockSDK:
-            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+            def tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False):
                 if entity_type == "object":
                     return [{"id": "obj-1", "content": "single-flash pipeline",
                              "point_kind": "core:plan"}]
@@ -1218,6 +1218,7 @@ class TestS3:
             before it is returned."""
 
             def tortoise_fts_query(self, query, *, entity_type, limit=3,
+                                   include_terminal=False,
                                    exclude_turn_echo_session=None):
                 if entity_type != "point":
                     return []
@@ -1350,6 +1351,7 @@ class TestS3:
                 self.seen = {}
 
             def tortoise_fts_query(self, query, *, entity_type, limit=3,
+                                   include_terminal=False,
                                    exclude_turn_echo_session=None):
                 self.seen[entity_type] = exclude_turn_echo_session
                 if entity_type == "point":
@@ -1400,6 +1402,7 @@ class TestS3:
                 self.asked = []
 
             def tortoise_fts_query(self, query, *, entity_type, limit=3,
+                                   include_terminal=False,
                                    exclude_turn_echo_session=None):
                 self.asked.append((entity_type, limit, exclude_turn_echo_session))
                 return []
@@ -1422,7 +1425,8 @@ class TestS3:
         ``exclude_turn_echo_session=None`` (sent even with no session) turns
         this test red. Reachable: both calls below omit ``session_id``."""
         class StrictMockSDK:
-            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+            def tortoise_fts_query(self, query, *, entity_type, limit=3,
+                                   include_terminal=False):
                 return []
 
         sdk = StrictMockSDK()
@@ -1436,6 +1440,7 @@ class TestS3:
 
         class MockSDK:
             def tortoise_fts_query(self, query, *, entity_type, limit=3,
+                                   include_terminal=False,
                                    exclude_turn_echo_session=None):
                 if entity_type != "point":
                     return []
@@ -1460,6 +1465,7 @@ class TestS3:
 
         class MockSDK:
             def tortoise_fts_query(self, query, *, entity_type, limit=3,
+                                   include_terminal=False,
                                    exclude_turn_echo_session=None):
                 if entity_type != "point":
                     return []
@@ -1532,7 +1538,7 @@ class TestS3:
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
 
         class BoomSDK:
-            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+            def tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False):
                 raise ConnectionError("graph unreachable")
 
         res = v2.search_graph(BoomSDK(), S2_FIXTURE, "STORY")
@@ -3904,6 +3910,46 @@ class TestClassifyStage:
             "the slot kind survives _clean_slots + _resolve_slot_refs"
         assert not any("minted slot kind" in w for w in res["warnings"]), \
             res["warnings"]
+
+    def test_event_slot_survives_for_pack_declared_event_kind(self):
+        """#5806: _clean_slots' EVENT lane gates against the SAME widened
+        event vocabulary as execute_embed's event gate — a slot referencing
+        a pack-DECLARED event kind keeps its kind and resolves. Previously
+        the lane read only master["events"] (core EVENTS), so such a slot
+        was repaired to core:occurrence for exactly the kinds the S5 event
+        gate admits — the same asymmetry FIX M closed on the entity side."""
+        embed = {"entities": [], "events": [], "operators": [],
+                 "chain_notes": [], "link_before_create": [],
+                 "points": [{"content": "the pr was opened",
+                             "pointKind": "statement",
+                             "about_entities": [],
+                             "slots": {"event": [
+                                 {"name": "the pr was opened",
+                                  "kind": "dev:prOpened",
+                                  "confidence": 0.9}]}}]}
+        res = v2.execute_embed(embed, {}, session_id="s1")
+        pt = res["payload"]["points"][0]
+        assert pt["slots"]["event"][0]["kind"] == "dev:prOpened", \
+            "the event slot kind survives _clean_slots + _resolve_slot_refs"
+        assert not any("minted slot kind" in w for w in res["warnings"]), \
+            res["warnings"]
+
+    def test_event_lane_still_repairs_a_foreign_kind(self):
+        """#5806 control: widening the event lane to _event_kind_forms must
+        NOT turn the gate into a no-op — a kind no vocabulary admits is
+        still repaired to the event fallback with a warning, so the
+        minted-kind census keeps working."""
+        warnings: list[str] = []
+        master = v2._build_master_from_brief(
+            {"events": {}, "objectKinds": {}, "documentKinds": {}})
+        slots = v2._clean_slots(
+            {"event": [{"name": "something",
+                         "kind": "nota:packsDoNotDeclareThis",
+                         "confidence": 0.5}]},
+            warnings, "t", master=master)
+        assert slots["event"][0]["kind"] == v2._EVENT_FALLBACK["kind"], \
+            "a kind no vocabulary admits is still repaired"
+        assert any("minted slot kind" in w for w in warnings), warnings
 
     def test_fold_never_drops_different_non_sentinel_kind(self):
         """A same-name duplicate carrying a DIFFERENT non-sentinel kind is

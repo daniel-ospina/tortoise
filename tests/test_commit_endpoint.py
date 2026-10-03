@@ -1741,6 +1741,178 @@ class TestE5PointSupersessions:
         assert r.json()["duplicate"] is False
 
 
+# ── #5363 — the #4021 inverted-window refusal on the hosted COMMIT path ─────
+#
+# The refusal is a DETERMINISTIC payload error (the same payload re-raises), so
+# the fail-closed 500's "retry with the same client_commit_id" advice is wrong
+# for it — and because `_execute_commit_writes` created the successor BEFORE
+# calling `supersede_point`, the refusal also left a live orphan successor that
+# no retry could fix. These tests pin both halves: the 422 mapping (A) and the
+# per-action check that keeps the refusal from MINTING the successor it would
+# orphan (B) — scoped to that successor, not to the whole request: the chain
+# writes and any earlier point of the commit have already landed by then.
+
+_PREDECESSOR_ID = "pt_0000000000000000000000000000000000000000000000000000000000000000"
+_SUPERSEDED_CONTENT = "the old 5K claim"
+_REVISING_CONTENT = "my 5K best is 27:12"
+_PREDECESSOR_VALID_FROM = "2026-08-01T00:00:00+00:00"
+_REVISING_WHEN = "2026-06-01T00:00:00+00:00"
+
+
+def _seed_inverted_window_predecessor() -> str:
+    """Seed the §5 supersede PREDECESSOR — the payload point id, live, non-
+    operator, carrying a stored window START the revising payload's `when`
+    precedes. A direct seed (conftest convention, cf. the E3 supersede test)
+    rather than a prior commit, so the stored `validFrom` is exact."""
+    _team_sdk()._get_proj().g.query(
+        "MERGE (p:Point {id:$id}) SET p.pointKind='statement', "
+        "    p.content=$c, p.is_operator=false, p.status='live', "
+        "    p.content_hash='seed', p.validFrom=$vf",
+        params={"id": _PREDECESSOR_ID, "c": _SUPERSEDED_CONTENT,
+                "vf": _PREDECESSOR_VALID_FROM})
+    return _PREDECESSOR_ID
+
+
+def _inverted_window_commit(client):
+    """Commit the same payload point id with DIFFERENT content and a `when`
+    that precedes the seeded predecessor's `validFrom` — the §5 reconcile
+    action is `supersede`, the one `_execute_commit_writes` takes."""
+    return _commit(client, _raw_payload(1, points=[_point(
+        0, content=_REVISING_CONTENT, when=_REVISING_WHEN)]))
+
+
+class Test5363InvertedSupersedeWindow:
+    """#5363 — the #4021 refusal mapped to an actionable 422 and raised before
+    the point's successor is minted (so the refusal leaves no orphan successor,
+    the partial write a retry could never complete)."""
+
+    def test_inverted_window_422s_before_the_successor_is_minted(self, client):
+        """(B) + (A) together, on the real write path: the commit 422s naming
+        the conflict, the successor is NEVER minted, and the predecessor is
+        left untouched. Without the fix this is a 500 over an orphan successor.
+
+        Fails without the fix: the status is 500 (not 422) AND the successor
+        node exists (the `succ == []` assertion). The final forward-window leg
+        is the over-fix guard — it passes before and after, and exists so a
+        pre-check that refuses EVERY supersede reds this test rather than
+        shipping."""
+        old_pid = _seed_inverted_window_predecessor()
+        r = _inverted_window_commit(client)
+        assert r.status_code == 422, r.text
+        detail = r.json()["detail"]
+        assert detail["code"] == "supersede_window_inverted"
+        # actionable: the conflicting ids AND the two window bounds it refuses
+        assert detail["superseded"] == old_pid
+        assert detail["supersedes_by"] == point_content_id(_REVISING_CONTENT)
+        assert detail["successor_validFrom"] == _REVISING_WHEN
+        assert detail["predecessor_validFrom"] == _PREDECESSOR_VALID_FROM
+        assert "inverted window" in detail["errors"][0]
+        # the retry-advising 500 detail must NOT ride this response (a
+        # same-payload retry re-raises identically)
+        assert "retry" not in json.dumps(detail).lower()
+
+        g = _team_sdk()._get_proj().g
+        # NO partial write: the successor was never created (the orphan)
+        succ = g.query(
+            "MATCH (p:Point) WHERE p.content = $c RETURN p.id",
+            params={"c": _REVISING_CONTENT}).result_set
+        assert succ == [], f"orphan successor minted before the refusal: {succ}"
+        # NO partial write: the predecessor was not superseded or stamped
+        old = g.query(
+            "MATCH (p:Point {id:$id}) RETURN p.status, p.validTo",
+            params={"id": old_pid}).result_set
+        assert old and old[0][0] == "live", f"predecessor mutated: {old}"
+        assert old[0][1] is None, f"predecessor validTo stamped: {old}"
+
+        # Over-fix guard: a `when` ON/AFTER the predecessor's `validFrom` is a
+        # legal window and must still commit (the check refuses the inversion,
+        # not supersession).
+        fwd = _commit(client, _raw_payload(1, points=[_point(
+            0, content=_REVISING_CONTENT, when="2026-09-01T00:00:00+00:00")]))
+        assert fwd.status_code == 200, fwd.text
+        after = g.query("MATCH (p:Point {id:$id}) RETURN p.status",
+                        params={"id": old_pid}).result_set
+        assert after and after[0][0] == "superseded", \
+            "the forward window did not take the supersede branch"
+
+    def test_refusal_escaping_the_precheck_is_still_a_422(self, client,
+                                                          monkeypatch):
+        """(A) alone: the boundary of last resort. With the pre-write check
+        disabled the #4021 refusal still reaches `supersede_point` after the
+        successor is minted (a race/uncatalogued path) — it must map to the
+        same 422, never the retry-advising 500.
+
+        Fails without the fix: the status is 500, not 422."""
+        import tortoise.hosted_api as ha_mod
+        monkeypatch.setattr(ha_mod, "_prevalidate_supersede_window",
+                            lambda sdk, pr, *, now: None)
+        _seed_inverted_window_predecessor()
+        r = _inverted_window_commit(client)
+        assert r.status_code == 422, r.text
+        detail = r.json()["detail"]
+        assert detail["code"] == "supersede_window_inverted"
+        assert detail["superseded"] == _PREDECESSOR_ID
+        assert "retry" not in json.dumps(detail).lower()
+
+    def test_same_commit_dedup_sibling_is_never_a_false_422(self, client):
+        """#7000 review P2 — a VALID commit must NOT be refused because the
+        pre-check resolved the successor at T0 and could not see the
+        same-commit sibling `create_point` dedups onto.
+
+        Deterministic repro (no timing race): the predecessor's window starts
+        in the FUTURE (`validFrom = now + 30d`); payload point A is `new` with
+        content C and `when = now + 90d`; payload point B carries the
+        predecessor id with the SAME content C and NO `when` (→ reconcile
+        action `supersede`).
+
+        On the write path A is minted first, then B re-keys onto A (same
+        content+kind) and `supersede_point` reads A's stored `validFrom`
+        (`now + 90d` ≥ the predecessor's `now + 30d`) → the window is legal.
+        A T0 pre-check cannot see A, so it measured the successor's fallback
+        start as the hosted `now` (< `now + 30d`) and refused a commit the
+        writer accepts.
+
+        Fails before the fix: `assert 422 == 200` (the refusal body names the
+        hosted `now`, not A's window start)."""
+        from datetime import UTC, datetime, timedelta
+        _now = datetime.now(UTC)
+        pred_vf = (_now + timedelta(days=30)).isoformat()
+        sibling_when = (_now + timedelta(days=90)).isoformat()
+        content = "the 5K claim, restated once"
+        old_pid = _PREDECESSOR_ID
+        _team_sdk()._get_proj().g.query(
+            "MERGE (p:Point {id:$id}) SET p.pointKind='statement', "
+            "    p.content=$c, p.is_operator=false, p.status='live', "
+            "    p.content_hash='seed-dedup', p.validFrom=$vf",
+            params={"id": old_pid, "c": _SUPERSEDED_CONTENT, "vf": pred_vf})
+
+        raw = _raw_payload(0, points=[
+            # A: NEW, content C, a future window start that LEGALLY follows the
+            # predecessor's. Deliberately id 7 — NOT the predecessor id.
+            _point(7, content=content, when=sibling_when),
+            # B: the predecessor id + the SAME content → supersede, whose
+            # successor (content C) already exists by the time B writes.
+            _point(8, id=old_pid, content=content),
+        ])
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+
+        g = _team_sdk()._get_proj().g
+        # the predecessor IS superseded, and its window ended at A's start
+        old = g.query(
+            "MATCH (p:Point {id:$id}) RETURN p.status, p.validTo",
+            params={"id": old_pid}).result_set
+        assert old and old[0][0] == "superseded", f"not superseded: {old}"
+        assert old[0][1] == sibling_when, \
+            f"validTo {old[0][1]!r} != successor window start {sibling_when!r}"
+        # exactly ONE node carries the shared content — B re-keyed onto A
+        # (a second node would mean the dedup path never folded the sibling)
+        dup = g.query(
+            "MATCH (p:Point) WHERE p.content = $c RETURN p.id",
+            params={"c": content}).result_set
+        assert len(dup) == 1, f"expected one deduped successor, got {dup}"
+
+
 class Test6bEntitySupersessionGuards:
     """#2193 — the hosted §6b entity-supersession GUARD SET pinned through
     POST /v1/sessions/commit (assert graph outcomes + the ObjectSuperseded

@@ -338,3 +338,45 @@ class EmbedderUnavailableError(RuntimeError):
             f"(uv sync --extra embeddings) or unset the variable to allow the "
             f"documented keyword-only degrade (#4861)."
         )
+
+
+class UnsupportedCypherOperatorError(ValueError):
+    """#3595 — a Cypher query used an operator FalkorDB does not implement.
+
+    FalkorDB has no ``=~`` regex-match operator, and it does not error: it
+    prints ``FalkorDB does not currently support =~`` *in place of results*,
+    so the surrounding query returns an **empty result set** — a confident
+    false negative that is indistinguishable from "no matches". Two agents in
+    one session read exactly that: an enumeration for legacy ``obj-<26hex>``
+    ids returned 0 across every graph, where the supported ``STARTS WITH``
+    found 5 nodes in 2 graphs.
+
+    Raised by the guarded-handle seam (``tortoise.cypher_guard``) BEFORE the
+    statement is sent, so a caller cannot mistake an unsupported operator for
+    an empty answer.
+    Subclasses ``ValueError``: an unsupported operator is a caller-side
+    predicate bug, and the historical ``ValueError`` for invalid input keeps
+    working.
+
+    ``operator`` is the offending token (currently always ``"=~"``); the
+    message names the supported alternatives.
+
+    ``cypher`` is retained as an ATTRIBUTE for a caller that wants it, but is
+    deliberately NOT interpolated into the message: this exception propagates
+    through `mcp_server`'s ``_SafeError(_scrub_error(str(e)))`` to the tenant, and
+    ``_scrub_error`` strips credentials and host:port but nothing else — so a
+    query in the message would reach a tenant verbatim. That is exactly what
+    `security.redact_error`'s contract forbids ("Never includes full Cypher,
+    query text, or tracebacks … so tenants never see DB/query internals").
+    """
+
+    def __init__(self, operator: str, cypher: str = ""):
+        self.operator = operator
+        self.cypher = cypher
+        super().__init__(
+            f"FalkorDB does not support the Cypher {operator!r} regex-match "
+            f"operator, and it fails SILENTLY — the query returns an EMPTY "
+            f"result set indistinguishable from 'no matches' (#3595). "
+            f"Use a supported operator instead: STARTS WITH / ENDS WITH / "
+            f"CONTAINS."
+        )

@@ -871,6 +871,225 @@ def test_integrity_problems_agrees_with_the_integrity_cli(
     assert cs.main() == 1
     assert any("duration-imbalanced" in p
                for p in ci_timing.integrity_problems(skewed))
+    # #6145: the duration skew above trips several checks at once, so a bare
+    # "non-empty" assertion cannot see a MISSING term. Pin the headroom term by
+    # name — the 90000s skew clamps a shard to the ceiling (1500 min -> 55m =
+    # 0.04x). The list is hand-maintained against `--integrity`, so an omission
+    # here would let the refresh WRITE a manifest the required
+    # `manifest-integrity` check immediately reds.
+    assert any("its emitted budget retains" in p
+               for p in ci_timing.integrity_problems(skewed)), (
+        "the refresh's pre-write gate must compose the watchdog-headroom check "
+        "(#6145) — otherwise the refresh writes what `--integrity` rejects")
+
+
+def test_integrity_problems_mirrors_the_spot_checked_validators() -> None:
+    """W37/#5373 MUTATION PROOF: the refresh's gate must surface the same REAL
+    violations as the gate of record.
+
+    `refresh_durations` gates on :func:`integrity_problems`, so a validator
+    present in `ci_selection.py --integrity` and missing here lets the weekly
+    durations writer persist a manifest the gate of record rejects. This test
+    builds a real violation for the two validators whose violation is cheap to
+    construct in isolation — a `carve_shards` explicit null (W37) and a
+    same-surface duplicate (#5373, a GATE FAILURE under the manifest's
+    `merge=union`) — each by MUTATION of the real manifest, so the pin does not
+    depend on a literal value and still fires if `carve_shards` is later rolled
+    back or a surface is renamed. It is NOT a per-validator sweep of the whole
+    composition: the composition-parity test below covers the remaining
+    validators, requiring each one's problems to be surfaced on BOTH entry
+    points, rather than building a real violation for each.
+    """
+    import ci_selection as cs
+
+    real = cs.MANIFEST.read_text()
+
+    # `carve_shard_issues`: an explicit null (absence is legitimate; null is a typo).
+    broken = yaml.safe_load(real)
+    broken["carve_shards"] = None
+    carve_case = (broken, "carve_shards is explicitly null")
+
+    # `duplicate_entries`: a same-surface repeat — what `merge=union` emits when
+    # two lanes append the same registration (#5373).
+    dup = yaml.safe_load(real)
+    surface = next(iter(dup["surfaces"]))
+    entry = dup["surfaces"][surface][0]
+    dup["surfaces"][surface] = [*list(dup["surfaces"][surface]), entry]
+    duplicate_case = (dup, f"{surface}: {entry}")
+
+    for name, (broken_manifest, expected) in {
+        "carve_shard_issues": carve_case,
+        "duplicate_entries": duplicate_case,
+    }.items():
+        # The gate of record refuses it …
+        assert getattr(cs, name)(broken_manifest), (
+            f"the {name} validator no longer rejects the mutation this pin builds")
+        # … and the refresh's gate must agree, naming the same problem rather than
+        # some unrelated one the re-serialization happened to introduce.
+        problems = ci_timing.integrity_problems(
+            yaml.safe_dump(broken_manifest, sort_keys=False))
+        assert any(expected in p for p in problems), (
+            f"integrity_problems does not surface the {name} validator the "
+            f"gate of record runs — the weekly refresh could write a manifest "
+            f"--integrity refuses: {problems}")
+
+
+def test_integrity_problems_mirrors_the_listed_integrity_composition(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The parity contract `integrity_problems`' docstring claims, over the
+    validators listed below.
+
+    The per-validator violation test above can only cover validators whose
+    violation is cheap to build. `tools/ci_timing.py::integrity_problems`
+    claims a stronger property — "Composed by CALLING the same functions as the
+    `--integrity` entry point — never a re-derived subset, so the two cannot
+    disagree about what a valid manifest is" — and the SAME docstring then warns
+    "⛔ The list is HAND-MAINTAINED, so it can drift out of that parity
+    silently". This test pins that claim over the validators listed below: wrap
+    each with a recorder that appends a unique sentinel to the real result, run
+    BOTH compositions over the same manifest, and require the two to call the
+    SAME functions and to surface the SAME sentinels.
+
+    ⛔ What is pinned is the SET, not the ORDER — see the assertion below for why
+    the order is not a contract in the post-#5050 shape.
+
+    ⛔ The pin is BOUNDED BY the hand-maintained `validators` tuple below — it
+    equals both compositions today and must be extended when a validator is
+    added. `validators` is an ALLOW-LIST, not a derivation of either
+    composition: a validator NOT listed there is never wrapped, so it never
+    reaches `calls`, and its presence in one composition and absence from the
+    other is invisible here. Only a LISTED validator's removal or reordering
+    reds. `set(cli_calls) == set(validators)` additionally reds if a listed
+    validator stops being called by the gate of record at all, so the spy
+    cannot pass by finding nothing.
+    """
+    import ci_manifest
+    import ci_selection as cs
+
+    # Two module IDENTITIES, one file. `ci_manifest` resolves `ci_selection`
+    # through its own accessor, which prefers the `tools.ci_selection` module
+    # object over the `ci_selection` this test imports (the accessor checks
+    # `sys.modules` for `"tools.ci_selection"` before `"ci_selection"`). The
+    # SHARED composition reaches the delegated validators through whichever copy
+    # that accessor returns, so patching only `cs` makes the spy miss all five
+    # when an earlier test in the session has caused `tools.ci_selection` to be
+    # imported — and the miss is SESSION-DEPENDENT, which is how it hid: this test
+    # passed when the file ran alone and lost five validators when it ran beside
+    # tests/test_ci_selection.py. Patch every identity the composition can reach.
+    spy_targets = [cs]
+    _delegated = ci_manifest._ci_selection()
+    if _delegated is not cs:
+        spy_targets.append(_delegated)
+
+    # ⛔ HAND-MAINTAINED ALLOW-LIST, NOT A DERIVATION — see the docstring. A
+    # validator absent from this tuple is never wrapped, so a composition that
+    # gains it on ONE side alone is invisible to the parity assertions below.
+    # The tuple's ORDER is NOT asserted (the pins below are order-insensitive —
+    # see the assertion for why order is not a contract after #5050); keep it
+    # stable and extend it whenever a validator is added to either composition.
+    # Deriving the set would mean
+    # introspecting an inline `main()` block or guessing which list-returning
+    # helpers are validators; a wrong guess would inject sentinels into a
+    # filename list and corrupt the run.
+    validators = (
+        "integrity",
+        "slow_file_issues",
+        "fast_shard_issues",
+        "carve_shard_issues",
+        "duration_issues",
+        "leg_coverage_issues",
+        "watchdog_headroom_issues",
+        "duration_coverage_issues",
+        "duplicate_entries",
+        "workflow_matrix_issues",
+        "workflow_halves_issues",
+    )
+    sentinel = "SENTINEL<{}>"
+    calls: list[str] = []
+    for name in validators:
+        for target in spy_targets:
+            real_validator = getattr(target, name)
+
+            def recorder(*args, _name=name, _real=real_validator, **kwargs):
+                calls.append(_name)
+                return [sentinel.format(_name), *_real(*args, **kwargs)]
+
+            monkeypatch.setattr(target, name, recorder)
+
+    real = cs.MANIFEST.read_text()
+
+    # The gate of record: run `python3 tools/ci_selection.py --integrity`.
+    monkeypatch.setattr(sys, "argv", ["ci_selection.py", "--integrity"])
+    cli_rc = cs.main()
+    cli_out = capsys.readouterr().out
+    assert cli_rc == 1, "the injected sentinel problems must make --integrity red"
+    cli_calls = list(calls)
+    calls.clear()
+
+    # … and the refresh's gate over the same manifest.
+    problems = ci_timing.integrity_problems(real)
+    mirror_calls = list(calls)
+
+    assert set(cli_calls) == set(validators), (
+        f"the gate of record no longer calls every validator this parity test "
+        f"guards: missing {sorted(set(validators) - set(cli_calls))}, "
+        f"extra {sorted(set(cli_calls) - set(validators))} — update the list "
+        f"if a validator was deliberately removed")
+    # ORDER is deliberately NOT pinned across the whole list, and this is the
+    # post-#5050 shape rather than a relaxation for convenience. Five of the
+    # listed validators (`fast_shard_issues`, `duration_issues`,
+    # `leg_coverage_issues`, `duration_coverage_issues`, `duplicate_entries`)
+    # are evaluated from the SHARED `ci_manifest` composition: `--integrity`
+    # reaches it inside `_manifest_contract_issues` (after `integrity` and
+    # `slow_file_issues`), while `integrity_problems` reaches it up front,
+    # because the stamp promotion that `ci_manifest.check`'s `red` feeds must be
+    # computed FIRST (it also decides which UNKNOWN reasons stay non-gating).
+    # Every listed validator is a pure list-builder whose result is concatenated,
+    # so which side of the composition evaluates it cannot change the SET of
+    # problems either entry point reports — and the set is what guards the
+    # property this test exists for: the weekly refresh must not be able to
+    # persist a manifest `--integrity` rejects. The sentinel assertions below
+    # still red if either side fails to surface ANY listed validator's problems.
+    assert sorted(mirror_calls) == sorted(cli_calls), (
+        f"integrity_problems and --integrity called DIFFERENT validators "
+        f"(integrity_problems: {mirror_calls}; --integrity: {cli_calls}) — every "
+        f"listed validator must be called by BOTH, or the weekly refresh can "
+        f"persist a manifest --integrity rejects")
+    missing_cli = [n for n in validators if sentinel.format(n) not in cli_out]
+    assert not missing_cli, (
+        f"--integrity did not report these validators' problems: {missing_cli}")
+    missing_mirror = [n for n in validators if sentinel.format(n) not in problems]
+    assert not missing_mirror, (
+        f"integrity_problems did not surface these validators' problems: "
+        f"{missing_mirror} — the weekly refresh could write a manifest "
+        f"--integrity refuses")
+
+
+
+def test_integrity_problems_promotes_a_present_but_unparseable_stamp() -> None:
+    """#6243 review cycle 3 (L3): the refresh gate composes the SAME promotion
+    as `--integrity`, so the claimed parity is real.
+
+    A refreshed manifest is NOT guaranteed a parseable stamp:
+    `render_refreshed_manifest` writes the caller's `captured_at` verbatim via
+    `_set_captured_at` — it OVERWRITES any stamp the input carried rather than
+    preserving it, so nothing validates it — the `CI_TIMING_NOW` override can
+    set it to anything, and this file's own tests render with `"T"`. Gating on
+    `check`'s `red` alone therefore accepted exactly the manifests the gate
+    rejects. A present-but-unparseable stamp must be refused here too, while a
+    GENUINELY ABSENT one stays the one soft class.
+    """
+    before = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+    rendered, _ = ci_timing.render_refreshed_manifest(
+        before, {"test_bridge_table.py": 12.0}, "T")
+    # The DURATION subset is blind to it — which is why the full gate is what
+    # must catch it, and why this test exists rather than trusting the subset.
+    assert ci_timing.validate_refreshed_manifest(rendered) == []
+    problems = ci_timing.integrity_problems(rendered)
+    assert any("not a parseable timestamp" in p for p in problems), problems
+    # Absence is still the notice-only class: no stamp key, no problem.
+    assert ci_timing.integrity_problems(before) == []
 
 
 def test_ci_timing_docstring_no_longer_claims_it_never_gates_ci() -> None:

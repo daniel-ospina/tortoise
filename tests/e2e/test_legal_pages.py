@@ -756,7 +756,8 @@ def test_company_host_legal_pages_redirect_to_tortoise(page: Page) -> None:
     #4054.
 
     TORTOISE_ONLY (docs, FAQ, security, self-hosted, the 5 legal pages,
-    aviso-privacidad, signin) is canonical on tortoise.premiselabs.co.
+    aviso-privacidad, signin, design-partners-intro) is canonical on
+    tortoise.premiselabs.co.
     APP_ONLY (auth, signup, welcome, invite-accept) moved to the APP origin —
     the BFF and the three pages it serves live in the `tortoise-dashboard`
     project — so those 301 to app.premiselabs.co, NOT to the tortoise host.
@@ -772,7 +773,8 @@ def test_company_host_legal_pages_redirect_to_tortoise(page: Page) -> None:
     """
     prod_company = urlsplit(BASE_URL).hostname == "premiselabs.co"
     tortoise_only = ("/docs", "/faq", "/security", "/self-hosted", "/privacy",
-                     "/tos", "/license", "/dpa", "/aviso-privacidad", "/signin")
+                     "/tos", "/license", "/dpa", "/aviso-privacidad", "/signin",
+                     "/design-partners-intro")
     app_only = ("/auth", "/signup", "/welcome", "/invite-accept")
 
     for path in tortoise_only + app_only:
