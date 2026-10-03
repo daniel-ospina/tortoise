@@ -85,13 +85,22 @@ EXIT CONTRACT
 """
 from __future__ import annotations
 
+import sys
+
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/engine_probe.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/engine_probe.py`"
+    )
+
 import argparse
 import json
 import math
 import os
 import socket
 import subprocess
-import sys
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -134,6 +143,35 @@ ENGINE_MEASURABLE = (ENGINE_OK, ENGINE_ABSENT, ENGINE_DAEMON_DOWN)
 UNMEASURABLE = "UNMEASURABLE"
 
 
+def _resolve_within_bound(host: str, port: int, timeout: float):
+    """`getaddrinfo` inside the bound, or None on timeout.
+
+    `socket.create_connection` resolves the name with NO timeout before any
+    connect bound applies, so a slow or hanging resolver blew straight through
+    `--timeout` — measured 5.05s elapsed for a 0.5s bound, 10x over — and
+    "EVERY PROBE IS BOUNDED" is this tool's central promise. A resolver that
+    hangs IS the wedged-substrate case the tool exists for, so it is bounded
+    here rather than documented away. The worker is a daemon thread: a resolver
+    call cannot be interrupted, and the point is to stop WAITING for it.
+    """
+    done = []
+
+    def resolve():
+        try:
+            done.append(socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP))
+        except OSError as exc:
+            done.append(exc)
+
+    worker = threading.Thread(target=resolve, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if not done:
+        return None
+    if isinstance(done[0], OSError):
+        raise done[0]
+    return done[0]
+
+
 def probe_graph(host: str, port: int, timeout: float) -> dict:
     """Bounded TCP connect + Redis PING. Never raises; always returns a dict.
 
@@ -154,7 +192,11 @@ def probe_graph(host: str, port: int, timeout: float) -> dict:
     started = time.monotonic()
     sock = None
     try:
-        sock = socket.create_connection((host, port), timeout=timeout)
+        addrinfo = _resolve_within_bound(host, port, timeout)
+        if addrinfo is None:
+            return {"ok": False, "reply": None, "error": "resolve-timeout",
+                    "elapsed_s": round(time.monotonic() - started, 3)}
+        sock = socket.create_connection(addrinfo[0][4], timeout=timeout)
         sock.sendall(b"PING\r\n")
         reply = sock.recv(64)
         elapsed = time.monotonic() - started
@@ -331,25 +373,32 @@ def main(argv: Optional[list] = None) -> int:
     # default to None so "not given" is distinguishable from "given the default".
     try:
         target = graph_target_from_env()
-    except ValueError as exc:
-        # Set but unresolvable. Probing DEFAULT_HOST instead is how a typo'd port
-        # or a TLS URI came back exit 0 against a graph the tool never reached.
-        return _refuse(args, "unresolvable-uri", exc,
-                       "TORTOISE_DB_URI cannot be resolved, so refusing to probe "
-                       "the default endpoint instead.")
+    except (ValueError, ImportError) as exc:
+        # Set but unresolvable (or the resolver itself is not importable).
+        # Probing DEFAULT_HOST instead is how a typo'd port or a TLS URI came
+        # back exit 0 against a graph the tool never reached — but a stale URI
+        # must NOT veto an endpoint the caller named explicitly.
+        if args.host is not None and args.port is not None:
+            target = None
+        else:
+            return _refuse(args, "unresolvable-uri", exc,
+                           "TORTOISE_DB_URI cannot be resolved, so refusing to "
+                           "probe the default endpoint instead. Pass --host AND "
+                           "--port to probe an endpoint explicitly.")
 
-    using_uri = target is not None and args.host is None and args.port is None
-    if using_uri and target["ssl"]:
-        # A plaintext PING cannot speak TLS. Answering GRAPH_DOWN would blame a
-        # graph this tool never reached; UNMEASURABLE is the honest verdict. An
-        # explicit --host/--port means the caller named a plaintext endpoint, so
-        # the refusal must not override them.
+    # The refusal is about a URI-supplied endpoint that cannot be spoken to. A
+    # caller asks for a plaintext endpoint only when it names BOTH fields: with
+    # one flag the other still comes from the TLS URI, and probing that mixture
+    # produced a confident GRAPH_DOWN for an endpoint the tool says it cannot
+    # address.
+    flags_override = args.host is not None and args.port is not None
+    if target is not None and target["ssl"] and not flags_override:
         return _refuse(args, "tls-not-probed",
                        f"TORTOISE_DB_URI names a rediss:// (TLS) target "
                        f"({target['host']}:{target['port']})",
                        "This probe speaks plaintext only, so it cannot tell you "
-                       "whether that graph is up. Pass --host/--port to probe a "
-                       "plaintext endpoint explicitly.",
+                       "whether that graph is up. Pass --host AND --port to "
+                       "probe a plaintext endpoint explicitly.",
                        target["host"], target["port"])
 
     env_host = target["host"] if target else DEFAULT_HOST
@@ -379,23 +428,26 @@ def _refuse(args, error: str, exc, message: str,
     """
     print(f"engine_probe: {exc}; {message}", file=sys.stderr)
     _report(args, UNMEASURABLE,
-            {"ok": False, "reply": None, "error": error, "elapsed_s": 0.0,
-             "probed": False},
-            host or "(not probed)", port if port is not None else 0, None)
+            {"ok": False, "reply": None, "error": error, "elapsed_s": 0.0},
+            host or "(not probed)", port if port is not None else 0, None,
+            probed=False)
     return 3
 
 
 def _report(args, verdict: str, graph: dict, host: str, port: int,
-            engine: Optional[dict]) -> None:
+            engine: Optional[dict], probed: bool = True) -> None:
     """Print the human summary or the JSON for a probe result.
 
-    Every exit path reports through here — including the refusals in `main` —
-    so `--json` cannot emit nothing on one path while the others emit JSON.
+    Every exit path AFTER argument validation reports through here — including
+    the refusals in `main` — so `--json` cannot emit nothing on one path while
+    the others emit JSON. (A rejected `--timeout` is a usage error and returns
+    before this.) `probed` says whether an endpoint was actually contacted, so
+    a consumer can tell "we looked and it was down" from "we never looked".
     """
     sock = docker_socket()
     result = {
         "verdict": verdict,
-        "graph": {"host": host, "port": port, **graph},
+        "graph": {"host": host, "port": port, "probed": probed, **graph},
         "engine": engine,
         "docker_socket": str(sock) if sock else None,
         "timeout_s": args.timeout,
@@ -454,9 +506,9 @@ def _report(args, verdict: str, graph: dict, host: str, port: int,
             print("  The engine answered, so the graph port itself is "
                   "unreachable. Check the\n  graph container and the "
                   "canonical instance (127.0.0.1, never `localhost` — #6666).")
-    if host not in ("127.0.0.1", "localhost") and verdict != GRAPH_UP:
-        print("  NOTE: this probed a non-loopback host from TORTOISE_DB_URI; "
-              "the #6666 warning\n  about `localhost` does not apply.")
+    if probed and host not in ("127.0.0.1", "localhost") and verdict != GRAPH_UP:
+        print("  NOTE: this probed a non-loopback host; the #6666 warning about "
+              "`localhost` does not apply.")
 
 
 if __name__ == "__main__":

@@ -20,8 +20,6 @@ import sys
 import threading
 from pathlib import Path
 
-import pytest
-
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "tools"))
 
@@ -87,9 +85,8 @@ def test_an_unprobed_or_malformed_engine_is_not_read_as_healthy():
     unknown status through to a confident verdict — the exact "an unmeasurable
     situation becomes a confident wrong answer" shape this tool removes. The
     allow-list treats everything that is not ENGINE_OK/ENGINE_ABSENT as wedged.
-    (b) Reachable: a probe that grows a new status (ENGINE_UNPROBED exists in
-    this module and is consumed by nothing), or an engine dict that lost its
-    status key.
+    (b) Reachable: a probe that grows a new status, or an engine dict that lost
+    its status key.
     """
     dead = {"ok": False, "error": "timeout", "elapsed_s": 3.0}
     for bad in ({}, {"detail": "no status key"},
@@ -595,11 +592,6 @@ def test_json_is_emitted_on_every_exit_path(monkeypatch, capsys):
     assert rc == 3, rc
     assert _json.loads(out)["verdict"] == e.UNMEASURABLE, out
 
-    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
-    rc = e.main(["--json", "--no-docker", "--port", "1", "--timeout", "1"])
-    payload = _json.loads(capsys.readouterr().out)
-    assert payload["verdict"] == e.GRAPH_DOWN, payload
-    assert payload["graph"]["port"] == 1
 
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     rc = e.main(["--json", "--no-docker", "--port", "1", "--timeout", "1"])
@@ -703,6 +695,95 @@ def test_an_unmeasurable_probe_exits_three_not_two(monkeypatch, capsys):
     rc = e.main(["--no-docker", "--port", "1", "--timeout", "1"])
     assert rc == 3, rc
     assert "UNMEASURABLE" in capsys.readouterr().out
+
+
+def test_a_single_flag_does_not_bypass_the_tls_refusal(monkeypatch):
+    """(a) FAILS if the refusal is skipped when only ONE field is overridden. A
+    single flag leaves the OTHER field coming from the TLS URI, so the probe
+    speaks plaintext to a TLS endpoint's neighbour and reports a confident
+    GRAPH_DOWN for the one thing the tool says it cannot address — measured: a
+    local listener answering with TLS handshake bytes gave rc=2 / GRAPH_DOWN.
+    (b) Reachable: `--port <same>` with a rediss URI.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "rediss://g.example.com:6380/t")
+    called = []
+    monkeypatch.setattr(e, "probe_graph",
+                        lambda *a, **k: called.append(a) or {"ok": True})
+    assert e.main(["--no-docker", "--port", "6380", "--timeout", "1"]) == 3
+    assert e.main(["--no-docker", "--host", "g.example.com", "--timeout", "1"]) == 3
+    assert called == [], "a TLS endpoint must not be probed with one flag given"
+
+
+def test_an_unresolvable_uri_still_yields_to_both_flags(monkeypatch):
+    """(a) FAILS if a stale/typo'd URI vetoes an endpoint the caller named. The
+    contract is field-by-field override, and the TLS path already honours it, so
+    an unresolvable URI refusing a fully-specified probe is inconsistent.
+    (b) Reachable: a typo'd port left in TORTOISE_DB_URI while --host/--port name
+    the real endpoint.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@127.0.0.1:16x00/t")
+    seen = {}
+    monkeypatch.setattr(e, "probe_graph",
+                        lambda h, p, t: seen.update(host=h, port=p) or {"ok": True})
+    rc = e.main(["--no-docker", "--host", "10.0.0.9", "--port", "2222",
+                 "--timeout", "1"])
+    assert rc == 0, rc
+    assert seen == {"host": "10.0.0.9", "port": 2222}, seen
+
+
+def test_a_hanging_resolver_is_bounded(monkeypatch):
+    """(a) FAILS if name resolution runs outside `--timeout`. `create_connection`
+    calls `getaddrinfo` with no bound, so a slow resolver blew through the
+    promise the module makes in capitals — measured 5.05s elapsed for a 0.5s
+    bound, 10x over. A hanging resolver IS the wedged-substrate case the tool
+    exists for, so it is bounded rather than documented away.
+    (b) Reachable: a slow/hanging DNS server, or an unresolvable host on a
+    blackholed network.
+    """
+    import time as _t
+
+    def slow(*_a, **_k):
+        _t.sleep(5)
+        return []
+
+    monkeypatch.setattr(e.socket, "getaddrinfo", slow)
+    started = _t.monotonic()
+    result = e.probe_graph("slow.example.com", 16379, timeout=0.5)
+    elapsed = _t.monotonic() - started
+    assert result["ok"] is False, result
+    assert result["error"] == "resolve-timeout", result
+    assert elapsed < 2.0, f"resolution was not bounded: {elapsed:.2f}s"
+
+
+def test_json_is_uniform_across_probe_and_refusal(monkeypatch, capsys):
+    """(a) FAILS if the `probed` key exists only on refusals. A consumer doing
+    `payload["graph"]["probed"]` then works on a refusal and KeyErrors on
+    success, so the machine-readable mode is not actually uniform.
+    (b) Reachable: both paths.
+    """
+    import json as _json
+    monkeypatch.setattr(e, "probe_graph", lambda *a, **k: {"ok": True})
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    e.main(["--json", "--no-docker", "--port", "1", "--timeout", "1"])
+    assert _json.loads(capsys.readouterr().out)["graph"]["probed"] is True
+
+    monkeypatch.setenv("TORTOISE_DB_URI", "rediss://g.example.com:6380/t")
+    e.main(["--json", "--no-docker", "--timeout", "1"])
+    refused = _json.loads(capsys.readouterr().out)
+    assert refused["graph"]["probed"] is False, refused
+
+
+def test_the_non_loopback_note_is_suppressed_when_nothing_was_probed(monkeypatch,
+                                                                    capsys):
+    """(a) FAILS if the trailing NOTE claims "this probed a non-loopback host" on
+    a refusal, where nothing was probed at all — the same "assert a state the
+    probe did not measure" shape the rest of this review set is about.
+    (b) Reachable: the TLS refusal, whose reported host is the URI's.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "rediss://g.example.com:6380/t")
+    e.main(["--no-docker", "--timeout", "1"])
+    out = capsys.readouterr().out
+    assert "NOTE: this probed" not in out, out
 
 
 def test_redis_port_comes_from_the_uri_when_present(monkeypatch):
