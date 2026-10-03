@@ -7663,6 +7663,8 @@ class FalkorProjection(
         Batched: the read is bounded by ``RESULTSET_SIZE``, so loop until no
         array rows remain rather than assuming one pass sees them all.
         """
+        created = False
+        dropped = False
         try:
             for _ in range(200):  # bounded; 200 × RESULTSET_SIZE rows
                 rows = self._array_search_keys_rows()
@@ -7695,16 +7697,141 @@ class FalkorProjection(
                               "db.idx.fulltext.dropIndex"):
                 try:
                     self.g.query(f"CALL {drop_proc}('Point')")
+                    dropped = True
                     break
                 except Exception:
                     continue
-            self.g.query(
-                "CALL db.idx.fulltext.createNodeIndex("
-                "'Point', 'content', 'search_keys')"
-            )
+            # #H05: the recreate used the historical procedure only, which
+            # FalkorDB 6.0.0 REJECTS -- so this migration could never complete
+            # on that engine, and the failure was swallowed. The helper tries
+            # the Cypher DDL first.
+            self._create_fulltext_index("Point", ["content", "search_keys"])
+            created = True
             self.g.query("MERGE (m:Meta {key:'point_fts_v2'}) SET m.v = true")
-        except Exception:
-            pass
+        except Exception as e:
+            # #H05: was a bare `pass`. How LOUDLY to report depends on which
+            # step got through, which is what _classify_fts_migration_failure
+            # decides; never fatal (an engine that cannot hold FTS must still
+            # open).
+            _level, _msg = self._classify_fts_migration_failure(
+                "Point", created, dropped, e
+            )
+            logger.log(_level, _msg)
+
+    def _create_fulltext_index(self, label: str, fields: list[str]) -> None:
+        """Create a FULLTEXT index over ``fields`` on ``label``.
+
+        Raises the engine's error when creation fails — including the
+        ``already indexed`` case, which the caller's one-time migration
+        branches match on, so its text is re-raised unchanged.
+
+        The FORM is engine-version-dependent (measured 2026-09-30 on the
+        live images):
+
+          * ``CREATE FULLTEXT INDEX FOR (n:Label) ON (n.f1, n.f2)`` — the
+            Cypher-native DDL — is accepted by 4.16.7 (module ver 41607),
+            4.20.4 (42004), 4.20.6 (42006) and 6.0.0 (60000); the resulting
+            index answers ``db.idx.fulltext.queryNodes`` on EVERY field
+            (verified per field, not just the last).
+          * the historical multi-field procedure is REJECTED by 6.0.0 —
+            ``Received 3 arguments to procedure
+            'db.idx.fulltext.createNodeIndex', expected at most 1`` — which
+            is the shape ``falkordb-server:latest`` (what CI's service
+            resolved to) reports. Every call site using only the procedure
+            failed there and left the index silently absent (#H05).
+
+        So the DDL is tried first and the procedure is kept as the fallback
+        for engines that register the procedure but not the DDL. An engine
+        that registers NEITHER (embedded FalkorDBLite on some builds) ends
+        here with a RuntimeError carrying both failures, which the caller
+        surfaces loudly rather than swallowing.
+        """
+        fields_expr = ", ".join(f"n.{f}" for f in fields)
+        fields_sql = ", ".join(f"'{f}'" for f in fields)
+        forms = (
+            f"CREATE FULLTEXT INDEX FOR (n:{label}) ON ({fields_expr})",
+            f"CALL db.idx.fulltext.createNodeIndex('{label}', {fields_sql})",
+        )
+        errors: list[str] = []
+        for query in forms:
+            try:
+                self.g.query(query)
+                return
+            except Exception as e:
+                if "already" in str(e).lower():
+                    raise
+                errors.append(str(e))
+        raise RuntimeError(
+            f"no supported FULLTEXT index creation form for {label}{fields}: "
+            + "; ".join(errors)
+        )
+
+    @staticmethod
+    def _report_fulltext_index_failure(label: str, fields: list[str], exc: object) -> None:
+        """#H05: report a failed FULLTEXT index creation LOUDLY.
+
+        This used to be a ``WARNING`` while execution continued, so the index
+        was simply absent and full-text search on the label degraded with NO
+        signal at the point of failure — the only symptom arrived later, as a
+        missing index. Deliberately NOT fatal: an engine that cannot hold a
+        FULLTEXT index at all (embedded FalkorDBLite builds) must still open,
+        its retrieval covered by the sparse TF-IDF path.
+        """
+        import logging
+        logging.getLogger(__name__).error(
+            "Failed to create fulltext index on %s.%s: %s — full-text search "
+            "on this label is DEGRADED (index absent; queries degrade to "
+            "`index_missing`)",
+            label, fields, exc,
+        )
+
+    @staticmethod
+    def _classify_fts_migration_failure(
+        label: str, created: bool, dropped: bool, exc: object
+    ) -> tuple[int, str]:
+        """#H05: decide how LOUDLY to report a failed one-time FTS migration.
+
+        The migration is drop -> recreate -> persist-marker, and WHICH of
+        those steps got through decides what is actually true. Deriving the
+        message from the two recorded facts (rather than from the bare fact
+        that something raised) is what keeps it from asserting an absence
+        that does not hold:
+
+        ``created`` -- the intended index was (re)created, so a later failure
+        is only the one-time marker failing to persist. The index IS in
+        place and the next boot retries; reporting that at ERROR would train
+        readers to ignore the real thing.
+        ``dropped`` -- the legacy index was actually removed. Only then can
+        the label be left with NO full-text index, which is the degradation
+        that earns an ERROR.
+
+        A drop that reports success while the recreate still answers
+        "already" is a third outcome: an index EXISTS, just not the intended
+        multi-field form -- so absence is NOT asserted there either.
+        """
+        if created:
+            return logging.WARNING, (
+                f"fulltext index MIGRATION for {label} recreated the index but "
+                f"could not persist its one-time marker: {exc} -- the index IS "
+                f"in place; the marker is retried on the next boot"
+            )
+        if dropped and "already" in str(exc).lower():
+            return logging.WARNING, (
+                f"fulltext index MIGRATION for {label} dropped the legacy index "
+                f"and the recreate then reported the index already exists: {exc} "
+                f"-- an index IS present, but NOT the intended multi-field form"
+            )
+        if dropped:
+            return logging.ERROR, (
+                f"fulltext index MIGRATION for {label} DROPPED the legacy index "
+                f"and the recreate failed: {exc} -- {label} now has NO full-text "
+                f"index (searches degrade to `index_missing`). The migration "
+                f"marker was NOT set, so this retries on the next boot"
+            )
+        return logging.WARNING, (
+            f"fulltext index MIGRATION could not run for {label}, so the legacy "
+            f"content-only index REMAINS (its sparse path covers retrieval): {exc}"
+        )
 
     def _ensure_indexes(self) -> None:
         """Create indexes on frequently-filtered Point properties.
@@ -7768,7 +7895,6 @@ class FalkorProjection(
                 if "already indexed" in msg or "already exists" in msg:
                     pass  # expected — index exists from prior startup
                 else:
-                    import logging
                     logging.getLogger(__name__).error(
                         "Failed to create index on n.%s: %s", prop, e)
 
@@ -7825,7 +7951,6 @@ class FalkorProjection(
             if "already indexed" in msg or "already exists" in msg:
                 pass  # expected — index exists from prior startup
             else:
-                import logging
                 logging.getLogger(__name__).error(
                     "Failed to create index on :Point(lastDreamedAt): %s", e)
 
@@ -7894,7 +8019,6 @@ class FalkorProjection(
                     if "already indexed" in msg or "already exists" in msg:
                         pass
                     else:
-                        import logging
                         logging.getLogger(__name__).error(
                             "Failed to create index on %s.%s: %s", label, prop, e)
 
@@ -7911,7 +8035,6 @@ class FalkorProjection(
             if "already indexed" in msg or "already exists" in msg:
                 pass
             else:
-                import logging
                 logging.getLogger(__name__).error(
                     "Failed to create index on Session.actor_user_id: %s", e)
 
@@ -7930,7 +8053,6 @@ class FalkorProjection(
             if "already indexed" in msg or "already exists" in msg:
                 pass
             else:
-                import logging
                 logging.getLogger(__name__).error(
                     "Failed to create index on Session.id: %s", e)
 
@@ -7967,8 +8089,13 @@ class FalkorProjection(
                                   # deliberately NOT indexed: a second
                                   # vocabulary the FTS surface does not read.
                 try:
-                    fields_sql = ", ".join(f"'{f}'" for f in fields)
-                    self.g.query(f"CALL db.idx.fulltext.createNodeIndex('{label}', {fields_sql})")
+                    # #H05: the creation FORM is version-dependent -- the
+                    # historical multi-field procedure is rejected by FalkorDB
+                    # 6.0.0 (`expected at most 1`), so EVERY call here failed
+                    # on that engine and left the index absent. The helper tries
+                    # the Cypher DDL first and keeps the procedure as the
+                    # fallback (its docstring records the measured forms).
+                    self._create_fulltext_index(label, fields)
                     if label == "Point":
                         # R2 (#1541) D3: a FRESH DB created the two-field
                         # index directly — mark the migration done so a later
@@ -8042,27 +8169,48 @@ class FalkorProjection(
                             # FalkorDBLite embedded lacks dropIndex — leave
                             # subject-only there (name search still covered by
                             # the keyword fallback + vector strategies).
+                            created = False
+                            dropped = False
                             try:
                                 done = self.g.query(
                                     "MATCH (m:Meta {key:'event_fts_v2'}) RETURN 1"
                                 ).result_set
                                 if not done:
-                                    self.g.query("CALL db.idx.fulltext.dropIndex('Event')")
-                                    self.g.query("CALL db.idx.fulltext.createNodeIndex('Event', 'subject', 'name')")
+                                    # #H05: the drop procedure NAME varies by
+                                    # engine (db.idx.fulltext.drop on server
+                                    # builds, dropIndex on older ones) -- the
+                                    # single hardcoded name could never migrate
+                                    # on a build registering only the other.
+                                    for drop_proc in ("db.idx.fulltext.drop",
+                                                      "db.idx.fulltext.dropIndex"):
+                                        try:
+                                            self.g.query(
+                                                f"CALL {drop_proc}('Event')"
+                                            )
+                                            dropped = True
+                                            break
+                                        except Exception:
+                                            continue
+                                    self._create_fulltext_index(
+                                        "Event", ["subject", "name"]
+                                    )
+                                    created = True
                                     self.g.query(
                                         "MERGE (m:Meta {key:'event_fts_v2'}) SET m.v = true"
                                     )
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                # #H05: was a bare `pass` -- same pure level
+                                # decision as the Point branch.
+                                _level, _msg = self._classify_fts_migration_failure(
+                                    "Event", created, dropped, e
+                                )
+                                logger.log(_level, _msg)
                     else:
-                        import logging
-                        logging.getLogger(__name__).warning(
-                            "Failed to create fulltext index on %s.%s: %s", label, fields, e)
+                        self._report_fulltext_index_failure(label, fields, e)
 
             # ── Vector index (HNSW) — Docker/server FalkorDB only (#7764) ──
             self._ensure_vector_index_api()
         else:
-            import logging
             logging.getLogger(__name__).info(
                 "Skipping FTS and vector indexes: FalkorDB %s < 4.x",
                 '.'.join(map(str, _ver)))

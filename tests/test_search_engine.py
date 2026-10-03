@@ -558,8 +558,11 @@ class TestR2OrUnionAndSearchKeys:
             raw.query("CALL db.idx.fulltext.drop('Point')")
         except Exception:
             pass
-        # legacy state: single-field index + list-valued search_keys
-        raw.query("CALL db.idx.fulltext.createNodeIndex('Point', 'content')")
+        # legacy state: single-field index + list-valued search_keys.
+        # #H05: the Cypher-native DDL -- FalkorDB 6.0.0 rejects the historical
+        # multi-field procedure (`expected at most 1`), while the DDL is
+        # accepted by 4.16.7 / 4.20.x / 6.0.0 alike.
+        raw.query("CREATE FULLTEXT INDEX FOR (n:Point) ON (n.content)")
         raw.query(
             "CREATE (n:Point {id:'legacy-pb', "
             "content:'personal best 5K time is 27:12', "
