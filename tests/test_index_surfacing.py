@@ -268,7 +268,7 @@ def test_e2e6_server_mode_fts_text_disambiguation(tmp_path):
                 g.query(probe)
                 unsupported = None
                 break
-            except Exception as e:  # noqa: PERF203
+            except Exception as e:
                 if "already" in str(e).lower():
                     unsupported = None
                     break
