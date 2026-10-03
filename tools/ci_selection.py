@@ -123,6 +123,27 @@ DEFAULT_FAST_SHARDS = 2
 # 26 = a..z is therefore also the hard ceiling on S.
 MAX_FAST_SHARDS = 26
 
+# W37: the CARVE-OUT pool's shard count (`config/ci-surfaces.yml::carve_shards`).
+#
+# WHY IT EXISTS. `test-carve-out` was ONE unsharded job and WAS the CI critical
+# path until W37 sharded it: measured over 23 PR runs and 3 successful main runs
+# (2026-09-30), its work was min 16.0m / p50 16.9m against a median run wall of
+# 18.6m — 91% of the wall. Meanwhile the fast band is already split nine ways,
+# so the wall was `max(9 fast shards, 1 carve-out)`, and the carve-out was the
+# pole in EVERY run examined (`test (b)`, which the objective names, ends at
+# +10.5m; it was never the pole). Sharding it converts that `max` into a
+# comparable term.
+#
+# ABSENCE KEEPS THE CURRENT SHAPE, and this is the one place this key differs
+# from `fast_shards`. There, absence means the historical S=2; here the
+# historical shape is ONE job, so absence means 1 and an unadopted repo is
+# byte-identical to today. A single shard is therefore legal (unlike
+# `fast_shards >= 2`) — removing the key must always be a safe rollback.
+DEFAULT_CARVE_SHARDS = 1
+# Same ceiling as the fast band, for the same reason: labels are positional
+# letters, and the rail's lane-parity subtracts main's names from the PR's.
+MAX_CARVE_SHARDS = 26
+
 # #6135: the per-shard WATCHDOG budget. The watchdog is PER-LEG, so a smaller
 # shard needs a smaller budget — inheriting the old 55m means a hung 6.6-minute
 # shard is detected 8× later than it should be, holding the REQUIRED aggregate
@@ -1462,6 +1483,100 @@ def fast_shard_issues(manifest: dict) -> list[str]:
     return []
 
 
+def carve_shard_count(manifest: dict) -> int:
+    """W37: the carve-out pool's shard count, floored to 1 (the unsharded
+    job) when the declaration is absent or malformed. Same fail-safe polarity
+    as `fast_shard_count` — an unreadable count falls back to the SHAPE THAT
+    EXISTS TODAY, never to a number nobody chose."""
+    raw = manifest.get("carve_shards", DEFAULT_CARVE_SHARDS)
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return DEFAULT_CARVE_SHARDS
+    if raw < 1 or raw > MAX_CARVE_SHARDS:
+        return DEFAULT_CARVE_SHARDS
+    return raw
+
+
+def carve_shard_issues(manifest: dict) -> list[str]:
+    """W37: fail-closed validation of the `carve_shards` declaration.
+
+    `fast_shards` demands >= 2 because a shard pool of one is not a pool. Here
+    1 is MEANINGFUL: it is the unsharded job this repo ran until now, and it is
+    what removing the key must give back, so a rollback is a key deletion rather
+    than a rewrite. Absence is 'not adopted'; an EXPLICIT null is a typo, not an
+    absence — same distinction, and the same reason, as `fast_shard_issues`.
+    """
+    if "carve_shards" not in manifest:
+        return []
+    raw = manifest.get("carve_shards")
+    if raw is None:
+        return ["carve_shards is explicitly null — remove the key to mean "
+                "'one unsharded job', or set an integer in [1, "
+                f"{MAX_CARVE_SHARDS}] (a null silently drops the pool to 1)"]
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return [f"carve_shards must be an integer, got {raw!r}"]
+    if raw < 1:
+        return [f"carve_shards must be >= 1 (1 is the unsharded job; 0 would "
+                f"delete the lane), got {raw}"]
+    if raw > MAX_CARVE_SHARDS:
+        return [f"carve_shards must be <= {MAX_CARVE_SHARDS} (the a..z label "
+                f"ceiling), got {raw}"]
+    return []
+
+
+def carve_shard_entries(manifest: dict) -> list[dict]:
+    """W37: the carve-out set packed into `carve_shards` LPT bins.
+
+    Uses `build_shard_entries`, the SAME pack the tier-2 fast lane uses
+    (`split_fast_gate` + `shard_watchdog_minutes`) — the carve-out gets the
+    established mechanism rather than a second one.
+
+    ⛔ THE FIRST SHARD'S JOB NAME IS THE BARE `test-carve-out`, and that is
+    load-bearing, not cosmetic. The merge rail's lane-parity subtracts main's
+    job names from the PR's, so an unadopted main holds `test-carve-out` and a
+    PR that renamed it to `test-carve-out (a)` would be missing one of main's
+    names and refuse EVERY merge until it landed. Keeping the bare name on
+    shard 0 (and `(b)`, `(c)`, … on the rest) makes the shard set a strict
+    SUPERSET of main's names — the same property `fast_shards` relies on when
+    it keeps `a` and `b`.
+    """
+    count = carve_shard_count(manifest)
+    carve = sorted(carve_out_files(manifest))
+    entries = build_shard_entries(carve, _durations_map(manifest), count)
+    labels = shard_labels(len(entries))
+    for i, e in enumerate(entries):
+        # `suffix` is the workflow's `name:` tail: '' for shard 0 (so the check
+        # is exactly `test-carve-out`), ' (b)'/ ' (c)' after that.
+        e["suffix"] = "" if i == 0 else f" ({labels[i]})"
+        # `label` is the ARTIFACT-name tail, and it must NOT be `suffix`: suffix
+        # carries a leading space and parentheses, and `github.job` is the BASE
+        # job id for every matrix leg, so an upload named `pytest-log-${{ github.job }}`
+        # is the SAME name for every shard — upload-artifact@v4 then 409s and,
+        # because the step is continue-on-error, the shard logs vanish silently
+        # (#6263 pins exactly this).
+        e["label"] = labels[i]
+    return entries
+
+
+def carve_matrix_include(entries: list[dict]) -> dict:
+    """W37: the GHA matrix the `test-carve-out` job expands.
+
+    Emitted COMPLETE, like `fast_matrix_include`: the shard set is the
+    selector's contract, never a workflow literal. `files` is SPACE-JOINED
+    (the workflow's `for f in ${{ matrix.files }}` shape) and, like the fast
+    band, the names are BARE (no `.py`) — the workflow re-adds the extension.
+    """
+    return {"include": [
+        {
+            "suffix": e["suffix"],
+            # Distinct per leg, and filesystem-safe — the artifact name tail.
+            "label": e["label"],
+            "files": " ".join(e["files"]),
+            "watchdog_minutes": e["watchdog_minutes"],
+        }
+        for e in entries
+    ]}
+
+
 def shard_labels(count: int) -> list[str]:
     """#6135: positional shard labels `a`, `b`, `c`, …
 
@@ -1670,6 +1785,15 @@ def push_legs(manifest: dict) -> dict:
             "slow": strip(slow - carve_out),
             "env_broken": sorted(ENV_BROKEN_FILES),
             "carve_out": strip(carve_out),
+            # W37: the same set, packed. `carve_out` is KEPT above because the
+            # `changes` job publishes it as its `carve_out` output and several
+            # pins read this emitted key; `leg_coverage_issues` enforces the
+            # coverage contract over the same set, read from the manifest rather
+            # than from this leg. The partition itself — the shards must cover
+            # `carve_out` exactly, never re-derive it — is pinned by
+            # `tests/test_ci_selection.py::test_carve_out_matrix_partitions_the_leg`;
+            # no check in THIS module enforces it.
+            "carve_shards": carve_shard_entries(manifest),
             # Not a push leg: emitted so leg_coverage_issues() can account for
             # the file. Nothing in python-ci.yml consumes this key — that is
             # the POINT of the lane.
@@ -1690,11 +1814,13 @@ def build_shard_entries(files: list[str], durations: dict,
     carrying its packed estimate, the per-shard watchdog derived from it, and
     the headroom that budget retains (#6145).
 
-    Used by the tier-2 `--split` path. `push_legs()` inlines the same pack (it
-    must round-robin `push_extra` across the shards in the same pass), so the
-    shared seam that keeps the two lanes' shard budgets in agreement is
-    `shard_watchdog_minutes()`, NOT this function — editing the packing here
-    changes only the tier-2 lane.
+    Used by the tier-2 `--split` path AND by `carve_shard_entries()` (the W37
+    carve-out lane, which `push_legs()` routes through). `push_legs()` itself
+    inlines the same pack for the fast shards (it must round-robin `push_extra`
+    across the shards in the same pass), so the shared seam that keeps every
+    lane's shard budgets in agreement is `shard_watchdog_minutes()`, NOT this
+    function — but editing the packing here DOES change both the tier-2 `--split`
+    lane and the carve-out lane, not the fast shards.
     """
     bins = split_fast_gate(files, durations, shards=shards)
     labels = shard_labels(len(bins))
@@ -3130,6 +3256,7 @@ def main() -> int:
         # followed. Both entry points compose it, so it stays single-sourced.
         problems = missing + slow_file_issues(manifest) \
             + _manifest_contract_issues(manifest) \
+            + carve_shard_issues(manifest) \
             + watchdog_headroom_issues(manifest)
         # #1472: the matrix must come from the selector derivation — when it
         # does, the #1266 halves-parse tie check is
@@ -3186,6 +3313,7 @@ def main() -> int:
             "fast_matrix": fast_matrix_include(legs["shards"]),
             "shards": legs["shards"],
             "carve_out": legs["carve_out"],
+            "carve_matrix": carve_matrix_include(legs["carve_shards"]),
         }))
         return 0
 
