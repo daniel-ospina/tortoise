@@ -840,6 +840,122 @@ def test_emit_manifest_still_refuses_a_collection_ERROR(tmp_path):
     assert not out.exists(), "a collection error must never write a manifest"
 
 
+def test_parse_hook_nodeids_reads_the_count_and_fails_closed_without_it():
+    # The authoritative count is the hook's FIRST line. Absent or unparseable,
+    # it must be None (refuse) rather than defaulting to 0: a file written by
+    # an older hook, or a truncated write, is not evidence of a clean
+    # collection (code-review P1, PR #7072).
+    nodeids, errors = _skip_guard._parse_hook_nodeids(
+        "# collection: errors=0\ntests/a.py::test_x\n")
+    assert errors == 0
+    assert nodeids == ["tests/a.py::test_x"]
+
+    nodeids, errors = _skip_guard._parse_hook_nodeids("# collection: errors=2\n")
+    assert errors == 2
+    assert nodeids == []
+
+    nodeids, errors = _skip_guard._parse_hook_nodeids("tests/a.py::test_x\n")
+    assert errors is None
+    assert nodeids == ["tests/a.py::test_x"]
+
+    nodeids, errors = _skip_guard._parse_hook_nodeids(
+        "# collection: errors=notanint\ntests/a.py::test_x\n")
+    assert errors is None
+
+
+def test_emit_manifest_accepts_a_normal_collection(tmp_path):
+    # rc=0, zero collect errors — the ordinary accept path, pinned so a fix
+    # for the masked-abort P1 cannot over-correct into a false red.
+    (tmp_path / "test_ok.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8")
+    out = tmp_path / "expected-nodeids.txt"
+    rc = _skip_guard.emit_manifest([str(tmp_path / "test_ok.py")],
+                                   "not track_b", out)
+    assert rc == 0, rc
+    assert out.exists()
+    assert "test_ok.py::test_ok" in out.read_text(encoding="utf-8")
+
+
+def test_emit_manifest_refuses_a_collect_error_masked_by_a_shutdown_abort(
+        tmp_path):
+    # P1 (PR #7072 review) — THE regression this fix exists for. pytest reaches
+    # pytest_collection_modifyitems even when a module cannot be imported, and
+    # the atexit SIGABRT turns the process exit negative. The pre-fix rule
+    # `(nodeid file exists) AND (rc is 0, 5 or negative)` therefore accepted
+    # this and wrote `# collection: completed 0`, certifying a BROKEN
+    # collection as complete. An exit code cannot witness WHERE the signal
+    # arrived; the CollectReport count can. Real subprocess, exactly the shape
+    # the reviewer measured: the abort handler is registered BEFORE the failing
+    # import, so the SIGABRT still fires at shutdown.
+    (tmp_path / "test_masked.py").write_text(
+        "import atexit\n"
+        "import os\n"
+        "import signal\n\n\n"
+        "def _abort_at_shutdown():\n"
+        "    os.kill(os.getpid(), signal.SIGABRT)\n\n\n"
+        "atexit.register(_abort_at_shutdown)\n\n\n"
+        "import definitely_not_a_real_module_xyz\n\n\n"
+        "def test_never_runs():\n"
+        "    assert True\n",
+        encoding="utf-8")
+    out = tmp_path / "expected-nodeids.txt"
+    rc = _skip_guard.emit_manifest([str(tmp_path / "test_masked.py")],
+                                   "not track_b", out)
+    assert rc != 0, rc
+    assert not out.exists(), (
+        "a collection error masked by a shutdown abort must never certify a "
+        "manifest — the hook counted the failed CollectReport")
+
+
+def test_emit_manifest_refuses_a_syntax_error(tmp_path):
+    # A syntax error is a failed CollectReport too (rc=2), not an import-only
+    # shape — the count is not specific to ImportError.
+    (tmp_path / "test_syntax.py").write_text(
+        "def test_x(:\n    pass\n", encoding="utf-8")
+    out = tmp_path / "expected-nodeids.txt"
+    rc = _skip_guard.emit_manifest([str(tmp_path / "test_syntax.py")],
+                                   "not track_b", out)
+    assert rc == 2, rc
+    assert not out.exists(), "a syntax error must never write a manifest"
+
+
+def test_emit_manifest_refuses_a_conftest_that_raises(tmp_path):
+    # A conftest that raises while being loaded aborts collection BEFORE
+    # pytest_collection_modifyitems, so the hook never runs and no nodeid file
+    # is written — the file's ABSENCE is the fail-closed signal here, because
+    # there is nowhere for the error count to be written.
+    (tmp_path / "conftest.py").write_text(
+        "raise RuntimeError('conftest boom during collection')\n",
+        encoding="utf-8")
+    (tmp_path / "test_a.py").write_text(
+        "def test_a():\n    assert True\n", encoding="utf-8")
+    out = tmp_path / "expected-nodeids.txt"
+    rc = _skip_guard.emit_manifest([str(tmp_path / "test_a.py")],
+                                   "not track_b", out)
+    assert rc != 0, rc
+    assert not out.exists(), "a conftest collection error must not write"
+
+
+def test_emit_manifest_refuses_a_conftest_error_masked_by_an_abort(tmp_path):
+    # Same masking shape as the import-error regression, on the conftest path:
+    # the abort makes rc negative, but no hook file was ever written, so the
+    # manifest must be refused on its ABSENCE alone.
+    (tmp_path / "conftest.py").write_text(
+        "import atexit\n"
+        "import os\n"
+        "import signal\n\n\n"
+        "atexit.register(lambda: os.kill(os.getpid(), signal.SIGABRT))\n"
+        "raise RuntimeError('conftest boom during collection')\n",
+        encoding="utf-8")
+    (tmp_path / "test_a.py").write_text(
+        "def test_a():\n    assert True\n", encoding="utf-8")
+    out = tmp_path / "expected-nodeids.txt"
+    rc = _skip_guard.emit_manifest([str(tmp_path / "test_a.py")],
+                                   "not track_b", out)
+    assert rc != 0, rc
+    assert not out.exists()
+
+
 def test_consumer_accepts_a_PROVEN_empty_manifest_but_refuses_a_bare_one(tmp_path):
     # #6898: an empty expected-set has two meanings and only one is a bug.
     # Without the completion marker the generator emitted nothing and the set is

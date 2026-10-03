@@ -194,20 +194,48 @@ _COLLECT_NODEID_RE = re.compile(r"^[^\s:]+::")
 #     already been printed (issue #6898).
 # So the manifest must not be derived from the exit code at all. Instead a
 # `pytest_collection_modifyitems` hook writes it, because that hook is only
-# reached by a collection that ran to completion. It is NOT sufficient alone:
-# an unimportable module yields rc=2 ("Interrupted: 1 error during
-# collection") and STILL reaches the hook with the errored module dropped, so
-# the exit code is kept as the second half of the test. Completion is
-# therefore (file exists) AND (rc is 0, 5, or negative), and the manifest's
-# EXISTENCE is what rules out a signal that killed the interpreter
-# mid-collection. The write is atomic for the same reason: a manifest that
-# exists must be complete, never half-written.
+# reached by a collection that ran to completion. But that hook is NOT
+# sufficient alone: an unimportable module yields rc=2 ("Interrupted: 1 error
+# during collection") and STILL reaches the hook with the errored module
+# dropped, so the nodeid list alone would fail OPEN on a genuine collection
+# error.
+#
+# The exit code is NOT an acceptable second half of that test (P1, PR #7072
+# review). `rc < 0` means only that the interpreter was SIGNALLED, at ANY
+# point: a shutdown SIGABRT masks a collection error just as easily as it
+# follows a clean collection. Measured: `ImportError` + an atexit SIGABRT
+# yields rc=-6 with a hook file present but EMPTY — accepted by
+# (file exists) AND (rc<0), certifying a broken collection. So the second half
+# is WITNESSED, not inferred: the hook counts pytest's own CollectReports
+# (`pytest_collectreport(report).failed`) and writes the count next to the
+# nodeids. Those reports are authoritative — a module that fails to import
+# produces a failed report BEFORE `pytest_collection_modifyitems` runs (and
+# when a conftest cannot be loaded at all, the hook never runs and no file is
+# written). Completion is therefore (file exists) AND (errors == 0). The write
+# is atomic for the same reason: a manifest that exists must be complete,
+# never half-written.
 _MANIFEST_HOOK_SOURCE = '''\
 """Written by tools/skip-guard.py for a single --emit-manifest run (#6898)."""
 import os
 from pathlib import Path
 
 import pytest
+
+# pytest's AUTHORITATIVE collection verdict: one CollectReport per collector,
+# `failed` set when that collector raised (import error, syntax error, a
+# conftest/collector error). Counting them here — instead of inferring "no
+# collection error" from the process exit code — is what stops an at-shutdown
+# abort (rc<0) from masking a real collection error: the count is written to
+# the nodeid file during collection, so it survives the later SIGABRT.
+_collect_errors = []
+
+
+@pytest.hookimpl()
+def pytest_collectreport(report):
+    # `failed` is the documented CollectReport property; `outcome` is the
+    # field it derives from. Either marks a collector that raised.
+    if getattr(report, "failed", False) or getattr(report, "outcome", None) == "failed":
+        _collect_errors.append(getattr(report, "nodeid", ""))
 
 
 @pytest.hookimpl(trylast=True)
@@ -223,10 +251,20 @@ def pytest_collection_modifyitems(config, items):
     if not out:
         return
     tmp = out + ".part"
-    Path(tmp).write_text("\\n".join(i.nodeid for i in items), encoding="utf-8")
+    body = "\\n".join(i.nodeid for i in items)
+    Path(tmp).write_text(
+        "# collection: errors=%d\\n%s" % (len(_collect_errors), body),
+        encoding="utf-8")
     os.replace(tmp, out)
 '''
 _COLLECT_ERROR_RC = 2
+
+# The error count the hook writes as the FIRST line of its nodeid file, e.g.
+# ``# collection: errors=0``. The leading ``#`` keeps it out of the nodeid set
+# for any consumer that filters comment lines, and its presence is the proof
+# that the count was witnessed rather than defaulted: _parse_hook_nodeids
+# fails closed (errors=None -> refuse) when the line is absent.
+_MANIFEST_ERRORS_MARK = "# collection: errors="
 
 # Written into the manifest header by _write_manifest and required by the
 # consumer before it will accept an EMPTY expected-set: the marker is only
@@ -765,6 +803,29 @@ def collect_only_nodeids(text: str) -> list[str]:
     return out
 
 
+def _parse_hook_nodeids(text: str) -> tuple[list[str], int | None]:
+    """Split the hook-written file into (nodeids, collect_errors).
+
+    The file's first line is the ``# collection: errors=<n>`` marker (see
+    ``_MANIFEST_ERRORS_MARK``); every other non-blank line is a nodeid. When
+    the marker is absent or unparseable, ``collect_errors`` is ``None`` — the
+    authoritative count is MISSING, which must fail closed rather than default
+    to zero (an old hook, or a truncated write, is not evidence of success).
+    """
+    errors: int | None = None
+    nodeids: list[str] = []
+    for line in text.splitlines():
+        if line.startswith(_MANIFEST_ERRORS_MARK):
+            try:
+                errors = int(line[len(_MANIFEST_ERRORS_MARK):].strip())
+            except ValueError:
+                errors = None
+            continue
+        if line.strip():
+            nodeids.append(line)
+    return nodeids, errors
+
+
 def emit_manifest(files: list[str], marker: str, output: Path,
                   runner=None, ignores: tuple[str, ...] = ()) -> int:
     """Generate the expected-nodeid manifest for the given file list.
@@ -790,18 +851,27 @@ def emit_manifest(files: list[str], marker: str, output: Path,
     sufficient:
       1. the hook-written nodeid file EXISTS — this rules out a signal that
          killed the interpreter mid-collection; and
-      2. ``rc`` is not a collection error — 0 (normal), 5 (collected nothing)
-         or negative (aborted at exit, #6898).
+      2. the hook counted ZERO failed CollectReports — pytest's own
+         authoritative collection verdict.
+    The process exit code is NOT one of those conditions. ``rc < 0`` says only
+    that the interpreter was signalled at SOME point, so a shutdown SIGABRT
+    masks a collection error as easily as it follows a clean one (P1, PR
+    #7072 review: `ImportError` + atexit SIGABRT yields rc=-6 with an EMPTY
+    hook file — accepted by a file-exists/rc<0 rule, certifying a broken
+    collection). ``rc`` survives only as a secondary signal for the positive,
+    non-normal exits (0/5 are normal; anything else positive fails closed).
     Measured: an unimportable module yields rc=2 and STILL reaches the hook
     (the errored module is dropped and the remaining items are collected), so
-    the file alone would fail OPEN on a genuine collection error; and the
-    marker matching nothing yields rc=5 while collecting perfectly, so rc
-    alone would refuse a clean run.
+    the file alone would fail OPEN on a genuine collection error — it is the
+    error COUNT that refuses it; and the marker matching nothing yields rc=5
+    while collecting perfectly, so rc alone would refuse a clean run.
     """
     if not files:
         print("emit-manifest: no files — no manifest written (guard skips)")
         return 0
     nodeids_file = None
+    rc, collected, _err = None, "", ""
+    collect_errors: int | None = None
     cmd = [sys.executable, "-m", "pytest", *files, "--collect-only", "-q",
            "-m", marker, "-p", "no:cacheprovider",
            *[f"--ignore={ig}" for ig in ignores]]
@@ -823,16 +893,27 @@ def emit_manifest(files: list[str], marker: str, output: Path,
             _err = proc.stderr
             # Read INSIDE the TemporaryDirectory: the completion proof is the
             # file the hook wrote, and it must be read before it is cleaned up.
-            nodeids = (list(Path(nodeids_file).read_text(
-                encoding="utf-8").splitlines())
-                if Path(nodeids_file).exists() else None)
+            if Path(nodeids_file).exists():
+                nodeids, collect_errors = _parse_hook_nodeids(
+                    Path(nodeids_file).read_text(encoding="utf-8"))
+            else:
+                nodeids = None
     else:
         rc, collected = runner(cmd)
-        _err = ""
         nodeids = collect_only_nodeids(collected)
-    if nodeids is None or (rc >= 0 and rc not in (0, 5)):
-        print(f"emit-manifest: collect-only did not COMPLETE (rc={rc}) — no "
-              f"manifest written (fail-closed)", file=sys.stderr)
+        # The injectable runner returns only (rc, stdout) — it has no collect
+        # reports — so rc is the only available signal and any non-normal exit
+        # (including a negative one) counts as a collection failure here.
+        collect_errors = 0 if rc in (0, 5) else 1
+    if (nodeids is None or collect_errors != 0
+            or (rc >= 0 and rc not in (0, 5))):
+        if collect_errors:
+            _why = (f"collect-only reported {collect_errors} collection "
+                    f"error(s)")
+        else:
+            _why = "collect-only did not COMPLETE"
+        print(f"emit-manifest: {_why} (rc={rc}) — no manifest written "
+              f"(fail-closed)", file=sys.stderr)
         # Surface the swallowed reason — a fail-closed gate that hides WHICH
         # file failed collection turns every runner hiccup into archaeology.
         # Print the tail of pytest's captured stderr/stdout (best-effort).
