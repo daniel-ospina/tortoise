@@ -854,6 +854,16 @@ TOOL_CARVEOUTS = (
     # SOURCE_PATTERNS entry matches it, so it lands in the unknown-path branch
     # -> FULL matrix (fail closed) — the safe default for a destructive-ref tool.
     "tools/branch_reaper.py",
+    # #7017: the container-engine probe (tools/engine_probe.py) owns
+    # tests/test_engine_probe.py. Exact same silent-drop class as the two
+    # reaper carve-outs below: the flat "tools/" prefix in
+    # NON_PYTHON_PREFIXES would swallow an engine_probe-only change, `changed`
+    # comes back empty, select() takes the docs-only path, and the probe's
+    # suite never runs on the PR that changes it. No SOURCE_PATTERNS entry
+    # matches it, so it lands in the unknown-path branch -> FULL matrix
+    # (fail closed) — the safe default for the tool that decides whether a
+    # graph failure is a graph failure at all.
+    "tools/engine_probe.py",
     # #6868: the wedged-CI-run reaper (tools/run_reaper.py) owns
     # tests/test_run_reaper.py. Exact same silent-drop class as the
     # branch-reaper carve-out above: the flat "tools/" prefix in

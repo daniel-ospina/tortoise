@@ -82,6 +82,24 @@ def test_a_reachable_graph_with_a_healthy_engine_is_graph_up():
     assert verdict == e.GRAPH_UP
 
 
+def test_an_unprobed_or_malformed_engine_is_not_read_as_healthy():
+    """(a) FAILS if `classify` enumerates only ENGINE_WEDGED and lets any other
+    unknown status through to a confident verdict — the exact "an unmeasurable
+    situation becomes a confident wrong answer" shape this tool removes. The
+    allow-list treats everything that is not ENGINE_OK/ENGINE_ABSENT as wedged.
+    (b) Reachable: a probe that grows a new status (ENGINE_UNPROBED exists in
+    this module and is consumed by nothing), or an engine dict that lost its
+    status key.
+    """
+    dead = {"ok": False, "error": "timeout", "elapsed_s": 3.0}
+    for bad in ({}, {"detail": "no status key"},
+                {"status": e.ENGINE_UNPROBED}, {"status": "SOMETHING_NEW"}):
+        assert e.classify(dead, bad) == e.ENGINE_WEDGED, bad
+    # and the two genuinely-known-good states still do not invert
+    assert e.classify(dead, {"status": e.ENGINE_OK}) == e.GRAPH_DOWN
+    assert e.classify(dead, {"status": e.ENGINE_ABSENT}) == e.GRAPH_DOWN
+
+
 def test_skipping_the_engine_probe_never_reports_wedged():
     """(a) FAILS if `engine=None` (--no-docker) is treated as wedged, which
     would break the one mode that works without a container engine (embedded /
@@ -114,6 +132,49 @@ def test_probe_graph_refuses_quickly_on_a_closed_port():
     assert result["ok"] is False
     assert result["error"] is not None
     assert elapsed < 3.0, f"probe exceeded its bound: {elapsed:.2f}s"
+
+
+def test_probe_graph_bounds_a_silent_peer(monkeypatch):
+    """(a) FAILS if the READ is not bounded — the defect the old closed-port
+    test could not see, because a refused connect returns in ~0.5ms and never
+    reaches the read at all. The bound here is consumed, not merely not
+    exceeded: a peer that accepts and then says nothing must produce a timeout
+    AT ~the bound.
+    (b) Reachable: a wedged engine leaves the graph socket accepted and silent,
+    which is exactly the 2026-10-03 shape.
+    """
+    import time
+
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+    held = []
+
+    def accept_and_say_nothing():
+        try:
+            conn, _ = server.accept()
+            held.append(conn)      # keep it open, never write
+            conn.recv(64)          # never reply
+        except OSError:
+            pass
+
+    t = threading.Thread(target=accept_and_say_nothing, daemon=True)
+    t.start()
+    try:
+        started = time.monotonic()
+        result = e.probe_graph("127.0.0.1", port, timeout=1.0)
+        elapsed = time.monotonic() - started
+        assert result["ok"] is False, result
+        assert result["error"] == "timeout", result
+        # both ends: an unbounded read would hang (>=1.5 is the tell if it
+        # somehow returned), and an unread fast-fail would be << 0.5.
+        assert 0.5 <= elapsed < 1.5, f"bound not consumed: {elapsed:.3f}s"
+    finally:
+        for conn in held:
+            conn.close()
+        server.close()
 
 
 def test_probe_graph_reports_a_real_pong(monkeypatch):
@@ -149,18 +210,26 @@ def test_probe_graph_reports_a_real_pong(monkeypatch):
 def test_probe_engine_treats_a_slow_answer_as_wedged(monkeypatch):
     """(a) FAILS if the subprocess timeout is not applied — without it this
     call blocks for the full kill interval when the control plane is wedged,
-    which is the 900s burn the tool removes.
+    which is the 900s burn the tool removes. The fake ASSERTS the bound was
+    passed: a fake that raises regardless of its kwargs would pass even with
+    `timeout=` dropped from the call, which is the hole the first version of
+    this test had.
     (b) Reachable: patch subprocess.run to raise TimeoutExpired, which is what
     a wedged engine produces.
     """
     import subprocess as sp
 
-    def boom(*_a, **_k):
-        raise sp.TimeoutExpired(cmd="docker version", timeout=3.0)
+    seen = {}
+
+    def boom(*_a, **kwargs):
+        seen.update(kwargs)
+        assert kwargs.get("timeout"), "probe_engine must pass a bound to docker"
+        raise sp.TimeoutExpired(cmd="docker version", timeout=kwargs["timeout"])
 
     monkeypatch.setattr(e.subprocess, "run", boom)
     result = e.probe_engine(3.0)
     assert result["status"] == e.ENGINE_WEDGED
+    assert seen["timeout"] == 3.0, seen
 
 
 def test_probe_engine_reports_a_missing_cli_as_absent_not_wedged(monkeypatch):
@@ -223,3 +292,35 @@ def test_redis_port_comes_from_the_uri_when_present(monkeypatch):
     assert e.redis_port_from_env() == 16400
     monkeypatch.setenv("TORTOISE_DB_URI", "falkor:///tmp/x")
     assert e.redis_port_from_env() is None
+
+
+def test_redis_port_is_not_taken_from_a_colon_that_is_not_a_port(monkeypatch):
+    """(a) FAILS with a `:`-split parser, which reads the last `1` of the IPv6
+    host `::1` as a port: the tool would then probe port 1 and report a FALSE
+    GRAPH_DOWN against a healthy graph. A malformed port must yield None (the
+    caller's documented default) rather than a confident wrong number.
+    (b) Reachable: an IPv6 target with no port, and a typo'd port.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@[::1]/tortoise")
+    assert e.redis_port_from_env() is None
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@127.0.0.1:16x00/tortoise")
+    assert e.redis_port_from_env() is None
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@127.0.0.1:16379")
+    assert e.redis_port_from_env() == 16379
+
+
+def test_the_engine_probe_tool_keeps_its_ci_carveout():
+    """(a) FAILS if the `tools/engine_probe.py` TOOL_CARVEOUTS entry is dropped:
+    `tools/` is in NON_PYTHON_PREFIXES, so an engine_probe-only change filters
+    to `changed == []`, takes the docs-only early return, and this suite never
+    runs on the PR that changes the tool (the #1349/#3332/#3616 silent-drop
+    class). No SOURCE_PATTERNS entry matches the tool, so the carved-out path
+    must fail CLOSED to the full matrix.
+    (b) Reachable: it already happened once for this file — the review that
+    added this test found the entry missing.
+    """
+    import ci_selection as cs
+
+    assert "tools/engine_probe.py" in cs.TOOL_CARVEOUTS
+    sel = cs.select(["tools/engine_probe.py"], "pull_request", cs.load_manifest())
+    assert sel["full"], "an engine_probe-only diff must fail closed to the full matrix"

@@ -33,8 +33,9 @@ THE THREE ANSWERS, AND WHY UNMEASURABLE IS ONE OF THEM
 
 EVERY PROBE IS BOUNDED. A probe that can hang is not a probe: the 2026-10-03
 occurrence cost 900s to a single unbounded `docker ps`. `--timeout` (default
-3s) applies to the socket connect, the PING read, and the docker subprocess
-alike.
+3s) bounds EACH probe — the socket connect, the PING read, and the docker
+subprocess alike. It is a per-probe bound, not a total budget: the graph and
+the engine are probed in turn, so the worst case is 2x `--timeout`.
 
 USAGE
     python3 tools/engine_probe.py            # human summary, exit 0/2
@@ -44,9 +45,13 @@ USAGE
 
 EXIT CONTRACT
     0  GRAPH_UP (and, when probed, the engine answered)
-    1  usage error
     2  not usable: ENGINE_WEDGED or GRAPH_DOWN — a caller that must not proceed
        on a broken substrate can gate on this without parsing prose
+
+    1  is reserved for a rejected `--timeout` (must be > 0). Note that argparse
+       itself exits 2 on a malformed argument (`--timeout abc`), so the two
+       meanings share a code; callers that must distinguish them should read
+       stderr, and the reserve exists for the case this file controls.
 """
 from __future__ import annotations
 
@@ -59,6 +64,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 DEFAULT_HOST = "127.0.0.1"
 #: The canonical graph port. NOT 6379 (`localhost` resolves `::1` first and a
@@ -163,21 +169,35 @@ def classify(graph: dict, engine: Optional[dict]) -> str:
     Order matters: a wedged engine makes the graph's state UNMEASURABLE, so it
     is reported as such rather than as GRAPH_DOWN. That inversion is the whole
     point of this tool — see the module docstring.
+
+    The engine test is an ALLOW-LIST over the states that mean "the graph's
+    state is measurable": anything that is not ENGINE_OK or ENGINE_ABSENT —
+    ENGINE_WEDGED, ENGINE_UNPROBED, or a malformed probe missing its status —
+    is reported as ENGINE_WEDGED. Enumerating the *bad* states instead would
+    let a shape nobody anticipated fall through to a confident verdict, which
+    is the misdiagnosis this tool exists to remove.
     """
-    if engine is not None and engine.get("status") == ENGINE_WEDGED:
+    if engine is not None and engine.get("status") not in (ENGINE_OK, ENGINE_ABSENT):
         return ENGINE_WEDGED
     return GRAPH_UP if graph.get("ok") else GRAPH_DOWN
 
 
 def redis_port_from_env() -> Optional[int]:
-    """The graph port from TORTOISE_DB_URI, when it names a docker:// target."""
+    """The graph port from TORTOISE_DB_URI, when it names a docker:// target.
+
+    Parsed with `urlsplit` rather than a `:` split, because a colon in the URI
+    need not be the port separator: `docker://:pw@::1/tortoise` has an IPv6
+    host and NO port, and `rpartition(":")` would read the last `1` of `::1` as
+    a port. `.port` returns None for a missing port and raises for a malformed
+    one, so a typo yields None instead of a confident wrong number; the caller
+    then falls back to DEFAULT_PORT, whose own hazard (`::1` hosts a second,
+    near-empty FalkorDB — #6666) is why this probe defaults to `127.0.0.1`.
+    """
     uri = os.environ.get("TORTOISE_DB_URI", "")
     if not uri.startswith("docker://"):
         return None
-    tail = uri.rsplit("@", 1)[-1]
-    _, _, port = tail.rpartition(":")
     try:
-        return int(port.split("/", 1)[0])
+        return urlsplit(uri).port
     except ValueError:
         return None
 
@@ -232,9 +252,16 @@ def main(argv: Optional[list] = None) -> int:
                   "  engine restart; do NOT stand up a second graph instance "
                   "and do NOT point at\n  the hosted API (see #7017).")
         elif verdict == GRAPH_DOWN:
-            print("  The engine is not wedged, so the graph port itself is "
-                  "unreachable. Check the\n  graph container and the canonical "
-                  "instance (127.0.0.1, never `localhost` — #6666).")
+            if engine is None:
+                print("  The graph port is unreachable and the engine was NOT "
+                      "probed (--no-docker),\n  so a wedged engine cannot be "
+                      "ruled out. Re-run without --no-docker before\n  treating "
+                      "this as a graph problem.")
+            else:
+                print("  The engine answered, so the graph port itself is "
+                      "unreachable. Check the\n  graph container and the "
+                      "canonical instance (127.0.0.1, never `localhost` — "
+                      "#6666).")
     return 0 if verdict == GRAPH_UP else 2
 
 
