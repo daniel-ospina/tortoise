@@ -2156,7 +2156,10 @@ class TestFulltextIndexCreationForm:
             proj_cls._create_fulltext_index(proj, "Source", ["_searchText"])
         msg = str(ei.value)
         assert "no supported FULLTEXT index creation form" in msg
-        assert "Unknown function" in msg
+        # BOTH causes must survive: the RuntimeError carries the per-form
+        # errors so an operator can tell which engine failed and how.
+        assert "Invalid input" in msg, msg
+        assert "Unknown function" in msg, msg
 
     def test_failure_is_reported_at_error_not_warning(self, caplog):
         """#H05: the swallow was a WARNING; it must be an ERROR naming the
@@ -2264,10 +2267,13 @@ class TestFulltextIndexCreationForm:
                 RuntimeError("Attribute 'content' is already indexed"),
                 logging.WARNING, "an index IS present, but NOT the intended",
             ),
-            # The ONLY case where the label is genuinely left with no index.
+            # The ONLY case where the label is genuinely left without the
+            # intended index: the drop returned without error, the recreate
+            # failed. (The message must not claim more: `dropped` records that
+            # the drop call did not raise, not that it removed anything.)
             (
                 False, True, RuntimeError("boom"),
-                logging.ERROR, "now has NO full-text index",
+                logging.ERROR, "is left without the intended",
             ),
             # The drop never ran at all -> the legacy index REMAINS. Note
             # the cause here is a marker-read failure, NOT a missing drop

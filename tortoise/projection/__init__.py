@@ -7780,8 +7780,9 @@ class FalkorProjection(
         import logging
         logging.getLogger(__name__).error(
             "Failed to create fulltext index on %s.%s: %s — full-text search "
-            "on this label is DEGRADED (index absent; queries degrade to "
-            "`index_missing`)",
+            "on this label is DEGRADED (the index is absent, so "
+            "`db.idx.fulltext.queryNodes` returns an EMPTY result set, "
+            "indistinguishable from a genuine zero-match)",
             label, fields, exc,
         )
 
@@ -7823,10 +7824,12 @@ class FalkorProjection(
             )
         if dropped:
             return logging.ERROR, (
-                f"fulltext index MIGRATION for {label} DROPPED the legacy index "
-                f"and the recreate failed: {exc} -- {label} now has NO full-text "
-                f"index (searches degrade to `index_missing`). The migration "
-                f"marker was NOT set, so this retries on the next boot"
+                f"fulltext index MIGRATION for {label} dropped the legacy index "
+                f"(the drop call returned without error) and the recreate "
+                f"failed: {exc} -- {label} is left without the intended "
+                f"full-text index, so `db.idx.fulltext.queryNodes` returns an "
+                f"EMPTY result set rather than raising. The migration marker "
+                f"was NOT set, so this retries on the next boot"
             )
         return logging.WARNING, (
             f"fulltext index MIGRATION could not run for {label}, so the legacy "

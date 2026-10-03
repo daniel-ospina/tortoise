@@ -598,6 +598,61 @@ class TestR2OrUnionAndSearchKeys:
         finally:
             proj.close()
 
+    def test_event_legacy_migration_runs_and_mints_the_marker(self):
+        """#5440 / #6380: the Event drop->recreate migration was DEAD on every
+        engine this repo supports.
+
+        It dropped via the single hardcoded name ``dropIndex``, which is
+        unregistered on 4.20.4 and on 6.x, so the call raised, the surrounding
+        ``except`` swallowed it, and ``MERGE (m:Meta {key:'event_fts_v2'})``
+        never ran -- the legacy subject-only index was never migrated. This
+        asserts the migration actually COMPLETES: the marker is minted and the
+        Event ``name`` (the field the migration adds) becomes searchable.
+        """
+        from falkordb import FalkorDB
+
+        from tortoise.projection import FalkorProjection
+        reset_circuit_breakers()
+        client = FalkorDB(host=_live_utils.service_host(),
+                          port=_live_utils.legacy_port())
+        gname = f"tortoise_test_event_migrate_{os.urandom(4).hex()}"
+        from tests._embedded import _journal_append
+        _journal_append(gname)
+        raw = client.select_graph(gname)
+        raw.query("MATCH (n) DETACH DELETE n")
+        for drop in ("db.idx.fulltext.drop", "db.idx.fulltext.dropIndex"):
+            try:
+                raw.query(f"CALL {drop}('Event')")
+                break
+            except Exception:
+                continue
+        # LEGACY state: a SUBJECT-ONLY Event index, and no event_fts_v2 marker
+        raw.query("CREATE FULLTEXT INDEX FOR (n:Event) ON (n.subject)")
+        raw.query(
+            "CREATE (n:Event {eventId:'legacy-mig-1', "
+            "subject:'standup notes', name:'zeta'})")
+        # booting the projection runs _ensure_indexes -> the migration
+        proj = FalkorProjection.from_uri(_live_utils.legacy_uri(gname))
+        try:
+            marker = proj.g.query(
+                "MATCH (m:Meta {key:'event_fts_v2'}) RETURN m.v").result_set
+            assert marker and marker[0][0] is True, (
+                "the Event migration did not run: event_fts_v2 was never "
+                "minted, i.e. the drop used a procedure name this engine "
+                "does not register (the #5440 defect)")
+            hits = proj.g.query(
+                "CALL db.idx.fulltext.queryNodes('Event','zeta')"
+            ).result_set
+            assert hits, (
+                "the migrated Event index does not answer on `name` -- the "
+                "drop->recreate did not widen the field set")
+            # and the catalogue must agree the field is indexed at all
+            ev = [r for r in proj.g.query("CALL db.indexes()").result_set
+                  if r and r[0] == "Event"]
+            assert ev and "name" in (ev[0][2] or {}), ev
+        finally:
+            proj.close()
+
     def test_fts_leg_trace_healthy(self, proj):
         """R2 D5 (inherited from R3 D4): a healthy run records the FTS leg
         with ran=True, degraded=False, reason='ok', count == hits."""

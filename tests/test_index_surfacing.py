@@ -295,10 +295,15 @@ def test_e2e6_server_mode_fts_text_disambiguation(tmp_path):
             "agentSession": 2, "meeting_summary": 1, "document": 1}
         assert _required_sweep(g) == 0
     finally:
-        try:  # noqa: SIM105
-            sdk._get_proj().g.query("CALL db.idx.fulltext.dropIndex('Source')")
-        except Exception:
-            pass
+        # #5440: drop via BOTH names -- `dropIndex` is unregistered on some
+        # builds (4.20.4, 6.x), so the single hardcoded name left the index
+        # in place and the comment above it was false there.
+        for _drop in ("db.idx.fulltext.drop", "db.idx.fulltext.dropIndex"):
+            try:
+                sdk._get_proj().g.query(f"CALL {_drop}('Source')")
+                break
+            except Exception:
+                continue
         sdk.close()
 
 
