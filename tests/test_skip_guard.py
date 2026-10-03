@@ -765,6 +765,256 @@ def test_emit_manifest_collect_failure_writes_no_manifest(tmp_path):
     assert not out.exists()
 
 
+def test_emit_manifest_accepts_a_completed_empty_collection(tmp_path):
+    # #6898 / #6390: pytest exits 5 ("no tests collected") when collection
+    # SUCCEEDS and matches nothing under `-m` — the shape a diff that selects
+    # files whose tests all fall outside the marker produces. The tool already
+    # treats rc=5 as a normal outcome everywhere else (see the rc-in-(0, 5)
+    # assertion further down), but emit_manifest refused it, so every
+    # docs/website-only PR red its shards for a reason unrelated to its
+    # content. Completion is judged by the hook-written nodeid file, so this is
+    # now a clean, empty manifest rather than a fail-closed refusal.
+    (tmp_path / "test_only_marked.py").write_text(
+        "import pytest\n\n\n@pytest.mark.live\ndef test_live_one():\n"
+        "    assert True\n",
+        encoding="utf-8")
+    out = tmp_path / "expected-nodeids.txt"
+    rc = _skip_guard.emit_manifest(
+        [str(tmp_path / "test_only_marked.py")], "not live", out)
+    assert rc == 0, (
+        "a collection that completed and matched nothing must not fail closed")
+    assert out.exists(), "the manifest must exist so the consumer sees zero-vs-zero"
+    rows = [ln for ln in out.read_text().splitlines()
+            if ln.strip() and not ln.startswith("#")]
+    assert rows == [], rows
+
+
+def test_emit_manifest_accepts_a_collection_that_completes_then_aborts(tmp_path):
+    # #6898, the main-red case: pytest collects the FULL set, prints it, and
+    # THEN the interpreter dies on SIGABRT at shutdown. Measured on main
+    # `55b0291b5` `test (b)`: `2156 tests collected in 21.82s`, then
+    # `terminate called without an active exception`, `rc=-6` -> the
+    # fail-closed gate refused and redded the shard, and the run step never
+    # executed. Collection had completed and the nodeids were available, so
+    # the abort is not a statement about the collection at all. The
+    # hook-written file is the completion proof, so rc<0 WITH that file must
+    # be accepted. Reproduced with a REAL subprocess: the module registers an
+    # atexit handler that SIGABRTs the interpreter at exit — the exact
+    # post-collection, at-shutdown shape (the hook runs during collection,
+    # long before this fires).
+    (tmp_path / "test_aborts_after_collection.py").write_text(
+        "import atexit\n"
+        "import os\n"
+        "import signal\n\n\n"
+        "def _abort_at_shutdown():\n"
+        "    os.kill(os.getpid(), signal.SIGABRT)\n\n\n"
+        "atexit.register(_abort_at_shutdown)\n\n\n"
+        "def test_collected_before_the_abort():\n"
+        "    assert True\n",
+        encoding="utf-8")
+    out = tmp_path / "expected-nodeids.txt"
+    rc = _skip_guard.emit_manifest(
+        [str(tmp_path / "test_aborts_after_collection.py")],
+        "not track_b", out)
+    assert rc == 0, (
+        "a collection that COMPLETED and then aborted at interpreter "
+        f"shutdown must still produce its manifest (rc={rc!r})")
+    assert out.exists(), "the completed nodeid list must not be discarded"
+    assert ("test_aborts_after_collection.py::"
+            "test_collected_before_the_abort") in out.read_text(encoding="utf-8")
+
+
+def test_emit_manifest_still_refuses_a_collection_ERROR(tmp_path):
+    # The other half of the completion test, and the reason the nodeid file
+    # alone is NOT sufficient: pytest reaches pytest_collection_modifyitems
+    # even when a module cannot be imported (it drops the errored module and
+    # collects the rest), so a file-exists-only rule would fail OPEN on a
+    # genuine collection error. Measured: an unimportable module yields rc=2
+    # ("Interrupted: 1 error during collection").
+    (tmp_path / "test_unimportable.py").write_text(
+        "import definitely_not_a_real_module_xyz\n", encoding="utf-8")
+    out = tmp_path / "expected-nodeids.txt"
+    rc = _skip_guard.emit_manifest([str(tmp_path / "test_unimportable.py")],
+                                   "not live", out)
+    assert rc == 2, rc
+    assert not out.exists(), "a collection error must never write a manifest"
+
+
+def test_parse_hook_nodeids_reads_the_count_and_fails_closed_without_it():
+    # The authoritative count is the hook's FIRST line. Absent or unparseable,
+    # it must be None (refuse) rather than defaulting to 0: a file written by
+    # an older hook, or a truncated write, is not evidence of a clean
+    # collection (code-review P1, PR #7072).
+    nodeids, errors = _skip_guard._parse_hook_nodeids(
+        "# collection: errors=0\ntests/a.py::test_x\n")
+    assert errors == 0
+    assert nodeids == ["tests/a.py::test_x"]
+
+    nodeids, errors = _skip_guard._parse_hook_nodeids("# collection: errors=2\n")
+    assert errors == 2
+    assert nodeids == []
+
+    nodeids, errors = _skip_guard._parse_hook_nodeids("tests/a.py::test_x\n")
+    assert errors is None
+    assert nodeids == ["tests/a.py::test_x"]
+
+    nodeids, errors = _skip_guard._parse_hook_nodeids(
+        "# collection: errors=notanint\ntests/a.py::test_x\n")
+    assert errors is None
+
+
+def test_emit_manifest_accepts_a_normal_collection(tmp_path):
+    # rc=0, zero collect errors — the ordinary accept path, pinned so a fix
+    # for the masked-abort P1 cannot over-correct into a false red.
+    (tmp_path / "test_ok.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8")
+    out = tmp_path / "expected-nodeids.txt"
+    rc = _skip_guard.emit_manifest([str(tmp_path / "test_ok.py")],
+                                   "not track_b", out)
+    assert rc == 0, rc
+    assert out.exists()
+    assert "test_ok.py::test_ok" in out.read_text(encoding="utf-8")
+
+
+def test_emit_manifest_refuses_a_collect_error_masked_by_a_shutdown_abort(
+        tmp_path):
+    # P1 (PR #7072 review) — THE regression this fix exists for. pytest reaches
+    # pytest_collection_modifyitems even when a module cannot be imported, and
+    # the atexit SIGABRT turns the process exit negative. The pre-fix rule
+    # `(nodeid file exists) AND (rc is 0, 5 or negative)` therefore accepted
+    # this and wrote `# collection: completed 0`, certifying a BROKEN
+    # collection as complete. An exit code cannot witness WHERE the signal
+    # arrived; the CollectReport count can. Real subprocess, exactly the shape
+    # the reviewer measured: the abort handler is registered BEFORE the failing
+    # import, so the SIGABRT still fires at shutdown.
+    (tmp_path / "test_masked.py").write_text(
+        "import atexit\n"
+        "import os\n"
+        "import signal\n\n\n"
+        "def _abort_at_shutdown():\n"
+        "    os.kill(os.getpid(), signal.SIGABRT)\n\n\n"
+        "atexit.register(_abort_at_shutdown)\n\n\n"
+        "import definitely_not_a_real_module_xyz\n\n\n"
+        "def test_never_runs():\n"
+        "    assert True\n",
+        encoding="utf-8")
+    out = tmp_path / "expected-nodeids.txt"
+    rc = _skip_guard.emit_manifest([str(tmp_path / "test_masked.py")],
+                                   "not track_b", out)
+    assert rc != 0, rc
+    assert not out.exists(), (
+        "a collection error masked by a shutdown abort must never certify a "
+        "manifest — the hook counted the failed CollectReport")
+
+
+def test_emit_manifest_refuses_a_syntax_error(tmp_path):
+    # A syntax error is a failed CollectReport too (rc=2), not an import-only
+    # shape — the count is not specific to ImportError.
+    (tmp_path / "test_syntax.py").write_text(
+        "def test_x(:\n    pass\n", encoding="utf-8")
+    out = tmp_path / "expected-nodeids.txt"
+    rc = _skip_guard.emit_manifest([str(tmp_path / "test_syntax.py")],
+                                   "not track_b", out)
+    assert rc == 2, rc
+    assert not out.exists(), "a syntax error must never write a manifest"
+
+
+def test_emit_manifest_refuses_a_conftest_that_raises(tmp_path):
+    # A conftest that raises while being loaded aborts collection BEFORE
+    # pytest_collection_modifyitems, so the hook never runs and no nodeid file
+    # is written — the file's ABSENCE is the fail-closed signal here, because
+    # there is nowhere for the error count to be written.
+    (tmp_path / "conftest.py").write_text(
+        "raise RuntimeError('conftest boom during collection')\n",
+        encoding="utf-8")
+    (tmp_path / "test_a.py").write_text(
+        "def test_a():\n    assert True\n", encoding="utf-8")
+    out = tmp_path / "expected-nodeids.txt"
+    rc = _skip_guard.emit_manifest([str(tmp_path / "test_a.py")],
+                                   "not track_b", out)
+    assert rc != 0, rc
+    assert not out.exists(), "a conftest collection error must not write"
+
+
+def test_emit_manifest_refuses_a_conftest_error_masked_by_an_abort(tmp_path):
+    # Same masking shape as the import-error regression, on the conftest path:
+    # the abort makes rc negative, but no hook file was ever written, so the
+    # manifest must be refused on its ABSENCE alone.
+    (tmp_path / "conftest.py").write_text(
+        "import atexit\n"
+        "import os\n"
+        "import signal\n\n\n"
+        "atexit.register(lambda: os.kill(os.getpid(), signal.SIGABRT))\n"
+        "raise RuntimeError('conftest boom during collection')\n",
+        encoding="utf-8")
+    (tmp_path / "test_a.py").write_text(
+        "def test_a():\n    assert True\n", encoding="utf-8")
+    out = tmp_path / "expected-nodeids.txt"
+    rc = _skip_guard.emit_manifest([str(tmp_path / "test_a.py")],
+                                   "not track_b", out)
+    assert rc != 0, rc
+    assert not out.exists()
+
+
+def test_consumer_accepts_a_PROVEN_empty_manifest_but_refuses_a_bare_one(tmp_path):
+    # #6898: an empty expected-set has two meanings and only one is a bug.
+    # Without the completion marker the generator emitted nothing and the set is
+    # UNKNOWABLE, so the guard must stay red (the whole point of the check).
+    # With it, collection provably ran to the end and matched nothing — every
+    # selected module skipped at collection (a URI-gated docker-lane module on a
+    # PR leg that runs embedded by design) — and expected=0 with 0 observed is
+    # consistent, not a vacuous green. Both halves are asserted here, because a
+    # guard that accepts every empty manifest is worse than one that refuses.
+    log = tmp_path / "pytest.log"
+    log.write_text("1 skipped in 0.20s\n", encoding="utf-8")
+
+    bare = tmp_path / "bare.txt"
+    bare.write_text(
+        "# expected nodeids — epic #1647 Task 6 coverage manifest\n\n",
+        encoding="utf-8")
+    assert run_guard_with_manifest(str(log), manifest=str(bare)) == 1, (
+        "an empty manifest with NO completion marker must stay fail-closed")
+
+    proven = tmp_path / "proven.txt"
+    proven.write_text(
+        "# expected nodeids — epic #1647 Task 6 coverage manifest\n"
+        "# collection: completed 0\n\n",
+        encoding="utf-8")
+    assert run_guard_with_manifest(str(log), manifest=str(proven)) == 0, (
+        "a PROVEN-empty manifest is a legitimate pass, not a vacuous green")
+
+
+def test_emit_manifest_hook_sees_the_marker_deselected_set(tmp_path):
+    # The hook is trylast because pytest's `-m`/`-k` filter is a default-priority
+    # pytest_collection_modifyitems and pluggy runs same-priority hooks in
+    # reverse registration order, so an untagged `-p` plugin would run first and
+    # snapshot the unfiltered items. Running last means the manifest holds the
+    # set the run step actually executes. If the order regressed, excluded
+    # nodeids would enter the manifest and the consumer would red every run on
+    # nodeids that were deliberately never collected.
+    (tmp_path / "test_mixed.py").write_text(
+        "import pytest\n\n\ndef test_included():\n    assert True\n\n\n"
+        "@pytest.mark.live\ndef test_excluded_one():\n    assert True\n\n\n"
+        "@pytest.mark.live\ndef test_excluded_two():\n    assert True\n",
+        encoding="utf-8")
+    out = tmp_path / "expected-nodeids.txt"
+    rc = _skip_guard.emit_manifest([str(tmp_path / "test_mixed.py")],
+                                   "not live", out)
+    assert rc == 0
+    rows = [ln for ln in out.read_text().splitlines()
+            if ln.strip() and not ln.startswith("#")]
+    # Compare on the file+test suffix, not the full nodeid: pytest renders a
+    # nodeid RELATIVE to its discovered rootdir, and the rootdir depends on
+    # the environment (a macOS TMPDIR under the /private/tmp symlink yields
+    # `tt_xxx/pytest-of-…/test_mixed.py`, a plain Linux /tmp yields
+    # `test_mixed.py`). The property under test is WHICH items the hook saw —
+    # exactly the marker-included one and neither excluded one — not how the
+    # path was rendered.
+    assert len(rows) == 1, rows
+    assert rows[0].endswith("test_mixed.py::test_included"), rows
+    assert "excluded" not in rows[0], rows
+
+
 # ── #3290: the live-URI gate has ONE reason string ────────────────────────
 
 def _live_uri_skip_reasons() -> list[tuple[str, int, str]]:
