@@ -818,9 +818,12 @@ def _redact_turn_contents(
     (``_capture_turn_window``'s 5,000), because a client-controlled turn of a few
     MB otherwise costs seconds of scanning (measured: 2 MB → ~6.9 s at
     ~3 s/MB), and because the value beyond that window is never persisted
-    anyway. The extraction consumers pass NO ``cap`` — see
-    ``_capture_turn_texts_with_redactions`` for why a cap there would truncate
-    the extraction input. The bound is a CPU-cost and window-parity bound, NOT
+    anyway. The capture-lane extraction consumers (``_extract_session_llm``,
+    ``_extract_session_v2``) are handed ``_capture_extraction_window``'s
+    already-clipped view, so a ``cap`` there would be a no-op; the commit
+    consumers (``_commit_session_v1``/``_commit_session_v2``) pass none for the
+    reason given in ``_capture_turn_texts_with_redactions``. The bound is a
+    CPU-cost and window-parity bound, NOT
     loop protection: in the hosted lane every capture-path caller of this is now
     off the event loop (#4911 cycle 1).
 
@@ -971,15 +974,18 @@ def _capture_turn_texts_with_redactions(
     confirmation path avoids the mismatch this order would otherwise create by
     windowing first (see ``session_confirm.expected_turns``).
 
-    ⛔ The extraction consumers (``_extract_session_llm``,
-    ``_extract_session_v2``, ``_commit_session_v1``, ``_commit_session_v2``)
-    deliberately pass NO ``cap``: the extractor renders each turn verbatim into
-    its prompt (``extractor_v2._edus_from_conversation`` does not window), so a
-    cap there would both leave the tail un-scanned and silently truncate the
-    extraction input — a fidelity loss with nothing to show for it (#4897's
-    lesson). They therefore pay a full linear scan of client-controlled text
-    (measured ~3 s/MB); the hosted lane keeps that off the event loop, and the
-    SDK-side call is bounded only by what the caller passes.
+    ⛔ The extraction consumers pass NO ``cap``, for two different reasons.
+    ``_commit_session_v1`` / ``_commit_session_v2`` receive the RAW conversation
+    and the extractor renders each turn verbatim into its prompt
+    (``extractor_v2._edus_from_conversation`` does not window), so a cap there
+    would both leave the tail un-scanned and silently truncate the extraction
+    input — a fidelity loss with nothing to show for it (#4897's lesson); those
+    two therefore pay a full linear scan of client-controlled text (measured
+    ~3 s/MB). ``_extract_session_llm`` / ``_extract_session_v2`` are instead
+    handed ``_capture_extraction_window``'s already-clipped view, so their scan
+    is bounded by that window and a ``cap`` would be a no-op. The hosted lane
+    keeps the scan off the event loop, and the SDK-side call is bounded only by
+    what the caller passes.
     """
     redacted, counts = _redact_turn_contents(windowed)
     texts: list[str] = []

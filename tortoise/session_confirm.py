@@ -102,11 +102,13 @@ def turn_point_id(session_id: str, index: int) -> str:
     """The deterministic per-turn id the hosted writer MERGEs on.
 
     ``{session_id}_t{index}`` is the server's IDEMPOTENCY CONTRACT for a
-    capture's turns. It is restated as a literal in several modules
-    (``hosted_api``, ``sdk``); this is the client's single constructor for the
-    confirmation path, pinned against ``sdk._write_capture_turns``'s own
-    ``f"{session_id}_t{i}"`` by ``tests/test_session_confirm.py``, so a format
-    change reds a test rather than silently making every confirmation defer.
+    capture's turns. The server formats it in ONE place
+    (``sdk._capture_turn_id``) rather than restating the literal per lane; this
+    is the client's single constructor for the confirmation path, pinned against
+    that function's body by ``tests/test_session_confirm.py`` (which re-parses
+    ``sdk.py``, drops the function's docstring, and matches the unparsed body),
+    so a format change reds a test rather than silently making every confirmation
+    defer.
     """
     return f"{session_id}_t{index}"
 
