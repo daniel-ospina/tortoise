@@ -47,6 +47,7 @@ import tortoise
 # a monkeypatch/override of the canonical constant reaches BOTH surfaces instead
 # of leaving a stale copy in this module.
 from tortoise import body_limits as _body_limits  # #2048 shared streaming body cap
+from tortoise import embed_metering as _embed_metering  # #4488 encode measurement
 from tortoise import mcp_auth as _mcp_auth
 from tortoise import monitoring as _monitoring  # #2924: call-time bound read
 from tortoise.abuse import (
@@ -70,10 +71,17 @@ from tortoise.capture_receipts import (  # #3809: ONE key definition
 from tortoise.capture_receipts import (
     capture_receipt_key as _capture_receipt_key,
 )
+from tortoise.embed_metering import (  # #4488: pure-ASGI encode-work flusher
+    EmbedMeteringMiddleware as _EmbedMeteringMiddleware,
+)
 from tortoise.env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from tortoise.file_indexer import (  # #4005 shared identity primitives
     derive_session_source_url,
     provenance_basename,
+)
+from tortoise.graph_ops import (  # #3359: per-capture graph-op accounting
+    GraphOpsCounter,
+    counts_capture_ops_async,
 )
 from tortoise.hosted_backup import (
     MemoryStorage,
@@ -120,6 +128,7 @@ from tortoise.sdk import (
     _CAPTURE_NO_PROVIDER_MODE,  # #3892: keyless-capture receipt mode (reused, not reinvented)
     _CAPTURE_NO_PROVIDER_WARNING,  # #3892: the canonical "stored, not extracted" notice
     REPORT_HOOK_URL,  # #2335 WI-2: the bug_report.yml report-hook target
+    InvertedSupersedeWindow,  # #5363: the named #4021 refusal the commit path maps to 422
     TortoiseSDK,
     _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
     _capture_ep_target_ids,  # W5 Phase D (#2104): EP pass targets (minted + first-time folds)
@@ -137,6 +146,7 @@ from tortoise.sdk import (
     _session_capture_event_id,  # W5 Phase F (#2104): deterministic sessionCaptured Event id
     _session_extraction_estimate,  # #1532 D4: v2-aware pre-write quota estimate
     _session_llm_transcript,  # P1 #1529: the shared empty/blank conversation gate
+    _supersede_window_end,  # #5363: the ONE inverted-window predicate (pre-write check)
     _write_capture_turns,  # #3086: the ONE batched turn-stream writer (shared with sdk.capture_session)
 )
 from tortoise.security import redact_error  # billing webhook + checkout error logging
@@ -2084,6 +2094,56 @@ def _enqueue_dream(org_id: str, dirty_roots: list[str],
         _DREAM_TASKS[key] = asyncio.create_task(_dream_worker(org_id, key))
 
 
+def _embed_metered(fn):
+    """Wrap a work-OWNING runner so its embedding encodes are attributed (#4488).
+
+    A DECORATOR rather than a ``with`` block at each call site on purpose: these
+    runners are reached from more than one boundary (the REST route, the MCP
+    tool, an internal call), and only the RUNNER knows the org with certainty —
+    the internal-seed lanes never populate ``scope["state"]["org_id"]``, so a
+    middleware-only attribution would drop their work into an unattributable
+    tally and fire a spurious operator alert on every tenant provisioning.
+    (The SESSION lane does populate it — ``_session_user_org`` stamps it — but
+    the runners themselves are reached directly by MCP too.)
+
+    The tally is FRESH and flushed on exit (``embed_metering.meted``): a detached
+    unit can neither double-count a request-scoped tally nor leak one. An
+    exception still flushes whatever the runner encoded before it failed, and
+    never propagates a measurement fault. Async runners get the async arm, whose
+    flush is offloaded so the blocking ledger write cannot stall the loop.
+
+    The org is pulled from the runner's own ``org_id`` parameter by signature
+    bind, so a positional or keyword call both work.
+
+    Defined BEFORE its first use (``_dream_worker``) because a decorator is
+    evaluated at import time, in file order.
+    """
+    import functools
+    import inspect
+
+    sig = inspect.signature(fn)
+
+    def _org(args, kwargs):
+        try:
+            return sig.bind_partial(*args, **kwargs).arguments.get("org_id")
+        except TypeError:  # pragma: no cover — defensive
+            return None
+
+    if inspect.iscoroutinefunction(fn):
+        @functools.wraps(fn)
+        async def _async_wrapper(*args, **kwargs):
+            async with _embed_metering.meted(_org(args, kwargs)):
+                return await fn(*args, **kwargs)
+        return _async_wrapper
+
+    @functools.wraps(fn)
+    def _sync_wrapper(*args, **kwargs):
+        with _embed_metering.meted(_org(args, kwargs)):
+            return fn(*args, **kwargs)
+    return _sync_wrapper
+
+
+@_embed_metered
 async def _dream_worker(org_id: str, key: str | None = None) -> None:
     """Drain one tenant's queue with debounce, then run incremental dream.
     C5: key carries the graph (org_id, or org_id::<graph_namespace> for a
@@ -2976,6 +3036,7 @@ class InFlightMiddleware:
             workload_exit()
 
 
+app.add_middleware(_EmbedMeteringMiddleware)
 app.add_middleware(InFlightMiddleware)
 
 
@@ -5038,6 +5099,15 @@ async def _session_user_org(request: Request, user: dict) -> dict:
     # auth_ip event or counted toward R3 read velocity). Same best-effort
     # semantics as the key lanes — abuse telemetry never breaks auth.
     await _abuse_post_auth(request, org)
+    # #4488: publish the resolved org on the ASGI scope, exactly as the key
+    # lanes do (``hosted_api.py`` get_current_org / _get_current_org_supabase).
+    # This lane resolves the org WITHOUT stamping it, so an embed tally armed by
+    # ``EmbedMeteringMiddleware`` had no org to attribute to at flush time: every
+    # SESSION-authed write that encoded (POST /v1/points, /v1/objects,
+    # /v1/subjects) was dropped AND misreported as a bookkeeping fault
+    # (UNMETERED_INCREMENT on a perfectly resolvable org). Setting it here —
+    # before the handler runs — makes the org resolvable at the boundary.
+    request.state.org_id = org["org_id"]
     return org
 
 
@@ -5307,6 +5377,24 @@ async def get_current_org_gated(request: Request) -> dict:
     override = overrides.get(get_current_org)
     if override is not None:
         org = await _invoke_override(override, request)
+        # #4488: publish the resolved org on the ASGI scope, exactly as the
+        # real lanes do (``get_current_org`` :3864, ``_get_current_org_
+        # supabase`` :3982, ``_session_user_org`` :4248). This branch resolves
+        # an org WITHOUT stamping it, and an embed tally armed by
+        # ``EmbedMeteringMiddleware`` resolves its org at FLUSH time from
+        # exactly this key — so an unattributed tally filed a SPURIOUS
+        # UNMETERED_INCREMENT operator alert ("no resolvable org … the ledger
+        # will read short") for a capture whose org was never in doubt.
+        # There are TWO such branches, not one: the same hole existed on
+        # ``get_current_org_session`` below, which guards the encoding write
+        # routes (POST /v1/objects, /v1/subjects, /v1/points) — so both are
+        # stamped. Neither is reachable in production (nothing outside tests
+        # sets ``dependency_overrides``), but a test-only hole that files real
+        # operator alerts is still a hole.
+        # ``.get`` not ``[]``: an override is test-supplied and may return a
+        # bare dict; a missing id must not turn a metering lookup into a 500.
+        if org.get("org_id"):
+            request.state.org_id = org["org_id"]
         return org
     return await get_current_org(request)
 
@@ -5488,6 +5576,14 @@ async def get_current_org_session(request: Request, gate_key_login: bool = True)
     override = overrides.get(get_current_org)
     if override is not None:
         org = await _invoke_override(override, request)
+        # #4488: publish here too — see the twin note on ``get_current_org_
+        # gated`` above. This branch guards the encoding WRITE routes
+        # (POST /v1/objects, /v1/subjects, /v1/points), so leaving it
+        # unpublishing kept the tally unattributable on exactly the routes the
+        # embed meter exists to measure. Guarded with ``.get`` for the same
+        # reason: an override may return a bare dict.
+        if org.get("org_id"):
+            request.state.org_id = org["org_id"]
         return org
     # Session JWT (eyJ...) — verify + resolve the user's org.
     user = await get_current_user(request)
@@ -5971,6 +6067,24 @@ class OrgInfoResponse(BaseModel):
     ask_tokens_in: int = 0
     ask_tokens_out: int = 0
     ask_cost_usd: float = 0.0
+    # #4488: per-org LOCAL EMBEDDING-ENCODE workload for the current period.
+    # WORKLOAD, not a price — nothing here can bill, cap or throttle (the
+    # issue's explicit out-of-scope list). Additive + defaulted, so every
+    # existing consumer of this response is unaffected; a fresh org reads
+    # zeros with a None identity (the MERGE creates the row on first write).
+    # ``embed_model``/``embed_revision`` travel WITH the figure so a reading
+    # can never be attributed to an encoder that did not run; a None identity
+    # with non-zero calls means the identity was never stamped.
+    embed_calls: int = 0
+    embed_texts: int = 0
+    embed_chars: int = 0
+    embed_wall_ms: float = 0.0
+    embed_skipped: int = 0
+    embed_model: str | None = None
+    embed_revision: str | None = None
+    #: Sticky: TRUE once two different encoder identities were seen in the
+    #: window. A figure that silently averaged two models would be unusable.
+    embed_identity_mixed: bool = False
 
 
 # ── Billing: Checkout + Portal request/response models (#310, Task 5) ───────
@@ -7688,8 +7802,18 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
     was not relevance-ranked (#160). FTS index on content/title/name/subject
     works without the embedding extra; vector joins in automatically when
     embeddings are available.
+
+    B6 (#3892): the read-path status contract is ADDITIVE and OFF BY DEFAULT.
+    When ``TORTOISE_READ_STATUS`` is truthy the response carries ``status`` —
+    ONE of the four recorded terms (``available`` / ``empty`` / ``degraded`` /
+    ``unconfigured``, see ``tortoise/read_status.py``) — so a store that could
+    not be reached is never served as a clean empty result. Unset/``0`` leaves
+    this response byte-identical.
     """
     _require_scope(org, "graphs:read", "search")
+    from tortoise.read_status import read_status_enabled as _read_status_enabled
+
+    status_out: dict | None = {} if _read_status_enabled() else None
     sdk = _data_sdk(org)
     try:
         # #1676 (launch capacity): tortoise_fts_query is CPU-blocking — the
@@ -7699,7 +7823,8 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
         # thread so concurrent searches overlap their encode/DB work (same
         # asyncio.to_thread pattern used throughout this file).
         results = await asyncio.to_thread(
-            sdk.tortoise_fts_query, q, limit=limit)
+            sdk.tortoise_fts_query, q, limit=limit,
+            read_status_out=status_out)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("search failed")
@@ -7715,7 +7840,12 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
         if "kind" not in props:
             props["kind"] = "statement"
         out.append(props)
-    return {"results": out, "count": len(out)}
+    response = {"results": out, "count": len(out)}
+    if status_out is not None:
+        # The SDK sets this on every return path; a missing term is a bug, not
+        # a reason to emit null under a vocabulary of exactly four terms.
+        response["status"] = status_out["status"]
+    return response
 
 
 @app.get("/v1/topics/{topic}/summary")
@@ -7833,14 +7963,26 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
                 org["org_id"], exc_info=True)
             max_nodes = None
 
-    # Metering (#681): fetch write-op usage for the current billing period.
-    from tortoise.metering import get_current_usage
-    usage = get_current_usage(org["org_id"])
+    # Metering: write-op usage for the current billing period (#681), ask usage
+    # (#1987 Task 6) and embedding-encode workload (#4488). All three are
+    # SYNCHRONOUS ledger/control-plane reads, and each was previously run
+    # straight on the event loop. #4488 added the third, which is the clearest
+    # possible reason to move the GROUP off the loop rather than add another
+    # blocking hop to a route that is also under a 10s transport bound
+    # (`mcp_auth.py`). ONE offloaded hop for all three — the figures then come
+    # from the same moment, and the route does strictly less blocking work than
+    # before this PR rather than more. Found in review.
+    #
+    # All three degrade internally to a zero view (never raising), so the
+    # best-effort contract is unchanged by where they run.
+    from tortoise.metering import get_ask_usage, get_current_usage, get_embedding_usage
 
-    # #1987 Task 6: ask usage — best-effort read; any failure degrades to
-    # the zero-usage view (never 500).
-    from tortoise.metering import get_ask_usage
-    ask_usage = get_ask_usage(org["org_id"])
+    def _read_usage():
+        oid = org["org_id"]
+        return (get_current_usage(oid), get_ask_usage(oid),
+                get_embedding_usage(oid))
+
+    usage, ask_usage, embed_usage = await asyncio.to_thread(_read_usage)
 
     return OrgInfoResponse(
         org_id=org["org_id"],
@@ -7878,6 +8020,20 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
         ask_tokens_in=ask_usage.get("ask_tokens_in", 0),
         ask_tokens_out=ask_usage.get("ask_tokens_out", 0),
         ask_cost_usd=ask_usage.get("ask_cost_usd", 0.0),
+        # #4488: embedding-encode workload for the current period. The read
+        # degrades to the zero view on failure (never 500); the identity
+        # fields are renderable so a person can read WHICH encoder produced
+        # the figure, and ``embed_identity_mixed`` says when it is not one
+        # encoder at all.
+        embed_calls=embed_usage.get("embed_calls", 0),
+        embed_texts=embed_usage.get("embed_texts", 0),
+        embed_chars=embed_usage.get("embed_chars", 0),
+        embed_wall_ms=embed_usage.get("embed_wall_ms", 0.0),
+        embed_skipped=embed_usage.get("embed_skipped", 0),
+        embed_model=embed_usage.get("embed_model"),
+        embed_revision=embed_usage.get("embed_revision"),
+        embed_identity_mixed=bool(
+            embed_usage.get("embed_identity_mixed", False)),
         # #1082 (PR1): anon flag drives the dashboard claim card — the shared
         # is_anon_org predicate (Supabase mode only; registry = False).
         anon=_org_is_anon(org["org_id"]),
@@ -8045,7 +8201,9 @@ async def _session_login_exchange(
     # KEY_NOT_USER_MINTED.
     cp = get_control_plane()
     try:
-        target = mint_target_user_for_key(cp, created_by, org_id)
+        target = await _cp_offload(
+            lambda: mint_target_user_for_key(cp, created_by, org_id),
+            op="mint_target_user_for_key")
     except RuntimeError:
         # #1719 (Task 4): the mint-path org_memberships read failed for a
         # control-plane reason (outage/schema-cache/column grant) — degrade
@@ -8063,8 +8221,10 @@ async def _session_login_exchange(
         # acceptance; the inline re.fullmatch is DELETED, not shadowed).
         try:
             anon = (created_by is not None and created_by != "api"
-                    and not _is_uuid(created_by)
-                    and is_anon_org(cp, org_id))
+                    and not _is_uuid(created_by))
+            if anon:
+                anon = await _cp_offload(
+                    lambda: is_anon_org(cp, org_id), op="is_anon_org")
         except RuntimeError:
             raise _control_plane_unavailable() from None
         if anon:
@@ -8372,7 +8532,9 @@ async def register_user(request: Request, response: Response):
     if is_supabase_enabled():
         cp = get_control_plane()
         try:
-            if org_by_email(cp, email):
+            _existing_org = await _cp_offload(
+                lambda: org_by_email(cp, email), op="org_by_email")
+            if _existing_org:
                 raise HTTPException(
                     status_code=409,
                     detail={"message": "already_registered", "email": email},
@@ -8386,7 +8548,10 @@ async def register_user(request: Request, response: Response):
             import hashlib as _hl2
             reg_id = f"reg-{_hl2.sha256(email.lower().encode()).hexdigest()[:12]}"
             from tortoise.supabase_control import membership_by_identity
-            if membership_by_identity(cp, reg_id):
+            _existing_reg = await _cp_offload(
+                lambda: membership_by_identity(cp, reg_id),
+                op="membership_by_identity")
+            if _existing_reg:
                 raise HTTPException(
                     status_code=409,
                     detail={"message": "already_registered", "email": email},
@@ -8454,22 +8619,24 @@ async def register_user(request: Request, response: Response):
         except Exception:
             raise HTTPException(status_code=500, detail="Registration failed")  # noqa: B904
         try:
-            provision_org(cp, **{
-                "p_user_id": None,
-                # deterministic per-email anchor: a re-register after a
-                # failed/rolled-back attempt reconciles the same membership
-                # row instead of accumulating anon rows (0010 identity
-                # upsert refreshes in place).
-                "p_identity": f"reg-{_hashlib.sha256(email.lower().encode()).hexdigest()[:12]}",
-                "p_org_id": org_id,
-                "p_org_name": org_name,
-                "p_api_key": api_key,
-                "p_key_hash": key_hash,
-                "p_lookup_hash": lookup_hash(api_key),
-                "p_graph_name": graph_name,
-                "p_email": email,
-                "p_key_prefix": org_id[:8],
-            })
+            await _cp_offload(
+                lambda: provision_org(cp, **{
+                    "p_user_id": None,
+                    # deterministic per-email anchor: a re-register after a
+                    # failed/rolled-back attempt reconciles the same membership
+                    # row instead of accumulating anon rows (0010 identity
+                    # upsert refreshes in place).
+                    "p_identity": f"reg-{_hashlib.sha256(email.lower().encode()).hexdigest()[:12]}",
+                    "p_org_id": org_id,
+                    "p_org_name": org_name,
+                    "p_api_key": api_key,
+                    "p_key_hash": key_hash,
+                    "p_lookup_hash": lookup_hash(api_key),
+                    "p_graph_name": graph_name,
+                    "p_email": email,
+                    "p_key_prefix": org_id[:8],
+                }),
+                op="provision_org")
             # #2668: agent-created orgs need API-key dashboard login enabled
             # by default — the agent has no session to log in with.
             from tortoise.supabase_control import set_dashboard_key_login
@@ -9228,8 +9395,10 @@ async def send_onboarding_offer_email_endpoint(request: Request):
             _inflight_onboarding_emails.discard(org_id)
 
         if result.get("status") == "sent":
-            stamped = set_org_onboarding_email_sent(
-                get_control_plane(), org_id)
+            stamped = await _cp_offload(
+                lambda: set_org_onboarding_email_sent(
+                    get_control_plane(), org_id),
+                op="set_org_onboarding_email_sent")
             if not stamped:
                 # Another process stamped concurrently (cross-replica race) —
                 # the provider Idempotency-Key collapsed the duplicate send;
@@ -9587,12 +9756,14 @@ async def _key_created_analytics(org: dict, kid: str, key_prefix: str) -> None:
     if is_supabase_enabled():
         cp = get_control_plane()
         try:
-            rows = cp.query(
-                "org_memberships",
-                select=["user_id", "identity"],
-                filters=[("org_id", "eq", org["org_id"]),
-                         ("status", "eq", "active")],
-            )
+            rows = await _cp_offload(
+                lambda: cp.query(
+                    "org_memberships",
+                    select=["user_id", "identity"],
+                    filters=[("org_id", "eq", org["org_id"]),
+                             ("status", "eq", "active")],
+                ),
+                op="query")
             actor = next((r.get("user_id") or r.get("identity")
                           for r in rows if r.get("user_id") or r.get("identity")),
                          None)
@@ -10262,8 +10433,10 @@ async def list_api_keys(graph_id: str | None = None,
     )
     if is_supabase_enabled():
         try:
-            keys = org_api_keys(get_control_plane(), org["org_id"],
-                                 graph_id=graph_id)
+            keys = await _cp_offload(
+                lambda: org_api_keys(
+                    get_control_plane(), org["org_id"], graph_id=graph_id),
+                op="org_api_keys")
         except Exception:
             import logging
             logging.getLogger("tortoise.api").exception("list_api_keys failed")
@@ -10436,7 +10609,9 @@ async def revoke_api_key(key_id: str, request: Request, org: dict = Depends(get_
                 return {"revoked": True, "already": True, "key_id": key_id}
             from datetime import datetime
             now = datetime.now(UTC).isoformat()
-            _sb_revoke(get_control_plane(), key_id, now)
+            await _cp_offload(
+                lambda: _sb_revoke(get_control_plane(), key_id, now),
+                op="revoke_api_key")
         except HTTPException:
             raise
         except Exception:
@@ -11107,9 +11282,11 @@ def _capture_abandoned_marker(proj, session_id: str, lane: str) -> None:
             "same-session retry would legacy-replay (#3129)", session_id)
 
 
+@counts_capture_ops_async  # #3359: count graph ops for the whole capture
 async def _capture_session_impl(body: SessionRequest, request: Request | None,
                                 org: dict, slot: _CaptureSlot,
-                                state: dict | None = None) -> dict:
+                                state: dict | None = None,
+                                _graph_ops: GraphOpsCounter | None = None) -> dict:
     """The capture pipeline (gates + writes). Shared by the REST endpoint and
     the ``tortoise_session_capture`` MCP tool (mcp_server.py) so the two
     surfaces can never drift on gate order.
@@ -12585,6 +12762,37 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         import logging  # function-local convention (see the turn-cap site)
         logging.getLogger("tortoise.api").exception(
             "capture_observation emit failed (non-fatal)")
+    # #3359: one ``capture_graph_ops`` analytics row per GENUINE capture (a
+    # replay writes no new nodes, so it is not a measured capture — the same
+    # guard the write-op meter uses). Emitted here, at the END of the write
+    # path, so the ~28% belief-propagation leg (the ingest EP pass above) is
+    # included; the #3508 ``capture_cost`` row (LLM spend) is emitted earlier
+    # and is complementary — this is the graph-op term of the same per-session
+    # cost picture. ``_emit_analytics_off_loop`` is the #4015 seam: off the
+    # event loop on the dedicated telemetry pool, best-effort EXCEPT the
+    # #3821 strict-mode ``UnregisteredTelemetryKey``, which must propagate —
+    # so this site does NOT wrap it in a swallow-all handler.
+    # ⚠️ The ``capture_cost`` ledger emit **in the ``_emit_capture_ledger``
+    # helper this write path calls** DOES swallow everything ("never block
+    # capture") — the two conventions sit far apart in this file, so the
+    # divergence is called out here rather than left to be discovered. It is
+    # deliberate on this side (#3821 is a convention with its own rationale,
+    # and this row is new), and reconciling `capture_cost` to it is a separate
+    # decision about an existing billing-adjacent site — not something to
+    # change as a side effect of adding a measurement.
+    if _graph_ops is not None and (
+            not session_existed or retry_failed_capture):
+        _ops_props = _capture_graph_ops_props(
+            session_id, len(body.conversation), _graph_ops)
+        try:
+            await _emit_analytics_off_loop(
+                org["org_id"], "capture_graph_ops", _ops_props)
+        except UnregisteredTelemetryKey:
+            raise  # #3821: the strict-mode guard must propagate
+        except Exception:  # noqa: BLE001, RUF100 — never block a committed capture
+            import logging
+            logging.getLogger("tortoise.api").exception(
+                "capture_graph_ops analytics emit failed (non-fatal)")
     return build_write_verb(
         source_session=session_id,
         source_harness=capture_harness or "unknown",
@@ -12885,6 +13093,104 @@ def _point_content_by_id(payload: CommitPayload, pid: str) -> str:  # noqa: F821
     return ""
 
 
+def _prevalidate_supersede_window(sdk, pr, *, now: str) -> None:
+    """#5363 (B) — refuse an inverted supersede window BEFORE THIS payload
+    point's successor is minted.
+
+    ``_execute_commit_writes`` creates the successor and only THEN calls
+    ``supersede_point``, whose #4021 guard refuses an inverted window before it
+    mutates the predecessor. Because the refuse happens second, the successor
+    it just created is left live with no ``CORRECTS`` edge — and since
+    ``supersede_point`` re-raises deterministically for the same payload, the
+    commit is permanently un-committable (a corrected ``when`` re-dedups onto
+    the already-minted successor). Validating first keeps THIS successor from
+    ever being minted on a refusal.
+
+    Called from the writer's OWN point loop, per supersede, at the writer's own
+    position in the sequence — after every EARLIER point of the commit has been
+    written. That position is the point: the successor's dedup target is
+    resolved with the SAME helper (``sdk._find_point_by_content``) that
+    ``create_point(dedup=True)`` calls immediately after, against the SAME
+    graph state, so a same-commit sibling minted earlier in this commit is
+    visible here exactly as it is to the writer. A single up-front pass cannot
+    see it: it resolves the successor at T0, reads the fallback start as the
+    hosted ``now`` where the writer reads the sibling's stored ``validFrom``,
+    and refuses a commit the writer accepts — a FALSE 422 (#7000 review P2).
+
+    The PREDICATE is not re-implemented here: only a successor start that is a
+    FACT is handed to the shared ``_supersede_window_end``:
+
+    - a dedup target's stored ``validFrom`` — or, when the payload carries a
+      truthy ``when``, that ``when``, because ``create_point``'s dedup branch
+      hands the payload props to ``update_point`` (``SET n += $props``) and
+      OVERWRITES the re-keyed node's start before ``supersede_point`` reads it;
+      or
+    - a freshly-minted successor's payload ``when`` (``create_point`` writes
+      ``validFrom`` only for a truthy ``when``).
+
+    When the resolution would instead fall through to a clock this check cannot
+    read before the write (a fresh node's future ``createdAt``, or
+    ``supersede_point``'s own ``now``), NOTHING is refused here and the ``[5]``
+    boundary owns the verdict. That deferral is deliberate, and it is why
+    ``now`` is not used to decide: predicting the instant would re-create
+    exactly the drift this check must not have, and a false 422 on a VALID
+    commit is worse than the partial write the boundary still guards against.
+
+    NOT a whole-commit guarantee: the chain writes (and any EARLIER point of
+    this commit) have already landed by the time this runs, so a refusal here
+    means no successor for THIS point — not that the request wrote nothing.
+
+    Raises ``InvertedSupersedeWindow`` — the caller's ``[5]`` boundary maps it
+    to the repo's validation posture (422).
+    """
+    from .search_engine import _created_sort_key  # lazy — mirrors sdk.py
+    proj = sdk._get_proj()
+    old_rows = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.validFrom",
+        params={"id": pr.existing_id},
+    ).result_set
+    # EVERY node carrying the predecessor id: the writer's stamp MATCHes and
+    # stamps them all, and row order is server-dependent (mirrors the #5358
+    # sibling loops + the MCP preview's identical read).
+    old_vfs = [r[0] for r in old_rows]
+    # Mirror `create_point(dedup=True)`'s successor resolution AT THIS POINT in
+    # the write sequence. A match re-keys the write onto that node (and, with a
+    # truthy payload `when`, `update_point` overwrites its stored start); no
+    # match mints the content-addressed `supersede_id` with the payload `when`.
+    existing_id = sdk._find_point_by_content(
+        pr.point.content, pointKind=pr.point.pointKind)
+    payload_when = pr.point.when or None
+    if existing_id:
+        rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.validFrom, n.createdAt",
+            params={"id": existing_id},
+        ).result_set
+        node_vf = rows[0][0] if rows else None
+        stored_vf = payload_when or node_vf
+        successor_created_at = (rows[0][1] if rows else None)
+    else:
+        stored_vf = payload_when
+        successor_created_at = None
+    # `_supersede_window_end` resolves `stored_vf` → `successor_created_at` →
+    # `now`. Both facts above are readable before the write; `now` is the
+    # writer's clock, not a fact — so a resolution that would land on it is NOT
+    # pre-validated; the boundary decides instead of this check guessing an
+    # instant the writer has not chosen yet.
+    if not (stored_vf and _created_sort_key(stored_vf)[0] == 0) and not (
+            successor_created_at
+            and _created_sort_key(successor_created_at)[0] == 0):
+        return
+    _supersede_window_end(
+        old_id=pr.existing_id,
+        new_id=existing_id or pr.supersede_id,
+        old_vfs=old_vfs,
+        valid_from=None,  # this write path passes no kwarg
+        stored_vf=stored_vf,
+        successor_created_at=successor_created_at,
+        now=now,
+    )
+
+
 def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # noqa: F821
     """W-3 [5] — the graph write phase for an adjudicated (budget=ok) commit.
 
@@ -12893,9 +13199,12 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     entities + aboutObject edges, then operators — IMPL/NAND BEFORE MITIGATES
     (v1 targets must be same-commit emitted operators, Layer-1 enforced).
 
-    Runs inside the handler's fail-closed guard — any graph error surfaces as
-    a redacted 500 and the client retries with the same client_commit_id
-    (safe by L1; the record stays partial until the write completes).
+    A DETERMINISTIC supersede-window refusal (#4021's inverted window) that
+    this commit can PROVE before minting a given successor (#5363) is refused
+    at that point in the points loop and surfaces as a 422 from the handler;
+    every other graph error stays fail-closed — a redacted 500 and the client
+    retries with the same client_commit_id (safe by L1; the record stays
+    partial until the write completes).
     """
     from tortoise.ids import content_hash
 
@@ -12903,6 +13212,13 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     now = datetime.now(UTC).isoformat()
     session_id = payload.session_id
     reconcile = plan.reconcile
+    # #5363 (B): each supersede window is validated inside the points loop
+    # below, PER ACTION and immediately BEFORE that action's successor is
+    # minted — see `_prevalidate_supersede_window` for why the position in the
+    # write sequence (not merely "before the first write") is the correctness
+    # condition. The #4021 refusal used to fire from `supersede_point` only
+    # AFTER the successor had been minted, leaving a live orphan successor and
+    # a commit no retry can complete.
     # #1370 / #4934: the SAME kind→label routing + gated binder as the local
     # capture seam (anti-drift — both call `subject_binding`). Subject-kind
     # names are excluded from the legacy `about_entities` channel below: the
@@ -13154,6 +13470,13 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             if pr.point.when:
                 point_props["when"] = pr.point.when
                 point_props["validFrom"] = pr.point.when
+            # #5363 (B) / #7000 review P2: validate THIS window here — after
+            # every EARLIER point of this commit has been written, so the
+            # successor this write will actually dedup onto is already visible
+            # (a T0 check cannot see it and falsely 422s a valid commit), and
+            # BEFORE this successor is minted, so a refusal leaves no orphan
+            # for this point.
+            _prevalidate_supersede_window(sdk, pr, now=now)
             _written = sdk.create_point(
                 pr.point.pointKind, pr.point.content, dedup=True, id=pid,
                 status=pr.point.status, confidence=pr.point.confidence,
@@ -13437,7 +13760,9 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     Response contract (§6.1): 200 {session_id, commit_id, nodes_created,
     nodes_merged, held[], duplicate} · 400 missing required fields ·
     401 bad/missing key (get_current_org) · 402 budget ceiling · 422 Layer-1
-    (retry once; code calibration_mismatch / commit_id_mismatch) · 429
+    (retry once; code calibration_mismatch / commit_id_mismatch) OR an
+    inverted supersede window (code supersede_window_inverted — #5363, a
+    deterministic payload refusal, NOT retryable) · 429
     dedicated 300/min/key bucket (R-13) · 500 fail-closed, redacted.
     """
     # #1927: commit_session is a session-content write surface that needs NO
@@ -13598,6 +13923,30 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         _execute_commit_writes(sdk, payload, plan)
     except HTTPException:
         raise
+    except InvertedSupersedeWindow as exc:
+        # #5363 (A): this is a DETERMINISTIC payload refusal, not a transient
+        # write failure — the retry-advising 500 below is actively wrong for it
+        # (a same-payload retry re-raises identically). Map it to the repo's
+        # validation posture (422) and NAME the conflicting ids / window so the
+        # client can fix the payload. The per-action check in
+        # `_execute_commit_writes` keeps a PROVABLE refusal from minting the
+        # successor it would orphan, but it is not a whole-commit guarantee
+        # (the chain writes and any earlier point have already landed); this
+        # clause is also the boundary of last resort for a refusal that still
+        # escapes it (e.g. a concurrent change between check and write, or the
+        # one resolution the pre-check deliberately does not guess — see
+        # `_prevalidate_supersede_window`).
+        raise HTTPException(  # noqa: B904
+            status_code=422,
+            detail={
+                "code": "supersede_window_inverted",
+                "errors": [str(exc)],
+                "superseded": exc.old_id,
+                "supersedes_by": exc.new_id,
+                "successor_validFrom": exc.successor_start,
+                "predecessor_validFrom": exc.predecessor_valid_from,
+            },
+        )
     except Exception:
         _logger.exception(
             "commit write failed (fail-closed 500): team=%s session=%s",
@@ -14530,7 +14879,9 @@ async def _count_active_free_memberships(user_id: str) -> int:
     )
     if is_supabase_enabled():
         import asyncio as _asyncio
-        count = _sb_count(get_control_plane(), user_id)
+        count = await _cp_offload(
+            lambda: _sb_count(get_control_plane(), user_id),
+            op="count_active_free_memberships")
         await _asyncio.sleep(0)  # the TOCTOU read window (#1954)
         return count
     reg = _make_sdk(namespace="registry")._get_registry()
@@ -14579,7 +14930,9 @@ async def _owned_free_org_ids(user_id: str) -> list[str]:
     )
     if is_supabase_enabled():
         import asyncio as _asyncio
-        ids = _sb_ids(get_control_plane(), user_id)
+        ids = await _cp_offload(
+            lambda: _sb_ids(get_control_plane(), user_id),
+            op="owned_free_org_ids")
         await _asyncio.sleep(0)  # the TOCTOU read window (#1954)
         return ids
     reg = _make_sdk(namespace="registry")._get_registry()
@@ -14740,15 +15093,18 @@ async def _create_org_supabase_lane(cp, name: str, user: dict) -> dict:
     # twin of the registry owner-membership count (#743(b) semantics:
     # role='owner' rows created within the last hour).
     since = (datetime.now(UTC) - _td(hours=1)).isoformat()
-    recent = membership_count_since(
-        cp, cutoff=since, user_id=user["user_id"], role="owner")
+    recent = await _cp_offload(
+        lambda: membership_count_since(
+            cp, cutoff=since, user_id=user["user_id"], role="owner"),
+        op="membership_count_since")
     if recent >= 3:
         raise HTTPException(status_code=429,
                             detail="Too many organizations created — try again later")
     # Duplicate-name 409 (registry org_create raises ControlPlaneError
     # 'already exists'; the 0011 unique index is the atomic guard — the
     # pre-check is the friendly fast-path, the RPC 409 is authoritative).
-    if org_by_name(cp, name):
+    _dup_org = await _cp_offload(lambda: org_by_name(cp, name), op="org_by_name")
+    if _dup_org:
         raise HTTPException(status_code=409, detail="Organization name already exists")
     # #1877/#2789: per-person entitlement — one FREE ORGANIZATION, counted by
     # OWNERSHIP (role='owner'), not membership. Any active owned org without an
@@ -14778,18 +15134,22 @@ async def _create_org_supabase_lane(cp, name: str, user: dict) -> dict:
         # #1921: all-NULL key params → the RPC writes orgs + membership but
         # NO api_keys row (all-or-none guard, migration 20260825214233) —
         # mirroring create_onboarding_org's #1716 keyless provision.
-        provision_org(cp, **{
-            "p_user_id": user["user_id"],
-            "p_identity": None,
-            "p_org_id": org_id,
-            "p_org_name": name,
-            "p_api_key": None,
-            "p_key_hash": None,
-            "p_lookup_hash": None,
-            "p_key_prefix": None,
-            "p_graph_name": graph_name,
-            "p_tier": "free",
-        })
+        await _cp_offload(
+            lambda: provision_org(cp, **{
+                "p_user_id": user["user_id"],
+                "p_identity": None,
+                "p_org_id": org_id,
+                "p_org_name": name,
+                "p_api_key": None,
+                "p_key_hash": None,
+                "p_lookup_hash": None,
+                "p_key_prefix": None,
+                "p_graph_name": graph_name,
+                "p_tier": "free",
+            }),
+            op="provision_org")
+    except HTTPException:
+        raise
     except Exception as e:
         # 0011 unique index: a concurrent duplicate name surfaces as a
         # PostgREST 409 → 409 (the ControlPlaneError mapping below is for
@@ -15431,15 +15791,19 @@ async def _apply_graph_recording_override(
         if graph_id == "default":
             kind = "default"
         else:
-            rows = cp.query(
-                "graphs", select=["kind"],
-                filters=[("id", "eq", graph_id), ("org_id", "eq", org_id),
-                         ("status", "eq", "active")],
-            )
+            rows = await _cp_offload(
+                lambda: cp.query(
+                    "graphs", select=["kind"],
+                    filters=[("id", "eq", graph_id), ("org_id", "eq", org_id),
+                             ("status", "eq", "active")],
+                ),
+                op="query")
             kind = rows[0].get("kind") if rows else None
         if kind is None:
             raise HTTPException(status_code=404, detail="Unknown graph")
-        written = sb_set_rec(cp, org_id, graph_id, body.recording)
+        written = await _cp_offload(
+            lambda: sb_set_rec(cp, org_id, graph_id, body.recording),
+            op="set_graph_recording")
     else:
         # Registry: probe the node (id match OR kind='default' for the
         # literal id) so unknown graphs 404 before any write.
@@ -15543,11 +15907,13 @@ async def _apply_graph_rename(
         if graph_id == "default":
             kind = "default"
         else:
-            rows = cp.query(
-                "graphs", select=["kind"],
-                filters=[("id", "eq", graph_id), ("org_id", "eq", org_id),
-                         ("status", "eq", "active")],
-            )
+            rows = await _cp_offload(
+                lambda: cp.query(
+                    "graphs", select=["kind"],
+                    filters=[("id", "eq", graph_id), ("org_id", "eq", org_id),
+                             ("status", "eq", "active")],
+                ),
+                op="query")
             kind = rows[0].get("kind") if rows else None
         if kind is None:
             raise HTTPException(status_code=404, detail="Unknown graph")
@@ -15584,8 +15950,10 @@ async def _apply_graph_rename(
                                     detail="Graph name already exists")
         try:
             if is_supabase_enabled():
-                written = sb_set_name(get_control_plane(), org_id,
-                                      graph_id, name)
+                written = await _cp_offload(
+                    lambda: sb_set_name(get_control_plane(), org_id,
+                                        graph_id, name),
+                    op="set_graph_name")
             else:
                 written = sdk.graph_set_name(org_id, graph_id, name)
         except Exception as _exc:
@@ -15658,10 +16026,12 @@ async def delete_graph(graph_id: str, org_id: str,
                             detail="Cannot delete the default graph")
     if is_supabase_enabled():
         cp = get_control_plane()
-        rows = cp.query(
-            "graphs", select=["kind", "status"],
-            filters=[("id", "eq", graph_id), ("org_id", "eq", org_id)],
-        )
+        rows = await _cp_offload(
+            lambda: cp.query(
+                "graphs", select=["kind", "status"],
+                filters=[("id", "eq", graph_id), ("org_id", "eq", org_id)],
+            ),
+            op="query")
         kind = rows[0].get("kind") if rows else None
     else:
         kind_rows = sdk._get_registry().query(
@@ -15675,11 +16045,23 @@ async def delete_graph(graph_id: str, org_id: str,
     if kind is None:
         raise HTTPException(status_code=404, detail="Unknown graph")
     if is_supabase_enabled():
-        deleted = soft_delete_graph(cp, org_id, graph_id)
-        key_ids = sb_graph_key_ids(cp, org_id, graph_id)
+        deleted = await _cp_offload(
+            lambda: soft_delete_graph(cp, org_id, graph_id),
+            op="soft_delete_graph")
+        key_ids = await _cp_offload(
+            lambda: sb_graph_key_ids(cp, org_id, graph_id),
+            op="graph_key_ids")
     else:
-        deleted = sdk.graph_delete(org_id, graph_id)
-        key_ids = sdk.graph_key_ids(org_id, graph_id)
+        # #4350: DATA plane, not control plane — the embedded SDK's graph work
+        # goes through #3773's dedicated `graph` pool (`_graph_offload`), never
+        # the auth pool `_cp_offload` uses. Same seam `_data_sdk` takes (#3773,
+        # :4906). Routing `graph_delete` here too: it was left synchronous while
+        # its sibling below was wrapped, which is the inconsistency, not a
+        # deliberate exemption.
+        deleted = await _graph_offload(
+            lambda: sdk.graph_delete(org_id, graph_id), op="graph_delete")
+        key_ids = await _graph_offload(
+            lambda: sdk.graph_key_ids(org_id, graph_id), op="graph_key_ids")
     if not deleted:
         # Kind was non-default and present a moment ago — belt-and-
         # suspenders only (no code path reaches here).
@@ -15696,7 +16078,9 @@ async def delete_graph(graph_id: str, org_id: str,
     for kid in key_ids:
         try:
             if is_supabase_enabled():
-                sb_revoke(get_control_plane(), kid)
+                await _cp_offload(
+                    lambda kid=kid: sb_revoke(get_control_plane(), kid),
+                    op="revoke_api_key")
             else:
                 sdk.apikey_revoke(kid)
         except Exception:
@@ -15776,13 +16160,16 @@ async def _graph_row_probe(org_id: str, graph_id: str) -> dict | None:
     )
     try:
         if is_supabase_enabled():
-            rows = get_control_plane().query(
-                "graphs",
-                select=["kind", "status", "name", "namespace",
-                        "deleted_at", "purged_at"],
-                filters=[("id", "eq", graph_id),
-                         ("org_id", "eq", org_id)],
-            )
+            cp = get_control_plane()
+            rows = await _cp_offload(
+                lambda: cp.query(
+                    "graphs",
+                    select=["kind", "status", "name", "namespace",
+                            "deleted_at", "purged_at"],
+                    filters=[("id", "eq", graph_id),
+                             ("org_id", "eq", org_id)],
+                ),
+                op="query")
             if not rows:
                 return None
             r = rows[0]
@@ -15824,13 +16211,15 @@ async def _rollback_restore_name_race(org_id: str, graph_id: str) -> None:
             is_supabase_enabled,
         )
         if is_supabase_enabled():
-            get_control_plane().query(
-                "graphs", method="PATCH",
-                filters=[("id", "eq", graph_id),
-                         ("org_id", "eq", org_id)],
-                json_body={"status": "deleted", "deleted_at": now,
-                           "purged_at": None, "purged_residual": False},
-            )
+            await _cp_offload(
+                lambda: get_control_plane().query(
+                    "graphs", method="PATCH",
+                    filters=[("id", "eq", graph_id),
+                             ("org_id", "eq", org_id)],
+                    json_body={"status": "deleted", "deleted_at": now,
+                               "purged_at": None, "purged_residual": False},
+                ),
+                op="query")
         else:
             sdk._get_registry().query(
                 "MATCH (g:Graph {id:$gid, org_id:$tid}) "
@@ -15859,11 +16248,13 @@ async def _trash_name_conflict(org_id: str, name: str,
     )
     try:
         if is_supabase_enabled():
-            rows = get_control_plane().query(
-                "graphs", select=["id"],
-                filters=[("org_id", "eq", org_id), ("name", "eq", name),
-                         ("status", "eq", "active")],
-            )
+            rows = await _cp_offload(
+                lambda: get_control_plane().query(
+                    "graphs", select=["id"],
+                    filters=[("org_id", "eq", org_id), ("name", "eq", name),
+                             ("status", "eq", "active")],
+                ),
+                op="query")
             return any(r.get("id") != self_gid for r in rows)
         rows = sdk._get_registry().query(
             "MATCH (g:Graph {org_id:$tid, name:$name}) "
@@ -16218,8 +16609,10 @@ async def list_graphs(org_id: str, user: dict = Depends(get_current_user)):  # n
         if g.get("kind") == "default":
             key_count = 0
         elif is_supabase_enabled():
-            key_count = count_graph_keys(
-                get_control_plane(), org_id, g["graph_id"])
+            key_count = await _cp_offload(
+                lambda g=g: count_graph_keys(
+                    get_control_plane(), org_id, g["graph_id"]),
+                op="count_graph_keys")
         else:
             key_count = sdk.graph_active_key_count(org_id, g["graph_id"])
         out.append({
@@ -16395,11 +16788,13 @@ async def _require_owner(user_id: str, org_id: str, *,
         is_supabase_enabled,
     )
     if is_supabase_enabled():
-        rows = get_control_plane().query(
-            "org_memberships",
-            select=["role", "status"],
-            filters=[("user_id", "eq", user_id), ("org_id", "eq", org_id)],
-        )
+        rows = await _cp_offload(
+            lambda: get_control_plane().query(
+                "org_memberships",
+                select=["role", "status"],
+                filters=[("user_id", "eq", user_id), ("org_id", "eq", org_id)],
+            ),
+            op="query")
         if not rows or rows[0].get("role") != "owner":
             raise HTTPException(status_code=403, detail="Requires owner role in team")
         status = rows[0].get("status")
@@ -16528,17 +16923,26 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
             async with _invite_org_lock(org_id):
                 if tier == "pro":
                     from datetime import datetime as _dt
-                    active = [m for m in org_members(get_control_plane(), org_id)
+                    _org_member_rows = await _cp_offload(
+                        lambda: org_members(get_control_plane(), org_id),
+                        op="org_members")
+                    active = [m for m in _org_member_rows
                               if m.get("status") == "active"]
                     now = _dt.now(UTC).isoformat()
-                    pending = [i for i in pending_invitations(get_control_plane(), org_id)
+                    _pending_rows = await _cp_offload(
+                        lambda: pending_invitations(get_control_plane(), org_id),
+                        op="pending_invitations")
+                    pending = [i for i in _pending_rows
                                if not i.get("expires_at") or i["expires_at"] > now]
                     if len(active) + len(pending) >= 2:  # Pro max_users=2
                         raise HTTPException(status_code=402,
                                             detail="Member limit reached — upgrade to invite more")
-                inv = invitation_mint(get_control_plane(), org_id, email, role,
-                                      invited_by=user["user_id"],
-                                      inviter_email=(user.get("email") or None))
+                inv = await _cp_offload(
+                    lambda: invitation_mint(
+                        get_control_plane(), org_id, email, role,
+                        invited_by=user["user_id"],
+                        inviter_email=(user.get("email") or None)),
+                    op="invitation_mint")
             # #307: best-effort invite email — never blocks the mint.
             try:
                 from tortoise.email_notify import send_invite_email
@@ -16825,8 +17229,11 @@ async def accept_invite(body: dict, request: Request,
             # two concurrent accepts cannot both read count==0 and mint two
             # free memberships.
             async with _org_create_lock(user["user_id"]):
-                res = _sb_accept(get_control_plane(), token, user["user_id"],
-                                 user_email=user.get("email"))
+                res = await _cp_offload(
+                    lambda: _sb_accept(
+                        get_control_plane(), token, user["user_id"],
+                        user_email=user.get("email")),
+                    op="invitation_accept")
             # #2003 (W7): arm the invitee's member slot (fail-soft; never
             # masks the accept response).
             _arm_invitee_member_progress(res.get("org_id") or "",
@@ -17431,9 +17838,12 @@ async def _accept_mismatch_v2(body: dict, request: Request, user: dict,
             # user so the loser re-checks AFTER the winner's commit and 409s
             # before any write.
             async with _org_create_lock(user["user_id"]):
-                res = _sb_accept_v2(get_control_plane(), token, user["user_id"],
-                                    user_email=user_email,
-                                    mismatch_override=path, otp_code=otp_code)
+                res = await _cp_offload(
+                    lambda: _sb_accept_v2(
+                        get_control_plane(), token, user["user_id"],
+                        user_email=user_email,
+                        mismatch_override=path, otp_code=otp_code),
+                    op="invitation_accept")
         except _InvErr as e:
             # P2 (merge review): the seam's REACHABLE wrong/expired-code
             # reject is "Invalid or expired verification code" (lowercase
@@ -17521,7 +17931,9 @@ async def invite_otp(body: dict, request: Request,
     try:
         if is_supabase_enabled():
             from tortoise.supabase_control import invitation_row_by_token
-            row = invitation_row_by_token(get_control_plane(), token)
+            row = await _cp_offload(
+                lambda: invitation_row_by_token(get_control_plane(), token),
+                op="invitation_row_by_token")
             if not row:
                 raise HTTPException(status_code=400, detail="Invalid or expired invite token")
             if (row.get("email") or "").lower() == user_email:
@@ -17529,10 +17941,14 @@ async def invite_otp(body: dict, request: Request,
                     "error_code": "otp_not_required",
                     "message": "This invitation matches your email — accept directly."})
             from tortoise.supabase_control import org_by_id as _org_by_id
-            org = _org_by_id(get_control_plane(), row["org_id"])
-            return _do_send({"id": row["id"], "email": row["email"],
-                             "org_id": row["org_id"]},
-                            (org or {}).get("name"))
+            org = await _cp_offload(
+                lambda: _org_by_id(get_control_plane(), row["org_id"]),
+                op="org_by_id")
+            return await _cp_offload(
+                lambda: _do_send({"id": row["id"], "email": row["email"],
+                                  "org_id": row["org_id"]},
+                                 (org or {}).get("name")),
+                op="invitation_otp_mint")
         invite = _registry_pending_invite_by_token(_make_sdk(namespace="registry"),
                                                    token)
         if not invite:
@@ -17547,7 +17963,8 @@ async def invite_otp(body: dict, request: Request,
             params={"id": invite["org_id"]},
         ).result_set
         org_name = (_org_row[0][0].get("name") if _org_row else None)
-        return _do_send(invite, org_name)
+        return await _cp_offload(
+            lambda: _do_send(invite, org_name), op="invitation_otp_mint")
     except HTTPException:
         raise
     except Exception:
@@ -17575,8 +17992,11 @@ async def resend_invite(invitation_id: str, org_id: str, request: Request,
 
     if is_supabase_enabled():
         try:
-            res = _sb_resend(get_control_plane(), invitation_id, org_id,
-                             actor_user_id=user["user_id"])
+            res = await _cp_offload(
+                lambda: _sb_resend(
+                    get_control_plane(), invitation_id, org_id,
+                    actor_user_id=user["user_id"]),
+                op="invitation_resend")
         except InvitationError as e:
             raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
         try:
@@ -17666,8 +18086,11 @@ async def expire_invite(invitation_id: str, org_id: str,
     await _require_owner_admin(user["user_id"], org_id)
     if is_supabase_enabled():
         try:
-            return _sb_expire(get_control_plane(), invitation_id, org_id,
-                              actor_user_id=user["user_id"])
+            return await _cp_offload(
+                lambda: _sb_expire(
+                    get_control_plane(), invitation_id, org_id,
+                    actor_user_id=user["user_id"]),
+                op="invitation_expire")
         except InvitationError as e:
             raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
     sdk = _make_sdk(namespace="registry")
@@ -17713,7 +18136,9 @@ async def list_invites(org_id: str, user: dict = Depends(get_current_user)):  # 
     if is_supabase_enabled():
         try:
             await _require_owner_admin(user["user_id"], org_id)
-            return pending_invitations(get_control_plane(), org_id)
+            return await _cp_offload(
+                lambda: pending_invitations(get_control_plane(), org_id),
+                op="pending_invitations")
         except HTTPException:
             raise
         except Exception:
@@ -17746,8 +18171,10 @@ async def list_pending_invites_for_me(user: dict = Depends(get_current_user)):  
     if not email:
         return {"invites": []}
     if is_supabase_enabled():
-        return {"invites": pending_invitations_for_email(
-            get_control_plane(), email)}
+        _invites = await _cp_offload(
+            lambda: pending_invitations_for_email(get_control_plane(), email),
+            op="pending_invitations_for_email")
+        return {"invites": _invites}
     sdk = _make_sdk(namespace="registry")
     from datetime import datetime as _dt
     now = _dt.now(UTC).isoformat()
@@ -17895,9 +18322,11 @@ async def accept_invite_by_id(invitation_id: str,
             # #1954: the join-side free-cap + membership write are
             # read-then-write — serialize per user (see _org_create_lock).
             async with _org_create_lock(user["user_id"]):
-                res = invitation_accept_by_id(
-                    get_control_plane(), invitation_id, user["user_id"],
-                    user.get("email"))
+                res = await _cp_offload(
+                    lambda: invitation_accept_by_id(
+                        get_control_plane(), invitation_id, user["user_id"],
+                        user.get("email")),
+                    op="invitation_accept_by_id")
         except InvitationError as e:
             raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
         # #2003 (W7): arm the invitee's member slot (fail-soft).
@@ -17926,8 +18355,10 @@ async def decline_invite(invitation_id: str,
     email = (user.get("email") or "").lower()
     if is_supabase_enabled():
         try:
-            return decline_invitation_by_email(
-                get_control_plane(), invitation_id, email)
+            return await _cp_offload(
+                lambda: decline_invitation_by_email(
+                    get_control_plane(), invitation_id, email),
+                op="decline_invitation_by_email")
         except InvitationError as e:
             raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
     sdk = _make_sdk(namespace="registry")
@@ -17988,8 +18419,10 @@ async def rescind_invite(invitation_id: str, org_id: str,
             # registry branch below). invitation_rescind re-checks RBAC
             # internally (harmless duplicate).
             await _require_owner_admin(user["user_id"], org_id)
-            return invitation_rescind(get_control_plane(), invitation_id,
-                                      org_id, user["user_id"])
+            return await _cp_offload(
+                lambda: invitation_rescind(
+                    get_control_plane(), invitation_id, org_id, user["user_id"]),
+                op="invitation_rescind")
         except InvitationError as e:
             raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
         except HTTPException:
@@ -18031,7 +18464,9 @@ async def list_members(org_id: str, user: dict = Depends(get_current_user)):  # 
     )
     if is_supabase_enabled():
         try:
-            return org_members(get_control_plane(), org_id)
+            return await _cp_offload(
+                lambda: org_members(get_control_plane(), org_id),
+                op="org_members")
         except Exception:
             raise HTTPException(status_code=500, detail="Internal server error")  # noqa: B904
     sdk = _make_sdk(namespace="registry")
@@ -18063,12 +18498,17 @@ async def remove_member(org_id: str, user_id: str, user: dict = Depends(get_curr
     )
     if is_supabase_enabled():
         try:
-            role = membership_role(get_control_plane(), org_id, user_id)
+            role = await _cp_offload(
+                lambda: membership_role(get_control_plane(), org_id, user_id),
+                op="membership_role")
             if role is None:
                 raise HTTPException(status_code=404, detail="Member not found")
             if role == "owner":
                 raise HTTPException(status_code=409, detail="Owner cannot be removed")
-            set_membership(get_control_plane(), org_id, user_id, status="removed")
+            await _cp_offload(
+                lambda: set_membership(
+                    get_control_plane(), org_id, user_id, status="removed"),
+                op="set_membership")
         except HTTPException:
             raise
         except Exception:
@@ -18109,12 +18549,17 @@ async def change_member_role(org_id: str, user_id: str, body: dict, user: dict =
     )
     if is_supabase_enabled():
         try:
-            role = membership_role(get_control_plane(), org_id, user_id)
+            role = await _cp_offload(
+                lambda: membership_role(get_control_plane(), org_id, user_id),
+                op="membership_role")
             if role is None:
                 raise HTTPException(status_code=404, detail="Member not found")
             if role == "owner":
                 raise HTTPException(status_code=409, detail="Owner role cannot be changed")
-            set_membership(get_control_plane(), org_id, user_id, role=new_role)
+            await _cp_offload(
+                lambda: set_membership(
+                    get_control_plane(), org_id, user_id, role=new_role),
+                op="set_membership")
         except HTTPException:
             raise
         except Exception:
@@ -19776,9 +20221,13 @@ async def reconcile(request: Request):
     result = {"reprovisioned": 0, "expired_keys_swept": 0, "notes": []}
 
     if is_supabase_enabled():
-        expired = expired_bootstrap_keys(get_control_plane(), now)
+        expired = await _cp_offload(
+            lambda: expired_bootstrap_keys(get_control_plane(), now),
+            op="expired_bootstrap_keys")
         for row in expired:
-            revoke_api_key(get_control_plane(), row["id"], now)
+            await _cp_offload(
+                lambda row=row: revoke_api_key(get_control_plane(), row["id"], now),
+                op="revoke_api_key")
             result["expired_keys_swept"] += 1
         result["notes"].append("bootstrap-expiry sweep complete")
         return result
@@ -19928,13 +20377,15 @@ async def _agent_recover_flow(request: Request, signup_token: str) -> dict:
         api_key = f"tt_{_uuid.uuid4().hex}"
         lookup_hash = _lookup_hash(api_key)
         try:
-            recover_org_key(
-                cp,
-                token_hash=token_hash,
-                org_id=org_id,
-                lookup_hash=lookup_hash,
-                key_prefix=api_key[:10],
-                max_api_keys=int(lim.get("max_api_keys", 2)))
+            await _cp_offload(
+                lambda: recover_org_key(
+                    cp,
+                    token_hash=token_hash,
+                    org_id=org_id,
+                    lookup_hash=lookup_hash,
+                    key_prefix=api_key[:10],
+                    max_api_keys=int(lim.get("max_api_keys", 2))),
+                op="recover_org_key")
         except SignupTokenRecoveryError as e:
             # token revoked between resolve and recover (revoke race) or org
             # soft-deleted concurrently — uniform 422, never a partial mint
@@ -20125,33 +20576,37 @@ async def agent_signup(request: Request):
             # (provision_team_with_token) is NEW-named: provision_org stays
             # untouched at 15 args (CREATE OR REPLACE with a trailing param
             # would create an overload — scope cycle-2 P1).
-            provision_org_with_token(get_control_plane(), **{
-                "p_user_id": None,
-                "p_identity": identity,
-                "p_org_id": org_id,
-                "p_org_name": org_name,
-                "p_api_key": api_key,
-                "p_key_hash": key_hash,
-                "p_lookup_hash": lookup_hash,
-                "p_graph_name": graph_name,
-                "p_tier": "free",
-                # key_prefix = api_key[:10] — registry-path parity (review
-                # P2, PR #874: without this the RPC default left(org_id, 8)
-                # applied, so the dashboard showed a different prefix per
-                # mode for the same mint type).
-                "p_key_prefix": api_key[:10],
-                "p_max_users": mu,
-                "p_max_graphs": mg,
-                "p_ops_allowance": ops,
-                "p_graph_size_cap": nodes,
-                "p_signup_token_hash": signup_token_hash,
-            })
+            await _cp_offload(
+                lambda: provision_org_with_token(get_control_plane(), **{
+                    "p_user_id": None,
+                    "p_identity": identity,
+                    "p_org_id": org_id,
+                    "p_org_name": org_name,
+                    "p_api_key": api_key,
+                    "p_key_hash": key_hash,
+                    "p_lookup_hash": lookup_hash,
+                    "p_graph_name": graph_name,
+                    "p_tier": "free",
+                    # key_prefix = api_key[:10] — registry-path parity (review
+                    # P2, PR #874: without this the RPC default left(org_id, 8)
+                    # applied, so the dashboard showed a different prefix per
+                    # mode for the same mint type).
+                    "p_key_prefix": api_key[:10],
+                    "p_max_users": mu,
+                    "p_max_graphs": mg,
+                    "p_ops_allowance": ops,
+                    "p_graph_size_cap": nodes,
+                    "p_signup_token_hash": signup_token_hash,
+                }),
+                op="provision_org_with_token")
             # #2668: agent-created orgs need API-key dashboard login enabled
             # by default — the agent has no session to log in with.
             from tortoise.supabase_control import set_dashboard_key_login
             await _cp_offload(
                 lambda: set_dashboard_key_login(get_control_plane(), org_id, True),
                 op="set_dashboard_key_login")
+        except HTTPException:
+            raise
         except Exception:
             raise HTTPException(status_code=500, detail="Agent signup failed")  # noqa: B904
         await _async_audit(request, org_id, "agent_signup", resource_type="team", resource_id=org_id)
@@ -20315,7 +20770,8 @@ async def agent_token_revoke(request: Request, org: dict = Depends(get_current_o
             revoke_signup_token as _sb_revoke,
         )
         cp = get_control_plane()
-        row = signup_token_row(cp, token_hash)
+        row = await _cp_offload(
+            lambda: signup_token_row(cp, token_hash), op="signup_token_row")
         if row is None:
             raise HTTPException(status_code=404, detail="Signup token not found")
         if row.get("org_id") != org_id:
@@ -20323,7 +20779,9 @@ async def agent_token_revoke(request: Request, org: dict = Depends(get_current_o
         if row.get("revoked_at") is not None:
             return {"revoked": True, "already": True, "org_id": org_id}
         try:
-            _sb_revoke(cp, token_hash, org_id)
+            await _cp_offload(
+                lambda: _sb_revoke(cp, token_hash, org_id),
+                op="revoke_signup_token")
         except HTTPException:
             raise
         except Exception:
@@ -20495,7 +20953,8 @@ async def claim_org(request: Request):
     )
     cp = get_control_plane()
     try:
-        anon = is_anon_org(cp, org_id)
+        anon = await _cp_offload(
+            lambda: is_anon_org(cp, org_id), op="is_anon_org")
     except RuntimeError:
         # #1719 (Task 4): the claim funnel shares the unwrapped
         # org_memberships reads — an outage must degrade to 503, never a
@@ -20509,8 +20968,11 @@ async def claim_org(request: Request):
     #    intact).
     from tortoise.auth import lookup_hash as _lookup_hash
     try:
-        claim_membership(cp, lookup_hash=_lookup_hash(api_key),
-                         user_id=user_id, email=email)
+        await _cp_offload(
+            lambda: claim_membership(
+                cp, lookup_hash=_lookup_hash(api_key),
+                user_id=user_id, email=email),
+            op="claim_membership")
     except ClaimError as e:
         raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
     except RuntimeError:
@@ -20595,7 +21057,8 @@ async def claim_email(request: Request, body: ClaimEmailRequest):
     # invariant today, reject minted keys anyway for symmetry.
     _reject_minted_delegated_key(org, "claim")
     try:
-        anon = is_anon_org(cp, org_id)
+        anon = await _cp_offload(
+            lambda: is_anon_org(cp, org_id), op="is_anon_org")
     except RuntimeError:
         # #1719 (Task 4): claim funnel control-plane outage → honest 503.
         raise _control_plane_unavailable() from None
@@ -20622,8 +21085,11 @@ async def claim_email(request: Request, body: ClaimEmailRequest):
 
     # 3. claim_membership RPC links the new user to the org's owner row
     try:
-        claim_membership(cp, lookup_hash=_lookup_hash(api_key),
-                         user_id=user_id, email=email)
+        await _cp_offload(
+            lambda: claim_membership(
+                cp, lookup_hash=_lookup_hash(api_key),
+                user_id=user_id, email=email),
+            op="claim_membership")
     except ClaimError as e:
         # The RPC's already_claimed guard may fire if a concurrent OAuth
         # claim won first — surface as a plain conflict.
@@ -20690,7 +21156,9 @@ async def claim_status(request: Request):
         return {"claimable": False}
     org_id = org["org_id"]
     try:
-        anon = is_anon_org(get_control_plane(), org_id)
+        anon = await _cp_offload(
+            lambda: is_anon_org(get_control_plane(), org_id),
+            op="is_anon_org")
     except RuntimeError:
         # #1719 (Task 4): claim_status's is_anon_org read failed — the
         # welcome/claim guard must NOT 500 (and must not report claimable).
@@ -20821,7 +21289,9 @@ async def get_user_identity(request: Request, user: dict = Depends(get_current_u
         return {"unsupported": True}
     cp = get_control_plane()
     try:
-        inv = user_identity_inventory(cp, user["user_id"])
+        inv = await _cp_offload(
+            lambda: user_identity_inventory(cp, user["user_id"]),
+            op="user_identity_inventory")
     except Exception:
         raise HTTPException(status_code=502, detail="Identity service unavailable")  # noqa: B904
     admin = _identity_admin_user(user["user_id"])
@@ -20885,8 +21355,11 @@ async def create_link_intent(request: Request, body: LinkIntentRequest,
     intent_ref = _b64.urlsafe_b64encode(payload.encode()).decode().rstrip("=") + "." + sig
     cp = get_control_plane()
     try:
-        store_link_intent(cp, nonce=nonce, user_id=user["user_id"],
-                          provider=provider, expires_at=expires.isoformat())
+        await _cp_offload(
+            lambda: store_link_intent(
+                cp, nonce=nonce, user_id=user["user_id"],
+                provider=provider, expires_at=expires.isoformat()),
+            op="store_link_intent")
     except Exception:
         raise HTTPException(status_code=502, detail="Identity service unavailable")  # noqa: B904
     return {"intent_ref": intent_ref, "expires_in": _LINK_INTENT_TTL_S,
@@ -20969,8 +21442,11 @@ async def commit_link_intent(request: Request, body: LinkCommitRequest,
                             detail="Confirm your email before adding a login method")
     # Consumed-once (guarded UPDATE; 0 rows = already consumed/expired/wrong user)
     try:
-        consumed = consume_link_intent(cp, nonce=nonce, user_id=intent_user,
-                                       consumed_at=now.isoformat())
+        consumed = await _cp_offload(
+            lambda: consume_link_intent(
+                cp, nonce=nonce, user_id=intent_user,
+                consumed_at=now.isoformat()),
+            op="consume_link_intent")
     except Exception:
         raise HTTPException(status_code=502, detail="Identity service unavailable")  # noqa: B904
     if consumed == 0 or expired:
@@ -21073,7 +21549,10 @@ async def unlink_identity(request: Request, body: UnlinkRequest,
     except ValueError:
         raise HTTPException(status_code=422, detail="identity_id must be a UUID")  # noqa: B904
     try:
-        reserve_unlink(cp, user_id=user["user_id"], identity_id=identity_id)
+        await _cp_offload(
+            lambda: reserve_unlink(
+                cp, user_id=user["user_id"], identity_id=identity_id),
+            op="reserve_unlink")
     except ClaimError as e:
         raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
     except Exception:
@@ -21101,17 +21580,25 @@ async def unlink_identity(request: Request, body: UnlinkRequest,
             timeout=15.0,
         )
     except (_httpx.HTTPError, _httpx.TimeoutException):
-        _compensate()
+        # #4350: the offload seam's own saturation error must not REPLACE the
+        # status this compensation path is about to return. A rollback that
+        # changes the response is the failure mode `_compensate` exists to
+        # prevent, so the seam error is suppressed exactly as the helper's own
+        # error already is inside `_compensate`.
+        with contextlib.suppress(Exception):
+            await _cp_offload(lambda: _compensate(), op="consume_unlink_permit")
         raise HTTPException(status_code=502, detail="Identity service unavailable")  # noqa: B904
 
     if resp.status_code == 404:
-        _compensate()
+        with contextlib.suppress(Exception):
+            await _cp_offload(lambda: _compensate(), op="consume_unlink_permit")
         await _async_audit(request, "", "identity_unlink", resource_type="identity",
                            resource_id=identity_id, actor_user_id=user["user_id"],
                            detail={"status": "already_unlinked"})
         return {"unlinked": True, "already": True}
     if resp.status_code in (401, 422):
-        _compensate()
+        with contextlib.suppress(Exception):
+            await _cp_offload(lambda: _compensate(), op="consume_unlink_permit")
         msg = resp.text
         if "single_identity_not_deletable" in msg:
             # #1765 review: GoTrue's floor counts IDENTITY ROWS (not password
@@ -21127,21 +21614,33 @@ async def unlink_identity(request: Request, body: UnlinkRequest,
                                 detail="Sign in again to continue (REAUTH_REQUIRED)")
         raise HTTPException(status_code=422, detail="Unable to remove this login method")
     if resp.status_code not in (200, 204):
-        _compensate()
+        with contextlib.suppress(Exception):
+            await _cp_offload(lambda: _compensate(), op="consume_unlink_permit")
         raise HTTPException(status_code=502, detail="Identity service unavailable")
 
     # Success: post-verify + consume + audit
     try:
-        inv = user_identity_inventory(cp, user["user_id"])
+        inv = await _cp_offload(
+            lambda: user_identity_inventory(cp, user["user_id"]),
+            op="user_identity_inventory")
         remaining = int(inv.get("login_methods", 0))
     except Exception:
         remaining = 1  # fail-open on the READ after a successful DELETE
     if remaining < 1:
-        _compensate()
+        with contextlib.suppress(Exception):
+            await _cp_offload(lambda: _compensate(), op="consume_unlink_permit")
         raise HTTPException(status_code=409, detail="Cannot remove the last login method")
-    import contextlib
+    # #4350: no local `import contextlib` here — it would make `contextlib`
+    # function-local for the WHOLE of `unlink_identity`, so the earlier
+    # `with contextlib.suppress(...)` on the 502/409/403 paths above would
+    # raise UnboundLocalError before this line ever ran. The module-level
+    # import is in scope throughout.
+    _consumed_at = _now_iso()
     with contextlib.suppress(Exception):
-        consume_unlink_permit(cp, user_id=user["user_id"], consumed_at=_now_iso())
+        await _cp_offload(
+            lambda: consume_unlink_permit(
+                cp, user_id=user["user_id"], consumed_at=_consumed_at),
+            op="consume_unlink_permit")
     await _async_audit(request, "", "identity_unlink", resource_type="identity",
                        resource_id=identity_id, actor_user_id=user["user_id"],
                        detail={"remaining_login_methods": remaining})
@@ -21593,7 +22092,8 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     user_id = user["user_id"]
 
     # #3498: the pre-lock reads are blocking PostgREST calls — off the loop.
-    # (The in-lock cap/revoke/recheck/insert calls below stay synchronous BY
+    # (The in-lock cap/revoke/recheck/insert calls below — plus the one direct
+    # ``cp.query`` candidate scan in the rotation branch — stay synchronous BY
     # DESIGN: the section runs under the per-org in-process mint lock, which
     # forbids awaits. That residual is tracked separately.)
     memberships = await _cp_offload(
@@ -23412,6 +23912,7 @@ def _next_onboarding_step(org_id: str, proj) -> str | None:
     return "done"
 
 
+@_embed_metered
 def _run_onboarding_seed(org_id: str, *, org_name: str | None = None,
                          person_name: str | None = None,
                          person_user_id: str | None = None,
@@ -23606,6 +24107,7 @@ async def onboarding_seed(body: OnboardingSeedRequest,
 # Subject + memberOf with a user-confirmed name. Both legs are REAL data;
 # nothing is ever invented or silently derived on the provisioning path.
 
+@_embed_metered
 def _run_starter_seed(org_id: str, *, org_name: str | None = None,
                       person_name: str | None = None,
                       person_user_id: str | None = None,
@@ -23895,18 +24397,22 @@ async def _create_onboarding_org_lane(org: dict, name: str,
             # guard, migration 20260825214233). #1748: USER path — the
             # session user is the owner member (p_user_id, identity NULL),
             # mirroring POST /v1/organizations (create_org).
-            provision_org(get_control_plane(), **{
-                "p_user_id": owner_user_id,
-                "p_identity": None,
-                "p_org_id": org_id,
-                "p_org_name": name,
-                "p_api_key": None,
-                "p_key_hash": None,
-                "p_lookup_hash": None,
-                "p_key_prefix": None,
-                "p_graph_name": graph_name,
-                "p_tier": "free",
-            })
+            await _cp_offload(
+                lambda: provision_org(get_control_plane(), **{
+                    "p_user_id": owner_user_id,
+                    "p_identity": None,
+                    "p_org_id": org_id,
+                    "p_org_name": name,
+                    "p_api_key": None,
+                    "p_key_hash": None,
+                    "p_lookup_hash": None,
+                    "p_key_prefix": None,
+                    "p_graph_name": graph_name,
+                    "p_tier": "free",
+                }),
+                op="provision_org")
+        except HTTPException:
+            raise
         except Exception as e:
             # 0011 unique index: a duplicate org name surfaces as a
             # PostgREST 409 → 409 (registry sdk.org_create raises
@@ -24010,6 +24516,14 @@ _ALLOWED_ANALYTICS_PROPS = {
     "calls", "retries", "prompt_tokens", "completion_tokens",
     "cost_usd", "calls_without_cost", "calls_without_usage",
     "calls_without_tokens", "deadline_aborts", "by_stage",
+    # #3359: capture_graph_ops — the per-session physical graph work.
+    # NAMESPACED (``graph_ops_*``) so these generic names do not widen the
+    # global filter for EVERY event: the flat allowlist has no per-event
+    # scoping, so a bare ``total``/``read``/``write`` would authorise those
+    # names at every emit site. Nested ``by_phase`` survives — the PII filter
+    # tests top-level keys only.
+    "graph_ops_total", "graph_ops_read", "graph_ops_write",
+    "graph_ops_turns", "graph_ops_by_phase",
     # #3824: provider calls the capture made that NO roll-up accounted for.
     # Without this key in the allowlist the counter is stripped here — the
     # documented #3359 loss mode — and F2 stays invisible even though the
@@ -25514,6 +26028,37 @@ async def _emit_analytics_off_loop(org_id: str, event_name: str,
         op="analytics_event", best_effort=True)
 
 
+def _capture_graph_ops_props(session_id: str, turns: int,
+                             counter: GraphOpsCounter) -> dict:
+    """#3359: the per-session graph-op accounting as an analytics
+    ``properties`` dict.
+
+    Shape (one row per captured ATTEMPT in ``analytics_events``):
+    ``session_id``, ``graph_ops_turns``, ``graph_ops_total``,
+    ``graph_ops_read``, ``graph_ops_write``, and ``graph_ops_by_phase``
+    (``session_store``/``extraction``/``commit``/``belief``, each
+    ``{read, write, total}``). The ``graph_ops_`` prefix keeps these generic
+    names from widening the FLAT global PII allowlist for every event. This
+    is MEASUREMENT, not the billed unit — the bill still counts API calls
+    (see ``tortoise/metering.py``).
+
+    A retried capture emits a second row with the same ``session_id``; the
+    reader's ``sessions`` counts rows, ``distinct_sessions`` dedupes.
+
+    Known gap: registry/control-plane graph handles are outside
+    ``_GuardedGraph`` and are not counted (see ``tortoise/graph_ops.py``).
+    """
+    ops = counter.as_dict()
+    return {
+        "session_id": session_id,
+        "graph_ops_turns": int(turns),
+        "graph_ops_total": ops["total"],
+        "graph_ops_read": ops["read"],
+        "graph_ops_write": ops["write"],
+        "graph_ops_by_phase": ops["by_phase"],
+    }
+
+
 async def _track_onboarding_event(org: dict, event_name: str, **props) -> None:
     """Convenience: track with the current org, swallowing errors.
 
@@ -25832,7 +26377,10 @@ async def github_callback(code: str | None = None, state: str | None = None,
         store_github_credentials as _sb_store,
     )
     if is_supabase_enabled():
-        _sb_store(get_control_plane(), org_id, token_enc=encrypted, org=org)
+        await _cp_offload(
+            lambda: _sb_store(
+                get_control_plane(), org_id, token_enc=encrypted, org=org),
+            op="store_github_credentials")
     else:
         sdk = _make_sdk(namespace="registry")
         sdk._get_registry().query(
@@ -26393,6 +26941,7 @@ def _is_safe_branch(branch: object) -> bool:
     return bool(_SAFE_BRANCH_RE.match(branch))
 
 
+@_embed_metered
 async def _run_indexing(job_id: str, org_id: str, org: str,
                         repos: list[str] | None) -> None:
     """Background indexing job: GitHub issues/PRs → entities/events.
@@ -26763,6 +27312,7 @@ class DocsIndexRequest(BaseModel):
     branch: str | None = None  # default "main" (fetcher falls back to master)
 
 
+@_embed_metered
 async def _run_docs_indexing(job_id: str, org_id: str, org: str,
                              scopes: list[dict] | None) -> None:
     """Background docs-indexing job: GitHub docs/ → staged corpus →
@@ -29816,8 +30366,11 @@ async def webhooks_stripe(request: Request):
         # Stripe's retry reprocesses it.
         if is_supabase_enabled():
             cp = get_control_plane()
-            tier = org_tier(cp, org_id)
-            is_first = webhook_event_marker(cp, event_id, etype)
+            tier = await _cp_offload(
+                lambda: org_tier(cp, org_id), op="org_tier")
+            is_first = await _cp_offload(
+                lambda: webhook_event_marker(cp, event_id, etype),
+                op="webhook_event_marker")
         else:
             tier_rows = sdk._get_registry().query(
                 "MATCH (t:Team {id:$id}) RETURN t.tier", params={"id": org_id}

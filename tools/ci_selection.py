@@ -587,15 +587,17 @@ SOURCE_PATTERNS = {
             # false`) and the gate never ran on precisely the PR that can break
             # it. Named here because a SOURCE_PATTERNS match beats the
             # non-python skip. A docs-only hand-edit of the generated file still
-            # skips the matrix by the repo's deliberate docs-PR policy — see
-            # tortoise #4454.
+            # skips THIS matrix by the repo's deliberate docs-PR policy; that
+            # direction is covered instead by the required `docs` job, which runs
+            # `tools/bridge_table.py --check` on every PR (#4454).
             "tools/bridge_table.py",
             # #4282 Phase 0.3: `tools/mcp_rename_table.py` GENERATES
             # `docs/product/mcp-rename-table.md` and `test_mcp_rename_table.py`
             # (registered in `api` + `core`) is the drift gate. Same shape as the
             # 0.1 entry directly above and the same reason: a generator-only edit
             # is swallowed by the flat `tools/` prefix and the gate never runs on
-            # the PR that can break it (#4454 covers a docs-only hand-edit).
+            # the PR that can break it (a docs-only hand-edit is covered by the
+            # required `docs` job's `--check` instead — #4454).
             "tools/mcp_rename_table.py",
             # #4282 Phase 0.3b: `tools/sdk_rename_table.py` GENERATES
             # `docs/product/sdk-rename-table.md`, and `test_sdk_rename_table.py`
@@ -612,8 +614,9 @@ SOURCE_PATTERNS = {
             # (registered in `api` AND `core`) is the drift gate. Same gap as the bridge
             # table above: `tools/` is in NON_PYTHON_PREFIXES, so a generator-only edit
             # selected NO surface and the gate never ran on the PR that can break it.
-            # A docs-only hand-edit of the generated doc still skips the matrix by the
-            # repo's deliberate docs-PR policy (tortoise #4454).
+            # A docs-only hand-edit of the generated doc still skips THIS matrix by the
+            # repo's deliberate docs-PR policy; the required `docs` job runs
+            # `tools/sdk_surface.py --check` on every PR instead (#4454).
             "tools/sdk_surface.py",
             # #5373: `tools/registry_integrity.py` is the fail-closed validator
             # paired with `merge=union` on the two config registries, and
@@ -899,6 +902,47 @@ TOOL_CARVEOUTS = (
     # Pinned by
     # test_ci_selection.test_run_with_eval_keys_tool_change_fails_closed_to_full.
     "tools/run-with-eval-keys.sh",
+    # #4503: the edge census/probe (tools/edge_census.py) owns
+    # tests/test_4503_edge_relationship_accounting.py. Same silent-drop class
+    # as every carve-out above: the flat "tools/" prefix in
+    # NON_PYTHON_PREFIXES swallows the path, `changed` comes back empty, and
+    # select() takes the docs-only return (surfaces=[] -> tier-1 smoke) — so
+    # the instrument's own guard tests would never run on the PR that changes
+    # the instrument. Verified live before adding: `--changed-files
+    # tools/edge_census.py` returned `"surfaces": []`. No SOURCE_PATTERNS
+    # entry matches the path, so it lands in the unknown-path branch -> FULL
+    # matrix (fail closed), the same treatment tools/finding_provenance.py and
+    # tools/embedded_evidence.py get. Pinned by
+    # test_ci_selection.test_edge_census_tool_change_fails_closed_to_full.
+    "tools/edge_census.py",
+    # #5050: the measured-durations-map validator (tools/ci_manifest.py) owns
+    # tests/test_ci_manifest.py. Same silent-drop class as the
+    # collision-preflight carve-out above: no SOURCE_PATTERNS entry matches the
+    # path, so a validator-only change is swallowed by the flat "tools/" prefix
+    # in NON_PYTHON_PREFIXES, `changed` comes back empty, and select() takes the
+    # docs-only return — the validator's own verdict-boundary tests would never
+    # run on the PR that changes the validator. Registering
+    # tests/test_ci_manifest.py under `surfaces: core` does NOT cover this: the
+    # early docs-only return bypasses the `matched.add("core")` fallback, so a
+    # tool-only change selects NO surface at all. It lands in the unknown-path
+    # branch -> FULL matrix (fail closed). Pinned by
+    # test_ci_selection.test_ci_manifest_tool_change_fails_closed_to_full.
+    "tools/ci_manifest.py",
+    # #5050: the sole writer of the measured `durations` map (tools/ci_timing.py)
+    # is pinned by the same suites as the validator it feeds:
+    # tests/test_ci_manifest.py holds the `VALUE_FLOOR ==
+    # ci_timing.DURATIONS_VALUE_FLOOR_S` pin and the one-decimal render pin
+    # (`test_the_floor_is_the_writers_own`,
+    # `test_the_writers_precision_is_the_one_this_check_assumes`) — the two
+    # contracts the validator ASSUMES about the writer — and
+    # tests/test_ci_timing.py covers the writer's refresh path. A writer-only
+    # change matches no SOURCE_PATTERNS entry, so without this carve-out the
+    # flat "tools/" prefix swallows it, `changed` comes back empty and select()
+    # takes the docs-only return — a writer drift would merge green and red
+    # `main` with neither suite having run. It lands in the unknown-path branch
+    # -> FULL matrix (fail closed). Pinned by
+    # test_ci_selection.test_ci_timing_tool_change_fails_closed_to_full.
+    "tools/ci_timing.py",
 )
 
 
@@ -2903,6 +2947,127 @@ def render_surface_audit(report: dict) -> str:
     return NL.join(lines)
 
 
+def _ci_manifest_module():
+    """The ``tools.ci_manifest`` module, reusing an already-loaded copy.
+
+    ``ci_manifest`` imports this module back for the manifest helpers, so the
+    import is lazy and must not create a second copy under a different name
+    (which would split module state under pytest). The RUNNING module is probed
+    FIRST: ``python3 tools/ci_manifest.py`` executes that file as ``__main__``,
+    which is under neither ``tools.ci_manifest`` nor ``ci_manifest``, so a
+    name-only lookup imported a SECOND copy of the same file.
+    """
+    import sys as _sys
+    main = _sys.modules.get("__main__")
+    if main is not None and hasattr(main, "check"):
+        _file = getattr(main, "__file__", None)
+        if _file:
+            try:
+                if Path(_file).resolve() == (REPO / "tools" / "ci_manifest.py").resolve():
+                    return main
+            except OSError:  # pragma: no cover - defensive
+                pass
+    for _name in ("tools.ci_manifest", "ci_manifest"):
+        mod = _sys.modules.get(_name)
+        if mod is not None and hasattr(mod, "check"):
+            return mod
+    for path in (str(REPO), str(REPO / "tools")):
+        if path not in _sys.path:
+            _sys.path.insert(0, path)
+    try:
+        from tools import ci_manifest as mod
+    except ImportError:  # pragma: no cover - module shipped with the repo
+        import ci_manifest as mod
+    return mod
+
+
+def _manifest_contract_issues(manifest: dict) -> list[str]:
+    """#5050: the measured-durations-map contract, as RED issues only.
+
+    Delegated to ``tools/ci_manifest.py`` so the map's checks live in ONE place
+    and cannot be half-wired: this call replaces the three direct
+    ``duration_issues``/``leg_coverage_issues``/``duration_coverage_issues``
+    calls that used to sit in the ``--integrity`` composition, and adds the
+    plausibility/freshness checks the validator contributes (any weight the
+    writer could not have rendered — sub-floor, finer precision, or negative —
+    a non-empty map whose every weight is the `0.0` sentinel, and a stale
+    capture date).
+
+    `ci_manifest.map_issues` also carries main's TWO newer manifest checks —
+    `fast_shard_issues` (#6135, the top-level `fast_shards` declaration) and
+    `duplicate_entries` (#2913/#5373, the same-surface `merge=union` gate) —
+    because they landed beside this change and the union of the two pipelines
+    must not drop either. Composing them here keeps the branch's invariant
+    (every check reachable from ONE place) while keeping main's coverage.
+
+    An ImportError is reported as an issue, never swallowed: returning ``[]``
+    would leave ``--integrity`` GREEN with none of these checks having run —
+    the "silent omission with every gate green" class they exist to kill.
+
+    The validator's UNKNOWN verdict is printed as a NOTICE rather than added to
+    ``problems`` — for every reason EXCEPT the one observed defect below. The
+    states are genuinely different: a RED map is observed to be wrong, while
+    UNKNOWN means the map's fidelity could not be observed. The notice keeps
+    the genuinely-UNKNOWN cases visible instead of silent and preserves this
+    gate's documented polarity (an absent map must not hard-fail a repo that
+    never adopted it; pinned by
+    ``test_null_or_non_mapping_durations_reports_instead_of_tracebacking``):
+    failing on absence would red ``manifest-integrity`` repo-wide until a weekly
+    data refresh landed — refusing honest merges for a state no lane owns.
+
+    ABSENCE ONLY is softened, and absence is the KEY'S. A
+    ``durations_captured_at`` that is PRESENT but unparseable is a MALFORMED
+    manifest value — an OBSERVED defect — and is added to ``problems`` (RED).
+    The predicate is structural: ``durations_captured_at not in manifest`` is
+    the sole non-gating case; otherwise ``ci_manifest._parse_captured_at``
+    decides, and a ``None`` verdict there is RED. So ``""``, an explicit
+    ``null``, ``"   "``, ``"not-a-date"``, ``0``, ``[]`` and ``{}`` are ALL
+    red, while a MISSING key stays the notice. Softening any present
+    unparseable value would invert fail-closed: a stale-but-parseable stamp is
+    RED, so degrading that same value to ``'not-a-date'`` would turn exit 1
+    into exit 0 — strictly worse data, strictly better verdict — and a
+    one-character typo would silently disable the staleness control at this,
+    the only CI-invoked, entry point. The strict exit-2 verdict for the
+    genuinely-UNKNOWN states lives in ``tools/ci_manifest.py``, which no
+    workflow invokes yet: this enforcing entry point exits 0 on an ABSENT
+    stamp until #6091 lets a refresh carry a real date. The promotion is
+    decided and worded in ONE place — ``ci_manifest.unparseable_stamp_issue`` —
+    so this gate and ``ci_timing.integrity_problems`` cannot disagree.
+    """
+    try:
+        module = _ci_manifest_module()
+        red, unknown = module.check(manifest)
+    except ImportError as exc:  # pragma: no cover - module shipped with the repo
+        return [
+            "the #5050 durations-map validator (tools/ci_manifest.py) could "
+            f"not be imported — the map's value/coverage/partition/staleness "
+            f"checks DID NOT RUN: {exc}"
+        ]
+    # #6243 review cycle 3: the promotion is STRUCTURAL. `unparseable_stamp_issue`
+    # decides from the PARSER's verdict plus the KEY's presence — never a
+    # hand-rolled value tuple (which exempted `""` and an explicit `null`, so a
+    # blanked stamp read as absence and exited 0 while the same stale value
+    # exited 1), and never a substring of another module's reason string (which
+    # a reword silently disabled). It is computed FIRST, because it also decides
+    # which UNKNOWN reasons stay non-gating.
+    stamp_issue = module.unparseable_stamp_issue(manifest)
+    promoted: set[str] = set()
+    if stamp_issue is not None:
+        red = [*red, stamp_issue]
+        # One condition must not be reported as BOTH "not gating this run" and
+        # RED, and an OBSERVED defect must not travel the soft channel.
+        # `staleness` owns the stamp's reason, so it names exactly the ones this
+        # promotion replaces — by IDENTITY, not by their wording. (An explicit
+        # `null` reaches `staleness`'s absent branch, so that reason is
+        # suppressed here too; the missing-key case never promotes.)
+        promoted = set(module.staleness(manifest)[1])
+    for reason in unknown:
+        if reason in promoted:
+            continue
+        print(f"⚠ durations map UNKNOWN (not gating this run): {reason}")
+    return red
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--changed-files", default="", help="newline-separated changed files")
@@ -2929,17 +3094,33 @@ def main() -> int:
 
     if args.integrity:
         missing = integrity(manifest)
-        # #3407 review P1: `duration_issues` must run BEFORE `leg_coverage_issues`.
-        # The latter calls `push_legs()` -> `split_fast_gate()`, so a malformed
+        # #3407 review P1: `duration_issues` must run BEFORE `leg_coverage_issues`
+        # — the latter calls `push_legs()` -> `split_fast_gate()`, so a malformed
         # durations value used to raise inside the packer before the check that
-        # names it had run — fail-closed, but with no diagnosis. (Belt and
-        # braces: `_duration_weight` also coerces, so the packer can no longer
-        # raise at all.)
+        # names it had run (fail-closed, but with no diagnosis; `_duration_weight`
+        # now coerces as well, so the packer cannot raise at all). That order is
+        # preserved inside `ci_manifest.map_issues`, which owns the composition
+        # as of #5050: the map's checks (`duration_issues`, `leg_coverage_issues`,
+        # `duration_coverage_issues`), main's two newer manifest checks
+        # (`fast_shard_issues` for the top-level `fast_shards` declaration and
+        # `duplicate_entries` for the same-surface `merge=union` gate — both
+        # landed beside this one while it was open, so BOTH were folded into the
+        # same one place rather than being re-added here), plus the
+        # plausibility/freshness checks the validator adds (any weight the writer
+        # could not have rendered — sub-floor, finer precision, or negative — a
+        # non-empty map whose every weight is the `0.0` sentinel, and a stale
+        # capture date) are called from ONE place, so they cannot be half-wired
+        # into one entry point and missing from the other.
+        #
+        # `watchdog_headroom_issues` is the EXCEPTION, and deliberately composed
+        # here instead: `ci_manifest` does not own it (main added it after this
+        # validator was cut, and `ci_manifest.map_issues` composes only the five
+        # above). It is re-added at this call site so the union of the two
+        # pipelines drops neither — the same rule the two folded-in checks
+        # followed. Both entry points compose it, so it stays single-sourced.
         problems = missing + slow_file_issues(manifest) \
-            + fast_shard_issues(manifest) \
-            + duration_issues(manifest) + leg_coverage_issues(manifest) \
-            + watchdog_headroom_issues(manifest) \
-            + duration_coverage_issues(manifest) + duplicate_entries(manifest)
+            + _manifest_contract_issues(manifest) \
+            + watchdog_headroom_issues(manifest)
         # #1472: the matrix must come from the selector derivation — when it
         # does, the #1266 halves-parse tie check is
         # subsumed (the derivation guarantees no slow leaks / dupes / dead
