@@ -321,6 +321,15 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # leaks a live-server URI into every later module (the sdk_factory lane flip).
     # DELIBERATE_URI: the setenv IS the test input.
     "test_2500_terminal_ep_backfill.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    # #7017: the engine-probe suite is hermetic — every probe is injected, so
+    # the URI's SOLE role is as the input to `graph_target_from_env()`, and the
+    # endpoint-resolution tests set/del it precisely to pin which endpoint
+    # `main` picks (the flag-override, TLS-refusal and malformed-port cases all
+    # turn on the URI's shape). The env control IS the test input; every site is
+    # a function-scoped `monkeypatch` call, auto-undone by pytest at teardown, so
+    # no lane flip can leak. DELIBERATE_URI.
+    "test_engine_probe.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
+                              r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;
