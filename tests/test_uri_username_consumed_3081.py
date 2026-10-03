@@ -271,10 +271,13 @@ def test_every_known_constructor_site_is_driven():
     """Anti-vacuity for the coverage claim, not a spelling check.
 
     Counts the ``FalkorDB(...)`` construction sites in the five fixed files and
-    asserts each file has at least one that the tests above drive. If a file
-    gains a second construction path that no test reaches, the residual
-    documented in the module docstring has widened — this fails loudly rather
-    than letting the claim silently go stale.
+    asserts the EXACT number per file, each of which the tests above drive. An
+    earlier version computed this and then asserted only ``>= 1``, so it could
+    not fail when a second client appeared — the claim in this docstring was
+    itself unenforceable, which is the failure class this whole file exists to
+    remove. Exact counts fail on any new site, including one added after the
+    first ``select_graph`` on a driven path (which truncates the drive, but not
+    the count). A deliberate new site therefore forces a reviewed update here.
     """
     import ast
 
@@ -290,15 +293,27 @@ def test_every_known_constructor_site_is_driven():
                     n += 1
         discovered[module_file] = n
 
-    assert discovered["audit_graph.py"] >= 1
-    assert discovered["audit_graph_deep.py"] >= 1
-    assert discovered["context_removal_audit.py"] >= 1
-    assert discovered["parity_sample.py"] >= 1
-    assert discovered["pre_migration_snapshot.py"] >= 1
-    # Recorded so a change here is visible rather than silent.
-    assert discovered["rdb_snapshot_restore.py"] == 0, (
-        "rdb_snapshot_restore.py gained a FalkorDB constructor — it authenticates "
-        "through `redis-cli --user`, and the consumer tests above do not cover it"
+    # EXACT counts, not `>= 1`. With `>= 1` this test could not fail when a
+    # second client appeared — it computed the count and then asserted nothing
+    # about it — so its own docstring claim ("fails loudly rather than letting
+    # the claim silently go stale") was untrue. Exact counts also close the
+    # shadowing case: a second client added after the first `select_graph`
+    # truncates the driven path invisibly, but it still CHANGES THE COUNT, and
+    # that is what fails here.
+    assert discovered == {
+        "audit_graph.py": 1,
+        "audit_graph_deep.py": 1,
+        "context_removal_audit.py": 1,
+        "parity_sample.py": 1,
+        "pre_migration_snapshot.py": 2,
+        "rdb_snapshot_restore.py": 0,
+    }, (
+        f"the set of client construction sites changed: {discovered}. Every site "
+        f"listed here must be reached by a test above (the two "
+        f"pre_migration_snapshot.py sites are its two credential helpers). If you "
+        f"added a site deliberately, drive it in a test and update this count; "
+        f"rdb_snapshot_restore.py is 0 because it authenticates through "
+        f"`redis-cli --user` and is covered by test_restore_container_recovery.py."
     )
 
 
