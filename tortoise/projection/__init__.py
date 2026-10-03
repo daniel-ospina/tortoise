@@ -1725,23 +1725,35 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
 #        gate); L2 was kept because removing it would refuse strictly less
 #        than before.
 #        SCOPE OF L2, stated exactly because the difference is a live hole:
-#        the bulk-wipe check is applied by ``_GuardedGraph.query`` and
+#        the ``_is_bulk_wipe`` classifier runs in ``_GuardedGraph.query`` and
 #        ``FalkorProjection.query`` ONLY. The wrapper's other query verbs
 #        (``ro_query``, ``_query``, ``profile``, ``explain``,
 #        ``execute_command``) are overridden and carry the #3595 ``=~``
-#        operator guard, but NOT the bulk-wipe check — see KNOWN GAPS.
+#        operator guard, but NOT the bulk-wipe check — see KNOWN GAPS. (The
+#        name check itself is not confined to a ``query`` verb: the L1 lane
+#        calls ``_assert_test_graph`` directly from ``rebuild_all`` and
+#        ``_wipe_all_nodes``, which is why the token, not L2, is the gate
+#        there.)
 #
 # KNOWN GAPS (pre-existing, NOT fixed by #2944):
 #   * ``proj.db`` is built through ``tortoise.cypher_guard.guarded_client``
 #     (it is NOT a bare FalkorDB client), so it carries the #3595 ``=~``
-#     operator guard — but NOT the L1/L2 bulk-wipe guard. Two destructive
+#     operator guard — but NOT the L1/L2 bulk-wipe guard. Three destructive
 #     forms reach a graph without passing either layer:
-#     ``select_graph(name).query("MATCH (n)
-#     DETACH DELETE n")`` (e.g. tortoise/graph_delete_guard.py:252, reached
-#     from battery/testing/seeds.py via ``safe_graph_delete``;
+#     (i) ``select_graph(name).query("MATCH (n) DETACH DELETE n")`` (e.g.
+#     tortoise/graph_delete_guard.py:252, reached from
+#     battery/testing/seeds.py via ``safe_graph_delete``;
 #     graph-scripts/smoke_test.py:140 in both modes, :121 on the embedded
-#     branch) and ``select_graph(name).delete()`` (GRAPH.DELETE — used by
-#     ``sdk.team_delete``, ``hosted_api``, ``backup_sweep``). This surface
+#     branch);
+#     (ii) ``select_graph(name).delete()`` (GRAPH.DELETE — used by
+#     ``sdk.team_delete``, ``hosted_api``, ``backup_sweep``); and
+#     (iii) the raw command channel itself,
+#     ``proj.db.execute_command("GRAPH.QUERY", name, "MATCH (n) DETACH
+#     DELETE n")``, which ``guarded_client`` rebinds to
+#     ``_guard_execute_command`` — a ``=~``-only check that never runs
+#     ``_is_bulk_wipe``. The same holds for the guarded handle's other verbs
+#     (``select_graph(name)._query`` / ``.execute_command`` / ``.profile``),
+#     which the next bullet enumerates for ``proj.g``. This surface
 #     cannot be closed inside the guard: a caller holding ``proj.db`` can
 #     equally build its own ``falkordb.FalkorDB(...)``. The guard's contract
 #     is "no wipe by *forgetting* an opt-in"; those callers carry their own

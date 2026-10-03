@@ -297,7 +297,7 @@ class TestIngestGuardAfterRebuild:
             assert row == ["superseded", True], (
                 "supersede_point must stamp status AND the flag (#3142)")
 
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             # The rebuild preserves both the status and the hash (#2795), so
             # the primary MATCH is exercised.
             row = sdk._get_proj().g.query(
@@ -340,7 +340,7 @@ class TestIngestGuardAfterRebuild:
                 "invalidate_point must NOT terminalize the status")
             assert row[1] is True, "invalidate_point must set the flag"
 
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             self._assert_bundle_local_ref_rejected(sdk, content)
         finally:
             sdk.close()
