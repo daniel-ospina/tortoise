@@ -546,7 +546,7 @@ def test_summary_overflow_line_is_silent_within_the_bound():
     at_bound = [f"e{i}" for i in range(runner.SUMMARY_BOUND)]
     assert runner.summary_overflow_line(at_bound, label="x") == []
     assert runner.summary_overflow_line(
-        at_bound + ["overflow"], label="x"
+        [*at_bound, "overflow"], label="x"
     ) == [f"x (all {runner.SUMMARY_BOUND + 1}): overflow"]
 
 
