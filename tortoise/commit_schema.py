@@ -406,7 +406,10 @@ def validate_validity_window(valid_from: object, valid_to: object) -> None:
     persist a window are wired by their own issues: ``supersede_point`` by
     #4021 (and its ``_preview_supersede`` parity by #5506), and
     ``create_point`` / ``update_point`` caller props plus
-    ``mining._temporal_wire`` by #5359. The projection fold/replay writers
+    ``mining._temporal_wire`` by #5359 — which routes all three through
+    ``sdk._refuse_inverted_point_window``, merging a caller's PARTIAL bound
+    with the stored opposite bound before delegating here. The projection
+    fold/replay writers
     deliberately do NOT call it: a rebuild must REPLAY windows that already
     exist, including ones that were inverted before a guard existed, so a fold
     that refused would turn a legacy corruption into a FAILED RESTORE — before
