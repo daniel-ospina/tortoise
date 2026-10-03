@@ -301,9 +301,17 @@ def test_created_since_last_wipe_collapses_duplicate_lines(tmp_path, monkeypatch
 
 
 def test_sweep_drop_converges_on_a_never_created_name(tmp_path):
-    """`_sweep_drop` (the REAL session sweep) drops a journaled name whose graph
-    was never created, tolerates the duplicate line, and removes the journal —
-    the journaled-but-never-created window converges instead of orphaning."""
+    """`_sweep_drop` (the REAL session sweep) converges on a journaled name whose
+    graph was never created: it tolerates the duplicate line and removes the
+    journal instead of orphaning it.
+
+    #2961: the name is absent from ``GRAPH.LIST``, so the sweep transmits NO
+    graph command at all. The ``dropped`` entry is still reported because the
+    entry is *satisfied* (``_drop_one_graph`` returns True for an absent
+    graph), which is what lets the journal converge. The blind DETACH this
+    test used to pin is exactly what materialises the record-less phantom
+    whose GRAPH.DELETE poisons the shared AOF.
+    """
     import tests._embedded as emb
 
     journal = tmp_path / "session.graphs.jsonl"
@@ -321,13 +329,19 @@ def test_sweep_drop_converges_on_a_never_created_name(tmp_path):
         def delete(self):
             calls.append(("delete", self._name))
 
-    proj = SimpleNamespace(_host="localhost", db=SimpleNamespace(select_graph=lambda n: _G(n)))
+    proj = SimpleNamespace(
+        _host="localhost",
+        db=SimpleNamespace(list_graphs=lambda: [], select_graph=lambda n: _G(n)),
+    )
     res = emb._sweep_drop(proj, str(journal), drop=True)
 
     assert res["journal_removed"] is True
     assert res["failed"] == []
     assert res["dropped"] == ["team_never"], "duplicate line collapses (seen-set)"
-    assert ("delete", "team_never") in calls
+    assert calls == [], (
+        "#2961: an absent graph is presence-gated — no DETACH, no DELETE; the "
+        "blind DETACH is what creates the AOF-poisoning phantom"
+    )
     assert not journal.exists()
 
 

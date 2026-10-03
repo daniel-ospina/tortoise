@@ -740,13 +740,18 @@ def test_every_emitted_prop_key_is_allowlisted():
     # #4015: routing the five analytics sites through ``_emit_analytics_off_loop``
     # does NOT change the count — the collector resolves that helper's args
     # exactly like the direct calls it replaced. main's #3773 added a sixth
-    # emitter, hence 12 here (11 before it). #3944 adds a thirteenth: the
-    # absence canary emits `_sink_canary` through ``_emit_analytics_off_loop``
-    # with NO props, so it resolves to ``keys=None`` and is deliberately
-    # excluded from the subset check below (there is no new prop key to
-    # register — the allowlist is props-only, and the canary ships an empty
-    # dict).
-    assert len(calls) == 13, (
+    # emitter, hence 12 here (11 before it). Two sites landed in parallel and
+    # the merge is their UNION: main's #3944 absence canary emits `_sink_canary`
+    # through ``_emit_analytics_off_loop`` with NO props, so it resolves to
+    # ``keys=None`` and is deliberately excluded from the subset check below
+    # (there is no new prop key to register — the allowlist is props-only, and
+    # the canary ships an empty dict); and #3359/#3561's ``capture_graph_ops``
+    # per-session row emits the physical graph-op count beside the
+    # ``capture_cost`` row, with its props (``graph_ops_total``/
+    # ``graph_ops_read``/``graph_ops_write``/``graph_ops_turns``/
+    # ``graph_ops_by_phase``) registered in ``_ALLOWED_ANALYTICS_PROPS``. The
+    # union is 14, not 13: each side incremented the SAME 12 independently.
+    assert len(calls) == 14, (
         f"emit-site inventory changed — {len(calls)} calls found: {calls}")
     resolved = [c for c in calls if c.keys]
     assert len(resolved) >= 10, (
