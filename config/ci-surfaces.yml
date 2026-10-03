@@ -2054,7 +2054,8 @@ carve_out:
 - test_write_path_unreachable_seam_5148.py
 - bench/test_smoke_embedded.py
 # #6884: modules that REQUIRE the docker lane — each one module-skips at import
-# when TORTOISE_DB_URI is absent (`if not _is_db_uri(...): pytest.skip(...)`
+# when `TORTOISE_DB_URI` is not a usable URI — in the tier-2 PR legs that means
+# present and EMPTY (`URI=""`), not absent (`if not _is_db_uri(...): pytest.skip(...)`
 # with `allow_module_level=True`). A module-level skip collects ZERO tests, so
 # `pytest --collect-only` exits 5 and the fail-closed manifest guard in
 # python-ci.yml ('Generate coverage manifest') kills the leg BEFORE any test
