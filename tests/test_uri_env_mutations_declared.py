@@ -198,6 +198,10 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # ── DELIBERATE_URI: fixtures/tests that force the docker lane directly ──
     "test_consolidation_4way.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     "test_doctor.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    # #3892: the read-path status test points the endpoint at a DECLARED but
+    # UNREACHABLE docker URI (127.0.0.1:1) to drive the `degraded` composite
+    # without mocking `_get_proj` — the setenv IS the test input.
+    "test_read_status.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # #3039: the ACL admin-client decode pin forces a docker:// URI so
     # `_admin_client` takes the redis path; redis.Redis is stubbed, never
     # connects. The setenv IS the test input (deliberate docker lane).
@@ -279,6 +283,23 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     #     so the reaper's own path is exercised; fixture-param monkeypatch, so
     #     pytest auto-undoes it at teardown (no lane leak).
     "test_backfill_ghost_members_guard.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #4503: the edge-accounting guards control TORTOISE_DB_URI deliberately in
+    # three places, and the env control IS the input in each:
+    #   * two `delenv` sites force the EMBEDDED lane (DELIBERATE_EMBEDDED_LANE)
+    #     so that a cap count read from a SECOND, EMPTY database is
+    #     distinguishable from a legitimately-empty org. With the URI in place,
+    #     `count_org_usage` resolves the `org_<org>` URI graph and the
+    #     wrong-graph read these guards exist to catch would be invisible (both
+    #     sides would agree).
+    #   * one `setenv` + its assertion site (DELIBERATE_URI) pin that
+    #     `_open_sdk` RESTORES a caller's URI — `main()` is called in-process,
+    #     so a leaked mutation re-points the next invocation.
+    # Fixture-param monkeypatch throughout, so pytest auto-undoes every site at
+    # teardown — no lane leak.
+    "test_4503_edge_relationship_accounting.py": [
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
+        r'os\.environ\["TORTOISE_DB_URI"\]\s*='],
     "test_server_hygiene_gate.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
                                      # the URI literal sits on the FOLLOWING line at
                                      # :251 (`setenv(` then the string), so the site's

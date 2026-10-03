@@ -1,0 +1,737 @@
+"""#3595 — the unsupported Cypher ``=~`` operator must FAIL LOUDLY, not silently.
+
+FalkorDB does not implement Cypher's ``=~`` regex-match operator, and it does
+not raise. It prints ``FalkorDB does not currently support =~`` IN PLACE OF
+RESULTS, so the surrounding query returns an **empty result set** — a confident
+false negative indistinguishable from "no matches". Two agents in one session
+read exactly that: enumerating "does any graph hold a legacy ``obj-<26hex>``
+id" with ``=~ '^[a-z]{2,3}-[0-9a-f]{26}$'`` returned 0 across every graph,
+where the supported ``STARTS WITH`` found 5 legacy-prefixed nodes in 2 graphs
+(``graphops_measure_tmp`` = 4, ``probe2517props`` = 1).
+
+The fix is a guard at the HANDLE-PRODUCING seam. ``tortoise/cypher_guard.py``
+wraps the vendor FalkorDB CLIENT, so the ``select_graph`` on a client the
+package builds returns a guarded ``Graph`` subclass that refuses the statement
+on EVERY query entry point (``query`` / ``ro_query`` / ``_query`` / ``profile``
+/ ``explain``) BEFORE it is sent. The projection's own handle wrapper
+(``_GuardedGraph``, the ``proj.g`` path) applies the same refusal, and the
+seam tests below drive that (a raw ``select_graph`` handle is refused too).
+
+Doctrine (TEST-DOCTRINE.md, Class B) — every test below answers both questions:
+
+  (1) **what value makes this test fail?** The load-bearing falsifiers fail
+      when the guard is ABSENT: the guarded handle then forwards the
+      ``=~`` statement to the wire (no exception, and the spy records the
+      call). Concretely, the value is the query text
+      ``LEGACY_SHAPE_CHECK`` — a real ``=~`` OPERATOR, outside any string
+      literal.
+  (2) **is that value reachable in the fixture?** Yes — ``LEGACY_SHAPE_CHECK``
+      is constructed verbatim below (the real near-miss from the issue), and
+      the spy handle proves the guard saw exactly that text and withheld it.
+
+These tests are PURE UNIT — no FalkorDB store, no Docker, no embedded server.
+The seam tests do use the REAL ``falkordb.Graph`` class, but with a spy
+``execute_command`` in place of the redis connection, so the proof is that the
+refusal happens in Python before any I/O — a guard test that needed a live
+handle to prove a PRE-dispatch refusal would be needlessly fragile.
+
+The anti-overfix guards pass on the pre-fix revision BY DESIGN — they defend
+the contracts this fix must not break: supported operators must still reach the
+graph, a ``=~`` that is DATA (a string literal or a parameter) or a NAME
+(backtick-quoted identifier) must not trip, and the Python-side id regexes
+(which contain ``=~`` in a character class) must be untouched.
+"""
+from __future__ import annotations
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import pytest  # noqa: E402, RUF100
+
+from tortoise.cypher_guard import guarded_client, guarded_client_class  # noqa: E402, RUF100
+from tortoise.exceptions import UnsupportedCypherOperatorError  # noqa: E402, RUF100
+from tortoise.projection import (  # noqa: E402, RUF100
+    FalkorProjection,
+    _GuardedGraph,
+    _unsupported_cypher_operator,
+)
+
+#: The REAL near-miss query from #3595. The ``=~`` is an OPERATOR (outside any
+#: string literal); the regex after it is the legacy ``obj-<26hex>`` shape.
+#: This is the exact value that makes the falsifiers below fail on unguarded code.
+LEGACY_SHAPE_CHECK = (
+    "MATCH (n) WHERE n.id =~ '^[a-z]{2,3}-[0-9a-f]{26}$' RETURN n.id"
+)
+
+
+class _FakeHandle:
+    """Stand-in for a FalkorDB graph handle: records what reaches the wire."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    def query(self, cypher, params=None, timeout=None):
+        self.calls.append((cypher, params, timeout))
+        return "SENTINEL-EMPTY-RESULT"
+
+
+class _StubProj:
+    """Minimal projection for ``_GuardedGraph`` — the bulk-wipe branch is only
+    reached for DETACH DELETE, which none of these queries are."""
+
+    _skip_guard = False
+    _is_embedded = True
+    _graph_name = "test_cypher_regex_guard_3595"
+
+    def _assert_test_graph(self, reason: str = "") -> None:  # pragma: no cover
+        raise AssertionError("bulk-wipe guard reached by a non-wipe query")
+
+
+def _guarded() -> tuple[_GuardedGraph, _FakeHandle]:
+    handle = _FakeHandle()
+    return _GuardedGraph(handle, _StubProj()), handle
+
+
+# ── falsifiers: the guard refuses the real near-miss ────────────────────────
+
+def test_real_legacy_shape_check_is_refused_at_the_projection_wrapper():
+    """Falsifier (guard removed -> RED): the exact #3595 query raises.
+
+    Value that makes it fail: ``LEGACY_SHAPE_CHECK``, a ``=~`` OPERATOR in
+    query text. Reachable in the fixture: it is the module constant above,
+    handed straight to the ``proj.g`` wrapper.
+    """
+    g, handle = _guarded()
+    with pytest.raises(UnsupportedCypherOperatorError) as exc:
+        g.query(LEGACY_SHAPE_CHECK)
+    assert exc.value.operator == "=~"
+    assert handle.calls == [], "the unsupported statement reached the graph handle"
+
+
+def test_refusal_message_names_operator_falkordb_and_alternatives():
+    """Falsifier: the error must be actionable, not a bare raise.
+
+    Value that makes it fail: the message must name ``=~``, FalkorDB, and all
+    three supported alternatives (``STARTS WITH`` / ``ENDS WITH`` /
+    ``CONTAINS``). Reachable: the guard raises this exact message from
+    ``LEGACY_SHAPE_CHECK``.
+    """
+    g, _ = _guarded()
+    with pytest.raises(UnsupportedCypherOperatorError) as exc:
+        g.query(LEGACY_SHAPE_CHECK)
+    msg = str(exc.value)
+    assert "=~" in msg
+    assert "FalkorDB" in msg
+    assert "STARTS WITH" in msg
+    assert "ENDS WITH" in msg
+    assert "CONTAINS" in msg
+    assert "SILENTLY" in msg, "the silent false-negative is the whole point"
+
+
+def test_falkorprojection_query_delegates_into_the_guard():
+    """Falsifier: the public ``FalkorProjection.query`` path is covered too.
+
+    Value that makes it fail: ``LEGACY_SHAPE_CHECK`` sent through
+    ``FalkorProjection.query`` -> ``self.g.query`` (the ``_GuardedGraph``).
+    Reachable: the projection is built with an injected fake handle, so no DB
+    is opened and the delegation is exercised directly.
+    """
+    handle = _FakeHandle()
+    proj = object.__new__(FalkorProjection)  # no DB / no __init__
+    proj.g = _GuardedGraph(handle, proj)
+    proj._skip_guard = False
+    proj._is_embedded = True
+    proj._graph_name = "test_cypher_regex_guard_3595"
+    with pytest.raises(UnsupportedCypherOperatorError):
+        proj.query(LEGACY_SHAPE_CHECK)
+    assert handle.calls == [], "FalkorProjection.query bypassed the guard"
+
+
+# ── anti-overfix guards: contracts the fix must not break ───────────────────
+
+@pytest.mark.parametrize("cypher", [
+    "MATCH (n) WHERE n.id STARTS WITH 'obj-' RETURN n.id",
+    "MATCH (n) WHERE n.name ENDS WITH '-hex' RETURN n.name",
+    "MATCH (n) WHERE n.content CONTAINS 'legacy' RETURN n.id",
+])
+def test_supported_operators_still_reach_the_handle(cypher):
+    """Anti-overfix guard: the three supported alternatives pass through.
+
+    Value that makes it fail: a supported operator query. Reachable: the
+    parametrize list is handed to the same guard entry point; the spy must record it.
+    """
+    g, handle = _guarded()
+    assert g.query(cypher) == "SENTINEL-EMPTY-RESULT"
+    assert handle.calls == [(cypher, None, None)]
+
+
+def test_tilde_equals_inside_a_string_literal_is_data_not_an_operator():
+    """Anti-overfix guard: ``=~`` quoted as DATA must NOT trip the guard.
+
+    Value that makes it fail: a literal containing ``=~``. Reachable: passed to
+    the guard entry point; the spy must record it (the guard strips literals first).
+    """
+    g, handle = _guarded()
+    cypher = "MATCH (n) WHERE n.content = 'explain a =~ b' RETURN n.id"
+    assert g.query(cypher) == "SENTINEL-EMPTY-RESULT"
+    assert handle.calls == [(cypher, None, None)]
+
+
+def test_tilde_equals_inside_a_comment_is_prose_not_an_operator():
+    """Anti-overfix guard: ``=~`` in a Cypher comment must NOT trip the guard.
+
+    Value that makes it fail: a comment containing ``=~``. Reachable: passed to
+    the guard entry point; the spy must record it.
+    """
+    g, handle = _guarded()
+    cypher = "MATCH (n) /* legacy =~ shape */ RETURN n.id"
+    assert g.query(cypher) == "SENTINEL-EMPTY-RESULT"
+    assert handle.calls == [(cypher, None, None)]
+
+
+def test_helper_classifies_operator_vs_literal_directly():
+    """Anti-overfix guard: the classifier's operator/data/prose boundary."""
+    assert _unsupported_cypher_operator(LEGACY_SHAPE_CHECK) == "=~"
+    assert _unsupported_cypher_operator("RETURN 'a =~ b'") is None
+    assert _unsupported_cypher_operator('RETURN "a =~ b"') is None
+    assert _unsupported_cypher_operator(
+        "MATCH (n) WHERE n.p CONTAINS '=~' RETURN n") is None
+    assert _unsupported_cypher_operator("MATCH (n) RETURN n") is None
+    # A `=~` in Cypher PROSE is not an operator either.
+    assert _unsupported_cypher_operator("// matched with =~ before\nRETURN 1") is None
+    assert _unsupported_cypher_operator("RETURN 1 /* no =~ here */") is None
+    # …but an operator before a comment is still refused.
+    assert _unsupported_cypher_operator(
+        "MATCH (n) WHERE n.id =~ 'x' // =~ again\nRETURN n") == "=~"
+    # An escaped quote does not end the literal, so a `=~` after it stays DATA.
+    assert _unsupported_cypher_operator(
+        "RETURN 'a\\'b=~c' AS x") is None
+    # A BACKTICK-quoted identifier may contain any character except a backtick,
+    # so `a=~b` there is a NAME, not the operator (openCypher).
+    assert _unsupported_cypher_operator("MATCH (n:`a=~b`) RETURN n") is None
+    assert _unsupported_cypher_operator(
+        "MATCH (n) RETURN n.`p=~q`") is None
+    # …but a real operator outside a backtick identifier is still refused.
+    assert _unsupported_cypher_operator(
+        "MATCH (n:`legacy id`) WHERE n.id =~ 'x' RETURN n") == "=~"
+    # An unterminated backtick consumes the remainder rather than inventing one.
+    assert _unsupported_cypher_operator("MATCH (n:`a=~b) RETURN n") is None
+
+
+def test_tilde_equals_inside_a_backtick_identifier_is_a_name_not_an_operator():
+    """Anti-overfix guard: ``=~`` in a backtick identifier must NOT trip.
+
+    Backticks quote an identifier and openCypher permits any character except a
+    backtick inside them, so ``MATCH (n:`a=~b`)`` is legitimate Cypher. A
+    scanner blind to backticks blocks it — a false positive. Value that makes
+    it fail: the backtick-quoted query below; reachable: handed to the same
+    guard entry point as the falsifiers.
+    """
+    g, handle = _guarded()
+    for cypher in (
+        "MATCH (n:`a=~b`) RETURN n",
+        "MATCH (n) RETURN n.`p=~q`",
+    ):
+        assert g.query(cypher) == "SENTINEL-EMPTY-RESULT"
+    assert handle.calls == [
+        ("MATCH (n:`a=~b`) RETURN n", None, None),
+        ("MATCH (n) RETURN n.`p=~q`", None, None),
+    ]
+
+
+def test_python_regex_character_class_as_data_does_not_trip_the_guard():
+    """Drives the real claim: a PYTHON regex is DATA on the wire, never the operator.
+
+    ``sdk._DIGEST_STRUCTURE_RE`` is the only Python-side pattern containing
+    ``=~`` — inside a CHARACTER CLASS, ``[=~]``. If such a pattern ever reaches
+    Cypher it arrives as a string literal (the way a regex should be passed),
+    and the guard must read that ``=~`` as DATA. This test drives the scanner
+    (unlike its predecessor, which only compiled Python regexes and so could not
+    fail for any value the guard took).
+
+    Value that makes it fail: the pattern text of the real Python regex,
+    embedded in a Cypher literal. Reachable: taken straight off the real
+    compiled object and handed to the guarded query text.
+    """
+    from tortoise import sdk
+
+    pattern = sdk._DIGEST_STRUCTURE_RE.pattern
+    assert "=~" in pattern, "premise: the Python regex carries a [=~] class"
+    assert "'" not in pattern, "premise: embeddable in a single-quoted literal"
+    assert sdk._is_entity_id("ab-0123456789abcdef0123456789")
+    assert sdk._ENTITY_ID_RE.match("obj-0123456789abcdef0123456789")
+    assert sdk._DIGEST_STRUCTURE_RE.match("===")
+
+    g, handle = _guarded()
+    cypher = f"MATCH (n) WHERE n.p = '{pattern}' RETURN n.id"
+    assert g.query(cypher) == "SENTINEL-EMPTY-RESULT"
+    assert handle.calls == [(cypher, None, None)]
+
+
+def test_regex_pattern_as_a_query_parameter_does_not_trip():
+    """Anti-overfix guard: a regex passed as DATA (``$pat``) is not an operator.
+
+    Value that makes it fail: the guarded query text carries no ``=~`` — the
+    pattern travels in ``params``. Reachable: handed to the guarded handle with
+    the parameter dict; the spy must record both.
+    """
+    g, handle = _guarded()
+    cypher = "MATCH (n) WHERE n.id = $pat RETURN n.id"
+    params = {"pat": "^[a-z]{2,3}-[0-9a-f]{26}$"}
+    assert g.query(cypher, params=params) == "SENTINEL-EMPTY-RESULT"
+    assert handle.calls == [(cypher, params, None)]
+
+
+# ── the HANDLE-PRODUCING seam: a raw `select_graph` handle is guarded ───────
+
+class _SpyWire:
+    """Stand-in for the redis connection: any command reaching it is recorded."""
+
+    def __init__(self) -> None:
+        self.commands: list[tuple] = []
+
+    def execute_command(self, *args, **kwargs):
+        self.commands.append(args)
+        return [[], [], []]  # a valid empty result set
+
+
+class _VendorClientWithRealGraph:
+    """A client whose ``select_graph`` returns the REAL vendor ``falkordb.Graph``.
+
+    Deliberately NOT a fake graph class: the seam must work on the vendor's own
+    ``Graph``, whatever ``select_graph`` yields, so this wraps the real one with
+    a spy connection.
+    """
+
+    def __init__(self, wire: _SpyWire) -> None:
+        self._wire = wire
+
+    def select_graph(self, graph_id):
+        from falkordb import Graph as VendorGraph
+
+        return VendorGraph(self._wire, graph_id)
+
+
+def _guarded_vendor_handle() -> tuple[object, _SpyWire]:
+    wire = _SpyWire()
+    client = guarded_client(_VendorClientWithRealGraph, wire)
+    return client.select_graph("g"), wire
+
+
+def test_raw_select_graph_handle_refuses_the_operator():
+    """Falsifier (guard removed -> RED): a ``select_graph(...)`` handle is guarded.
+
+    This is the P1 regression: the guard must live on the HANDLE, not on one
+    call site. Value that makes it fail: ``LEGACY_SHAPE_CHECK`` sent to a handle
+    returned by ``select_graph`` — the ~150+ call sites the previous fix missed.
+    Reachable: the handle comes off the real vendor graph class, and the spy
+    proves nothing reached the wire.
+    """
+    g, wire = _guarded_vendor_handle()
+    with pytest.raises(UnsupportedCypherOperatorError) as exc:
+        g.query(LEGACY_SHAPE_CHECK)
+    assert exc.value.operator == "=~"
+    assert wire.commands == [], "the unsupported statement reached the wire"
+
+
+def test_raw_select_graph_handle_refuses_ro_query():
+    """Falsifier: the alternate public read verb is guarded too (P1).
+
+    The previous wrapper forwarded ``ro_query`` to the raw handle, so a ``=~``
+    written against it still returned an empty result set. Value that makes it
+    fail: ``LEGACY_SHAPE_CHECK`` through ``ro_query``.
+    """
+    g, wire = _guarded_vendor_handle()
+    with pytest.raises(UnsupportedCypherOperatorError):
+        g.ro_query(LEGACY_SHAPE_CHECK)
+    assert wire.commands == [], "ro_query forwarded the unsupported statement"
+
+
+@pytest.mark.parametrize("verb", ["_query", "profile", "explain"])
+def test_raw_select_graph_handle_refuses_every_other_query_entry_point(verb):
+    """Falsifier: ``_query`` / ``profile`` / ``explain`` are not escape hatches.
+
+    The vendor's ``profile`` / ``explain`` issue ``GRAPH.PROFILE`` /
+    ``GRAPH.EXPLAIN`` WITHOUT routing through ``_query``, and ``_query`` is the
+    verb both public methods delegate to — so each needs its own refusal.
+    """
+    g, wire = _guarded_vendor_handle()
+    with pytest.raises(UnsupportedCypherOperatorError):
+        getattr(g, verb)(LEGACY_SHAPE_CHECK)
+    assert wire.commands == []
+
+
+def test_raw_select_graph_supported_query_reaches_the_wire():
+    """Anti-overfix guard: the guarded handle still passes supported queries."""
+    g, wire = _guarded_vendor_handle()
+    g.query("MATCH (n) WHERE n.id STARTS WITH 'obj-' RETURN n.id")
+    assert len(wire.commands) == 1, wire.commands
+
+
+def test_projection_wrapper_refuses_on_every_query_entry_point():
+    """Falsifier: ``_GuardedGraph`` refuses on all five entry points itself.
+
+    ``__getattr__`` forwards un-overridden attributes to the inner handle; every
+    QUERY entry point must be overridden, not forwarded, or the wrapper is an
+    escape hatch on its own.
+    """
+    for verb in ("query", "ro_query", "_query", "profile", "explain"):
+        g, handle = _guarded()
+        with pytest.raises(UnsupportedCypherOperatorError):
+            getattr(g, verb)(LEGACY_SHAPE_CHECK)
+        assert handle.calls == [], f"{verb} reached the raw handle"
+
+
+# ── review round 2: the three P2 probes + the P1 duck-typed handle ──────────
+
+def test_backslash_does_not_escape_a_backtick_identifier():
+    r"""Falsifier (round-2 P2): ``\`` is NOT an escape inside a backtick name.
+
+    openCypher escapes a backtick only by DOUBLING it, so the backtick after a
+    backslash CLOSES the identifier and the ``=~`` that follows is the real
+    operator. Pre-fix, ``\\``` swallowed the close and the operator was never
+    seen — the round-2 probe, which reached the wire unrefused. Value that
+    makes it fail: ``probe``, a real operator after the backtick identifier.
+    """
+    probe = "MATCH (n:`weird\\`) WHERE n.x =~ 'y' RETURN n"
+    assert _unsupported_cypher_operator(probe) == "=~"
+    g, handle = _guarded()
+    with pytest.raises(UnsupportedCypherOperatorError):
+        g.query(probe)
+    assert handle.calls == [], "the pre-fix miss reached the graph handle"
+
+
+def test_doubled_backtick_inside_identifier_is_a_name():
+    """Anti-overfix guard: a DOUBLED backtick stays inside the identifier.
+
+    ``a``b`` is the openCypher way to write a literal backtick in an
+    identifier, so the ``=~`` between the doubled pair is still NAME content.
+    """
+    assert _unsupported_cypher_operator(
+        "MATCH (n:`a``b=~c`) RETURN n") is None
+
+
+def test_doubled_quote_inside_a_literal_is_data():
+    """Anti-overfix guard: openCypher's doubled-quote escape is honoured.
+
+    ``'a''b=~c'`` is one STRING literal (``a'b=~c``), so the ``=~`` is DATA.
+    """
+    assert _unsupported_cypher_operator("RETURN 'a''b=~c' AS x") is None
+    assert _unsupported_cypher_operator('RETURN "a""b=~c" AS x') is None
+
+
+def test_execute_command_refuses_the_operator_on_a_guarded_handle():
+    """Falsifier (round-2 P2): the raw command channel is guarded too.
+
+    The vendor binds ``Graph.execute_command`` as an INSTANCE attribute, so a
+    plain method override loses to it; the guarded subclass re-binds it. Value
+    that makes it fail: ``LEGACY_SHAPE_CHECK`` as the Cypher argument of a
+    ``GRAPH.QUERY`` command.
+    """
+    g, wire = _guarded_vendor_handle()
+    with pytest.raises(UnsupportedCypherOperatorError):
+        g.execute_command("GRAPH.QUERY", "g", LEGACY_SHAPE_CHECK)
+    assert wire.commands == [], "execute_command forwarded the operator"
+    # A non-query command (or a supported query) still passes through.
+    g.execute_command("GRAPH.DELETE", "g")
+    assert wire.commands == [("GRAPH.DELETE", "g")]
+
+
+def test_projection_wrapper_execute_command_is_guarded():
+    """Falsifier: ``proj.g.execute_command`` refuses the operator directly."""
+    g, handle = _guarded()
+    with pytest.raises(UnsupportedCypherOperatorError):
+        g.execute_command("GRAPH.QUERY", "test", LEGACY_SHAPE_CHECK)
+    assert handle.calls == []
+
+
+def test_duck_typed_handle_is_proxied_not_reconstructed():
+    """Falsifier (round-2 P1): a stub handle must not raise ``AttributeError``.
+
+    ``tests/test_redirect_seam.py`` installs a client whose ``select_graph``
+    returns a stub exposing only ``query`` (no ``client``/``name``). The
+    pre-fix rebuild ``graph_cls(handle.client, handle.name)`` raised
+    ``AttributeError`` there and redded that ``core``-surface file. The handle
+    must instead be wrapped in a delegating proxy that GUARDS it.
+    """
+    class _StubHandle:
+        def __init__(self):
+            self.calls: list = []
+
+        def query(self, q):
+            self.calls.append(q)
+            return "OK"
+
+    class _ClientReturningStub:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def select_graph(self, graph_id):
+            return self._handle
+
+    handle = _StubHandle()
+    guard = guarded_client(_ClientReturningStub, handle).select_graph("g")
+    # No AttributeError; the supported query reaches the stub unchanged.
+    assert guard.query("MATCH (n) RETURN n") == "OK"
+    assert handle.calls == ["MATCH (n) RETURN n"]
+    # …and the operator is refused BEFORE the stub sees it.
+    with pytest.raises(UnsupportedCypherOperatorError):
+        guard.query(LEGACY_SHAPE_CHECK)
+    assert handle.calls == ["MATCH (n) RETURN n"], "the stub saw the operator"
+
+
+def test_permissive_factory_object_is_not_short_circuited():
+    """Falsifier (round-2 P1): a permissive ``__getattr__`` cannot skip the guard.
+
+    ``getattr(MagicMock(), marker, False)`` is truthy, so the pre-fix marker
+    test returned the mock UNTOUCHED and the guard vanished. The marker is now
+    read from the class MRO, and a non-class factory is wrapped instead. Value
+    that makes it fail: a factory whose every attribute auto-exists must still
+    yield a guarded handle.
+    """
+    from unittest import mock
+
+    factory = mock.MagicMock()
+    factory.return_value.select_graph.return_value = mock.MagicMock()
+    client = guarded_client(factory, host="example.invalid")
+    assert client is not factory, "the factory itself was returned unguarded"
+    guard = client.select_graph("g")
+    with pytest.raises(UnsupportedCypherOperatorError):
+        guard.query(LEGACY_SHAPE_CHECK)
+
+
+# ── round 3: the REAL production client classes ─────────────────────────────
+# The tests above drive the seam through hand-written client classes. These
+# drive the ACTUAL classes the package constructs, so a vendor shape the fakes
+# happen to share but the vendor does not (the round-2 `AttributeError` class of
+# bug) cannot pass unnoticed.
+
+
+def test_the_real_vendor_client_class_is_subclassed_not_proxied():
+    """Falsifier: the server-lane client must be SUBCLASSED, not proxied.
+
+    A proxy would break `isinstance(client, falkordb.FalkorDB)` for every caller
+    holding the client; an INHERITED (un-overridden) `select_graph` would let the
+    vendor's own `Graph(...)` through unguarded. Both are asserted on the real
+    vendor class — no fake stands in for it.
+    """
+    import falkordb
+
+    cls = guarded_client_class(falkordb.FalkorDB)
+    assert cls is not falkordb.FalkorDB
+    assert issubclass(cls, falkordb.FalkorDB), "a proxy would break isinstance"
+    assert "select_graph" in vars(cls), "select_graph is inherited, so unguarded"
+    # Idempotent: re-guarding must not nest a second layer.
+    assert guarded_client_class(falkordb.FalkorDB) is cls
+    assert guarded_client_class(cls) is cls
+
+
+def test_the_real_vendor_client_guards_the_handles_it_yields():
+    """Falsifier: end-to-end through the REAL vendor class, still no server.
+
+    ``falkordb.FalkorDB.__init__`` contacts the server (its sentinel probe), so
+    the instance is built with ``object.__new__`` and only the ONE attribute the
+    vendor's ``Graph`` constructor needs (``execute_command``) is stubbed —
+    everything else is the real class. The handle that comes back is the
+    vendor's own ``Graph`` subclass, a supported query reaches the wire, and
+    ``=~`` is refused BEFORE anything is sent.
+    """
+    import falkordb
+
+    wire: list[tuple] = []
+
+    def execute_command(*args, **kwargs):
+        wire.append(args)
+        return [[], [], []]
+
+    client = object.__new__(guarded_client_class(falkordb.FalkorDB))
+    client.execute_command = execute_command
+    g = client.select_graph("g")
+    assert isinstance(g, falkordb.Graph), "the vendor Graph contract was broken"
+    g.query("MATCH (n) WHERE n.id STARTS WITH 'obj-' RETURN n.id")
+    assert len(wire) == 1, wire
+    with pytest.raises(UnsupportedCypherOperatorError) as exc:
+        g.query(LEGACY_SHAPE_CHECK)
+    assert exc.value.operator == "=~"
+    assert len(wire) == 1, "the unsupported statement reached the wire"
+
+
+def test_the_embedded_client_class_is_guarded_too():
+    """Falsifier: the embedded lane's class is the redislite subclass.
+
+    ``tortoise.FalkorDB`` is redislite's ``FalkorDB`` (built by the pre-existing
+    ``_build_guarded_falkordb``), whose ``select_graph`` keys off ``self.client``
+    rather than the raw client — so it must be guarded as its OWN class, never
+    assumed to share the server lane's shape. Class-level only: constructing it
+    starts an embedded server, which these tests deliberately never do.
+    """
+    from tortoise import FalkorDB as EmbeddedFalkorDB
+
+    cls = guarded_client_class(EmbeddedFalkorDB)
+    assert cls is not EmbeddedFalkorDB
+    assert issubclass(cls, EmbeddedFalkorDB)
+    assert "select_graph" in vars(cls), "select_graph is inherited, so unguarded"
+    assert guarded_client_class(EmbeddedFalkorDB) is cls
+
+
+
+def test_guarded_class_publishes_its_unguarded_base_and_still_blocks():
+    """#6072: BOTH directions of the guard's identity contract.
+
+    (1) The vendor graph class stays REACHABLE as a published contract. The
+        guard subclasses it so no un-guarded query verb is reachable through the
+        MRO — that isolation is deliberate and is NOT traded away for instance
+        attributes (which `del handle.query` would undo). But consumers must not
+        have to infer the vendor class from `type()`: when they do, behaviour
+        changes under them (measured: tests/test_hosted_api.py patches `query` at
+        vendor-class level and dispatches via `_orig_query[type(self)]`, so a
+        generated subclass raises KeyError and the REQUIRED python-ci-gate leg
+        fails).
+
+    (2) The guard STILL REFUSES an unsupported operator. Publishing the base
+        class must not become a way to bypass the guard.
+
+    Mutation that must turn this RED: drop `_GUARDED_GRAPH_BASE_MARKER` from the
+    generated class in `guarded_graph_class` — then (1) fails while (2) still
+    passes, which is exactly the regression this pins.
+    """
+    from tortoise import cypher_guard as cg
+
+    class _VendorGraph:
+        """Stand-in for falkordb.graph.Graph (the vendor class)."""
+
+        def __init__(self, client=None, name="g"):
+            self.client, self.name = client, name
+
+        def query(self, q):          # pragma: no cover - never reached when guarded
+            return ("UNGURADED", q)
+
+        def ro_query(self, q):       # pragma: no cover - never reached when guarded
+            return ("UNGURADED", q)
+
+    guarded_cls = cg.guarded_graph_class(_VendorGraph)
+    assert guarded_cls is not _VendorGraph, "the guard must produce a guarded class"
+
+    # (1) the vendor class is REACHABLE as a published contract — not inferred.
+    assert cg.unguarded_graph_class(guarded_cls) is _VendorGraph, (
+        "the guarded class must publish its unguarded base; consumers keying on "
+        "type(handle) otherwise break (this is the #6072 defect)")
+    # ...and an unguarded class is returned unchanged, so callers need no special case.
+    assert cg.unguarded_graph_class(_VendorGraph) is _VendorGraph
+
+    # (2) the guard STILL BLOCKS. An unsupported operator must be refused even
+    #     though the base class is now reachable.
+    class _StubClient:
+        """Minimal client: the mixin's __init__ reads .execute_command."""
+
+        def execute_command(self, *a, **k):   # pragma: no cover - never reached
+            return ("UNGURADED", a)
+
+        def __getattr__(self, name):          # pragma: no cover
+            return lambda *a, **k: ("UNGURADED", name, a)
+
+    handle = guarded_cls(_StubClient(), "g")
+    for verb in ("query", "ro_query"):
+        try:
+            getattr(handle, verb)("MATCH (n) CALL apoc.foo() RETURN n")
+        except Exception:
+            pass          # refused — the contract that matters
+        else:
+            # If it did not raise, the base-class method must not have run
+            # unguarded: reaching _VendorGraph.query would return the UNGURADED
+            # tuple. Accept only a non-unguarded result.
+            raise AssertionError(
+                f"{verb} reached the UNGUARDED vendor method — publishing the "
+                f"base class must not become a bypass (#6072)")
+
+
+# ── the channels a review found still open on the guarded objects ───────────
+
+
+def test_carriage_return_terminates_a_line_comment():
+    """Falsifier: a ``//`` comment ending in a bare ``\\r`` must not swallow the rest.
+
+    Terminating the comment on ``\\n`` alone let a classic-Mac line ending hide
+    a real ``=~`` after it — a silent false negative, the class this module
+    exists to stop. Value that makes it fail:
+    ``"// prose\\rMATCH (n) WHERE n.x =~ 'a' RETURN n"``.
+    """
+    assert _unsupported_cypher_operator(
+        "// prose\rMATCH (n) WHERE n.x =~ 'a' RETURN n") == "=~"
+    # …and the comment itself is still prose, on either ending.
+    assert _unsupported_cypher_operator("// no =~ here\rRETURN 1") is None
+    g, handle = _guarded()
+    with pytest.raises(UnsupportedCypherOperatorError):
+        g.query("// prose\rMATCH (n) WHERE n.x =~ 'a' RETURN n")
+    assert handle.calls == [], "the statement after a \\r comment reached the handle"
+
+
+def test_execute_command_refuses_the_operator_in_a_bytes_payload():
+    """Falsifier: the BYTES form of a command/payload is scanned, not skipped.
+
+    redis-py accepts ``execute_command`` in bytes; the scanner reports ``None``
+    for anything not ``str``, so a bytes payload used to pass untouched.
+    """
+    g, wire = _guarded_vendor_handle()
+    with pytest.raises(UnsupportedCypherOperatorError):
+        g.execute_command(b"GRAPH.QUERY", b"g", LEGACY_SHAPE_CHECK.encode())
+    assert wire.commands == [], "the bytes payload reached the wire"
+    # A supported bytes query still passes through.
+    g.execute_command(b"GRAPH.QUERY", b"g", b"RETURN 1")
+    assert wire.commands == [(b"GRAPH.QUERY", b"g", b"RETURN 1")]
+
+
+def test_the_client_command_channel_is_guarded_too():
+    """Falsifier: the CLIENT's own ``execute_command`` is guarded, not just handles.
+
+    The vendor binds the command channel as an INSTANCE attribute, so
+    subclassing the client guarded only the handles it yields: measured
+    ``proj.db.execute_command("GRAPH.QUERY", g, cypher)`` reached the server
+    while every handle verb refused (#3595 review). This stub binds it the same
+    way — as an instance attribute — which is what makes it a pin: with the
+    rebinding removed, ``self.execute_command`` is the raw wire method and the
+    operator reaches it.
+    """
+
+    class _VendorLikeClient:
+        def __init__(self, wire):
+            self.wire = wire
+            # Exactly what falkordb.FalkorDB.__init__ does.
+            self.execute_command = wire.execute_command
+
+        def select_graph(self, graph_id):
+            return object()
+
+    wire = _SpyWire()
+    client = guarded_client(_VendorLikeClient, wire)
+    with pytest.raises(UnsupportedCypherOperatorError):
+        client.execute_command("GRAPH.QUERY", "g", LEGACY_SHAPE_CHECK)
+    assert wire.commands == [], "the client channel forwarded the operator"
+    # Non-query commands and supported queries still pass.
+    client.execute_command("GRAPH.DELETE", "g")
+    assert wire.commands == [("GRAPH.DELETE", "g")]
+
+
+def test_the_proxied_client_command_channel_is_guarded_too():
+    """Falsifier: the same channel on the PROXY path (a factory, not a class)."""
+
+    class _StubClient:
+        def __init__(self):
+            self.calls = []
+
+        def select_graph(self, graph_id):
+            return object()
+
+        def execute_command(self, *args, **kwargs):
+            self.calls.append(args)
+            return args
+
+    stub = _StubClient()
+    client = guarded_client(lambda: stub)
+    with pytest.raises(UnsupportedCypherOperatorError):
+        client.execute_command("GRAPH.QUERY", "g", LEGACY_SHAPE_CHECK)
+    assert stub.calls == [], "the proxied client channel forwarded the operator"
+    client.execute_command("GRAPH.DELETE", "g")
+    assert stub.calls == [("GRAPH.DELETE", "g")]
