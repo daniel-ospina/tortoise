@@ -465,8 +465,10 @@ def test_the_graph_down_prose_matches_the_engine_state(monkeypatch, capsys):
     monkeypatch.setattr(e.subprocess, "run", lambda *a, **k: Proc())
     e.main(["--port", str(port), "--timeout", "1"])
     out = capsys.readouterr().out
-    assert "daemon is not running" in out, out
     assert "fail fast" in out, out
+    assert "not necessarily a stopped daemon" in out, out
+    # and the prose must not name a cause the probe never measured
+    assert "daemon is not running" not in out, out
     assert "did not answer inside the bound" not in out, out
 
 
@@ -489,14 +491,65 @@ def test_redis_and_docker_schemes_both_supply_host_and_port(monkeypatch):
     """
     monkeypatch.setenv("TORTOISE_DB_URI",
                        "redis://prod-graph.example.com:16400/tortoise")
-    assert e.graph_target_from_env() == (
-        "prod-graph.example.com", 16400, "redis")
+    assert e.graph_target_from_env()["host"] == "prod-graph.example.com"
+    assert e.graph_target_from_env()["port"] == 16400
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@127.0.0.1:16379/tortoise")
-    assert e.graph_target_from_env() == ("127.0.0.1", 16379, "docker")
+    assert e.graph_target_from_env()["host"] == "127.0.0.1"
+    assert e.graph_target_from_env()["port"] == 16379
     monkeypatch.setenv("TORTOISE_DB_URI", "rediss://g.example.com:6380/t")
-    assert e.graph_target_from_env() == ("g.example.com", 6380, "rediss")
-    monkeypatch.setenv("TORTOISE_DB_URI", "falkor:///tmp/x")
+    assert e.graph_target_from_env()["ssl"] is True
+    # no URI at all is the ONLY thing that returns None
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     assert e.graph_target_from_env() is None
+
+
+def test_a_portless_uri_keeps_its_host(monkeypatch):
+    """(a) FAILS if a portless URI is read as "no URI configured". The round-1
+    host-discard survived for this form: the canonical resolver defaults the port
+    to 16379 and KEEPS the host, so probing 127.0.0.1 instead of the configured
+    host is a wrong endpoint, and a false green wherever a local graph exists.
+    (b) Reachable: `resolve_db_endpoint` supports the portless form.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "redis://prod-graph.example.com/tortoise")
+    target = e.graph_target_from_env()
+    assert target["host"] == "prod-graph.example.com", target
+    assert target["port"] == 16379, target
+
+
+def test_an_unresolvable_uri_raises_instead_of_defaulting(monkeypatch):
+    """(a) FAILS if an unsupported scheme, an embedded path, or a malformed /
+    out-of-range port is collapsed into the same None as "no URI". `main` then
+    probed the DEFAULT endpoint, so `docker://:pw@127.0.0.1:16x00` came back
+    exit 0 against a graph the tool never reached — while the product RAISES on
+    that same URI.
+    (b) Reachable: a typo'd port, an out-of-range port, an embedded path, and a
+    scheme nobody supports.
+    """
+    for bad in ("docker://:pw@127.0.0.1:16x00/tortoise",
+                "docker://:pw@127.0.0.1:99999/tortoise",
+                "falkor:///tmp/x",
+                "/tmp/tortoise.db"):
+        monkeypatch.setenv("TORTOISE_DB_URI", bad)
+        try:
+            target = e.graph_target_from_env()
+        except ValueError:
+            continue
+        raise AssertionError(f"{bad} resolved to {target} instead of refusing")
+    # and redis_port_from_env stays total for callers that only want a port
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@127.0.0.1:16x00/t")
+    assert e.redis_port_from_env() is None
+
+
+def test_the_uri_localhost_is_mapped_to_loopback_v4(monkeypatch):
+    """(a) FAILS if `localhost` is dialled literally: it resolves `::1` FIRST and
+    a second, near-empty FalkorDB has been observed there (#6666), so the probe
+    would report on the wrong instance.
+    (b) Reachable: the repo's own `.env.example` uses `localhost`.
+    """
+    for uri in ("docker://:pw@localhost:16379/t",
+                "docker://:pw@[::1]:16379/t"):
+        monkeypatch.setenv("TORTOISE_DB_URI", uri)
+        assert e.graph_target_from_env()["host"] == "127.0.0.1", uri
 
 
 def test_a_rediss_target_is_refused_rather_than_guessed(monkeypatch, capsys):
@@ -509,6 +562,133 @@ def test_a_rediss_target_is_refused_rather_than_guessed(monkeypatch, capsys):
     rc = e.main(["--no-docker", "--timeout", "1"])
     assert rc == 3, rc
     assert "rediss" in capsys.readouterr().err
+
+
+def test_the_tls_refusal_does_not_override_an_explicit_endpoint(monkeypatch):
+    """(a) FAILS if the refusal fires before --host/--port are applied. `main`'s
+    own contract is that the flags override the URI field by field, so a caller
+    naming a plaintext endpoint is by construction asking for that endpoint; the
+    URI's TLS-ness must not veto it.
+    (b) Reachable: `--host`/`--port` given while TORTOISE_DB_URI is a rediss
+    target.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "rediss://g.example.com:6380/t")
+    seen = {}
+    monkeypatch.setattr(e, "probe_graph",
+                        lambda h, p, t: seen.update(host=h, port=p) or {"ok": True})
+    rc = e.main(["--host", "1.2.3.4", "--port", "1111", "--no-docker",
+                 "--timeout", "1"])
+    assert seen == {"host": "1.2.3.4", "port": 1111}, seen
+    assert rc == 0, rc
+
+
+def test_json_is_emitted_on_every_exit_path(monkeypatch, capsys):
+    """(a) FAILS if a refusal bypasses `_report`. `--json` is the documented
+    machine-readable mode and it emitted ZERO bytes on the TLS refusal, so a
+    caller parsing stdout got nothing — while nothing tested JSON at all.
+    (b) Reachable: the refusal path, and the normal path.
+    """
+    import json as _json
+    monkeypatch.setenv("TORTOISE_DB_URI", "rediss://g.example.com:6380/t")
+    rc = e.main(["--json", "--no-docker", "--timeout", "1"])
+    out = capsys.readouterr().out
+    assert rc == 3, rc
+    assert _json.loads(out)["verdict"] == e.UNMEASURABLE, out
+
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    rc = e.main(["--json", "--no-docker", "--port", "1", "--timeout", "1"])
+    payload = _json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == e.GRAPH_DOWN, payload
+    assert payload["graph"]["port"] == 1
+
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    rc = e.main(["--json", "--no-docker", "--port", "1", "--timeout", "1"])
+    payload = _json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == e.GRAPH_DOWN, payload
+    assert payload["graph"]["port"] == 1
+
+
+def test_the_endpoint_main_probes_is_the_one_the_uri_names(monkeypatch):
+    """(a) FAILS if `main` discards the URI's host or port, or ignores --host or
+    --port. Those four mutations left all previous tests GREEN: the parser was
+    pinned but never the endpoint actually probed, so the round-1 bugs could be
+    reintroduced silently through the CLI seam.
+    (b) Reachable: exactly those mutations.
+    """
+    seen = {}
+    monkeypatch.setattr(e, "probe_graph",
+                        lambda h, p, t: seen.update(host=h, port=p) or {"ok": True})
+
+    # URI only -> the URI's endpoint
+    monkeypatch.setenv("TORTOISE_DB_URI", "redis://g.example.com:16400/t")
+    assert e.main(["--no-docker", "--timeout", "1"]) == 0
+    assert seen == {"host": "g.example.com", "port": 16400}, seen
+
+    # URI + --port -> the URI's host, the flag's port
+    e.main(["--no-docker", "--timeout", "1", "--port", "2222"])
+    assert seen == {"host": "g.example.com", "port": 2222}, seen
+
+    # URI + --host -> the flag's host, the URI's port
+    e.main(["--no-docker", "--timeout", "1", "--host", "10.0.0.9"])
+    assert seen == {"host": "10.0.0.9", "port": 16400}, seen
+
+    # no URI -> the documented defaults
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    e.main(["--no-docker", "--timeout", "1"])
+    assert seen == {"host": "127.0.0.1", "port": 16379}, seen
+
+
+def test_a_non_finite_timeout_is_rejected_not_crashed(monkeypatch):
+    """(a) FAILS if `nan` passes the `<= 0` guard: `nan <= 0` is False, so the
+    probe reached the socket layer and raised an uncaught ValueError, breaking
+    the documented 0/1/2/3 exit contract with a traceback. `inf` overflows.
+    (b) Reachable: `--timeout nan` / `--timeout inf`.
+    """
+    for bad in ("nan", "inf", "0"):
+        assert e.main(["--timeout", bad]) == 1, bad
+    # `-inf` reaches argparse as a FLAG, so argparse itself exits 2 — which the
+    # EXIT CONTRACT documents. `--timeout=-inf` names the value and must reach
+    # our own guard rather than crash.
+    assert e.main(["--timeout=-inf"]) == 1
+
+
+def test_docker_socket_honours_the_environment(monkeypatch, tmp_path):
+    """(a) FAILS if `DOCKER_HOST` is ignored. `docker_socket()` is the SOLE
+    discriminator between ENGINE_ABSENT (believable) and ENGINE_UNMEASURED
+    (treated as wedged); ignoring DOCKER_HOST made "no engine is in play" assert
+    something the environment contradicts, and a missed socket endorses a graph
+    result that a wedged engine could explain.
+    (b) Reachable: colima/rootless/Docker-Desktop layouts set DOCKER_HOST.
+    """
+    fake = tmp_path / "docker.sock"
+    fake.write_text("")            # exists() is the predicate, not is_socket()
+    monkeypatch.setenv("DOCKER_HOST", f"unix://{fake}")
+    assert e.docker_socket() == fake
+    # a tcp:// DOCKER_HOST names no local socket, so it must not be mistaken for
+    # one — the default path list is neutralized so this box's real OrbStack
+    # socket cannot make the assertion pass for the wrong reason.
+    monkeypatch.setenv("DOCKER_HOST", "tcp://1.2.3.4:2375")
+    monkeypatch.setattr(e, "DOCKER_SOCKETS", (tmp_path / "absent.sock",))
+    assert e.docker_socket() is None
+    # and a DOCKER_HOST pointing nowhere falls through to the default probe
+    monkeypatch.setenv("DOCKER_HOST", f"unix://{tmp_path}/absent.sock")
+    monkeypatch.setattr(e, "DOCKER_SOCKETS", (tmp_path / "also-absent.sock",))
+    assert e.docker_socket() is None
+
+
+def test_an_unresolvable_uri_is_refused_before_any_probe(monkeypatch, capsys):
+    """(a) FAILS if the refusal path skips `_report`, or if the URI-set-but-
+    unresolvable case falls back to the default endpoint.
+    (b) Reachable: any uri the canonical resolver rejects.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@127.0.0.1:16x00/t")
+    called = []
+    monkeypatch.setattr(e, "probe_graph",
+                        lambda *a, **k: called.append(a) or {"ok": True})
+    rc = e.main(["--no-docker", "--timeout", "1"])
+    assert rc == 3, rc
+    assert called == [], "must not probe a default endpoint for an unresolvable URI"
+    assert "refus" in capsys.readouterr().err.lower()
 
 
 def test_an_unmeasurable_probe_exits_three_not_two(monkeypatch, capsys):
@@ -539,14 +719,23 @@ def test_redis_port_comes_from_the_uri_when_present(monkeypatch):
 def test_redis_port_is_not_taken_from_a_colon_that_is_not_a_port(monkeypatch):
     """(a) FAILS with a `:`-split parser, which reads the last `1` of the IPv6
     host `::1` as a port: the tool would then probe port 1 and report a FALSE
-    GRAPH_DOWN against a healthy graph. A malformed port must yield None (the
-    caller's documented default) rather than a confident wrong number.
-    (b) Reachable: an IPv6 target with no port, and a typo'd port.
+    GRAPH_DOWN against a healthy graph. A malformed port must refuse (the
+    canonical resolver raises) rather than becoming a confident wrong number.
+    (b) Reachable: an IPv6 target, and a typo'd port.
     """
+    # The canonical resolver defaults a missing port to 16379 (as the product
+    # does) and keeps the host — mapped to 127.0.0.1 by #6666.
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@[::1]/tortoise")
-    assert e.redis_port_from_env() is None
+    assert e.graph_target_from_env() == {
+        "host": "127.0.0.1", "port": 16379, "ssl": False,
+        "uri": "docker://:pw@[::1]/tortoise"}
+    # a malformed port is NOT defaulted: it refuses
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@127.0.0.1:16x00/tortoise")
-    assert e.redis_port_from_env() is None
+    try:
+        e.graph_target_from_env()
+        raise AssertionError("a malformed port must not resolve")
+    except ValueError:
+        pass
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@127.0.0.1:16379")
     assert e.redis_port_from_env() == 16379
 

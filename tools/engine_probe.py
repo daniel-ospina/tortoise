@@ -47,23 +47,25 @@ THE ENGINE VOCABULARY, AND WHY EACH STATE HAS ITS OWN RECOVERY
     ENGINE_ABSENT      no docker CLI and no engine socket: no engine is in play
                        (embedded/remote use). There was nothing to wedge, so
                        the graph result IS trustworthy.
-    ENGINE_DAEMON_DOWN the CLI answered, with an error: the daemon is not
-                       running. Docker calls FAIL FAST rather than hang, so the
-                       graph result is trustworthy — and the recovery is
-                       `docker start`, not "restart the engine".
+    ENGINE_DAEMON_DOWN the CLI answered, with an error: docker will fail FAST
+                       rather than hang (an unreachable daemon returns rc=1 in
+                       ~0.1s), so the graph result is still trustworthy. The
+                       recovery depends on the error, so the tool reports the
+                       rc it measured rather than guessing at the cause.
     ENGINE_UNMEASURED  no CLI, but an engine socket EXISTS. Something is trying
                        to be an engine and cannot be probed; treat as wedged.
 
     UNMEASURABLE       the probe shapes themselves are unusable (a malformed
                        result). No confident verdict is possible.
 
-The first three and ENGINE_DAEMON_DOWN are the states in which the graph probe
-can be believed. Anything else — including a status this module has never heard
-of, which is how a new probe state silently becomes a confident wrong answer —
-is treated as unmeasurable.
+    ENGINE_MEASURABLE — the states in which the graph result can be BELIEVED —
+    is ENGINE_OK, ENGINE_ABSENT and ENGINE_DAEMON_DOWN. ENGINE_WEDGED and
+    ENGINE_UNMEASURED are not in it, and neither is any status this module has
+    never heard of: the test is an allow-list, so a new probe state cannot
+    silently become a confident wrong answer.
 
 USAGE
-    python3 tools/engine_probe.py            # human summary, exit 0/2
+    python3 tools/engine_probe.py            # human summary, exit 0/2/3
     python3 tools/engine_probe.py --json     # machine-readable verdict
     python3 tools/engine_probe.py --timeout 2
     python3 tools/engine_probe.py --no-docker   # skip the engine probe
@@ -85,6 +87,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import socket
 import subprocess
@@ -92,7 +95,6 @@ import sys
 import time
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlsplit
 
 DEFAULT_HOST = "127.0.0.1"
 #: The canonical graph port. NOT 6379 (`localhost` resolves `::1` first and a
@@ -101,11 +103,18 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 16379
 DEFAULT_TIMEOUT = 3.0
 
-#: OrbStack/Docker socket. The engine is the thing that wedges; a socket that
-#: exists but does not answer is the signature.
+#: OrbStack/Docker sockets. The engine is the thing that wedges; a socket that
+#: exists but does not answer is the signature. The list covers the common
+#: desktop and rootless layouts, because `docker_socket()` is the SOLE
+#: discriminator between ENGINE_ABSENT (believable) and ENGINE_UNMEASURED
+#: (treated as wedged) — missing a live socket there endorses a graph result that
+#: may be attributable to a wedged engine.
 DOCKER_SOCKETS = (
     Path.home() / ".orbstack" / "run" / "docker.sock",
     Path("/var/run/docker.sock"),
+    Path.home() / ".docker" / "run" / "docker.sock",  # Docker Desktop
+    Path.home() / ".colima" / "default" / "docker.sock",  # Colima
+    Path("/run/user") / str(os.getuid()) / "docker.sock",  # rootless
 )
 
 ENGINE_WEDGED = "ENGINE_WEDGED"
@@ -136,22 +145,23 @@ def probe_graph(host: str, port: int, timeout: float) -> dict:
     probe does not AUTH: it is asking whether the substrate answers, not whether
     this client is authorised.
 
-    A connect that succeeds but yields no reply inside the bound is `ok=False`
-    with `error='timeout'` — the shape a wedged engine produces, which must not
-    be read as a successful probe.
+    Never raises ON A REACHABLE-then-silent endpoint: a connect that succeeds but
+    yields no reply inside the bound is `ok=False` with `error='timeout'` — the
+    shape a wedged engine produces, which must not be read as a successful probe.
+    (A caller that passes a non-finite timeout still gets a ValueError from the
+    socket layer; `main` rejects those before calling.)
     """
     started = time.monotonic()
     sock = None
     try:
         sock = socket.create_connection((host, port), timeout=timeout)
-        sock.settimeout(timeout)
         sock.sendall(b"PING\r\n")
         reply = sock.recv(64)
         elapsed = time.monotonic() - started
         text = reply.decode("utf-8", "replace").strip()
         #: Redis replies are one of +, -, :, $, *. Anything else is some other
         #: service on the port — reachable, but not the graph.
-        speaks_redis = bool(text) and text[0] in "+-:$"
+        speaks_redis = bool(text) and text[0] in "+-:$*"
         ok = b"PONG" in reply or speaks_redis
         return {
             "ok": ok,
@@ -174,7 +184,17 @@ def probe_graph(host: str, port: int, timeout: float) -> dict:
 
 
 def docker_socket() -> Optional[Path]:
-    """The first configured engine socket that exists, else None."""
+    """The first configured engine socket that exists, else None.
+
+    `DOCKER_HOST` is consulted first: a `unix://` DOCKER_HOST names the socket
+    the CLI would actually use, and ignoring it made `ENGINE_ABSENT` ("no engine
+    is in play") assert something the environment contradicts.
+    """
+    docker_host = os.environ.get("DOCKER_HOST", "")
+    if docker_host.startswith("unix://"):
+        path = Path(docker_host[len("unix://"):])
+        if path.exists():
+            return path
     for path in DOCKER_SOCKETS:
         if path.exists():
             return path
@@ -247,44 +267,46 @@ def classify(graph: dict, engine: Optional[dict]) -> str:
     return GRAPH_UP if graph["ok"] else GRAPH_DOWN
 
 
-def graph_target_from_env() -> Optional[tuple]:
-    """The `(host, port, scheme)` from TORTOISE_DB_URI, or None.
+def graph_target_from_env() -> Optional[dict]:
+    """The resolved graph endpoint from TORTOISE_DB_URI, or None when UNSET.
 
-    Every scheme `tortoise.config.SUPPORTED_URI_SCHEMES` declares is honoured —
-    not just `docker://` — and the HOST is returned as well as the port. Reading
-    only the port discarded the host, so a `redis://prod-graph.example.com:16400`
-    URI was silently probed at `127.0.0.1:16379`: a DOWN remote graph read
-    GRAPH_UP on any host with a local graph (a false green, the one direction a
+    None means exactly one thing: no URI is configured, so the caller's own
+    defaults apply. Every OTHER state — an unsupported scheme, an embedded
+    path, a malformed or out-of-range port — raises ValueError, and the caller
+    must refuse rather than probe somewhere else. Collapsing those four states
+    into None was a real defect: `main` read them all as "no URI" and probed the
+    DEFAULT endpoint, so a `rediss://` target silently bypassed its own TLS
+    refusal, a portless URI lost its host, and a typo'd port produced exit 0
+    against a graph the tool never reached (a false green — the one direction a
     caller gating on the exit code cannot detect).
 
-    A port that is absent, non-numeric or out of range yields None rather than a
-    confident wrong number, and `urlsplit` is used rather than a `:` split
-    because a colon in the URI need not be the port separator (an IPv6 host has
-    several). `rediss://` is returned with its scheme so the caller can refuse
-    it: a plaintext PING cannot speak TLS, and a verdict about an endpoint the
-    tool cannot address would be a guess.
+    The parse is `tortoise.projection.resolve_db_endpoint`, the ONE canonical
+    URI -> endpoint derivation (documented "so a backup can never dial a
+    different instance than the product it is backing up"), imported lazily so
+    this module's probes stay stdlib-only. Hand-rolling it here is how the
+    caller and the product drift apart.
     """
-    uri = os.environ.get("TORTOISE_DB_URI", "")
+    uri = os.environ.get("TORTOISE_DB_URI", "").strip()
     if not uri:
         return None
-    parts = urlsplit(uri)
-    if parts.scheme not in ("docker", "redis", "rediss"):
-        return None
-    try:
-        port = parts.port
-    except ValueError:
-        return None
-    if port is None:
-        return None
-    return (parts.hostname or DEFAULT_HOST, port, parts.scheme)
+    from tortoise.projection import resolve_db_endpoint
+    ep = resolve_db_endpoint(uri)
+    # #6666: `localhost` resolves `::1` FIRST, and a second, near-empty
+    # FalkorDB has been observed there. The canonical instance is 127.0.0.1.
+    host = "127.0.0.1" if ep.host in ("localhost", "::1") else ep.host
+    return {"host": host, "port": ep.port, "ssl": ep.ssl, "uri": uri}
 
 
-#: Kept for callers that only want the port (the module's own history, and the
-#: tests that pin the parsing). Derived, so the two cannot disagree.
+#: Kept for callers that only want the port. Derived, so the two cannot
+#: disagree. Returns None for "no URI" AND for an unresolvable one; callers that
+#: must tell those apart use `graph_target_from_env`.
 def redis_port_from_env() -> Optional[int]:
     """The graph port from TORTOISE_DB_URI, when it names a supported target."""
-    target = graph_target_from_env()
-    return target[1] if target else None
+    try:
+        target = graph_target_from_env()
+    except ValueError:
+        return None
+    return target["port"] if target else None
 
 
 def main(argv: Optional[list] = None) -> int:
@@ -300,23 +322,38 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--json", action="store_true", help="emit the verdict as JSON")
     args = ap.parse_args(argv)
 
-    if args.timeout <= 0:
-        print("engine_probe: --timeout must be > 0", file=sys.stderr)
+    if not math.isfinite(args.timeout) or args.timeout <= 0:
+        print("engine_probe: --timeout must be a finite value > 0", file=sys.stderr)
         return 1
 
     # The URI supplies host AND port; the flags override it field by field, so
     # `--port` alone still probes the URI's host and vice versa. Both flags
     # default to None so "not given" is distinguishable from "given the default".
-    target = graph_target_from_env()
-    if target and target[2] == "rediss":
+    try:
+        target = graph_target_from_env()
+    except ValueError as exc:
+        # Set but unresolvable. Probing DEFAULT_HOST instead is how a typo'd port
+        # or a TLS URI came back exit 0 against a graph the tool never reached.
+        return _refuse(args, "unresolvable-uri", exc,
+                       "TORTOISE_DB_URI cannot be resolved, so refusing to probe "
+                       "the default endpoint instead.")
+
+    using_uri = target is not None and args.host is None and args.port is None
+    if using_uri and target["ssl"]:
         # A plaintext PING cannot speak TLS. Answering GRAPH_DOWN would blame a
-        # graph this tool never reached; UNMEASURABLE is the honest verdict.
-        print(f"engine_probe: TORTOISE_DB_URI names a rediss:// target "
-              f"({target[0]}:{target[1]}); this probe speaks plaintext only, so "
-              f"it cannot tell you whether that graph is up.", file=sys.stderr)
-        return 3
-    env_host = target[0] if target else DEFAULT_HOST
-    env_port = target[1] if target else DEFAULT_PORT
+        # graph this tool never reached; UNMEASURABLE is the honest verdict. An
+        # explicit --host/--port means the caller named a plaintext endpoint, so
+        # the refusal must not override them.
+        return _refuse(args, "tls-not-probed",
+                       f"TORTOISE_DB_URI names a rediss:// (TLS) target "
+                       f"({target['host']}:{target['port']})",
+                       "This probe speaks plaintext only, so it cannot tell you "
+                       "whether that graph is up. Pass --host/--port to probe a "
+                       "plaintext endpoint explicitly.",
+                       target["host"], target["port"])
+
+    env_host = target["host"] if target else DEFAULT_HOST
+    env_port = target["port"] if target else DEFAULT_PORT
     host = args.host if args.host is not None else env_host
     port = args.port if args.port is not None else env_port
 
@@ -331,10 +368,30 @@ def main(argv: Optional[list] = None) -> int:
     return 2
 
 
+def _refuse(args, error: str, exc, message: str,
+            host: Optional[str] = None, port: Optional[int] = None) -> int:
+    """Report a refusal through `_report` so `--json` still yields JSON, and
+    return the UNMEASURABLE code. "Could not tell" is not "broken".
+
+    `host`/`port` are the endpoint the URI NAMED, when one is known — the
+    default is a placeholder for a probe that never happened and must not be
+    read as "this is the endpoint that failed".
+    """
+    print(f"engine_probe: {exc}; {message}", file=sys.stderr)
+    _report(args, UNMEASURABLE,
+            {"ok": False, "reply": None, "error": error, "elapsed_s": 0.0,
+             "probed": False},
+            host or "(not probed)", port if port is not None else 0, None)
+    return 3
+
+
 def _report(args, verdict: str, graph: dict, host: str, port: int,
             engine: Optional[dict]) -> None:
-    """Print the human summary or the JSON. Split out so the rediss refusal and
-    the normal path cannot drift apart in what they report."""
+    """Print the human summary or the JSON for a probe result.
+
+    Every exit path reports through here — including the refusals in `main` —
+    so `--json` cannot emit nothing on one path while the others emit JSON.
+    """
     sock = docker_socket()
     result = {
         "verdict": verdict,
@@ -384,10 +441,15 @@ def _report(args, verdict: str, graph: dict, host: str, port: int,
                   "container and the canonical instance\n  (127.0.0.1, never "
                   "`localhost` — #6666).")
         elif engine.get("status") == ENGINE_DAEMON_DOWN:
-            print("  The docker daemon is not running, so docker calls fail "
-                  "fast rather than hang and\n  the graph port itself is "
-                  "unreachable. Check the graph container and the\n  "
-                  "canonical instance (127.0.0.1, never `localhost` — #6666).")
+            # Only the MEASURED thing: nonzero rc covers permission-denied,
+            # TLS/context errors and plugin failures as well as a stopped
+            # daemon, and asserting "not running" would name a cause the probe
+            # never observed (with `docker start` as the wrong recovery).
+            print(f"  The docker CLI answered with an error "
+                  f"({engine.get('detail')}), so docker calls fail fast rather\n"
+                  f"  than hang and the graph port itself is unreachable. Read "
+                  f"the error above for\n  the cause — it is not necessarily a "
+                  f"stopped daemon.")
         else:
             print("  The engine answered, so the graph port itself is "
                   "unreachable. Check the\n  graph container and the "
