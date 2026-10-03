@@ -2150,6 +2150,7 @@ uri_requiring:
 - test_invite_fusion_docker.py
 - test_onboarding_false_completion_repair.py
 - test_onboarding_seed_endpoint.py
+- test_onboarding_state_cas.py
 - test_onboarding_state_split.py
 - test_onboarding_w4_settings.py
 - test_onboarding_w6_capture_disclosure.py
