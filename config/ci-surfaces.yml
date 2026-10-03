@@ -2093,14 +2093,18 @@ carve_out:
 # the reason a module yields no nodeids, it was not going to run a test in that
 # leg.
 #
-# The candidate set is a superset bounded by a mechanism (selectable modules
-# mentioning `allow_module_level`); pytest decides the answer over it. Two
-# deliberate exclusions are stated in the guard's module docstring — a skip
-# living in a SHARED helper, and module-level `pytest.importorskip` (which means
-# a missing dependency and must RED the leg rather than be silently subtracted).
-# A module emptied by some other cause (the manifest's own `-m` marker, a
-# collection error) is the attribution half of #6884 and is tracked on the
-# issue, not here.
+# The candidate set is a superset bounded by **URI-relevance, not mechanism
+# spelling** (selectable modules that read the URI env var or `is_db_uri`);
+# pytest decides the answer over it. A mechanism bound (`allow_module_level`) was
+# tried and leaked four times — `unittest.SkipTest`, `collect_ignore` and
+# `pytest.exit` abort collection identically — so the bound is the property the
+# lane is about, not how a module happens to spell the abort. Two consequences
+# are stated in the guard's module docstring: `pytest.importorskip` is excluded
+# structurally (it does not read the URI — and a missing dependency must RED the
+# leg rather than be silently subtracted), and a URI check hidden in a SHARED
+# helper is the one residual, closed by the tripwire. A module emptied by some
+# other cause (the manifest's own `-m` marker, a collection error) is the
+# attribution half of #6884 and is tracked on the issue, not here.
 uri_requiring:
 - test_capabilities_endpoint.py
 - test_eval_ingest_cache.py

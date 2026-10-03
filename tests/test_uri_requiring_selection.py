@@ -35,22 +35,29 @@ It also cannot remove coverage: whatever the reason a module yields no nodeids i
 that leg, it was not going to run a test there.
 
 **Exact over the candidate set, never over the tree.** The probe is authoritative
-for every file it is given, but the set it is given is bounded by a mechanism:
-selectable modules whose own source contains `allow_module_level`. Two deliberate
-exclusions follow, and both are stated rather than implied:
+for every file it is given, but the set it is given is bounded — and the bound is
+**URI-relevance, not mechanism spelling**: selectable modules that somewhere READ
+the URI (the env var, or `is_db_uri`). That distinction is the whole lesson of the
+review cycles on this change. A mechanism filter (`allow_module_level`) was tried
+and leaked four times, because the mechanism is incidental to the defect:
+`allow_module_level`, module-level `raise unittest.SkipTest(...)`,
+`collect_ignore` and `pytest.exit` all abort collection identically, and every
+spelling the filter missed handed a URI-gated module to a URI-less leg while the
+census reported clean. A module cannot abort collection *because the URI is
+unusable* without reading the URI, so reading it is the correct bound.
 
-* a module-level skip living in a SHARED helper that a test module imports and
-  calls at import — the caller's text has no literal, so it is not a candidate.
-  `test_only_candidate_shaped_files_carry_the_module_skip_mechanism` closes that
-  route by forbidding the mechanism outside the files the census scans.
-* module-level `pytest.importorskip(...)` — a second collection-time mechanism
-  with no literal in the caller's source, already used at module scope by several
-  selectable modules (`tests/test_guard.py`, `tests/test_embedded_lifecycle.py`,
-  ...). It is excluded ON PURPOSE and must not be folded in: that skip means a
-  MISSING DEPENDENCY, so the leg should go RED and say so, not have the module
-  silently subtracted into this lane — folding it in would convert an environment
-  break into a quiet coverage hole. (`importorskip` also aborts on every leg, not
-  just the URI-less one.)
+Two consequences, both stated rather than implied:
+
+* `pytest.importorskip(...)` is excluded **structurally, not by special case** —
+  it does not read the URI, so it is not a candidate. That is the right outcome:
+  the skip means a MISSING DEPENDENCY, so the leg should go RED and say so, not
+  have the module silently subtracted into this lane — folding it in would
+  convert an environment break into a quiet coverage hole. (`importorskip` also
+  aborts on every leg, not just the URI-less one.)
+* a URI check hidden inside a SHARED helper the module never names is the one
+  residual. `test_only_candidate_shaped_files_carry_the_module_skip_mechanism`
+  closes that route by forbidding any module-level collection-abort mechanism
+  outside the files the census scans.
 
 A module emptied by some other cause (the manifest's own `-m` marker, a
 collection error) is the *attribution* half of #6884, recorded separately on the
@@ -103,11 +110,20 @@ def _MANIFEST() -> dict:
 # The census: ask pytest, don't model pytest
 # --------------------------------------------------------------------------
 def _candidate_modules() -> list[str]:
-    """Selectable modules that can contain a module-level skip.
+    """Selectable modules that can gate their own collection on the URI.
 
-    A cheap superset used only to bound the probe's cost: a module-level skip
-    needs `allow_module_level`, so a module without it cannot abort collection
-    this way. The probe below decides the actual answer.
+    A cheap superset used only to bound the probe's cost. The bound is
+    **URI-relevance, not mechanism spelling**: a module can only abort collection
+    because the URI is unusable if it somewhere READS the URI — the env var or
+    `is_db_uri`. Four review cycles proved a mechanism filter (`allow_module_level`)
+    is the wrong bound, because the mechanism is incidental: `allow_module_level`,
+    a module-level `raise unittest.SkipTest(...)`, `collect_ignore`, and
+    `importorskip` all produce the identical rc=5 shape, and each new spelling the
+    filter missed handed a URI-gated module to a URI-less leg.
+
+    Reading the URI is the property the lane is actually about, so it is the
+    property that bounds the scan. The residual — a module whose URI check is
+    hidden inside a helper it never names — is closed by the tripwire below.
     """
     out: list[str] = []
     for path in sorted(TESTS.rglob("test_*.py")):
@@ -119,7 +135,7 @@ def _candidate_modules() -> list[str]:
             src = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        if "allow_module_level" in src:
+        if "TORTOISE_DB_URI" in src or "is_db_uri" in src:
             out.append(str(rel))
     return out
 
@@ -201,28 +217,35 @@ def test_only_candidate_shaped_files_carry_the_module_skip_mechanism() -> None:
     """The census is exact over its candidate set, so the mechanism may not
     appear outside it.
 
-    `_candidate_modules()` scans `test_*.py` files whose OWN source contains
-    `allow_module_level`. A skip living in a shared helper that a test module
-    imports and calls at import is therefore invisible: the caller has no
-    literal, the census reports "declared == observed" while the module aborts
-    collection in a URI-less leg. Rather than chase spellings across files, this
-    forbids the mechanism anywhere under `tests/` that the census does not read —
-    if a helper needs it, the census must be widened deliberately at the same
-    time. (A helper carrying it OUTSIDE `tests/` remains a stated residual: the
-    scan is scoped to the suite because that is where the census and
-    `integrity()` look.)
+    `_candidate_modules()` scans `test_*.py` files that READ the URI. A skip
+    living in a shared helper that a test module imports and calls at import is
+    therefore invisible: the caller never names the URI, the census reports
+    "declared == observed" while the module aborts collection in a URI-less leg.
+    Rather than chase mechanism spellings across files, this forbids ANY
+    module-level collection-abort mechanism anywhere under `tests/` that the
+    census does not read — if a helper needs one, the census must be widened
+    deliberately at the same time. (A helper carrying it OUTSIDE `tests/`
+    remains a stated residual: the scan is scoped to the suite because that is
+    where the census and `integrity()` look.)
+
+    The offender set is the spellings that abort collection at import:
+    `allow_module_level` (pytest.skip / pytest.importorskip, which all accept it)
+    and `SkipTest` (`raise unittest.SkipTest(...)` — no `allow_module_level`
+    literal at all, the spelling a mechanism filter missed).
     """
+    mechanisms = ("allow_module_level", "SkipTest")
     offenders = sorted(
         str(p.relative_to(TESTS))
         for p in TESTS.rglob("*.py")
         if not p.name.startswith("test_")
         and p.relative_to(TESTS).parts[0] != "e2e"
-        and "allow_module_level" in p.read_text(encoding="utf-8")
+        and any(m in p.read_text(encoding="utf-8") for m in mechanisms)
     )
     assert not offenders, (
-        f"{offenders} carry `allow_module_level` but are not `test_*.py` files, "
-        "so the census never scans them. A test module that imports such a helper "
-        "and calls it at import aborts collection in a URI-less leg while the "
+        f"{offenders} carry a module-level collection-abort mechanism "
+        f"{mechanisms} but are not `test_*.py` files that read the URI, so the "
+        "census never scans them. A test module that imports such a helper and "
+        "calls it at import aborts collection in a URI-less leg while the "
         "census stays green (#6884). Either move the skip into the module that "
         "needs it, or widen `_candidate_modules()` to cover this file in the same "
         "change. (The `e2e/` subtree is excluded, matching the census and "
