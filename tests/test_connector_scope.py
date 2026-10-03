@@ -456,8 +456,8 @@ def test_the_validators_mirror_the_migration_check_lists() -> None:
     # Guard the derivation: a collapsed parse would make equality vacuous.
     assert len(declared_source) >= 7 and len(declared_sync) >= 4, (
         f"migration CHECK parse collapsed ({declared_source}, {declared_sync})")
-    assert _CONNECTOR_SOURCE_TYPES == declared_source
-    assert _CONNECTOR_SYNC_STATUSES == declared_sync
+    assert declared_source == _CONNECTOR_SOURCE_TYPES
+    assert declared_sync == _CONNECTOR_SYNC_STATUSES
     # ...and every declared member actually validates through the models, so a
     # frozenset that is right but unbound (e.g. a typo'd field name) still fails.
     for v in sorted(declared_source):

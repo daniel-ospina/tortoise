@@ -26939,7 +26939,12 @@ async def list_connectors(
     )
     org_id = org["org_id"]
     if is_supabase_enabled():
-        return {"connectors": _sb_conn_by_org(get_control_plane(), org_id)}
+        # #4350/#3498: ONE thread hop for the listing — the seam is blocking
+        # HTTP against the control plane, so calling it on the loop delays
+        # every other request in the process (the loop-safety guard reddens).
+        return {"connectors": await _cp_offload(
+            lambda: _sb_conn_by_org(get_control_plane(), org_id),
+            op="connector_by_org")}
     # Self-host has no connector store: the siblings (create/get/patch/delete)
     # all 501 here. This branch used to read a `:Connector` GRAPH node, which
     # no endpoint in this PR can ever write, so it could only ever answer [] —
@@ -26964,8 +26969,13 @@ async def create_connector(
     org_id = org["org_id"]
     if is_supabase_enabled():
         try:
-            row = _sb_conn_create(get_control_plane(), org_id=org_id,
-                                  source_type=body.source_type, config=body.config)
+            # #4350/#3498: the seam blocks on HTTP; run it off the loop. Domain
+            # errors propagate unchanged, so the 409 mapping below still holds.
+            row = await _cp_offload(
+                lambda: _sb_conn_create(
+                    get_control_plane(), org_id=org_id,
+                    source_type=body.source_type, config=body.config),
+                op="connector_create")
         except RuntimeError as e:
             # The migration declares `idx_connectors_org_source`, one connector
             # per (org_id, source_type); PostgREST maps the 23505 to HTTP 409.
@@ -27000,7 +27010,10 @@ async def get_connector(
     if is_supabase_enabled():
         # org_id is passed INTO the seam: the query runs on the service-role
         # key (RLS bypassed), so the filter is the only tenancy boundary.
-        row = _sb_conn_by_id(get_control_plane(), org_id, connector_id)
+        # #4350: the seam blocks on HTTP — one thread hop, off the loop.
+        row = await _cp_offload(
+            lambda: _sb_conn_by_id(get_control_plane(), org_id, connector_id),
+            op="connector_by_id")
         if not row:
             raise HTTPException(status_code=404, detail="Connector not found")
         return {"connector": row}
@@ -27024,8 +27037,11 @@ async def update_connector(
     org_id = org["org_id"]
     if is_supabase_enabled():
         updates = body.model_dump(exclude_none=True)
-        if not _sb_conn_update(get_control_plane(), org_id, connector_id,
-                               **updates):
+        # #4350: off-loop — the seam blocks on HTTP against the control plane.
+        if not await _cp_offload(
+                lambda: _sb_conn_update(get_control_plane(), org_id,
+                                        connector_id, **updates),
+                op="connector_update"):
             # No row in THIS org matched — a foreign id is indistinguishable
             # from an absent one (matches the neighbouring index-job and
             # invitation endpoints, which 404 on a cross-org id).
@@ -27049,7 +27065,10 @@ async def delete_connector(
     )
     org_id = org["org_id"]
     if is_supabase_enabled():
-        if not _sb_conn_delete(get_control_plane(), org_id, connector_id):
+        # #4350: off-loop — the seam blocks on HTTP against the control plane.
+        if not await _cp_offload(
+                lambda: _sb_conn_delete(get_control_plane(), org_id, connector_id),
+                op="connector_delete"):
             raise HTTPException(status_code=404, detail="Connector not found")
         return {"status": "deleted"}
     raise HTTPException(status_code=501, detail="Self-host not yet implemented")
