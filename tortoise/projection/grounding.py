@@ -25,9 +25,17 @@ class _GroundingMixin:
 
         # 2. Build sparse symmetric adjacency from :IMPL and :NAND edges
         try:
-            from scipy.sparse import coo_matrix  # noqa: I001
-            from scipy.sparse.linalg import spsolve
-            from scipy.sparse import eye as speye
+            # #7014: a cold scipy import must not overlap an in-process torch
+            # import (scipy's array-API dispatch does an unguarded
+            # ``getattr(sys.modules['torch'], 'Tensor')`` and raises on a
+            # partially-initialized torch). scipy comes in through the shared
+            # lock-taking helper — see ``tortoise/heavy_imports.py``.
+            from tortoise.heavy_imports import import_scipy_sparse
+
+            sparse, sparse_linalg = import_scipy_sparse()
+            coo_matrix = sparse.coo_matrix
+            spsolve = sparse_linalg.spsolve
+            speye = sparse.eye
         except ImportError:
             raise ImportError(  # noqa: B904
                 "scipy required for compute_grounding; install with: pip install scipy"
