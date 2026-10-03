@@ -677,7 +677,7 @@ def _capture_turn_window(
     Returns a NEW list; the windowed conversation feeds BOTH the turn-store
     loop and the extraction call so the LLM never sees a phrase with no home
     in any stored turn (stored-source parity, #721). Content coercion matches
-    the store loop: None -> '', truthy non-strings -> str() (isinstance-first,
+    the store loop: None -> '', non-strings -> str() (isinstance-first,
     #721). The ROLE is coerced with ``_normalize_turn_role`` and capped the same
     way (#5445/#5775), so the scanned and the persisted role are the same bytes
     and a non-string role cannot skip the bound. Idempotent when the caller
@@ -951,10 +951,10 @@ def _capture_turn_texts_with_redactions(
     """``_capture_turn_texts`` PLUS the per-kind redaction counts of the window.
 
     Split out (rather than returning a tuple from ``_capture_turn_texts``) so
-    the five read-only callers keep the plain-list contract. The writer is the
-    only caller that needs the counts — it records them on the Session, and it
-    is the count of record because it scans the same window (and therefore the
-    same spans) the ``:Source`` sink and the extractor do.
+    the five read-only callers keep the plain-list contract. The capture writer
+    records the counts on the Session, and its count is the count of record
+    because it scans the same window (and therefore the same spans) the
+    ``:Source`` sink and the extractor do.
 
     The scrubber runs on the FULL content of each turn in the list it is given,
     and the ``[:5000]`` cut is applied to the RESULT. That order matters for a
@@ -1004,14 +1004,16 @@ def _capture_turn_texts_with_redactions(
 def _capture_turn_texts(windowed: list[dict]) -> list[str]:
     """The exact stored turn text (``[role] <content>``) for each windowed turn.
 
-    One definition shared by the turn-store write and the turn-embedding batch
-    (#4194) — the vector is computed over the string the node stores (the
-    embedder applies its own 512-word cap; model/dimension/normalisation are
-    shared with the read path, the cap is write-side), so a dense (vector) hit
-    can never resolve to a turn whose stored content differs from what was
-    encoded. Coercion is the loop's own (isinstance-first: None -> "", truthy
-    non-strings -> ``str()``, #721); the ``[:5000]`` is the idempotent
-    re-application of ``_capture_turn_window``'s cap (#1532 D1).
+    The stored-text definition (#4194) — the vector is computed over the string
+    the node stores (the embedder applies its own 512-word cap;
+    model/dimension/normalisation are shared with the read path, the cap is
+    write-side), so a dense (vector) hit can never resolve to a turn whose
+    stored content differs from what was encoded. The two write paths call
+    ``_capture_turn_texts_with_redactions`` directly; this function delegates to
+    it and returns its first element. Coercion is the loop's own
+    (isinstance-first: None -> "", non-strings -> ``str()``, #721); the
+    ``[:5000]`` is the idempotent re-application of ``_capture_turn_window``'s
+    cap (#1532 D1).
 
     #4911: THIS is where a stored turn's credentials are scrubbed — one place,
     applied by every writer of every lane, because this function IS the stored
@@ -1627,9 +1629,9 @@ def _write_session_and_turns(
 
     Returns the write facts the callers READ — the stored turn texts (hosted
     reuses them for its entity-link pass instead of re-scrubbing) and the total
-    redaction count — plus the full post-write state (the offset-aware turn ids,
-    the per-kind redaction counts, the ``Session`` record and the MERGE params)
-    for tests and future consumers. The journal emit rides the
+    redaction count — plus the rest of the post-write state (the offset-aware
+    turn ids, the per-kind redaction counts, the ``Session`` record and the
+    MERGE params), which nothing reads today. The journal emit rides the
     ``on_session_merged`` callback, not the returned ``session_record``.
     """
     turn_count = len(turns)
