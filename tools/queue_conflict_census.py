@@ -144,6 +144,40 @@ GENERATOR_DIRS = ("tools", "scripts", "graph-scripts")
 #: Calls that produce a tracked artifact. A script that never calls one cannot
 #: be the producer.
 WRITE_METHODS = frozenset({"write_text", "write_bytes", "write", "writelines"})
+#: Mode characters that make an `open()` file object able to write. The builtin
+#: DEFAULTS to `'r'`, so `open(p)` and `open(p, "r")` are reads.
+_WRITE_MODE_CHARS = frozenset("wax+")
+
+
+def _open_writes(call: ast.Call) -> bool:
+    """True iff this `open()` call can write the file it opens.
+
+    `open(path)` and `open(path, "r")` READ — the builtin's mode defaults to
+    `'r'`. Only a constant mode containing `w`, `a`, `x` or `+` writes, and the
+    mode may be spelled positionally or as `mode=`. A mode that is not a
+    constant is unresolved, which by this module's stated blind spot means the
+    path is not resolved either — so it must not manufacture an output, because
+    the classifier's remedy is chosen from this set.
+    """
+    mode = None
+    if len(call.args) > 1:
+        second = call.args[1]
+        if isinstance(second, ast.Constant) and isinstance(second.value, str):
+            mode = second.value
+        else:
+            return False
+    for keyword in call.keywords:
+        if keyword.arg == "mode":
+            if isinstance(keyword.value, ast.Constant) and isinstance(
+                keyword.value.value, str
+            ):
+                mode = keyword.value.value
+            else:
+                return False
+    if mode is None:
+        return False
+    return any(ch in mode for ch in _WRITE_MODE_CHARS)
+
 #: How far `_string_literals` follows a `Name` back to the expression that
 #: bound it (`MANIFEST = ROOT / "config" / "ci-surfaces.yml"`). Bounded so a
 #: self-referential binding cannot recurse forever.
@@ -300,8 +334,9 @@ def declared_outputs(text: str) -> set:
 
     Blind spots are stated, not hidden: a path built from a non-literal (an
     environment variable, a loop variable, an `--out` passed at runtime) is not
-    resolved, and a write through an already-open handle is caught only at its
-    `open()`.
+    resolved, and a write through an already-open handle is caught at its
+    `open()`, but only when that call's mode can actually write — a bare
+    `open(p)` defaults to `'r'` and is a read (see `_open_writes`).
     """
     try:
         tree = ast.parse(text)
@@ -348,7 +383,12 @@ def declared_outputs(text: str) -> set:
                 and target.attr in argparse_defaults
             ):
                 outputs |= _string_literals(argparse_defaults[target.attr], assignments)
-        elif isinstance(func, ast.Name) and func.id == "open" and node.args:
+        elif (
+            isinstance(func, ast.Name)
+            and func.id == "open"
+            and node.args
+            and _open_writes(node)
+        ):
             outputs |= _string_literals(node.args[0], assignments)
         elif isinstance(func, ast.Name) and func.id in functions:
             positional = _positional_names(functions[func.id])
@@ -432,6 +472,7 @@ def _written_parameters(fdef) -> set:
             isinstance(func, ast.Name)
             and func.id == "open"
             and node.args
+            and _open_writes(node)
             and isinstance(node.args[0], ast.Name)
             and node.args[0].id in params
         ):
