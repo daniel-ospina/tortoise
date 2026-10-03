@@ -2227,10 +2227,18 @@ def _numeric_alteration_reason(
             # the ``isfinite`` arm below already refuses that.
             _fr = math.inf
         if not math.isfinite(_fr) or fractions.Fraction(_fr) != value:
+            # ``bit_length()`` rather than interpolating ``value``: ``str()`` on a
+            # ``Fraction`` renders its numerator, so ``Fraction(10**5000, 3)``
+            # hits CPython's 4300-digit int->str limit and the message raises
+            # BEFORE it can name the key — the same reason the integral branch
+            # uses ``bit_length``, and the sibling of the ``OverflowError``
+            # handled just above (code-review cycle 4, P2).
             return (
-                f"{key!r}: {value} is not exactly representable as a double, "
-                "so FalkorDB would store a DIFFERENT number. Store it as a "
-                "string if the full precision is needed."
+                f"{key!r}: a value with a {value.numerator.bit_length()}-bit "
+                f"numerator and a {value.denominator.bit_length()}-bit "
+                "denominator is not exactly representable as a double, so "
+                "FalkorDB would store a DIFFERENT number. Store it as a string "
+                "if the full precision is needed."
             )
         return None
     if isinstance(value, (list, tuple, set, frozenset)):
@@ -23498,13 +23506,6 @@ class TortoiseSDK:
                     f"{_svk!r} is a server-managed provenance field and cannot "
                     f"be set via props."
                 )
-        # #4647 (code-review P1): this writer bypasses `_sanitize_props`, so the
-        # numeric-domain guard that every other props surface gets must run here
-        # too — otherwise `create_source(url, "web", v=2**70)` is accepted and
-        # the store silently clamps it, which is the exact defect #4647 exists to
-        # fix, still live on a public tenant write surface.
-        for _key, _value in props.items():
-            _reject_unrepresentable_number(_key, _value)
         ev = {
             "url": url,
             "sourceKind": sourceKind,
@@ -23529,6 +23530,18 @@ class TortoiseSDK:
             # the ev dict to _upsert_source (popped by apply) and is stripped
             # from the journaled payload below.
             ev["_merge_run_id"] = _merge_run_id
+        # #4647 (code-review P1): this writer bypasses `_sanitize_props`, so the
+        # numeric-domain guard every other props surface gets must run here too.
+        # It runs over the ASSEMBLED event dict rather than over `props`:
+        # guarding `props` alone left the explicit keyword arguments reaching the
+        # store unguarded, so `create_source(url, "web", sourceDate=2**70)` was
+        # still silently clamped — the exact defect #4647 exists to fix, still
+        # live on a public tenant write surface (and reachable through `ingest`,
+        # which splats `**item` into this method). Running it here, after every
+        # `ev` assignment, makes the cover structural: a field added to `ev`
+        # later cannot bypass a guard that runs after all of them.
+        for _key, _value in ev.items():
+            _reject_unrepresentable_number(_key, _value)
         proj = self._get_proj()
         proj._source_merge_result = None
         result = self._create_entity("Source", url, ev, "SourceCreated",

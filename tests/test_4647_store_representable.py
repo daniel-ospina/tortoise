@@ -211,6 +211,29 @@ class TestCreateSourceBypassIsClosed:
             assert "'v'" in str(exc.value), str(exc.value)
             assert not create.called, "the guard must fire BEFORE the write"
 
+    def test_an_unrepresentable_keyword_argument_is_refused_too(self):
+        """Cycle-4 P1: the guard covered ``props`` ONLY, so ``sourceDate`` — a
+        first-class keyword argument assigned into the event dict AFTER the
+        guard loop — still reached the store unguarded and was silently clamped.
+        Reachable on the public surface as
+        ``create_source(url, "web", sourceDate=2**70)`` and through ``ingest``,
+        which splats ``**item`` into this method.
+        """
+        from unittest import mock
+
+        from tortoise.sdk import TortoiseSDK
+
+        sdk = TortoiseSDK.__new__(TortoiseSDK)
+        with mock.patch.object(
+            TortoiseSDK, "_create_entity", autospec=True
+        ) as create:
+            with pytest.raises(ValueError) as exc:
+                TortoiseSDK.create_source(
+                    sdk, "https://example.test/p", "web", sourceDate=2**70
+                )
+            assert "'sourceDate'" in str(exc.value), str(exc.value)
+            assert not create.called, "the guard must fire BEFORE the write"
+
 
 class TestNumpyArrays:
 
@@ -296,3 +319,17 @@ class TestFractionTakesTheInt64Path:
         msg = str(exc.value)
         assert "'v'" in msg, msg
         assert "OverflowError" not in msg, msg
+
+    def test_a_fraction_too_large_to_render_still_names_its_key(self):
+        """Cycle-4 P2 (sibling of the ``OverflowError`` above): interpolating
+        ``{value}`` rendered the numerator, so a numerator past CPython's
+        4300-digit int->str limit made the MESSAGE itself raise, losing the key
+        and the remedy.
+        """
+        import fractions
+
+        with pytest.raises(ValueError) as exc:
+            _sanitize_props({"v": fractions.Fraction(10**5000, 3)})
+        msg = str(exc.value)
+        assert "'v'" in msg, msg
+        assert "4300 digits" not in msg, msg
