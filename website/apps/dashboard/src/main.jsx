@@ -7910,18 +7910,24 @@ function claimIntentInFlight() {
                       {isBuildFork ? (
                         // #3428/#2937 (lane B3, review cycle 2 P1-2): the build
                         // fork never offers a harness — its step 2 is the SDK
-                        // call (`POST /v1/points`). That write files a point but
-                        // files NO onboarding step: no REST route reaches
-                        // `_maybe_onboarding_auto_complete()` (only the MCP tools
-                        // do — verified 2026-09-16, and reported to the lane
-                        // orchestrator as its own defect). The self-fork body is
+                        // call (`POST /v1/points`). The self-fork body is
                         // therefore false twice here: "hasn't filed anything" is
                         // false the moment the user runs the wizard's own curl,
                         // and the harness name is the untouched 'claude' default
                         // on a branch that never offered Claude. This body names
-                        // the SDK call the user actually has, asserts nothing
-                        // about filing, and ties the live update to the agent
-                        // tools that CAN file the step.
+                        // the SDK call the user actually has and asserts nothing
+                        // about filing.
+                        //
+                        // #5378: the rationale that used to sit here ("no REST
+                        // route reaches `_maybe_onboarding_auto_complete()` —
+                        // only the MCP tools do", verified 2026-09-16) went
+                        // STALE on 2026-09-22. #3670 made `POST /v1/points` file
+                        // `harness-connected` when the credential is an agent's
+                        // and the key is not graph-bound
+                        // (`hosted_api.py::_maybe_file_harness_connected`), and
+                        // the build fork's step 2 IS that call — so this body
+                        // must not claim the REST route cannot mark the
+                        // connection.
                         serverHarnessConnected ? (
                           <>
                             <p aria-hidden="true" style={{ fontSize: 26, lineHeight: 1.2, margin: '0 0 0.15rem' }}>✓</p>
@@ -7942,8 +7948,8 @@ function claimIntentInFlight() {
                           // self arm).
                           <p className="dim" style={{ lineHeight: 1.6 }}>
                             Your project's graph is set up, but we can't tell it's connected yet — Tortoise
-                            marks a project connected when a write arrives through its agent tools, not
-                            through the <code>/v1/points</code> REST call. Connect an agent to Tortoise
+                            marks a project connected when a write arrives through its agent tools or
+                            the <code>/v1/points</code> REST call. Connect an agent to Tortoise
                             and {wizardConnectPollStalled
                               ? "we'll show it as soon as we can check"
                               : 'it shows up here on its own'}.
