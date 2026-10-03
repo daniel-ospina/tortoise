@@ -875,6 +875,16 @@ TOOL_CARVEOUTS = (
     # SOURCE_PATTERNS entry matches it, so it lands in the unknown-path branch
     # -> FULL matrix (fail closed) — the safe default for a destructive-ref tool.
     "tools/branch_reaper.py",
+    # #7017: the container-engine probe (tools/engine_probe.py) owns
+    # tests/test_engine_probe.py. Exact same silent-drop class as the two
+    # reaper carve-outs below: the flat "tools/" prefix in
+    # NON_PYTHON_PREFIXES would swallow an engine_probe-only change, `changed`
+    # comes back empty, select() takes the docs-only path, and the probe's
+    # suite never runs on the PR that changes it. No SOURCE_PATTERNS entry
+    # matches it, so it lands in the unknown-path branch -> FULL matrix
+    # (fail closed) — the safe default for the tool that decides whether a
+    # graph failure is a graph failure at all.
+    "tools/engine_probe.py",
     # #6868: the wedged-CI-run reaper (tools/run_reaper.py) owns
     # tests/test_run_reaper.py. Exact same silent-drop class as the
     # branch-reaper carve-out above: the flat "tools/" prefix in
@@ -1037,8 +1047,21 @@ def slow_leg_by_surface(manifest: dict) -> dict[str, set[str]]:
     tests pin the per-surface splits."""
     slow = set(manifest.get("slow_files", []))
     carve = set(manifest.get("carve_out", []))
+    # #6884: the test-slow legs are URI-empty on a tier-2 PR too (python-ci.yml
+    # :1367-1368; :600-602 for the fast job — URI is set only when full==true),
+    # and they build their collect-only input from `slow_selected`. A
+    # `uri_requiring` file in `slow_selected` therefore contributes no tests to
+    # that step, and when it is the leg's ONLY file the collect step exits 5 and
+    # fails unattributably — the same shape as the fast lane, which is what
+    # stranded #6390. Subtracting HERE is single-definition: this function has
+    # exactly one consumer (the tier-2 selection), while `push_legs` builds its
+    # own legs, so the push lane still runs these files (asserted in
+    # tests/test_uri_requiring_selection.py). No file is in both lanes today;
+    # the guard test pins that, and handles a future relocation rather than
+    # forbidding it.
+    uri_requiring = uri_requiring_files(manifest)
     by_surface: dict[str, set[str]] = {}
-    for f in sorted(slow - carve):
+    for f in sorted(slow - carve - uri_requiring):
         by_surface.setdefault(classify_test_file(f, manifest), set()).add(f)
     return by_surface
 
@@ -1122,7 +1145,16 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
     if not changed:
         # docs-only PR -> tier 1 (curated smoke) only; no slow/carve surface
         # is touched, so both diff-gated legs skip (#2147/#2148).
-        return {"surfaces": [], "full": False, "test_files": sorted(tier1),
+        # #6884: the `uri_requiring` subtraction applies HERE TOO. This returns
+        # before the tier-2 subtraction below, and a URI-less leg cannot run a
+        # module-skipping file no matter which exit selected it. The tier-1
+        # smoke set contains none today, so this is behaviour-neutral — it keeps
+        # the rule in ONE place instead of depending on that staying true, and
+        # the guard test pins it by injecting one into tier-1 (a plain arm on a
+        # docs-only vector could not fail: with tier1 ∩ uri_requiring == []
+        # the output is byte-identical with and without the subtraction).
+        return {"surfaces": [], "full": False,
+                "test_files": sorted(set(tier1) - uri_requiring_files(manifest)),
                 "slow_files": sorted(slow),
                 "slow_run": False, "carve_out_run": False,
                 "slow_selected": []}
@@ -1176,11 +1208,34 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
     files -= slow  # #1371: slow files never run in the fast gate
     # #1988: carve-out (embedded-only) files run in the dedicated carve-out
     # job — on tier-2 PR legs the fast-matrix process runs everything embedded
-    # (URI unset) and exhausts its redislite spawn budget before the late
+    # (URI empty) and exhausts its redislite spawn budget before the late
     # embedded suites (RedisLiteServerStartError); the carve-out job gives
     # them a fresh process. The carve-out job now runs on PRs too.
     carve = set(manifest.get("carve_out", []))
     files -= carve
+    # #6884: the MIRROR of the carve-out subtraction above. A `carve_out` file
+    # cannot run in a URI-SET leg; these cannot run in a URI-EMPTY one, and the
+    # tier-2 PR legs ARE URI-empty BY DESIGN — both the URI and EXPECT_URI are
+    # emptied, which is what keeps the E2E-6 tripwire INERT on the tier-2 shape
+    # (it arms only when full==true, where both are set; python-ci.yml:600-602
+    # and 1367-1368; epic #1647 Task 9, cycle-6 P2-8), so 'provision the URI' is
+    # a reversal of a recorded
+    # decision, not an available fix. Handed to such a leg each of these
+    # module-skips at import, so it collects ZERO tests and `pytest
+    # --collect-only` exits 5; the fail-closed manifest guard then kills the leg
+    # BEFORE any test runs, and because that is outside the test step there is
+    # no `FAILED <nodeid>` for the merge rail to attribute — it refuses for want
+    # of a failure identity (the #6798 shape; #6390 was clean-reviewed AT HEAD,
+    # `mergeable=true`, `behind=0`, and still unlandable). A shard left with no
+    # files hits the empty-shard branch at python-ci.yml:652 ('no selected files
+    # for this shard - no manifest (guard skips)') and greys out green having run
+    # nothing — honest only because a tier-2 selection cannot get that small
+    # (`tier1` is 31 files against `fast_shards: 9`), which is a margin, not a
+    # guarantee this comment should claim.
+    #
+    # Tier-2 ONLY: the `full` path returned above and keeps these files, because
+    # a full leg HAS the URI.
+    files -= uri_requiring_files(manifest)
     # #2147/#2148 tier-2: test-slow runs the slow files owned by the matched
     # surfaces (slow_selected — carve-out files excluded: they run in the
     # carve-out job when it triggers, never the docker slow legs); test-carve-
@@ -1404,6 +1459,31 @@ def on_demand_files(manifest: dict) -> set[str]:
     # obvious `on_demand=[]` spelling in a test is a Python list and never
     # reproduces the state a human actually types into the YAML.
     return set(manifest.get("on_demand") or [])
+
+
+def uri_requiring_files(manifest: dict) -> set[str]:
+    """#6884: modules that cannot COLLECT in a URI-EMPTY leg.
+
+    Each module-skips at import when `TORTOISE_DB_URI` is empty — present and
+    empty, the shape the tier-2 leg actually sets — so in a
+    tier-2 PR leg (URI-empty by design) it collects ZERO tests and
+    `pytest --collect-only` exits 5 — the fail-closed manifest guard then kills
+    the leg before any test runs, with no `FAILED <nodeid>` for the merge rail
+    to attribute. Read through ONE definition, like `on_demand_files`: the
+    subtraction happens on two tier-2 paths (the docs-only early return and the
+    main surface path) plus the slow lane, and three independent
+    `manifest.get("uri_requiring", [])` reads are three places for the lane to
+    be half-adopted.
+
+    The `or []` is REQUIRED, not defensive: `uri_requiring:` with no entries
+    parses to None, not [] — YAML's empty value — and `set(None)` raises
+    TypeError in the `changes` job, i.e. on the single path all PR CI goes
+    through. That is reachable at the lane's terminal state: the day the last
+    URI-gated module is fixed, a lane empties the list. (Same trap and same fix
+    as `on_demand_files`; the None form is pinned by
+    tests/test_uri_requiring_selection.py.)
+    """
+    return set(manifest.get("uri_requiring") or [])
 
 
 def fast_pool(manifest: dict) -> list[str]:
