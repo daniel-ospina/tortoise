@@ -1322,14 +1322,18 @@ def test_keyless_no_capability_leaf_prints_no_capture_sentence(page: Page) -> No
 
 
 def test_build_fork_done_step_never_claims_a_harness_or_filing(page: Page) -> None:
-    """#3428/#2937 (lane B3, review cycle 2 P1-2): the build fork's step 2 is
-    the SDK call (POST /v1/points), which files NO onboarding step — so the
-    self-fork body ("hasn't filed anything … head back to Claude Code") is
-    false the moment the user runs the wizard's own curl, and names a harness
-    this branch never offered. The build leaf must say neither.
+    """#3428/#2937 (lane B3, review cycle 2 P1-2): the self-fork body ("hasn't
+    filed anything … head back to Claude Code") is false the moment the user
+    runs the wizard's own curl, and names a harness this branch never offered.
+    The build leaf must say neither.
 
-    (The server-side gap — a REST-first org has no server-observed completion
-    signal — is a separate defect, filed by the lane orchestrator.)"""
+    #5378: the older rationale here said the build fork's step-2
+    ``POST /v1/points`` "files NO onboarding step", and treated the REST-first
+    org's missing completion signal as a separate server-side defect. #3670
+    (2026-09-22) landed that signal — an agent-credentialed, non-graph-bound
+    ``POST /v1/points`` now files ``harness-connected`` — so these assertions
+    pin the leaf's SHAPE only, never the false claim that the REST route files
+    nothing."""
     _seed_cookie(page, "u-b3-build")
     _wire(page, role="owner")  # GET unmocked → nothing connected
     _walk_to_fork(page)
