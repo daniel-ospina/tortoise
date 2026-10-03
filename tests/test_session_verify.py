@@ -1247,6 +1247,27 @@ def test_pi_static_match_sentence_is_earned_not_unconditional(hosted, setup):
     assert report["exit_code"] == EXIT_UNVERIFIABLE
 
 
+def test_static_result_consumes_the_detector_findings():
+    """The sentence is earned from the DETECTOR's result, not re-derived.
+
+    Guards the invariant found in review (#4710): a helper that tested the
+    marker alone would emit the sentence for a byte-different artifact whose
+    marker matches — safe today only because that finding happens to be
+    BLOCKING, which returns the run before this helper is reached.  Tying the
+    sentence to the detector's own list makes it true by construction: ANY
+    finding withholds it, blocking or not.
+    """
+    from tortoise import session_verify as _sv
+
+    assert _sv._install_static_result("pi", []) is not None
+    assert _sv._install_static_result(
+        "pi", [{"kind": "ahead-artifact", "blocking": False}]) is None
+    assert _sv._install_static_result(
+        "pi", [{"kind": "modified-artifact", "blocking": True}]) is None
+    # A harness with no artifact seam never has one claimed for it.
+    assert _sv._install_static_result("cursor", []) is None
+
+
 def test_pi_ruling_matcher_covers_the_possessive():
     """A comment block whose only Pi reference is the possessive ``Pi's`` must
     still count as naming the Pi ruling — otherwise a wrapped line carrying a
