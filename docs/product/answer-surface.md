@@ -139,7 +139,8 @@ measurement justifies a change.
   tokens still dropped there). Honest scope: a question with NO numeric
   tokens (e.g. the #2070 `gpt4_d84a3211` sum question) is served by the
   vector leg, not this knob.
-- **A4 `TORTOISE_ASK_SEARCH_KEYS_PRF` (default 1):** additive `search_keys`
+- **A4 `TORTOISE_ASK_SEARCH_KEYS_PRF` (default 0 — OFF until its delta is
+  measured, #4593):** additive `search_keys`
   pseudo-relevance-feedback expansion — a bounded second FTS pass whose
   OR-union reserves the original query's token slots and appends aliases
   from the retrieved pool's top-5 hits (max 12+8 terms). Never replaces
