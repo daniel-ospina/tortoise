@@ -31,6 +31,8 @@ import decimal
 import hashlib
 import json as _json
 import logging
+import math
+import numbers
 import os
 import re
 import stat
@@ -2108,44 +2110,73 @@ _RESERVED_ACTOR_PROPS = frozenset(
 #: a string — and should choose it deliberately rather than have it inferred.
 _INT64_MIN = -(2 ** 63)
 _INT64_MAX = 2 ** 63 - 1
-#: Significant digits a double can carry (~15-17). A `Decimal` beyond this
-#: cannot round-trip through the store's number type.
-_SIGNIFICANT_DIGITS_MAX = 15
+
+
+def _numeric_alteration_reason(key: str, value: object) -> str | None:
+    """#4647: why the store would ALTER this value, or None if it would not.
+
+    The test is EXACTNESS, not a digit count. A digit-count proxy is wrong in
+    both directions (code-review P1): it refused ``Decimal('1000000000000001')``
+    and ``Decimal(0.1)``, which a double holds exactly, while admitting
+    ``Decimal('0.1')``, which it silently rounds. The predicate is therefore
+    \"does this value round-trip through the store's own number type\" — plus
+    finiteness, which also catches the exponent axis (``Decimal('1E+400')`` ->
+    ``inf``, ``Decimal('1e-400')`` -> ``0.0``) and the non-finite Decimals.
+
+    ``numbers.Integral`` (not ``int``) so a ``numpy`` scalar is caught too —
+    numpy integers are NOT Python ``int`` subclasses. ``bool`` is excluded
+    explicitly: it is an ``int`` subclass and is always representable.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, numbers.Integral):
+        ivalue = int(value)
+        if not (_INT64_MIN <= ivalue <= _INT64_MAX):
+            # ``bit_length`` rather than ``str(value)``: ``str`` on a very large
+            # int raises the 4300-digit limit error BEFORE the message is built,
+            # losing the key, the range and the remedy (code-review P3).
+            return (
+                f"{key!r}: integer with {ivalue.bit_length()} bits is outside "
+                f"the range FalkorDB can store ({_INT64_MIN}..{_INT64_MAX}) and "
+                "would be SILENTLY clamped to a different number. Store it as "
+                "a string if the full value is needed."
+            )
+        return None
+    if isinstance(value, decimal.Decimal):
+        as_float = float(value)
+        if not math.isfinite(as_float):
+            return (
+                f"{key!r}: Decimal {value} is not a finite number, so the "
+                "store cannot represent it faithfully. Store it as a string "
+                "if the full value is needed."
+            )
+        if decimal.Decimal(as_float) != value:
+            return (
+                f"{key!r}: Decimal {value} is not exactly representable as a "
+                "double, so FalkorDB would store a DIFFERENT number. Store it "
+                "as a string if the full precision is needed."
+            )
+        return None
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            reason = _numeric_alteration_reason(key, item)
+            if reason:
+                return reason
+        return None
+    if isinstance(value, dict):
+        for item in value.values():
+            reason = _numeric_alteration_reason(key, item)
+            if reason:
+                return reason
+        return None
+    return None
 
 
 def _reject_unrepresentable_number(key: str, value: object) -> None:
-    """#4647: fail closed on a value the store cannot hold without altering it.
-
-    Called from ``_sanitize_props`` for every property value on the tenant props
-    surface. ``bool`` is a subclass of ``int`` and is always representable, so it
-    is excluded explicitly. Any other type is left to the existing boundaries.
-    """
-    if isinstance(value, bool):
-        return
-    if isinstance(value, int):
-        if not (_INT64_MIN <= value <= _INT64_MAX):
-            raise ValueError(
-                f"{key!r}: integer {value} is outside the range FalkorDB can "
-                f"store ({_INT64_MIN}..{_INT64_MAX}) and would be SILENTLY "
-                "clamped to a different number. Store it as a string if the "
-                "full value is needed."
-            )
-        return
-    if isinstance(value, decimal.Decimal):
-        digits = value.as_tuple().digits
-        # Trailing zeros are not significant to the stored value: Decimal('1.50')
-        # and Decimal('1.5') are the same number, and the store keeps neither
-        # beyond a double. Count only the leading run of real digits.
-        significant = len(digits)
-        while significant > 1 and digits[significant - 1] == 0:
-            significant -= 1
-        if significant > _SIGNIFICANT_DIGITS_MAX:
-            raise ValueError(
-                f"{key!r}: Decimal {value} carries {significant} significant "
-                "digits, beyond what FalkorDB's double can hold "
-                f"({_SIGNIFICANT_DIGITS_MAX}) and would be SILENTLY rounded. "
-                "Store it as a string if the full precision is needed."
-            )
+    """#4647: fail closed on a value the store cannot hold without altering it."""
+    reason = _numeric_alteration_reason(key, value)
+    if reason:
+        raise ValueError(reason)
 
 
 def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
@@ -23383,6 +23414,13 @@ class TortoiseSDK:
                     f"{_svk!r} is a server-managed provenance field and cannot "
                     f"be set via props."
                 )
+        # #4647 (code-review P1): this writer bypasses `_sanitize_props`, so the
+        # numeric-domain guard that every other props surface gets must run here
+        # too — otherwise `create_source(url, "web", v=2**70)` is accepted and
+        # the store silently clamps it, which is the exact defect #4647 exists to
+        # fix, still live on a public tenant write surface.
+        for _key, _value in props.items():
+            _reject_unrepresentable_number(_key, _value)
         ev = {
             "url": url,
             "sourceKind": sourceKind,
