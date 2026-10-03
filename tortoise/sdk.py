@@ -813,14 +813,16 @@ def _redact_turn_contents(
     and its counts join the same total.
 
     ``cap`` bounds the text scanned per turn. The turn store already caps, so
-    callers there pass nothing; the session-``:Source``/extractor consumers get
-    the RAW conversation and MUST pass the same window the persisted text uses
+    callers there pass nothing; the session-``:Source`` consumer receives the RAW
+    conversation and passes the same window the persisted text uses
     (``_capture_turn_window``'s 5,000), because a client-controlled turn of a few
     MB otherwise costs seconds of scanning (measured: 2 MB → ~6.9 s at
     ~3 s/MB), and because the value beyond that window is never persisted
-    anyway. The bound is a CPU-cost and window-parity bound, NOT loop
-    protection: in the hosted lane every capture-path caller of this is now off
-    the event loop (#4911 cycle 1).
+    anyway. The extraction consumers pass NO ``cap`` — see
+    ``_capture_turn_texts_with_redactions`` for why a cap there would truncate
+    the extraction input. The bound is a CPU-cost and window-parity bound, NOT
+    loop protection: in the hosted lane every capture-path caller of this is now
+    off the event loop (#4911 cycle 1).
 
     Idempotent: no rule's ANCHOR GROUP can be satisfied inside a
     ``[REDACTED:<kind>]`` marker, so re-running over already-redacted text
