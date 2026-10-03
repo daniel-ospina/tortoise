@@ -26873,6 +26873,268 @@ def _clear_github_credentials(org_id: str) -> None:
     )
 
 
+# ── Connector CRUD (#2636, epic #2632) ────────────────────────────────────
+# Universal source connectors: GitHub, Slack, Linear, Google Drive, etc.
+# Each connector row stores source_type, scope config, encrypted credentials,
+# and sync state. The pattern is identical across sources — only the
+# extractors differ.
+
+
+# The allowed value sets mirror the CHECK constraints in the migration that
+# owns them (supabase/migrations/20260922000001_connectors.sql). Without a
+# boundary check a bad value reaches PostgREST, whose 4xx raises out of the seam
+# (`SupabaseControlPlane.query` raises on status >= 300, it does not return
+# None) and surfaces as the generic 500 {"detail": "Internal server error"} —
+# a client error reported as a server error (#2642 re-review P2). Validated at
+# the model boundary (422), following the SessionRequest.harness precedent above.
+_CONNECTOR_SOURCE_TYPES = frozenset({
+    "github", "slack", "linear", "google_drive", "confluence", "notion", "asana",
+})
+_CONNECTOR_SYNC_STATUSES = frozenset({"idle", "syncing", "error", "completed"})
+
+
+class ConnectorCreateRequest(BaseModel):
+    source_type: str
+    config: dict | None = None
+
+    @field_validator("source_type")
+    @classmethod
+    def _validate_source_type(cls, v):
+        if v not in _CONNECTOR_SOURCE_TYPES:
+            raise ValueError(
+                f"invalid source_type {v!r} — must be one of "
+                f"{sorted(_CONNECTOR_SOURCE_TYPES)}")
+        return v
+
+
+class ConnectorUpdateRequest(BaseModel):
+    config: dict | None = None
+    sync_status: str | None = None
+    sync_cursor: dict | None = None
+    last_error: str | None = None
+
+    # Same 500-instead-of-4xx shape as source_type, on the same migration's
+    # CHECK (sync_status). Mirroring both keeps the twins from re-diverging.
+    @field_validator("sync_status")
+    @classmethod
+    def _validate_sync_status(cls, v):
+        if v is not None and v not in _CONNECTOR_SYNC_STATUSES:
+            raise ValueError(
+                f"invalid sync_status {v!r} — must be one of "
+                f"{sorted(_CONNECTOR_SYNC_STATUSES)}")
+        return v
+
+
+def _require_uuid_connector_id(connector_id: str) -> str:
+    """Reject a non-UUID connector id with 422 BEFORE it reaches the seam.
+
+    ``connectors.id`` is a uuid column, so PostgREST casts the filter literal
+    and a non-UUID one is a 22P02 → HTTP 400 → a RuntimeError out of the seam →
+    the generic 500: a malformed id reported as a server error. Same shape as
+    the #1765 non-UUID ``identity_id`` arm (#2642 re-review P2).
+    """
+    import uuid as _uuid_validate
+    try:
+        _uuid_validate.UUID(connector_id)
+    except ValueError:
+        raise HTTPException(status_code=422,
+                            detail="connector_id must be a UUID") from None
+    return connector_id
+
+
+@app.get("/v1/connectors")
+async def list_connectors(
+    org: dict = Depends(get_current_org_session_ungated),  # noqa: B008
+):
+    """List all connectors for the authenticated team's org."""
+    from tortoise.supabase_control import (
+        connector_by_org as _sb_conn_by_org,
+    )
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    org_id = org["org_id"]
+    if is_supabase_enabled():
+        # #4350/#3498: ONE thread hop for the listing — the seam is blocking
+        # HTTP against the control plane, so calling it on the loop delays
+        # every other request in the process (the loop-safety guard reddens).
+        return {"connectors": await _cp_offload(
+            lambda: _sb_conn_by_org(get_control_plane(), org_id),
+            op="connector_by_org")}
+    # Self-host has no connector store: the siblings (create/get/patch/delete)
+    # all 501 here. This branch used to read a `:Connector` GRAPH node, which
+    # no endpoint in this PR can ever write, so it could only ever answer [] —
+    # a silently-empty surface that reads as "no connectors" instead of
+    # "unsupported" (#2642 re-review P2).
+    raise HTTPException(status_code=501, detail="Self-host connectors not yet implemented")
+
+
+@app.post("/v1/connectors")
+async def create_connector(
+    body: ConnectorCreateRequest,
+    org: dict = Depends(get_current_org_session_ungated),  # noqa: B008
+):
+    """Create a new connector (no credential yet — OAuth step follows)."""
+    from tortoise.supabase_control import (
+        connector_create as _sb_conn_create,
+    )
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    org_id = org["org_id"]
+    if is_supabase_enabled():
+        try:
+            # #4350/#3498: the seam blocks on HTTP; run it off the loop. Domain
+            # errors propagate unchanged, so the 409 mapping below still holds.
+            row = await _cp_offload(
+                lambda: _sb_conn_create(
+                    get_control_plane(), org_id=org_id,
+                    source_type=body.source_type, config=body.config),
+                op="connector_create")
+        except RuntimeError as e:
+            # The migration declares `idx_connectors_org_source`, one connector
+            # per (org_id, source_type); PostgREST maps the 23505 to HTTP 409.
+            # Surface it as the client error it is instead of letting it fall
+            # through to the generic 500 — the same mapping create_graph uses.
+            if "HTTP 409" in str(e):
+                raise HTTPException(
+                    status_code=409,
+                    detail="A connector for this source type already exists",
+                ) from None
+            raise
+        if not row:
+            raise HTTPException(status_code=500, detail="Failed to create connector")
+        return {"connector": row}
+    raise HTTPException(status_code=501, detail="Self-host connector creation not yet implemented")
+
+
+@app.get("/v1/connectors/{connector_id}")
+async def get_connector(
+    connector_id: str,
+    org: dict = Depends(get_current_org_session_ungated),  # noqa: B008
+):
+    """Get a single connector by id, scoped to the caller's org."""
+    from tortoise.supabase_control import (
+        connector_by_id as _sb_conn_by_id,
+    )
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    org_id = org["org_id"]
+    if is_supabase_enabled():
+        connector_id = _require_uuid_connector_id(connector_id)
+        # org_id is passed INTO the seam: the query runs on the service-role
+        # key (RLS bypassed), so the filter is the only tenancy boundary.
+        # #4350: the seam blocks on HTTP — one thread hop, off the loop.
+        row = await _cp_offload(
+            lambda: _sb_conn_by_id(get_control_plane(), org_id, connector_id),
+            op="connector_by_id")
+        if not row:
+            raise HTTPException(status_code=404, detail="Connector not found")
+        return {"connector": row}
+    raise HTTPException(status_code=501, detail="Self-host not yet implemented")
+
+
+@app.patch("/v1/connectors/{connector_id}")
+async def update_connector(
+    connector_id: str,
+    body: ConnectorUpdateRequest,
+    org: dict = Depends(get_current_org_session_ungated),  # noqa: B008
+):
+    """Update connector config/sync state, scoped to the caller's org."""
+    from tortoise.supabase_control import (
+        connector_update as _sb_conn_update,
+    )
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    org_id = org["org_id"]
+    if is_supabase_enabled():
+        connector_id = _require_uuid_connector_id(connector_id)
+        updates = body.model_dump(exclude_none=True)
+        # #4350: off-loop — the seam blocks on HTTP against the control plane.
+        if not await _cp_offload(
+                lambda: _sb_conn_update(get_control_plane(), org_id,
+                                        connector_id, **updates),
+                op="connector_update"):
+            # No row in THIS org matched — a foreign id is indistinguishable
+            # from an absent one (matches the neighbouring index-job and
+            # invitation endpoints, which 404 on a cross-org id).
+            raise HTTPException(status_code=404, detail="Connector not found")
+        return {"status": "updated"}
+    raise HTTPException(status_code=501, detail="Self-host not yet implemented")
+
+
+@app.delete("/v1/connectors/{connector_id}")
+async def delete_connector(
+    connector_id: str,
+    org: dict = Depends(get_current_org_session_ungated),  # noqa: B008
+):
+    """Delete a connector (disconnect source, clean up), scoped to the org."""
+    from tortoise.supabase_control import (
+        connector_delete as _sb_conn_delete,
+    )
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    org_id = org["org_id"]
+    if is_supabase_enabled():
+        connector_id = _require_uuid_connector_id(connector_id)
+        # #4350: off-loop — the seam blocks on HTTP against the control plane.
+        if not await _cp_offload(
+                lambda: _sb_conn_delete(get_control_plane(), org_id, connector_id),
+                op="connector_delete"):
+            raise HTTPException(status_code=404, detail="Connector not found")
+        return {"status": "deleted"}
+    raise HTTPException(status_code=501, detail="Self-host not yet implemented")
+
+
+@app.post("/v1/connectors/{source_type}/auth")
+async def connector_auth(
+    source_type: str,
+    org: dict = Depends(get_current_org_session_ungated),  # noqa: B008
+):
+    """Initiate OAuth for a connector source type. Returns the authorize URL.
+
+    Dispatches to the correct OAuth flow based on source_type.
+    """
+    org_id = org["org_id"]
+    if source_type == "github":
+        # Reuse the existing GitHub OAuth flow
+        import os as _os
+        import secrets
+        from urllib.parse import urlencode
+        client_id = _os.environ.get("GITHUB_CLIENT_ID")
+        if not client_id:
+            raise HTTPException(status_code=503, detail="GitHub OAuth not configured")
+        state = secrets.token_urlsafe(24)
+        # Store CSRF state with connector context
+        from tortoise.hosted_api import _GITHUB_STATES
+        _GITHUB_STATES[state] = {
+            "org_id": org_id,
+            "org": None,
+            "created_at": __import__("time").time(),
+        }
+        callback = _os.environ.get(
+            "GITHUB_CALLBACK_URL",
+            "https://api.premiselabs.co/v1/onboarding/github/callback",
+        )
+        params = {
+            "client_id": client_id,
+            "redirect_uri": callback,
+            "scope": "repo",
+            "state": state,
+        }
+        auth_url = f"{_GITHUB_AUTHORIZE_URL}?{urlencode(params)}"
+        return {"auth_url": auth_url, "state": state}
+    raise HTTPException(status_code=400, detail=f"Unsupported source type: {source_type}")
+
+
 def _cleanup_legacy_docs_corpus(org_id: str,
                                 walk_items: list[tuple[str, str | None]]) -> None:
     """Review (deep bug scan): remove a pre-#1845 UNQUALIFIED docs corpus.
