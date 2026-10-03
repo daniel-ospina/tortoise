@@ -156,15 +156,25 @@ def test_lock_is_held_across_the_drop_and_released():
     assert conn.commands[-1][0] == "EVAL"
     assert conn.commands[-1][3] == g.GRAPH_DELETE_LOCK_KEY, \
         "release must target the delete lock"
-    # The SCRIPT, not just its arguments (review P3): asserting only that our
-    # token is passed as ARGV leaves a blind-del Lua body green. A blind
-    # release lets an EXPIRED holder evict the CURRENT holder's lock, so up to
-    # three guarded deleters can enter together.
+    # The SCRIPT, semantically, not just its arguments (review P3): a substring
+    # check alone accepted an INVERTED compare (`~=`, which deletes the lock
+    # precisely when it is NOT ours — evicting a live peer) and a body with the
+    # delete DROPPED. A blind or inverted release lets an EXPIRED holder evict
+    # the CURRENT holder's lock, so up to three guarded deleters can enter
+    # together. Checks are case-insensitive so a correct uppercase GET is not
+    # false-redded.
     script = conn.commands[-1][1]
-    assert "get" in script, \
+    low = script.lower()
+    assert "get" in low, \
         f"the release must READ the key (compare) — got {script!r}"
-    assert "ARGV[1]" in script, \
+    assert "argv[1]" in low, \
         f"the release must compare against OUR token — got {script!r}"
+    assert "del" in low, \
+        f"the release must actually DELETE the lock — got {script!r}"
+    assert "~=" not in script and "!=" not in script, \
+        f"an INVERTED compare deletes the lock when it is NOT ours — {script!r}"
+    assert low.index("get") < low.index("del"), \
+        f"the delete must be GATED by the compare — got {script!r}"
     assert conn.commands[-1][4] == acquire[2], \
         "release must be compare-and-delete on OUR token, never a blind DEL"
 

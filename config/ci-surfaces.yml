@@ -2171,7 +2171,7 @@ durations:
   # --integrity) and `test (b)`
   # (test_ci_selection.py::test_duration_coverage_guard_boundary_and_realistic)
   # from that single condition. Measured 23 tests / 13.12s local (the file has
-  # since grown to 28 hermetic tests; the 10.0s lock-deadline sleep this note
+  # since grown to 29 hermetic tests; the 10.0s lock-deadline sleep this note
   # used to name was removed in #2961 — the contention test now passes
   # wait_s=0.0, so the figure is conftest setup); the base has no junit for a
   # file it introduces. Supersede from the first post-merge main run that
