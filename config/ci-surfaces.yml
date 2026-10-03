@@ -2184,7 +2184,7 @@ durations:
   test_write_verb.py: 34.6
   test_index_restore.py: 2.7
   test_capture_session.py: 53.9
-  test_write_session_and_turns_3551.py: 70.8  # #3551: locally measured (9 tests, embedded carve-out lane; the hosted half drives POST /v1/sessions) — refresh from CI junit
+  test_write_session_and_turns_3551.py: 70.8  # #3551: locally measured (10 tests, embedded carve-out lane; the hosted half drives POST /v1/sessions) — refresh from CI junit
   test_battery_setup.py: 67.9
   test_graph_write_loop_responsiveness.py: 19.6
   test_read_routes_loop_responsiveness.py: 6.5

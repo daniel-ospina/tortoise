@@ -11611,9 +11611,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # the server-resolved human (#2600 — the org dict carries it on REST; the
     # MCP capture tool threads the middleware ContextVar into its hand-built
     # dict at mcp_server.py), and machine_id/model are the #2599 CLIENT-CLAIMED
-    # informational fields. All are set-only-when-present, each with a
-    # first-writer-wins ``coalesce`` so an idempotent re-POST never overwrites
-    # and a no-harness re-capture never erases a stored value.
+    # informational fields. All are set-only-when-present; actor_user_id /
+    # machine_id / model carry a first-writer-wins ``coalesce`` so an idempotent
+    # re-POST never overwrites them, while harness's first-writer-wins is the
+    # #3681 resolution above — its clause is a plain ``SET``, so it is that
+    # RESOLUTION, not the Cypher, that keeps a no-harness re-capture from
+    # erasing a stored value.
     _actor_uid = org.get("actor_user_id") or _current_actor_user_id.get()
 
     # #1727 Slice 2 (Task 11, T2-P2c): idempotency scope = Session + turn

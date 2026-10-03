@@ -14,7 +14,8 @@ already durable retries forever and ``session drain`` never reaches
 THE PROOF IS THE POSTED TURNS' OWN IDS *AND SERVED TEXT*, never the Session's
 existence. The server writes the whole window in ONE batched transaction
 **before** extraction (``hosted_api.py`` calling the shared
-``sdk._write_capture_turns``), so those rows are durable independently of the
+``sdk._write_session_and_turns``, which writes the turns through
+``_write_capture_turns``), so those rows are durable independently of the
 extraction the bound may abandon. Two weaker tests are deliberately NOT used:
 
 * **Session existence** — the Session MERGE precedes the turn write, so an

@@ -96,8 +96,9 @@ from pathlib import Path
 #     therefore a resurrection this classifier tolerates. ``n.content=$content``
 #     and the operator ``n.direction=$dir`` (entities.py:766, :825) are the same
 #     family on the same re-create composition, and so is an owned-null
-#     ``embedding`` (re-capture of a deterministic turn id — ``turn_id =
-#     f"{session_id}_t{i}"``, sdk.py:1106 — with changed content and nothing
+#     ``embedding`` (re-capture of a deterministic turn id — the
+#     ``f"{session_id}_t{i}"`` form ``sdk._capture_turn_id`` mints — with
+#     changed content and nothing
 #     encoded, whose snapshot journals the read-back ``None``, sdk.py:1130):
 #     the replay then keeps a stale vector the live write cleared. It is NOT a
 #     first-order path (unlike ``EventRecorded``'s connector leg, which every

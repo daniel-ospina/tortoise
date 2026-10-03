@@ -1016,10 +1016,10 @@ def _capture_turn_texts(windowed: list[dict]) -> list[str]:
     the node stores (the embedder applies its own 512-word cap;
     model/dimension/normalisation are shared with the read path, the cap is
     write-side), so a dense (vector) hit can never resolve to a turn whose
-    stored content differs from what was encoded. The two write paths call
-    ``_capture_turn_texts_with_redactions`` directly; this function delegates to
-    it and returns its first element. Coercion is the loop's own
-    (isinstance-first: None -> "", non-strings -> ``str()``, #721); the
+    stored content differs from what was encoded. The write path reaches
+    ``_capture_turn_texts_with_redactions`` through ``_write_session_and_turns``;
+    this function delegates to it and returns its first element. Coercion is the
+    loop's own (isinstance-first: None -> "", non-strings -> ``str()``, #721); the
     ``[:5000]`` is the idempotent re-application of ``_capture_turn_window``'s
     cap (#1532 D1).
 
@@ -1169,7 +1169,8 @@ def _capture_turn_embeddings(
 # then a `CONTAINS` edge `MERGE`. For a 500-turn capture that is ~1000
 # blocking calls — the ~4.75s single-loop freeze #3086 measures.
 #
-# This is the ONE implementation both lanes call. The batch is a single
+# This is the ONE turn store — reached by the primitive both lanes call. The
+# batch is a single
 # `UNWIND $turns` statement, i.e. ONE transaction per capture: a runtime error
 # anywhere in `$turns` rolls the WHOLE batch back, so a failed batch leaves no
 # turn written without its CONTAINS edge (never a partially-wired session).
@@ -1178,7 +1179,8 @@ def _capture_turn_embeddings(
 # (`{session_id}_t{i}`), so a retried batch MERGEs the same rows and converges.
 # (Precondition, stated in the docstring: the Session must already exist — the
 # statement MATCHes it, so a missing Session leaves the batch's nodes
-# unwired. Both callers MERGE it immediately before.)
+# unwired. Its caller, ``_write_session_and_turns``, MERGEs it immediately
+# before.)
 _TURN_WRITE_CYPHER = (
     "UNWIND $turns AS turn "
     # `MERGE (t:Point {id:...})` binds the node FIRST: a full-path
