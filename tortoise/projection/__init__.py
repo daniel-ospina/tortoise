@@ -1709,8 +1709,8 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
 #        issue that literal statement; there it is authorized by L2's
 #        embedded/test-name exemption, NOT by a token — see KNOWN GAPS.)
 #
-#   L2 — DEFENCE IN DEPTH, disposable-graph check (#99), on every GUARDED
-#        query. ``_GuardedGraph`` wraps the raw graph handle reached as
+#   L2 — DEFENCE IN DEPTH, disposable-graph check (#99), on the guarded
+#        ``query`` verb. ``_GuardedGraph`` wraps the graph handle reached as
 #        ``proj.g``, so a bulk DETACH DELETE
 #        issued through ``proj.g.query`` / ``FalkorProjection.query``
 #        (hand-written Cypher included) is refused on a server graph whose name
@@ -1724,10 +1724,19 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
 #        disposable registry and chose the per-call token as the structural
 #        gate); L2 was kept because removing it would refuse strictly less
 #        than before.
+#        SCOPE OF L2, stated exactly because the difference is a live hole:
+#        the bulk-wipe check is applied by ``_GuardedGraph.query`` and
+#        ``FalkorProjection.query`` ONLY. The wrapper's other query verbs
+#        (``ro_query``, ``_query``, ``profile``, ``explain``,
+#        ``execute_command``) are overridden and carry the #3595 ``=~``
+#        operator guard, but NOT the bulk-wipe check — see KNOWN GAPS.
 #
 # KNOWN GAPS (pre-existing, NOT fixed by #2944):
-#   * ``proj.db`` is the RAW FalkorDB client. Two destructive forms reach a
-#     graph without passing either layer: ``select_graph(name).query("MATCH (n)
+#   * ``proj.db`` is built through ``tortoise.cypher_guard.guarded_client``
+#     (it is NOT a bare FalkorDB client), so it carries the #3595 ``=~``
+#     operator guard — but NOT the L1/L2 bulk-wipe guard. Two destructive
+#     forms reach a graph without passing either layer:
+#     ``select_graph(name).query("MATCH (n)
 #     DETACH DELETE n")`` (e.g. tortoise/graph_delete_guard.py:252, reached
 #     from battery/testing/seeds.py via ``safe_graph_delete``;
 #     graph-scripts/smoke_test.py:140 in both modes, :121 on the embedded
@@ -1738,11 +1747,23 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
 #     is "no wipe by *forgetting* an opt-in"; those callers carry their own
 #     confirmation/authorization (e.g. ``team_delete`` requires the team name
 #     to match).
-#   * ``_GuardedGraph`` forwards every method except ``query`` to the raw
-#     handle via ``__getattr__``, so ``proj.g.delete()`` (GRAPH.DELETE — e.g.
-#     tests/test_hosted_backup.py) is NOT guarded by L2 either. Only
-#     ``query`` is intercepted; the class name says "guarded query", not
-#     "guarded handle".
+#   * ``_GuardedGraph`` is a "guarded QUERY" wrapper, not a guarded handle, and
+#     only its ``query`` verb applies the bulk-wipe check. It EXPLICITLY
+#     defines ``query``, ``ro_query``, ``_query``, ``profile``, ``explain``
+#     and ``execute_command``; ``__getattr__`` forwards only the remaining,
+#     non-Cypher attributes (``name``, ``schema``, ...). So
+#     ``proj.g._query("MATCH (n) DETACH DELETE n")``, ``proj.g.profile(...)``
+#     (PROFILE executes) and ``proj.g.execute_command("GRAPH.QUERY", <graph>,
+#     "MATCH (n) DETACH DELETE n")`` each reach a whole-graph wipe on a
+#     NON-test server graph passing NEITHER layer, and ``proj.g.delete()``
+#     (GRAPH.DELETE — e.g. tests/test_hosted_backup.py) is a non-Cypher verb
+#     no query guard can see at all. All of these PRE-DATE #2944 (``query`` was
+#     the only verb that checked ``_is_bulk_wipe`` before it too); they are
+#     recorded because this comment is the guard's own map of its holes.
+#     Closing them is a separate change, not a doc fix: it first needs a
+#     decision on ``_is_bulk_wipe``'s scope (#3007/#3037), because more verbs
+#     applying a classifier with those two defects would REFUSE more
+#     legitimate operations than it catches.
 #   * ``_is_bulk_wipe`` over-classifies label/LIMIT/WITH-scoped deletes and
 #     ``WHERE id(n) IN [..]``-scoped ones, so ``event_store.purge_overflow`` is
 #     refused on a non-test server graph and
@@ -1788,12 +1809,15 @@ class _GuardedGraph:
     navigation/..., the SDK registry handles) are covered because ``proj.db``
     and every other FalkorDB client the ``tortoise`` package builds are
     constructed through ``tortoise.cypher_guard.guarded_client``, whose handles
-    guard every query entry point. For defence in depth this wrapper also
-    overrides every query entry point itself (``query``, ``ro_query``,
-    ``_query``, ``profile``, ``explain``, ``execute_command``), so it does not
-    depend on the inner handle's class to refuse. ``__getattr__`` below forwards
-    only the remaining non-query attributes (``name``, ``delete``, ``schema``,
-    ...) to the underlying handle.
+    guard every query entry point against the #3595 ``=~`` operator. For
+    defence in depth this wrapper also overrides every query entry point itself
+    (``query``, ``ro_query``, ``_query``, ``profile``, ``explain``,
+    ``execute_command``), so it does not depend on the inner handle's class to
+    refuse the ``=~`` operator. NOTE the override is NOT uniform: only
+    ``query`` applies the bulk-wipe check (L2) as well — the other five verbs
+    carry the operator guard only (see KNOWN GAPS in the module comment
+    above). ``__getattr__`` below forwards only the remaining non-query
+    attributes (``name``, ``delete``, ``schema``, ...) to the underlying handle.
     """
 
     __slots__ = ("_g", "_proj")
@@ -7408,10 +7432,12 @@ class FalkorProjection(
         # L2: name/embedded check. Redundant with _GuardedGraph.query below
         # on purpose — this method is the readable contract; the guarded
         # handle is the last line of defence for every other caller that goes
-        # through it. Callers on the raw client (``proj.db``), or on Graph
-        # methods that ``_GuardedGraph.__getattr__`` forwards (e.g.
-        # ``proj.g.delete()`` → GRAPH.DELETE), bypass BOTH layers — see the
-        # KNOWN GAPS note in the module comment.
+        # through it. Callers on ``proj.db``, on the wrapper's OTHER query
+        # verbs (``proj.g._query`` / ``profile`` / ``execute_command`` — only
+        # ``query`` applies the bulk-wipe check), or on the non-Cypher verbs
+        # ``_GuardedGraph.__getattr__`` forwards (e.g. ``proj.g.delete()`` →
+        # GRAPH.DELETE) bypass BOTH layers — see the KNOWN GAPS note in the
+        # module comment.
         self._assert_test_graph(
             f"REFUSING to run bulk DETACH DELETE on non-test graph "
             f"({operation})"
