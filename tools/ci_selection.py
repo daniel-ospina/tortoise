@@ -1017,13 +1017,17 @@ def slow_leg_by_surface(manifest: dict) -> dict[str, set[str]]:
     slow = set(manifest.get("slow_files", []))
     carve = set(manifest.get("carve_out", []))
     # #6884: the test-slow legs are URI-unset on a tier-2 PR too (python-ci.yml
-    # :1367-1368 (:600-602 for the fast job) sets URI only when full==true), so a
-    # `uri_requiring` file relocated into `slow_files` reproduces the identical
-    # unattributable rc=5. Subtracting HERE covers every consumer of this
-    # function — it has exactly one (the tier-2 selection); `push_legs` builds
-    # its own legs, so the push lane still runs these files (asserted by the
-    # guard test). No file is in both lanes today; that disjointness is pinned
-    # by the guard test rather than left to this comment.
+    # :1367-1368; :600-602 for the fast job — URI is set only when full==true),
+    # and they build their collect-only input from `slow_selected`. A
+    # `uri_requiring` file in `slow_selected` therefore contributes no tests to
+    # that step, and when it is the leg's ONLY file the collect step exits 5 and
+    # fails unattributably — the same shape as the fast lane, which is what
+    # stranded #6390. Subtracting HERE is single-definition: this function has
+    # exactly one consumer (the tier-2 selection), while `push_legs` builds its
+    # own legs, so the push lane still runs these files (asserted in
+    # tests/test_uri_requiring_selection.py). No file is in both lanes today;
+    # the guard test pins that, and handles a future relocation rather than
+    # forbidding it.
     uri_requiring = uri_requiring_files(manifest)
     by_surface: dict[str, set[str]] = {}
     for f in sorted(slow - carve - uri_requiring):

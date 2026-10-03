@@ -26,6 +26,7 @@ from tools.ci_selection import (  # noqa: I001
     surface_audit, render_surface_audit, duplicate_entries,
     on_demand_files, leg_coverage_issues, push_legs, fast_pool,
     duration_issues, TESTS_DIR, WATCHDOG_HEADROOM, WATCHDOG_CEILING_MIN,
+    uri_requiring_files,
 )
 from tools import mergify_config_guard as mcg
 from tools import ci_selection as cs
@@ -305,9 +306,14 @@ def test_onboarding_change_selects_onboarding():
     # those modules module-skip at import in a URI-less leg, collect zero tests
     # and red the leg unattributably. The shipped defect and its arm are in
     # tests/test_uri_requiring_selection.py.
+    # #6884: read the lane through the accessor, NOT `manifest.get(key, [])` —
+    # the `.get` default only applies when the key is ABSENT, while an empty
+    # `uri_requiring:` in the YAML is present-and-None, so `set(None)` would
+    # TypeError here on the lane's terminal state (the last URI-gated module
+    # fixed) even though `select()` itself is fixed.
     assert set(r["test_files"]) == ((_tier1() | set(load_manifest()["surfaces"]["onboarding"]))
                                      - set(load_manifest().get("carve_out", []))
-                                     - set(load_manifest().get("uri_requiring", [])))
+                                     - uri_requiring_files(load_manifest()))
 
 
 def test_ep_change_selects_ep():
