@@ -103,27 +103,54 @@ def test_anonymous_uri_yields_empty_username(module_file, fn_name):
     assert cfg["username"] == ""
 
 
-@pytest.mark.parametrize("module_file", [p[0] for p in PARSERS])
-def test_every_password_construction_also_passes_a_username(module_file):
-    """The consumer half. A dropped field is invisible to the #3047 AST guard.
+def _falkordb_names(tree: ast.AST) -> set[str]:
+    """Names bound to ``falkordb.FalkorDB`` by this module's imports.
 
-    Walks every ``FalkorDB(...)`` call in the module and requires that any call
-    supplying ``password=`` also supplies ``username=``. This is the check that
-    would have caught the original five: each decoded the username (so the
-    #3047 guard was satisfied) and then built the client without it.
+    ``context_removal_audit.py`` and ``parity_sample.py`` do
+    ``from falkordb import FalkorDB as _FalkorDB`` and call ``_FalkorDB(...)``.
+    Matching the literal spelling ``FalkorDB`` therefore skipped exactly those
+    two modules — the guard could not fail on them, so a future deletion of
+    ``username=`` there would have been a green-CI return of #3081. Resolve the
+    name from the import instead of guessing it from the call site.
     """
-    tree = ast.parse((GS / module_file).read_text(encoding="utf-8"))
+    names = {"FalkorDB"}  # a bare `FalkorDB(...)` needs no import to be matched
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and (node.module or "").endswith("falkordb"):
+            for alias in node.names:
+                if alias.name == "FalkorDB":
+                    names.add(alias.asname or alias.name)
+    return names
+
+
+def _password_only_constructors(tree: ast.AST) -> list[int]:
+    """Line numbers of FalkorDB(...) calls handed a password but no username."""
+    names = _falkordb_names(tree)
     offenders = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-        if name != "FalkorDB":
+        called = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+        if called not in names:
             continue
         kws = {k.arg for k in node.keywords}
         if "password" in kws and "username" not in kws:
             offenders.append(node.lineno)
+    return offenders
+
+
+@pytest.mark.parametrize("module_file", [p[0] for p in PARSERS])
+def test_every_password_construction_also_passes_a_username(module_file):
+    """The consumer half. A dropped field is invisible to the #3047 AST guard.
+
+    Walks every ``FalkorDB(...)`` call in the module — including the aliased
+    ``_FalkorDB(...)`` spelling two of these modules use — and requires that any
+    call supplying ``password=`` also supplies ``username=``. This is the check
+    that would have caught the original five: each decoded the username (so the
+    #3047 guard was satisfied) and then built the client without it.
+    """
+    tree = ast.parse((GS / module_file).read_text(encoding="utf-8"))
+    offenders = _password_only_constructors(tree)
     assert not offenders, (
         f"{module_file}: FalkorDB(...) at line(s) {offenders} is handed a "
         f"password but no username — a named-user URI would authenticate as the "
@@ -131,20 +158,51 @@ def test_every_password_construction_also_passes_a_username(module_file):
     )
 
 
-def test_the_ast_guard_can_fail():
-    """A guard that cannot fail is not a guard — prove the walker sees an offender.
+def test_the_ast_guard_can_fail_on_both_spellings():
+    """A guard that cannot fail is not a guard.
 
-    Without this, a typo in the call-name match (e.g. comparing against
-    ``Attr``-only) would make every module pass vacuously.
+    This canary drives the REAL matcher (``_password_only_constructors``), not a
+    copy of its logic, because a copy would stay green while the matcher was
+    broken. It covers both the literal and the aliased spelling — the alias case
+    is the one that silently passed for two of the six modules when this guard
+    first landed.
     """
-    src = "def f(cfg):\n    return FalkorDB(host=cfg['h'], password=cfg['p'] or None)\n"
-    tree = ast.parse(src)
-    found = [
-        n.lineno
-        for n in ast.walk(tree)
-        if isinstance(n, ast.Call)
-        and getattr(n.func, "id", None) == "FalkorDB"
-        and "password" in {k.arg for k in n.keywords}
-        and "username" not in {k.arg for k in n.keywords}
+    literal = (
+        "def f(cfg):\n"
+        "    return FalkorDB(host=cfg['h'], password=cfg['p'] or None)\n"
+    )
+    aliased = (
+        "from falkordb import FalkorDB as _FalkorDB\n"
+        "\n"
+        "def f(cfg):\n"
+        "    return _FalkorDB(host=cfg['h'], password=cfg['p'] or None)\n"
+    )
+    compliant = (
+        "from falkordb import FalkorDB as _FalkorDB\n"
+        "\n"
+        "def f(cfg):\n"
+        "    return _FalkorDB(host=cfg['h'], username=cfg['u'] or None,\n"
+        "                     password=cfg['p'] or None)\n"
+    )
+    assert _password_only_constructors(ast.parse(literal)) == [2]
+    assert _password_only_constructors(ast.parse(aliased)) == [4], (
+        "the matcher missed the ALIASED constructor (_FalkorDB) — the hole that "
+        "left context_removal_audit.py and parity_sample.py unguarded"
+    )
+    assert _password_only_constructors(ast.parse(compliant)) == []
+
+
+def test_real_modules_use_an_aliased_constructor():
+    """Anti-vacuity: the alias path above must actually be exercised by a real
+    module, otherwise this suite's alias coverage is theoretical."""
+    aliased = [
+        m
+        for m, _ in PARSERS
+        if "_FalkorDB" in _falkordb_names(
+            ast.parse((GS / m).read_text(encoding="utf-8"))
+        )
     ]
-    assert found == [2], "the offender detector did not see a password-only construction"
+    assert aliased, (
+        "no module in PARSERS uses an aliased FalkorDB constructor — if that "
+        "changes, drop this test rather than let it pass vacuously"
+    )
