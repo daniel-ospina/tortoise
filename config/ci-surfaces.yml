@@ -2093,18 +2093,21 @@ carve_out:
 # the reason a module yields no nodeids, it was not going to run a test in that
 # leg.
 #
-# The candidate set is a superset bounded by **URI-relevance, not mechanism
-# spelling** (selectable modules that read the URI env var or `is_db_uri`);
-# pytest decides the answer over it. A mechanism bound (`allow_module_level`) was
-# tried and leaked four times — `unittest.SkipTest`, `collect_ignore` and
-# `pytest.exit` abort collection identically — so the bound is the property the
-# lane is about, not how a module happens to spell the abort. Two consequences
-# are stated in the guard's module docstring: `pytest.importorskip` is excluded
-# structurally (it does not read the URI — and a missing dependency must RED the
-# leg rather than be silently subtracted), and a URI check hidden in a SHARED
-# helper is the one residual, closed by the tripwire. A module emptied by some
-# other cause (the manifest's own `-m` marker, a collection error) is the
-# attribution half of #6884 and is tracked on the issue, not here.
+# The candidate set is a cheap superset and the bound is a DISJUNCTION, because
+# each half alone was measured to leak under review: (a) the module NAMES the URI
+# (`TORTOISE_DB_URI`/`is_db_uri`) — the property the lane is about, which a
+# mechanism-only filter misses (a module-level `raise unittest.SkipTest(...)`
+# carries no `allow_module_level` literal); and (b) the module CARRIES the abort
+# mechanism — which a URI-only filter misses (a caller that reads the URI through
+# a helper never names it). pytest decides the answer over the union. Two
+# consequences are stated in the guard's module docstring: `pytest.importorskip`
+# is excluded structurally (it spells neither half — and a missing dependency must
+# RED the leg rather than be silently subtracted), and the residual is a
+# collection abort through something neither half spells, e.g. a helper that
+# raises, closed by the tripwire. A module emptied by some other cause (the
+# manifest's own `-m` marker, a collection error — note `pytest.exit`/`sys.exit`
+# give rc=1/3, not this rc=5 shape) is the attribution half of #6884 and is
+# tracked on the issue, not here.
 uri_requiring:
 - test_capabilities_endpoint.py
 - test_eval_ingest_cache.py
