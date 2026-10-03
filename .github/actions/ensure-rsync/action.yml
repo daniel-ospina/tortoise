@@ -1,0 +1,34 @@
+name: ensure-rsync
+description: >-
+  Provide `rsync` for every job that EXECUTES the shipped deploy step, whose
+  staging mechanism is `rsync -a` (deploy-pages.yml). Call it before the step
+  that runs tests/test_pages_bindings.py, and before the real deploy itself.
+
+  WHY (#7026): tests/test_pages_bindings.py executes the shipped deploy script
+  instead of reimplementing it, so it shells out to `rsync`. GitHub's
+  ubuntu-latest image ships rsync; the self-hosted ARM64 runners that ALSO
+  answer the `ubuntu-latest` label (self-hosted,Linux,ARM64,ubuntu-latest) did
+  not, so the file failed rc=127 on whichever job the scheduler placed there.
+  This is NOT a selection difference: main runs the same file — whichever fast
+  shard the packer assigns it, since python-ci carries no `paths:` filter — so
+  the variable is the shard-to-HOST assignment. That is nondeterministic, which
+  lets main be green on a host that ships rsync while a PR shard is red on one
+  that does not: the shape that blocks a merge instead of informing it.
+
+  The install is a no-op wherever rsync already exists (no steady-state cost)
+  and idempotent under the concurrency this pool creates: many jobs share one
+  runner host, so apt is told to WAIT for the dpkg lock instead of losing the
+  race in the one case this action exists to fix.
+runs:
+  using: composite
+  steps:
+    - name: Provide rsync (#7026)
+      shell: bash
+      run: |
+        if command -v rsync >/dev/null; then
+          echo "rsync already present: $(rsync --version | head -1)"
+        else
+          sudo apt-get -o DPkg::Lock::Timeout=120 update -qq
+          sudo apt-get -o DPkg::Lock::Timeout=120 install -y -qq rsync
+          command -v rsync
+        fi
