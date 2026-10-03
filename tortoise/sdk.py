@@ -27,9 +27,13 @@ an extractor/indexer, update the catalog reference.
 """
 from __future__ import annotations  # noqa: I001
 
+import decimal
 import hashlib
 import json as _json
 import logging
+import fractions
+import math
+import numbers
 import os
 import re
 import stat
@@ -2036,6 +2040,165 @@ _RESERVED_ACTOR_PROPS = frozenset(
     {"actor_user_id", "owner", "initiated_by", "agent_id"})
 
 
+#: #4647: FalkorDB stores an integer as INT64 and a number as a double. A
+#: Python `int` is UNBOUNDED and `decimal.Decimal` is arbitrary-precision, so a
+#: value outside those domains is SILENTLY ALTERED by the store — `SET n.v = $v`
+#: reports success and stores a different number:
+#:
+#:     wrote 2**70        -> stored 9223372036854775807   (clamped)
+#:     wrote -(2**70)     -> stored -9223372036854775808  (clamped)
+#:     wrote 2**63        -> stored 9223372036854775807   (clamped: max + 1)
+#:     wrote Decimal('0.12345678901234567890')
+#:                        -> stored 0.123456789012346    (rounded)
+#:
+#: Reproduced against a live FalkorDB (#4647). The store cannot hold the value,
+#: so some information is lost either way; refusing the write is the honest
+#: failure mode, matching this function's existing fail-closed rejects below and
+#: the repo's own `SPAN_OFFSET_MAX = 2**63 - 1` precedent (commit_schema.py).
+#: A caller needing a wider identifier has a correct representation available —
+#: a string — and should choose it deliberately rather than have it inferred.
+_INT64_MIN = -(2 ** 63)
+_INT64_MAX = 2 ** 63 - 1
+
+#: Depth cap for the container recursion: a self-referential container would
+#: otherwise raise ``RecursionError`` instead of a bounded fail-closed error
+#: (code-review cycle 2, P3).
+_MAX_RECURSION_DEPTH = 12
+
+try:  # numpy is a declared dependency, but not on every import path.
+    import numpy as _np
+
+    _HAS_NUMPY = True
+except Exception:  # pragma: no cover - environment dependent
+    _np = None
+    _HAS_NUMPY = False
+
+
+def _numeric_alteration_reason(
+    key: str, value: object, _depth: int = 0
+) -> str | None:
+    """#4647: why the store would ALTER this value, or None if it would not.
+
+    The test is EXACTNESS, not a digit count. A digit-count proxy is wrong in
+    both directions (code-review P1): it refused ``Decimal('1000000000000001')``
+    and ``Decimal(0.1)``, which a double holds exactly, while admitting
+    ``Decimal('0.1')``, which it silently rounds. The predicate is therefore
+    \"does this value round-trip through the store's own number type\" — plus
+    finiteness, which also catches the exponent axis (``Decimal('1E+400')`` ->
+    ``inf``, ``Decimal('1e-400')`` -> ``0.0``) and the non-finite Decimals.
+
+    ``numbers.Integral`` (not ``int``) so a ``numpy`` scalar is caught too —
+    numpy integers are NOT Python ``int`` subclasses. ``bool`` is excluded
+    explicitly: it is an ``int`` subclass and is always representable.
+    """
+    if _depth > _MAX_RECURSION_DEPTH:
+        # REFUSE at the cap, never ``return None``: a fail-closed guard that
+        # fails OPEN is worse than no cap, because a value nested past the cap
+        # is admitted and the store then clamps its leaf — the exact #4647
+        # defect, and a regression introduced by adding the cap at all
+        # (code-review cycle 3, P2).
+        return (
+            f"{key!r}: value is nested deeper than the guard inspects "
+            f"({_MAX_RECURSION_DEPTH} levels), so its contents cannot be "
+            "checked for a number the store would silently alter. Flatten it "
+            "or store the deep part as a string."
+        )
+    if isinstance(value, bool):
+        # ``bool`` is an ``int`` subclass, but 0/1 are in range either way — this
+        # is documentation, not a load-bearing branch (cycle-2 P3).
+        return None
+    if isinstance(value, numbers.Integral):
+        ivalue = int(value)
+        if not (_INT64_MIN <= ivalue <= _INT64_MAX):
+            # ``bit_length`` rather than ``str(value)``: ``str`` on a very large
+            # int raises the 4300-digit limit error BEFORE the message is built,
+            # losing the key, the range and the remedy (code-review P3).
+            return (
+                f"{key!r}: integer with {ivalue.bit_length()} bits is outside "
+                f"the range FalkorDB can store ({_INT64_MIN}..{_INT64_MAX}) and "
+                "would be SILENTLY clamped to a different number. Store it as "
+                "a string if the full value is needed."
+            )
+        return None
+    if isinstance(value, decimal.Decimal):
+        if not value.is_finite():
+            return (
+                f"{key!r}: Decimal {value} is not a finite number, so the "
+                "store cannot represent it faithfully. Store it as a string "
+                "if the full value is needed."
+            )
+        # The driver sends ``str(value)``, and Cypher parses a bare integer
+        # literal as INT64 — a DIFFERENT domain from the double. An integral
+        # Decimal must therefore be range-checked, not round-tripped through a
+        # double (code-review cycle 2, P1): ``Decimal(2**70)`` is exactly
+        # representable as a double yet the store CLAMPS it, while
+        # ``Decimal('9223372036854775807')`` is NOT exactly a double yet the
+        # store holds it exactly. Checking one domain for both was wrong in
+        # both directions.
+        _text = str(value)
+        if "e" not in _text.lower() and "." not in _text:
+            _ivalue = int(value)
+            if not (_INT64_MIN <= _ivalue <= _INT64_MAX):
+                return (
+                    f"{key!r}: integer with {_ivalue.bit_length()} bits is "
+                    "outside the range FalkorDB can store "
+                    f"({_INT64_MIN}..{_INT64_MAX}) and would be SILENTLY "
+                    "clamped to a different number. Store it as a string if "
+                    "the full value is needed."
+                )
+            return None
+        _as_float = float(value)
+        if not math.isfinite(_as_float) or decimal.Decimal(_as_float) != value:
+            return (
+                f"{key!r}: Decimal {value} is not exactly representable as a "
+                "double, so FalkorDB would store a DIFFERENT number. Store it "
+                "as a string if the full precision is needed."
+            )
+        return None
+    if isinstance(value, numbers.Rational):
+        # ``fractions.Fraction`` and friends: the same domain question as a
+        # Decimal — an integral value is a bare INT64 literal to the store
+        # (cycle-3 P2: ``Fraction(2**70)`` was admitted and then clamped).
+        if value.denominator == 1:
+            return _numeric_alteration_reason(key, int(value), _depth)
+        _fr = float(value)
+        if not math.isfinite(_fr) or fractions.Fraction(_fr) != value:
+            return (
+                f"{key!r}: {value} is not exactly representable as a double, "
+                "so FalkorDB would store a DIFFERENT number. Store it as a "
+                "string if the full precision is needed."
+            )
+        return None
+    if isinstance(value, (list, tuple, set, frozenset)):
+        for item in value:
+            reason = _numeric_alteration_reason(key, item, _depth + 1)
+            if reason:
+                return reason
+        return None
+    if isinstance(value, dict):
+        for item in value.values():
+            reason = _numeric_alteration_reason(key, item, _depth + 1)
+            if reason:
+                return reason
+        return None
+    if _HAS_NUMPY and isinstance(value, _np.ndarray):
+        # list/tuple/dict alone missed array-likes (cycle-2 P2):
+        # `np.array([2**70])` was admitted and stored as [9223372036854775807].
+        for item in value.ravel().tolist():
+            reason = _numeric_alteration_reason(key, item, _depth + 1)
+            if reason:
+                return reason
+        return None
+    return None
+
+
+def _reject_unrepresentable_number(key: str, value: object) -> None:
+    """#4647: fail closed on a value the store cannot hold without altering it."""
+    reason = _numeric_alteration_reason(key, value)
+    if reason:
+        raise ValueError(reason)
+
+
 def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
     """#329: reject server-managed fields on tenant write surfaces.
 
@@ -2064,6 +2227,10 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
             _logger.warning(
                 "ignoring client-supplied %r on tenant props", _reserved)
             props.pop(_reserved)
+    # #4647: a value the store cannot hold without altering it must fail here,
+    # not be silently clamped/rounded by FalkorDB on the way in.
+    for _key, _value in props.items():
+        _reject_unrepresentable_number(_key, _value)
     for key in ("sourcePath", "source_path"):
         if key in props:
             raise ValueError(
@@ -23020,6 +23187,13 @@ class TortoiseSDK:
                     f"{_svk!r} is a server-managed provenance field and cannot "
                     f"be set via props."
                 )
+        # #4647 (code-review P1): this writer bypasses `_sanitize_props`, so the
+        # numeric-domain guard that every other props surface gets must run here
+        # too — otherwise `create_source(url, "web", v=2**70)` is accepted and
+        # the store silently clamps it, which is the exact defect #4647 exists to
+        # fix, still live on a public tenant write surface.
+        for _key, _value in props.items():
+            _reject_unrepresentable_number(_key, _value)
         ev = {
             "url": url,
             "sourceKind": sourceKind,
