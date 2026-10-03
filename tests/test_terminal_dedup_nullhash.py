@@ -23,7 +23,7 @@ These tests pin BOTH paths of that helper:
   (b) terminal + hash present   -> found exactly as before (unchanged path),
   (c) non-terminal + NULL hash  -> NOT returned (terminal scoping preserved)
       UNLESS it carries the legacy ``outdated=true`` flag (#3142 — the flag
-      IS terminal; see the module note below),
+      IS terminal; see ``test_outdated_flag_is_terminal``),
   (d) end-to-end: after ``rebuild_all`` the ingest guard still rejects a
       bundle-local ref that resolves to a terminal point, via the PRIMARY
       hash path (the rebuild re-derives the hash — issue Indicator 2),
@@ -119,15 +119,24 @@ class TestFindTerminalDedupHitFallback:
 
         The old filter was ``coalesce(n.outdated,false) = false``, i.e. the
         AND of "not outdated" with "terminal status". That is satisfiable
-        only by a terminal point that is NOT flagged — a state canonically
-        impossible, because ``supersede_point`` stamps the status AND the
-        flag together. So the guard matched NEITHER the point it exists to
-        catch nor an ``invalidate_point`` node, and Phase-2
-        ``_check_endpoint_race`` raised mid-write instead.
+        only by a terminal point that is NOT flagged — a shape neither
+        lifecycle transition produces, since ``supersede_point`` stamps the
+        status AND the flag together and ``invalidate_point`` sets only the
+        flag. (It IS producible by a direct status write — ``retract_point``
+        and ``create_point(status=...)`` leave the flag unset, and those are
+        the shapes the sibling tests above cover — so those are NOT the
+        shapes that were missed.) So the guard missed BOTH lifecycle shapes,
+        and Phase-2 ``_check_endpoint_race`` raised mid-write instead.
 
-        MUTATION THAT REDS THIS TEST: restore the AND-of-two-conjuncts filter
-        (either conjunct alone is not enough to red it — both limbs are here
-        for that reason)."""
+        MUTATION THAT REDS THIS TEST — measured, and attributed per test; the
+        naive "either conjunct alone is equally fatal" reading is wrong:
+          * the pre-#3142 AND filter  -> reds this test;
+          * the ``status`` limb alone -> reds this test (via limb (ii));
+          * the ``flag`` limb alone   -> does NOT red this test (both points
+            here carry the flag); it reds the pre-existing status-only tests
+            instead, e.g. ``test_terminal_point_with_hash_found``;
+          * no filter at all          -> reds the negative controls.
+        """
         # (i) terminal status AND the flag — the supersede_point shape.
         flagged_terminal = _make_point(sdk, "superseded and flagged",
                                        status="superseded", null_hash=True)
