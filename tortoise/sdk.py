@@ -31,6 +31,7 @@ import decimal
 import hashlib
 import json as _json
 import logging
+import fractions
 import math
 import numbers
 import os
@@ -2143,9 +2144,17 @@ def _numeric_alteration_reason(
     explicitly: it is an ``int`` subclass and is always representable.
     """
     if _depth > _MAX_RECURSION_DEPTH:
-        # Bounded, rather than ``RecursionError`` (cycle-2 P3). Props are shallow;
-        # anything past the cap is left to the existing boundaries.
-        return None
+        # REFUSE at the cap, never ``return None``: a fail-closed guard that
+        # fails OPEN is worse than no cap, because a value nested past the cap
+        # is admitted and the store then clamps its leaf — the exact #4647
+        # defect, and a regression introduced by adding the cap at all
+        # (code-review cycle 3, P2).
+        return (
+            f"{key!r}: value is nested deeper than the guard inspects "
+            f"({_MAX_RECURSION_DEPTH} levels), so its contents cannot be "
+            "checked for a number the store would silently alter. Flatten it "
+            "or store the deep part as a string."
+        )
     if isinstance(value, bool):
         # ``bool`` is an ``int`` subclass, but 0/1 are in range either way — this
         # is documentation, not a load-bearing branch (cycle-2 P3).
@@ -2190,21 +2199,26 @@ def _numeric_alteration_reason(
                     "the full value is needed."
                 )
             return None
-        try:
-            _as_float = float(value)
-        except (ValueError, OverflowError):
-            # e.g. Decimal('sNaN'): ``float`` raises before a reason can be
-            # built, which would lose the key and the remedy (cycle-2 P3).
-            return (
-                f"{key!r}: Decimal {value} cannot be represented as a finite "
-                "number by the store. Store it as a string if the full value "
-                "is needed."
-            )
+        _as_float = float(value)
         if not math.isfinite(_as_float) or decimal.Decimal(_as_float) != value:
             return (
                 f"{key!r}: Decimal {value} is not exactly representable as a "
                 "double, so FalkorDB would store a DIFFERENT number. Store it "
                 "as a string if the full precision is needed."
+            )
+        return None
+    if isinstance(value, numbers.Rational):
+        # ``fractions.Fraction`` and friends: the same domain question as a
+        # Decimal — an integral value is a bare INT64 literal to the store
+        # (cycle-3 P2: ``Fraction(2**70)`` was admitted and then clamped).
+        if value.denominator == 1:
+            return _numeric_alteration_reason(key, int(value), _depth)
+        _fr = float(value)
+        if not math.isfinite(_fr) or fractions.Fraction(_fr) != value:
+            return (
+                f"{key!r}: {value} is not exactly representable as a double, "
+                "so FalkorDB would store a DIFFERENT number. Store it as a "
+                "string if the full precision is needed."
             )
         return None
     if isinstance(value, (list, tuple, set, frozenset)):

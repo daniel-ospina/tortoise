@@ -179,12 +179,11 @@ class TestIntegralDecimalTakesTheInt64Path:
         assert "'v'" in str(exc.value), str(exc.value)
 
     def test_a_self_referential_container_is_bounded(self):
+        """Bounded and fail-closed: a ValueError, never a RecursionError."""
         a: list = []
         a.append(a)
-        try:
+        with pytest.raises(ValueError):
             _sanitize_props({"k": a})
-        except RecursionError:  # pragma: no cover
-            pytest.fail("self-referential container raised RecursionError")
 
 
 class TestCreateSourceBypassIsClosed:
@@ -241,3 +240,47 @@ class TestNumpyScalars:
     def test_numpy_ints_in_range_pass(self):
         np = pytest.importorskip("numpy")
         assert int(_sanitize_props({"v": np.int64(7)})["v"]) == 7
+
+
+class TestDepthCapFailsClosed:
+    """Cycle-3 P2: the cap must REFUSE, not `return None`.
+
+    Returning None at the cap re-admitted the very defect: a value nested past
+    the cap was allowed through and the store then clamped its leaf. Proven
+    before the fix — 13 nested lists around 2**70 -> no error, stored
+    9223372036854775807.
+    """
+
+    def test_a_value_nested_past_the_cap_is_refused_not_admitted(self):
+        deep: object = [2**70]
+        for _ in range(20):
+            deep = [deep]
+        with pytest.raises(ValueError) as exc:
+            _sanitize_props({"k": deep})
+        assert "'k'" in str(exc.value), str(exc.value)
+        assert "nested deeper" in str(exc.value), str(exc.value)
+
+    def test_a_shallow_container_still_passes(self):
+        assert _sanitize_props({"k": [[1, 2], [3]]})["k"] == [[1, 2], [3]]
+
+
+class TestFractionTakesTheInt64Path:
+    """Cycle-3 P2: ``Fraction(2**70)`` was admitted and the store clamped it."""
+
+    def test_an_out_of_range_fraction_is_refused(self):
+        import fractions
+
+        with pytest.raises(ValueError):
+            _sanitize_props({"v": fractions.Fraction(2**70)})
+
+    def test_an_in_range_fraction_passes(self):
+        import fractions
+
+        assert _sanitize_props({"v": fractions.Fraction(3, 1)})["v"] == 3
+
+    def test_an_inexact_fraction_is_refused(self):
+        import fractions
+
+        with pytest.raises(ValueError):
+            _sanitize_props({"v": fractions.Fraction(1, 3)})
+        assert _sanitize_props({"v": fractions.Fraction(1, 2)})["v"] == fractions.Fraction(1, 2)
