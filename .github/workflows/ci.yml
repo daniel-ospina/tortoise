@@ -483,10 +483,17 @@ jobs:
   #   migration-append-only    — edits/renames/deletions of already-merged
   #                              migrations are rejected (a change to an applied
   #                              migration must be a NEW timestamp file).
-  #                              #1235: when SUPABASE_ACCESS_TOKEN is available
-  #                              (same-repo PRs), a PURE PREFIX RENAME of a
-  #                              provably-unapplied migration is exempt; fork
-  #                              PRs (no token) keep the strict block (fail-closed).
+  #                              #1235/#2240: when SUPABASE_ACCESS_TOKEN is
+  #                              available (same-repo PRs), the exemption covers
+  #                              only a git-detected forward prefix rename (R*)
+  #                              whose destination version sorts strictly AFTER
+  #                              the newest applied version, with BOTH endpoints
+  #                              provably unapplied — the remedy
+  #                              check-migration-drift prescribes for an
+  #                              out-of-order repo-ahead migration. An edit or a
+  #                              deletion (M/T/D) carries no destination version,
+  #                              so it is NEVER exempt. Fork PRs (no token) keep
+  #                              the strict block (fail-closed).
   # Both drive the shared .github/scripts/check-migration-append-only script so
   # tests exercise the shipped logic. fetch-depth: 0 is required for the base
   # SHA to be available to `git diff` (default checkout is depth 1).
@@ -609,6 +616,49 @@ jobs:
             exit 1
           fi
           echo "no conflict markers"
+      - uses: actions/setup-python@v5
+        with:
+          # The generators carry the #5128 `>=3.12` runtime guard, which exits
+          # EXIT_USAGE rather than silently running on an older interpreter.
+          python-version: '3.12'
+      - name: Generated-artifact drift check (#4454)
+        # #4454: a PR that edits ONLY a generated DOCUMENT under `docs/` never
+        # runs the matrix — `docs/` is in NON_PYTHON_PREFIXES and no
+        # SOURCE_PATTERNS entry claims a `.md` path, so a docs-only change
+        # selects `surfaces: []` and the guard test is skipped by the deliberate
+        # docs-PR policy. (A `tools/`-only edit is NOT skipped: PR #4177 named
+        # the generators in SOURCE_PATTERNS, which beats the non-python prefix.
+        # `config/sdk-surface.json` also selects `core`.)
+        #
+        # It lives here, and runs unconditionally, because `docs` is a REQUIRED
+        # context with no `paths:` filter (only the non-required jobs in this
+        # file are path-gated, #2149) — so the check cannot inherit the very
+        # skip it exists to close. A path-gated home would reproduce the #2802
+        # shape, where a repo-wide gate was invisible to every gate and shipped
+        # to main twice.
+        #
+        # `--check` is verify-only: it re-renders and exits non-zero on drift.
+        # A bare invocation would REWRITE the artifact and always pass, which
+        # looks present and never fires — worse than absent.
+        #
+        # The install is required, not incidental. The generators import
+        # `tortoise.sdk`, which pulls the declared runtime set (numpy via
+        # cross_lens, prometheus_client via monitoring, fastmcp via
+        # tool_registry). Without it they abort at IMPORT time and exit 1 on
+        # EVERY PR — a fail-always gate that reds this required context and
+        # blocks all merges, the exact opposite of fail-on-drift. The sibling
+        # required artifact job `pricing-artifact` installs the package for the
+        # same reason (its parity check imports `tortoise.pricing`).
+        #
+        # Positive control, run in THIS environment — a developer venv that
+        # already has the package installed cannot exhibit the failure mode:
+        # inject a line into a listed artifact -> exit 1 naming the file;
+        # restore -> exit 0.
+        run: |
+          pip install -e . --quiet
+          python3 tools/bridge_table.py --check
+          python3 tools/mcp_rename_table.py --check
+          python3 tools/sdk_surface.py --check
       - uses: actions/setup-node@v4
         with:
           node-version: '22'

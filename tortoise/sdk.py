@@ -39,6 +39,11 @@ from typing import Any
 
 from .domain_loader import known_kinds, register_kind
 from .cross_lens import DEFAULT_THRESHOLD
+# #3301: the canonical OBJECT terminal vocabulary — the SAME set the four
+# search legs exclude by default. Imported here so recall_state's Object
+# filter never re-literals it (a copy is how the read surface drifts from
+# search).
+from .commit_ops import OBJECT_TERMINAL_STATUSES as _OBJECT_TERMINAL_STATUSES
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
@@ -52,6 +57,7 @@ from . import file_indexer  # noqa: F401 — binds the classifier/identity modul
 from .projection import FalkorProjection
 from .projection import _ANNOTATOR_PROPS as _ANNOTATOR_PROP_NAMES
 from .projection import is_missing_graph_error  # #2163: absent-graph family == success
+from .graph_ops import counts_capture_ops, phased  # #3359: per-capture graph-op accounting
 from .quota import MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS
 from .canonical import derive_batch_id
 # #4911: the ONE credential scrubber for stored turn text. Stdlib-only module
@@ -218,6 +224,26 @@ def _capture_redaction_warning(count: int) -> str:
         f"`[REDACTED:<kind>]` in place) — the stored turns are complete "
         f"except for those spans"
     )
+
+
+def _journal_write_failure_warning(count: int) -> str:
+    """#4240 review F1: the additive warning a capture carries when a journal
+    append failed on a CONFIGURED journal.
+
+    One canonical string, shared with ``hosted_api._capture_session_impl``
+    (byte-parity: both lanes must describe the same event identically — the
+    hosted lane builds its OWN receipt and never calls ``capture_session``, so
+    without this the disclosure would exist only on the SDK lane), naming that
+    THIS capture's records never reached the journal and a later rebuild will
+    therefore lose them. Deliberately independent of the capture's ``ok`` flag:
+    the graph write persisted, and marking it failed would trip the #2335
+    TRUE-retry gate over a write that was in fact persisted.
+    """
+    return (
+        f"journal append failed {count}x — this capture is live-only and will "
+        f"not survive a rebuild (#4240)"
+    )
+
 
 #: #3892: a keyless session re-captured WITH a key while the deployment is on
 #: the NON-convergent M2 lane. The re-attempt is refused (re-running M2 could
@@ -595,9 +621,19 @@ def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
     lines: list[str] = []
     n_sentences = 0
     for turn in conversation:
-        raw_role = turn.get("role")
-        role = raw_role if isinstance(raw_role, str) else (
-            "unknown" if raw_role is None else str(raw_role))
+        # The ONE role-normalization funnel (#5445): a second, inline copy here
+        # was redundant, and removing it fixed NOTHING on its own — the deleted
+        # form was semantically identical to `_normalize_turn_role` for every
+        # input (#5445 review round 12). What actually protects this sink is the
+        # SCRUB: the caller hands in a role that already passed `redact_secrets`
+        # at `_redact_turn_contents`, the one chokepoint. Do not read this funnel
+        # as the protection — deleting the scrub while keeping the normalization
+        # would reopen the sink.
+        #
+        # On the capture path the conversation handed in is already role-scrubbed
+        # (``_materialize_session_source`` passes ``_redact_turn_contents``'s
+        # output), so this consumes the redacted role rather than re-scrubbing.
+        role = _normalize_turn_role(turn.get("role"))
         speaker = role.title()
         if not re.match(r"^[A-Z][\w .'-]{0,40}$", speaker):
             # non-word roles (123, dict str, weird casing) still extract under
@@ -642,13 +678,37 @@ def _capture_turn_window(
     loop and the extraction call so the LLM never sees a phrase with no home
     in any stored turn (stored-source parity, #721). Content coercion matches
     the store loop: None -> '', truthy non-strings -> str() (isinstance-first,
-    #721). Idempotent when the caller already truncated."""
+    #721). The ROLE is coerced with ``_normalize_turn_role`` and capped the same
+    way (#5445/#5775), so the scanned and the persisted role are the same bytes
+    and a non-string role cannot skip the bound. Idempotent when the caller
+    already truncated."""
     out: list[dict] = []
     for turn in conversation:
         t = dict(turn)
         raw = t.get("content")
         content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
         t["content"] = content[:cap]
+        # ⛔ The ROLE is capped here too (#5445 review round 12). It is persisted as
+        # text by the same frame AND scrubbed by ``_redact_turn_contents``, so a
+        # client-controlled role was the one scan on this path the cap did not
+        # reach: ``redact_secrets`` ran over the WHOLE role (measured ~2.7 s for a
+        # 500,000-char role, and ``cap`` changed nothing), and the module's own
+        # "``cap`` bounds the text scanned per turn" claim was false for it. Capping
+        # at the window keeps the scanned and the persisted role the SAME bytes.
+        #
+        # ⛔ COERCE BEFORE THE CAP (#5775). The guard here was
+        # ``isinstance(t.get("role"), str)``, so a NON-STRING role skipped the cap
+        # ENTIRELY while the downstream ``_redact_turn_contents`` still normalized
+        # it with ``str()`` and scanned the whole thing. It is reachable from
+        # untrusted input: the hosted model types ``conversation: list[dict]`` with
+        # no inner validation, so ``role`` can be any JSON type. A one-element list
+        # of a 1,000,000-char string stringifies to 1,000,004 chars and cost a
+        # measured ~0.7-3.8 s of scanning PER REQUEST, against ~0.002 s for a
+        # same-length STRING role (which the cap did cut). ``_normalize_turn_role``
+        # is the SAME normalization every consumer already applies to this value
+        # (None -> "unknown", any non-str -> ``str()``), so coercing before the cap
+        # changes no downstream output and makes the bound total.
+        t["role"] = _normalize_turn_role(t.get("role"))[:cap]
         out.append(t)
     return out
 
@@ -714,8 +774,9 @@ def _redact_turn_contents(
     """The ONE place capture text is scrubbed of credentials (#4911).
 
     Returns a copy of ``conversation`` whose turns carry a scrubbed
-    ``content``, plus the per-kind counts. Every capture consumer derives its
-    text from this — the stored turn text (``_capture_turn_texts``), the session
+    ``content`` AND a scrubbed ``role``, plus the per-kind counts. Every capture
+    consumer derives its text from this — the stored turn text
+    (``_capture_turn_texts``), the session
     ``:Source`` metadata (``_materialize_session_source``) and the extraction
     transcript (``_extract_session_llm`` / ``_extract_session_v2``) — so the
     control sits at the single point where a message becomes persisted or
@@ -736,6 +797,20 @@ def _redact_turn_contents(
     be stringified by a downstream consumer (the session ``:Source`` does exactly
     that with ``str()``). A turn with no match is returned as the SAME object, so
     nothing else about a stored shape moves.
+
+    ⛔ The sibling ``role`` is scrubbed HERE too (#5445). It is caller-controlled
+    (the hosted model takes ``conversation: list[dict]`` with no role validation)
+    and the capture path persists it as TEXT through three sinks — the
+    ``f"[{role}] {content}"`` stored turn, ``:Point.speaker`` and the session
+    ``:Source`` transcript (``_session_llm_transcript`` uses the role as the
+    speaker label). A credential placed in ``role`` therefore reached the graph
+    while the receipt reported zero. The role is scrubbed, not replaced with a
+    placeholder, because there is no canonical role enum in the capture contract
+    — the codebase and its own tests use ``developer``, ``toolResult``,
+    ``robot`` and ``agent`` — so a whitelist would silently rewrite legitimate
+    labels, i.e. over-redact ordinary text. The role scrub runs through this same
+    chokepoint (one ``redact_secrets`` owner, per the #4911 control-site rule)
+    and its counts join the same total.
 
     ``cap`` bounds the text scanned per turn. The turn store already caps, so
     callers there pass nothing; the session-``:Source``/extractor consumers get
@@ -763,14 +838,40 @@ def _redact_turn_contents(
     for turn in conversation:
         raw = turn.get("content")
         content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
+        # #5472: emptiness is judged on the PRE-cut content. Judging it after
+        # the cut made ``cap=0`` (which cuts any non-empty string to "") take
+        # the genuinely-empty branch below and append the ORIGINAL, untruncated
+        # turn — a cap that does not cap.
+        had_content = bool(content)
         cut = False
         if cap is not None and len(content) > cap:
             content = content[:cap]
             cut = True
-        if not content:
-            out.append(turn)
+        # #5445: the role is caller-controlled and persisted as text by three
+        # sinks, so it is coerced and scrubbed through this same chokepoint. The
+        # cap applies to it as well — ``_capture_turn_window`` already truncated a
+        # string role, and re-applying here keeps the bound true for callers that
+        # pass a raw conversation with an explicit ``cap``.
+        role = _normalize_turn_role(turn.get("role"))
+        if cap is not None and len(role) > cap:
+            role = role[:cap]
+        scrubbed_role, role_counts = redact_secrets(role)
+        if not had_content:
+            # Genuinely-empty content: nothing in the body to scan. The role is
+            # still caller-controlled, so it is scrubbed here too; the turn is
+            # copied only when that changed.
+            for kind, n in role_counts.items():
+                totals[kind] = totals.get(kind, 0) + n
+            if role_counts:
+                out.append({**turn, "role": scrubbed_role})
+            else:
+                out.append(turn)
             continue
         scrubbed, counts = redact_secrets(content)
+        if role_counts:
+            counts = {**counts}
+            for kind, n in role_counts.items():
+                counts[kind] = counts.get(kind, 0) + n
         for kind, n in counts.items():
             totals[kind] = totals.get(kind, 0) + n
         # ⛔ TWO and only two reasons to emit a new object, and the second one is
@@ -780,7 +881,11 @@ def _redact_turn_contents(
         # the ``_commit_session_v2`` call site meant a credential past the cap
         # was rendered into the extractor prompt and sent to the provider.
         if counts or cut:
-            out.append({**turn, "content": scrubbed})
+            if role_counts:
+                out.append({**turn, "content": scrubbed,
+                            "role": scrubbed_role})
+            else:
+                out.append({**turn, "content": scrubbed})
         else:
             out.append(turn)
     return out, totals
@@ -799,7 +904,12 @@ def _redact_summary_strings(obj, _depth: int = 0):
     never mutated.
 
     ⛔ KEYS are scrubbed too: ``json.dumps`` renders keys into the prompt, so an
-    unscrubbed key is the same leak in a different position. (If two keys
+    unscrubbed key is the same leak in a different position. Every key is passed
+    through this function recursively, so a ``str`` key is redacted and a tuple
+    key's ``str`` elements are redacted with it (a key that is neither a ``str``
+    nor a container of them — e.g. ``bytes`` — is passed through, but such a key
+    is not JSON-renderable: ``json.dumps`` raises ``TypeError`` before emitting
+    any key, so it cannot carry a credential into the prompt). (If two keys
     redact to the same marker the later one wins — a duplicate key is not a
     summary shape, and the alternative is a leak.)
 
@@ -807,16 +917,26 @@ def _redact_summary_strings(obj, _depth: int = 0):
     ``commit_session``, where a cyclic or very deep ``summary=`` previously
     reached ``construct_graph``, whose ``json.dumps`` raised ``ValueError`` and
     was swallowed (degraded, no crash). Unbounded recursion turned that into an
-    unhandled ``RecursionError`` on a public method. Past the guard the object
-    is returned as-is — the deepest shapes are not commit summaries, and the
-    caller's own credential is the only thing that could be hiding there.
+    unhandled ``RecursionError`` on a public method.
+
+    ⛔ ...and it must FAIL CLOSED (#5446). The original guard returned the
+    subtree VERBATIM past depth 64, so a credential nested deeper than 64 levels
+    was rendered into the commit prompt (``json.dumps``) and POSTed unbounded.
+    Past the bound a ``str`` leaf is still scrubbed (cheap at any depth) and a
+    container is replaced by a visible marker. The trade-off is deliberate:
+    a pathological deep summary is not a commit shape, so beyond the bound the
+    subtree is COLLAPSED (legible, ``[REDACTED:depth]``) rather than silently
+    omitted or returned raw. The recursion never passes depth 65, so the
+    no-crash property the guard exists for still holds.
     """
     if _depth > 64:
-        return obj
+        if isinstance(obj, str):
+            return redact_secrets(obj)[0]
+        return "[REDACTED:depth]"
     if isinstance(obj, str):
         return redact_secrets(obj)[0]
     if isinstance(obj, dict):
-        return {(k if not isinstance(k, str) else _redact_summary_strings(k)):
+        return {_redact_summary_strings(k):
                 _redact_summary_strings(v, _depth + 1) for k, v in obj.items()}
     if isinstance(obj, list):
         return [_redact_summary_strings(v, _depth + 1) for v in obj]
@@ -863,6 +983,18 @@ def _capture_turn_texts_with_redactions(
     texts: list[str] = []
     for turn in redacted:
         role = _normalize_turn_role(turn.get("role"))
+        # ⛔ NEUTRALIZE THE FRAMING DELIMITERS IN THE ROLE (#5445 review). The
+        # frame is ``[<role>] <body>`` and ``<role>`` is caller-controlled, so a
+        # role containing ``]`` ends the frame early. That is not hypothetical:
+        # the #5445 role scrub WRITES one — a role holding a credential becomes
+        # ``[REDACTED:github_token]``, and the stored text is
+        # ``[[REDACTED:github_token]] please review…``. The reader's inverse
+        # (``_CAPTURE_ROLE_PREFIX``, ``^\[([^\]]*)\]\s*``) then parses the
+        # speaker as ``[REDACTED:github_token`` — dropping the closing bracket —
+        # and hands the BODY a stray ``] ``, so ``:Point.speaker`` and the turn
+        # the read path serves are both corrupted on the exact path this cluster
+        # fixes. Brackets are rewritten in the ROLE only; the body is untouched.
+        role = role.replace("[", "(").replace("]", ")")
         raw = turn.get("content")
         content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
         texts.append(f"[{role}] {content[:_CAPTURE_TURN_CAP]}")
@@ -909,7 +1041,14 @@ def _capture_turn_texts(windowed: list[dict]) -> list[str]:
 #: anything comparing a stored turn against a served one must go through the
 #: inverse — comparing the raw string never matches (#4675). One definition so
 #: the writer's format and the reader's split cannot drift.
-_CAPTURE_ROLE_PREFIX = re.compile(r"^\[([^\]]+)\]\s*")
+_CAPTURE_ROLE_PREFIX = re.compile(r"^\[([^\]]*)\]\s*")
+#: ⛔ ``*``, not ``+`` (review round 12). A role can be EMPTY: ``_normalize_turn_role``
+#: passes ``""`` through, the writer emits the frame ``"[] <body>"``, and a ``+``
+#: quantifier refuses to match it — so the inverse returned the WHOLE string as the
+#: body (``("unknown", "[] hello world")``) and the served turn was corrupted with a
+#: stray ``[] `` prefix. That is the same corruption class round 11 closed for a role
+#: containing a bracket, on the one remaining way a role can break the frame. An empty
+#: role is recovered verbatim as ``""``, so writer and reader stay consistent.
 
 
 def _capture_turn_role_text(stored: str) -> tuple[str, str]:
@@ -1198,7 +1337,7 @@ def _write_capture_turns(
         turn_embs = [None] * len(turn_texts)
     turn_rows: list[dict] = []
     turn_hashes: list[str] = []
-    for i, turn in enumerate(windowed):
+    for i, _turn in enumerate(windowed):
         text = turn_texts[i]
         text_hash = _content_hash(text)
         turn_hashes.append(text_hash)
@@ -1206,11 +1345,13 @@ def _write_capture_turns(
             "id": f"{session_id}_t{i}",
             "c": text,
             "k": "event",
-            # `_normalize_turn_role` is the isinstance-first pattern (#721):
-            # None -> "unknown", truthy non-strings -> str() — a raw
-            # non-string stored as `speaker` contradicts the ontology row and
-            # a dict role could fail the write mid-batch.
-            "speaker": _normalize_turn_role(turn.get("role")),
+            # #5445: derived from the SCRUBBED stored text, not from the raw
+            # ``turn["role"]`` — the role is caller-controlled and the `role`
+            # sink must inherit `_redact_turn_contents`'s scrub. Going through
+            # the reader's own inverse (`_capture_turn_role_text`) also makes
+            # the stored `speaker` agree with what `get_session_detail` serves
+            # for the same row (#4675 parity).
+            "speaker": _capture_turn_role_text(text)[0],
             "s": "draft",
             "ch": text_hash,
             "emb": turn_embs[i],
@@ -1249,9 +1390,10 @@ def _write_capture_turns(
     # the CONTAINS link is a capture-write structural fact (ONTOLOGY §4.5),
     # restored by the projection's edge fold without inventing a node
     # property the live write never sets. Gated on a configured journal: on a
-    # lane with no `event_log_path` (`_make_sdk`/`_data_sdk` pass none) the
-    # JSONL half is a no-op and the `:GraphEvent` half is not a rebuild
-    # source — `ensure_event_schema` + `next_seq` + `append_event` per turn
+    # lane with no `event_log_path` (a hosted SDK when
+    # `TORTOISE_EVENT_LOG_BASE_DIR` is unset; #4240) the JSONL half is a
+    # no-op and the `:GraphEvent` half is not a rebuild source —
+    # `ensure_event_schema` + `next_seq` + `append_event` per turn
     # there buys no durability on the very lane #3086 measures.
     if sdk._get_event_log() is None:
         return redacted_total
@@ -1271,7 +1413,7 @@ def _write_capture_turns(
         # fold tombstones (the wrong meaning for a removal).
         sdk._emit_event("PointRetracted", {"id": tid})
         sdk._journal_entity_mutation("Point", tid, "delete")
-    for i, turn in enumerate(windowed):
+    for i, _turn in enumerate(windowed):
         turn_id = f"{session_id}_t{i}"
         created_at, status, stored_emb = stored.get(turn_id, (None, None, None))
         # #5004: the turn's vector WAS stored live (`turn_embs[i]` is the `emb`
@@ -1291,7 +1433,8 @@ def _write_capture_turns(
             "id": turn_id,
             "content": turn_texts[i],
             "pointKind": "event",
-            "speaker": _normalize_turn_role(turn.get("role")),
+            # #5445: the redacted role (see the turn_rows write above).
+            "speaker": _capture_turn_role_text(turn_texts[i])[0],
             "is_episodic": True,
             "status": status if status is not None else "draft",
             "createdAt": created_at if created_at is not None else now,
@@ -1701,8 +1844,10 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
             "'contains_session' is a server-managed capture field and cannot "
             "be set via props."
         )
-    # #1486 (code-review P1): is_episodic is the points-quota discriminator
-    # (quota.py counts only `is_episodic IS NULL OR = false` points). A tenant
+    # #1486 (code-review P1): is_episodic is the POINT-arm discriminator of the
+    # points quota — quota.py counts `is_episodic IS NULL OR = false` points, and
+    # since #1911 it ALSO counts Object/Subject nodes unconditionally, so the
+    # resource is no longer Points alone (#1975). For Points, a tenant
     # setting it true via props would exclude their points from the quota —
     # unlimited points past the paid-tier cap. Server-managed: internal
     # capture/extractor callers set it via the explicit `is_episodic` kwarg on
@@ -1892,20 +2037,116 @@ def _iso_date10(value: object) -> str:
 # (label[:3] + '-' + sha256[:26], e.g. ``sub-<hex26>`` / ``obj-<hex26>``).
 # These are IDs, not names — a guard that only recognizes bare ULIDs treats
 # them as names and runs the stub-creating keyword fallback.
-_ENTITY_ID_RE = re.compile(r"^[a-z]{2,3}-[0-9a-f]{26}$")
+#
+# #3586: the digest spelling is deliberately NOT pinned to ``{26}``/lowercase.
+# An opaque id's spelling is a property of the MINTER, not of the value, so a
+# spelling the regex does not anticipate is not thereby a name: epic #2835
+# Stage 3 mints new opaque ids, and a minted spelling this regex rejected was
+# silently treated as a NAME and minted as a Subject whose name AND id are the
+# identifier (`_mint_subject_stub`, projection/edges.py). The predicate is
+# therefore LENIENT about casing and digest length — ``prefix`` + a 16..64 hex
+# digest covers every id spelling the SDK mints or can plausibly mint — and it
+# is used ONLY for the negative case at the about* seam (may an UNRESOLVED
+# value be treated as a name?), never to decide that a value IS an id: that is
+# provenance, decided by resolution (`_wire_about_value`). Over-refusal there
+# is fail-closed (one warning, no node); the reverse mints junk a caller cannot
+# distinguish from data.
+#
+# ``_is_canonical_entity_id`` is the STRICT, HARD-REJECTION predicate. The two
+# are NOT interchangeable, and widening this one is not free: its consumer
+# (`_check_refs`) fails the WHOLE bundle closed on a hit, so a digest it newly
+# rejects is a previously-valid ref that stops ingesting. Keep it pinned to the
+# shapes the minting surfaces actually emit — a bare ULID, or
+# ``label[:3]-<sha256[:26]>`` (`_entity_name_id`). A spelling no minter can
+# produce (``pr-<hex16>``) cannot shadow a real node, so rejecting it buys no
+# safety and breaks a live ingest.
+_ENTITY_ID_RE = re.compile(r"^[a-z]{2,8}-[0-9a-f]{16,64}$", re.IGNORECASE)
+_CANONICAL_ENTITY_ID_RE = re.compile(r"^[a-z]{2,3}-[0-9a-f]{26}$")
 
 
 def _is_entity_id(s: str) -> bool:
-    """Return True if *s* is an entity id: the prefixed _entity_name_id format
-    OR a bare ULID. Used by the about* wiring guards (create_entity event
-    branch) so ID-valued aboutSubject/aboutObject/aboutPoint/aboutDocument
-    props never hit the name-resolution fallback.
+    """Return True if *s* is shaped like an entity handle (an opaque id), not
+    a name: a bare ULID (canonical or Crockford) OR ``prefix-<hex digest>``.
 
-    Boundary: a NAME shaped exactly like ``[a-z]{2,3}-<26 lowercase hex>``
-    (e.g. ``ab-0123456789abcdef0123456789``) is classified as an id and skips
-    name resolution — vanishingly rare for human names and consistent with
-    the pre-existing bare-ULID/Crockford behavior."""
+    NOT a provenance test (#3586): a minted id and a legacy
+    ``obj-<sha26(name)>`` alias are shape-identical, so shape alone cannot say
+    which node — if any — a value addresses. Callers that need that answer MUST
+    resolve the value first (``_wire_about_value`` does) and use this predicate
+    only for the negative case: may an UNRESOLVED value be resolve-or-minted as
+    a name? See ``_ENTITY_ID_RE`` for why the spelling range is lenient.
+
+    Boundary: a NAME shaped like ``[a-z]{2,8}-<16..64 hex>`` (e.g.
+    ``ab-0123456789abcdef``) is classified as an id — vanishingly rare for
+    human names, and now REPORTED rather than silently dropped by the about*
+    seam."""
     return bool(_is_ulid(s) or _ENTITY_ID_RE.match(s))
+
+
+def _is_canonical_entity_id(s: str) -> bool:
+    """Return True if *s* is shaped like an id the minting surfaces EMIT — a
+    bare ULID or ``label[:3]-<sha256[:26]>`` (``_entity_name_id``) — and so
+    could address (and shadow) a real node.
+
+    The HARD-REJECTION predicate (``_check_refs`` fails the whole bundle closed
+    on a hit). Do NOT widen it to anticipate a future id format: that trades a
+    live, previously-accepted ingest for protection against a spelling no
+    minter produces and which therefore cannot shadow anything. The lenient
+    about*-seam predicate is ``_is_entity_id``."""
+    return bool(_is_ulid(s) or _CANONICAL_ENTITY_ID_RE.match(s))
+
+
+def _wire_about_value(proj, source_id: str, value, rel: str) -> bool:
+    """Wire ONE ``about*`` prop of a freshly-written Event; True iff an edge
+    was created.
+
+    **Provenance first (#3586).** ``create_about_edge`` resolves the value
+    against the id/eventId index WITHIN the label *rel* implies — the surfaces
+    a HANDLE comes from — so a value that resolves to a node of that label is
+    an id, whatever its spelling, and a value that resolves only to a
+    DIFFERENT label is refused here and falls through to the name path below
+    (it must not steal the rel from its intended target). Its result previously
+    went unread and a shape test decided instead, which took the wrong branch in
+    both directions:
+
+    * a resolvable value whose spelling the shape test did not recognize (a
+      minted id under a new format) fell through to the name fallback, which
+      found no node NAMED after the id and minted a stub — so the edge landed
+      on a junk Subject, not on the entity the caller named;
+    * an unresolvable id-shaped value fell through to that same fallback, whose
+      ``_mint_subject_stub`` made the identifier BOTH a name and an id;
+    * an unresolvable recognized-id was a silent no-op — no edge, no node, no
+      signal — which is how a cached legacy alias vanishes.
+
+    So: only a value that resolves to nothing can be a name, and only a value
+    that is not handle-shaped may then be resolve-or-minted as one. An
+    unresolvable handle is a stale/unknown reference and is REPORTED, never
+    minted — the #1917 precedent (a long id that does not resolve is never
+    stubbed; warn and skip, projection/edges.py) applied to the about* seam.
+
+    epic #2835 Stage 3: while legacy ``obj-<sha26(name)>`` aliases remain
+    resolvable they are shape-identical to minted ids, so the alias→id lookup is
+    the REQUIRED resolution branch here — extend the ``create_about_edge`` hop
+    below, never this shape predicate.
+    """
+    from .projection.edges import STRUCTURAL_REL_LABELS
+    # The rel names its target label; scope the resolution to it so a value that
+    # collides with ANOTHER label's id/eventId cannot win (review of #3586 —
+    # `aboutSubject="acme"` landing on the Event whose eventId is "acme" and
+    # dropping the intended Subject).
+    target_label = STRUCTURAL_REL_LABELS.get(rel)
+    if proj.create_about_edge(source_id, value, rel, target_label=target_label):
+        return True
+    if not isinstance(value, str):
+        return False
+    if _is_entity_id(value):
+        _logger.warning(
+            "create_entity: %s %r is handle-shaped but does not resolve to a "
+            "%s node — edge not created and no stub minted (an identifier "
+            "must not become a name, #3586)", rel, value,
+            target_label or "node")
+        return False
+    proj._create_about_edges(source_id, value)
+    return True
 
 
 def _content_hash(text: str) -> str:
@@ -2133,6 +2374,7 @@ def _capture_ep_target_ids(extracted: list[dict], proj) -> list[str]:
     return [r[0] for r in rows]
 
 
+@phased("belief")
 def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
                              warn=None) -> None:
     """W5 Phase C (#2104, indicator 3): EP-on-ingest for one capture.
@@ -2796,6 +3038,58 @@ HOLDS_ROLE_UNAVAILABLE = (
 )
 
 
+def _derive_graph_name(*, namespace: str | None,
+                       graph_name: str | None,
+                       uri_graph: str | None = None) -> str:
+    """The SDK's ONE namespace/graph_name → DB graph-name derivation.
+
+    Extracted from ``_get_proj`` (#4240 review F2) so a caller that must name
+    the graph OUTSIDE a projection derives it identically instead of
+    re-implementing the branches. The hosted lane's per-graph journal path is
+    exactly such a caller: a second derivation there would key the journal to a
+    graph the SDK never opens (a rebuild would replay the wrong file), and the
+    branches are not obvious — ``namespace="test-foo"`` opens
+    ``test_foo_tortoise``, NOT ``org_test-foo``.
+
+    Precedence is unchanged from ``_get_proj`` (in order): registry control
+    plane → explicit ``graph_name`` verbatim → namespace (test_*/
+    tortoise_test* → ``{ns}_tortoise``, hyphenated test-* → normalized to
+    ``test_<ns>_tortoise``, otherwise ``org_{ns}``) → the URI's own graph,
+    else ``tortoise``.
+    """
+    if namespace == "registry":
+        # Control-plane SDK: shared registry main graph.
+        return "registry_tortoise"
+    if graph_name is not None:
+        # C5 #2114 (D-C5-1): explicit graph-name override (a custom
+        # org_{tid}_{gid} graph). Never a namespace derivation — the name is
+        # used verbatim.
+        return graph_name
+    if namespace:
+        if namespace.startswith(("test_", "tortoise_test")):
+            # Test namespace: isolate on a test-prefixed graph so the
+            # _assert_test_graph guard still passes (#221). Matches the
+            # historical {ns}_tortoise naming.
+            return f"{namespace}_tortoise"
+        if namespace.startswith("test-"):
+            # Epic #1647 (T7, cycle-5 P1-5): the hyphenated test-* family
+            # (test-tiers, test-invites, test-hosted, test-e1, test-org-722,
+            # ...) is a TEST namespace too — normalize '-' → '_' so it maps to
+            # the guard-passing test_<ns>_tortoise graph (test-tiers →
+            # test_tiers_tortoise). Without the branch it falls into org_<ns>
+            # (org_test-tiers) — a NON-test graph that is invisible to
+            # `grep -v 'namespace="test_'` and fails _assert_test_graph on
+            # bulk wipe.
+            return f"{namespace.replace('-', '_')}_tortoise"
+        # Org SDK: isolated org graph (matches provision's org_{org_id}
+        # namespace creation, #7886).
+        return f"org_{namespace}"
+    # No namespace: honor the URI's own graph (the conftest session graph for
+    # tests). Fixes #7886 regression that hardcoded 'tortoise' and clobbered
+    # the test graph.
+    return uri_graph or "tortoise"
+
+
 def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
                           stored_vf, successor_created_at, now):
     """Resolve the predecessor's window END and refuse an inverted window (#4021).
@@ -3046,6 +3340,12 @@ class TortoiseSDK:
         self._graph_name = graph_name
         self._event_log_path = event_log_path
         self._event_log = None  # lazy-init EventLog (#548)
+        # #4240 review F1: count journal appends that failed on a CONFIGURED
+        # journal. A configured journal that cannot record makes the derived
+        # graph live-only, so a failure is a real degradation — it is counted
+        # (monitoring.record_journal_write_failure) and disclosed on the next
+        # capture receipt instead of being only a log line.
+        self._journal_write_failures = 0
         # Epic #900 §5.3 (cycle-21): cross-process embedded overlap probe —
         # fail-fast when another PROCESS holds this embedded store (redislite
         # pid-registry + liveness probe). Same-process threads reuse the daemon
@@ -3166,40 +3466,9 @@ class TortoiseSDK:
                 from urllib.parse import urlparse
                 uri_graph = urlparse(self._db_uri).path.lstrip('/') or "tortoise"
 
-            if self._namespace == "registry":
-                # Control-plane SDK: shared registry main graph.
-                graph_name = "registry_tortoise"
-            elif self._graph_name is not None:
-                # C5 #2114 (D-C5-1): explicit graph-name override (a custom
-                # org_{tid}_{gid} graph). Never a namespace derivation — the
-                # name is used verbatim.
-                graph_name = self._graph_name
-            elif self._namespace:
-                if self._namespace.startswith(("test_", "tortoise_test")):
-                    # Test namespace: isolate on a test-prefixed graph so the
-                    # _assert_test_graph guard still passes (#221). Matches the
-                    # historical {ns}_tortoise naming.
-                    graph_name = f"{self._namespace}_tortoise"
-                elif self._namespace.startswith("test-"):
-                    # Epic #1647 (T7, cycle-5 P1-5): the hyphenated test-*
-                    # family (test-tiers, test-invites, test-hosted, test-e1,
-                    # test-org-722, ...) is a TEST namespace too — normalize
-                    # '-' → '_' so it maps to the guard-passing
-                    # test_<ns>_tortoise graph (test-tiers →
-                    # test_tiers_tortoise). Without the branch it falls
-                    # into org_<ns> (org_test-tiers) — a NON-test graph that
-                    # is invisible to `grep -v 'namespace="test_'` and fails
-                    # _assert_test_graph on bulk wipe.
-                    graph_name = f"{self._namespace.replace('-', '_')}_tortoise"
-                else:
-                    # Org SDK: isolated org graph (matches provision's
-                    # org_{org_id} namespace creation, #7886).
-                    graph_name = f"org_{self._namespace}"
-            else:
-                # No namespace: honor the URI's own graph (the conftest
-                # session graph for tests). Fixes #7886 regression that
-                # hardcoded 'tortoise' and clobbered the test graph.
-                graph_name = uri_graph or "tortoise"
+            graph_name = _derive_graph_name(
+                namespace=self._namespace, graph_name=self._graph_name,
+                uri_graph=uri_graph)
             if self._db_uri is not None:
                 # Multi-tenant isolation (#7886): pass the namespaced graph
                 # name so tenants never share the URI's default graph.
@@ -3657,8 +3926,35 @@ class TortoiseSDK:
             # not crash the caller or pretend the write failed. Rebuild parity
             # is best-effort here: rebuild_all's graph snapshot catches any
             # point missing from the log on the next rebuild (#548).
-            _logger.warning(
-                "failed to append %s event to SDK log %s: %s",
+            #
+            # #4240 review F1: on a CONFIGURED journal that posture is the
+            # silent-live-only hazard the journal exists to close, so the
+            # failure must not be a bare WARNING. Never raise (the write
+            # succeeded, and raising would hand the caller a failure for it),
+            # but count it (`monitoring.record_journal_write_failure`, carried
+            # by ``monitoring.metrics()``) and return it to the caller through
+            # ``capture_session``'s receipt warning below.
+            # Residual (deliberate, recorded on #5612): a journal that starts
+            # failing AFTER the entrypoint's boot-time writability probe — the
+            # probe catches a NON-ROOT mode-bit failure and EROFS/ENOSPC on any
+            # uid, but NOT a mode-bit failure under root (the image has no USER,
+            # so on Fly the process is uid 0; F1 cycle 2) — is still fail-soft.
+            # The foreseeable trigger is ENOSPC once the journal has grown below
+            # the volume's free space. The record is lost
+            # from the journal, `rebuild_all` reconstructs only what the
+            # journal holds (so a later rebuild cannot restore that write), and
+            # the ONLY signals are this ERROR log, the failure counter and the
+            # capture-receipt warning. It is not fatal by design: the graph
+            # mutation stands, and failing the request would lose a write that
+            # actually persisted.
+            self._journal_write_failures += 1
+            try:  # noqa: SIM105 — counting must never mask the original error
+                monitoring.record_journal_write_failure()
+            except Exception:  # noqa: BLE001, RUF100
+                pass
+            _logger.error(
+                "failed to append %s event to SDK log %s: %s — the write is "
+                "LIVE-ONLY and will not survive a rebuild (#4240)",
                 type_, self._event_log_path, exc,
             )
 
@@ -4454,6 +4750,7 @@ class TortoiseSDK:
             return {"session_id": session_id, "ok": False, "error": str(e),
                     "payload": payload, "guards": guards, "delta": delta}
 
+    @counts_capture_ops
     def capture_session(
         self,
         conversation: list[dict[str, str]],
@@ -4537,6 +4834,13 @@ class TortoiseSDK:
         proj = self._get_proj()
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
+        # #5632: snapshot the LIFETIME journal-failure counter at the START of
+        # THIS capture. The receipt below must disclose only appends that
+        # failed DURING it — a failure from an earlier, unrelated write on this
+        # SDK used to make every later capture falsely report itself
+        # live-only, forever. The counter itself stays lifetime (monitoring
+        # reads it; no other consumer changes).
+        _journal_failures_before = self._journal_write_failures
 
         if len(conversation) > max_turns:
             # #2335 WI-1c: the self-host turn-cap refusal is a structured
@@ -5259,6 +5563,22 @@ class TortoiseSDK:
         if _capture_redactions:
             extraction_warnings.append(
                 _capture_redaction_warning(_capture_redactions))
+        # #4240 review F1: a journal append that failed during this capture is
+        # disclosed on the receipt. ``ok`` stays True — the graph write
+        # succeeded, and flipping it would mark the capture failed, which the
+        # #2335 TRUE-retry gate would then RE-RUN (duplicating extraction) over
+        # a write that was in fact persisted. Additive and present only when
+        # non-zero, so an ordinary capture's warning list is unchanged. The same
+        # failure also increments ``tortoise_journal_write_failures_total``
+        # (monitoring) and logs at ERROR — a receipt alone is only seen by the
+        # caller of a capture that happened to fail. #5632: the count is THIS
+        # capture's DELTA (``_journal_failures_before``), not the lifetime
+        # counter — an earlier failed write is not this capture's residue.
+        _capture_journal_failures = (
+            self._journal_write_failures - _journal_failures_before)
+        if _capture_journal_failures > 0:
+            extraction_warnings.append(
+                _journal_write_failure_warning(_capture_journal_failures))
         resp = {
             "session_id": session_id,
             "turns": len(conversation),
@@ -5353,6 +5673,7 @@ class TortoiseSDK:
             _logger.warning("capture_observation emit failed: %s", e)
         return resp
 
+    @phased("extract")
     def _extract_session_llm(
         self,
         conversation: list[dict[str, str]],
@@ -5596,6 +5917,7 @@ class TortoiseSDK:
                 zip(_CAPTURE_PASSTHROUGH_ORDER, rows[0], strict=True)
                 if v is not None}
 
+    @phased("extract")
     def _extract_session_v2(
         self,
         conversation: list[dict[str, str]],
@@ -5698,8 +6020,8 @@ class TortoiseSDK:
         # `event_log_path` (a journal-less SDK's `_emit_event` is a no-op).
         # The claim → Object edges below are routed through the shared
         # journaled writer, so they survive rebuild_all when such a journal is
-        # configured — without one they stay live-only (the hosted lane's
-        # `_make_sdk`/`_data_sdk` set no `event_log_path`). The SESSION-level
+        # configured — without one they stay live-only (a hosted SDK built with
+        # `TORTOISE_EVENT_LOG_BASE_DIR` unset has no journal; #4240). The SESSION-level
         # attachment is owned by the
         # conversation-reference link pass (session_link.link_session_entities,
         # WorkItem Objects) — deliberately NOT the extractor's per-claim
@@ -6520,6 +6842,51 @@ class TortoiseSDK:
         elif "embedding" in props:
             props["embedding_verbatim"] = None
 
+        # #4208: a content edit must recompute the DERIVED vector in the SAME
+        # write, exactly as it already recomputes the derived `content_hash`
+        # (#1904). Before this, `update_point(content=B)` left the node holding
+        # content B with `vec(A)` — the dense leg then ranked it by text no
+        # longer on the node, and live != rebuild, because the replay's
+        # `_revise_point` DOES re-encode. Same rule as the hash, and the same
+        # rule #19 set for the revise fold: recompute from the new content, or
+        # WIPE it when the embedder is unavailable (`None`) — never preserve a
+        # vector the new content did not produce (a vector for different text
+        # is worse than none). #4194/#4280: route through `encode_for_store`
+        # (the store-width-declaring seam) so the stored width matches the
+        # Point HNSW index this store created; the seam is still
+        # `compute_embedding` (module global), so installed doubles intercept.
+        #
+        # A CALLER-supplied vector is deliberately NOT recomputed: the caller
+        # owns that write, the verbatim marker above already describes it, and
+        # the record/replay treatment of a caller vector on a revise is the
+        # separate declared gap #5046. Gated on the KEY, so this fires only
+        # when the caller supplied none.
+        _derived_embedding = False
+        _new_content = props.get("content")
+        if ("content" in props and "embedding" not in props
+                and _new_content is not None):
+            # `_new_content is not None` mirrors `_revise_point`'s own boundary
+            # — a `None` new_content is "no content edit" there, so it must not
+            # derive (or wipe) a vector either.
+            try:
+                from .embeddings import encode_for_store
+                props["embedding"] = (
+                    encode_for_store(_new_content, proj.required_embedding_dim)
+                    if _new_content else None)
+            except Exception:
+                props["embedding"] = None
+            _derived_embedding = True
+            # #5238 review P3: the vector just derived is NOT caller-owned, so
+            # a node that previously held a CALLER-supplied vector (and still
+            # carries `embedding_verbatim=true`) must have that marker cleared —
+            # exactly as the `embedding=None` path above does. Left set, the
+            # node advertises a SERVER-derived vector as caller-owned: the
+            # marker selects raw-vs-`vecf32` storage on every later re-emit and
+            # flips the consistency comparison to an exact-float compare, while
+            # a rebuild drops it (`_revise_point` re-encodes and never reads
+            # the marker) — live != rebuild, the round-6 false-verbatim class.
+            props["embedding_verbatim"] = None
+
         # #49 Phase 2: context is REMOVED — raise TypeError if passed
         if "context" in props:
             raise TypeError(
@@ -6619,7 +6986,17 @@ class TortoiseSDK:
         # #548: emit PointRevised event for rebuild parity
         # #1904: content_hash is derived from content — keep it out of the
         # event record (mirrors create_point's snapshot strip at emit).
-        emit_props = {k: v for k, v in props.items() if k != "content_hash"}
+        # #4208: the vector this path just DERIVED from the content is stripped
+        # for the same reason — it is not owned by this record. The replay's
+        # `_revise_point` re-encodes from `new_content`, so a journalled copy
+        # would be dead weight, and #5004's presence-is-ownership rule would
+        # read the key as a producer claim the replay does not honour (the
+        # #5046 shape). A CALLER-supplied vector stays in the record, as before.
+        emit_props = {
+            k: v for k, v in props.items()
+            if k != "content_hash"
+            and not (_derived_embedding and k == "embedding")
+        }
         self._emit_event("PointRevised", id=id,
                          new_content=props.get("content"), **emit_props)
         return result
@@ -9344,7 +9721,15 @@ class TortoiseSDK:
         """Check 3 (ref-table half) — duplicate refs across the whole bundle
         and node-id-shadowing rejection: a ref shaped like a real node id —
         a bare ULID OR a prefixed entity id (e.g. ``sub-<hex26>``, #1553) —
-        would make refs.get(x, x) silently address an existing node."""
+        would make refs.get(x, x) silently address an existing node.
+
+        #3586: rejection fails the WHOLE bundle closed, so this check uses the
+        STRICT canonical predicate (``_is_canonical_entity_id``): only a shape
+        a minting surface can actually emit is rejected. The lenient about*-
+        seam predicate (``_is_entity_id``) is deliberately broader, and sharing
+        it here hard-rejected previously-valid refs whose digest is not a
+        canonical id (``pr-<hex16>``) — an id no minter produces, and which
+        therefore cannot shadow anything."""
         seen: dict[str, str] = {}
         for section in ("sources", "points", "entities"):
             for i, item in enumerate(bundle.get(section) or []):
@@ -9353,7 +9738,7 @@ class TortoiseSDK:
                 ref = item.get("ref")
                 if not ref:
                     continue
-                if _is_entity_id(str(ref)):
+                if _is_canonical_entity_id(str(ref)):
                     violations.append({
                         "section": section, "index": i,
                         "message": f"ingest: {section}[{i}] ref {ref!r} is "
@@ -15354,6 +15739,10 @@ class TortoiseSDK:
         _elevated_timeout_ms: int | None = None,
         pool_size: int | None = None,
         leg_trace: list[dict] | None = None,
+        # B6 (#3892): the read-path status sink — one of the four recorded terms
+        # (tortoise.read_status). Caller-owned and opt-in, exactly like
+        # ``leg_trace``; default None = not computed, byte-identical behavior.
+        read_status_out: dict | None = None,
         recency_field: str | None = None,
         recency_boost: float = 0.0,
         keep_numeric: bool = False,
@@ -15381,9 +15770,15 @@ class TortoiseSDK:
         entity_type: 'point' (default), 'event', 'subject', 'document', 'object', 'operator', or 'source'.
         Full-scan mode: omit query, set kind → all Points of that kind.
         Best-match mode: provide query → RRF fusion of FTS + vector + structural.
-        include_terminal (#1391): default False — terminal-status Points
-        (retracted, superseded, outdated, archived) are excluded from the
-        BASE retrieval; pass True to surface them (audit/history queries).
+        include_terminal (#1391, #3301): default False — terminal-status
+        nodes are excluded from the BASE retrieval. For Points that is
+        ``live.TERMINAL_EXCLUDED_STATUSES`` (retracted, superseded, outdated,
+        archived, deprecated); for Objects it is the canonical OBJECT
+        vocabulary (superseded, deprecated, archived, retracted — no
+        ``outdated`` flag, which no Object writer sets). Pass
+        True to surface them (audit/history queries); a prior/resolution leg
+        that must still SEE a terminal node (link-before-create, anchor
+        resolution) opts in here too.
 
         pool_size: EXACT per-strategy retrieval depth override (benchmark/tests).
         Precedence: pool_size > TORTOISE_POOL_FLOOR env > the baked floor
@@ -15427,6 +15822,18 @@ class TortoiseSDK:
             ``fallback`` entry is appended last on every early-return branch
             (snapshot TF-IDF path, legacy fallback_tfidf path, non-point
             return []). Default None = no trace, byte-identical behavior.
+        read_status_out (B6 #3892): the read-path status contract — when
+            provided, the dict receives ``{"status": <term>}`` with ONE of the
+            four recorded terms (``tortoise.status_vocabulary``, consumed by
+            ``tortoise.read_status``): ``available`` (reached, hits), ``empty``
+            (reached, nothing matched), ``degraded`` (the memory layer is
+            impaired — the store is configured but could not be reached, or it
+            answered while a leg did not run, e.g. the embedder is absent so
+            the dense leg was skipped, the #2573/#2898 class), or
+            ``unconfigured`` (NO store/endpoint was declared — returned as a
+            status, NEVER as an empty result and never as an exception).
+            Caller-owned opt-in sink, the same pattern as ``leg_trace``;
+            default None = not computed, no probe, byte-identical behavior.
         structural_kind (R4 #1543): keyword-only, default None — the kind
             passed to the STRUCTURAL strategy only (kind-scan), WITHOUT
             triggering the post-retrieval kind filter. Deliberately distinct
@@ -15520,6 +15927,14 @@ class TortoiseSDK:
             enrich_items as w4_enrich_items,
             w4_enrichment_enabled,
         )
+        # B6 (#3892): the recorded vocabulary's ONE home is
+        # ``tortoise/status_vocabulary.py``; ``tortoise/read_status.py`` is the
+        # read-path consumer of it and this method consumes that — it mints no
+        # terms of its own.
+        from .read_status import (
+            STATUS_DEGRADED as _STATUS_DEGRADED,
+            classify_leg_trace as _classify_leg_trace,
+        )
 
         if entity_type not in ("point", "event", "subject", "document", "object", "operator", "source"):
             raise ValueError(f"entity_type must be 'point', 'event', 'subject', 'document', 'object', 'operator', or 'source', got {entity_type!r}")
@@ -15535,8 +15950,72 @@ class TortoiseSDK:
         if order_by not in ("relevance", "confidence", "graph"):
             raise ValueError(f"order_by must be 'relevance', 'confidence', or 'graph', got {order_by!r}")
 
-        proj = self._get_proj()
+        # B6 (#3892): the status sink and the trace used to classify it. When
+        # no status is requested this is exactly today's ``leg_trace`` (None
+        # unless the caller passed one) — byte-identical behavior. When a
+        # status IS requested the classification gets its OWN per-call trace,
+        # so one leg's entries can never answer for another (recall_state
+        # classifies its Point and Object legs separately) while the caller's
+        # ``leg_trace`` still receives every entry it used to.
+        status_trace: list[dict] | None = leg_trace
+        if read_status_out is not None:
+            status_trace = []
+            _caller_trace = leg_trace
+        else:
+            _caller_trace = None
+
+        def _with_read_status(rows: list[dict]) -> list[dict]:
+            """Attach the recorded read status when the caller asked for it.
+
+            With a sink, EVERY call happens after the projection was obtained
+            AND the bounded reachability probe answered — a probe failure or a
+            `_get_proj()` failure returns before any of these paths. So the
+            store is known to be DECLARED and to have ANSWERED, and
+            ``configured=True`` / ``reached=True`` are facts, not defaults.
+            """
+            if read_status_out is not None:
+                read_status_out["status"] = _classify_leg_trace(
+                    status_trace or (), hit_count=len(rows),
+                    configured=True,
+                    reached=True)
+                if _caller_trace is not None and _caller_trace is not status_trace:
+                    _caller_trace.extend(status_trace or ())
+            return rows
+
+        try:
+            proj = self._get_proj()
+        except Exception:
+            if read_status_out is not None:
+                # A store that will not OPEN is `degraded` (off by OUTAGE):
+                # `_auto_health_recover()` raises when a declared server is
+                # unreachable or a declared embedded file cannot be read. This
+                # SDK always resolves a store TARGET — a server URI, or the
+                # canonical embedded path via `resolve_db_path()` and
+                # `FalkorProjection`'s no-arg fallback — so there is no
+                # "never declared" state here to report as `unconfigured`
+                # (off by policy, a set-up gap the engine does not have).
+                # Never an empty result, and never a raise.
+                read_status_out["status"] = _STATUS_DEGRADED
+                return []
+            raise
         graph = proj.g
+        if read_status_out is not None:
+            # The store is configured; prove it ANSWERS before claiming
+            # anything about its contents. BOUNDED like every other read query
+            # — an unbounded probe would let a wedged store stall the read it
+            # annotates.
+            try:
+                graph.query("RETURN 1", timeout=int(_elevated_timeout_ms or 500))
+            except Exception as e:  # noqa: BLE001, RUF100
+                # The store IS configured (the projection object was obtained
+                # just above) but did not answer: off by OUTAGE — `degraded`,
+                # never `unconfigured` (which is reserved for a store that was
+                # never declared) and never an empty result.
+                _logger.warning(
+                    "read path cannot reach the configured store (%s) — "
+                    "degraded", e)
+                read_status_out["status"] = _STATUS_DEGRADED
+                return []
         # D10 (ONTOLOGY v3.15 §4.4): a document IS a :Source — there is no
         # :Document graph label, so post-retrieval Cypher must never address
         # one. Mirrors tortoise/search_engine.py's legs (the caller-facing
@@ -15586,11 +16065,11 @@ class TortoiseSDK:
                     query_vec = model.encode([_dense_query])[0].tolist()
                 except Exception:  # noqa: BLE001, RUF100
                     _vec_reason = "encode_failed"
-        if _vec_reason is not None and leg_trace is not None:
+        if _vec_reason is not None and status_trace is not None:
             # Recorded at the source (the strategy is never submitted) —
             # BEFORE degradation_chain merges its own entries, so the
             # vector entry always precedes the fts/structural merge.
-            leg_trace.append(_trace_entry(
+            status_trace.append(_trace_entry(
                 "vector", ran=False, degraded=True,
                 reason=_vec_reason, count=0))
 
@@ -15644,7 +16123,7 @@ class TortoiseSDK:
             # lets run_vector_query skip the failing signature attempt.
             vector_index_api=getattr(proj, "_vector_index_api", None),
             excluded_statuses=() if include_terminal else None,
-            leg_trace=leg_trace,
+            leg_trace=status_trace,
             # A1 (#2070): the ask-lane numeric-token policy threads into the
             # sparse leg's OR-union (default False = search lane unchanged).
             keep_numeric=keep_numeric,
@@ -15664,7 +16143,12 @@ class TortoiseSDK:
                     leg_trace.append(_trace_entry(
                         "fallback", ran=False, degraded=False,
                         reason="relevance_floor_empty", count=0))
-                return []
+                # A REACHED store that answered with nothing relevant is still
+                # an ANSWER — it must report a term like every other
+                # data-returning path here. The hosted route indexes
+                # ``status_out["status"]`` unguarded, so a missing term is a
+                # 500, not a null.
+                return _with_read_status([])
             # All strategies failed — fallback to in-memory TF-IDF (Point only).
             if query and entity_type == "point":
                 # #1375: serve from the cached lean corpus snapshot when
@@ -15687,11 +16171,12 @@ class TortoiseSDK:
                         exclude_status=exclude_status,
                         include_terminal=include_terminal,
                     )
-                    if leg_trace is not None:
-                        leg_trace.append(_trace_entry(
+                    if status_trace is not None:
+                        status_trace.append(_trace_entry(
                             "fallback", ran=True, degraded=True,
                             reason="tfidf_snapshot", count=len(snap_hits)))
-                    return _decorate_fallback_hits(snap_hits, graph)
+                    return _with_read_status(
+                        _decorate_fallback_hits(snap_hits, graph))
                 points = self.query(kind=kind,
                                     include_retracted=include_terminal)
                 if exclude_status and points:
@@ -15702,16 +16187,17 @@ class TortoiseSDK:
                     points = [p for p in points
                               if (p.get("status") or "") not in set(exclude_status)]
                 legacy_hits = fallback_tfidf(query, points, limit=limit)
-                if leg_trace is not None:
-                    leg_trace.append(_trace_entry(
+                if status_trace is not None:
+                    status_trace.append(_trace_entry(
                         "fallback", ran=True, degraded=True,
                         reason="tfidf_legacy", count=len(legacy_hits)))
-                return _decorate_fallback_hits(legacy_hits, graph)
-            if leg_trace is not None:
-                leg_trace.append(_trace_entry(
+                return _with_read_status(
+                    _decorate_fallback_hits(legacy_hits, graph))
+            if status_trace is not None:
+                status_trace.append(_trace_entry(
                     "fallback", ran=True, degraded=True,
                     reason="no_fallback_applicable", count=0))
-            return []
+            return _with_read_status([])
 
         # R4 (#1543): 1-2 hop IMPL/NAND expansion on TEXT hits (graph as
         # recall amplifier — graphiti episode-mentions pattern). Folds into
@@ -15755,7 +16241,7 @@ class TortoiseSDK:
                 query, raw_results["fts"],
                 str_limit=str_limit,
                 excluded_statuses=() if include_terminal else None,
-                leg_trace=leg_trace,
+                leg_trace=status_trace,
                 # P1-fix (#2070): the second pass respects the caller's A1
                 # keep_numeric — an operator who opted OUT of numeric tokens
                 # must not have them silently re-introduced by the PRF pass
@@ -15785,7 +16271,7 @@ class TortoiseSDK:
                 query, raw_results["fts"],
                 str_limit=str_limit,
                 excluded_statuses=() if include_terminal else None,
-                leg_trace=leg_trace,
+                leg_trace=status_trace,
                 # the anchor + alias tokenization honors the caller's A1
                 # numeric policy (same posture as the A4 P1-fix).
                 keep_numeric=keep_numeric,
@@ -16298,7 +16784,7 @@ class TortoiseSDK:
             if entity_type == "point" and w4_enrich \
                     and w4_enrichment_enabled():
                 ranked = w4_enrich_items(proj, ranked)
-            return ranked
+            return _with_read_status(ranked)
         if order_by == "confidence":
             # #25/#2206/#2286: sort by the PERSISTED EP belief mean α/(α+β)
             # that ep.confidence_mean carries. GraphRanker reads the
@@ -16323,7 +16809,7 @@ class TortoiseSDK:
         if entity_type == "point" and w4_enrich \
                 and w4_enrichment_enabled():
             out = w4_enrich_items(proj, out)
-        return out
+        return _with_read_status(out)
 
     # ── A4 (#2070): search_keys PRF expansion (ask lane) ──────────────────
 
@@ -16488,7 +16974,12 @@ class TortoiseSDK:
             anchor_rows = run_fts_query(
                 proj.g, query, entity_type="object",
                 limit=_ENTITY_ANCHOR_CANDIDATES,
-                keep_numeric=keep_numeric)
+                keep_numeric=keep_numeric,
+                # #3301: anchor RESOLUTION only — these ids/names are never
+                # surfaced to a caller, so terminal Objects must stay
+                # resolvable as anchors (the assembly-resolver principle);
+                # only the surfaced search legs hide them by default.
+                excluded_statuses=())
         except Exception:
             _logger.warning(
                 "C2 anchor resolution failed — keeping the original fts "
@@ -16784,6 +17275,10 @@ class TortoiseSDK:
         object_centric: bool = True,
         state_ranker=None,
         leg_trace: list[dict] | None = None,
+        # B6 (#3892): the read-path status sink — the coalesced status of the
+        # composite (Points + Objects) read. Same opt-in caller-owned pattern
+        # as ``leg_trace``; default None = not computed, byte-identical.
+        read_status_out: dict | None = None,
     ) -> list[dict]:
         """UC1 "state" recall (epic #898 Wave A) — what is true and
         high-confidence right now.
@@ -16828,8 +17323,27 @@ class TortoiseSDK:
             :func:`tortoise.search_engine.declared_degraded_read` (declare the
             single-leg read) or :func:`tortoise.search_engine.require_hybrid_read`
             (fail loud) — see also :meth:`retrieval_legs`.
+        read_status_out (B6 #3892): the read-path status contract — when
+            provided, the dict receives ``{"status": <term>}`` with ONE of the
+            four recorded terms (``tortoise.status_vocabulary``, consumed by
+            ``tortoise.read_status``) for the WHOLE composite read:
+            ``available`` / ``empty`` / ``degraded`` / ``unconfigured``. The
+            Point and Object legs each classify their own read and the two are
+            coalesced so that a leg that reached the store makes the composite
+            ``degraded`` (incomplete) rather than ``unconfigured`` — a store's
+            configuration is one global fact, so the reached leg proves it was
+            declared; ``unconfigured`` wins only when NO leg reached the
+            store. A read that returned rows can therefore never report
+            ``unconfigured`` alongside them. Caller-owned opt-in sink; default
+            None = not computed, byte-identical behavior.
         """
         from .ranking import StateRanker
+        from .read_status import (
+            STATUS_AVAILABLE,
+            STATUS_DEGRADED,
+            STATUS_EMPTY,
+            combine_read_statuses,
+        )
 
         if limit < 1 or limit > 10000:
             raise ValueError(f"limit must be 1-10000, got {limit}")
@@ -16841,7 +17355,16 @@ class TortoiseSDK:
         if not 0.0 <= centrality_weight <= 1.0:
             raise ValueError(f"centrality_weight must be 0-1, got {centrality_weight}")
 
-        proj = self._get_proj()
+        try:
+            proj = self._get_proj()
+        except Exception:
+            if read_status_out is not None:
+                # A store that will not OPEN is `degraded` (off by outage);
+                # `unconfigured` (off by policy) is not reachable from this
+                # SDK, which always resolves a store target. Never a raise.
+                read_status_out["status"] = STATUS_DEGRADED
+                return []
+            raise
         ranker = state_ranker or StateRanker(
             proj,
             relevance_exp=relevance_exp,
@@ -16859,6 +17382,13 @@ class TortoiseSDK:
         # superseded/deprecated are excluded here unless include_superseded.
         exclude_status = None if include_superseded else sorted(
             self.STATE_EXCLUDED_STATUS - {"retracted"})
+        # B6 (#3892): per-leg status sinks, combined into one after both reads.
+        # None when no status was requested, so the calls stay byte-identical.
+        _point_status: dict | None = None
+        _object_status: dict | None = None
+        if read_status_out is not None:
+            _point_status = {}
+            _object_status = {}
         point_results = self.tortoise_fts_query(
             query, kind=kind, entity_type="point", limit=pool,
             exclude_status=exclude_status,
@@ -16870,11 +17400,14 @@ class TortoiseSDK:
             w4_enrich=False,
             # #2985: observational only — the call is byte-identical when
             # leg_trace is None (the product default).
-            leg_trace=leg_trace)
+            leg_trace=leg_trace,
+            read_status_out=_point_status)
         object_results = (
             self.tortoise_fts_query(
                 query, kind=kind, entity_type="object", limit=pool,
-                leg_trace=leg_trace)
+                include_terminal=include_superseded,
+                leg_trace=leg_trace,
+                read_status_out=_object_status)
             if object_centric else []
         )
         # #1350: Object status filter (decision 2a — completed/in_progress
@@ -16882,9 +17415,12 @@ class TortoiseSDK:
         # from the state view unless include_superseded brings them back).
         objects = [dict(r, entity_type="object") for r in object_results]
         if not include_superseded:
+            # #3301: ONE canonical OBJECT vocabulary — the same set
+            # ``search_engine._status_vocab_for("Object")`` feeds the four
+            # search legs. Never re-literal it here.
             objects = [o for o in objects
-                       if (o.get("status") or "") not in
-                       ("superseded", "deprecated", "archived", "retracted")]
+                       if (o.get("status") or "")
+                       not in _OBJECT_TERMINAL_STATUSES]
 
         # UC1 state view: hide mitigation bookkeeping points (they are
         # surfaced ATTACHED to results as context, not standalone claims —
@@ -16955,6 +17491,26 @@ class TortoiseSDK:
                 out = [by_id.get(i["id"], i) for i in out]
         except Exception as e:  # noqa: BLE001, RUF100 — fail-open
             _logger.warning("W4 enrichment failed (recall_state): %s", e)
+        if read_status_out is not None:
+            # B6 (#3892): the composite is derived AFTER the pipeline, from the
+            # rows the caller actually RECEIVES. The filters, the rerank and
+            # the `min_confidence` floor can drop every candidate the legs
+            # returned, and `available` ("reached AND returned content") must
+            # never describe an empty result — the same rule
+            # `tortoise_fts_query` applies to its final row list.
+            _composite = combine_read_statuses(
+                (_point_status or {}).get("status"),
+                (_object_status or {}).get("status"))
+            if _composite is None:
+                # Defect guard, not a state: every leg's return path writes
+                # its own term (see ``_with_read_status``), so a None
+                # composite means one path escaped that contract. Never emit
+                # ``null`` under the four-term vocabulary — describe the read
+                # the caller RECEIVES instead.
+                _composite = STATUS_AVAILABLE if out else STATUS_EMPTY
+            if _composite == STATUS_AVAILABLE and not out:
+                _composite = STATUS_EMPTY
+            read_status_out["status"] = _composite
         return out
 
     def retrieval_legs(
@@ -19697,22 +20253,13 @@ class TortoiseSDK:
                 is_episodic=is_episodic)
             proj = self._get_proj()
             if about_subject:
-                proj.create_about_edge(eid, about_subject, "aboutSubject")
-                # Only name-resolve if it looks like a plain name, not an ID
-                if isinstance(about_subject, str) and not _is_entity_id(about_subject):
-                    proj._create_about_edges(eid, about_subject)
+                _wire_about_value(proj, eid, about_subject, "aboutSubject")
             if about_object:
-                proj.create_about_edge(eid, about_object, "aboutObject")
-                if isinstance(about_object, str) and not _is_entity_id(about_object):
-                    proj._create_about_edges(eid, about_object)
+                _wire_about_value(proj, eid, about_object, "aboutObject")
             if about_point:
-                proj.create_about_edge(eid, about_point, "aboutPoint")
-                if isinstance(about_point, str) and not _is_entity_id(about_point):
-                    proj._create_about_edges(eid, about_point)
+                _wire_about_value(proj, eid, about_point, "aboutPoint")
             if about_document:
-                proj.create_about_edge(eid, about_document, "aboutDocument")
-                if isinstance(about_document, str) and not _is_entity_id(about_document):
-                    proj._create_about_edges(eid, about_document)
+                _wire_about_value(proj, eid, about_document, "aboutDocument")
         elif t == "document":
             documentKind = props.pop("documentKind", None)
             if not documentKind:

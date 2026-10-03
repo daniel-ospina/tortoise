@@ -99,7 +99,7 @@ TDD per step. All paths relative to the worktree root. The design behind each ta
 
 1. Add the file with a single placeholder test asserting `True`.
 2. Register it: a surface row in `config/ci-surfaces.yml`; its stem in `config/ci-surfaces.yml::carve_out`, `tests/_embedded.py::TEST_NO_REDIRECT_STEMS`, **and** the hand-maintained `expected` frozenset in `tests/test_markers.py::test_no_redirect_stems_registry_exact` (the `test_ci_selection` mirror is *derived*, so only the literal catches a one-sided add); add to `RAW_EMBEDDED_ALLOWLIST` if raw construction.
-3. Verify: `python3 tools/ci_selection.py --integrity` clean; `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_ci_selection.py tests/test_markers.py -q` passes.
+3. Verify: `uv run python tools/ci_selection.py --integrity` clean; `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_ci_selection.py tests/test_markers.py -q` passes.
 4. Commit.
 
 ### Task 1: Registry, validators, and the cycle-safe accessor
@@ -369,7 +369,7 @@ Real-writer end-to-end (proves the writers' shapes are registry-consistent, not 
 6. `tests/test_durability_posture.py` (docs gate) + `tests/test_embedded_durability_claim.py`
 7. `uv lock --check`
 8. **Cycle check** (P1 from solution-verify cycle 2): `uv run python -c "import tortoise.projection"` and `uv run python -c "import tortoise.sdk"` must both succeed — the registry's lazy import must not create the projection → pack_state → sdk → projection cycle. Also `python -c "import tortoise.pack_manifest_store"`.
-9. **Surface gates the change can trip (Phase 7 review findings):** `uv run python tools/sdk_rename_table.py --check` — Step 9 keeps the two SDK delegates private precisely because a public method with no canonical row reddens this; and `python3 tools/ci_selection.py --integrity` — Step 9b registers the new test file, without which this merge-blocking job fails on every unclassified `tests/**/test_*.py`. **⚠️ The rename-table gate is ALREADY RED on `main`** (stale generated table; 4 failures; filed as #4655, also #4648/#4670) — so the criterion is "no **new** failure", and the pre-existing red is not this change's to fix.
+9. **Surface gates the change can trip (Phase 7 review findings):** `uv run python tools/sdk_rename_table.py --check` — Step 9 keeps the two SDK delegates private precisely because a public method with no canonical row reddens this; and `uv run python tools/ci_selection.py --integrity` — Step 9b registers the new test file, without which this merge-blocking job fails on every unclassified `tests/**/test_*.py`. **⚠️ The rename-table gate is ALREADY RED on `main`** (stale generated table; 4 failures; filed as #4655, also #4648/#4670) — so the criterion is "no **new** failure", and the pre-existing red is not this change's to fix.
 10. `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_ci_selection.py tests/test_sdk_rename_table.py tests/test_markers.py -q` — the mirrors and the **literal** that enforce 9 (`test_markers.py::test_no_redirect_stems_registry_exact` holds the hand-maintained frozenset, which the derived `test_ci_selection` mirror cannot check).
 
 ## 7. Acceptance criteria

@@ -3399,6 +3399,111 @@ def _install_read_hook_impl(args) -> int:
     return 0
 
 
+def _upgrade_artifact_seam(args, root, home) -> int:
+    """Repair a non-shell capture seam through the installer that owns it.
+
+    The ARTIFACT half of `hooks upgrade`.  A seam with no ``hooks_dir`` has no
+    ``upgrade_install``, so the repair is the file copy that IS the install —
+    ``capture_install.install_capture``, the same entry point
+    ``tortoise install <harness>`` calls.  A second writer would be the
+    two-detectors defect inverted: two installers that drift, with the stale
+    one reported by `hooks status` and the fresh one by `install` (#5351).
+
+    ``home`` is the validated ``$HOME`` the artifact root is scoped under
+    (``<home>/<root_relpath>``), derived by the caller from ``root`` — so
+    ``--dir`` is honoured rather than ignored in favour of the process HOME,
+    which would install into a different tree and leave ``--dir`` untouched.
+    """
+    import sys as _sys
+
+    from tortoise.capture_install import install_capture
+    from tortoise.hook_install import detect_artifact_install
+
+    dry_run = getattr(args, "dry_run", False)
+    try:
+        result = install_capture(args.harness, root=root, home=home,
+                                 dry_run=dry_run)
+    except MemoryError:
+        raise  # resource exhaustion is not a refusal; the handler allocates
+    except Exception as e:
+        # The installer's contract is "refuse, never raise"; this catch-all is
+        # the same belt-and-suspenders the layout path carries, because a
+        # traceback out of the CLI is never a reportable outcome (#4024 P2-2).
+        print(f"Upgrade failed: {e.__class__.__name__}: {e}",
+              file=_sys.stderr)
+        return 1
+    if not result.ok:
+        print(result.error, file=_sys.stderr)
+        return 1
+    prefix = "[dry-run] " if dry_run else ""
+    if not result.actions:
+        print(f"{prefix}✅ {args.harness} capture seam at {root} already "
+              "current — nothing to do.")
+        return 0
+    for action in result.actions:
+        # `install_capture` already prefixes its planned actions in dry-run;
+        # prefixing again here would print `[dry-run] [dry-run]`.
+        print(action)
+    if dry_run:
+        return 0
+    # The repair's own evidence: re-read through the SAME detector `status`
+    # prints, so "upgraded" is never claimed over bytes still reported stale.
+    remaining = [f for f in detect_artifact_install(root, args.harness)
+                 if f.blocking]
+    if remaining:
+        print(f"⚠️ {len(remaining)} issue(s) remain after upgrade:",
+              file=_sys.stderr)
+        for f in remaining:
+            print(f"  {f.line()}", file=_sys.stderr)
+        return 1
+    print(f"✅ {args.harness} capture seam upgraded.")
+    return 0
+
+
+def _artifact_detail_would_refuse(finding, harness: str, *,
+                                  unrepairable: bool) -> bool:
+    """Whether rendering ``finding``'s OWN detail would prescribe a repair
+    the installer refuses (#5351).
+
+    Declared ONCE, because BOTH surfaces that render an artifact finding —
+    ``hooks status`` line by line and ``doctor``'s one summary row — must make
+    this call identically; a copy in each caller drifts, and the drifted copy
+    either prints a command that refuses or deletes an instruction the user
+    needs.
+
+    Three conditions, each load-bearing for a specific kind:
+
+    * ``unrepairable`` — the seam's installer refuses right now (a MANUAL kind
+      or the legacy collision; the caller decides which findings those are).
+      In a repairable seam the detail's command WORKS and must be printed.
+    * the detail embeds one of :data:`hook_install.ARTIFACT_INSTALLER_CLAUSES`.
+      The details that name no command are never withheld, because the pointer
+      does not always recover them — ``tortoise session verify`` resolves its
+      transmit identity first and, with no API key configured, returns before
+      printing a single finding.  The clauses are matched whole so an install
+      PATH cannot masquerade as one, and a note that merely MENTIONS the
+      installer (``ahead-artifact``: ``would replace it with N``) embeds none.
+    * the kind is not a MANUAL one.  That exempts the third way a detail can
+      name the installer without being the repair the verdict calls for: a
+      conditional two-step whose first action is the user's — ``foreign-artifact``
+      (``move it aside, then re-run …``) and the ``symlinked-install`` note
+      (``replace it with a real directory, then re-run …``).  Withholding those
+      would delete the step that clears the refusal.
+
+    ``Finding.blocking`` is deliberately NOT consulted: every clause-bearing
+    kind that is a note rather than a verdict is already exempt above, so the
+    test would change no reachable state (measured — dropping it leaves every
+    state's rendering identical), and a future non-blocking detail that names
+    the installer would be one whose first step is the user's, exactly like
+    ``symlinked-install``.
+    """
+    from tortoise.hook_install import ARTIFACT_INSTALLER_CLAUSES, is_manual_fix
+    return (unrepairable
+            and not is_manual_fix(finding.kind)
+            and any(clause.format(harness=harness) in finding.detail
+                    for clause in ARTIFACT_INSTALLER_CLAUSES))
+
+
 def _cmd_hooks(args) -> int:
     """Detect and repair drift in an already-installed capture-hook seam.
 
@@ -3406,26 +3511,46 @@ def _cmd_hooks(args) -> int:
     ``# tortoise-hook-version: N``) and the ``settings.json`` entry that must
     carry the load-bearing per-hook ``timeout`` (#3754/#3801).  Both are
     checked here; ``upgrade`` merges the settings half rather than
-    overwriting it, and re-copies the scripts.  Harness-agnostic: the layout
-    registry in ``tortoise.hook_install`` supplies the targets.
+    overwriting it, and re-copies the scripts.  Seam-agnostic: the two
+    registries in ``tortoise.hook_install`` — ``HARNESS_LAYOUTS`` for the
+    shell hooks and ``ARTIFACT_CONTRACTS`` for a non-shell seam like Pi's
+    TypeScript extension — supply the targets, and neither class is a
+    hand-written harness list (#5351).
     """
     import sys as _sys
     from pathlib import Path as _P
 
+    from tortoise.capture_install import legacy_extension_obstacle
     from tortoise.hook_install import (
+        ARTIFACT_CONTRACTS,
+        artifact_home,
+        artifact_root,
         contract_version_for,
         default_root,
+        detect_artifact_install,
         detect_install,
         get_layout,
         is_manual_fix,
         upgrade_install,
     )
 
+    # `--harness` is implicit for the default (claude) in every hint this
+    # command prints; declared once so the hints cannot drift apart.
+    hsel = "" if args.harness == "claude" else f" --harness {args.harness}"
+
+    # TWO seam classes, ONE command (#5351).  A shell-hook harness resolves
+    # through `HARNESS_LAYOUTS`; a non-shell seam (Pi's TypeScript extension)
+    # through `ARTIFACT_CONTRACTS` — the SAME registries the verifier and
+    # `doctor` read, never a third hand-written harness list.  Anything in
+    # NEITHER is genuinely unknown, and `get_layout` owns that message (one
+    # home for the wording).
     try:
         layout = get_layout(args.harness)
     except ValueError as e:
-        print(str(e), file=_sys.stderr)
-        return 1
+        if args.harness not in ARTIFACT_CONTRACTS:
+            print(str(e), file=_sys.stderr)
+            return 1
+        layout = None
     # An explicit `--dir` always wins (Claude's project-scoped install depends
     # on it). With NO `--dir`, a layout that declares an env root (Codex)
     # resolves through it — `${CODEX_HOME:-$HOME/.codex}` — because Codex reads
@@ -3439,6 +3564,9 @@ def _cmd_hooks(args) -> int:
     # written ONLY for a genuinely HOME-scoped root — an explicit `--dir` never
     # consults HOME (#4110).
     resolved_home = None
+    # The `$HOME` an ARTIFACT seam's install root is scoped under, derived from
+    # the resolved root once so `status` and `upgrade` cannot disagree (#5351).
+    artifact_home_dir = None
     try:
         # `_P.home()` is INSIDE the boundary because it can RAISE, not merely
         # return a non-absolute path: with `$HOME` set to a literal `~` (or
@@ -3468,7 +3596,31 @@ def _cmd_hooks(args) -> int:
             root = _P(explicit_dir)
         else:
             resolved_home = _P.home()
-            root = default_root(layout, resolved_home)
+            # A non-shell seam has no layout to resolve a default from: its
+            # root is the ARTIFACT contract's `root_relpath` under the same
+            # HOME (`~/.pi/agent/extensions`), never a cwd default.
+            if layout is not None:
+                root = default_root(layout, resolved_home)
+            else:
+                root = artifact_root(args.harness, resolved_home)
+        if layout is None:
+            # The artifact installer is scoped by HOME and `--dir` names the
+            # ROOT it installs into (`<home>/<root_relpath>`), so derive that
+            # HOME back out.  A `--dir` that is NOT the contract's root has no
+            # install this command can inspect OR repair — the installer would
+            # write under HOME and leave the named directory untouched — so it
+            # is refused rather than guessed at.  Doing it HERE, before either
+            # subcommand, is what keeps `status` from ever recommending an
+            # `upgrade` that refuses.
+            artifact_home_dir = artifact_home(args.harness, root)
+            if artifact_home_dir is None:
+                print(
+                    f"--dir {root} is not {args.harness}'s artifact install "
+                    f"root (expected a path ending in "
+                    f"{ARTIFACT_CONTRACTS[args.harness].root_relpath}) — pass "
+                    f"that directory, or omit --dir to use $HOME.",
+                    file=_sys.stderr)
+                return 1
     except MemoryError:
         raise  # resource exhaustion is not a refusal; the handler allocates
     except Exception as e:
@@ -3478,13 +3630,19 @@ def _cmd_hooks(args) -> int:
         # could not be resolved, so echoing one back would teach a path that
         # is itself unresolvable.
         print("\nRun `tortoise hooks upgrade"
-              f"{'' if args.harness == 'claude' else ' --harness ' + args.harness}"
-              " --dir <absolute-dir>` to repair.", file=_sys.stderr)
+              f"{hsel}" " --dir <absolute-dir>` to repair.", file=_sys.stderr)
         return 1
 
     if args.hooks_cmd == "status":
         try:
-            findings = detect_install(root, args.harness)
+            # ONE detector per seam class, and the SAME pair `session verify`
+            # grades with (#5351): a Pi finding printed here is the finding the
+            # verifier already reported, not a second, differently-worded
+            # opinion about the same file.
+            if layout is None:
+                findings = detect_artifact_install(root, args.harness)
+            else:
+                findings = detect_install(root, args.harness)
         except MemoryError:
             raise  # resource exhaustion is not a refusal; the handler allocates
         except Exception as e:
@@ -3513,6 +3671,12 @@ def _cmd_hooks(args) -> int:
                 # "installed and ran" from "never ran" too.  `None` means this
                 # harness's hooks do not write a record at all.
                 "hook_run": _hook_run_json(args.harness, layout, root),
+                # `detail` is the DETECTOR's own finding, verbatim (#5351): it
+                # is data about the install, not a recommendation to execute,
+                # and the TEXT surface — which owns the human-facing repair
+                # wording — is where a prescription that would refuse is
+                # withheld.  A consumer that RENDERS `detail` to a human owns
+                # that distinction.
                 "findings": [
                     {"kind": f.kind, "script": f.script, "event": f.event,
                      "detail": f.detail, "blocking": f.blocking}
@@ -3523,35 +3687,73 @@ def _cmd_hooks(args) -> int:
             print(f"✅ {args.harness} capture hooks in {root} are current "
                   f"(contract v{version}).")
         else:
+            # Repairability is decided BEFORE the findings are rendered, because
+            # an ARTIFACT finding's OWN detail can embed a repair command
+            # ("reinstall with `tortoise install pi`") — unconditionally — and
+            # the installer REFUSES that command whenever this seam is
+            # unrepairable.  That detail is the "second place a refusing
+            # recommendation can come from" (the same reason `doctor` withholds
+            # it, through the SAME predicate).  TWO independent reasons make the
+            # installer refuse: a MANUAL kind (`is_manual_fix` is the DECLARED
+            # conservative proxy for refusal — see its docstring; for an
+            # artifact leaf link it can be true where the installer would in
+            # fact succeed, which is the documented cheap error), and the legacy
+            # collision (#3713).  A manual step does not clear the collision, so
+            # both are reported below.
+            blocking = [f for f in findings if f.blocking]
+            # Some blocking kinds are NOT repairable by `upgrade` (it refuses
+            # rather than clobber an unreadable/unsafe/foreign path), so the
+            # hint must name the manual fix for those instead of recommending
+            # a command that will refuse.  Which kinds those are is declared
+            # ONCE, in `hook_install`, because `doctor` recommends a repair for
+            # the same kinds (#4680 review).  It is asked over ALL findings,
+            # not just the blocking ones, so a non-blocking symlink note still
+            # blocks the recommendation.
+            manual = {f.kind for f in findings if is_manual_fix(f.kind)}
+            # An artifact seam's installer has ONE refusal state no finding
+            # kind expresses — a legacy extension already disabled at its
+            # backup name (#3713) — so repairability cannot be read off the
+            # kinds alone.  Consult the ONE declaration `doctor` also reads,
+            # never a second copy of the condition (#5351).
+            obstacle = ("" if layout is not None
+                        else legacy_extension_obstacle(args.harness, root))
+            unrepairable = bool(manual) or bool(obstacle)
             print(f"Capture-hook install at {root} (contract v{version}):")
             for f in findings:
-                print(f"  {f.line()}")
-            blocking = [f for f in findings if f.blocking]
+                # The call is the SHARED predicate; the two rules it replaces
+                # each failed a measured case.  A kind-based rule withheld
+                # `bytes differ from the shipped seam` (non-manual) while
+                # exempting the manual details, and the round-5 collision arm
+                # withheld `chmod it so the seam can load` the moment any
+                # collision existed — neither is a command the installer owns.
+                if (layout is None
+                        and _artifact_detail_would_refuse(
+                            f, args.harness, unrepairable=unrepairable)):
+                    print(f"  ❌ {f.kind}: run `tortoise session verify "
+                          f"--harness {args.harness}` for the repair path")
+                else:
+                    print(f"  {f.line()}")
             if blocking:
-                # Some blocking kinds are NOT repairable by `upgrade` (it
-                # refuses rather than clobber an unreadable/unsafe/foreign
-                # path), so the hint must name the manual fix for those
-                # instead of recommending a command that will refuse.  Which
-                # kinds those are is declared ONCE, in `hook_install`, because
-                # `doctor` recommends a repair for the same kinds (#4680
-                # review).
                 kinds = {f.kind for f in blocking}
-                # `upgrade` refuses on ANY symlink in a target path, and the
-                # finding kinds for those are not knowable in advance, so
-                # `is_manual_fix` treats every symlink kind as manual — and it
-                # is asked over ALL findings, not just the blocking ones, so a
-                # non-blocking symlink note still blocks the recommendation.
-                manual = {f.kind for f in findings if is_manual_fix(f.kind)}
                 if manual:
                     # A manual kind makes `upgrade` refuse the WHOLE run, so
                     # recommending it (even alongside repairable findings)
                     # would point at a command that refuses.
                     print("\nSome findings need a manual fix before upgrade "
                           "can run: " + ", ".join(sorted(manual)) + ".")
-                elif kinds:
+                # NOT an `elif`: the two obstacles are INDEPENDENT — clearing
+                # the manual kind (e.g. re-pointing a symlink) does not clear
+                # the legacy collision, so suppressing this line would promise
+                # a repair that still refuses.  Both are named when both hold.
+                if obstacle:
+                    # The installer's own refusal, in its own words: `upgrade`
+                    # would refuse, so name the obstacle instead of a command
+                    # that cannot run until a human clears it.
+                    print("\nUpgrade cannot run until this is fixed: "
+                          + obstacle + ".")
+                elif not manual and kinds:
                     print("\nRun `tortoise hooks upgrade"
-                          f"{'' if args.harness == 'claude' else ' --harness ' + args.harness}"
-                          f" --dir {root}` to repair.")
+                          f"{hsel}" f" --dir {root}` to repair.")
         # #3797: the hook-run observation — the install's OWN evidence that
         # it ran, which is what separates "installed and ran" from "not
         # installed" without a credential.  Human-readable branch ONLY: the
@@ -3561,11 +3763,18 @@ def _cmd_hooks(args) -> int:
         # rendering an absence of observation for a harness that structurally
         # never writes one would assert what was never observed — the very
         # defect this line removes.
-        if not getattr(args, "json", False) and layout.writes_hook_run:
+        if (not getattr(args, "json", False) and layout is not None
+                and layout.writes_hook_run):
             _print_hook_run(args.harness, layout, root)
         return 1 if any(f.blocking for f in findings) else 0
 
     # upgrade (also performs a fresh install when nothing is present)
+    if layout is None:
+        # The artifact half's installer, not `upgrade_install` — a seam with no
+        # `hooks_dir` has no layout-driven upgrade, and a second writer would
+        # be the two-detectors defect inverted (#5351).  `artifact_home_dir` is
+        # the validated HOME: the guard above refused a `--dir` outside it.
+        return _upgrade_artifact_seam(args, root, artifact_home_dir)
     try:
         result = upgrade_install(root, args.harness,
                                  dry_run=getattr(args, "dry_run", False),
@@ -4690,7 +4899,7 @@ def _hook_run_json(harness: str, layout, root) -> dict | None:
     observed run was not observed.  Best-effort and exit-code-neutral, like
     its text sibling.
     """
-    if not layout.writes_hook_run:
+    if layout is None or not layout.writes_hook_run:
         return None
     try:
         path = str(_hook_run_file(harness))
@@ -7006,10 +7215,12 @@ def _cmd_doctor(args):
             # surfaces as a clean ❌ + rc 1, never a traceback (#720 P2 conf 75).
             probe_port = parsed.port or 16379
             from falkordb import FalkorDB
-            dbc = FalkorDB(host=probe_host, port=probe_port,
-                           username=probe_user, password=probe_pass,
-                           ssl=(parsed.scheme == "rediss"),
-                           socket_connect_timeout=5, socket_timeout=10)
+
+            from tortoise.cypher_guard import guarded_client  # #3595: guard seam
+            dbc = guarded_client(FalkorDB, host=probe_host, port=probe_port,
+                                 username=probe_user, password=probe_pass,
+                                 ssl=(parsed.scheme == "rediss"),
+                                 socket_connect_timeout=5, socket_timeout=10)
             dbc.select_graph(graph_name).query("RETURN 1")
             results.append(("Graph: FalkorDB", "✅", f"connected at {probe_host}:{probe_port} (graph {graph_name})"))
         except ImportError:
@@ -7323,10 +7534,7 @@ def _cmd_doctor(args):
     # green row for an install Codex never reads (#3818) — the same silent
     # no-capture the row exists to catch.
     try:
-        from tortoise.capture_install import (
-            LEGACY_PI_DIRNAME,
-            PI_DISABLED_DIRNAME,
-        )
+        from tortoise.capture_install import legacy_extension_obstacle
         from tortoise.hook_install import (
             ARTIFACT_CONTRACTS,
             HARNESS_LAYOUTS,
@@ -7422,44 +7630,63 @@ def _cmd_doctor(args):
                               if is_manual_fix(f.kind)})
             # A collision the DETECTOR cannot see, so it cannot arrive as a
             # finding: `install_capture` refuses when a REAL legacy extension
-            # directory is already disabled at `PI_DISABLED_DIRNAME` (it will
-            # not overwrite the previous backup).  The condition MIRRORS the
-            # installer's, which handles a symlinked legacy entry by unlinking
-            # it and never reaches the refusal — so `exists()` alone would fire
-            # the guard on a state the install repairs and withhold a working
-            # command.  The detector's legacy blind spot is #3713; this guard
-            # exists only so the hint never names a command that refuses.
-            _legacy = _root / LEGACY_PI_DIRNAME
-            _legacy_disabled = _root / PI_DISABLED_DIRNAME
-            _legacy_collision = (
-                _harness == "pi"
-                and _legacy.is_dir()
-                and not _legacy.is_symlink()
-                and (_legacy_disabled.exists()
-                     or _legacy_disabled.is_symlink())
-            )
+            # directory is already disabled at its backup name (it will not
+            # overwrite the previous backup).  The condition lives in
+            # `capture_install`, the module that owns BOTH the names and the
+            # refusal, and `hooks status` consults the SAME declaration for the
+            # artifact seams (#5351) — a copy in each caller drifts, and the
+            # drifted copy tells the user to run a command that refuses (the
+            # argument `MANUAL_FIX_KINDS` is declared once for).  The detector's
+            # legacy blind spot is #3713.
+            _legacy_obstacle = legacy_extension_obstacle(_harness, _root)
             if _manual:
                 _hint = ("needs a manual fix before "
                          f"`tortoise hooks upgrade --harness {_harness}` "
                          f"can run ({', '.join(_manual)})" if _layout is not None
                          else "needs a manual fix before `tortoise install "
                          f"{_harness}` can run ({', '.join(_manual)})")
-            elif _legacy_collision:
-                _hint = (f"a legacy capture extension is already disabled at "
-                         f"{PI_DISABLED_DIRNAME} — move one aside")
+                # NOT an `elif`, for the reason recorded at the same pair of
+                # arms in `hooks status`: the two obstacles are INDEPENDENT, so
+                # clearing the manual kind (re-pointing a symlink, moving a
+                # foreign file aside) does not clear the legacy collision —
+                # naming only the manual one promises a repair that still
+                # refuses, and no other line in this row would mention it.
+                if _legacy_obstacle:
+                    _hint += f"; also {_legacy_obstacle}"
+            elif _legacy_obstacle:
+                # The predicate's own sentence IS the hint: one home for the
+                # wording, so a reworded refusal cannot leave a stale copy here.
+                _hint = _legacy_obstacle
             else:
                 _hint = (f"run `tortoise hooks status --harness {_harness}` "
                          "for the repair path" if _layout is not None else
                          f"run `tortoise install {_harness}` to repair")
             # The finding's OWN detail names the repair command too, so it is
-            # the second place a refusing recommendation can come from.  In the
-            # collision state that command is replaced — and it must be one that
-            # ACCEPTS `--harness pi`: `tortoise hooks status` is layout-keyed and
-            # exits 1 with "unknown harness 'pi'", so naming it would swap one
-            # refusal for another.  `session verify` takes the artifact seam.
-            _detail = (f"({first.kind}: {first.detail})" if not _legacy_collision
-                       else f"({first.kind}; run `tortoise session verify "
-                            f"--harness {_harness}` for the repair path)")
+            # the SECOND place a refusing recommendation can come from, and
+            # BOTH surfaces decide that through the same predicate
+            # (`_artifact_detail_would_refuse`): the seam is unrepairable
+            # (`_manual` OR the collision — the installer refuses either way),
+            # the detail embeds one of `hook_install.ARTIFACT_INSTALLER_CLAUSES`,
+            # and the kind is not MANUAL.  Exempting the manual kinds keeps
+            # instructions whose first step is the user's (`foreign-artifact`,
+            # the `symlinked-install` note), and matching whole clauses keeps a
+            # note that merely mentions the installer (`ahead-artifact`) out,
+            # together with a path that merely looks like a command.
+            # A MANUAL kind's second step can still be blocked by the collision,
+            # and the collision is named in the hint above it (the non-`elif`
+            # arms), so the row carries that counter-signal — `doctor` puts it
+            # in the same summary row, `hooks status` prints it as the following
+            # paragraph.  The replacement names a command that ACCEPTS the
+            # harness: the read-only diagnostic that carries the finding.
+            _withhold = (_layout is None
+                         and _artifact_detail_would_refuse(
+                             first, _harness,
+                             unrepairable=(bool(_manual)
+                                           or bool(_legacy_obstacle))))
+            _detail = (
+                f"({first.kind}; run `tortoise session verify "
+                f"--harness {_harness}` for the repair path)" if _withhold
+                else f"({first.kind}: {first.detail})")
             results.append((
                 _label, "❌",
                 f"{len(blocking)} stale issue(s) — {_hint} {_detail}",

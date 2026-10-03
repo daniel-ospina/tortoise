@@ -218,6 +218,14 @@ class TestPointBurst:
             for i in range(5):
                 self._post_point(tc, 51 + i)
             assert fake.tables["organizations"][0]["suspended_at"] is None
+        # The second burst is a NEW episode and must RE-FLAG and RE-ALERT — the
+        # false-positive guarantee is that it never suspends. The alert budget
+        # is released when the clean evaluation above ends the first episode
+        # (#3631), so both episodes notify; assert both the durable re-flag and
+        # the second alert.
+        flag_rows = [e for e in fake.tables["abuse_events"]
+                     if e["event_type"] == "flag"]
+        assert len(flag_rows) >= 2
         assert [c[0] for c in env["notified"]].count("abuse_flag") >= 2
 
     def test_boundary_crossing_suspends_and_403(self, env):
