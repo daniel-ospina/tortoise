@@ -950,6 +950,22 @@ def test_the_engine_line_does_not_claim_a_flag_that_was_not_passed(monkeypatch,
     assert "refused" in out, out
 
 
+def test_a_non_finite_timeout_does_not_raise_out_of_probe_graph(monkeypatch):
+    """(a) FAILS if `probe_graph` raises for a nan/inf timeout — its documented
+    contract is that it never raises, and the docstring used to claim a ValueError
+    escaped from the socket layer. It does not: `Thread.join` rejects the value
+    inside `_resolve_within_bound` and the result is `ok=None` / `resolve-failed`.
+    A comment may describe the code; it may not claim a guarantee the code cannot
+    make, in either direction.
+    (b) Reachable: a caller passing nan/inf to the public `probe_graph`.
+    """
+    for bad in (float("nan"), float("inf"), 1e18):
+        result = e.probe_graph("x.example.com", 1, timeout=bad)
+        assert result["ok"] is None, (bad, result)
+        assert result["error"].startswith("resolve-failed"), (bad, result)
+        assert e.classify(result, {"status": e.ENGINE_OK}) == e.UNMEASURABLE
+
+
 def test_a_socket_that_cannot_even_be_created_is_unmeasured(monkeypatch):
     """(a) FAILS if a failure BEFORE any `connect()` is reported as `ok=False`.
     That asserts the documented meaning of False — "every address was dialled

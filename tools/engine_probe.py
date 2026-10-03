@@ -183,11 +183,12 @@ def probe_graph(host: str, port: int, timeout: float) -> dict:
     probe does not AUTH: it is asking whether the substrate answers, not whether
     this client is authorised.
 
-    Never raises ON A REACHABLE-then-silent endpoint: a connect that succeeds but
-    yields no reply inside the bound is `ok=False` with `error='timeout'` — the
-    shape a wedged engine produces, which must not be read as a successful probe.
-    (A caller that passes a non-finite timeout still gets a ValueError from the
-    socket layer; `main` rejects those before calling.)
+    never raises: a connect that succeeds but yields no reply inside the bound is
+    `ok=False` with `error='timeout'` — the shape a wedged engine produces, which
+    must not be read as a successful probe. A non-finite timeout does NOT raise
+    either: `Thread.join` rejects it inside `_resolve_within_bound` and the
+    result is `ok=None` with a `resolve-failed` error. (`main` rejects those
+    before calling, so `--timeout` cannot reach here as nan/inf.)
     """
     started = time.monotonic()
     sock = None
