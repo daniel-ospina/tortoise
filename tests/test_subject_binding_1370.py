@@ -644,7 +644,7 @@ class TestReplayParity:
                          "confidence": 0.9}]})
         before = _edge(sdk, pid)
         assert before
-        sdk._get_proj().rebuild_all(str(jpath.parent))
+        sdk._get_proj().rebuild_all(str(jpath.parent), confirm_destructive=True)
         after = _edge(sdk, pid)
         assert after == before  # name + confidence byte-identical
 
@@ -674,7 +674,7 @@ class TestReplayParity:
                 "source_label": "Point", "target_id": sid,
                 "target_label": "Subject", "edge_type": "aboutSubject",
             }) + "\n")
-        sdk._get_proj().rebuild_all(str(jpath.parent))
+        sdk._get_proj().rebuild_all(str(jpath.parent), confirm_destructive=True)
         rows = _edge(sdk, pid)
         assert rows and abs(float(rows[0][1]) - 0.9) < 1e-9
 
@@ -706,7 +706,7 @@ class TestReplayParity:
                     "confidence": bad,
                 }) + "\n")
         # Must not raise; must not lose the node/edge to a post-wipe abort.
-        sdk._get_proj().rebuild_all(str(jpath.parent))
+        sdk._get_proj().rebuild_all(str(jpath.parent), confirm_destructive=True)
         rows = _edge(sdk, pid)
         assert rows and abs(float(rows[0][1]) - 0.9) < 1e-9
 

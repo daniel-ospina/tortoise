@@ -317,7 +317,7 @@ def test_capture_aboutobject_edges_survive_rebuild_all(hosted_lane):
             f"the capture's nodes were not journaled, so the EntityLinked "
             f"fold has no endpoints to resolve: {sorted(set(types))}")
 
-        proj.rebuild_all(str(log_path.parent))
+        proj.rebuild_all(str(log_path.parent), confirm_destructive=True)
         assert _about_edges(proj) == live, (
             "aboutObject edge drift across rebuild\n"
             f" live={sorted(live)}\n post={sorted(_about_edges(proj))}")
@@ -367,7 +367,7 @@ def test_relink_aboutobject_edge_survives_rebuild_all(hosted_lane):
         assert "EntityLinked" in _journal_types(log_path), (
             "the re-link's EntityLinked record was not journaled")
 
-        proj.rebuild_all(str(log_path.parent))
+        proj.rebuild_all(str(log_path.parent), confirm_destructive=True)
         assert _about_edges(proj) == live, (
             "re-linked aboutObject edge drift across rebuild\n"
             f" live={sorted(live)}\n post={sorted(_about_edges(proj))}")
@@ -417,7 +417,7 @@ def test_live_only_capture_loses_aboutobject_edges_without_the_journal(
         assert not (hosted_lane.events / proj.graph_name / "events.jsonl").exists(), \
             "the journal-less SDK must not have written a journal"
 
-        proj.rebuild_all(str(hosted_lane.events))
+        proj.rebuild_all(str(hosted_lane.events), confirm_destructive=True)
         post = _about_edges(proj)
         assert not post, (
             "the live-only edges SURVIVED a rebuild_all — the mutation is inert "
