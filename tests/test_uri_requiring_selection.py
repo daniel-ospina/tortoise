@@ -22,23 +22,30 @@ alias renames, local wrappers, class bodies, decorators, lambdas, `**_KW`
 forwarding, constructed env names, transitive helpers, default arguments, guard
 polarity...). Each cycle found more shapes: an AST predicate is an approximation
 of a question pytest already answers exactly. So the census now asks pytest —
-the same command the failing CI step runs, with the URI unset — and treats "this
-module produced no nodeids" as the single, shape-independent rule. That is the
+the same command the failing CI step runs, in the same environment shape — and
+treats "this module produced no nodeids" as the single rule. That is the
 invariant itself, not a model of it:
 
     a module that collects NOTHING in a leg's own configuration
     must not be handed to that leg.
 
-It is also strictly safer than the approximation in both directions. It cannot
-under-report (pytest decides, so no spelling escapes), and it cannot remove
-coverage: whatever the reason a module yields no nodeids, it was not going to run
-a test in that leg.
+It also cannot remove coverage: whatever the reason a module yields no nodeids in
+that leg, it was not going to run a test there.
 
-The candidate set is a cheap superset — every selectable module that mentions
-`allow_module_level`, the mechanism a module-level skip needs. A module emptied
-by some other cause (the manifest's own `-m` marker, a collection error) is the
-*attribution* half of #6884, recorded separately on the issue, and is out of
-scope here.
+**Exact over the candidate set, not over the tree.** The probe is authoritative
+for every file it is given, but the candidate set is a SUPERSET defined by a
+mechanism: selectable modules whose own source contains `allow_module_level`.
+That is complete for a module-level skip written in the module itself, and it is
+deliberately not a widening race (past cycles showed each new spelling invites
+the next). The residual is a module-level skip living in a SHARED helper that a
+test module imports and calls at import: the caller's text has no literal, so it
+is not a candidate. `test_only_candidate_shaped_files_carry_the_module_skip_mechanism`
+closes that route by forbidding the mechanism outside the files the census
+scans.
+
+A module emptied by some other cause (the manifest's own `-m` marker, a
+collection error) is the *attribution* half of #6884, recorded separately on the
+issue, and is out of scope here.
 """
 from __future__ import annotations
 
@@ -138,11 +145,17 @@ def _collect_nothing_uri_less() -> frozenset[str]:
     candidates = _candidate_modules()
     if not candidates:
         return frozenset()
-    env = {
-        k: v
-        for k, v in os.environ.items()
-        if k not in ("TORTOISE_DB_URI", "TORTOISE_TEST_EXPECT_URI", "PYTEST_ADDOPTS")
-    }
+    # MATCH THE LEG'S ENV SHAPE EXACTLY. The tier-2 legs do not leave these
+    # variables UNSET: "Compute docker URI" writes URI="" into $GITHUB_ENV and
+    # the manifest/run steps export it (python-ci.yml:606-624), so the leg sees
+    # TORTOISE_DB_URI PRESENT AND EMPTY. The two shapes are not interchangeable —
+    # a module gating on `"TORTOISE_DB_URI" not in os.environ`, on `== ""`, or
+    # on `os.environ.setdefault(...)`, behaves differently under each — and the
+    # probe must measure the leg that actually breaks. Only PYTEST_ADDOPTS is
+    # removed (it would inject the parent session's options into the child).
+    env = {k: v for k, v in os.environ.items() if k != "PYTEST_ADDOPTS"}
+    env["TORTOISE_DB_URI"] = ""
+    env["TORTOISE_TEST_EXPECT_URI"] = ""
     env["TORTOISE_TEST_CARVE_OUT"] = "1"  # the URI-less lane's required opt-in
     proc = subprocess.run(
         [
@@ -168,6 +181,37 @@ def _collect_nothing_uri_less() -> frozenset[str]:
 # --------------------------------------------------------------------------
 # The probe's own correctness, then the census
 # --------------------------------------------------------------------------
+def test_only_candidate_shaped_files_carry_the_module_skip_mechanism() -> None:
+    """The census is exact over its candidate set, so the mechanism may not
+    appear outside it.
+
+    `_candidate_modules()` scans `test_*.py` files whose OWN source contains
+    `allow_module_level`. A skip living in a shared helper that a test module
+    imports and calls at import is therefore invisible: the caller has no
+    literal, the census reports "declared == observed" while the module aborts
+    collection in a URI-less leg. Rather than chase spellings across files, this
+    forbids the mechanism anywhere the census does not look — if a helper needs
+    it, the census must be widened deliberately at the same time.
+    """
+    offenders = sorted(
+        str(p.relative_to(TESTS))
+        for p in TESTS.rglob("*.py")
+        if not p.name.startswith("test_")
+        and p.relative_to(TESTS).parts[0] != "e2e"
+        and "allow_module_level" in p.read_text(encoding="utf-8")
+    )
+    assert not offenders, (
+        f"{offenders} carry `allow_module_level` but are not `test_*.py` files, "
+        "so the census never scans them. A test module that imports such a helper "
+        "and calls it at import aborts collection in a URI-less leg while the "
+        "census stays green (#6884). Either move the skip into the module that "
+        "needs it, or widen `_candidate_modules()` to cover this file in the same "
+        "change. (The `e2e/` subtree is excluded, matching the census and "
+        "`integrity()` #1349 — those files are not selectable, so the mechanism "
+        "there cannot be handed to a leg.)"
+    )
+
+
 def test_nodeid_parsing_is_not_fooled_by_skip_summary_lines() -> None:
     """The parser's one hazard: an `-rs` SKIPPED line names the file.
 
