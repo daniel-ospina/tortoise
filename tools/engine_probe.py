@@ -33,9 +33,34 @@ THE THREE ANSWERS, AND WHY UNMEASURABLE IS ONE OF THEM
 
 EVERY PROBE IS BOUNDED. A probe that can hang is not a probe: the 2026-10-03
 occurrence cost 900s to a single unbounded `docker ps`. `--timeout` (default
-3s) bounds EACH probe — the socket connect, the PING read, and the docker
-subprocess alike. It is a per-probe bound, not a total budget: the graph and
-the engine are probed in turn, so the worst case is 2x `--timeout`.
+3s) bounds EACH socket operation and the docker subprocess. It is not a total
+budget: a connect and a read are bounded separately, and the engine probe adds
+its own, so the worst case is a small multiple of `--timeout`, not one.
+
+THE ENGINE VOCABULARY, AND WHY EACH STATE HAS ITS OWN RECOVERY
+-------------------------------------------------------------
+    ENGINE_OK          `docker version` answered. The graph result is
+                       trustworthy.
+    ENGINE_WEDGED      nothing came back inside the bound. Every docker call
+                       will HANG, so a graph timeout cannot be attributed — the
+                       graph's state is NOT MEASURABLE.
+    ENGINE_ABSENT      no docker CLI and no engine socket: no engine is in play
+                       (embedded/remote use). There was nothing to wedge, so
+                       the graph result IS trustworthy.
+    ENGINE_DAEMON_DOWN the CLI answered, with an error: the daemon is not
+                       running. Docker calls FAIL FAST rather than hang, so the
+                       graph result is trustworthy — and the recovery is
+                       `docker start`, not "restart the engine".
+    ENGINE_UNMEASURED  no CLI, but an engine socket EXISTS. Something is trying
+                       to be an engine and cannot be probed; treat as wedged.
+
+    UNMEASURABLE       the probe shapes themselves are unusable (a malformed
+                       result). No confident verdict is possible.
+
+The first three and ENGINE_DAEMON_DOWN are the states in which the graph probe
+can be believed. Anything else — including a status this module has never heard
+of, which is how a new probe state silently becomes a confident wrong answer —
+is treated as unmeasurable.
 
 USAGE
     python3 tools/engine_probe.py            # human summary, exit 0/2
@@ -85,7 +110,16 @@ GRAPH_DOWN = "GRAPH_DOWN"
 GRAPH_UP = "GRAPH_UP"
 ENGINE_OK = "ENGINE_OK"
 ENGINE_ABSENT = "ENGINE_ABSENT"
-ENGINE_UNPROBED = "ENGINE_UNPROBED"
+ENGINE_DAEMON_DOWN = "ENGINE_DAEMON_DOWN"
+ENGINE_UNMEASURED = "ENGINE_UNMEASURED"
+
+#: The ONLY engine states in which the graph probe can be believed. An
+#: allow-list, not an enumeration of the bad states: a status this module has
+#: never heard of must not fall through to a confident verdict.
+ENGINE_MEASURABLE = (ENGINE_OK, ENGINE_ABSENT, ENGINE_DAEMON_DOWN)
+
+#: No confident verdict is possible. Reported instead of guessing.
+UNMEASURABLE = "UNMEASURABLE"
 
 
 def probe_graph(host: str, port: int, timeout: float) -> dict:
@@ -138,6 +172,13 @@ def probe_engine(timeout: float) -> dict:
 
     Without the bound this call hangs for the full kill interval when the
     control plane is wedged, which is exactly the 900s burn this tool removes.
+
+    The failure modes are kept DISTINCT, because each has a different recovery
+    and a different meaning for the graph result: a timeout means callers hang
+    (unmeasurable), a nonzero rc means the daemon is down and callers fail fast
+    (measurable), and a missing CLI means there is no engine at all — unless a
+    socket exists, in which case something is trying to be one and cannot be
+    probed (unmeasurable).
     """
     started = time.monotonic()
     try:
@@ -149,7 +190,13 @@ def probe_engine(timeout: float) -> dict:
         return {"status": ENGINE_WEDGED, "detail": f"no answer in {timeout}s",
                 "elapsed_s": round(time.monotonic() - started, 3)}
     except FileNotFoundError:
-        return {"status": ENGINE_ABSENT, "detail": "docker CLI not on PATH",
+        sock = docker_socket()
+        if sock is not None:
+            return {"status": ENGINE_UNMEASURED,
+                    "detail": f"no docker CLI, but an engine socket exists at {sock}",
+                    "elapsed_s": round(time.monotonic() - started, 3)}
+        return {"status": ENGINE_ABSENT,
+                "detail": "no docker CLI and no engine socket — no engine in play",
                 "elapsed_s": round(time.monotonic() - started, 3)}
     except OSError as exc:
         return {"status": ENGINE_WEDGED, "detail": f"{type(exc).__name__}: {exc}",
@@ -157,29 +204,33 @@ def probe_engine(timeout: float) -> dict:
     elapsed = round(time.monotonic() - started, 3)
     if proc.returncode != 0:
         stderr = (proc.stderr or "").strip()[:160]
-        return {"status": ENGINE_WEDGED, "detail": f"rc={proc.returncode} {stderr}",
-                "elapsed_s": elapsed}
+        return {"status": ENGINE_DAEMON_DOWN,
+                "detail": f"rc={proc.returncode} {stderr}", "elapsed_s": elapsed}
     return {"status": ENGINE_OK, "detail": (proc.stdout or "").strip(),
             "elapsed_s": elapsed}
 
 
 def classify(graph: dict, engine: Optional[dict]) -> str:
-    """The verdict. Pure, so the three answers are testable without a machine.
+    """The verdict. Pure, so the answers are testable without a machine.
 
     Order matters: a wedged engine makes the graph's state UNMEASURABLE, so it
     is reported as such rather than as GRAPH_DOWN. That inversion is the whole
     point of this tool — see the module docstring.
 
-    The engine test is an ALLOW-LIST over the states that mean "the graph's
-    state is measurable": anything that is not ENGINE_OK or ENGINE_ABSENT —
-    ENGINE_WEDGED, ENGINE_UNPROBED, or a malformed probe missing its status —
-    is reported as ENGINE_WEDGED. Enumerating the *bad* states instead would
-    let a shape nobody anticipated fall through to a confident verdict, which
-    is the misdiagnosis this tool exists to remove.
+    BOTH sides are allow-listed. The engine test accepts only the states that
+    mean "the graph's state is measurable" (ENGINE_MEASURABLE), so a wedged
+    engine, an unprobeable one, or a status this module has never heard of all
+    report ENGINE_WEDGED rather than falling through to a confident verdict —
+    enumerating the *bad* states instead is how a shape nobody anticipated
+    becomes the misdiagnosis this tool exists to remove. The graph side is
+    symmetric: `ok` must be a real bool, and a malformed probe result yields
+    UNMEASURABLE rather than a confident GRAPH_DOWN.
     """
-    if engine is not None and engine.get("status") not in (ENGINE_OK, ENGINE_ABSENT):
+    if not isinstance(graph.get("ok"), bool):
+        return UNMEASURABLE
+    if engine is not None and engine.get("status") not in ENGINE_MEASURABLE:
         return ENGINE_WEDGED
-    return GRAPH_UP if graph.get("ok") else GRAPH_DOWN
+    return GRAPH_UP if graph["ok"] else GRAPH_DOWN
 
 
 def redis_port_from_env() -> Optional[int]:
@@ -246,17 +297,38 @@ def main(argv: Optional[list] = None) -> int:
                   + (f" socket={sock}" if sock else ""))
         print(f"VERDICT: {verdict}")
         if verdict == ENGINE_WEDGED:
-            print("  The container engine did not answer inside the bound. Every "
-                  "docker call will hang,\n  so the graph's state is NOT "
-                  "MEASURABLE — this is not a graph failure. Recovery is an\n"
-                  "  engine restart; do NOT stand up a second graph instance "
-                  "and do NOT point at\n  the hosted API (see #7017).")
+            # Word this from the MEASURED detail, never from an asserted
+            # mechanism: a timeout, a missing CLI with a live socket, an OSError
+            # and an unrecognised status all arrive here, and only one of them
+            # "did not answer inside the bound". Asserting a cause the probe did
+            # not observe is the misdiagnosis this tool exists to remove.
+            cause = engine["detail"] if engine else "not probed"
+            print(f"  The container engine is not usable ({cause}), so a graph "
+                  f"result cannot be\n  trusted here. Every docker call may "
+                  f"hang, and a graph timeout cannot be\n  attributed — this "
+                  f"is not necessarily a graph failure. Do NOT stand up a\n  "
+                  f"second graph instance and do NOT point at the hosted API "
+                  f"(see #7017).")
+        elif verdict == UNMEASURABLE:
+            print("  The probes did not return usable results, so no verdict is "
+                  "possible. Re-run and\n  read the raw output above rather "
+                  "than acting on a guess.")
         elif verdict == GRAPH_DOWN:
             if engine is None:
                 print("  The graph port is unreachable and the engine was NOT "
                       "probed (--no-docker),\n  so a wedged engine cannot be "
                       "ruled out. Re-run without --no-docker before\n  treating "
                       "this as a graph problem.")
+            elif engine.get("status") == ENGINE_ABSENT:
+                print("  No engine is in play (no docker CLI and no engine socket), "
+                      "so the graph port\n  itself is unreachable. Check the "
+                      "graph container and the canonical instance\n  (127.0.0.1, "
+                      "never `localhost` — #6666).")
+            elif engine.get("status") == ENGINE_DAEMON_DOWN:
+                print("  The docker daemon is not running, so docker calls fail "
+                      "fast rather than hang and\n  the graph port itself is "
+                      "unreachable. Check the graph container and the\n  "
+                      "canonical instance (127.0.0.1, never `localhost` — #6666).")
             else:
                 print("  The engine answered, so the graph port itself is "
                       "unreachable. Check the\n  graph container and the "

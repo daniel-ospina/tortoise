@@ -93,11 +93,27 @@ def test_an_unprobed_or_malformed_engine_is_not_read_as_healthy():
     """
     dead = {"ok": False, "error": "timeout", "elapsed_s": 3.0}
     for bad in ({}, {"detail": "no status key"},
-                {"status": e.ENGINE_UNPROBED}, {"status": "SOMETHING_NEW"}):
+                {"status": "ENGINE_SOMETHING_NEW"}):
         assert e.classify(dead, bad) == e.ENGINE_WEDGED, bad
-    # and the two genuinely-known-good states still do not invert
-    assert e.classify(dead, {"status": e.ENGINE_OK}) == e.GRAPH_DOWN
-    assert e.classify(dead, {"status": e.ENGINE_ABSENT}) == e.GRAPH_DOWN
+    # the genuinely-known-good states must NOT invert: a daemon that is down
+    # fails fast, so the graph probe is still believable
+    for good in (e.ENGINE_OK, e.ENGINE_ABSENT, e.ENGINE_DAEMON_DOWN):
+        assert e.classify(dead, {"status": good}) == e.GRAPH_DOWN, good
+
+
+def test_a_malformed_graph_probe_is_unmeasurable_not_graph_down():
+    """(a) FAILS if the graph side is not allow-listed: a probe result without a
+    real `ok` bool would become a confident GRAPH_DOWN, which is the engine-side
+    mistake mirrored. The module consumes its own pure API this way, so the
+    shape is reachable through any caller that builds a result dict.
+    (b) Reachable: a future probe_graph that forgets `ok`, or a caller that
+    passes a partial dict.
+    """
+    for bad in ({}, {"ok": None}, {"ok": "yes"}, {"reply": "+PONG"}):
+        assert e.classify(bad, {"status": e.ENGINE_OK}) == e.UNMEASURABLE, bad
+    # the real shapes still work, in both directions
+    assert e.classify({"ok": True}, {"status": e.ENGINE_OK}) == e.GRAPH_UP
+    assert e.classify({"ok": False}, {"status": e.ENGINE_OK}) == e.GRAPH_DOWN
 
 
 def test_skipping_the_engine_probe_never_reports_wedged():
@@ -232,23 +248,14 @@ def test_probe_engine_treats_a_slow_answer_as_wedged(monkeypatch):
     assert seen["timeout"] == 3.0, seen
 
 
-def test_probe_engine_reports_a_missing_cli_as_absent_not_wedged(monkeypatch):
-    """(a) FAILS if FileNotFoundError is folded into ENGINE_WEDGED — a machine
-    without the docker CLI is not a wedged engine, and reporting it as one
-    would send a lane to restart something that is not running.
-    (b) Reachable: any host with no docker binary.
-    """
-    def boom(*_a, **_k):
-        raise FileNotFoundError("docker")
-
-    monkeypatch.setattr(e.subprocess, "run", boom)
-    assert e.probe_engine(3.0)["status"] == e.ENGINE_ABSENT
-
-
-def test_probe_engine_reports_a_nonzero_rc_as_wedged(monkeypatch):
-    """(a) FAILS if `returncode != 0` is read as success. A CLI that answers
-    with an error is not evidence the engine is answering.
-    (b) Reachable: `docker version` against a dead daemon exits nonzero.
+def test_probe_engine_reports_a_nonzero_rc_as_daemon_down(monkeypatch):
+    """(a) FAILS if `returncode != 0` is folded into ENGINE_WEDGED. The two are
+    NOT the same state: a daemon that is down answers with an error, so docker
+    calls FAIL FAST rather than hang, and the recovery is `docker start`, not
+    "restart the engine". Calling an answered error "no answer" also makes the
+    CLI print a mechanism sentence the output disproves.
+    (b) Reachable: `docker version` against a dead daemon exits nonzero with
+    "Cannot connect to the Docker daemon".
     """
     class Proc:
         returncode = 1
@@ -256,7 +263,44 @@ def test_probe_engine_reports_a_nonzero_rc_as_wedged(monkeypatch):
         stderr = "Cannot connect to the Docker daemon"
 
     monkeypatch.setattr(e.subprocess, "run", lambda *a, **k: Proc())
-    assert e.probe_engine(3.0)["status"] == e.ENGINE_WEDGED
+    result = e.probe_engine(3.0)
+    assert result["status"] == e.ENGINE_DAEMON_DOWN
+    assert result["status"] != e.ENGINE_WEDGED
+
+
+def test_probe_engine_reports_a_missing_cli_as_absent_not_wedged(monkeypatch):
+    """(a) FAILS if FileNotFoundError is folded into ENGINE_WEDGED — a machine
+    without the docker CLI is not a wedged engine, and reporting it as one
+    would send a lane to restart something that is not running.
+    (b) Reachable: any host with no docker binary and no engine socket.
+    """
+    def boom(*_a, **_k):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(e.subprocess, "run", boom)
+    monkeypatch.setattr(e, "docker_socket", lambda: None)
+    assert e.probe_engine(3.0)["status"] == e.ENGINE_ABSENT
+
+
+def test_a_missing_cli_with_a_live_socket_is_unmeasured_not_absent(monkeypatch):
+    """(a) FAILS if ENGINE_ABSENT is read as "no engine is in play" whenever the
+    CLI is missing. A present engine SOCKET means something is trying to be an
+    engine and cannot be probed — the graph's state is then unmeasurable, and
+    calling it ABSENT is the #4844/#7017 misdiagnosis re-entering through the
+    allow-list (the socket-existence half of the definition was never checked).
+    (b) Reachable: this machine — an OrbStack socket exists, and PATH was
+    mutated so `docker` was missing (measured live during review).
+    """
+    def boom(*_a, **_k):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(e.subprocess, "run", boom)
+    monkeypatch.setattr(e, "docker_socket", lambda: Path("/var/run/docker.sock"))
+    result = e.probe_engine(3.0)
+    assert result["status"] == e.ENGINE_UNMEASURED
+    assert result["status"] != e.ENGINE_ABSENT
+    # and it must not be believed
+    assert e.classify({"ok": False}, result) == e.ENGINE_WEDGED
 
 
 # ==========================================================================
@@ -273,6 +317,67 @@ def test_main_exits_two_when_the_graph_is_unreachable(monkeypatch):
     port = s.getsockname()[1]
     s.close()
     assert e.main(["--no-docker", "--port", str(port), "--timeout", "1"]) == 2
+
+
+def test_the_graph_down_prose_never_claims_an_unprobed_engine_answered(capsys):
+    """(a) FAILS if the GRAPH_DOWN prose asserts "The engine answered" when the
+    engine was not probed. That sentence sends the operator to the graph
+    container on a machine whose engine is the actual problem — the misdiagnosis
+    this tool was built to remove — and it is invisible to any test that only
+    reads the exit code, which is how it survived the first review.
+    (b) Reachable: `--no-docker`, the mode that exists precisely so the engine
+    is NOT probed.
+    """
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    e.main(["--no-docker", "--port", str(port), "--timeout", "1"])
+    out = capsys.readouterr().out
+    assert "The engine answered" not in out, out
+    assert "cannot be ruled out" in out, out
+
+
+def test_the_graph_down_prose_matches_the_engine_state(monkeypatch, capsys):
+    """(a) FAILS if the prose asserts a mechanism the probed state contradicts:
+    "The engine answered" for ENGINE_ABSENT/ENGINE_UNMEASURED, or the wedged
+    timeout sentence for a daemon that answered with an error.
+    (b) Reachable: each branch is produced by a real probe state (measured live
+    during review: PATH mutated so docker was missing, socket present).
+    """
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+
+    # ENGINE_UNMEASURED: no CLI but a live socket -> the graph verdict cannot be
+    # believed, so the prose must say so rather than sending us to the graph.
+    def no_cli(*_a, **_k):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(e.subprocess, "run", no_cli)
+    monkeypatch.setattr(e, "docker_socket", lambda: Path("/var/run/docker.sock"))
+    e.main(["--port", str(port), "--timeout", "1"])
+    out = capsys.readouterr().out
+    assert "ENGINE_UNMEASURED" in out, out
+    assert "no docker CLI, but an engine socket exists" in out, out
+    assert "The engine answered" not in out, out
+    # and the wedged sentence must not ASSERT a timeout that never happened
+    assert "did not answer inside the bound" not in out, out
+
+    # ENGINE_DAEMON_DOWN: the engine DID answer (with an error), so "answered"
+    # is true but the wedged wording ("did not answer inside the bound") is not.
+    class Proc:
+        returncode = 1
+        stdout = ""
+        stderr = "Cannot connect to the Docker daemon"
+
+    monkeypatch.setattr(e.subprocess, "run", lambda *a, **k: Proc())
+    e.main(["--port", str(port), "--timeout", "1"])
+    out = capsys.readouterr().out
+    assert "daemon is not running" in out, out
+    assert "fail fast" in out, out
+    assert "did not answer inside the bound" not in out, out
 
 
 def test_main_rejects_a_nonpositive_timeout():
