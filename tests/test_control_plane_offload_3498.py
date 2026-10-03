@@ -785,7 +785,7 @@ def test_session_recording_gate_reads_off_main_thread(monkeypatch):
     _cp, transport = _stub_control_plane(
         monkeypatch, [{"onboarding_state": {"session_recording": False}}])
 
-    allowed, layer = asyncio.run(
+    allowed, layer, _state = asyncio.run(
         ha._session_recording_allowed_off_loop({"org_id": "org-4625"}))
 
     assert (allowed, layer) == (False, "team")

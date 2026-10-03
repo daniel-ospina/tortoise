@@ -758,7 +758,7 @@ def test_cmd_session_capture_replayed_is_not_reported_as_not_extracted(
 # (an older stored state must never silently mean OFF).
 
 
-def test_capture_extract_absence_reads_on(monkeypatch):
+def test_capture_extract_absence_reads_on():
     """#4258 (proof a + the mutation guard for proof d): the per-org setting is
     read with an EXPLICIT ``True`` default — an older stored onboarding state
     (key absent) resolves ON, never OFF.
@@ -769,19 +769,16 @@ def test_capture_extract_absence_reads_on(monkeypatch):
     import tortoise.hosted_api as ha_mod
 
     # an OLD stored state — no `capture_extract` key at all.
-    monkeypatch.setattr(ha_mod, "_get_onboarding_state",
-                        lambda org_id: {"session_recording": True})
-    assert ha_mod._capture_extract_enabled({"org_id": "old-team"}) is True
+    assert ha_mod._capture_extract_enabled(
+        {"org_id": "old-team"}, {"session_recording": True}) is True
 
     # an explicit OFF is honoured …
-    monkeypatch.setattr(ha_mod, "_get_onboarding_state",
-                        lambda org_id: {"capture_extract": False})
-    assert ha_mod._capture_extract_enabled({"org_id": "off-team"}) is False
+    assert ha_mod._capture_extract_enabled(
+        {"org_id": "off-team"}, {"capture_extract": False}) is False
 
     # … and an explicit ON too.
-    monkeypatch.setattr(ha_mod, "_get_onboarding_state",
-                        lambda org_id: {"capture_extract": True})
-    assert ha_mod._capture_extract_enabled({"org_id": "on-team"}) is True
+    assert ha_mod._capture_extract_enabled(
+        {"org_id": "on-team"}, {"capture_extract": True}) is True
 
 
 def test_capture_extract_defaults_on_and_registered():
@@ -892,13 +889,22 @@ def test_capture_extract_on_extracts(monkeypatch, client):
 
 def test_capture_extract_is_per_org(monkeypatch, client):
     """#4258: the setting is PER-ORG — turning extraction off for one team must
-    leave another team's default ON (never a per-graph or global flag)."""
+    leave another team's default ON (never a per-graph or global flag).
+
+    Driven through the REAL stored state (the same read the capture hot path's
+    gate-resolution worker performs and hands to ``_capture_extract_enabled``),
+    so this pins the per-org read path, not just the predicate.
+    """
     import tortoise.hosted_api as ha_mod
 
     ha_mod._update_onboarding_state("test-team-722", capture_extract=False)
-    assert ha_mod._capture_extract_enabled({"org_id": "test-team-722"}) is False
+    off_state = ha_mod._get_onboarding_state("test-team-722")
+    assert ha_mod._capture_extract_enabled(
+        {"org_id": "test-team-722"}, off_state) is False
     # a different org, whose stored state lacks the key, still reads ON.
-    assert ha_mod._capture_extract_enabled({"org_id": "other-team-4258"}) is True
+    on_state = ha_mod._get_onboarding_state("other-team-4258")
+    assert ha_mod._capture_extract_enabled(
+        {"org_id": "other-team-4258"}, on_state) is True
 
 
 def test_store_only_lane_is_one_derivation():

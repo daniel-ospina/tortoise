@@ -339,6 +339,9 @@ def test_sessions_import_defers_on_extraction_disabled(tmp_path, monkeypatch, ca
     from tortoise.__main__ import _cmd_sessions_import
 
     monkeypatch.setenv("TORTOISE_API_KEY", "tt_test")
+    # #3615: capture is gated on EXPLICIT consent — a credential is not
+    # consent. This test exercises the real import path, so opt in.
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
     monkeypatch.delenv("TORTOISE_API_URL", raising=False)
     monkeypatch.setenv("TORTOISE_IMPORT_RECEIPT_DIR", str(tmp_path / "receipts"))
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -389,6 +392,9 @@ def test_sessions_import_deferred_remedy_names_both_levers(tmp_path, monkeypatch
     from tortoise.sdk import _CAPTURE_EXTRACTION_DISABLED_WARNING
 
     monkeypatch.setenv("TORTOISE_API_KEY", "tt_test")
+    # #3615: capture is gated on EXPLICIT consent — a credential is not
+    # consent. This test exercises the real import path, so opt in.
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
     monkeypatch.delenv("TORTOISE_API_URL", raising=False)
     monkeypatch.setenv("TORTOISE_IMPORT_RECEIPT_DIR", str(tmp_path / "receipts"))
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -439,6 +445,9 @@ def test_sessions_import_defers_on_upgrade_refused_replay(tmp_path, monkeypatch,
     )
 
     monkeypatch.setenv("TORTOISE_API_KEY", "tt_test")
+    # #3615: capture is gated on EXPLICIT consent — a credential is not
+    # consent. This test exercises the real import path, so opt in.
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
     monkeypatch.delenv("TORTOISE_API_URL", raising=False)
     monkeypatch.setenv("TORTOISE_IMPORT_RECEIPT_DIR", str(tmp_path / "receipts"))
     monkeypatch.setenv("HOME", str(tmp_path))

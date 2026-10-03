@@ -10741,7 +10741,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # `capture_extract` read below (and the completion disclosure further down)
     # reuses it — ONE read per capture, not two.
     recording_ok, rec_layer, _onboard_state = (
-        await _capture_gate_resolution_off_loop(org))
+        await _session_recording_allowed_off_loop(org))
     if not recording_ok:
         if rec_layer == "graph":
             # #2302 (recording-on surface): the graph-layer 409 copy names
@@ -21738,7 +21738,7 @@ def _session_recording_allowed(org: dict,
     return True, "team"
 
 
-def _capture_extract_enabled(org: dict, state: dict | None = None) -> bool:
+def _capture_extract_enabled(org: dict, state: dict) -> bool:
     """#4258 (owner ruling on #3892, comment 5723832861 — user-configurable,
     default ON; reaffirmed by 5737715963): the EFFECTIVE
     ``capture_extract`` for a capture — a PER-ORG user setting, default ON.
@@ -21749,12 +21749,14 @@ def _capture_extract_enabled(org: dict, state: dict | None = None) -> bool:
     polarity: that key is an opt-out, where absence correctly means OFF; this
     one is read as an opt-in-consumed setting, where absence means ON.
 
-    ``state`` may be passed by a caller that already read it (see
-    ``_session_recording_allowed``) — the read is a blocking control-plane
-    round trip, so the capture hot path reads it ONCE, not twice (#4258).
+    ``state`` is REQUIRED, with NO fallback read: the read is a blocking
+    control-plane round trip, so the capture hot path reads it ONCE, in the
+    gate-resolution worker, and passes it in (#4258). A fallback here would
+    defeat that one-read invariant AND run the read ON the event loop (#4625)
+    — and the capture path always has the state, so it would be a latent
+    hazard with no caller. Same shape as ``_session_recording_allowed(org,
+    state)``, its sibling on this gate.
     """
-    if state is None:
-        state = _get_onboarding_state(org["org_id"])
     return bool(state.get("capture_extract", True))
 
 
@@ -21796,29 +21798,9 @@ def _capture_gate_resolution(org: dict) -> tuple[bool, str, dict]:
     return recording_ok, rec_layer, state
 
 
-async def _capture_gate_resolution_off_loop(org: dict) -> tuple[bool, str, dict]:
-    """`_capture_gate_resolution` off the event loop (#4625 leg 12).
-
-    The recording gate used to run inline in ``_capture_session_impl``, holding
-    the single event loop for the whole resolution — one of the py-spy
-    MainThread legs #4625 was measured on. The pool is ``graph`` and the bound
-    is the seam's standard REQUEST bound — the same contract its sibling read
-    wrappers keep (``_get_onboarding_projection_off_loop``): a capture must not
-    park a graph worker for the lane's cold-start allowance, and an over-bound
-    read fails closed (503) rather than hanging the capture.
-
-    Returns the onboarding state as well, for ``_capture_extract_enabled``
-    (#4258).
-    """
-    return await _graph_offload(
-        lambda: _capture_gate_resolution(org),
-        op="session_recording_allowed",
-        timeout=_monitoring.CONTROL_PLANE_OFFLOAD_TIMEOUT_S,
-    )
-
-
-async def _session_recording_allowed_off_loop(org: dict) -> tuple[bool, str]:
-    """`_session_recording_allowed` off the event loop (#4625, leg 12).
+async def _session_recording_allowed_off_loop(org: dict) -> tuple[bool, str, dict]:
+    """`_session_recording_allowed` off the event loop (#4625, leg 12),
+    returning the onboarding state it already read (#4258).
 
     The helper is synchronous END TO END and both of its legs block: its
     ``_get_onboarding_state`` read goes through the blocking
@@ -21836,17 +21818,23 @@ async def _session_recording_allowed_off_loop(org: dict) -> tuple[bool, str]:
     worker for the lane's cold-start allowance, and an over-bound read fails
     closed (503) rather than hanging the capture.
 
-    Thin 2-tuple adapter over the shared worker unit
-    (``_capture_gate_resolution_off_loop``), so this standalone entry point and
-    the capture path's state-returning variant can never drift on the gate
-    itself.
+    It returns the state as its THIRD element so ``_capture_session_impl`` can
+    hand that one read to ``_capture_extract_enabled`` and to its completion
+    disclosure (#4258) — the hot path reads the control plane ONCE per
+    capture, not twice. There is deliberately only ONE wrapper for this gate:
+    a second, 2-tuple alias of it was added and then left uncalled, which the
+    #4625 registry guard correctly reds (a wrapper nothing calls is not a
+    fix).
 
     Read-MOSTLY, not read-only (the #4625 work order §2): in the selfhost lane
     ``_get_onboarding_state`` auto-materializes defaults, but that write is
     idempotent, so abandoning the worker on a bound miss is safe.
     """
-    recording_ok, rec_layer, _state = await _capture_gate_resolution_off_loop(org)
-    return recording_ok, rec_layer
+    return await _graph_offload(
+        lambda: _capture_gate_resolution(org),
+        op="session_recording_allowed",
+        timeout=_monitoring.CONTROL_PLANE_OFFLOAD_TIMEOUT_S,
+    )
 
 
 
