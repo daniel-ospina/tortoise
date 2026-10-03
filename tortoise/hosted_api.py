@@ -18293,6 +18293,7 @@ async def list_pending_invites_for_me(user: dict = Depends(get_current_user)):  
             "MATCH (i:Invitation {email:$email}) "
             "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status = 'pending') "
             "AND (i.expires_at IS NULL OR i.expires_at > $now) "
+            "WITH i "  # #6976 — load-bearing: keeps the status predicate bound
             "MATCH (t:Team {id:i.org_id}) "
             "RETURN i.id, i.org_id, t.name, i.role, i.inviter_email, i.expires_at",
             params={"email": email, "now": now},

@@ -704,8 +704,8 @@ def test_no_query_loses_its_id_predicate():
 
     root = pathlib.Path(__file__).resolve().parent.parent / "tortoise"
     pred = re.compile(
-        r"(?:WHERE|AND|OR)\s+\(?\s*`?([A-Za-z_][A-Za-z0-9_]*)`?\s*\.\s*[A-Za-z_]"
-        r"[A-Za-z0-9_]*`?\s*(?:IN|=)\s*\$",
+        r"(?:WHERE|AND|OR)\s*\(?\s*`?([A-Za-z_][A-Za-z0-9_]*)`?\s*\.\s*`?"
+        r"[A-Za-z_][A-Za-z0-9_]*`?\s*(?:IN|=)\s*[\$'\"\[]",
         re.IGNORECASE,
     )
     clause = re.compile(r"\b(OPTIONAL\s+MATCH|MATCH|CALL)\b", re.IGNORECASE)
@@ -796,14 +796,33 @@ def test_no_query_loses_its_id_predicate():
     # Backtick-quoted variable.
     backtick = 'Q = ("MATCH (`n`:Point) WHERE `n`.id IN $ids MATCH (`n`)-[r]-(o) RETURN `n`")'
     assert unbarred(backtick) == ["1 (n)"], backtick
+    # The drop is RHS-AGNOSTIC (measured on 6.0.0 with a LITERAL right-hand side:
+    # unbarred 10000 rows / 2642 foreign ids, barred 8 rows / 1 id), so a rail
+    # that only saw `$param` was blind to the natural literal form.
+    literal_rhs = 'Q = ("MATCH (n:Point) WHERE n.id = \'p0\' " "MATCH (n)-[r]-(o) RETURN n")'
+    assert unbarred(literal_rhs) == ["1 (n)"], literal_rhs
+    list_rhs = 'Q = ("MATCH (n:Point) WHERE n.id IN [\'p0\'] " "MATCH (n)-[r]-(o) RETURN n")'
+    assert unbarred(list_rhs) == ["1 (n)"], list_rhs
+    # No whitespace between the keyword and the predicate (also measured leaking).
+    no_space = 'Q = ("MATCH (n:Point) WHERE(n.id = \'p0\') " "MATCH (n)-[r]-(o) RETURN n")'
+    assert unbarred(no_space) == ["1 (n)"], no_space
 
     offenders: list[str] = []
+    scanned = 0
     for path in sorted(root.rglob("*.py")):
         try:
-            for hit in unbarred(path.read_text(encoding="utf-8", errors="replace")):
-                offenders.append(f"{path.name}:{hit}")
+            hits = unbarred(path.read_text(encoding="utf-8", errors="replace"))
         except SyntaxError:
             continue  # a syntax error is py_compile's to report, not this rail's
+        scanned += 1
+        offenders.extend(f"{path.name}:{hit}" for hit in hits)
+    # A scan that reads nothing passes vacuously — a package rename, a test
+    # relocation or a packaging change would disarm the only rail for this
+    # defect while staying green (review P3). Measured: 190 files.
+    assert scanned > 100, (
+        f"the shape scan read only {scanned} files under {root} — it is not "
+        "looking at the package, so its silence means nothing"
+    )
     assert not offenders, (
         "these queries lose their id predicate when a following clause expands "
         "the match (#6976) — add a load-bearing `WITH <var>` between the "
