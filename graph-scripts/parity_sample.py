@@ -63,10 +63,12 @@ def _parse_uri(uri: str) -> dict:
     from tortoise.config import parse_uri_userinfo
     parsed = urlparse(uri)
     # #3039: decode userinfo through the single shared rule.
-    _username, password = parse_uri_userinfo(uri)
+    username, password = parse_uri_userinfo(uri)
     return {
         "host": parsed.hostname or "localhost",
         "port": parsed.port or 16379,
+        # #3081: the username MUST travel with the password — see audit_graph.py.
+        "username": username or "",
         "password": password or "",
         "graph": parsed.path.lstrip("/") or "tortoise",
     }
@@ -228,6 +230,22 @@ def classify_delta(
 
 # ── Main ────────────────────────────────────────────────────────────────
 
+def _build_client(cfg: dict):
+    """Connect directly (avoids the heavy index creation of FalkorProjection).
+
+    Split out of ``main`` as the seam a behavioural test can observe: the
+    decoded username must reach ``FalkorDB``, and watching the real call is the
+    only check that cannot miss a spelling (#3081).
+    """
+    from falkordb import FalkorDB as _FalkorDB
+    return _FalkorDB(
+        host=cfg["host"], port=cfg["port"],
+        username=cfg["username"] or None,
+        password=cfg["password"] or None,
+        socket_connect_timeout=5, socket_timeout=120,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Cross-subgraph parity sample — #49 Phase 2 Task 2.0"
@@ -260,13 +278,7 @@ def main() -> int:
     print(f"  Seed:    {args.seed}")
     print()
 
-    # Use direct FalkorDB connection (avoids heavy index creation)
-    from falkordb import FalkorDB as _FalkorDB
-    db = _FalkorDB(
-        host=cfg["host"], port=cfg["port"],
-        password=cfg["password"] or None,
-        socket_connect_timeout=5, socket_timeout=120,
-    )
+    db = _build_client(cfg)
     g = db.select_graph(cfg["graph"])
     light_proj = _LightProj(g)
 
