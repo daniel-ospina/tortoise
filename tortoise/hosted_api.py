@@ -128,6 +128,7 @@ from tortoise.sdk import (
     _CAPTURE_NO_PROVIDER_MODE,  # #3892: keyless-capture receipt mode (reused, not reinvented)
     _CAPTURE_NO_PROVIDER_WARNING,  # #3892: the canonical "stored, not extracted" notice
     REPORT_HOOK_URL,  # #2335 WI-2: the bug_report.yml report-hook target
+    InvertedSupersedeWindow,  # #5363: the named #4021 refusal the commit path maps to 422
     TortoiseSDK,
     _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
     _capture_ep_target_ids,  # W5 Phase D (#2104): EP pass targets (minted + first-time folds)
@@ -145,6 +146,7 @@ from tortoise.sdk import (
     _session_capture_event_id,  # W5 Phase F (#2104): deterministic sessionCaptured Event id
     _session_extraction_estimate,  # #1532 D4: v2-aware pre-write quota estimate
     _session_llm_transcript,  # P1 #1529: the shared empty/blank conversation gate
+    _supersede_window_end,  # #5363: the ONE inverted-window predicate (pre-write check)
     _write_capture_turns,  # #3086: the ONE batched turn-stream writer (shared with sdk.capture_session)
 )
 from tortoise.security import redact_error  # billing webhook + checkout error logging
@@ -13091,6 +13093,70 @@ def _point_content_by_id(payload: CommitPayload, pid: str) -> str:  # noqa: F821
     return ""
 
 
+def _prevalidate_supersede_window(sdk, pr, *, now: str) -> None:
+    """#5363 (B) — refuse an inverted supersede window BEFORE the successor is
+    minted, so a refused commit leaves NO partial write.
+
+    ``_execute_commit_writes`` creates the successor and only THEN calls
+    ``supersede_point``, whose #4021 guard refuses an inverted window before it
+    mutates the predecessor. Because the refuse happens second, the successor
+    it just created is left live with no ``CORRECTS`` edge — and since
+    ``supersede_point`` re-raises deterministically for the same payload, the
+    commit is permanently un-committable (a corrected ``when`` re-dedups onto
+    the already-minted successor).
+
+    The PREDICATE is not re-implemented here: this mirrors the inputs the
+    writer will hand the shared ``_supersede_window_end`` and lets it decide, so
+    the pre-write check and the write cannot drift. The mirror is:
+
+    - no ``valid_from`` kwarg (this path passes none);
+    - the successor's stored ``validFrom`` is the payload ``when`` the write
+      sets, EXCEPT on a content-dedup hit (``create_point`` re-keys onto an
+      existing node via ``_find_point_by_content`` — the same helper this uses)
+      whose stored window start survives when ``when`` is empty;
+    - ``createdAt`` is the existing node's when re-keyed, else the fresh node's
+      create timestamp (mirrored by the writer's own ``now``).
+
+    Raises ``InvertedSupersedeWindow`` — the caller's ``[5]`` boundary maps it
+    to the repo's validation posture (422).
+    """
+    proj = sdk._get_proj()
+    old_rows = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.validFrom",
+        params={"id": pr.existing_id},
+    ).result_set
+    # EVERY node carrying the predecessor id: the writer's stamp MATCHes and
+    # stamps them all, and row order is server-dependent (mirrors the #5358
+    # sibling loops + the MCP preview's identical read).
+    old_vfs = [r[0] for r in old_rows]
+    # Mirror `create_point(dedup=True)`'s successor resolution. When no node
+    # matches, the write mints the content-addressed `supersede_id` and stamps
+    # it with the payload `when`.
+    existing_id = sdk._find_point_by_content(
+        pr.point.content, pointKind=pr.point.pointKind)
+    stored_vf = pr.point.when or None
+    successor_created_at = now
+    if existing_id:
+        rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.validFrom, n.createdAt",
+            params={"id": existing_id},
+        ).result_set
+        if rows:
+            if not stored_vf:
+                # No payload `when` → the re-keyed node keeps its own start.
+                stored_vf = rows[0][0]
+            successor_created_at = rows[0][1] or now
+    _supersede_window_end(
+        old_id=pr.existing_id,
+        new_id=existing_id or pr.supersede_id,
+        old_vfs=old_vfs,
+        valid_from=None,  # this write path passes no kwarg
+        stored_vf=stored_vf,
+        successor_created_at=successor_created_at,
+        now=now,
+    )
+
+
 def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # noqa: F821
     """W-3 [5] — the graph write phase for an adjudicated (budget=ok) commit.
 
@@ -13099,9 +13165,11 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     entities + aboutObject edges, then operators — IMPL/NAND BEFORE MITIGATES
     (v1 targets must be same-commit emitted operators, Layer-1 enforced).
 
-    Runs inside the handler's fail-closed guard — any graph error surfaces as
-    a redacted 500 and the client retries with the same client_commit_id
-    (safe by L1; the record stays partial until the write completes).
+    A DETERMINISTIC supersede-window refusal (#4021's inverted window) is
+    pre-validated before the first write (#5363) and surfaces as a 422 from the
+    handler; every other graph error stays fail-closed — a redacted 500 and the
+    client retries with the same client_commit_id (safe by L1; the record stays
+    partial until the write completes).
     """
     from tortoise.ids import content_hash
 
@@ -13109,6 +13177,14 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     now = datetime.now(UTC).isoformat()
     session_id = payload.session_id
     reconcile = plan.reconcile
+    # #5363 (B): validate EVERY supersede window BEFORE the first write of this
+    # phase. The #4021 refusal used to fire from `supersede_point` only AFTER
+    # the successor had been minted (and after the chain writes), leaving a live
+    # orphan successor and a commit no retry can complete. The shared predicate
+    # is unchanged — this only moves the check ahead of the write it protects.
+    for _pr in reconcile.points:
+        if _pr.action == "supersede":
+            _prevalidate_supersede_window(sdk, _pr, now=now)
     # #1370 / #4934: the SAME kind→label routing + gated binder as the local
     # capture seam (anti-drift — both call `subject_binding`). Subject-kind
     # names are excluded from the legacy `about_entities` channel below: the
@@ -13643,7 +13719,9 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     Response contract (§6.1): 200 {session_id, commit_id, nodes_created,
     nodes_merged, held[], duplicate} · 400 missing required fields ·
     401 bad/missing key (get_current_org) · 402 budget ceiling · 422 Layer-1
-    (retry once; code calibration_mismatch / commit_id_mismatch) · 429
+    (retry once; code calibration_mismatch / commit_id_mismatch) OR an
+    inverted supersede window (code supersede_window_inverted — #5363, a
+    deterministic payload refusal, NOT retryable) · 429
     dedicated 300/min/key bucket (R-13) · 500 fail-closed, redacted.
     """
     # #1927: commit_session is a session-content write surface that needs NO
@@ -13804,6 +13882,26 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         _execute_commit_writes(sdk, payload, plan)
     except HTTPException:
         raise
+    except InvertedSupersedeWindow as exc:
+        # #5363 (A): this is a DETERMINISTIC payload refusal, not a transient
+        # write failure — the retry-advising 500 below is actively wrong for it
+        # (a same-payload retry re-raises identically). Map it to the repo's
+        # validation posture (422) and NAME the conflicting ids / window so the
+        # client can fix the payload. The pre-write check in
+        # `_execute_commit_writes` keeps this path from leaving a partial
+        # write; this clause is the boundary of last resort for a refusal that
+        # still escapes it (e.g. a concurrent change between check and write).
+        raise HTTPException(  # noqa: B904
+            status_code=422,
+            detail={
+                "code": "supersede_window_inverted",
+                "errors": [str(exc)],
+                "superseded": exc.old_id,
+                "supersedes_by": exc.new_id,
+                "successor_validFrom": exc.successor_start,
+                "predecessor_validFrom": exc.predecessor_valid_from,
+            },
+        )
     except Exception:
         _logger.exception(
             "commit write failed (fail-closed 500): team=%s session=%s",
