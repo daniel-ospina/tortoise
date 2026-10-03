@@ -283,6 +283,13 @@ surfaces:
   - test_client_ip_middleware.py
   - test_commit_endpoint.py
   - test_commit_schema.py
+  # #2642/#2636 (epic #2632): the connector CRUD surface. Load-bearing here for
+  # the same reason as test_hosted_api.py below — every assertion drives an
+  # `@app.*` route in tortoise/hosted_api.py plus the org-scoped filters in
+  # tortoise/supabase_control.py, and `hosted_api.py` selects `api`. Without
+  # this entry the cross-tenant IDOR pins (and the #2642 boundary tests) never
+  # run on a diff-based lane at all.
+  - test_connector_scope.py
   # #1370: dual-registered with `core` — the same test file covers the hosted
   # commit seam (tortoise/hosted_api.py), so a hosted-only change must run it too.
   - test_subject_binding_1370.py
@@ -1017,6 +1024,7 @@ surfaces:
   - test_onboarding_truth_surface.py  # #3670/#3671/#3681: dual-registered (api+core) — pins tortoise/hosted_api.py
   - test_restore_container_recovery.py
   - test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan
+  - test_destructive_wipe_guard.py
   - test_session_attribution.py
   - test_ci_selection.py
   # #6884: pins the `uri_requiring` declaration (re-derived BEHAVIOURALLY — it
@@ -2464,6 +2472,30 @@ durations:
   eval/retrieval/test_oracle.py: 5.7
   longmem_eval/test_context_assembly_leakage.py: 5.2
   test_ep_directional.py: 5.7
+  # #2944: new file. NOT gate-required. Measured at 4a453a352 (the base merge):
+  # the fast pool is 729 files and duration coverage is 663/729 = 90.95% WITH
+  # this row vs 662/729 = 90.81% WITHOUT it — both clear the 0.90 floor, so the
+  # gated `--integrity` step (`tools/ci_selection.py`,
+  # `duration_coverage_issues`) returns [] either way. Those counts move as
+  # main lands test files, so the claim to re-check is only that removing this
+  # row does not push coverage below 0.90. (An earlier revision claimed the row
+  # was REQUIRED by a 544/605 = 89.92% floor breach. That was TRUE when written:
+  # this branch's own merge 006acbec2 sat at 544/605 = 89.92%, one file under
+  # the floor, and the row took it to 545/605 = 90.08% (4b2e5e225). Main's #3400
+  # durations refresh then grew the map to 720 weights / 729 fast files, so the
+  # row is no longer gate-required — the earlier claim was SUPERSEDED by that
+  # refresh, not wrong.)
+  #
+  # The value is a LOCAL measurement (31 tests; the file held 30 when the row
+  # was added, 66.7s at fleet load) and no CI
+  # leg has collected it, so the row carries `# unmeasured` per the convention
+  # above. It is carried (rather than left to the flat 2.0s default) for LPT
+  # packing accuracy: the durations map has 720 entries, median 1.5s
+  # (fast-pool subset 663, median 1.3s), so 66.7s is ~44x the median. Refresh
+  # from the first post-merge main junit run that includes it — the BARE marker
+  # form is deliberate, because the refresh writer (`tools/ci_timing.py`,
+  # `re.fullmatch(r"[ \t]*#\s*unmeasured", tail)`) can only clear a bare marker.
+  test_destructive_wipe_guard.py: 66.7  # unmeasured
   test_extractor_reliability.py: 5.5
   test_acl_graph_users.py: 9.8
   test_battery_exposure_liveness.py: 5.9
