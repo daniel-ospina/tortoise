@@ -498,19 +498,30 @@ def test_non_finite_json_is_a_422_not_a_500(client) -> None:
     model validator present, a 422 that raises while being rendered.
     """
     tc, cp = client
-    for literal in ("NaN", "Infinity"):
-        post = tc.post("/v1/connectors",
-                       content='{"source_type":"slack","config":{"x":' + literal + '}}',
-                       headers={"content-type": "application/json"})
-        assert post.status_code == 422, (literal, post.status_code, post.text)
-        assert "non-finite" in post.json()["detail"]
-        patch = tc.patch(f"/v1/connectors/{CONN_A}",
-                         content='{"config":{"x":' + literal + '}}',
-                         headers={"content-type": "application/json"})
-        assert patch.status_code == 422, (literal, patch.status_code, patch.text)
-        # ...and the value never reached the row.
-        mine = next(x for x in cp.tables["connectors"] if x["id"] == CONN_A)
-        assert mine["config"] == {"repo": "alpha"}
+    # Every content type FastAPI parses as JSON: a gate on the literal
+    # `application/json` substring was a fail-open hole — `+json` subtypes and
+    # case variants skipped it and the 500 came back.
+    for ctype in ("application/json", "application/merge-patch+json",
+                  "application/vnd.api+json", "APPLICATION/JSON"):
+        for literal in ("NaN", "Infinity", "-Infinity"):
+            post = tc.post("/v1/connectors",
+                           content='{"source_type":"slack","config":{"x":' + literal + '}}',
+                           headers={"content-type": ctype})
+            assert post.status_code == 422, (ctype, literal, post.status_code, post.text)
+            assert "non-finite" in post.json()["detail"]
+            patch = tc.patch(f"/v1/connectors/{CONN_A}",
+                             content='{"config":{"x":' + literal + '}}',
+                             headers={"content-type": ctype})
+            assert patch.status_code == 422, (ctype, literal, patch.status_code, patch.text)
+            # ...and the value never reached the row.
+            mine = next(x for x in cp.tables["connectors"] if x["id"] == CONN_A)
+            assert mine["config"] == {"repo": "alpha"}
+    # The refusal must not swallow the shapes FastAPI owns: a malformed body is
+    # still FastAPI's 422, and a non-JSON body must not 500 here.
+    assert tc.post("/v1/connectors", content="{not json",
+                   headers={"content-type": "application/json"}).status_code == 422
+    assert tc.post("/v1/connectors", content="plain text",
+                   headers={"content-type": "text/plain"}).status_code == 422
 
 
 def test_connector_auth_distinguishes_unknown_from_unimplemented(client) -> None:

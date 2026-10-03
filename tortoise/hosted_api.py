@@ -26927,9 +26927,13 @@ async def _reject_non_finite_body(request: Request) -> None:
     ``allow_nan=False``, so a NaN-echoing 422 raises during rendering and the
     client still gets a 500. Nothing non-finite ever reaches the error body this
     way.
+
+    The body is parsed REGARDLESS of Content-Type, matching
+    ``_read_internal_json_body`` above and FastAPI's own body parser — which
+    accepts any ``application/*+json`` subtype and any case. A content-type gate
+    here was a fail-open hole: ``application/merge-patch+json`` skipped the check
+    and the 500 came back.
     """
-    if "application/json" not in request.headers.get("content-type", ""):
-        return
     body = await request.body()
     if not body:
         return
