@@ -2063,9 +2063,11 @@ carve_out:
 # identity (the #6798 shape) — #6390 was `mergeable=true` with a clean review
 # record AT HEAD and still could not be landed.
 #
-# WHY THE FIX IS HERE AND NOT IN THE WORKFLOW: the tier-2 PR legs are URI-UNSET
-# BY DESIGN — the empty URI is the E2E-6 tripwire signal (python-ci.yml:600-602
-# and 1367-1368, epic #1647 Task 9 + cycle-6 P2-8), so 'provision the URI' is a
+# WHY THE FIX IS HERE AND NOT IN THE WORKFLOW: the tier-2 PR legs are URI-EMPTY
+# (present and empty, never unset) BY DESIGN — both the URI and EXPECT_URI are
+# emptied, which is what keeps the E2E-6 tripwire INERT on the tier-2 shape (it
+# arms only when full==true, where both are set; python-ci.yml:600-602 and
+# 1367-1368, epic #1647 Task 9 + cycle-6 P2-8), so 'provision the URI' is a
 # reversal of a recorded decision, not a fix. A file that cannot collect in a
 # URI-less leg must therefore not be handed to one — the exact MIRROR of
 # `carve_out` above, which excludes files that cannot run in a URI-SET leg.

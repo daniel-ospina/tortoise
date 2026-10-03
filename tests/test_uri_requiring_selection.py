@@ -1,10 +1,12 @@
 """#6884: a module that collects NOTHING must not be handed to a test leg.
 
 The defect this pins: the tier-2 PR legs run with an **EMPTY `TORTOISE_DB_URI`**
-by design — the empty value *is* the E2E-6 tripwire signal (`python-ci.yml:600-602`
+(present and empty, never unset) by design — both the URI and `EXPECT_URI` are
+emptied, which is what keeps the E2E-6 tripwire **inert** on the tier-2 shape (it
+arms only when `full==true`, where both are set; `python-ci.yml:600-602`
 and `:1367-1368`; epic #1647 Task 9, cycle-6 P2-8), so "provision the URI" is a
 reversal of a recorded decision, not a fix. A selected test module that
-module-skips at import on a missing URI therefore collects ZERO tests in such a
+module-skips at import on an empty URI therefore collects ZERO tests in such a
 leg: `pytest --collect-only` exits 5 and the fail-closed manifest step kills the
 leg BEFORE any test runs. That is outside the test step, so the run carries no
 `FAILED <nodeid>` for the merge rail to attribute, and the rail refuses with

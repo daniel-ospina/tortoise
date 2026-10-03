@@ -1016,7 +1016,7 @@ def slow_leg_by_surface(manifest: dict) -> dict[str, set[str]]:
     tests pin the per-surface splits."""
     slow = set(manifest.get("slow_files", []))
     carve = set(manifest.get("carve_out", []))
-    # #6884: the test-slow legs are URI-unset on a tier-2 PR too (python-ci.yml
+    # #6884: the test-slow legs are URI-empty on a tier-2 PR too (python-ci.yml
     # :1367-1368; :600-602 for the fast job — URI is set only when full==true),
     # and they build their collect-only input from `slow_selected`. A
     # `uri_requiring` file in `slow_selected` therefore contributes no tests to
@@ -1177,16 +1177,18 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
     files -= slow  # #1371: slow files never run in the fast gate
     # #1988: carve-out (embedded-only) files run in the dedicated carve-out
     # job — on tier-2 PR legs the fast-matrix process runs everything embedded
-    # (URI unset) and exhausts its redislite spawn budget before the late
+    # (URI empty) and exhausts its redislite spawn budget before the late
     # embedded suites (RedisLiteServerStartError); the carve-out job gives
     # them a fresh process. The carve-out job now runs on PRs too.
     carve = set(manifest.get("carve_out", []))
     files -= carve
     # #6884: the MIRROR of the carve-out subtraction above. A `carve_out` file
-    # cannot run in a URI-SET leg; these cannot run in a URI-UNSET one, and the
-    # tier-2 PR legs ARE URI-unset BY DESIGN — the empty URI is the E2E-6
-    # tripwire signal (python-ci.yml:600-602 and 1367-1368; epic #1647 Task 9,
-    # cycle-6 P2-8), so 'provision the URI' is a reversal of a recorded
+    # cannot run in a URI-SET leg; these cannot run in a URI-EMPTY one, and the
+    # tier-2 PR legs ARE URI-empty BY DESIGN — both the URI and EXPECT_URI are
+    # emptied, which is what keeps the E2E-6 tripwire INERT on the tier-2 shape
+    # (it arms only when full==true, where both are set; python-ci.yml:600-602
+    # and 1367-1368; epic #1647 Task 9, cycle-6 P2-8), so 'provision the URI' is
+    # a reversal of a recorded
     # decision, not an available fix. Handed to such a leg each of these
     # module-skips at import, so it collects ZERO tests and `pytest
     # --collect-only` exits 5; the fail-closed manifest guard then kills the leg
@@ -1429,10 +1431,11 @@ def on_demand_files(manifest: dict) -> set[str]:
 
 
 def uri_requiring_files(manifest: dict) -> set[str]:
-    """#6884: modules that cannot COLLECT in a URI-UNSET leg.
+    """#6884: modules that cannot COLLECT in a URI-EMPTY leg.
 
-    Each module-skips at import when `TORTOISE_DB_URI` is absent, so in a
-    tier-2 PR leg (URI-unset by design) it collects ZERO tests and
+    Each module-skips at import when `TORTOISE_DB_URI` is empty — present and
+    empty, the shape the tier-2 leg actually sets — so in a
+    tier-2 PR leg (URI-empty by design) it collects ZERO tests and
     `pytest --collect-only` exits 5 — the fail-closed manifest guard then kills
     the leg before any test runs, with no `FAILED <nodeid>` for the merge rail
     to attribute. Read through ONE definition, like `on_demand_files`: the
