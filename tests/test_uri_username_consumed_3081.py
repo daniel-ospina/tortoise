@@ -239,6 +239,27 @@ def test_pre_migration_helpers_deliver_the_username():
         assert got.get("password") == "pw", f"{helper.__name__} lost the password"
 
 
+def test_pre_migration_helpers_send_none_for_the_anonymous_form():
+    """The ANONYMOUS form, and the `""` -> `None` conversion.
+
+    `docker://:pw@host` carries no username, so the client must be handed
+    ``None`` rather than ``""``. (They happen to be equivalent in redis-py —
+    ``UsernamePasswordCredentialProvider`` normalises a falsy username — but
+    the conversion is the contract, and without this test a hardcoded or
+    unreduced username in either helper goes unnoticed.)
+    """
+    mod = _load("pre_migration_snapshot.py")
+    for helper in (mod.trigger_bgsave, mod.check_rdb):
+        _Recording.calls = []
+        with _patched(mod):
+            helper("example.invalid", 16379, "pw", username="")
+        assert _Recording.calls, f"{helper.__name__} never built a client"
+        assert _Recording.calls[-1].get("username") is None, (
+            f"{helper.__name__} must convert an empty username to None; got "
+            f"{_Recording.calls[-1].get('username')!r}"
+        )
+
+
 def test_pre_migration_helpers_require_the_username():
     """The root-cause fix: the silent default is gone.
 
@@ -340,11 +361,18 @@ def test_the_call_site_recorders_can_fail():
 
     Without this, a typo in the patched name would leave both call-site tests
     green while observing nothing at all.
+
+    The assertion is deliberately SPELLING-AGNOSTIC. Pinning `args[:2]` would
+    red a semantically identical fully-keyword call site — the same false-red
+    class that justified deleting the AST matcher in the first place.
     """
     captured = _drive_main_and_capture(
         "pre_migration_snapshot.py",
         ["pre_migration_snapshot.py", "--uri", NAMED, "--trigger-bgsave"],
     )
-    assert captured["trigger_bgsave"]["args"][:2] == ("localhost", 16379), (
+    call = captured["trigger_bgsave"]
+    seen = dict(zip(("host", "port"), call["args"], strict=False))
+    seen.update(call["kwargs"])
+    assert (seen.get("host"), seen.get("port")) == ("localhost", 16379), (
         f"the recorder did not capture the real call: {captured!r}"
     )
