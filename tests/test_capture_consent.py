@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
+import stat
 import sys
+import threading
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -214,12 +217,110 @@ def test_the_shown_stamp_does_not_follow_a_symlink(tmp_path):
 def test_the_notice_is_written_at_mode_0600(tmp_path):
     """It names the capture policy, so it is not world-readable — the old
     `write_text` path left it at the umask default (0o644)."""
-    import stat
-
     from tortoise.capture_consent import record_capture_declined
     assert record_capture_declined(tmp_path) is True
     mode = stat.S_IMODE(capture_notice_path(tmp_path).stat().st_mode)
     assert mode == 0o600, f"expected 0o600, got {oct(mode)}"
+
+
+def test_the_notice_mode_is_pinned_against_a_restrictive_umask(tmp_path):
+    """0o600 must be PINNED, not left at `0o600 & ~umask`. Under `umask 0o400`
+    the mode lands at 0o200 — which the owner cannot read — so the notice would
+    be written but never deliverable."""
+    from tortoise.capture_consent import record_capture_declined
+    previous = os.umask(0o400)
+    try:
+        assert record_capture_declined(tmp_path) is True
+    finally:
+        os.umask(previous)
+    mode = stat.S_IMODE(capture_notice_path(tmp_path).stat().st_mode)
+    assert mode == 0o600, f"expected a pinned 0o600, got {oct(mode)}"
+
+
+def test_a_symlink_at_the_notice_is_not_read(tmp_path):
+    """The READ half of #3684: `read_text` follows links, so a symlink at the
+    notice made `pending_capture_notice` return an ARBITRARY readable file's
+    content — which a terminal stderr then printed."""
+    from tortoise.capture_consent import record_capture_declined
+    secret = tmp_path / "secret"
+    secret.write_text("SECRET-CONTENT\n", encoding="utf-8")
+    notice = capture_notice_path(tmp_path)
+    notice.parent.mkdir(parents=True, exist_ok=True)
+    notice.symlink_to(secret)
+
+    assert pending_capture_notice(tmp_path) is None, "read THROUGH the symlink"
+    assert record_capture_declined(tmp_path) is False
+
+
+def test_a_symlink_at_the_stamp_does_not_suppress_the_notice(tmp_path):
+    """`exists()` follows links, so a link at `….shown` pointing at ANY readable
+    file read as "already shown" and the migration notice was silently never
+    delivered."""
+    from tortoise.capture_consent import record_capture_declined
+    assert record_capture_declined(tmp_path) is True
+    target = tmp_path / "unrelated-existing-file"
+    target.write_text("x\n", encoding="utf-8")
+    capture_notice_shown_path(tmp_path).symlink_to(target)
+
+    assert pending_capture_notice(tmp_path) is not None, "the notice was suppressed"
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="mkfifo is not POSIX")
+def test_a_fifo_at_the_notice_path_is_refused(tmp_path):
+    """`write_text` would have blocked on it. On the parent the STAMP write does
+    exactly that — it opens the fifo `O_WRONLY` and waits forever for a reader,
+    which is why the fix opens `O_NONBLOCK` and refuses anything that is not a
+    regular file. The stamp half therefore runs under an alarm, so a regression
+    FAILS here instead of wedging the suite (observed: the parent hung until a
+    30-minute tool timeout killed it)."""
+    from tortoise.capture_consent import mark_capture_notice_shown, record_capture_declined
+    notice = capture_notice_path(tmp_path)
+    notice.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(notice)
+
+    assert record_capture_declined(tmp_path) is False
+    assert stat.S_ISFIFO(notice.lstat().st_mode), "the fifo is left alone"
+
+    stamp = capture_notice_shown_path(tmp_path)
+    os.mkfifo(stamp)
+
+    def _stuck(signum, frame):
+        raise AssertionError("the stamp write blocked on the fifo (no O_NONBLOCK)")
+
+    previous = signal.signal(signal.SIGALRM, _stuck)
+    signal.alarm(10)
+    try:
+        mark_capture_notice_shown(tmp_path)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+    assert stat.S_ISFIFO(stamp.lstat().st_mode)
+
+
+def test_the_first_write_is_atomic_under_concurrency(tmp_path):
+    """The reason for `O_CREAT|O_EXCL` over the old `exists()` probe: racing
+    writers must produce exactly ONE winner. A check-then-write probe has a
+    window in which both callers see "not yet written" and both write."""
+    from tortoise.capture_consent import record_capture_declined
+    racers = 32
+    barrier = threading.Barrier(racers)
+    results: list[bool] = []
+    guard = threading.Lock()
+
+    def attempt() -> None:
+        barrier.wait()
+        got = record_capture_declined(tmp_path)
+        with guard:
+            results.append(got)
+
+    threads = [threading.Thread(target=attempt) for _ in range(racers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert results.count(True) == 1, (
+        f"exactly one writer must win the first write, got {results.count(True)}")
 
 
 def test_the_refusal_still_writes_nothing_readable_by_a_reader(tmp_path):

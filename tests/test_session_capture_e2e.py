@@ -327,6 +327,36 @@ def test_session_end_notice_survives_a_marker_written_by_a_stale_hook(
         "written by a stale hook's CLI refusal\n"
 
 
+def test_session_end_notice_does_not_follow_a_symlink_at_the_marker(
+        tmp_path, transcript):
+    """#3684 — the BASH writer of the same path, and the reason the Python fix
+    alone was not enough.
+
+    `[ ! -f "$NOTICE_MARKER" ]` follows a symlink and `> "$NOTICE_MARKER"`
+    follows it too, so a DANGLING link made `-f` false, the guard pass, and the
+    redirect then CREATE the attacker's target at the umask (reproduced: 0644) —
+    on a host where the hook writes the notice, the Python hardening was
+    therefore bypassed end to end. The hook must refuse the link, and pin 0600
+    when it does write.
+    """
+    log = tmp_path / "calls.log"
+    bindir = _write_mock_tortoise(tmp_path, log)
+    home = bindir.parent / "home"
+    marker = home / ".tortoise" / "capture-consent-notice"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    victim = home / "some-other-file"
+    marker.symlink_to(victim)
+    meta = json.dumps({"session_id": "s-symlink", "transcript_path": str(transcript)})
+
+    r = _run_hook(SESSION_END, meta, bindir,
+                  extra_env={"TORTOISE_API_KEY": "tt_legacy_credential"})
+    assert r.returncode == 0
+    assert not victim.exists(), "the hook wrote the notice THROUGH the symlink"
+    assert marker.is_symlink(), "the link is left alone, not replaced"
+    # the visible line is not marker-gated, so it still fires
+    assert "session capture is OFF" in r.stderr, r.stderr
+
+
 def test_session_end_notice_ignores_a_blank_legacy_credential(tmp_path, transcript):
     """The notice predicate is a *second* bash predicate; a whitespace-only key
     is not a resolvable credential (the resolver strips it and treats it as
