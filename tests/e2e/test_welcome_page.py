@@ -177,7 +177,6 @@ def _register_signup_capture(
 
 
 def _dispose_captured(
-    signup: dict,
     transport_failures: list[str],
     post_issued: dict,
     browser_to_supabase: list[str],
@@ -185,12 +184,11 @@ def _dispose_captured(
     skip,
     fail,
 ) -> None:
-    """Dispose of a captured-nothing signup POST, taking the live STATE by reference.
+    """Dispose of a captured-nothing signup POST, reading the live register itself.
 
-    The call site passes state rather than `post_issued["value"]` so the read of
-    the live register is inside a pinned function: spelled out at the call site,
-    hardcoding it `True` survived every pin while turning a "form never submitted"
-    PRODUCT regression into a skip (#4940 review round 7).
+    The read of `post_issued` happens HERE rather than at the call site: spelled
+    out there, hardcoding it `True` survived every pin while turning a "form never
+    submitted" PRODUCT regression into a skip.
     """
     _handle_unobserved(
         transport_failures,
@@ -198,6 +196,28 @@ def _dispose_captured(
         browser_to_supabase,
         skip=skip,
         fail=fail,
+    )
+
+
+def _dispose_live(
+    transport_failures: list[str],
+    post_issued: dict,
+    browser_to_supabase: list[str],
+) -> None:
+    """The LIVE binding of the runner callables.
+
+    Bound here rather than in the test body so it is executable browser-free. With
+    `skip=pytest.fail, fail=pytest.skip` written into the smoke's body, that swap
+    survived the entire suite — and it inverts the verdict in BOTH directions: a
+    product regression calls `pytest.skip` (GREEN) and an outage calls
+    `pytest.fail` (reported as a product failure).
+    """
+    _dispose_captured(
+        transport_failures,
+        post_issued,
+        browser_to_supabase,
+        skip=pytest.skip,
+        fail=pytest.fail,
     )
 
 
@@ -606,18 +626,35 @@ def test_dispose_captured_reads_the_live_register() -> None:
     skip = lambda m: calls.append(("skip", m))  # noqa: E731
     fail = lambda m: calls.append(("fail", m))  # noqa: E731
 
-    _dispose_captured({"status": None}, [], {"value": False}, [], skip=skip, fail=fail)
+    _dispose_captured([], {"value": False}, [], skip=skip, fail=fail)
     assert [kind for kind, _ in calls] == ["fail"]
 
     calls.clear()
-    _dispose_captured({"status": None}, [], {"value": True}, [], skip=skip, fail=fail)
+    _dispose_captured([], {"value": True}, [], skip=skip, fail=fail)
     assert [kind for kind, _ in calls] == ["skip"]
 
     # The tripwire still wins over a skip, through this entry point too.
     calls.clear()
-    _dispose_captured(
-        {"status": None}, [], {"value": True}, ["https://x/auth/v1/token"], skip=skip, fail=fail
-    )
+    _dispose_captured([], {"value": True}, ["https://x/auth/v1/token"], skip=skip, fail=fail)
+    assert [kind for kind, _ in calls] == ["fail"]
+
+
+def test_dispose_live_binds_the_runner_callables(monkeypatch) -> None:
+    """The live binding must be the REAL `pytest.skip` / `pytest.fail`.
+
+    With the binding written into the smoke's body, swapping it survived the whole
+    suite, inverting the verdict both ways. Monkeypatching the two callables makes
+    the live binding executable without a browser.
+    """
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(pytest, "skip", lambda m: calls.append(("skip", m)))
+    monkeypatch.setattr(pytest, "fail", lambda m: calls.append(("fail", m)))
+
+    _dispose_live([], {"value": True}, [])
+    assert [kind for kind, _ in calls] == ["skip"]
+
+    calls.clear()
+    _dispose_live([], {"value": False}, [])
     assert [kind for kind, _ in calls] == ["fail"]
 
 
@@ -773,14 +810,7 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
             # precedence over a skip, and the evidence that reaches the message all
             # live in `_handle_unobserved`, pinned behaviourally below rather than
             # trusted.
-            _dispose_captured(
-                signup,
-                transport_failures,
-                post_issued,
-                browser_to_supabase,
-                skip=pytest.skip,
-                fail=pytest.fail,
-            )
+            _dispose_live(transport_failures, post_issued, browser_to_supabase)
         assert signup["status"] == 200, (
             f"live signup returned {signup['status']} — rate-limited or error: "
             f"{signup['body']!r}"
