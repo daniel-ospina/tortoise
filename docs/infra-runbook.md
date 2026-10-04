@@ -815,13 +815,23 @@ fly machine restart <id> -a tortoise-y4mjjq
 - **Rolling deploys still replace the only machine** — there is a boot-length
   window with no healthy instance. `canary`/`bluegreen` cannot fix this while a
   volume is attached; only §6.3 can.
-- **`/health` still spawns a DB probe per call** (`asyncio.to_thread`; the probe
-  is bounded at 1.5 s and abandons its worker thread on timeout —
-  `monitoring.probe_db`, via the `executor.shutdown(wait=False)` path). Under a black-holed DB, threads can accumulate
-  slowly. This no longer affects routing (the routing check is TCP), but it still
-  affects the human/operator view and any external probe that hits `/health`.
-  App-layer, tracked outside this runbook; a `wait_for` wrapper would bound the
-  request even if the probe regresses.
+- **`/health` no longer spawns a DB probe per call** — superseded by the
+  background health refresher (#2850 hosted, #2988 selfhost). Neither handler
+  performs request-path I/O: `hosted_api`'s "#2850 (P0) … collects NO I/O and
+  takes NO thread", and `selfhost`'s reads its DB verdict from the single-flight
+  coordinator (`_HEALTH_PROBE.snapshot()`) and "submits nothing to any pool, and
+  never waits on a worker". The `asyncio.to_thread` / `monitoring.probe_db` /
+  `executor.shutdown(wait=False)` shape this bullet used to describe is gone.
+  The probe now runs on the refresher, **off** the request path, which is also
+  what lets it carry the projection cold-start allowance without making the
+  deploy gate slow (#3243).
+  **Residual — SELFHOST ONLY, do not conflate the two surfaces:** selfhost's
+  `/health/ready` still awaits a real DB probe on the request path, and its
+  worker can stay parked past the answer it gave because the client read timeout
+  (10 s) exceeds its outer bound (6.0 s) — tracked as #3320. The HOSTED
+  `/health/ready` does **not** share this: its bound (`DB_PROBE_HARD_TIMEOUT` =
+  `PROBE_HARD_TIMEOUT`, 5.6 s) sits strictly above the probe's inner static bound
+  (`PROBE_DB_TOTAL_TIMEOUT`, ~3.1 s), so its worker frees itself.
 - **Nobody has replayed #2850 in staging.** The fix rests on the in-machine
   evidence and the code path, not on a reproduced failure (the issue's
   indicator list requires this).
