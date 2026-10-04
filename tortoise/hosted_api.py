@@ -31492,6 +31492,57 @@ def _oauth_error_response(exc: OAuthError) -> JSONResponse:  # noqa: F821
     return JSONResponse(status_code=exc.status, content=exc.body())
 
 
+def _oauth_unconverted_failure(exc: BaseException, *, where: str) -> JSONResponse:
+    """#3026: a control-plane failure must not escape an OAuth endpoint as a bare
+    500 ``{"detail": "Internal server error"}``.
+
+    The five endpoints below caught only ``OAuthError``, so such a failure
+    reached the global ``Exception`` handler and the consumer got a body it
+    could not act on. This helper backs the ``except Exception`` clause that
+    closes it.
+
+    WHY 503 FOR A ``RuntimeError``: ``SupabaseControlPlane`` documents that
+    non-2xx responses and transport errors raise ``RuntimeError``
+    (``supabase_control.py``, its class docstring), and RFC 6749 defines
+    ``temporarily_unavailable`` for exactly that (§4.1.2.1; §8.5 permits the
+    additional token-endpoint code). A retry is safe here: the
+    reads are reads, ``issue_auth_code`` inserts a fresh self-expiring code,
+    revoke is RFC 7009 idempotent, DCR is a fresh insert, and the CIMD
+    provisioning insert ``validate_authorize_params`` can reach is guarded and
+    idempotent (``_persist_cimd_client``).
+
+    THE LIMIT, stated because this helper cannot make the distinction: a LOCAL
+    bug that raises ``RuntimeError`` is also labelled retryable. The
+    discriminator is a convention, not a proof. It is chosen because the
+    alternative — treating every ``RuntimeError`` as a bug — puts the real
+    outage back on the bare-500 path this issue exists to close.
+
+    WHY THE §5.2 BODY, NOT ``_control_plane_unavailable()``: that helper returns
+    FastAPI's ``{"detail": {...}}`` shape, and these consumers parse the OAuth
+    body — the consent page's own JS reads ``payload.error_description ||
+    payload.error`` (``oauth.py``), so a ``detail`` body would render as a
+    generic "Consent failed" with no cause or remedy. This mirrors
+    ``_oauth_offload``'s ``unavailable`` override for the OAuth lanes.
+
+    ANYTHING ELSE IS A BUG, NOT A RETRY SIGNAL: it keeps the honest 500
+    ``server_error``. ``/oauth/token`` is the exception — its oauth.py helpers
+    WRAP, so its own net can return 500 for everything it catches.
+
+    The exception is CONSUMED here, so the global handler cannot re-shape it.
+    """
+    from tortoise.oauth import (
+        OAuthError,
+        OAuthTemporarilyUnavailable,
+        _log_and_capture,
+    )
+
+    _log_and_capture(exc, where=where)
+    if isinstance(exc, RuntimeError):
+        return _oauth_error_response(OAuthTemporarilyUnavailable())
+    return _oauth_error_response(
+        OAuthError(500, "server_error", "Internal error processing the request."))
+
+
 @app.get("/.well-known/oauth-protected-resource")
 @app.get("/.well-known/oauth-protected-resource/mcp")
 async def oauth_protected_resource(request: Request):
@@ -31524,7 +31575,14 @@ async def oauth_authorize(request: Request):
         consent_page_html,
         validate_authorize_params,
     )
-    cp, enabled = _oauth_control_plane()
+    try:
+        cp, enabled = _oauth_control_plane()
+    except RuntimeError as exc:      # #3026: an unconfigured control plane
+        # must not escape as a bare 500 detail. Acquisition fails BEFORE any
+        # request is made, so it is not a mid-request transport failure — but
+        # the branch immediately below already answers 'OAuth is not usable
+        # right now' with a 503, and this keeps ONE story for that state.
+        return _oauth_unconverted_failure(exc, where="oauth/authorize")
     if not enabled or cp is None:
         raise HTTPException(status_code=503, detail="OAuth not configured")
     params = {
@@ -31581,6 +31639,8 @@ async def oauth_authorize(request: Request):
                 params["redirect_uri"] + sep + urlencode(
                     {"error": exc.error, "state": params["state"]}))
         return _oauth_error_response(exc)
+    except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
+        return _oauth_unconverted_failure(exc, where="oauth/authorize")
     html, nonce = consent_page_html(
         client_name=client.get("client_name") or client["id"],
         scope=params["scope"] or client.get("scope") or "mcp",
@@ -31615,7 +31675,14 @@ async def oauth_consent_preview(request: Request):
     the session JWT + client-declared resource indicator. No state change.
     """
     from tortoise.oauth import OAuthError, consent_preview
-    cp, enabled = _oauth_control_plane()
+    try:
+        cp, enabled = _oauth_control_plane()
+    except RuntimeError as exc:      # #3026: an unconfigured control plane
+        # must not escape as a bare 500 detail. Acquisition fails BEFORE any
+        # request is made, so it is not a mid-request transport failure — but
+        # the branch immediately below already answers 'OAuth is not usable
+        # right now' with a 503, and this keeps ONE story for that state.
+        return _oauth_unconverted_failure(exc, where="oauth/consent/preview")
     if not enabled or cp is None:
         raise HTTPException(status_code=503, detail="OAuth not configured")
     user = await verify_session_jwt(request)
@@ -31624,6 +31691,8 @@ async def oauth_consent_preview(request: Request):
                                request.query_params.get("resource") or None)
     except OAuthError as exc:
         return _oauth_error_response(exc)
+    except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
+        return _oauth_unconverted_failure(exc, where="oauth/consent/preview")
 
 
 @app.post("/oauth/consent")
@@ -31637,7 +31706,14 @@ async def oauth_consent(request: Request):
         issue_auth_code,
         validate_authorize_params,
     )
-    cp, enabled = _oauth_control_plane()
+    try:
+        cp, enabled = _oauth_control_plane()
+    except RuntimeError as exc:      # #3026: an unconfigured control plane
+        # must not escape as a bare 500 detail. Acquisition fails BEFORE any
+        # request is made, so it is not a mid-request transport failure — but
+        # the branch immediately below already answers 'OAuth is not usable
+        # right now' with a 503, and this keeps ONE story for that state.
+        return _oauth_unconverted_failure(exc, where="oauth/consent params")
     if not enabled or cp is None:
         raise HTTPException(status_code=503, detail="OAuth not configured")
     try:
@@ -31661,6 +31737,8 @@ async def oauth_consent(request: Request):
             op="oauth_consent_params")
     except OAuthError as exc:
         return _oauth_error_response(exc)
+    except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
+        return _oauth_unconverted_failure(exc, where="oauth/consent params")
     # The browser session JWT — same JWKS/ES256+RS256 verification the session
     # endpoints use (D2: reuse session_auth verify; no new auth stack).
     user = await verify_session_jwt(request)
@@ -31676,6 +31754,8 @@ async def oauth_consent(request: Request):
         )
     except OAuthError as exc:
         return _oauth_error_response(exc)
+    except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
+        return _oauth_unconverted_failure(exc, where="oauth/consent mint")
     return {"code": code, "state": body.get("state"),
             "redirect_uri": body["redirect_uri"]}
 
@@ -31736,7 +31816,14 @@ async def oauth_token(request: Request):
 async def oauth_revoke(request: Request):
     """RFC 7009 token revocation (D5 — explicit client-initiated revocation)."""
     from tortoise.oauth import OAuthError, revoke_token
-    cp, enabled = _oauth_control_plane()
+    try:
+        cp, enabled = _oauth_control_plane()
+    except RuntimeError as exc:      # #3026: an unconfigured control plane
+        # must not escape as a bare 500 detail. Acquisition fails BEFORE any
+        # request is made, so it is not a mid-request transport failure — but
+        # the branch immediately below already answers 'OAuth is not usable
+        # right now' with a 503, and this keeps ONE story for that state.
+        return _oauth_unconverted_failure(exc, where="oauth/revoke")
     if not enabled or cp is None:
         raise HTTPException(status_code=503, detail="OAuth not configured")
     from urllib.parse import parse_qs
@@ -31751,6 +31838,8 @@ async def oauth_revoke(request: Request):
         revoke_token(cp, body)
     except OAuthError as exc:
         return _oauth_error_response(exc)
+    except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
+        return _oauth_unconverted_failure(exc, where="oauth/revoke")
     return Response(status_code=200, content="")
 
 
@@ -31761,7 +31850,14 @@ async def oauth_dcr_register(request: Request):
     connectors) without operator-issued client_ids.
     """
     from tortoise.oauth import OAuthError, register_client
-    cp, enabled = _oauth_control_plane()
+    try:
+        cp, enabled = _oauth_control_plane()
+    except RuntimeError as exc:      # #3026: an unconfigured control plane
+        # must not escape as a bare 500 detail. Acquisition fails BEFORE any
+        # request is made, so it is not a mid-request transport failure — but
+        # the branch immediately below already answers 'OAuth is not usable
+        # right now' with a 503, and this keeps ONE story for that state.
+        return _oauth_unconverted_failure(exc, where="oauth/register")
     if not enabled or cp is None:
         raise HTTPException(status_code=503, detail="OAuth not configured")
     await _check_oauth_dcr_rate_limit(request)
@@ -31776,6 +31872,8 @@ async def oauth_dcr_register(request: Request):
         reg = register_client(cp, body)
     except OAuthError as exc:
         return _oauth_error_response(exc)
+    except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
+        return _oauth_unconverted_failure(exc, where="oauth/register")
     return JSONResponse(status_code=201, content=reg)
 
 
