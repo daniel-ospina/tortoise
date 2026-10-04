@@ -204,15 +204,14 @@ class TestPersistLoad:
         idx = KindIndex.build(spec, persist=False)
         assert idx.degraded is True, "embedder down → degraded build"
         key = cache_key_for(spec)
-        with ki._INDEX_LOCK:
-            assert key in ki._INDEX_CACHE
-            assert ki._INDEX_CACHE[key].degraded is True
+        _memo = ki._INDEX_CACHE.get(key)
+        assert _memo is not None
+        assert _memo.degraded is True
         state["up"] = True
         assert KindIndex.load(spec) is None, \
             "a memoized degraded index is popped + treated as a miss"
-        with ki._INDEX_LOCK:
-            assert key not in ki._INDEX_CACHE, \
-                "the degraded entry must not survive the load"
+        assert ki._INDEX_CACHE.get(key) is None, \
+            "the degraded entry must not survive the load"
         good = KindIndex.build(spec, persist=True)
         assert good.degraded is False, "recovery rebuilds good"
 
@@ -339,3 +338,56 @@ class TestMemoizationAndLazy:
         _clear_kind_spec_cache()
         compile_kind_index_spec()
         assert calls["n"] > first, "clear hook must force a re-parse"
+
+
+class TestIndexMemoIsBoundedAndThreadSafe:
+    """#5339 review: the index memo is gate-keyed after #5163 (tenant-growable
+    key space), and the classifier must never raise — so the cap must evict,
+    and the evict-and-insert must be ATOMIC. The first cut's inline
+    ``if len(d) >= cap: d.pop(next(iter(d)))`` was a check-then-act that could
+    raise ``KeyError`` out of a never-raise path; nothing pinned it.
+    """
+
+    def test_memoize_index_evicts_the_lru(self, monkeypatch):
+        import tortoise.kind_index as ki
+        from tortoise._gate_memo import GateMemo
+
+        monkeypatch.setattr(ki, "_INDEX_CACHE", GateMemo(maxsize=2))
+        for k in ("a", "b"):
+            ki._memoize_index(k, object())
+        assert ki._INDEX_CACHE.get("a") is not None  # refresh a's recency
+        ki._memoize_index("c", object())
+        assert ki._INDEX_CACHE.get("b") is None, "the LRU entry must be evicted"
+        assert ki._INDEX_CACHE.get("a") is not None
+        assert ki._INDEX_CACHE.get("c") is not None
+        assert len(ki._INDEX_CACHE) == 2
+
+    def test_memoize_index_never_raises_under_concurrency(self, monkeypatch):
+        import threading
+
+        import tortoise.kind_index as ki
+        from tortoise._gate_memo import GateMemo
+
+        monkeypatch.setattr(ki, "_INDEX_CACHE", GateMemo(maxsize=4))
+        errors: list[str] = []
+
+        def worker(n: int) -> None:
+            for i in range(2000):
+                key = f"{n}-{i % 8}"
+                ki._memoize_index(key, object())
+                ki._INDEX_CACHE.get(key)
+
+        def guarded(n: int) -> None:
+            try:
+                worker(n)
+            except Exception as e:
+                errors.append(repr(e))
+
+        threads = [threading.Thread(target=guarded, args=(n,))
+                   for n in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert not errors, f"_memoize_index raised under concurrency: {errors[:3]}"
+        assert len(ki._INDEX_CACHE) <= 4

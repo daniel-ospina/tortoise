@@ -27,11 +27,11 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
-from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
 
+from tortoise._gate_memo import GateMemo
 from tortoise.embeddings import (
     EMBEDDING_MODEL,
     EMBEDDING_MODEL_REVISION,
@@ -48,39 +48,39 @@ DEFAULT_CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "kind_inde
 #: key — now varies per graph. Each entry holds the full float64 ``vectors`` +
 #: ``_norm`` matrices for one gate (megabytes), and the key space is
 #: tenant-growable, so an uncapped memo accumulates one index per distinct
-#: installed-namespace set for the process lifetime. Eviction drops the
-#: in-memory copy only; a later ``load`` re-reads/re-builds it. (The persisted
-#: ``data/kind_index/*.npz`` files are NOT swept here — disk retention is a
-#: separate follow-up.)
-_INDEX_CACHE: dict[str, KindIndex] = OrderedDict()
-_INDEX_LOCK = threading.Lock()
-_MAX_MEMOIZED_INDEXES = 16
+#: installed-namespace set for the process lifetime. The shared ``GateMemo``
+#: primitive (``tortoise/_gate_memo.py``) owns the atomic LRU evict-and-insert
+#: invariant so it lives in ONE place, not a sixth hand-rolled copy; its
+#: ``discard`` covers this cache's targeted pop (the degraded-index path).
+#: Eviction drops the in-memory copy only; a later ``load`` re-reads or
+#: rebuilds it.
+#:
+#: The persisted ``data/kind_index/*.npz`` files are STILL unbounded on disk —
+#: one per distinct gate, and nothing sweeps them — tracked by #7351. Do not
+#: read this memo's cap as covering the disk.
+_MAX_MEMOIZED_INDEXES = 16  # < _gate_memo._MAX_GATE_MEMOS (64): a matrix entry
+#: is megabytes where a brief/spec entry is kilobytes, so the resident set is
+#: bounded harder here.
+_INDEX_CACHE = GateMemo(maxsize=_MAX_MEMOIZED_INDEXES)
 
 
 def _memoize_index(key: str, idx: KindIndex) -> None:
-    """Insert under the lock with LRU eviction (#5339 review): the
-    evict-and-insert is atomic, so a concurrent capture worker cannot lose a
-    check-then-pop race and raise ``KeyError`` out of the classifier."""
-    with _INDEX_LOCK:
-        if key in _INDEX_CACHE:
-            _INDEX_CACHE.move_to_end(key)
-        _INDEX_CACHE[key] = idx
-        while len(_INDEX_CACHE) > _MAX_MEMOIZED_INDEXES:
-            _INDEX_CACHE.popitem(last=False)
+    """Memoize under the shared ``GateMemo`` (#5339 review): lock-guarded and
+    never raising, so a concurrent capture worker cannot lose a check-then-pop
+    race out of the classifier."""
+    _INDEX_CACHE.put_if_absent(key, idx)
 
 
 def _clear_index_cache() -> None:
     """Test hook — clear the memoized indexes (cross-test isolation)."""
-    with _INDEX_LOCK:
-        _INDEX_CACHE.clear()
+    _INDEX_CACHE.clear()
 
 
 def _evict_index(key: str) -> None:
     """Evict ONE memoized index (cycle-3 P2 degraded-path hook): the
     classifier drops a good-dim memo entry when the embedder goes down
     mid-process so the degraded rebuild can't be shadowed by it."""
-    with _INDEX_LOCK:
-        _INDEX_CACHE.pop(key, None)
+    _INDEX_CACHE.discard(key)
 
 
 def cache_key_for(spec: dict) -> str:
@@ -177,14 +177,13 @@ class KindIndex:
         key = cache_key_for(spec)
         memoize = encoder is None
         if memoize:
-            with _INDEX_LOCK:
-                cached = _INDEX_CACHE.get(key)
-                if cached is not None:
-                    if persist:
-                        target = KindIndex._path_for(key, cache_dir)
-                        if not target.exists():
-                            cached.persist(cache_dir=cache_dir)
-                    return cached
+            cached = _INDEX_CACHE.get(key)
+            if cached is not None:
+                if persist:
+                    target = KindIndex._path_for(key, cache_dir)
+                    if not target.exists():
+                        cached.persist(cache_dir=cache_dir)
+                return cached
         enc = encoder or _DefaultEncoder()
         kind_names = sorted(spec)
         texts = [spec[k]["text"] for k in kind_names]
@@ -208,20 +207,18 @@ class KindIndex:
         build — a recovered embedder rebuilds good, persist=True). Encoder
         is only used when building."""
         key = cache_key_for(spec)
-        with _INDEX_LOCK:
-            cached = _INDEX_CACHE.get(key)
-            if cached is not None:
-                if cached.degraded:
-                    # FIX-N: a degraded index memoized in-process (embedder
-                    # was down during its build) must NOT stick — the disk
-                    # guard below can't cover the memo path, and every
-                    # classify_items would fall back for the process
-                    # lifetime. Pop it and treat as a miss so a recovered
-                    # embedder rebuilds good (persist=True).
-                    _INDEX_CACHE.pop(key, None)
-                else:
-                    _INDEX_CACHE.move_to_end(key)
-                    return cached
+        cached = _INDEX_CACHE.get(key)
+        if cached is not None:
+            if cached.degraded:
+                # FIX-N: a degraded index memoized in-process (embedder
+                # was down during its build) must NOT stick — the disk
+                # guard below can't cover the memo path, and every
+                # classify_items would fall back for the process
+                # lifetime. Pop it and treat as a miss so a recovered
+                # embedder rebuilds good (persist=True).
+                _INDEX_CACHE.discard(key)
+            else:
+                return cached
         path = cls._path_for(key, cache_dir)
         if not path.exists():
             return None

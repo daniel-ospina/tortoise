@@ -70,6 +70,12 @@ class GateMemo:
         with self._lock:
             self._cache.clear()
 
+    def discard(self, key: Any) -> None:
+        """Remove ``key`` if present; never raises (targeted eviction, e.g.
+        the degraded-index pop, needs this rather than ``clear``)."""
+        with self._lock:
+            self._cache.pop(key, None)
+
     def __len__(self) -> int:
         with self._lock:
             return len(self._cache)
