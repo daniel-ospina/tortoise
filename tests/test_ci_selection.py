@@ -944,6 +944,28 @@ def test_ci_timing_tool_change_fails_closed_to_full():
     assert "core" in r["surfaces"]
 
 
+def test_pr_lead_time_tool_change_fails_closed_to_full():
+    # #6139: tools/pr_lead_time.py owns tests/test_pr_lead_time.py, whose guards
+    # pin the decomposition's residence rule (a zero-length Mergify run is a
+    # queue EVALUATION, not residence), its gate clamp, and its exit-code
+    # contract (an unobserved read is UNKNOWN, never 0). Same silent-drop class
+    # as the carve-outs above: the flat "tools/" NON_PYTHON_PREFIXES entry
+    # swallows a tool-only change, so without a TOOL_CARVEOUTS entry `changed`
+    # is empty and select() takes the docs-only return (surfaces=[], tier-1
+    # smoke only) — and that early return bypasses the
+    # `if not matched: matched.add("core")` fallback, so the guard suite would
+    # never run on the PR that changes the tool. Registering the TEST under
+    # `core` in ci-surfaces.yml does NOT cover this: it applies to edits of the
+    # test file, not of the tool. No SOURCE_PATTERNS entry matches the path, so
+    # it lands in the unknown-path fail-closed branch -> FULL matrix + both
+    # legs. Mutation check: removing the TOOL_CARVEOUTS entry filters the path
+    # out (docs-only early return), failing all three asserts below.
+    r = _sel(["tools/pr_lead_time.py"])
+    assert r["full"] is True
+    assert r["test_files"] == "ALL"
+    assert "core" in r["surfaces"]
+
+
 def test_finding_provenance_tool_change_fails_closed_to_full():
     # #4290: tools/finding_provenance.py owns tests/test_finding_provenance.py.
     # Same silent-drop class as the collision-preflight carve-out above — the
