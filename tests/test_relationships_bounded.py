@@ -811,7 +811,6 @@ def test_no_query_loses_its_id_predicate():
             is not None
         )
     clause = re.compile(r"\b(OPTIONAL\s+MATCH|MATCH|CALL)\b", re.IGNORECASE)
-    with_any = re.compile(r"\bWITH\b", re.IGNORECASE)
     # A `UNION` starts a NEW query branch, so the predicate's branch ends there.
     # navigation.py:62's `WHERE NOT m.id IN $visited … UNION MATCH (…)<-[r]-(m)`
     # is two independent legs; reading the second leg's `(m)` as a re-binding of
