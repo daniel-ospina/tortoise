@@ -29,6 +29,7 @@ Env:   WELCOME_URL overrides the target (default https://tortoise.premiselabs.co
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import re
@@ -41,20 +42,40 @@ from playwright.sync_api import Page, expect
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 
-def _unobserved_signup_message(transport_failures: list[str]) -> str:
+def _is_bff_signup_request(method: str, url: str) -> bool:
+    """True for the BFF call this monitor watches (`POST /auth/signup`)."""
+    return method == "POST" and url.endswith("/auth/signup")
+
+
+def _signup_transport_failure(method: str, url: str, failure: str | None) -> str | None:
+    """The entry to record for a FAILED BFF signup request, else None.
+
+    Split out of the listener so the method/URL filter and the entry format are
+    pinnable without a browser: a pin over the message alone cannot see a deleted
+    listener or a broken filter (#4940 review).
+    """
+    if not _is_bff_signup_request(method, url):
+        return None
+    # `Request.failure` is Optional[str] in playwright-python and can be None at
+    # handler time; name that rather than rendering "None".
+    return f"{method} {url} — {failure or 'unknown transport failure'}"
+
+
+def _unobserved_signup_message(*, transport_failures: list[str], post_issued: bool) -> str:
     """Name the condition actually observed, instead of asserting a product cause (#4940).
 
-    `page.on("response")` only fires when a request gets an ANSWER. A `POST
-    /auth/signup` that dies at the transport layer (DNS, TLS, connection refused,
-    aborted socket) fires nothing, so `signup["status"]` stays `None` for two
-    very different situations:
+    `page.on("response")` only fires when a request gets an ANSWER, so
+    `signup["status"]` stays `None` for three different situations:
 
-    - the BFF never answered — recorded by the `requestfailed` listener, so
-      `transport_failures` is non-empty;
-    - the form never submitted the request — nothing failed at the transport
-      layer, so `transport_failures` is empty.
+    - the request DIED at the transport layer (DNS, TLS, connection refused,
+      aborted socket) — a `requestfailed` event was recorded;
+    - the request was ISSUED but never answered (connection blackhole, slow
+      connect timeout) — neither event fires, so only the `request` listener's
+      flag distinguishes this from the next case;
+    - the form never submitted a request at all — the only case that is a
+      product condition.
 
-    The pre-#4940 message asserted the second cause for both. Run 35780459764
+    The pre-#4940 message asserted the third for all three. Run 35780459764
     (2026-09-22T20:27:57Z, `main`) failed on that message while the page had
     loaded, every locator had filled and clicked, and the test had simply waited
     out its whole 30s budget against a host the availability watchdog was
@@ -65,6 +86,11 @@ def _unobserved_signup_message(transport_failures: list[str]) -> str:
             "no POST to the BFF /auth/signup got a response — the request failed at the "
             "TRANSPORT layer, so this is a reachability failure, not a signup failure: "
             + "; ".join(transport_failures)
+        )
+    if post_issued:
+        return (
+            "the POST to the BFF /auth/signup was issued but no response arrived within "
+            "the poll budget — a reachability/timeout condition, not a signup failure"
         )
     return (
         "no POST to the BFF /auth/signup was observed — the form did not "
@@ -260,13 +286,54 @@ LIVE_SIGNUP = pytest.mark.skipif(
 )
 
 
+def test_signup_transport_failure_is_filtered_and_formatted() -> None:
+    """#4940: pins the LISTENER half, not just the message half.
+
+    A pin over the message alone cannot see a deleted listener or a broken
+    method/URL filter — deleting `page.on("requestfailed", ...)` left it green.
+    """
+    url = "https://app.premiselabs.co/auth/signup"
+    assert _is_bff_signup_request("POST", url)
+    # A different method or path must not be recorded as a signup failure.
+    assert not _is_bff_signup_request("GET", url)
+    assert not _is_bff_signup_request("POST", "https://app.premiselabs.co/auth/login")
+
+    assert _signup_transport_failure("POST", url, "net::ERR_NAME_NOT_RESOLVED") == (
+        f"POST {url} — net::ERR_NAME_NOT_RESOLVED"
+    )
+    assert _signup_transport_failure("GET", url, "net::ERR_ABORTED") is None
+    assert _signup_transport_failure("POST", "https://x/auth/other", "net::ERR_ABORTED") is None
+    # `Request.failure` is Optional[str]; it must not render as "None".
+    assert _signup_transport_failure("POST", url, None) == (
+        f"POST {url} — unknown transport failure"
+    )
+
+
+def test_live_signup_registers_both_capture_listeners() -> None:
+    """#4940: a deleted listener must redden something.
+
+    Scope, stated so this is not over-read: this pins that the two capture
+    listeners are REGISTERED on the smoke, which is the regression a reviewer
+    demonstrated (deleting `page.on("requestfailed", ...)` left every other pin
+    green). It does not prove the callbacks are reached — no browser-free test
+    can, and pretending otherwise would be the vacuous-guard defect this issue
+    is itself about.
+    """
+    src = inspect.getsource(test_live_signup_no_429_confirmation_required)
+    assert 'page.on("requestfailed", _on_requestfailed)' in src
+    assert 'page.on("request", _on_request)' in src
+
+
 def test_unobserved_signup_message_names_the_transport_condition() -> None:
     """#4940: the message must not assert a product cause when nothing answered.
 
     No browser needed — this pins the branch selection the live smoke relies on.
     """
     transport = _unobserved_signup_message(
-        ["POST https://app.premiselabs.co/auth/signup — net::ERR_NAME_NOT_RESOLVED"]
+        transport_failures=[
+            "POST https://app.premiselabs.co/auth/signup — net::ERR_NAME_NOT_RESOLVED"
+        ],
+        post_issued=True,
     )
     assert "TRANSPORT" in transport
     assert "net::ERR_NAME_NOT_RESOLVED" in transport
@@ -275,7 +342,16 @@ def test_unobserved_signup_message_names_the_transport_condition() -> None:
     assert "did not submit" not in transport
     assert "Supabase" not in transport
 
-    product = _unobserved_signup_message([])
+    # Issued but never answered (connection blackhole / slow connect timeout): no
+    # failure event fires, so this must not fall through to the product cause.
+    timed_out = _unobserved_signup_message(transport_failures=[], post_issued=True)
+    assert "did not submit" not in timed_out
+    assert "Supabase" not in timed_out
+    assert "no response" in timed_out
+
+    # Nothing issued at all IS the product condition — the original wording is
+    # right here, and is now selected rather than assumed.
+    product = _unobserved_signup_message(transport_failures=[], post_issued=False)
     assert "did not submit" in product
     assert "TRANSPORT" not in product
 
@@ -312,6 +388,11 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
     # form never submitted". Record transport-level failures separately so the
     # assertion can name the condition it actually observed.
     transport_failures: list[str] = []
+    # #4940: set by the `request` listener when the BFF POST is actually issued.
+    # A request that is issued but never answered fires neither `response` nor
+    # `requestfailed`, so this flag is the only thing that distinguishes that
+    # availability condition from "the form never submitted".
+    post_issued = {"value": False}
     # Tripwire for the BFF contract (#4054): these Supabase endpoints must never
     # be reached FROM THE BROWSER. Before the move the page called them
     # directly; now it must not — for the BFF session the browser holds only the
@@ -335,14 +416,21 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
         elif "v1/signup/email" in resp.url or "grant_type=password" in resp.url:
             browser_to_supabase.append(resp.url)
 
+    def _on_request(req):
+        # #4940: record that the BFF POST was ACTUALLY ISSUED.
+        if _is_bff_signup_request(req.method, req.url):
+            post_issued["value"] = True
+
     def _on_requestfailed(req):
-        # #4940: only a request that failed BEFORE any response reached the page
-        # arrives here. `req.failure` carries the transport reason (e.g.
+        # #4940: a request that did not produce a usable response arrives here;
+        # the transport reason is in `req.failure` (e.g.
         # "net::ERR_NAME_NOT_RESOLVED" / "net::ERR_CONNECTION_REFUSED").
-        if req.method == "POST" and req.url.endswith("/auth/signup"):
-            transport_failures.append(f"{req.method} {req.url} — {req.failure}")
+        entry = _signup_transport_failure(req.method, req.url, req.failure)
+        if entry is not None:
+            transport_failures.append(entry)
 
     page.on("response", _on_response)
+    page.on("request", _on_request)
     page.on("requestfailed", _on_requestfailed)
     # #1566: the account is created pre-confirmed, so the SIGNUP flow
     # redirects to the APP ROOT (signup.html WELCOME_URL =
@@ -389,7 +477,25 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
         deadline = time.time() + 30
         while signup["status"] is None and time.time() < deadline:
             page.wait_for_timeout(250)
-        assert signup["status"] is not None, _unobserved_signup_message(transport_failures)
+        if signup["status"] is None:
+            # #4940/#4686: the BFF never ANSWERED. Host availability has its own
+            # discriminating monitor (availability-watchdog -> incident issues),
+            # and this smoke's job is the no-429 CONTRACT — so it asserts that
+            # contract only when the BFF actually answers, and reports an
+            # unanswered request as UNAVAILABLE rather than as a product cause.
+            # This is the same verdict split the MCP probe above uses.
+            if transport_failures or post_issued["value"]:
+                pytest.skip(
+                    _unobserved_signup_message(
+                        transport_failures=transport_failures,
+                        post_issued=post_issued["value"],
+                    )
+                )
+            # Nothing was ever issued: that IS the product condition the old
+            # message named — now established rather than assumed.
+            pytest.fail(
+                _unobserved_signup_message(transport_failures=[], post_issued=False)
+            )
         assert signup["status"] == 200, (
             f"live signup returned {signup['status']} — rate-limited or error: "
             f"{signup['body']!r}"
