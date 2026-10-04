@@ -5630,6 +5630,16 @@ _POINT_FALLBACK = {"kind": "statement"}
 #: installed could still mint `marketing:*`.
 _PACK_EVENT_FORMS: dict[frozenset[str] | None, set[str]] = {}
 
+#: Cap on the gate-keyed memos (#5339 review, P2). The key space is
+#: tenant-growable (``graph_kind_namespaces`` mines namespaces from the
+#: graph's data, and ``POST /v1/objects`` persists an unvalidated
+#: ``objectKind``), so an uncapped dict grows one entry per distinct
+#: installed-namespace set. Oldest gate evicted (dict insertion order) —
+#: a recompute, never a wrong answer. Shared by ``_PACK_EVENT_FORMS`` /
+#: ``_PACK_OBJECT_FORMS``; the sibling caps live in ``commit_schema`` and
+#: ``value_extractor``.
+_MAX_GATE_MEMOS = 64
+
 
 def _installed_pack_ns(master: dict) -> frozenset[str] | None:
     """The graph's AUTHORITATIVE installed namespaces, in ``"ns:"`` form.
@@ -5645,13 +5655,23 @@ def _installed_pack_ns(master: dict) -> frozenset[str] | None:
     NOT re-inferred from ``pack_kinds``: that section is lossy, so a namespace
     declaring only kindDefs-less kinds would be dropped and its kinds
     over-gated — an allow-list filter denies what it cannot see.
+
+    NO case folding (#5339 review, P2): the gate is compared to the registry
+    namespace RAW, exactly as ``compile_value_brief``,
+    ``compile_kind_index_spec`` and ``commit_schema.compile_vocab`` compare
+    it. A former ``.lower()`` here made this gate WIDER than the other three
+    whenever the resolver returned a mixed-case namespace (reachable —
+    ``graph_kind_namespaces`` mines the prefix of an unvalidated ``objectKind``
+    verbatim), i.e. the S5 write/repair gate admitted a lowercase pack the
+    prompt and the door both excluded. Raw comparison is the fail-CLOSED
+    direction an allow-list must take: absent ⇒ denied.
     """
     if "_installed_namespaces" not in master:
         return None
     ns = master["_installed_namespaces"]
     if ns is None:
         return None
-    return frozenset(f"{str(n).lower().rstrip(':')}:" for n in ns)
+    return frozenset(f"{str(n).rstrip(':')}:" for n in ns)
 
 
 def _event_kind_forms(master: dict) -> set[str]:
@@ -5676,7 +5696,7 @@ def _event_kind_forms(master: dict) -> set[str]:
             reg = PackRegistry(packs_dir)
             reg.load_all()
             for ns, pack in reg.packs.items():
-                if gate is not None and f"{ns.lower()}:" not in gate:
+                if gate is not None and f"{ns}:" not in gate:
                     continue
                 for k in (pack.event_kinds or []):
                     pack_forms.add(f"{ns}:{k}".lower())
@@ -5684,6 +5704,8 @@ def _event_kind_forms(master: dict) -> set[str]:
         except Exception:  # noqa: BLE001, RUF100 — never let the write
             # gate raise (fail-open to the master-forms-only gate)
             pack_forms = set()
+        if len(_PACK_EVENT_FORMS) >= _MAX_GATE_MEMOS:
+            _PACK_EVENT_FORMS.pop(next(iter(_PACK_EVENT_FORMS)))
         _PACK_EVENT_FORMS[gate] = pack_forms
     return forms | pack_forms
 
@@ -5722,7 +5744,7 @@ def _object_kind_forms(master: dict) -> set[str]:
             reg = PackRegistry(packs_dir)
             reg.load_all()
             for ns, pack in reg.packs.items():
-                if gate is not None and f"{ns.lower()}:" not in gate:
+                if gate is not None and f"{ns}:" not in gate:
                     continue
                 for k in (pack.object_kinds or []) + \
                         (pack.document_kinds or []):
@@ -5731,6 +5753,8 @@ def _object_kind_forms(master: dict) -> set[str]:
         except Exception:  # noqa: BLE001, RUF100 — never let the write
             # gate raise (fail-open to the master-forms-only gate)
             pack_forms = set()
+        if len(_PACK_OBJECT_FORMS) >= _MAX_GATE_MEMOS:
+            _PACK_OBJECT_FORMS.pop(next(iter(_PACK_OBJECT_FORMS)))
         _PACK_OBJECT_FORMS[gate] = pack_forms
     return forms | pack_forms
 

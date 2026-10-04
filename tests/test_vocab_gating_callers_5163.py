@@ -711,3 +711,37 @@ class TestS5WritePathGateIsGraphScoped:
         obj = {f.lower() for f in _object_kind_forms(m)}
         assert "marketing:keyword" in obj, "the ungated path is the full union"
         assert "dev:apispec" in obj
+
+    def test_gate_is_case_sensitive_like_the_other_seams(self):
+        """#5339 review (P2): the S5 gate must compare the namespace the SAME
+        way as the other three seams — RAW, not case-folded.
+
+        ``_installed_pack_ns`` used to lower-case the gate while
+        ``compile_value_brief`` / ``compile_kind_index_spec`` /
+        ``compile_vocab`` compared the resolver's value verbatim. A
+        mixed-case namespace in the graph's installed set is REACHABLE
+        (``graph_kind_namespaces`` mines the prefix of an unvalidated
+        ``objectKind``), so the S5 write gate was WIDER than the prompt and
+        the door: a lowercase pack the other seams excluded was admitted here
+        and left un-repaired.
+
+        FAIL-ON: the S5 gate admits ``dev:*`` for a graph whose only marker
+        is ``Dev`` while the brief excludes it (an allow-list filter must deny
+        what it cannot see).
+        REACHABLE: the assert compares the two seams directly, on the value
+        the resolver actually returns.
+        """
+        from tortoise.extractor_v2 import _installed_pack_ns, _object_kind_forms
+
+        mixed = self._master({"Dev"})
+        assert _installed_pack_ns(mixed) == frozenset({"Dev:"}), (
+            "the gate must carry the resolver's namespace verbatim")
+        obj = _object_kind_forms(mixed)
+        assert not [f for f in obj if f.lower().startswith("dev:")], (
+            "a 'Dev'-only graph must not admit the lowercase dev: pack on the "
+            "S5 write gate — the other seams compare RAW and exclude it")
+
+        # ...and the canonical lowercase install still admits its pack.
+        canonical = _object_kind_forms(self._master({"dev"}))
+        assert [f for f in canonical if f.lower().startswith("dev:")], (
+            "the canonical lowercase install must still be admitted")

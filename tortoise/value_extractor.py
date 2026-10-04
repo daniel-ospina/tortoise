@@ -36,16 +36,35 @@ def compile_value_brief(packs_dir: Path | str | None = None,
     ``docs/EXPANSION_PACKS.md`` §"The extractor contract".
 
     The brief the PROMPTS are compiled from. It is graph-gated when a caller
-    passes ``installed_namespaces``. Every caller that can observe a graph
-    now passes the gate (#5163): the classify-later kind index
+    passes ``installed_namespaces``. The callers that RESOLVE a graph gate now
+    pass it (#5163): the classify-later kind index
     (``compile_kind_index_spec``), the deterministic enforcer
     (``validate_summary`` → ``_object_kind_vocab``, via the SDK v1 path and
     its client-side Layer-1 pre-check) and the hosted commit door (which
     compiles a graph-scoped ``commit_schema`` vocab and passes it to
     ``validate_payload_dict``). The seams keep ``None`` = no gate (the
     catalog union) for a caller with no graph handle — the documented
-    back-compat value — and a graph that IS bound but unreachable RAISES;
-    there is no silent fallback from a real graph to the union.
+    back-compat value — and a resolver that is handed a graph it cannot
+    reach RAISES rather than returning ``None``, so an outage never reads as
+    "no packs" and silently widens a gate.
+
+    **Scope of that claim — do NOT read it as "every graph-observing caller
+    is gated" (#5339 review).** Reachable paths still fall back to the
+    UNGATED union, deliberately:
+
+    * the SDK v2 extraction master: ``TortoiseSDK._commit_session_v2`` calls
+      ``extract_session_v2`` without a ``master``, so S1/S2/S4 and the S5
+      write gate fall through to ``build_master_list()`` (the union) while
+      the classify-later index in the same call IS gated (#5202);
+    * ``extract_session_v2``'s classifier-construction ``except`` sets
+      ``classify_later = False`` and continues on the legacy union master —
+      an explicit FAIL-OPEN;
+    * ``hosted_api._capture_session_impl`` catches a ``build_master_list``
+      failure and proceeds with the default vocabulary.
+
+    The claim this docstring makes is narrower: every seam that RESOLVES the
+    gate wires the result through, and none of them converts a resolver
+    failure into the union.
 
     ``tenant_manifests`` (#2031 — hosted per-tenant custom packs) is an
     ADDITIVE overlay: ``{namespace: full manifest yaml}`` compiled through
@@ -343,6 +362,8 @@ def compile_kind_index_spec(packs_dir: Path | str | None = None,
             spec[k] = {"text": k, "section": section,
                        "description": "", "synonyms": [], "examples": [],
                        "nearMisses": []}
+    if len(_KIND_SPEC_CACHE) >= _MAX_GATE_MEMOS:
+        _KIND_SPEC_CACHE.pop(next(iter(_KIND_SPEC_CACHE)))
     _KIND_SPEC_CACHE[_memo_key] = spec
     return copy.deepcopy(spec)
 
@@ -351,7 +372,13 @@ def compile_kind_index_spec(packs_dir: Path | str | None = None,
 #: (#5163): the set is a function of the graph's installed namespaces, so a
 #: single process-global slot would serve a dev-only graph the catalog union
 #: (and vice versa). ``None`` = no gate (the union).
+#:
+#: !! BOUNDED (#5339 review, P2): the key space is tenant-growable
+#: (``graph_kind_namespaces`` mines namespaces from the graph's data), so the
+#: oldest gate is evicted at ``_MAX_GATE_MEMOS`` — a recompute, never a wrong
+#: answer. The sibling caps live in ``commit_schema`` and ``extractor_v2``.
 _VOCAB_CACHE: dict[frozenset[str] | None, set[str]] = {}
+_MAX_GATE_MEMOS = 64
 
 
 #: Load-once memo for the kind-index spec, keyed by ``(RESOLVED packs dir,
@@ -396,6 +423,8 @@ def _object_kind_vocab(installed_namespaces: Collection[str] | None = None
             vocab.add(kind)                       # bare form
             vocab.add(kind.lower())              # case-folded
             vocab.add(f"{ns}:{kind.lower()}")   # namespaced + folded
+        if len(_VOCAB_CACHE) >= _MAX_GATE_MEMOS:
+            _VOCAB_CACHE.pop(next(iter(_VOCAB_CACHE)))
         _VOCAB_CACHE[cache_key] = vocab
         cached = vocab
     return cached

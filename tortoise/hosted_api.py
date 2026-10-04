@@ -14244,9 +14244,18 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     # (fail-closed): an outage never becomes a silent widen back to the
     # union. ``None`` = a graph with no :PackInstall records → the catalog
     # union, exactly as before (#2714 indicator 3).
+    #
+    # #5339 review (P1): ``graph_installed_namespaces`` is a WHOLE-GRAPH read
+    # (the :PackInstall rows plus ``graph_kind_namespaces``' per-property
+    # scans — O(nodes), documented to run per call), and this handler is
+    # ``async``, so running it inline parks the event loop for every commit —
+    # the #3086/#3060 class this very handler already off-loads for its SDK
+    # open and its point-count check. Both the SDK open and the gate read go
+    # through the graph pool.
     _require_scope(org, "graphs:write", "commit_session")
-    sdk = _data_sdk(org)
-    _gate_namespaces = graph_installed_namespaces(sdk)
+    sdk = await _data_sdk_offloaded(org)
+    _gate_namespaces = await _graph_offload(
+        lambda: graph_installed_namespaces(sdk), op="commit_gate_namespaces")
     result, payload = validate_payload_dict(
         raw, vocab=compile_vocab(installed_namespaces=_gate_namespaces))
     if result.code == "missing_required_fields":

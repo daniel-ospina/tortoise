@@ -220,8 +220,13 @@ def compile_vocab(packs_dir: Path | str | None = None,
             return cached
         vocab = _compile_vocab_uncached(None, installed_namespaces)
         with _vocab_lock:
-            _vocab_gate_cache.setdefault(key, vocab)
-        return _vocab_gate_cache[key]
+            # Read AND write under the lock (#5339 review P2): the former
+            # `setdefault` then `[key]` let a concurrent `refresh_vocab()`
+            # clear() land in between, raising KeyError out of the
+            # write-gate path. `setdefault` returns the stored value.
+            if len(_vocab_gate_cache) >= _MAX_GATE_MEMOS:
+                _vocab_gate_cache.pop(next(iter(_vocab_gate_cache)))
+            return _vocab_gate_cache.setdefault(key, vocab)
     return _compile_vocab_uncached(packs_dir, installed_namespaces)
 
 
@@ -259,14 +264,16 @@ _vocab_cache: Vocab | None = None
 #: ~40 ms of registry load + YAML parse per request ON THE EVENT LOOP. ``None``
 #: is a real key — the ungated catalogue union. Cleared by ``refresh_vocab``.
 #:
-#: !! UNBOUNDED — one entry per distinct installed-namespace set and nothing
-#: evicts it (#5339 security review, P2). The key space is tenant-growable
-#: (``graph_kind_namespaces`` unions namespaces found in the graph's data), so
-#: this needs a cap in the style of ``pack_manifest_store._MAX_TENANT_VIEWS``.
-#: The same applies to ``value_extractor._VOCAB_CACHE`` /
-#: ``_KIND_SPEC_CACHE`` and ``extractor_v2._PACK_OBJECT_FORMS`` /
-#: ``_PACK_EVENT_FORMS``.
+#: !! BOUNDED (#5339 review, P2). The key space is tenant-growable
+#: (``graph_kind_namespaces`` unions namespaces mined from the graph's data,
+#: and ``POST /v1/objects`` persists an unvalidated ``objectKind``), so one
+#: entry per distinct installed-namespace set would grow without bound in a
+#: multi-tenant process. ``_MAX_GATE_MEMOS`` evicts the oldest gate (dict
+#: insertion order) — a recompute, never a wrong answer. The same cap is
+#: applied to ``value_extractor._VOCAB_CACHE`` / ``_KIND_SPEC_CACHE`` and
+#: ``extractor_v2._PACK_OBJECT_FORMS`` / ``_PACK_EVENT_FORMS``.
 _vocab_gate_cache: dict[frozenset[str] | None, Vocab] = {}
+_MAX_GATE_MEMOS = 64
 
 
 def get_vocab() -> Vocab:
