@@ -8162,7 +8162,7 @@ class TortoiseSDK:
         # instead. The resolution
         # branch below delegates to ``_supersede_window_start_source`` — PRESENT
         # (not truthy) AND ORDERABLE: #3985 for the falsey-but-orderable `0`,
-        # #5360 for the truthy-but-unparseable / unparseable `createdAt`.
+        # #5360 for the truthy-but-unparseable stored start and the unparseable `createdAt`.
         # The guard follows
         # `_covers`: with a kwarg present it refuses rather than allow an
         # unchecked window end against a start the read path treats as real

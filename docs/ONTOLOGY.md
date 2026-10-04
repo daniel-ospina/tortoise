@@ -53,7 +53,8 @@ doc_status: live
 > - Supersedes the v3.13 no-kwarg sentence's scope from "the falsey case" to "the
 >   falsey-and-unorderable case", and supersedes v3.13's contrast that the **presence**
 >   predicate is "the read path's … not the resolution branch's truthiness": the resolution
->   branch now takes the same PRESENT-and-ORDERABLE predicate, so that contrast no longer holds.
+>   branch now ALSO gates on presence (plus the #5360 orderability conjunct), so that contrast no
+>   longer holds.
 >   This entry records only what the code now does. (The two entries below that both carry
 >   "v3.18" are a pre-existing duplicated label — filed as **#7214**, not renumbered here.)
 >
