@@ -1,15 +1,17 @@
-"""A bounded, thread-safe memo keyed by the #2714 installed-pack gate.
+"""A bounded, thread-safe memo for the gate-keyed caches (#5163 / #5339).
 
-One implementation for the five gate-keyed memos (#5163 / #5339):
+One implementation for the six gate-keyed memos:
 ``commit_schema._vocab_gate_cache``, ``value_extractor._VOCAB_CACHE`` and
-``_KIND_SPEC_CACHE``, and ``extractor_v2._PACK_EVENT_FORMS`` /
-``_PACK_OBJECT_FORMS``.
+``_KIND_SPEC_CACHE``, ``extractor_v2._PACK_EVENT_FORMS`` /
+``_PACK_OBJECT_FORMS``, and ``kind_index._INDEX_CACHE``.
 
-Every one of them is keyed by a frozenset of installed namespaces — a
-**tenant-growable** key space (``pack_state.graph_kind_namespaces`` mines
-namespaces from unvalidated graph data, and ``POST /v1/objects`` persists an
-unvalidated ``objectKind``). Two properties follow, and both were defects in
-the first cut of the cap:
+Five are keyed by a frozenset of installed namespaces; the sixth
+(``kind_index._INDEX_CACHE``) is keyed by the content hash of the gated spec
+(``kind_index.cache_key_for``) — both key spaces are **tenant-growable**
+(``pack_state.graph_kind_namespaces`` mines namespaces from unvalidated graph
+data, and ``POST /v1/objects`` persists an unvalidated ``objectKind`` — see
+#5475). Two properties follow, and both were defects in the first cut of the
+cap:
 
 * **Atomicity.** An inline ``if len(d) >= cap: d.pop(next(iter(d)))`` is a
   check-then-act: two worker threads (the capture pool runs up to 8) can read
@@ -35,8 +37,9 @@ _MAX_GATE_MEMOS = 64
 
 
 class GateMemo:
-    """An LRU map keyed by a gate (``frozenset[str] | None``, or a tuple
-    containing one). Thread-safe; a miss returns ``None``, never raises."""
+    """An LRU map of bounded size. Thread-safe; a miss returns ``None``, never
+    raises. The key is whatever its consumer uses — a ``frozenset`` gate, a
+    tuple containing one, or a content-hash ``str``."""
 
     __slots__ = ("_cache", "_lock", "_max")
 

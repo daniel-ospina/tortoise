@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 import threading
 from pathlib import Path
 
@@ -41,26 +43,29 @@ from tortoise.heavy_imports import import_tfidf_vectorizer  # #5718 lock-taking 
 #: The persisted-index directory (gitignored — see .gitignore).
 DEFAULT_CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "kind_index"
 
+#: Cap on the memoized indexes. Deliberately SMALLER than
+#: ``_gate_memo._MAX_GATE_MEMOS`` (64): an index entry holds a full float64
+#: ``vectors`` + ``_norm`` matrix (~0.5 MB at the current 91-kind core+pack
+#: baseline, larger as packs add kinds), where a brief/spec entry is
+#: kilobytes — so the resident set is bounded harder here.
+_MAX_MEMOIZED_INDEXES = 16
+
 #: Load-once memoized built indexes: cache_key → KindIndex.
 #:
 #: BOUNDED + LRU (#5339 review): #5163 threads ``installed_namespaces`` into
 #: ``compile_kind_index_spec``, so the spec — and therefore this content-hash
 #: key — now varies per graph. Each entry holds the full float64 ``vectors`` +
-#: ``_norm`` matrices for one gate (megabytes), and the key space is
-#: tenant-growable, so an uncapped memo accumulates one index per distinct
-#: installed-namespace set for the process lifetime. The shared ``GateMemo``
-#: primitive (``tortoise/_gate_memo.py``) owns the atomic LRU evict-and-insert
-#: invariant so it lives in ONE place, not a sixth hand-rolled copy; its
-#: ``discard`` covers this cache's targeted pop (the degraded-index path).
-#: Eviction drops the in-memory copy only; a later ``load`` re-reads or
-#: rebuilds it.
+#: ``_norm`` matrices for one gate, and the key space is tenant-growable, so an
+#: uncapped memo accumulates one index per distinct installed-namespace set for
+#: the process lifetime. The shared ``GateMemo`` primitive
+#: (``tortoise/_gate_memo.py``) owns the atomic LRU evict-and-insert invariant
+#: so it lives in ONE place, not a sixth hand-rolled copy; its ``discard``
+#: covers this cache's targeted pop (the degraded-index path). Eviction drops
+#: the in-memory copy only; a later ``load`` re-reads or rebuilds it.
 #:
 #: The persisted ``data/kind_index/*.npz`` files are STILL unbounded on disk —
 #: one per distinct gate, and nothing sweeps them — tracked by #7351. Do not
 #: read this memo's cap as covering the disk.
-_MAX_MEMOIZED_INDEXES = 16  # < _gate_memo._MAX_GATE_MEMOS (64): a matrix entry
-#: is megabytes where a brief/spec entry is kilobytes, so the resident set is
-#: bounded harder here.
 _INDEX_CACHE = GateMemo(maxsize=_MAX_MEMOIZED_INDEXES)
 
 
@@ -248,20 +253,35 @@ class KindIndex:
 
     def persist(self, cache_dir: Path | str | None = None) -> Path:
         """Write ``data/kind_index/<key>.npz`` (content-addressed, atomic:
-        temp-file + rename so a crash mid-save never leaves a corrupt
-        index; kind_names stored as a unicode array — no pickle)."""
+        UNIQUE temp-file + rename, so a crash mid-save never leaves a corrupt
+        index, and two concurrent writers for the same key cannot collide on
+        the temp path — a fixed ``.<key>.tmp.npz`` made the loser's ``replace``
+        hit an already-renamed source and raise ``FileNotFoundError`` out of
+        ``build``; #5339 review. kind_names stored as a unicode array — no
+        pickle)."""
         key = cache_key_for(self._spec_of())
         path = self._path_for(key, cache_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f".{path.stem}.tmp.npz")  # ends in .npz (savez appends otherwise)
-        np.savez(
-            tmp,
-            kind_names=np.asarray(self.kind_names, dtype=str),
-            vectors=self.vectors,
-            metadata=json.dumps(self.metadata, default=str),
-            degraded=np.asarray(self.degraded),
-        )
-        tmp.replace(path)
+        # mkstemp hands each writer its OWN temp path (and the suffix ends in
+        # .npz so savez does not append a second one).
+        fd, tmp_name = tempfile.mkstemp(
+            dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp.npz")
+        os.close(fd)
+        tmp = Path(tmp_name)
+        try:
+            np.savez(
+                tmp,
+                kind_names=np.asarray(self.kind_names, dtype=str),
+                vectors=self.vectors,
+                metadata=json.dumps(self.metadata, default=str),
+                degraded=np.asarray(self.degraded),
+            )
+            tmp.replace(path)
+        finally:
+            # A failed save (or a lost race) leaves no stray temp behind;
+            # after a successful replace ``tmp`` no longer exists.
+            if tmp.exists():
+                tmp.unlink()
         return path
 
     def _spec_of(self) -> dict:

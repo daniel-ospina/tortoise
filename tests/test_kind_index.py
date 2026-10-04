@@ -391,3 +391,29 @@ class TestIndexMemoIsBoundedAndThreadSafe:
             t.join()
         assert not errors, f"_memoize_index raised under concurrency: {errors[:3]}"
         assert len(ki._INDEX_CACHE) <= 4
+
+    def test_concurrent_persist_same_key_never_raises(self, spec, tmp_path):
+        """A FIXED temp name made concurrent writers of the SAME key collide:
+        the loser's ``replace`` hit an already-renamed source and raised
+        ``FileNotFoundError`` out of ``build`` (measured when the memo-hit
+        persist lost ``_INDEX_LOCK``'s incidental serialization). Each writer
+        now gets its own mkstemp path (#5339 review)."""
+        import threading
+
+        idx = KindIndex.build(spec, encoder=StubEncoder(), persist=False)
+        errors: list[str] = []
+
+        def worker() -> None:
+            try:
+                for _ in range(10):
+                    idx.persist(cache_dir=tmp_path)
+            except Exception as e:
+                errors.append(repr(e))
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert not errors, f"persist raised under concurrency: {errors[:3]}"
+        assert (tmp_path / f"{cache_key_for(spec)}.npz").exists()
