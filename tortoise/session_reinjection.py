@@ -356,6 +356,9 @@ def source_session_chunk_pass(
     try:
         rows = proj.g.query(
             "MATCH (seed:Point) WHERE seed.id IN $seed_ids "
+            # #6976: load-bearing `WITH seed` — without it FalkorDB 6.0.0 drops
+            # the id predicate at the re-binding MATCH below (foreign rows).
+            "WITH seed "
             "MATCH (s:Session)-[:CONTAINS]->(seed) "
             # ``WITH DISTINCT s`` is a PLAN barrier, not a result change: it
             # dedups the session reached from a shared seed and forces the
