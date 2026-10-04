@@ -2158,6 +2158,18 @@ def _numeric_alteration_reason(
             "checked for a number the store would silently alter. Flatten it "
             "or store the deep part as a string."
         )
+    if _HAS_NUMPY and isinstance(value, (_np.timedelta64, _np.datetime64)):
+        # numpy temporal scalars register as ``numbers.Integral`` (timedelta64),
+        # or fall through every branch (datetime64), but neither has a Cypher
+        # number literal: the driver inlines ``str(value)``, which is
+        # ``'1 years'`` / ``'1970-01-02'``. Catching only the units whose
+        # ``int()`` raises left the calendar/sub-microsecond units admitted —
+        # ``str()`` is not a number for ANY unit (code-review cycle 7, P2).
+        return (
+            f"{key!r}: {type(value).__name__} has no Cypher number literal "
+            "(``str()`` renders a date/duration, not a number), so the store "
+            "cannot hold it. Store it as a string or an epoch integer."
+        )
     if isinstance(value, bool):
         # ``bool`` is an ``int`` subclass, but 0/1 are in range either way — this
         # is documentation, not a load-bearing branch (cycle-2 P3).
@@ -9530,6 +9542,15 @@ class TortoiseSDK:
                           ("consistency", consistency), ("directness", directness)):
             if not 0 <= val <= 1:
                 raise ValueError(f"{name} must be 0-1, got {val}")
+        # #4647: the range check above admits an inexact Decimal/Fraction/
+        # np.float32 (all satisfy 0<=v<=1), but ``_emit_event`` runs BEFORE
+        # ``update_point``'s guard — so for those the journal would emit, a
+        # failed ``json.dumps`` would log a FALSE "LIVE-ONLY" error, and only
+        # then would the write be refused. Hold the same invariant every other
+        # guarded writer holds: refuse BEFORE any emit (code-review cycle 7, P2).
+        for _name, _val in (("bias", bias), ("precision", precision),
+                            ("consistency", consistency), ("directness", directness)):
+            _reject_unrepresentable_number(_name, _val)
         # #432 Task 3: durable OperatorAnnotated event (append-before-mutation).
         # #3689: the positional payload is the :GraphEvent contract
         # (docs/event-catalog.md — id/bias/precision/consistency/directness),
@@ -15747,6 +15768,8 @@ class TortoiseSDK:
                         # above — guard before the write.
                         for _k, _v in props.items():
                             _reject_unrepresentable_number(_k, _v)
+                        # #244: compute the session embedding (name + summary +
+                        # keywords + topics) and store as vecf32 — None when the
                         # model is unavailable (indexing never depends on it).
                         embedding = self._session_embedding(
                             props["name"], metadata.get("summary", ""),

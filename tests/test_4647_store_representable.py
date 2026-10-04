@@ -403,9 +403,11 @@ class TestNumpyFloatingScalarsAreGuarded:
 
     The driver sends ``str(value)`` and Cypher parses that as a double, so
     ``np.float32(0.1)`` — whose shortest repr is ``'0.1'`` — reaches the store
-    as the double ``0.1``, a DIFFERENT number from the float32 value. Verified
-    live: ``SET n.v=$v`` with ``np.float32(0.1)`` stored ``0.1``, and
-    ``np.longdouble(2**64+1)`` stored ``1.84467440737096e+19``.
+    as the double ``0.1``, a DIFFERENT number from the float32 value (verified
+    live: ``SET n.v=$v`` stored ``0.1``). ``np.longdouble`` is NOT cited as an
+    alteration: on a 64-bit-longdouble platform it IS the double, so the store
+    holds it exactly and the guard admits it — the predicate's longdouble
+    compare only bites where ``str()`` differs from the double.
     """
 
     def test_numpy_float32_is_refused_because_the_store_would_alter_it(self):
@@ -526,23 +528,55 @@ class TestDirectWriterSitesAreGuarded:
             assert not proj.return_value.g.query.called
 
 
-class TestNumpyTimedeltaIsRefusedNotRaised:
-    """Cycle-6 P2: ``np.timedelta64`` registers as ``numbers.Integral`` but
-    ``int()`` on it raises ``TypeError`` — a bare, key-less TypeError escaped
-    from a helper documented to raise ValueError. It must fail closed with the
-    key instead."""
+class TestNumpyTemporalScalarsAreRefusedNotRaised:
+    """Cycle-6 P2 / cycle-7 P2: ``np.timedelta64`` registers as
+    ``numbers.Integral`` but neither it nor ``np.datetime64`` has a Cypher
+    number literal — ``str()`` is ``'1 years'`` / ``'1970-01-02'``. Catching
+    only the units whose ``int()`` raises left the calendar/sub-microsecond
+    units admitted (silently dropped or opaque store error)."""
 
-    def test_a_timedelta64_scalar_names_its_key(self):
+    @pytest.mark.parametrize("unit", ["D", "h", "s", "ms", "us", "ns", "ps", "Y", "M"])
+    def test_a_timedelta64_unit_names_its_key(self, unit):
         np = pytest.importorskip("numpy")
         with pytest.raises(ValueError) as exc:
-            _sanitize_props({"duration": np.timedelta64(5, "s")})
+            _sanitize_props({"duration": np.timedelta64(5, unit)})
         assert "duration" in str(exc.value), str(exc.value)
         assert "TypeError" not in str(exc.value), str(exc.value)
+
+    def test_a_datetime64_is_refused(self):
+        np = pytest.importorskip("numpy")
+        with pytest.raises(ValueError) as exc:
+            _sanitize_props({"when": np.datetime64("1970-01-02")})
+        assert "when" in str(exc.value), str(exc.value)
 
     def test_a_timedelta64_array_is_refused(self):
         np = pytest.importorskip("numpy")
         with pytest.raises(ValueError):
             _sanitize_props({"v": np.array([np.timedelta64(5, "s")])})
+
+
+class TestAnnotateOperatorGuardsBeforeTheEmit:
+    """Cycle-7 P2: ``annotate_operator`` emitted ``OperatorAnnotated`` BEFORE
+    ``update_point``'s guard ran, so an inexact Decimal/Fraction/np.float32 that
+    passed the [0,1] range check logged a FALSE \"LIVE-ONLY\" journal error for a
+    write that was then refused. The guard must run before the emit."""
+
+    def test_an_inexact_decimal_is_refused(self):
+        from unittest import mock
+
+        from tortoise.sdk import TortoiseSDK
+
+        sdk = TortoiseSDK.__new__(TortoiseSDK)
+        with mock.patch.object(
+            TortoiseSDK, "get_point", autospec=True,
+            return_value={"is_operator": True},
+        ), mock.patch.object(TortoiseSDK, "_emit_event", autospec=True) as emit:
+            with pytest.raises(ValueError) as exc:
+                TortoiseSDK.annotate_operator(
+                    sdk, "op1", bias=D("0.12345678901234567890"),
+                    precision=0.5, consistency=0.5, directness=0.5)
+            assert "bias" in str(exc.value), str(exc.value)
+            assert not emit.called, "the guard must fire BEFORE the journal emit"
 
 
 class TestDirectWriterSitesAreGuardedRoundTwo:
