@@ -257,6 +257,68 @@ def test_health_never_raises_on_watcher_failure(monkeypatch):
 # ── (c) #4498 `expected` — visible without degrading ────────────────────────
 
 
+def test_expected_rides_every_state_and_mirrors_the_boot_marker(monkeypatch):
+    """#4498: EVERY ``backup_watcher`` state carries ``expected``, and it is
+    the boot-published module marker ``_WATCHER_EXPECTED`` — the same value
+    ``_lifespan`` publishes and the boot-time "no monitor" warning derives
+    from ``_watcher_expected_on_this_host()``. The ``ok``/``status`` verdict is
+    UNCHANGED by it: ``disabled`` stays ``ok`` (#4470).
+
+    Without this pin only ``running`` and ``disabled`` are asserted, so
+    dropping ``expected`` from the ``stopped``/``failed``/``unknown`` returns
+    — the states where "expected and absent" matters most — fails nothing.
+    """
+    def _running():
+        hosted_api._WATCHER = _FakeWatcher(alive=True)
+        hosted_api._WATCHER_START_ERROR = None
+
+    def _stopped():
+        hosted_api._WATCHER = _FakeWatcher(alive=False)
+        hosted_api._WATCHER_START_ERROR = None
+
+    def _failed():
+        hosted_api._WATCHER = None
+        hosted_api._WATCHER_START_ERROR = "start raised"
+
+    def _disabled():
+        hosted_api._WATCHER = None
+        hosted_api._WATCHER_START_ERROR = None
+
+    def _unknown():
+        class _Boom:
+            @property
+            def _thread(self):
+                raise RuntimeError("metadata unreadable")
+
+        hosted_api._WATCHER = _Boom()
+        hosted_api._WATCHER_START_ERROR = None
+
+    states = (
+        ("running", _running, "ok", True),
+        ("stopped", _stopped, "degraded", False),
+        ("failed", _failed, "degraded", False),
+        ("disabled", _disabled, "ok", True),
+        ("unknown", _unknown, "degraded", False),
+    )
+    for expected in (True, False):
+        # The marker is published once at boot; /health READS it. Set the
+        # published value directly rather than the env var — the read point is
+        # the marker, and a request-time re-derivation is the design this
+        # merge deliberately removed.
+        monkeypatch.setattr(hosted_api, "_WATCHER_EXPECTED", expected)
+        for name, set_state, want_status, want_ok in states:
+            set_state()
+            body = _health_with_db_ok(monkeypatch)
+            block = body["backup_watcher"]
+            assert block["state"] == name, (name, block)
+            assert block["expected"] is expected, (
+                f"state {name!r} must mirror the boot marker "
+                f"_WATCHER_EXPECTED={expected}: {block}"
+            )
+            assert block["ok"] is want_ok, (name, block)
+            assert body["status"] == want_status, (name, block, body["status"])
+
+
 def test_health_expected_and_absent_is_visible_but_stays_ok(monkeypatch):
     """Hosted boot that dropped/lost its ``BACKUP_*`` config: /health must SHOW
     that a watcher was expected, yet still answer ``ok``.

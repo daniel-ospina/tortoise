@@ -1006,10 +1006,49 @@ def test_watcher_non_start_reason_is_gated_on_being_hosted():
     assert any(
         isinstance(node, ast.Name) and node.id == "_watcher_expected" for node in ast.walk(lifespan)
     ), "no `_watcher_expected` marker is computed in _lifespan"
+    # #4498/#3124 review: the derivation now lives in the shared helper
+    # `_watcher_expected_on_this_host` so the boot warning and `/health` can
+    # never disagree. Pin the ASSIGNMENT LINK, not the mere presence of a call
+    # somewhere in the function: `_watcher_expected = True` plus a stray
+    # `_watcher_expected_on_this_host()` expression satisfies a
+    # "call exists somewhere" check while the boot warning and `/health` both
+    # lied (mutation-verified during review). Follow the delegation rather than
+    # pinning the literal to THIS function, and additionally assert that the
+    # helper itself derives from FLY_APP_NAME — the invariant the pin protects.
+    assert any(
+        isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "_watcher_expected"
+            for target in node.targets
+        )
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "_watcher_expected_on_this_host"
+        for node in ast.walk(lifespan)
+    ), (
+        "`_watcher_expected` must be derived by ASSIGNING the result of the "
+        "shared `_watcher_expected_on_this_host` helper (a call elsewhere in "
+        "_lifespan does not bind the value)"
+    )
+    hosted_tree = ast.parse((TORTOISE_PKG / "hosted_api.py").read_text(),
+                            filename="hosted_api.py")
+    helper = next(
+        (
+            node
+            for node in ast.walk(hosted_tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "_watcher_expected_on_this_host"
+        ),
+        None,
+    )
+    assert helper is not None, (
+        "hosted_api.py has no `_watcher_expected_on_this_host` helper — if it "
+        "was renamed, relocate this #2922 pin with it"
+    )
     assert any(
         isinstance(node, ast.Constant) and node.value == "FLY_APP_NAME"
-        for node in ast.walk(lifespan)
-    ), "`_watcher_expected` must derive from FLY_APP_NAME (the hosted marker)"
+        for node in ast.walk(helper)
+    ), "`_watcher_expected_on_this_host` must derive from FLY_APP_NAME (the hosted marker)"
 
     gated = [
         node
