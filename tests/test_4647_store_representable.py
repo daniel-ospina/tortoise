@@ -579,6 +579,42 @@ class TestAnnotateOperatorGuardsBeforeTheEmit:
             assert not emit.called, "the guard must fire BEFORE the journal emit"
 
 
+class TestNonFiniteDecimalNamesTheKeyBeforeTheRangeCheck:
+    """Cycle-8 P2: ``0 <= Decimal('NaN') <= 1`` raises
+    ``decimal.InvalidOperation`` (an ArithmeticError), so a range check placed
+    BEFORE the guard escapes as a wrong-class, key-less error. The guard must
+    run first at each such site."""
+
+    def _bare(self):
+        from tortoise.sdk import TortoiseSDK
+
+        return TortoiseSDK.__new__(TortoiseSDK)
+
+    def test_annotate_operator(self):
+        from unittest import mock
+
+        from tortoise.sdk import TortoiseSDK
+
+        sdk = self._bare()
+        with mock.patch.object(
+            TortoiseSDK, "get_point", autospec=True,
+            return_value={"is_operator": True},
+        ):
+            with pytest.raises(ValueError) as exc:
+                TortoiseSDK.annotate_operator(
+                    sdk, "op1", bias=D("NaN"),
+                    precision=0.5, consistency=0.5, directness=0.5)
+            assert "bias" in str(exc.value), str(exc.value)
+
+    def test_mitigate_operator(self):
+        from tortoise.sdk import TortoiseSDK
+
+        sdk = self._bare()
+        with pytest.raises(ValueError) as exc:
+            TortoiseSDK.mitigate_operator(sdk, "op1", "why", strength=D("NaN"))
+        assert "strength" in str(exc.value), str(exc.value)
+
+
 class TestDirectWriterSitesAreGuardedRoundTwo:
     """Cycle-6 P1/P2: three more raw-Cypher writers bypass ``_sanitize_props``.
     Each must refuse BEFORE any query runs."""
@@ -605,8 +641,9 @@ class TestDirectWriterSitesAreGuardedRoundTwo:
                 TortoiseSDK.mitigate_operator(
                     sdk, "op1", "reason", strength=D("0.12345678901234567890"))
             assert "strength" in str(exc.value), str(exc.value)
-            # the only query allowed is the idempotency read
-            assert proj.return_value.g.query.call_count == 1
+            # cycle-8: the guard now precedes the idempotency read too,
+            # so NO query may run for a refused strength.
+            assert proj.return_value.g.query.call_count == 0
 
     def test_connect_issue_objects_guards_oid_and_issue_number(self):
         from unittest import mock

@@ -9540,17 +9540,20 @@ class TortoiseSDK:
             raise ValueError(f"Point {id!r} is not an operator")
         for name, val in (("bias", bias), ("precision", precision),
                           ("consistency", consistency), ("directness", directness)):
+            # #4647: the guard runs BEFORE the range check because
+            # ``0 <= Decimal('NaN') <= 1`` raises ``decimal.InvalidOperation``
+            # (an ArithmeticError, not the documented ValueError), so the
+            # range check would raise an unnamed wrong-class error for the
+            # exact values this guard exists to name (cycle-8 P2). It also
+            # runs before ``_emit_event`` below: the range check admits an
+            # inexact Decimal/Fraction/np.float32, and the emit would then
+            # record the caller's raw value. This closes the INEXACT subset;
+            # an exact-but-non-JSON-native value (``Decimal('0.5')``) is still
+            # emitted raw and its journal write still fails — a pre-existing
+            # serializer gap tracked in #7174, not this PR.
+            _reject_unrepresentable_number(name, val)
             if not 0 <= val <= 1:
                 raise ValueError(f"{name} must be 0-1, got {val}")
-        # #4647: the range check above admits an inexact Decimal/Fraction/
-        # np.float32 (all satisfy 0<=v<=1), but ``_emit_event`` runs BEFORE
-        # ``update_point``'s guard — so for those the journal would emit, a
-        # failed ``json.dumps`` would log a FALSE "LIVE-ONLY" error, and only
-        # then would the write be refused. Hold the same invariant every other
-        # guarded writer holds: refuse BEFORE any emit (code-review cycle 7, P2).
-        for _name, _val in (("bias", bias), ("precision", precision),
-                            ("consistency", consistency), ("directness", directness)):
-            _reject_unrepresentable_number(_name, _val)
         # #432 Task 3: durable OperatorAnnotated event (append-before-mutation).
         # #3689: the positional payload is the :GraphEvent contract
         # (docs/event-catalog.md — id/bias/precision/consistency/directness),
@@ -9615,6 +9618,10 @@ class TortoiseSDK:
         Idempotent: second call updates existing mitigation (reason + strength),
         does not create a duplicate.
         """
+        # #4647: guard before the range check — ``0 <= Decimal('NaN') <= 1``
+        # raises ``decimal.InvalidOperation``, so the check would raise an
+        # unnamed wrong-class error ahead of this guard (cycle-8 P2).
+        _reject_unrepresentable_number("strength", strength)
         if not 0 <= strength <= 1:
             raise ValueError(f"strength must be 0-1, got {strength}")
         point = self.get_point(id)
@@ -24540,6 +24547,15 @@ class TortoiseSDK:
                 "mean_grounding_delta are both required (Gate B must not "
                 "open without measured evidence)"
             )
+        # #4647: guard the caller-supplied numerics BEFORE the range checks /
+        # gate checks — ``0.0 <= Decimal('NaN') <= 1.0`` raises
+        # ``decimal.InvalidOperation``, so the range check would raise ahead of
+        # this guard (cycle-8 P2). `props`' write guard below stays as the
+        # belt for fields added after these checks.
+        for _k, _v in (("precision", precision),
+                       ("mean_grounding_delta", mean_grounding_delta),
+                       ("sample_size", sample_size)):
+            _reject_unrepresentable_number(_k, _v)
         if not 0.0 <= precision <= 1.0:
             raise ValueError(f"precision must be in [0, 1], got {precision}")
         # Gate B criterion enforcement (review round 1): the docstring
