@@ -303,25 +303,45 @@ class TestNumpyScalars:
 
 
 class TestDepthCapFailsClosed:
-    """Cycle-3 P2: the cap must REFUSE, not `return None`.
+    """The cap must REFUSE, not `return None`, and must sit AT the store limit.
 
-    Returning None at the cap re-admitted the very defect: a value nested past
-    the cap was allowed through and the store then clamped its leaf. Proven
-    before the fix — 13 nested lists around 2**70 -> no error, stored
-    9223372036854775807.
+    Cycle-3 P2: returning None at the cap re-admitted the very defect — a value
+    nested past the cap was allowed through and the store then clamped its leaf.
+    Cycle-5 P2: a cap of 12 was BELOW the store's own persistable depth (32,
+    ``projection/entities.py::_PERSISTABLE_MAX_DEPTH``), so it refused structures
+    the store holds exactly. The cap is now 32 and still fails closed.
     """
 
     def test_a_value_nested_past_the_cap_is_refused_not_admitted(self):
-        deep: object = [2**70]
-        for _ in range(20):
+        # A benign leaf, so the refusal can ONLY come from the depth cap.
+        deep: object = 1
+        for _ in range(40):
             deep = [deep]
         with pytest.raises(ValueError) as exc:
             _sanitize_props({"k": deep})
         assert "'k'" in str(exc.value), str(exc.value)
         assert "nested deeper" in str(exc.value), str(exc.value)
 
+    def test_a_leaf_at_depth_20_is_still_inspected(self):
+        # Below the cap the guard must REACH the leaf and refuse it on the
+        # INT64 branch — the cycle-3 defect was a leaf waved through by depth.
+        deep: object = [2**70]
+        for _ in range(20):
+            deep = [deep]
+        with pytest.raises(ValueError) as exc:
+            _sanitize_props({"k": deep})
+        assert "clamped" in str(exc.value), str(exc.value)
+
     def test_a_shallow_container_still_passes(self):
         assert _sanitize_props({"k": [[1, 2], [3]]})["k"] == [[1, 2], [3]]
+
+    def test_a_legitimate_32_deep_container_is_not_refused(self):
+        # The store holds depth-32 structures exactly (verified live against
+        # FalkorDB); the old cap of 12 refused them (cycle-5 P2).
+        deep: object = 1
+        for _ in range(30):
+            deep = [deep]
+        assert _sanitize_props({"k": deep})["k"] == deep
 
 
 class TestFractionTakesTheInt64Path:
@@ -370,3 +390,131 @@ class TestFractionTakesTheInt64Path:
         msg = str(exc.value)
         assert "'v'" in msg, msg
         assert "4300 digits" not in msg, msg
+
+
+class TestNumpyFloatingScalarsAreGuarded:
+    """Cycle-5 P1: the guard covered numpy INTEGERS but not numpy FLOATS.
+
+    The driver sends ``str(value)`` and Cypher parses that as a double, so
+    ``np.float32(0.1)`` — whose shortest repr is ``'0.1'`` — reaches the store
+    as the double ``0.1``, a DIFFERENT number from the float32 value. Verified
+    live: ``SET n.v=$v`` with ``np.float32(0.1)`` stored ``0.1``, and
+    ``np.longdouble(2**64+1)`` stored ``1.84467440737096e+19``.
+    """
+
+    def test_numpy_float32_is_refused_because_the_store_would_alter_it(self):
+        np = pytest.importorskip("numpy")
+        with pytest.raises(ValueError) as exc:
+            _sanitize_props({"v": np.float32(0.1)})
+        assert "'v'" in str(exc.value), str(exc.value)
+
+    def test_numpy_float16_is_refused_too(self):
+        np = pytest.importorskip("numpy")
+        # float16(0.1) renders as '0.1' but is 0.0999755859375 — altered.
+        with pytest.raises(ValueError):
+            _sanitize_props({"v": np.float16(0.1)})
+
+    def test_numpy_float64_and_plain_float_pass(self):
+        np = pytest.importorskip("numpy")
+        assert _sanitize_props({"v": np.float64(0.1)})["v"] == np.float64(0.1)
+        assert _sanitize_props({"v": 0.1})["v"] == 0.1
+        assert _sanitize_props({"v": 1e308})["v"] == 1e308
+
+    def test_a_float32_ARRAY_is_refused_too(self):
+        """The scalar fix must survive the array path: ``.tolist()`` widened the
+        float32 element to a Python float and hid the alteration."""
+        np = pytest.importorskip("numpy")
+        with pytest.raises(ValueError):
+            _sanitize_props({"v": np.array([np.float32(0.1)])})
+
+
+class TestNonFiniteFloatsAreRefused:
+    """Cycle-5 P2: a non-finite plain float reached the store and failed there
+    with an opaque ``Failed to parse query parameter``, while the same value as
+    a Decimal was refused up front with a key-naming message. Symmetry."""
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_float_is_refused_with_the_key(self, value):
+        import math
+
+        with pytest.raises(ValueError) as exc:
+            _sanitize_props({"v": value})
+        assert "'v'" in str(exc.value), str(exc.value)
+        assert math.isfinite(value) is False
+
+    def test_a_non_finite_float_inside_an_embedding_is_refused(self):
+        with pytest.raises(ValueError) as exc:
+            _sanitize_props({"embedding": [0.1, float("inf")]})
+        assert "embedding" in str(exc.value), str(exc.value)
+
+
+class TestFlatFloatSequenceFastPath:
+    """Cycle-5 P2 (perf): a 1536-dim embedding is the hot write path; the guard
+    must not pay a Python-level recursive call per element. The fast path must
+    still refuse a non-finite element — it is not a bypass."""
+
+    def test_a_flat_float_embedding_passes(self):
+        vec = [0.5] * 1536
+        assert _sanitize_props({"embedding": vec})["embedding"] == vec
+
+    def test_a_non_finite_element_still_refuses(self):
+        with pytest.raises(ValueError):
+            _sanitize_props({"embedding": [0.5] * 100 + [float("nan")]})
+
+    def test_a_mixed_sequence_is_still_fully_inspected(self):
+        with pytest.raises(ValueError):
+            _sanitize_props({"arr": [0.5, 2**70]})
+
+
+class TestDirectWriterSitesAreGuarded:
+    """Cycle-5 P1/P2: three more writers hand raw Cypher parameters to the store
+    and bypass ``_sanitize_props``. Each must refuse BEFORE any query."""
+
+    def _bare_sdk(self):
+        from tortoise.sdk import TortoiseSDK
+
+        return TortoiseSDK.__new__(TortoiseSDK)
+
+    def test_record_calibration_guards_its_numerics(self):
+        from unittest import mock
+
+        from tortoise.sdk import TortoiseSDK
+
+        sdk = self._bare_sdk()
+        with mock.patch.object(TortoiseSDK, "_get_proj", autospec=True) as proj:
+            with pytest.raises(ValueError) as exc:
+                TortoiseSDK.record_calibration(
+                    sdk, precision=0.75, sample_size=2**70,
+                    mean_grounding_delta=0.01)
+            assert "sample_size" in str(exc.value), str(exc.value)
+            assert not proj.return_value.g.query.called
+
+    def test_complete_source_guards_external_id(self):
+        from unittest import mock
+
+        from tortoise.sdk import TortoiseSDK
+
+        sdk = self._bare_sdk()
+        with mock.patch.object(
+            TortoiseSDK, "_resolve_source_url", autospec=True, return_value="u"
+        ), mock.patch.object(TortoiseSDK, "_get_proj", autospec=True) as proj:
+            with pytest.raises(ValueError) as exc:
+                TortoiseSDK.complete_source(sdk, "u", external_id=2**70)
+            assert "externalId" in str(exc.value), str(exc.value)
+            assert not proj.return_value.g.query.called
+
+    def test_session_event_write_guards_frontmatter_message_count(self):
+        """A YAML frontmatter int is arbitrary-precision; the graph would clamp
+        it while the journal recorded the original (live != replay)."""
+        from unittest import mock
+
+        from tortoise.sdk import TortoiseSDK
+
+        sdk = self._bare_sdk()
+        with mock.patch.object(TortoiseSDK, "_get_proj", autospec=True) as proj:
+            with pytest.raises(ValueError) as exc:
+                TortoiseSDK._session_event_write(
+                    sdk, {"message_count": 2**70, "agent": "pi"}, "hi", "p.md",
+                    "e1", "s1", "h", "t", False, None, "s.md", "p.md")
+            assert "message_count" in str(exc.value), str(exc.value)
+            assert not proj.return_value.g.query.called

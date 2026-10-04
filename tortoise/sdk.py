@@ -2114,8 +2114,12 @@ _INT64_MAX = 2 ** 63 - 1
 
 #: Depth cap for the container recursion: a self-referential container would
 #: otherwise raise ``RecursionError`` instead of a bounded fail-closed error
-#: (code-review cycle 2, P3).
-_MAX_RECURSION_DEPTH = 12
+#: (code-review cycle 2, P3). 32 is the repo's own persistable depth
+#: (``projection/entities.py::_PERSISTABLE_MAX_DEPTH``); the shallower cap (12)
+#: refused structures the store holds EXACTLY — a false refusal, because the
+#: guard must sit AT the store's limit, never below it. At the limit it still
+#: fails closed (code-review cycle 5, P2).
+_MAX_RECURSION_DEPTH = 32
 
 try:  # numpy is a declared dependency, but not on every import path.
     import numpy as _np
@@ -2241,7 +2245,62 @@ def _numeric_alteration_reason(
                 "if the full precision is needed."
             )
         return None
+    if isinstance(value, numbers.Real):
+        # Plain ``float`` and the numpy floating scalars (float16/32/64,
+        # longdouble). The driver sends ``str(value)`` and Cypher parses that
+        # as a DOUBLE, so the predicate must compare the number the store will
+        # PARSE against the caller's value — not the caller's value against
+        # itself. ``np.float32(0.1)`` renders as ``'0.1'`` (numpy's
+        # shortest-repr) and parses to the double ``0.1``, a DIFFERENT number
+        # from the float32 value; a bare ``float``/finiteness test admitted it
+        # and the store altered it (code-review cycle 5, P1). ``np.float64``
+        # and plain ``float`` round-trip through their repr exactly.
+        # ``numbers.Real`` is after ``numbers.Rational`` on purpose: a
+        # ``Fraction`` is both, and the Rational branch is the exact one.
+        try:
+            _as_float = float(value)
+        except (OverflowError, ValueError):
+            _as_float = math.inf
+        if not math.isfinite(_as_float):
+            return (
+                f"{key!r}: {value!r} is not a finite number, so the store "
+                "cannot represent it faithfully. Store it as a string if the "
+                "full value is needed."
+            )
+        try:
+            _parsed = float(str(value))
+        except (OverflowError, ValueError):
+            _parsed = math.inf
+        # Compare at FULL precision: a numpy scalar's own ``!=`` narrows to its
+        # dtype, and ``float(value)`` is exact for float16/32/64 but NOT for
+        # longdouble — either misses the alteration. Widening the stored double
+        # back to longdouble and comparing there is exact for every numpy float.
+        if _HAS_NUMPY and isinstance(value, _np.floating):
+            _exact_ok = bool(_np.longdouble(_parsed) == value)
+        else:
+            _exact_ok = _parsed == float(value)
+        if not math.isfinite(_parsed) or not _exact_ok:
+            return (
+                f"{key!r}: {value!r} is not exactly representable as a double, "
+                "so FalkorDB would store a DIFFERENT number. Store it as a "
+                "string if the full precision is needed."
+            )
+        return None
     if isinstance(value, (list, tuple, set, frozenset)):
+        # Fast path (code-review cycle 5, P2 perf): a flat sequence of plain
+        # Python floats is the embedding case — every element is exactly a
+        # double, so the only possible refusal is non-finite, which can be
+        # checked without a Python-level recursive call per element (~60-75x
+        # an ordinary props write; 1.4 ms for a 1536-dim embedding).
+        if value and all(type(item) is float for item in value):
+            for item in value:
+                if not math.isfinite(item):
+                    return (
+                        f"{key!r}: {item!r} is not a finite number, so the "
+                        "store cannot represent it faithfully. Store it as a "
+                        "string if the full value is needed."
+                    )
+            return None
         for item in value:
             reason = _numeric_alteration_reason(key, item, _depth + 1)
             if reason:
@@ -2256,7 +2315,12 @@ def _numeric_alteration_reason(
     if _HAS_NUMPY and isinstance(value, _np.ndarray):
         # list/tuple/dict alone missed array-likes (cycle-2 P2):
         # `np.array([2**70])` was admitted and stored as [9223372036854775807].
-        for item in value.ravel().tolist():
+        # Iterate the ELEMENTS, not ``.tolist()`` (code-review cycle 5, P1):
+        # ``tolist()`` widens a float32/float16 array to Python floats, so the
+        # serialized form the store actually parses (``str()`` of the ORIGINAL
+        # numpy scalar, e.g. ``'0.1'``) was never checked and a float32 array
+        # was admitted then altered.
+        for item in value.ravel():
             reason = _numeric_alteration_reason(key, item, _depth + 1)
             if reason:
                 return reason
@@ -15584,6 +15648,13 @@ class TortoiseSDK:
                             }),
                             "message_count": frontmatter.get("message_count", 0),
                         }
+                        # #4647: this writer hands $props straight to the store
+                        # (raw Cypher parameters), so it bypasses
+                        # _sanitize_props and must apply the numeric-domain
+                        # guard itself — a frontmatter int is an arbitrary-
+                        # precision Python int the store would SILENTLY clamp.
+                        for _k, _v in update_props.items():
+                            _reject_unrepresentable_number(_k, _v)
                         # #330: unchanged content whose enrichment produced nothing
                         # new counts as skipped, not updated (counter honesty).
                         # Compare the FULL payload that would be written (keywords,
@@ -15657,6 +15728,10 @@ class TortoiseSDK:
                             "classificationLevel": "internal",
                             "format": "markdown",
                         }
+                        # #4647: same direct-$props writer as the update branch
+                        # above — guard before the write.
+                        for _k, _v in props.items():
+                            _reject_unrepresentable_number(_k, _v)
                         # #244: compute the session embedding (name + summary +
                         # keywords + topics) and store as vecf32 — None when the
                         # model is unavailable (indexing never depends on it).
@@ -22449,6 +22524,13 @@ class TortoiseSDK:
             "classificationLevel": "internal",
             "format": "markdown",
         }
+        # #4647: this writer reaches the store directly (the MERGE below takes
+        # $props as raw parameters) AND journals the SAME dict verbatim, so an
+        # out-of-domain value would be clamped in the graph while the journal
+        # recorded the original — a live!=replay divergence. Guard before any
+        # write or emit.
+        for _k, _v in props.items():
+            _reject_unrepresentable_number(_k, _v)
         # embedding — short-circuited to None under extract_metadata=False
         # (I15 pin) or NO_NETWORK; CASE-guarded $embedding is the ONLY node-
         # write surface (never rides $props).
@@ -24308,6 +24390,10 @@ class TortoiseSDK:
             updates["contentHash"] = hashlib.sha256(content.encode()).hexdigest()
         if external_id is not None:
             updates["externalId"] = external_id
+        # #4647: raw $updates SET — guard the caller-supplied value before the
+        # write (an oversized external_id would be silently clamped).
+        for _k, _v in updates.items():
+            _reject_unrepresentable_number(_k, _v)
         # Increment version
         r = proj.g.query(
             "MATCH (s:Source {url:$url}) "
@@ -24436,6 +24522,10 @@ class TortoiseSDK:
         props["mean_grounding_delta"] = mean_grounding_delta
         if notes is not None:
             props["notes"] = notes
+        # #4647: raw $props MERGE — guard the caller-supplied numerics
+        # (precision/sample_size/mean_grounding_delta) before the write.
+        for _k, _v in props.items():
+            _reject_unrepresentable_number(_k, _v)
         proj.g.query(
             "MERGE (m:Meta {key:$key}) SET m += $props RETURN m",
             params={"key": self._CALIBRATION_MARKER_KEY, "props": props},
