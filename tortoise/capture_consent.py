@@ -96,6 +96,35 @@ def capture_notice_shown_path(home: Path | str | None = None) -> Path:
     return notice.with_name(notice.name + NOTICE_SHOWN_SUFFIX)
 
 
+def _write_text_no_follow(path: Path, text: str, *, exclusive: bool) -> bool:
+    """Write `text` to `path` WITHOUT following a symlink, at mode 0o600.
+
+    `Path.write_text` follows symlinks and pins no mode, so a DANGLING symlink at
+    `path` defeats a `path.exists()` first-write guard: `exists()` follows the
+    link, sees nothing, and the write then creates or truncates an
+    attacker-chosen target (#3684). `O_NOFOLLOW` refuses the final-component
+    symlink instead, and `O_CREAT|O_EXCL` makes the first-write check atomic with
+    the write rather than a separate, racy `exists()` probe.
+
+    Returns True only when this call created the file. Returns False when it
+    deliberately did not — the path already exists (`EEXIST`), a symlink sits at
+    it (`ELOOP`), or the open failed for any other reason. Never raises OSError:
+    this runs on a fail-closed refusal path, where a bookkeeping failure must not
+    turn a declined capture into a crash.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    flags |= os.O_EXCL if exclusive else os.O_TRUNC
+    try:
+        handle_fd = os.open(path, flags, 0o600)
+    except OSError:
+        # EEXIST (already written), ELOOP (a symlink is not a notice), EACCES,
+        # ENOTDIR … — every one means "this call did not write it".
+        return False
+    with os.fdopen(handle_fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    return True
+
+
 def record_capture_declined(home: Path | str | None = None) -> bool:
     """Write the durable migration notice. Returns True only on the first write.
 
@@ -106,15 +135,13 @@ def record_capture_declined(home: Path | str | None = None) -> bool:
     """
     try:
         path = capture_notice_path(home)
-        if path.exists():
-            return False
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
+        return _write_text_no_follow(
+            path,
             f"Tortoise: {CAPTURE_DECLINED_HINT}\n"
             "Capture used to follow the credential; it no longer does (#3615).\n",
-            encoding="utf-8",
+            exclusive=True,
         )
-        return True
     except (OSError, RuntimeError):
         # RuntimeError: `Path.home()` with no $HOME and no passwd entry.
         return False
@@ -151,6 +178,8 @@ def mark_capture_notice_shown(home: Path | str | None = None) -> None:
     try:
         stamp = capture_notice_shown_path(home)
         stamp.parent.mkdir(parents=True, exist_ok=True)
-        stamp.write_text("shown\n", encoding="utf-8")
+        # Rewritten by design, so TRUNC without EXCL — but still O_NOFOLLOW: a
+        # symlink at the stamp is not a stamp.
+        _write_text_no_follow(stamp, "shown\n", exclusive=False)
     except (OSError, RuntimeError):
         pass

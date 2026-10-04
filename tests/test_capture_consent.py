@@ -164,6 +164,75 @@ def test_record_capture_declined_is_first_write_only(tmp_path):
     assert record_capture_declined(tmp_path) is False
 
 
+# ── #3684: the notice write must not FOLLOW a symlink ────────────────────
+
+def test_a_dangling_symlink_at_the_notice_path_is_not_followed(tmp_path):
+    """#3684: `Path.exists()` follows symlinks and so did `write_text`, so a
+    DANGLING link defeated the first-write guard — `exists()` saw nothing, the
+    guard passed, and the write then CREATED an attacker-chosen target. The
+    write must refuse the link rather than follow it."""
+    from tortoise.capture_consent import record_capture_declined
+    victim = tmp_path / "some-other-file"
+    notice = capture_notice_path(tmp_path)
+    notice.parent.mkdir(parents=True, exist_ok=True)
+    notice.symlink_to(victim)
+
+    assert notice.exists() is False, "a dangling link is invisible to exists()"
+    assert record_capture_declined(tmp_path) is False
+    assert not victim.exists(), "the notice was written THROUGH the symlink"
+    assert notice.is_symlink(), "the link is left alone, not replaced"
+
+
+def test_a_symlink_to_an_existing_file_is_not_followed(tmp_path):
+    """The non-dangling variant: following it would TRUNCATE the target with
+    the notice body."""
+    from tortoise.capture_consent import record_capture_declined
+    victim = tmp_path / "existing"
+    victim.write_text("do not touch\n")
+    notice = capture_notice_path(tmp_path)
+    notice.parent.mkdir(parents=True, exist_ok=True)
+    notice.symlink_to(victim)
+
+    assert record_capture_declined(tmp_path) is False
+    assert victim.read_text() == "do not touch\n", "the target was truncated"
+
+
+def test_the_shown_stamp_does_not_follow_a_symlink(tmp_path):
+    """The stamp is rewritten by design, so it cannot use O_EXCL — but O_NOFOLLOW
+    still applies: a symlink at the stamp is not a stamp."""
+    from tortoise.capture_consent import mark_capture_notice_shown
+    victim = tmp_path / "victim"
+    stamp = capture_notice_shown_path(tmp_path)
+    stamp.parent.mkdir(parents=True, exist_ok=True)
+    stamp.symlink_to(victim)
+
+    mark_capture_notice_shown(tmp_path)
+    assert not victim.exists(), "the stamp was written THROUGH the symlink"
+    assert stamp.is_symlink()
+
+
+def test_the_notice_is_written_at_mode_0600(tmp_path):
+    """It names the capture policy, so it is not world-readable — the old
+    `write_text` path left it at the umask default (0o644)."""
+    import stat
+
+    from tortoise.capture_consent import record_capture_declined
+    assert record_capture_declined(tmp_path) is True
+    mode = stat.S_IMODE(capture_notice_path(tmp_path).stat().st_mode)
+    assert mode == 0o600, f"expected 0o600, got {oct(mode)}"
+
+
+def test_the_refusal_still_writes_nothing_readable_by_a_reader(tmp_path):
+    """Regression guard for the fix's blast radius: an ordinary (non-symlink)
+    first write still lands, is still delivered once, and a refused write leaves
+    `pending_capture_notice` with nothing to say."""
+    from tortoise.capture_consent import record_capture_declined
+    assert pending_capture_notice(tmp_path) is None, "nothing written yet"
+    assert record_capture_declined(tmp_path) is True
+    assert pending_capture_notice(tmp_path) is not None, "the notice is delivered"
+    assert record_capture_declined(tmp_path) is False, "still one-time"
+
+
 # ── migration DELIVERY: the notice must reach a human, not just a file ────
 
 def test_a_refusal_does_not_consume_the_notice(tmp_path, transcript):
