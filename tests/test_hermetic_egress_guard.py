@@ -1,20 +1,22 @@
 """#4387 item 2 — the suite's egress guard (tests/conftest.py).
 
-Pins BOTH directions of the guard installed by
-``tests/conftest.py::_hermetic_egress_guard``:
+Pins BOTH directions of the guard installed at configure time by
+``tests/conftest.py::_install_hermetic_egress_guard`` (called from
+``pytest_configure``):
 
   * a real (non-loopback) egress attempt is blocked at the transport, and the
     analytics POST / JWKS GET are answered by the stub and recorded;
   * loopback and the in-process TestClient transport are NOT blocked.
 
-The guard is a test-suite fixture, so these tests exercise it exactly as the
-SUPABASE_URL-setting files do — through the real product call sites
-(``hosted_api._track_analytics_event``, ``session_auth._fetch_jwks``).
+The guard is process-wide test-suite infrastructure, so these tests exercise it
+exactly as the SUPABASE_URL-setting files do — through the real product call
+sites (``hosted_api._track_analytics_event``, ``session_auth._fetch_jwks``).
 """
 from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -22,6 +24,19 @@ import httpx
 import pytest
 
 import tortoise.hosted_api as ha
+
+# #4387 review: the guard must already be in place when this module is IMPORTED
+# (collection), not merely before its first test runs. A session-scoped fixture
+# installs too late for collection-time egress — including the `--collect-only`
+# pass that emits the skip-guard manifest — so this is asserted at import time.
+# A regression to fixture-time installation fails the suite during collection
+# instead of passing quietly.
+assert httpx.HTTPTransport.handle_request.__qualname__ == "_hermetic_handle_request", (
+    "the #4387 egress guard is not installed at import/collection time"
+)
+assert httpx.AsyncHTTPTransport.handle_async_request.__qualname__ == (
+    "_hermetic_handle_async_request"
+), "the #4387 async egress guard is not installed at import/collection time"
 
 _BLOCKED_HOST = "https://hermetic-guard.invalid"
 
@@ -40,7 +55,12 @@ def test_analytics_post_is_served_by_the_stub_and_recorded(
 
     assert outcome == "supabase", outcome
     assert not fallback.exists(), "the stubbed POST must not fall back to JSONL"
-    posts = hermetic_egress.analytics_posts
+    # Scoped to the host THIS test configured, not a raw list length (#4387
+    # review): the recorder is a process global, and a straggling off-loop
+    # analytics emit from a preceding test (#4608) would otherwise be counted
+    # here as a second post to this test's endpoint.
+    posts = [c for c in hermetic_egress.analytics_posts
+             if c.host == "hermetic-guard.invalid"]
     assert len(posts) == 1, hermetic_egress.calls
     call = posts[0]
     assert call.method == "POST"
@@ -68,7 +88,8 @@ def test_jwks_fetch_is_answered_off_the_network(hermetic_egress, monkeypatch):
     with pytest.raises(httpx.HTTPStatusError):
         asyncio.run(sa._fetch_jwks())
 
-    gets = hermetic_egress.jwks_gets
+    gets = [c for c in hermetic_egress.jwks_gets
+            if c.host == "hermetic-guard.invalid"]
     assert len(gets) == 1, hermetic_egress.calls
     assert gets[0].method == "GET"
     assert gets[0].path == "/auth/v1/.well-known/jwks.json"
@@ -82,7 +103,13 @@ def test_non_test_egress_is_blocked(hermetic_egress):
             "https://api.resend.com/emails")
     assert "#4387" in str(ei.value)
     assert "api.resend.com" in str(ei.value)
-    assert [c.host for c in hermetic_egress.blocked] == ["api.resend.com"]
+    # Scoped to the host this test used, and by MEMBERSHIP not a whole-list
+    # equality (#4387 review): the recorder is a process global, so a
+    # straggling call from a preceding test (#4608) can append to any kind —
+    # including this one. Nothing here can attribute a call to its originator.
+    blocked = [c.host for c in hermetic_egress.blocked
+               if c.host == "api.resend.com"]
+    assert len(blocked) == 1, hermetic_egress.calls
 
 
 def test_loopback_egress_is_not_blocked():
@@ -125,8 +152,8 @@ def test_lookalike_loopback_hostname_is_blocked_not_delegated(hermetic_egress):
     with pytest.raises(httpx.ConnectError) as ei:
         httpx.Client(timeout=2, trust_env=False).get(f"https://{host}/probe")
     assert "#4387" in str(ei.value), str(ei.value)
-    assert [c.host for c in hermetic_egress.blocked] == [host]
-    assert hermetic_egress.loopback == []
+    assert [c.host for c in hermetic_egress.blocked if c.host == host] == [host]
+    assert host not in [c.host for c in hermetic_egress.loopback]
 
 
 def test_localhost_suffix_lookalike_is_blocked_not_delegated(hermetic_egress):
@@ -145,8 +172,8 @@ def test_localhost_suffix_lookalike_is_blocked_not_delegated(hermetic_egress):
     with pytest.raises(httpx.ConnectError) as ei:
         httpx.Client(timeout=2, trust_env=False).get(f"https://{host}/probe")
     assert "#4387" in str(ei.value), str(ei.value)
-    assert [c.host for c in hermetic_egress.blocked] == [host]
-    assert hermetic_egress.loopback == []
+    assert [c.host for c in hermetic_egress.blocked if c.host == host] == [host]
+    assert host not in [c.host for c in hermetic_egress.loopback]
 
 
 def test_testclient_transport_is_not_blocked():
@@ -164,3 +191,32 @@ def test_testclient_transport_is_not_blocked():
         resp = client.get("/ping")
     assert resp.status_code == 200
     assert resp.json() == {"ok": True}
+
+
+def test_guard_install_is_reference_counted_across_nested_sessions(
+        hermetic_egress):
+    """A nested in-process pytest session must not disarm the OUTER one.
+
+    `pytest_configure`/`pytest_unconfigure` are balanced by DEPTH, not by a
+    boolean. With a boolean, an inner session's unconfigure (pytester, or a test
+    that calls `pytest.main()`) restored the pristine transports and left every
+    remaining test in the OUTER session unguarded — silently, because the guard
+    is what supplies the blocking.
+
+    The owning module is resolved from the recorder's own class instead of
+    `import conftest`: there are four `conftest.py` files under tests/ and only
+    one of them is this one.
+    """
+    conftest = sys.modules[type(hermetic_egress).__module__]
+    depth = conftest._HERMETIC_GUARD_DEPTH
+    assert depth >= 1, "the guard is not installed in this session"
+
+    conftest._install_hermetic_egress_guard()   # an inner session's configure
+    conftest.pytest_unconfigure(None)           # ... and its unconfigure
+
+    assert depth == conftest._HERMETIC_GUARD_DEPTH, (
+        "a nested session's unconfigure disarmed the outer session's guard")
+    assert httpx.HTTPTransport.handle_request.__qualname__ == (
+        "_hermetic_handle_request")
+    assert httpx.AsyncHTTPTransport.handle_async_request.__qualname__ == (
+        "_hermetic_handle_async_request")

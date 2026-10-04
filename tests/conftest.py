@@ -1381,7 +1381,13 @@ def _disable_embedder_autowarmup(monkeypatch):
 #      sites is #4387 item 3, not this change.
 _HERMETIC_ANALYTICS_PATH = "/rest/v1/analytics_events"
 _HERMETIC_JWKS_PATH = "/auth/v1/.well-known/jwks.json"
-_HERMETIC_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "[::1]", "localhost"})
+# Bracketed IPv6 is deliberately NOT a member (#4387 review): httpx strips the
+# brackets before the host reaches the guard, so `httpx.Request("GET",
+# "http://[::1]/x").url.host == "::1"` — a `"[::1]"` entry can never match and
+# would read as coverage that does not exist. The `::1` address is covered by
+# the `ipaddress` range test in `_hermetic_is_loopback`, and `localhost` is the
+# one non-address spelling honoured (policy 2).
+_HERMETIC_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 _HERMETIC_NETWORK_MARKERS = ("live", "integration")
 _HERMETIC_CALL_CAP = 2000
 
@@ -1419,6 +1425,23 @@ class _HermeticEgress:
         self.calls = []
 
     def _record(self, kind, request, transport):
+        # Quiet unless a test opted in via `hermetic_egress` (#4387 review): the
+        # recorder is a process global, and nothing but an opted-in test ever
+        # clears it, so without this gate EVERY test appended to the list an
+        # opted-in test asserts on. Blocking and answering are unaffected — only
+        # the observation is suppressed.
+        #
+        # This narrows the window; it does NOT close it. A straggling off-loop
+        # request (#4608) that lands AFTER `recording` flips is recorded like any
+        # other, whatever its kind — so there is no kind the gate exempts. The
+        # guard tests compensate only where the host identifies the call: their
+        # analytics, JWKS and blocked counts filter to the host that test itself
+        # used, and their `loopback` check is a membership test on that same
+        # host. A straggler aimed at the SAME host stays indistinguishable from
+        # the test's own call; attributing a call to its originator is not
+        # something this recorder can do.
+        if not self.recording:
+            return
         if len(self.calls) < _HERMETIC_CALL_CAP:
             self.calls.append(_HttpxEgressCall(kind, request, transport))
 
@@ -1495,9 +1518,12 @@ def _hermetic_blocked(request, transport):
 
 
 def _hermetic_dispatch_sync(request, transport, delegate):
-    if _HERMETIC_EGRESS.allow_live or _hermetic_is_loopback(request.url.host):
-        if _HERMETIC_EGRESS.recording:
-            _HERMETIC_EGRESS._record("loopback", request, transport)
+    # `allow_live` is checked BEFORE the loopback test so a live item's real
+    # (non-loopback) egress is never recorded as `loopback` (#4387 review).
+    if _HERMETIC_EGRESS.allow_live:
+        return delegate()
+    if _hermetic_is_loopback(request.url.host):
+        _HERMETIC_EGRESS._record("loopback", request, transport)
         return delegate()
     kind, response = _hermetic_canned_response(request)
     if response is not None:
@@ -1507,9 +1533,11 @@ def _hermetic_dispatch_sync(request, transport, delegate):
 
 
 async def _hermetic_dispatch_async(request, transport, delegate):
-    if _HERMETIC_EGRESS.allow_live or _hermetic_is_loopback(request.url.host):
-        if _HERMETIC_EGRESS.recording:
-            _HERMETIC_EGRESS._record("loopback", request, transport)
+    # Same split as the sync arm: `loopback` must mean loopback.
+    if _HERMETIC_EGRESS.allow_live:
+        return await delegate()
+    if _hermetic_is_loopback(request.url.host):
+        _HERMETIC_EGRESS._record("loopback", request, transport)
         return await delegate()
     kind, response = _hermetic_canned_response(request)
     if response is not None:
@@ -1530,20 +1558,57 @@ async def _hermetic_handle_async_request(self, request):
         lambda: _ORIGINAL_ASYNC_HANDLE_ASYNC_REQUEST(self, request))
 
 
+# #4387 review: the guard is installed at CONFIGURE time, not from the
+# session-scoped fixture. A fixture is too late — pytest imports every test
+# module (and sub-conftest) during COLLECTION, before the first fixture runs,
+# so module-level or collection-time egress (including the `--collect-only`
+# invocation that emits the skip-guard manifest) would run unguarded. The
+# previous "in place before ANY test" was true of test EXECUTION only.
+#
+# Reference-counted rather than a boolean (#4387 review): an in-process nested
+# pytest session (pytester, or a test that calls `pytest.main()`) would
+# otherwise have its own `pytest_unconfigure` restore the pristine transports
+# while the OUTER session's remaining tests are still to run — silently
+# disarming the guard for the rest of the run.
+_HERMETIC_GUARD_DEPTH = 0
+
+
+def _install_hermetic_egress_guard():
+    """Patch the two concrete httpx transports; idempotent, ref-counted."""
+    global _HERMETIC_GUARD_DEPTH
+    _HERMETIC_GUARD_DEPTH += 1
+    if _HERMETIC_GUARD_DEPTH > 1:
+        return
+    httpx.HTTPTransport.handle_request = _hermetic_handle_request
+    httpx.AsyncHTTPTransport.handle_async_request = _hermetic_handle_async_request
+
+
+def pytest_configure(config):
+    _install_hermetic_egress_guard()
+
+
+def pytest_unconfigure(config):
+    global _HERMETIC_GUARD_DEPTH
+    if _HERMETIC_GUARD_DEPTH == 0:
+        return
+    _HERMETIC_GUARD_DEPTH -= 1
+    if _HERMETIC_GUARD_DEPTH:
+        return
+    httpx.HTTPTransport.handle_request = _ORIGINAL_SYNC_HANDLE_REQUEST
+    httpx.AsyncHTTPTransport.handle_async_request = (
+        _ORIGINAL_ASYNC_HANDLE_ASYNC_REQUEST)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _hermetic_egress_guard():
-    """#4387 item 2: install the process-wide transport guard once.
+    """#4387 item 2: the process-wide transport guard's recorder.
 
-    Session-scoped and autouse so it is in place before ANY test — including
-    module-scoped `client` fixtures whose TestClient boot fires the JWKS
-    pre-warm. Teardown restores the original transport methods.
+    Session-scoped and autouse so a test — or a module-scoped `client` fixture
+    whose TestClient boot fires the JWKS pre-warm — has the recorder in place.
+    The INSTALL itself happens in `pytest_configure`, so collection is covered
+    too (see above); this fixture is the stable name for it.
     """
-    mp = pytest.MonkeyPatch()
-    mp.setattr(httpx.HTTPTransport, "handle_request", _hermetic_handle_request)
-    mp.setattr(httpx.AsyncHTTPTransport, "handle_async_request",
-               _hermetic_handle_async_request)
     yield _HERMETIC_EGRESS
-    mp.undo()
 
 
 @pytest.fixture(autouse=True)
@@ -1552,6 +1617,12 @@ def _hermetic_egress_live_bypass(request):
 
     Those tests are excluded from the deterministic suite and reach real
     upstreams by design (the #1787 probes, the Resend integration test).
+
+    `allow_live` is a process global, so the guarantee is "blocked unless a
+    live item is in flight", NOT "blocked by policy for all non-live work":
+    egress from a straggling worker (#4608) during a live test is delegated to
+    the real transport. Keying the decision on the requesting thread/context
+    would tighten it; that is a separate change, not this one (#4387 review).
     """
     previous = _HERMETIC_EGRESS.allow_live
     _HERMETIC_EGRESS.allow_live = any(
@@ -1572,6 +1643,9 @@ def hermetic_egress():
     individual test — owns the stub. The payload-asserting tests that install
     their own `httpx.Client` stub keep observing their own recorder; they do
     not need this one.
+
+    The recorder is OPT-IN: `recording` defaults to False, so tests that do not
+    ask for this fixture do not accumulate calls into it (#4387 review).
     """
     _HERMETIC_EGRESS.clear()
     _HERMETIC_EGRESS.recording = True

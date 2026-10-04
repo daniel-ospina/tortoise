@@ -2629,11 +2629,14 @@ def test_carve_out_lane_provisions_the_embedder_offline():
     provision) and run the suite OFFLINE.
 
     Measured failure this pins: with the suite-wide egress guard installed and
-    no HF_HUB_OFFLINE on this lane, `SentenceTransformer()` made 22 blocked
-    requests to huggingface.co over ~70s of retry backoff, and
-    test_longmem_runner.py re-attempted the load once per test, so the shard
-    burned ~770s and the 15m watchdog killed it with 0 failures (rc=124) —
-    leaving the merge rail no failure identity to read (#6798). A lane that
+    no HF_HUB_OFFLINE on this lane, an uncached `SentenceTransformer()` load
+    RETRIES against huggingface.co instead of failing fast, and
+    test_longmem_runner.py re-attempts the load once per test — so the shard is
+    killed by the 15m watchdog with 0 failures (rc=124), leaving the merge rail
+    no failure identity to read (#6798). The request/backoff/test counts
+    observed on the pre-`pytest_configure` revision are not restated here: this
+    docstring and two comments carried three copies of them, which is what
+    drifts. A lane that
     instead SKIPS the dense assertion trips the skip-guard's
     embedder-unavailable family (#2573). Both outcomes are reds, so the lane
     must be provisioned, not merely offline.

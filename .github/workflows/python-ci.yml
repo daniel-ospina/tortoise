@@ -2037,11 +2037,13 @@ jobs:
         # #4387: the carve-out job runs test_longmem_runner.py, which exercises
         # the dense leg — so it provisions the embedder OFFLINE, exactly like
         # the `test`, `test-slow` and `test-concurrency-falkor` jobs. Without
-        # the cache AND the offline pair on the pytest step, the suite-wide
-        # egress guard turns an uncached load into 22 blocked requests to
-        # huggingface.co over ~70s of retry backoff (measured), which is what
-        # killed this shard on the 15m watchdog; and a load that merely FAILS
-        # instead skips the dense assertion and trips the skip-guard's
+        # the cache AND the offline pair on the pytest step, an uncached load
+        # does not fail fast: with the suite-wide egress guard installed it
+        # RETRIES against huggingface.co rather than resolving DNS, and
+        # test_longmem_runner.py re-attempts the load per test — so the shard is
+        # killed by the 15m watchdog with 0 failures (rc=124) instead of
+        # reporting a failure the merge rail can read; and a load that merely
+        # FAILS skips the dense assertion and trips the skip-guard's
         # embedder-unavailable family (#2573). Same v2 key as the other jobs,
         # so the cache is shared and a warm restore is a no-op.
         uses: actions/cache@v4
@@ -2055,7 +2057,11 @@ jobs:
         # jobs for the same reason as the cache above — the carve-out lane runs
         # the dense leg, so the model must be PRESENT before the offline pytest
         # step, otherwise those assertions skip and the skip-guard reds.
-        timeout-minutes: 6
+        # 10 minutes, matching the two `--attempts 5 --backoff 10` siblings
+        # (test-slow, test-concurrency-falkor): five attempts sleep 100s of
+        # backoff before the final probe, which does not fit the `test` job's
+        # tighter `--attempts 3 --backoff 5` budget under a 6-minute cap.
+        timeout-minutes: 10
         run: |
           python3 tools/embedder_provision.py --attempts 5 --backoff 10
       - name: Generate coverage manifest (carve-out — expected nodeids, epic #1647 Task 9)
@@ -2075,15 +2081,15 @@ jobs:
         # -r fEs (the manifest's observed-set source); pytest-rc for the
         # guard/orphan gates.
         env:
-          # #4387: the same deterministic-embeddings pair every other pytest
-          # step carries (see the `test` job's step env). This job was the one
-          # lane WITHOUT it, and that gap is why its shards hit the 15m
-          # watchdog: with the suite-wide egress guard installed, an uncached
-          # embedder load no longer fails fast on DNS — it makes 22 blocked
-          # requests to huggingface.co over ~70s of retry backoff (measured),
-          # and test_longmem_runner.py re-attempts the load per test, so ~11
-          # tests burn ~770s and the shard is killed with 0 failures (rc=124),
-          # leaving the merge rail no failure identity to read.
+          # #4387: the same deterministic-embeddings pair the four
+          # embedder-provisioning pytest steps carry (see the `test` job's step
+          # env). This job was the one PROVISIONING lane WITHOUT it — the two
+          # other lanes that carry neither are track-b and d14, and neither
+          # provisions — and that gap is why its shards died on the 15m
+          # watchdog with 0 failures (rc=124): see this job's cache step above
+          # for the mechanism. The request/backoff/test counts observed on the
+          # pre-`pytest_configure` revision are deliberately NOT restated here,
+          # or anywhere else — three copies of a measured figure is what drifts.
           HF_HUB_OFFLINE: "1"
           TRANSFORMERS_OFFLINE: "1"
         run: |
