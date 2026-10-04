@@ -422,3 +422,32 @@ class TestIndexMemoIsBoundedAndThreadSafe:
         # shared cache dir keeps group/other read (#5339 review).
         assert written.stat().st_mode & 0o044, \
             "the persisted index lost group/other read" 
+
+    def test_persist_mode_matches_umask_and_preserves_existing(self, spec, tmp_path):
+        """#5339 review: mkstemp creates 0600, so `persist()` must restore the
+        pre-#5339 mode (`0o666 & ~umask`) for a fresh index, keep an existing
+        index's own mode, and CLAMP by the umask — never widen past it and
+        never leave a world-writable index world-writable."""
+        import os
+        import stat as _stat
+
+        idx = KindIndex.build(spec, encoder=StubEncoder(), persist=False)
+        path = tmp_path / f"{cache_key_for(spec)}.npz"
+
+        def _mode() -> int:
+            return _stat.S_IMODE(path.stat().st_mode)
+
+        old_umask = os.umask(0o022)
+        try:
+            idx.persist(cache_dir=tmp_path)
+            assert _mode() == 0o644, "a fresh index gets the umask default"
+            os.chmod(path, 0o640)
+            idx.persist(cache_dir=tmp_path)
+            assert _mode() == 0o640, "an existing index's mode is preserved"
+            # A restrictive umask clamps an existing index's mode.
+            os.umask(0o077)
+            os.chmod(path, 0o644)
+            idx.persist(cache_dir=tmp_path)
+            assert _mode() == 0o600, "the umask clamps, it never widens"
+        finally:
+            os.umask(old_umask)

@@ -24,6 +24,7 @@ Design constraints (from the plan):
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -266,17 +267,25 @@ class KindIndex:
         # .npz so savez does not append a second one).
         fd, tmp_name = tempfile.mkstemp(
             dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp.npz")
-        try:
-            # mkstemp creates 0600; restore the process-umask default (0644),
-            # or the mode of an index already on disk, so a shared cache dir
-            # does not silently lose group/other read (#5339 review — mirrors
-            # hook_install._atomic_write_text).
-            mode = (path.stat().st_mode & 0o777) if path.exists() else 0o644
-            os.fchmod(fd, mode)
-        finally:
-            os.close(fd)
         tmp = Path(tmp_name)
         try:
+            # mkstemp creates 0600. Reproduce the pre-#5339 mode for a fresh
+            # index (np.savez's ``0o666 & ~umask``), or keep the mode of an
+            # index ALREADY on disk clamped by the umask — so a shared cache
+            # dir keeps group/other read (mirrors
+            # ``hook_install._atomic_write_text``) without ever widening past
+            # the operator's umask, and without keeping a world-writable index
+            # world-writable (#5339 review).
+            umask = os.umask(0)
+            os.umask(umask)
+            try:
+                base = path.stat().st_mode & 0o777
+            except OSError:
+                # Raced away (or absent): ``exists()``+``stat()`` would raise
+                # here with mkstemp's temp already created and the unlink
+                # below unreachable (mirrors hook_install's guarded stat).
+                base = 0o666
+            os.fchmod(fd, base & ~umask)
             np.savez(
                 tmp,
                 kind_names=np.asarray(self.kind_names, dtype=str),
@@ -286,10 +295,14 @@ class KindIndex:
             )
             tmp.replace(path)
         finally:
-            # A failed save (or a lost race) leaves no stray temp behind;
+            # Close mkstemp's fd (np.savez re-opened the path itself), and a
+            # failed save or a raised mode step leaves no stray temp behind;
             # after a successful replace ``tmp`` no longer exists.
+            with contextlib.suppress(OSError):
+                os.close(fd)
             if tmp.exists():
-                tmp.unlink()
+                with contextlib.suppress(OSError):
+                    tmp.unlink()
         return path
 
     def _spec_of(self) -> dict:
