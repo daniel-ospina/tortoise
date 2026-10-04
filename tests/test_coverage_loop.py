@@ -56,6 +56,7 @@ import pytest
 # "session-transcript") apply (turn points in the eval's graphs are Point
 # nodes with pointKind "event" — the fixture mirrors that shape).
 import tools.longmem_eval.ingest  # noqa: F401
+from tests import _live_utils
 from tortoise.sdk import TortoiseSDK
 
 
@@ -65,7 +66,7 @@ def _falkordb_available() -> bool:
     module never captures it at import (#221 test-isolation lint)."""
     uri = os.environ.get(
         "TORTOISE_DB_URI",
-        "docker://:falkordb@localhost:6379/tortoise_test_matrix").rstrip("/")
+        _live_utils.docker_uri("tortoise_test_matrix")).rstrip("/")
     old = os.environ.get("TORTOISE_DB_URI")
     try:
         os.environ["TORTOISE_DB_URI"] = f"{uri}_probe"
@@ -90,7 +91,7 @@ def _uri() -> str:
     """Current TORTOISE_DB_URI (or the default), read at CALL time."""
     return os.environ.get(
         "TORTOISE_DB_URI",
-        "docker://:falkordb@localhost:6379/tortoise_test_matrix").rstrip("/")
+        _live_utils.docker_uri("tortoise_test_matrix")).rstrip("/")
 
 pytestmark = pytest.mark.skipif(
     not FALKORDB_AVAILABLE, reason="requires TORTOISE_DB_URI (live FalkorDB FTS lane — tier-2 embedded legs skip)")
@@ -205,6 +206,22 @@ def seeded_sdk(monkeypatch):
 
 # ── (a) the end-to-end contract ───────────────────────────────────────────
 
+def test_terminal_object_anchor_still_resolves(seeded_sdk):
+    """#3301: the facet census anchor resolution is a RESOLUTION path, never a
+    surfaced result, so a terminal Object anchor must still resolve. Without
+    the ``excluded_statuses=()`` opt-out the widened Object exclusion leaves
+    the census with no anchor and the loop silently no-ops."""
+    from tortoise.coverage_loop import facet_census
+
+    proj = seeded_sdk._get_proj()
+    proj.g.query("MATCH (o:Object {name:$n}) SET o.status='superseded'",
+                 params={"n": ENTITY_ANCHOR})
+    facets = facet_census(proj, QUESTION)
+    assert any(f.key == f"entity:{ENTITY_ANCHOR}" for f in facets), (
+        "a terminal Object anchor must still resolve for the census "
+        "(resolution is not a surfaced search)")
+
+
 def test_loop_surfaces_missing_session_evidence_inside_topk(seeded_sdk):
     """Plain top-k misses the same-subject point from session B (its
     content shares no query token and it is not structural-scanned); the
@@ -243,7 +260,7 @@ def test_loop_surfaces_missing_session_evidence_inside_topk(seeded_sdk):
     assert stats["loop_fired_facet"] == f"entity:{ENTITY_ANCHOR}"
     assert stats["loop_merged_added"] >= 1
     # #2517 driver-level annotation golden: the C3-1 driver's INJECTED hit
-    # must carry the WHOLE annotated key set (17), not a subset —
+    # must carry the WHOLE annotated key set (18), not a subset —
     # ``session_date`` is derived from the question's ``haystack_dates``
     # via ``lme_session_index`` and silently emptied in the pre-review
     # extraction, which a 4-field golden could not see. The base hit is
@@ -251,7 +268,13 @@ def test_loop_surfaces_missing_session_evidence_inside_topk(seeded_sdk):
     base_hit = next(h for h in on["hits"] if h["id"] == SEED_ID)
     inj_hit = next(h for h in on["hits"] if h["id"] == JOIN_ID)
     assert set(inj_hit) == set(base_hit)
-    assert len(inj_hit) == 17
+    assert len(inj_hit) == 18  # +status (C6 #2520)
+    # The C6 ``status`` key is asserted BY NAME (a count alone would pass a
+    # rename that silently disables the status-only stale clause). Its value
+    # is the search payload's ``status`` — absent from the payload for this
+    # undecorated non-terminal draft, so it lands as ``""`` here (verified
+    # by direct execution; the eval's terminal rows carry the real status).
+    assert "status" in inj_hit, inj_hit
     # session_date is derived from the QUESTION's haystack_dates, indexed by
     # the point's lme_session_index — a driver that drops ``dates`` (or the
     # props) leaves it empty. Both sessions are pinned.

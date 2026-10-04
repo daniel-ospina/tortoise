@@ -70,6 +70,66 @@ class TestPointsCRUD:
             r = tc.post("/v1/points", json={"content": "x", "kind": "not-a-real-kind"})
             assert r.status_code == 422  # pydantic validator rejects
 
+    def _persisted_props(self, pid: str) -> dict:
+        """Read the stored node props for `pid`.
+
+        The selfhost REST read surface (list + by-id) is deliberately
+        narrow (``PointResponse`` = id/content/kind/created_at), so it cannot
+        show arbitrary props; read them straight from the graph the route
+        wrote to (same TORTOISE_DB_PATH).
+        """
+        from tortoise import selfhost_api as _sha
+
+        sdk = _sha._sdk()
+        try:
+            return dict(sdk.get_point(pid) or {})
+        finally:
+            sdk.close()
+
+    def test_confidence_and_author_persist(self, monkeypatch, tmp_path):
+        """#4032: same silent-drop class as hosted_api — `confidence` /
+        `authoredBy` must be stored, never dropped while the write reports ok."""
+        tc = _client_for_env(monkeypatch, tmp_path)
+        with tc:
+            r = tc.post(
+                "/v1/points",
+                json={
+                    "content": "selfhost confidence round trip",
+                    "kind": "hypothesis",
+                    "confidence": 0.8,
+                    "authoredBy": "research-skill",
+                },
+            )
+            assert r.status_code == 200, r.text
+            props = self._persisted_props(r.json()["id"])
+            assert props.get("confidence") == 0.8, props
+            assert props.get("authoredBy") == "research-skill", props
+
+    def test_confidence_zero_persists_not_dropped(self, monkeypatch, tmp_path):
+        # 0.0 is FALSY — a truthiness guard at the boundary would drop it.
+        tc = _client_for_env(monkeypatch, tmp_path)
+        with tc:
+            r = tc.post(
+                "/v1/points",
+                json={
+                    "content": "selfhost zero confidence",
+                    "kind": "hypothesis",
+                    "confidence": 0.0,
+                },
+            )
+            assert r.status_code == 200, r.text
+            props = self._persisted_props(r.json()["id"])
+            assert props.get("confidence") == 0.0, props
+
+    def test_out_of_range_confidence_is_rejected_not_dropped(self, monkeypatch, tmp_path):
+        tc = _client_for_env(monkeypatch, tmp_path)
+        with tc:
+            r = tc.post(
+                "/v1/points",
+                json={"content": "selfhost bad confidence", "kind": "statement", "confidence": 5},
+            )
+            assert r.status_code == 422, r.text
+
 
 class TestSearch:
     def test_search_finds_point(self, monkeypatch, tmp_path):

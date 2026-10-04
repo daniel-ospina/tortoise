@@ -110,6 +110,19 @@ path.
 **not** user content and **not** a deletion promise, so it is exempt from the
 "link or be a named constant" rule.
 
+## A different axis: OAuth credential hygiene
+
+`tortoise/oauth.py` `OAUTH_ACCESS_RETENTION_S` / `OAUTH_REFRESH_RETENTION_S` /
+`OAUTH_CODE_RETENTION_S` (each 86400s by default; env-overridable as
+`TORTOISE_OAUTH_{ACCESS,REFRESH,CODE}_RETENTION_S`) is the grace kept after a
+row's own `expires_at` before the scheduled OAuth sweep hard-deletes it
+(`sweep_oauth_retention`, wired into the `hosted_api` sweep runner). These rows
+are service-role-only SHA-256 hashes — never user content, never plaintext — so
+this is **credential hygiene**, a different axis from the deletion promise above,
+and it is exempt from the "link or be a named constant" rule by the same logic
+as the operational event store. The control-plane audit trail lives in
+`audit_events`; no deletion here destroys an audit record.
+
 ## Open gaps and open decisions
 
 - **Team-account cascade (D5 — follow-up).** Deleting a team account today

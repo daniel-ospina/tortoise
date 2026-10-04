@@ -202,7 +202,8 @@ class TestTenantMaster:
     def test_default_master_pack_kinds_byte_identity(self):
         """The default master's pack_kinds keyset + order match the shared
         catalog exactly (the PackRegistry over default_packs_dir() is the
-        independent oracle) — the PACK_NS parameterization cannot drift."""
+        independent oracle) — the pack_kinds derivation cannot drift (#5165:
+        it is the brief's own non-core key set, in brief order)."""
         from tortoise.extractor_v2 import build_master_list
         from tortoise.pack_registry import PackRegistry, default_packs_dir
         from tortoise.value_extractor import compile_value_brief

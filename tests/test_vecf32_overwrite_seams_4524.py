@@ -161,12 +161,20 @@ def test_object_embedding_overwrite_lands(tmp_path, monkeypatch):
 
 
 def test_document_embedding_overwrite_lands(tmp_path, monkeypatch):
-    """``Document`` — the plain ``SET d.embedding`` in ``_upsert_document``,
-    guarded by the conditional in-query ``REMOVE d.embedding``."""
+    """``Document`` — the plain ``SET s.embedding`` in ``_upsert_document``,
+    guarded by the conditional in-query ``REMOVE s.embedding``.
+
+    D10 (#5026, ONTOLOGY v3.15 §4.4) RETIRED the ``:Document`` graph label:
+    the document node is now ``(:Source {url: <document id>})``, so the guard
+    reads that node. The SEAM is unchanged (same statement, same conditional
+    in-query REMOVE) — only the label and MERGE key moved, and they moved
+    together. Reading the old label would now match nothing and the guard
+    would fail on absence rather than on the stale vector it exists to catch.
+    """
     calls = _run_seam(
         tmp_path, monkeypatch,
         label="Document",
-        read_cypher="MATCH (d:Document {id:$id}) RETURN d.embedding",
+        read_cypher="MATCH (s:Source {url:$id}) RETURN s.embedding",
         read_params={"id": "doc-1"},
         write=lambda proj, i: proj.apply(
             {"type": "DocumentCreated", "id": "doc-1", "title": "Report",
@@ -223,6 +231,10 @@ def test_turn_write_cypher_embedding_overwrite_lands(tmp_path):
             proj.g.query(_TURN_WRITE_CYPHER, params={
                 "sid": "turn-4524",
                 "now": "2026-01-01T00:00:00Z",
+                # #4911: the statement carries a required `$redactions` param
+                # (the per-session redaction count), so every driver of the
+                # production constant must bind it.
+                "redactions": 0,
                 "turns": [{"id": "turn-1", "c": f"text-{i}", "k": "turn",
                            "speaker": "user", "s": "completed",
                            "ch": f"h-{i}", "emb": list(vec)}],

@@ -329,12 +329,20 @@ class TestRdbSnapshotRestore:
         assert cfg["host"] == "localhost"
         assert cfg["port"] == 6379
         assert cfg["graph"] == "tortoise"
+        assert cfg["username"] == ""  # anonymous docker:// form
+
+    def test_parse_uri_named_user(self):
+        """#3089: a named-user URI exposes its user so redis-cli can --user."""
+        cfg = rdb_snapshot_restore.parse_uri(
+            "redis://alice:pw@localhost:6379/tortoise")
+        assert cfg["username"] == "alice"
+        assert cfg["password"] == "pw"
 
     def test_parse_uri_percent_decodes_credentials(self):
         """#3039: ``parse_uri`` must percent-decode userinfo (urlparse does
-        not). ``parse_uri`` exposes only the password (anonymous-user docker
-        form) and this module's callers currently discard the dict, so the
-        assertion pins the shared rule rather than a live client feed (#3089)."""
+        not). #3089: the decoded value is now consumed by ``_redis_cli`` (see
+        ``tests/test_restore_container_recovery.py``), so this pins the shared
+        decode rule at the parse boundary."""
         cfg = rdb_snapshot_restore.parse_uri(
             "docker://:p%40ss@localhost:6379/tortoise")
         assert cfg["password"] == "p@ss"
@@ -374,15 +382,17 @@ class TestRdbSnapshotRestore:
                             lambda uri, c: (calls.append("resolve"),
                                             "falkordb")[1])
         monkeypatch.setattr(rdb_snapshot_restore, "_container_rdb_info",
-                            lambda c: (calls.append("rdb_info"),
-                                       {"dir": "/data",
-                                        "dbfilename": "dump.rdb"})[1])
+                            lambda c, password="", username="":
+                            (calls.append("rdb_info"),
+                             {"dir": "/data",
+                              "dbfilename": "dump.rdb"})[1])
         monkeypatch.setattr(rdb_snapshot_restore, "graph_stats_for",
                             lambda uri: (calls.append("stats"),
                                          {"nodes": 3, "edges": 1,
                                           "by_label": {"Point": 3}})[1])
         monkeypatch.setattr(rdb_snapshot_restore, "_bgsave_and_wait",
-                            lambda c, start_ts, timeout_s=120:
+                            lambda c, start_ts, password="", username="",
+                            timeout_s=120:
                             (calls.append("bgsave"),
                              {"ok": True, "lastsave": 1})[1])
 
@@ -417,9 +427,12 @@ class TestRdbSnapshotRestore:
         monkeypatch.setattr(rdb_snapshot_restore, "resolve_container",
                             lambda uri, c: "falkordb")
 
-        def fake_docker(args, timeout=30):
-            if (args[:3] == ["exec", "falkordb", "redis-cli"] and
-                    args[3:5] == ["CONFIG", "GET"]):
+        def fake_docker(args, timeout=30, env=None):
+            # #3089: redis-cli is now preceded by `-e REDISCLI_AUTH`; the
+            # credential must reach the child env and stay out of argv.
+            if ("redis-cli" in args and "appendonly" in args):
+                assert (env or {}).get("REDISCLI_AUTH") == "x"
+                assert "x" not in args
                 return subprocess.CompletedProcess(
                     args, 0, stdout="appendonly\nyes\n", stderr="")
             return subprocess.CompletedProcess(args, 0, stdout="", stderr="")

@@ -19,11 +19,16 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from tests import _live_utils
 from tortoise.api import EventAPI, provenance  # noqa: E402, I001, RUF100
 from tortoise.log import EventLog  # noqa: E402, RUF100
 from tortoise.projection import (  # noqa: E402, RUF100
-    _apply_one, fold, split,
-    InMemoryProjection, FalkorProjection, Projection,
+    FalkorProjection,
+    InMemoryProjection,
+    Projection,
+    _apply_one,
+    fold,
+    split,
 )  # noqa: E402, RUF100
 
 # ------------------------------------------------------------------ helpers
@@ -95,19 +100,11 @@ def _docker_falkor_reachable() -> bool:
     connecting so the fixture skips instead of raising redis
     ConnectionError (Error 111/61). _skip_if_no_falkor only covers
     redislite import availability, not Docker connectivity.
+
+    #6673: the port comes from tests/_live_utils.py — the provisioned legacy
+    service is published on an EPHEMERAL host port (docker `-p 0:6379`).
     """
-    import socket
-    host = os.environ.get("FALKORDB_HOST", "localhost")
-    port = int(os.environ.get("FALKORDB_PORT", "16379"))
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(1.0)
-    try:
-        s.connect((host, port))
-        return True
-    except OSError:
-        return False
-    finally:
-        s.close()
+    return _live_utils.legacy_reachable()
 
 
 # ----------------------------------------------------------------- _apply_one
@@ -314,7 +311,7 @@ def test_inmemory_rebuild():
     api = EventAPI(log, initiated_by="extractor", agent_id="test")
     a, b, op = _build(api)
     proj = InMemoryProjection()
-    proj.rebuild(log)
+    proj.rebuild(log)  # in-memory: no graph to wipe, no destructive-op token
     assert a in proj.points
     assert b in proj.points
     assert op in proj.points
@@ -610,7 +607,7 @@ def test_falkor_rebuild_from_log():
     _build(api)
     proj = _shared_proj()
     try:
-        proj.rebuild(log)
+        proj.rebuild(log, confirm_destructive=True)
         n = proj.query("MATCH (n:Point) RETURN count(n)").result_set[0][0]
         assert n == 3  # 2 statements + 1 operator
     finally:
@@ -625,7 +622,7 @@ def test_falkor_rebuild_then_apply():
     a, b, op = _build(api)  # noqa: RUF059
     proj = _shared_proj()
     try:
-        proj.rebuild(log)
+        proj.rebuild(log, confirm_destructive=True)
         # Apply a new event incrementally
         c = api.add_point("third statement", provenance("doc.txt", [20, 30], "extra"))  # noqa: F841
         proj.apply(log.read_all()[-1])  # the newly appended event
@@ -647,7 +644,7 @@ def test_falkor_rebuild_preserves_unknown_point_prop():
                         custom_keep="yes")
     proj = _shared_proj()
     try:
-        proj.rebuild_all(str(log.path.parent))
+        proj.rebuild_all(str(log.path.parent), confirm_destructive=True)
         row = proj.query(
             "MATCH (n:Point {id:$id}) RETURN n.custom_keep", id=pid
         ).result_set
@@ -666,7 +663,7 @@ def test_falkor_rebuild_dict_prop_not_persisted_no_crash():
                         custom_map={"nested": 1})
     proj = _shared_proj()
     try:
-        proj.rebuild_all(str(log.path.parent))
+        proj.rebuild_all(str(log.path.parent), confirm_destructive=True)
         row = proj.query(
             "MATCH (n:Point {id:$id}) RETURN n.custom_map", id=pid
         ).result_set
@@ -685,7 +682,7 @@ def test_falkor_rebuild_recomputes_content_hash():
     pid = api.add_point("hash me", provenance("d.txt", [0, 5], "q"))
     proj = _shared_proj()
     try:
-        proj.rebuild_all(str(log.path.parent))
+        proj.rebuild_all(str(log.path.parent), confirm_destructive=True)
         row = proj.query(
             "MATCH (n:Point {id:$id}) RETURN n.content_hash, n.is_operator",
             id=pid,
@@ -708,7 +705,7 @@ def test_falkor_rebuild_operator_has_no_content_hash():
     op = api.add_operator("IMPL", [a, b], provenance("d.txt", [0, 10], "q"))
     proj = _shared_proj()
     try:
-        proj.rebuild_all(str(log.path.parent))
+        proj.rebuild_all(str(log.path.parent), confirm_destructive=True)
         row = proj.query(
             "MATCH (n:Point {id:$id}) RETURN n.content_hash, n.is_operator",
             id=op,
@@ -751,7 +748,7 @@ def test_falkor_rebuild_undeclared_list_prop_denied(caplog):
     try:
         with caplog.at_level(logging.WARNING,
                              logger="tortoise.projection.entities"):
-            proj.rebuild_all(str(log.path.parent))
+            proj.rebuild_all(str(log.path.parent), confirm_destructive=True)
         row = proj.query(
             "MATCH (n:Point {id:$id}) RETURN n.custom_list, n.tags", id=pid
         ).result_set
@@ -777,7 +774,7 @@ def test_falkor_point_deny_list_drop_is_reported(caplog):
     try:
         with caplog.at_level(logging.WARNING,
                              logger="tortoise.projection.entities"):
-            proj.rebuild_all(str(log.path.parent))
+            proj.rebuild_all(str(log.path.parent), confirm_destructive=True)
         assert any("deny-listed" in r.getMessage() and "reason" in r.getMessage()
                    for r in caplog.records), caplog.text
     finally:
@@ -799,7 +796,7 @@ def test_falkor_rebuild_preserves_nested_list_prop_on_object_layer():
                    custom_nested=[[1, 2], [3, 4]])
     proj = _shared_proj()
     try:
-        proj.rebuild_all(str(log.path.parent))
+        proj.rebuild_all(str(log.path.parent), confirm_destructive=True)
         row = proj.query(
             "MATCH (o:Object {name:'Nested Co'}) RETURN o.custom_nested"
         ).result_set
@@ -818,7 +815,7 @@ def test_falkor_rebuild_nested_dict_in_list_not_persisted_no_crash():
     api.add_object("Mixed Co", "organization", custom_mixed=[1, {"a": 1}])
     proj = _shared_proj()
     try:
-        proj.rebuild_all(str(log.path.parent))  # must not raise
+        proj.rebuild_all(str(log.path.parent), confirm_destructive=True)  # must not raise
         row = proj.query(
             "MATCH (o:Object {name:'Mixed Co'}) RETURN o.custom_mixed"
         ).result_set
@@ -846,6 +843,40 @@ def test_is_persistable_prop_value_matches_engine_type_model():
     assert not ok(b"x") and not ok({1, 2}) and not ok(None)
 
 
+def test_falkor_guarded_merge_filters_non_persistable_prop_values():
+    """#2962: the guarded meeting MERGE builds its OWN full prop set in
+    `_event_guarded_merge` and writes it with `SET e += $props` — a
+    dict/nested-valued unknown prop must be filtered by the SAME
+    `_is_persistable_prop_value` predicate `_persist_extra_props` uses,
+    instead of reaching the engine and raising."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    proj = _shared_proj()
+    try:
+        proj._upsert_event(
+            {
+                "eventId": "ev-guarded-2962",
+                "eventKind": "meeting",
+                "source_file": "doc.txt",
+                "subject": "pi-agent",
+                "object": "worktree-guard",
+                "startedAt": "2026-07-17T22:00:00Z",
+                "participants": ["pi-agent"],
+                "custom_nested": {"a": {"b": 1}},  # non-persistable
+            },
+            guard=True,
+            guard_source_file="doc.txt",
+        )  # must not raise
+        row = proj.query(
+            "MATCH (e:Event {eventId:'ev-guarded-2962'}) "
+            "RETURN e.source_file, e.custom_nested"
+        ).result_set
+        assert row and row[0][0] == "doc.txt", row
+        assert row[0][1] is None, row  # filtered, not written
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
 def test_falkor_rebuild_malformed_revised_content_does_not_crash():
     """#2958 review / #2795: a PointRevised carrying a non-string
     `new_content` (a hand-edited or corrupt JSONL line — rebuild is the
@@ -860,7 +891,7 @@ def test_falkor_rebuild_malformed_revised_content_does_not_crash():
                 "agent_id": "test"})
     proj = _shared_proj()
     try:
-        proj.rebuild_all(str(log.path.parent))  # must not raise
+        proj.rebuild_all(str(log.path.parent), confirm_destructive=True)  # must not raise
         row = proj.query(
             "MATCH (n:Point {id:$id}) RETURN n.content_hash", id=pid
         ).result_set
@@ -907,7 +938,7 @@ def test_falkor_rebuild_deny_warning_emitted_once_per_key(caplog):
                 params={"id": pid})
         with caplog.at_level(logging.WARNING,
                              logger="tortoise.projection.entities"):
-            proj.rebuild_all(tempfile.mkdtemp(prefix="tortoise_deny_once_"))
+            proj.rebuild_all(tempfile.mkdtemp(prefix="tortoise_deny_once_"), confirm_destructive=True)
         hits = [r.getMessage() for r in caplog.records
                 if "deny-listed" in r.getMessage()
                 and "posterior_alpha" in r.getMessage()]
@@ -946,7 +977,7 @@ def test_falkor_rebuild_resets_deny_warning_between_passes(caplog):
             "is_operator:false, status:'live', reason:'r'})")
         with caplog.at_level(logging.WARNING,
                              logger="tortoise.projection.entities"):
-            proj.rebuild_all(tempfile.mkdtemp(prefix="tortoise_deny_reset_"))
+            proj.rebuild_all(tempfile.mkdtemp(prefix="tortoise_deny_reset_"), confirm_destructive=True)
         hits = [r.getMessage() for r in caplog.records
                 if "deny-listed" in r.getMessage()
                 and "reason" in r.getMessage()]
@@ -1252,7 +1283,7 @@ def test_falkor_rebuild_all():
 
         proj = FalkorProjection(_tmp("g_rebuild_all.db"), graph_name="test")
         try:
-            result = proj.rebuild_all(d)
+            result = proj.rebuild_all(d, confirm_destructive=True)
             # 2 builds × 6 events each (IngestStarted + 2 PointAdded + OperatorAdded)
             # Actually _build does 4 things: add_point a, add_point b,
             # add_operator. Plus begin_ingest = IngestStarted.
@@ -1274,7 +1305,7 @@ def test_falkor_rebuild_all_empty_dir():
     try:
         proj = FalkorProjection(_tmp("g_rebuild_empty.db"), graph_name="test")
         try:
-            result = proj.rebuild_all(d)
+            result = proj.rebuild_all(d, confirm_destructive=True)
             assert result["events"] == 0
             assert result["nodes"] == 0
             assert result["edges"] == 0
@@ -1301,7 +1332,7 @@ def test_falkor_rebuild_all_ignores_non_dict_point():
                                           "context": "ctx"}}) + "\n")
         proj = FalkorProjection(_tmp("g_badpoint.db"), graph_name="test")
         try:
-            result = proj.rebuild_all(d)
+            result = proj.rebuild_all(d, confirm_destructive=True)
             assert result["nodes"] == 1, f"expected 1 valid node, got {result['nodes']}"
             rows = proj.g.query(
                 "MATCH (n:Point {id:'ok-1'}) RETURN count(n)"
@@ -1329,7 +1360,7 @@ def test_falkor_rebuild_all_with_retractions():
 
         proj = FalkorProjection(_tmp("g_retract.db"), graph_name="test")
         try:
-            result = proj.rebuild_all(d)  # noqa: F841
+            result = proj.rebuild_all(d, confirm_destructive=True)  # noqa: F841
             # b was retracted — leaves a tombstone (#689)
             node_count = proj.query("MATCH (n:Point) RETURN count(n)").result_set[0][0]
             assert node_count == 3  # a + op + b tombstone
@@ -1764,7 +1795,7 @@ def test_check_consistency_matches():
     _build(api)
     proj = FalkorProjection(_tmp("g_consistency_ok.db"), graph_name="test")
     try:
-        proj.rebuild(log)
+        proj.rebuild(log, confirm_destructive=True)
         from tortoise.consistency import check_consistency
         result = check_consistency(log.path, proj)
         assert result["ok"], f"expected ok, got {result}"
@@ -1781,7 +1812,7 @@ def test_check_consistency_mismatch():
     _build(api)
     proj = FalkorProjection(_tmp("g_consistency_bad.db"), graph_name="test")
     try:
-        proj.rebuild(log)
+        proj.rebuild(log, confirm_destructive=True)
         # Inject a stray node directly into DB (bypassing the log)
         proj._upsert({"id": "ghost", "content": "not in log", "context": "ctx"})
         from tortoise.consistency import check_consistency
@@ -1819,13 +1850,13 @@ if __name__ == "__main__":
 def live_proj():
     """Live FalkorProjection on a test-prefixed graph (safe via test_guard)."""
     if not _docker_falkor_reachable():
-        pytest.skip("live FalkorDB (FALKORDB_HOST:PORT) not reachable")
+        pytest.skip(f"live FalkorDB ({_live_utils.service_host()}:{_live_utils.legacy_port()}) not reachable")
     # #1553: the CI tier-2 env exports TORTOISE_DB_URI as an EMPTY string
     # (set-but-empty, not unset) — os.environ.get(..., default) then returns
     # "" and from_uri("") raises "Unsupported scheme:". Treat empty-but-set
     # as absent (fall back to the local default).
     uri = os.environ.get("TORTOISE_DB_URI") or \
-        "docker://:@localhost:16379/tortoise_test_proj125"
+        _live_utils.legacy_uri("tortoise_test_proj125")
     # Epic #1647 (T7, cycle-5 P1-6): the env URI may resolve the SHARED job
     # path — bulk-DETACHing it clobbers concurrent sessions; per-test graph.
     proj = FalkorProjection.from_uri(
@@ -1838,34 +1869,39 @@ def live_proj():
 
 def test_upsert_document_capture_fields(live_proj):
     """#125: _upsert_document persists topics/summary/sessionId/eventId/
-    doc_status/_searchText + aboutSubject edges."""
+    needs_extraction/_searchText + aboutSubject edges. D10 (ONTOLOGY v3.15
+    §4.4): the document node is a :Source keyed ``url``; ``doc_status`` is
+    retired and ``needs_extraction`` is the extraction signal."""
     proj = live_proj
     proj.apply({"type": "SubjectAdded", "id": "agent-pi", "name": "agent-pi",
                 "subject_kind": "other"})
     proj.apply({"type": "DocumentCreated", "id": "test-doc-1",
                 "title": "Conv", "topics": ["licensing", "AGPL"],
                 "summary": "Compared licenses", "session_id": "sess-1",
-                "event_id": "evt-1", "doc_status": "captured",
+                "event_id": "evt-1", "needs_extraction": True,
+                "source_url": "corpus://test-doc-1",
                 "about_entities": ["agent-pi"]})
     rows = proj.g.query(
-        "MATCH (d:Document {id:'test-doc-1'}) "
-        "RETURN d.topics, d.summary, d.sessionId, d.eventId, d.doc_status, d._searchText"
+        "MATCH (s:Source {url:'test-doc-1'}) "
+        "RETURN s.topics, s.summary, s.sessionId, s.eventId, s.needs_extraction, s._searchText"
     ).result_set
-    assert rows, "Document not created"
+    assert rows, "document Source not created"
     assert rows[0][0] == ["licensing", "AGPL"], rows[0][0]
     assert rows[0][1] == "Compared licenses"
     assert rows[0][2] == "sess-1"
     assert rows[0][3] == "evt-1"
-    assert rows[0][4] == "captured"
+    assert rows[0][4] is True
     assert "AGPL" in rows[0][5] and "Compared" in rows[0][5], rows[0][5]
     rows2 = proj.g.query(
-        "MATCH (d:Document {id:'test-doc-1'})-[:aboutSubject]->(s) RETURN s.name"
+        "MATCH (s:Source {url:'test-doc-1'})-[:aboutSubject]->(s2) RETURN s2.name"
     ).result_set
     assert len(rows2) == 1 and rows2[0][0] == "agent-pi", rows2
-    # #205: _upsert_document now creates references edge (Source → Document)
+    # #205: _upsert_document creates the references edge from the distinct
+    # corpus Source to the document Source (D10: two Source nodes, never a
+    # degenerate self-loop).
     rows3 = proj.g.query(
-        "MATCH (s:Source {url:'test-doc-1'})-[:references]->"
-        "(d:Document {id:'test-doc-1'}) RETURN count(*) > 0"
+        "MATCH (s:Source {url:'corpus://test-doc-1'})-[:references]->"
+        "(d:Source {url:'test-doc-1'}) RETURN count(*) > 0"
     ).result_set
     assert rows3[0][0] is True, "references edge not created by _upsert_document (#205)"
 
@@ -1875,14 +1911,195 @@ def test_upsert_document_partial_update_preserves_search_text(live_proj):
     proj = live_proj
     proj.apply({"type": "DocumentCreated", "id": "doc-p",
                 "title": "Full Title", "topics": ["alpha"], "summary": "Sum"})
-    rows = proj.g.query("MATCH (d:Document {id:'doc-p'}) RETURN d._searchText").result_set
+    rows = proj.g.query("MATCH (s:Source {url:'doc-p'}) RETURN s._searchText").result_set
     assert rows[0][0] and "alpha" in rows[0][0], rows
-    proj.apply({"type": "DocumentCreated", "id": "doc-p", "doc_status": "captured"})
+    proj.apply({"type": "DocumentCreated", "id": "doc-p", "needs_extraction": True})
     rows = proj.g.query(
-        "MATCH (d:Document {id:'doc-p'}) RETURN d._searchText, d.doc_status"
+        "MATCH (s:Source {url:'doc-p'}) RETURN s._searchText, s.needs_extraction"
     ).result_set
     assert "alpha" in rows[0][0], f"_searchText wiped on partial update: {rows[0][0]}"
-    assert rows[0][1] == "captured"
+    assert rows[0][1] is True
+
+
+# ── #5422: the document :Source's version anchor (contentHash) ──────────────
+# The extraction path was version-BLIND: `_upsert_document` wrote no
+# contentHash at all, so a document-derived Point had no version to anchor on
+# (the operand ONTOLOGY §4.6 names and #5256's anchor reader resolves). These
+# tests pin the fold contract only — they are NOT the re-inference adapter.
+
+def _doc_anchor(proj, url: str):
+    rows = proj.g.query(
+        "MATCH (s:Source {url:$u}) RETURN s.contentHash, count(s)",
+        params={"u": url},
+    ).result_set
+    return (rows[0][0], int(rows[0][1])) if rows else (None, 0)
+
+
+def test_document_source_records_content_hash_anchor(live_proj):
+    """#5422: a DocumentCreated carrying contentHash lands it on the node."""
+    proj = live_proj
+    proj.apply({"type": "DocumentCreated", "id": "doc-h1", "title": "V1",
+                "contentHash": "sha-v1"})
+    assert _doc_anchor(proj, "doc-h1") == ("sha-v1", 1)
+
+
+def test_document_hashless_reemit_preserves_the_anchor(live_proj):
+    """#5422: a write carrying NO hash must NOT wipe the anchor.
+
+    The #900 index path (`_doc_write`) emits DocumentCreated with no hash at
+    all, and `--capture-metadata` deliberately passes none; a hash-less write
+    that cleared the stored hash would silently un-anchor every fact derived
+    from the doc. An EMPTY-string hash (the spelling `_mint_source_stub`,
+    `_materialize_session_source` and `hosted_api` use for "no hash") is the
+    same shape and must behave identically.
+    """
+    proj = live_proj
+    proj.apply({"type": "DocumentCreated", "id": "doc-h2", "title": "V1",
+                "contentHash": "sha-v1"})
+    proj.apply({"type": "DocumentCreated", "id": "doc-h2", "title": "V1 renamed"})
+    assert _doc_anchor(proj, "doc-h2") == ("sha-v1", 1), "anchor wiped by a hash-less re-emit"
+    proj.apply({"type": "DocumentCreated", "id": "doc-h2", "content_hash": ""})
+    assert _doc_anchor(proj, "doc-h2") == ("sha-v1", 1), (
+        "an empty-string hash wiped the anchor")
+
+
+def test_document_content_hash_accepts_both_journal_spellings(live_proj):
+    """#5422 + api.py §4.3: the journal field is snake_case, but the camelCase
+    spelling must still land on the node — and must not leak as a second,
+    unread property (neither spelling may reach the open passthrough)."""
+    proj = live_proj
+    proj.apply({"type": "DocumentCreated", "id": "doc-h7", "content_hash": "sha-snake"})
+    assert _doc_anchor(proj, "doc-h7") == ("sha-snake", 1)
+    proj.apply({"type": "DocumentCreated", "id": "doc-h7", "contentHash": "sha-snake"})
+    assert _doc_anchor(proj, "doc-h7") == ("sha-snake", 1)
+    leaked = proj.g.query(
+        "MATCH (s:Source {url:'doc-h7'}) RETURN s.content_hash"
+    ).result_set
+    assert leaked and leaked[0][0] is None, f"snake spelling leaked as a node prop: {leaked}"
+
+
+def test_document_version_counter_advances_with_the_hash(live_proj):
+    """#5422 + ONTOLOGY §4.6: ``version`` is the monotonic ordinal beside the
+    hash — 1 at creation, +1 on each content-hash change — and a hash-less
+    write must not move it. The pair is never half-written."""
+    proj = live_proj
+    proj.apply({"type": "DocumentCreated", "id": "doc-v1", "title": "V1",
+                "content_hash": "sha-v1"})
+    rows = proj.g.query(
+        "MATCH (s:Source {url:'doc-v1'}) RETURN s.contentHash, s.version").result_set
+    assert list(rows[0]) == ["sha-v1", 1], rows
+    proj.apply({"type": "DocumentCreated", "id": "doc-v1", "content_hash": "sha-v1"})
+    rows = proj.g.query(
+        "MATCH (s:Source {url:'doc-v1'}) RETURN s.contentHash, s.version").result_set
+    assert list(rows[0]) == ["sha-v1", 1], f"unchanged content bumped the version: {rows[0]}"
+    proj.apply({"type": "DocumentCreated", "id": "doc-v1", "content_hash": "sha-v2"})
+    rows = proj.g.query(
+        "MATCH (s:Source {url:'doc-v1'}) RETURN s.contentHash, s.version").result_set
+    assert list(rows[0]) == ["sha-v2", 2], f"version did not advance with the hash: {rows[0]}"
+    proj.apply({"type": "DocumentCreated", "id": "doc-v1", "title": "renamed"})
+    rows = proj.g.query(
+        "MATCH (s:Source {url:'doc-v1'}) RETURN s.contentHash, s.version").result_set
+    assert list(rows[0]) == ["sha-v2", 2], f"hash-less write moved the pair: {rows[0]}"
+
+
+def test_document_content_hash_completes_an_empty_stub(live_proj):
+    """#5422: an empty stored hash (a `_mint_source_stub` stub, or a pre-#5422
+    document node) is COMPLETED by a real hash — never treated as a match."""
+    proj = live_proj
+    proj.apply({"type": "DocumentCreated", "id": "doc-h3", "title": "V1"})
+    proj.g.query("MATCH (s:Source {url:'doc-h3'}) SET s.contentHash = ''")
+    proj.apply({"type": "DocumentCreated", "id": "doc-h3", "title": "V2",
+                "contentHash": "sha-v2"})
+    assert _doc_anchor(proj, "doc-h3") == ("sha-v2", 1)
+
+
+def test_document_content_hash_replaces_on_change_and_identity_stays_url(live_proj):
+    """#5422 + ONTOLOGY §4.6: a NEW version replaces the hash on the SAME node.
+
+    Identity is `url`; the hash names a version. A changed document must never
+    mint a second :Source — that would fork the provenance of every fact the
+    document derives.
+    """
+    proj = live_proj
+    proj.apply({"type": "DocumentCreated", "id": "doc-h4", "title": "V1",
+                "contentHash": "sha-v1"})
+    proj.apply({"type": "DocumentCreated", "id": "doc-h4", "title": "V2",
+                "contentHash": "sha-v2"})
+    assert _doc_anchor(proj, "doc-h4") == ("sha-v2", 1), "new version forked the node"
+
+
+def test_minted_source_stub_does_not_clobber_the_document_anchor(live_proj):
+    """#5422 ordering hazard: the extractedFrom wiring runs AFTER the document
+    fold. `_mint_source_stub`'s `contentHash=''` is ON CREATE only, so a Point
+    linking to an existing document Source must not erase its anchor."""
+    proj = live_proj
+    proj.apply({"type": "DocumentCreated", "id": "doc-h5", "title": "V1",
+                "contentHash": "sha-v1"})
+    prov = provenance("doc-h5", [0, 10], "a claim", extracted_by="test@0")
+    _api(projection=proj)[0].add_point("a claim in the doc", prov,
+                                       extractedFrom="doc-h5")
+    assert _doc_anchor(proj, "doc-h5") == ("sha-v1", 1), (
+        "the extractedFrom stub write clobbered the anchor")
+    edge = proj.g.query(
+        "MATCH (n:Point)-[:extractedFrom]->(s:Source {url:'doc-h5'}) RETURN count(n)"
+    ).result_set
+    assert int(edge[0][0]) == 1, "extractedFrom edge not wired to the document Source"
+
+
+def test_add_document_journals_the_anchor_and_replays_identically(live_proj):
+    """#5422: the anchor rides the JOURNALED event, so replay reproduces it.
+
+    Write through EventAPI.add_document, then re-apply the same journal to a
+    FRESH graph and assert the anchored prop is identical — the
+    `derived = replay(journal)` contract for this field.
+    """
+    from tortoise.ids import content_hash as _ch
+    proj = live_proj
+    api, log = _api(projection=proj)
+    api.add_document("doc-h6", "Doc", content_hash=_ch("body v1"))
+    live = _doc_anchor(proj, "doc-h6")
+    assert live == (_ch("body v1"), 1), live
+    # A metadata-only re-emit must not move it either.
+    api.add_document("doc-h6", "Doc renamed")
+    assert _doc_anchor(proj, "doc-h6") == live
+
+    uri = (os.environ.get("TORTOISE_DB_URI")
+           or _live_utils.legacy_uri("tortoise_test_proj125"))
+    replay = FalkorProjection.from_uri(
+        uri, graph_name=f"test_proj125_5422_{os.urandom(4).hex()}")
+    try:
+        replay.g.query("MATCH (n) DETACH DELETE n")
+        for ev in log.read_all():
+            replay.apply(ev)
+        assert _doc_anchor(replay, "doc-h6") == live, (
+            "replay diverged on the document anchor")
+    finally:
+        replay.close()
+
+
+def test_document_version_does_not_double_bump_across_the_two_folds(live_proj):
+    """#5422: a document `:Source` can be reached by BOTH folds (`DocumentCreated`
+    and `SourceCreated`) on one `url`. The hash gate is idempotent — the second
+    fold sees stored == incoming — so one re-ingest must not bump `version`
+    twice, in either order."""
+    from tortoise.ids import content_hash as _ch
+    h = _ch("body v1")
+    for order in ("doc-first", "source-first"):
+        gid = f"doc-v2-{order}"
+        events = [{"type": "DocumentCreated", "id": gid, "title": "Doc",
+                   "content_hash": h},
+                  {"type": "SourceCreated", "url": gid, "sourceKind": "document",
+                   "contentHash": h, "title": "Doc"}]
+        if order == "source-first":
+            events.reverse()
+        for ev in events:
+            live_proj.apply(ev)
+        rows = live_proj.g.query(
+            "MATCH (s:Source {url:$u}) RETURN s.contentHash, s.version, count(s)",
+            params={"u": gid}).result_set
+        assert rows[0][0] == h and int(rows[0][2]) == 1, rows[0]
+        assert int(rows[0][1]) == 1, (
+            f"double-bumped version on {order}: {rows[0]}")
 
 
 def test_upsert_event_uses_dict_kind(live_proj):
@@ -1908,7 +2125,7 @@ def test_upsert_event_produces_document(live_proj):
         "subject": "agent-pi", "object": "doc-1", "objectType": "Document",
         "uses": [{"name": "tortoise-capture", "kind": "skill"}]}})
     rows = proj.g.query(
-        "MATCH (e:Event {eventId:'evt-2'})-[:produces]->(d:Document) RETURN d.id"
+        "MATCH (e:Event {eventId:'evt-2'})-[:produces]->(d:Source) RETURN d.id"
     ).result_set
     assert rows and rows[0][0] == "doc-1", rows
     # No Object clone
@@ -1995,42 +2212,300 @@ def test_upsert_document_includes_source_path(live_proj):
     proj.apply({"type": "DocumentCreated", "id": "doc-sp",
                 "title": "With Source", "source_path": "/tmp/test.md"})
     rows = proj.g.query(
-        "MATCH (d:Document {id:'doc-sp'}) RETURN d.sourcePath"
+        "MATCH (s:Source {url:'doc-sp'}) RETURN s.sourcePath"
     ).result_set
     assert rows and rows[0][0] == "/tmp/test.md", rows
 
     # Partial update without source_path must preserve existing value
     proj.apply({"type": "DocumentCreated", "id": "doc-sp",
-                "doc_status": "archived"})
+                "needs_extraction": True})
     rows = proj.g.query(
-        "MATCH (d:Document {id:'doc-sp'}) RETURN d.sourcePath, d.doc_status"
+        "MATCH (s:Source {url:'doc-sp'}) RETURN s.sourcePath, s.needs_extraction"
     ).result_set
     assert rows[0][0] == "/tmp/test.md", f"sourcePath wiped: {rows[0][0]}"
-    assert rows[0][1] == "archived"
+    assert rows[0][1] is True
 
 
-def test_upsert_document_preserves_doc_status_and_needs_extraction(live_proj):
-    """#133 P0: partial update via _upsert_document must NOT wipe
-    doc_status='captured' or needs_extraction=true (coalesce-null sentinel —
-    the add_document non-null-default bug class from #167)."""
+def test_upsert_document_preserves_needs_extraction_and_retires_doc_status(live_proj):
+    """#133 P0 + D10: a partial update via _upsert_document must NOT wipe
+    needs_extraction=true (coalesce-null sentinel — the add_document
+    non-null-default bug class from #167), and the retired ``doc_status`` must
+    never be written to the node (ONTOLOGY v3.15 §4.4 / adversarial B6)."""
     proj = live_proj
     proj.apply({"type": "DocumentCreated", "id": "doc-133",
                 "title": "Captured", "doc_status": "captured",
                 "needs_extraction": True})
     rows = proj.g.query(
-        "MATCH (d:Document {id:'doc-133'}) RETURN d.doc_status, d.needs_extraction"
+        "MATCH (s:Source {url:'doc-133'}) RETURN s.doc_status, s.needs_extraction"
     ).result_set
-    assert rows[0][0] == "captured", rows[0][0]
+    assert rows[0][0] is None, f"retired doc_status was written: {rows[0][0]}"
     assert rows[0][1] is True, rows[0][1]
 
-    # Partial update with neither field — must preserve both
+    # Partial update with neither field — must preserve needs_extraction and
+    # must never resurrect the retired doc_status
     proj.apply({"type": "DocumentCreated", "id": "doc-133", "title": "Renamed"})
     rows = proj.g.query(
-        "MATCH (d:Document {id:'doc-133'}) RETURN d.doc_status, d.needs_extraction, d.title"
+        "MATCH (s:Source {url:'doc-133'}) RETURN s.doc_status, s.needs_extraction, s.title"
     ).result_set
-    assert rows[0][0] == "captured", f"doc_status wiped: {rows[0][0]}"
+    assert rows[0][0] is None, f"retired doc_status was written: {rows[0][0]}"
     assert rows[0][1] is True, f"needs_extraction wiped: {rows[0][1]}"
     assert rows[0][2] == "Renamed"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# #5026 (D10) adversarial coverage — retiring the :Document graph label.
+# Declared threat surface (plan §threat): B1 label/key divergence ·
+# B2 derivable-set regression · B3 quota escape · B4 quota over-count ·
+# B5 resurrection residue · B6 retired-field re-write. B3/B4 live in
+# tests/test_quota.py; B5 in tests/test_pointsuperseded_rebuild.py
+# (test_about_document_title_keyed_resolution: the superseded old point
+# keeps zero aboutDocument incidence after rebuild).
+# ══════════════════════════════════════════════════════════════════════
+
+def test_5026_b1_aboutdocument_replay_key_is_url_never_title(live_proj):
+    """B1 (#5026): the label and the replay key move TOGETHER. A
+    title-keyed aboutDocument descriptor is un-replayable and must never be
+    emitted; a url-keyed one resolves to the document :Source. The replay
+    resolver is RESOLVE-ONLY — a miss must never mint a phantom Source."""
+    from tortoise.projection.edges import resolve_structural_target, stub_key
+
+    # emission guard: a target with no `url` yields no descriptor (skip)
+    assert stub_key("aboutDocument", {"title": "Spec"}) is None
+    assert stub_key("aboutDocument", {"url": "u", "title": "Spec"}) \
+        == ("Source", "u")
+
+    proj = live_proj
+    proj.g.query(
+        "MERGE (s:Source {url:'https://x/spec', title:'Spec', "
+        "documentKind:'report'})")
+    before = proj.g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0]
+    # a TITLE-keyed descriptor (the old :Document convention) does NOT resolve
+    assert resolve_structural_target(
+        proj.g, "Source", "Spec", "aboutDocument") is None
+    after = proj.g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0]
+    assert after == before, \
+        "title-keyed aboutDocument descriptor minted a phantom Source"
+    # the SAME node resolves by its identity key (url)
+    assert resolve_structural_target(
+        proj.g, "Source", "https://x/spec", "aboutDocument") is not None
+
+
+def test_5026_b1_live_aboutdocument_ignores_non_document_source(live_proj):
+    """B1 (#5026): a session/connector/provenance :Source (no documentKind)
+    is NEVER an aboutDocument target — the `documentKind IS NOT NULL` guard.
+    The fallback is a Subject stub, not a mis-pointed Source."""
+    proj = live_proj
+    proj.g.query(
+        "MERGE (s:Source {url:'https://x/prov', title:'ProvOnly', "
+        "sourceKind:'github'})")
+    proj.apply({"type": "DocumentCreated", "id": "doc-b1",
+                "title": "DocB1", "document_kind": "report",
+                "about_entities": ["ProvOnly"]})
+    bad = proj.g.query(
+        "MATCH (s:Source {url:'doc-b1'})-[:aboutDocument]->"
+        "(t:Source {url:'https://x/prov'}) RETURN count(*)").result_set[0][0]
+    assert bad == 0, "a provenance Source became an aboutDocument target"
+    good = proj.g.query(
+        "MATCH (s:Source {url:'doc-b1'})-[:aboutSubject]->"
+        "(sub:Subject {name:'ProvOnly'}) RETURN count(*)").result_set[0][0]
+    assert good == 1, "auto-detect fallback did not mint the Subject stub"
+
+
+def test_5026_b1_replay_aboutdocument_ignores_non_document_source(live_proj):
+    """B1 (#5026): the REPLAY resolver must carry the LIVE path's
+    `documentKind IS NOT NULL` guard. Without it a producer-created
+    aboutDocument edge (reachable through the public `sdk.create_edge`) to a
+    provenance Source is re-attached to that non-document Source on rebuild —
+    live and replay disagree. A genuine document Source at the same shape
+    still resolves."""
+    from tortoise.projection.edges import resolve_structural_target
+
+    proj = live_proj
+    proj.g.query(
+        "MERGE (s:Source {url:'https://x/prov-b1', title:'ProvB1', "
+        "sourceKind:'github'})")
+    assert resolve_structural_target(
+        proj.g, "Source", "https://x/prov-b1", "aboutDocument") is None, \
+        "replay resolved a provenance Source as an aboutDocument target"
+    proj.g.query(
+        "MERGE (s:Source {url:'https://x/doc-b1', title:'DocB1R', "
+        "documentKind:'report'})")
+    assert resolve_structural_target(
+        proj.g, "Source", "https://x/doc-b1", "aboutDocument") is not None, \
+        "replay refused a genuine document Source"
+
+
+def test_5026_b2_derivable_set_unchanged():
+    """B2 (#5026): aboutDocument stays in DERIVABLE_STRUCTURAL_RELS and
+    aboutSource stays out (it is not a real rel) — the target label moved to
+    Source, the REL name did not."""
+    from tortoise.projection.edges import DERIVABLE_STRUCTURAL_RELS, STRUCTURAL_REL_LABELS
+    assert "aboutDocument" in DERIVABLE_STRUCTURAL_RELS
+    assert "aboutSource" not in DERIVABLE_STRUCTURAL_RELS
+    assert STRUCTURAL_REL_LABELS["aboutDocument"] == "Source"
+    assert STRUCTURAL_REL_LABELS["extractedFrom"] == "Source"
+
+
+def test_5026_b6_retired_fields_cannot_reenter(live_proj):
+    """B6 (#5026): `content`/`doc_status`/`objectKind`/`status` cannot
+    reappear — neither via the fixed clause NOR the open passthrough. A
+    NON-retired key (`domain`) still rides the passthrough, so the deny-set
+    did not over-reach. The snake/camel synonym spellings are denied too."""
+    proj = live_proj
+    proj.apply({"type": "DocumentCreated", "id": "doc-b6", "title": "B6",
+                "document_kind": "report", "format": "markdown",
+                "content": "SECRET BODY", "doc_status": "captured",
+                "docStatus": "captured",
+                "objectKind": "document", "object_kind": "document",
+                "status": "draft",
+                "domain": "legal"})
+    rows = proj.g.query(
+        "MATCH (s:Source {url:'doc-b6'}) RETURN s.content, s.doc_status, "
+        "s.objectKind, s.status, s.object_kind, s.docStatus").result_set[0]
+    assert rows[0] is None, f"retired `content` written: {rows[0]!r}"
+    assert rows[1] is None, f"retired `doc_status` written: {rows[1]!r}"
+    assert rows[2] is None, f"retired `objectKind` written: {rows[2]!r}"
+    assert rows[3] is None, f"retired `status` written: {rows[3]!r}"
+    assert rows[4] is None, f"retired `object_kind` written: {rows[4]!r}"
+    assert rows[5] is None, f"retired `docStatus` written: {rows[5]!r}"
+    ok = proj.g.query(
+        "MATCH (s:Source {url:'doc-b6'}) RETURN s.domain, s.format").result_set[0]
+    assert ok[0] == "legal", f"non-retired passthrough key dropped: {ok[0]!r}"
+    assert ok[1] == "markdown", f"fixed-clause `format` dropped: {ok[1]!r}"
+
+
+def test_5026_b6_update_entity_cannot_rewrite_retired_fields(sdk_factory):
+    """B6, the THIRD DOOR (#5135, #5026): `update_entity` is a generic
+    `SET n += $props` surface, and its non-Point branch JOURNALS the write as
+    `state` — which the fold re-applies through `SET n += $s`. So retiring a
+    field on the document path is not enough on its own: while the generic
+    surface still accepted these keys, the field was written, journaled, and
+    SURVIVED `rebuild_all`. The two declared B6 tests cover
+    `_upsert_document` and `_upsert_source`, and neither can see this route.
+
+    The denial has to be TARGET-AWARE: `objectKind` is the canonical Object
+    kind (ONTOLOGY §5) and `content` is a legitimate Point key, so a blanket
+    `_sanitize_props` reject would break unrelated labels. It fires only on a
+    document `:Source` — the same predicate the `documents` meter uses.
+    """
+    sdk = sdk_factory()
+    doc = sdk.create_document("B6ThirdDoor", "report")
+    did = doc["id"]
+    assert doc["url"] == did, "a document Source is keyed by the doc id"
+    for key, val in (("content", "SECRET BODY"),
+                     ("doc_status", "captured"),
+                     ("docStatus", "captured"),
+                     ("objectKind", "document"),
+                     ("object_kind", "document")):
+        with pytest.raises(ValueError, match="retired document field"):
+            sdk.update_entity(did, **{key: val})
+    rows = sdk._get_proj().g.query(
+        "MATCH (s:Source {url:$u}) "
+        "RETURN s.content, s.doc_status, s.objectKind",
+        params={"u": did}).result_set[0]
+    assert list(rows) == [None, None, None], \
+        f"retired field written through update_entity: {rows!r}"
+    # ⛔ A TRANSCRIPT document is still a document for the RETIREMENT. The
+    # `documents` meter excludes transcripts from the CAP, but
+    # `_upsert_document` denies the retired fields on EVERY document — so this
+    # guard must too. An earlier revision copied the meter's `<> 'transcript'`
+    # clause, which left exactly this node as an open third door: the same
+    # field denied by the document path and writable by the generic one, on
+    # the same node.
+    tdoc = sdk.create_document("B6ThirdDoorTranscript", "transcript")
+    tid = tdoc["id"]
+    assert tdoc["documentKind"] == "transcript"
+    with pytest.raises(ValueError, match="retired document field"):
+        sdk.update_entity(tid, content="SECRET BODY")
+    trows = sdk._get_proj().g.query(
+        "MATCH (s:Source {url:$u}) "
+        "RETURN s.content, s.doc_status, s.objectKind",
+        params={"u": tid}).result_set[0]
+    assert list(trows) == [None, None, None], \
+        f"retired field written on a transcript document: {trows!r}"
+    # Non-over-reach: a NON-retired key still rides the same surface, so the
+    # refusal did not turn `update_entity` into a no-op for a document.
+    sdk.update_entity(did, domain="legal")
+    assert sdk._get_proj().g.query(
+        "MATCH (s:Source {url:$u}) RETURN s.domain",
+        params={"u": did}).result_set[0][0] == "legal"
+
+
+def test_5026_b6_promotion_scrubs_inherited_retired_fields(sdk_factory):
+    """B6, the FOURTH DOOR (review round 3): the retired fields must be
+    SCRUBBED when a node is PROMOTED to a document, not merely refused on
+    write. A non-document `:Source` may legitimately carry `content` or
+    `objectKind` — the target-aware `update_entity` guard above allows exactly
+    that — and a later document creator MERGEs onto that SAME node by `url`.
+    Without the scrub at the document MERGE, the inherited value survived both
+    live and on replay.
+
+    This is the complement of the third-door test: that one proves the write
+    is refused on a document, this one proves a value written while the node
+    was NOT a document does not become a retired field when it becomes one.
+    """
+    sdk = sdk_factory()
+    sdk.create_source("doc/promo.md", "document")
+    sdk.update_entity("doc/promo.md", content="SECRET", objectKind="X")
+    proj = sdk._get_proj()
+    assert proj.g.query(
+        "MATCH (s:Source {url:'doc/promo.md'}) RETURN s.content"
+    ).result_set[0][0] == "SECRET", \
+        "precondition: writable while the node is not a document"
+    proj.apply({"type": "DocumentCreated", "id": "doc/promo.md",
+                "title": "Promo", "document_kind": "report"})
+    rows = proj.g.query(
+        "MATCH (s:Source {url:'doc/promo.md'}) "
+        "RETURN s.documentKind, s.content, s.objectKind").result_set[0]
+    assert rows[0] == "report", f"promotion did not land: {rows!r}"
+    assert list(rows[1:]) == [None, None], \
+        f"promotion inherited the retired fields: {rows!r}"
+
+
+def test_5026_b6_sourcecreated_cannot_rewrite_retired_fields(live_proj):
+    """B6 (#5026): a document IS a :Source, so a SourceCreated whose url
+    equals a document id MERGEs onto the SAME node the document path owns.
+    Its open passthrough must carry the RETIRED-KEYS deny-set, or the retired
+    fields re-enter and survive a rebuild.
+
+    ⛔ Non-over-reach pin (cycle 2): the deny-set must be the literal retired
+    keys, NOT the historical `_DOCUMENT_HANDLED` union. `_upsert_source`'s
+    fixed clause writes neither `summary` nor `topics`, so a Source that
+    legitimately carries them depends on the passthrough — widening the set to
+    all of `_DOCUMENT_HANDLED` would silently drop them (and an `embedding`,
+    which the vector retrieval leg reads)."""
+    proj = live_proj
+    proj.apply({"type": "DocumentCreated", "id": "doc-b6s", "title": "B6S",
+                "document_kind": "report", "format": "markdown",
+                "domain": "legal"})
+    proj.apply({"type": "SourceCreated", "url": "doc-b6s",
+                "sourceKind": "document",
+                "content": "SECRET BODY", "doc_status": "captured",
+                "docStatus": "captured", "objectKind": "document",
+                "object_kind": "document", "domain": "contracts",
+                "summary": "a legit Source summary",
+                "topics": ["legit", "source"],
+                "status": "active"})
+    rows = proj.g.query(
+        "MATCH (s:Source {url:'doc-b6s'}) RETURN s.content, s.doc_status, "
+        "s.objectKind, s.object_kind, s.docStatus, s.documentKind, "
+        "s.domain, s.format, s.summary, s.topics, s.status").result_set[0]
+    assert rows[0] is None, f"retired `content` via SourceCreated: {rows[0]!r}"
+    assert rows[1] is None, f"retired `doc_status` via SourceCreated: {rows[1]!r}"
+    assert rows[2] is None, f"retired `objectKind` via SourceCreated: {rows[2]!r}"
+    assert rows[3] is None, f"retired `object_kind` via SourceCreated: {rows[3]!r}"
+    assert rows[4] is None, f"retired `docStatus` via SourceCreated: {rows[4]!r}"
+    assert rows[5] == "report", f"document kind lost: {rows[5]!r}"
+    assert rows[6] == "contracts", f"non-retired key dropped: {rows[6]!r}"
+    assert rows[7] == "markdown", f"fixed-clause `format` dropped: {rows[7]!r}"
+    # Non-over-reach: these are NOT retired and `_upsert_source`'s fixed clause
+    # does not write them, so they MUST survive the widened deny-set.
+    assert rows[8] == "a legit Source summary", \
+        f"non-retired `summary` dropped by the deny-set (over-reach): {rows[8]!r}"
+    assert sorted(rows[9] or []) == ["legit", "source"], \
+        f"non-retired `topics` dropped by the deny-set (over-reach): {rows[9]!r}"
+    assert rows[10] == "active", \
+        f"non-retired `status` dropped by the deny-set (over-reach): {rows[10]!r}"
 
 
 # ── #214: Vocabulary edge cleanup ──────────────────────────────────────
@@ -2038,6 +2513,70 @@ def test_upsert_document_preserves_doc_status_and_needs_extraction(live_proj):
 
 class TestVocabEdgeValidation:
     """#214: instantiates removed; dependsOn/reportsTo/related kept."""
+
+    def test_related_is_neutral_by_construction(self):
+        """#5025: `related` is the neutral association predicate — pinned.
+
+        `related` is a LIVE, agent-writable predicate — `tortoise_create_edge`
+        (`tortoise/tool_registry.py` tool def → `sdk.create_edge`), the ingest
+        `connections` path, and `security.KNOWN_REL_TYPES` all reach it — so its
+        neutrality is NOT emptiness. It is a property of the three maps it is
+        absent from, and the load-bearing one is SUPERSEDE:
+
+        * absent from ``SUPERSEDE_STRUCTURAL_RELS`` — a supersede does not
+          transfer it; it stays at the old point (also pinned behaviourally by
+          `test_dry_run_preview`, "in NO transfer leg").
+        * absent from ``DERIVABLE_STRUCTURAL_RELS`` — belt-and-braces. The SDK
+          emission path is SUPERSEDE-gated (it iterates
+          ``SUPERSEDE_STRUCTURAL_RELS`` and tests ``derivable = rel in
+          DERIVABLE_STRUCTURAL_RELS`` *inside* that loop), so DERIVABLE alone
+          emits nothing. It is NOT inert overall: the replay branch
+          (`projection/__init__.py`) routes journaled descriptors on
+          ``etype in DERIVABLE_STRUCTURAL_RELS`` with no SUPERSEDE reference,
+          and a raw producer can journal one directly. DERIVABLE is therefore a
+          live replay discriminator — and a rel in it that is missing from
+          ``STRUCTURAL_REL_LABELS`` fails there on lookup.
+        * absent from ``STRUCTURAL_REL_LABELS`` — it holds the target **label**;
+          the replay-**key** selection sits beside it in ``stub_key``, and #2489
+          requires the two to move together (a retargeted label with a stale key
+          resolves to nothing).
+
+        Do NOT read this test as "no belief path reads `related`". No path
+        **weights** it — ``ep``'s factor queries are ``IMPL|NAND``-filtered, and
+        the source-credibility prior lives in ``sdk._apply_source_inheritance``
+        (``extractedFrom``-filtered; ``ep.py`` itself never reads
+        ``extractedFrom``). But ``ep``'s affected-set BFS is unfiltered on the
+        relation (`MATCH (n:Point)-[r]-(op:Point)-[r2]-(m:Point)`), so a
+        `related` edge onto an operator **does** pull the far endpoint into the
+        recompute set — and there a node with no ``IMPL|NAND`` factor *and no
+        run-level evidence* is recomputed as ``Beta(1,1)``, its prior discarded
+        (#5566). That is not specific to `related`, and this test does not cover
+        it.
+
+        This is a GUARD, not a policy. The transfer half is a tested decision;
+        the other two absences are mechanism, not decision. Adding `related` to
+        any of these maps — or giving it a producer or a weight — is an
+        ontology decision (owner-reserved), not a bug fix.
+        """
+        from tortoise.projection.edges import (
+            _VALID_EDGE_PREDICATES,
+            DERIVABLE_STRUCTURAL_RELS,
+            STRUCTURAL_REL_LABELS,
+        )
+        from tortoise.sdk import SUPERSEDE_STRUCTURAL_RELS
+
+        # It IS valid and creatable — the neutrality is not emptiness.
+        assert "related" in _VALID_EDGE_PREDICATES
+        # ...and yet it is in none of the three maps that would give it
+        # behaviour.
+        assert "related" not in SUPERSEDE_STRUCTURAL_RELS
+        assert "related" not in DERIVABLE_STRUCTURAL_RELS
+        assert "related" not in STRUCTURAL_REL_LABELS
+        # Non-vacuity: the assertions above also pass if a map were renamed
+        # away or emptied, so pin a member each must still carry.
+        assert "extractedFrom" in SUPERSEDE_STRUCTURAL_RELS
+        assert "extractedFrom" in DERIVABLE_STRUCTURAL_RELS
+        assert "extractedFrom" in STRUCTURAL_REL_LABELS
 
     def test_instantiates_rejected_by_create_edge(self):
         """create_edge rejects 'instantiates' — Action dissolved in v3.0."""
@@ -2297,7 +2836,7 @@ def test_falkor_rebuild_all_parity_with_apply():
         try:
             for ev in log.read_all():
                 projA.apply(ev)
-            projB.rebuild_all(d)
+            projB.rebuild_all(d, confirm_destructive=True)
 
             def node_map(proj):
                 rows = proj.g.query("MATCH (n:Point) RETURN n.id, properties(n)").result_set
@@ -2409,7 +2948,7 @@ def test_falkor_rebuild_all_revision_before_add():
 
         proj = FalkorProjection(_tmp("g_rebuild_21.db"), graph_name="test")
         try:
-            proj.rebuild_all(d)
+            proj.rebuild_all(d, confirm_destructive=True)
             r = proj.g.query(
                 "MATCH (n:Point {id:$id}) RETURN n.content",
                 params={"id": pid},
@@ -2504,7 +3043,7 @@ def test_falkor_rebuild_all_with_sdk_points():
         proj = FalkorProjection(
             os.path.join(d, "rebuilt.db"), graph_name="test")
         try:
-            result = proj.rebuild_all(d)
+            result = proj.rebuild_all(d, confirm_destructive=True)
             assert result["nodes"] >= 4, (
                 f"Expected at least 4 nodes (3 points + 1 operator), "
                 f"got {result['nodes']}")
@@ -2590,7 +3129,7 @@ def test_falkor_rebuild_all_snapshot_preserves_sdk_points():
         # Must use the same graph_name as the SDK ("tortoise" is default).
         proj = FalkorProjection(db_path, graph_name="tortoise")
         try:
-            result = proj.rebuild_all(d)
+            result = proj.rebuild_all(d, confirm_destructive=True)
 
             # Should have 4+ nodes: p1, p2, op, evt-001
             assert result["nodes"] >= 4, (
@@ -2675,7 +3214,7 @@ def test_falkor_rebuild_all_eventapi_regression():
         try:
             for ev in log.read_all():
                 projA.apply(ev)
-            result = projB.rebuild_all(d)
+            result = projB.rebuild_all(d, confirm_destructive=True)
 
             # p-reg-1 survives, p-reg-2 was retracted (tombstone per #689)
             assert result["nodes"] >= 1, (
@@ -3219,7 +3758,7 @@ def test_rebuild_all_tolerates_malformed_events():
                                 "point": {"id": ["x"], "content": "bad id"}}) + "\n")
         proj = FalkorProjection(_tmp("g_rebuild_331.db"), graph_name="test")
         try:
-            result = proj.rebuild_all(d)
+            result = proj.rebuild_all(d, confirm_destructive=True)
             assert result["nodes"] >= 1
             rows = proj.g.query(
                 "MATCH (n:Point {id:'p1'}) RETURN n.status").result_set
@@ -3307,7 +3846,7 @@ def _interrupted_rebuild(prefix: str, *, fail_on: int = 1,
     try:
         with mock.patch.object(FalkorProjection, "_upsert_point_props", _boom), \
                 pytest.raises(RuntimeError, match="injected mid-replay"):
-            proj.rebuild_all(d)
+            proj.rebuild_all(d, confirm_destructive=True)
     except BaseException:
         proj.close()
         shutil.rmtree(d, ignore_errors=True)
@@ -3346,7 +3885,7 @@ def test_falkor_rebuild_all_survives_mid_replay_failure():
         assert ctx["op_id"] in recorded, "operator snapshot lost"
 
         # 3. Re-running the rebuild restores everything.
-        result = proj.rebuild_all(d)
+        result = proj.rebuild_all(d, confirm_destructive=True)
         for pid, content in ctx["points"]:
             rows = proj.g.query(
                 "MATCH (n:Point {id:$id}) RETURN n.content",
@@ -3368,7 +3907,7 @@ def test_falkor_rebuild_all_survives_mid_replay_failure():
         # 5. ... and rebuilding again duplicates nothing: the count is the
         # same 4 the snapshot+journal union replays (not `again["nodes"]`,
         # which would make this assertion compare a value to itself).
-        again = proj.rebuild_all(d)
+        again = proj.rebuild_all(d, confirm_destructive=True)
         assert again["events"] == 4, again
         assert again["nodes"] == 4, again
         assert proj.g.query(
@@ -3456,7 +3995,7 @@ def test_prewipe_snapshot_corrupt_aborts_before_wipe():
 
                 with pytest.raises(RuntimeError,
                                    match="wipe the graph"):
-                    proj.rebuild_all(d)
+                    proj.rebuild_all(d, confirm_destructive=True)
 
                 # The wipe never ran — the graph is untouched.
                 rows = proj.g.query(
@@ -3702,7 +4241,7 @@ def test_prewipe_snapshot_written_before_wipe_and_cleared_after():
                 return real_query(gself, cypher, *args, **kwargs)
 
             with mock.patch.object(type(proj.g), "query", spy):
-                result = proj.rebuild_all(d)
+                result = proj.rebuild_all(d, confirm_destructive=True)
             assert seen.get("sidecar_at_wipe") is True, (
                 "the durable snapshot must exist BEFORE MATCH (n) DETACH "
                 "DELETE n — otherwise a kill in the wipe window loses every "
@@ -3731,7 +4270,7 @@ def test_prewipe_snapshot_write_failure_aborts_before_wipe():
                             side_effect=OSError("disk full")), \
                     pytest.raises(RuntimeError,
                                    match="aborted BEFORE the graph wipe"):
-                proj.rebuild_all(d)
+                proj.rebuild_all(d, confirm_destructive=True)
             rows = proj.g.query(
                 "MATCH (n:Point {id:'g1'}) RETURN count(n)").result_set
             assert rows[0][0] == 1, (
@@ -3770,7 +4309,7 @@ def test_prewipe_snapshot_capture_failure_aborts_before_wipe():
             with mock.patch.object(type(proj.g), "query", spy), \
                     pytest.raises(RuntimeError,
                                    match="could not be captured"):
-                proj.rebuild_all(d)
+                proj.rebuild_all(d, confirm_destructive=True)
             rows = proj.g.query(
                 "MATCH (n:Point {id:'g1'}) RETURN count(n)").result_set
             assert rows[0][0] == 1, (
@@ -3804,7 +4343,7 @@ def test_prewipe_snapshot_retry_dedups_against_partial_replay():
         assert partial == 1, (
             "the injected failure must leave exactly one re-created node")
 
-        result = proj.rebuild_all(d)
+        result = proj.rebuild_all(d, confirm_destructive=True)
         assert result["events"] == 4, (
             "3 snapshot events + 1 journal event — a duplicate prepend means "
             f"the union dedup failed (got {result['events']})")
@@ -3842,7 +4381,7 @@ def test_prewipe_snapshot_restores_quarantined_batch():
         assert payload["batch_snapshot"], "quarantine marker not snapshotted"
         assert payload["batch_point_links"], "batch_id link not snapshotted"
 
-        proj.rebuild_all(d)
+        proj.rebuild_all(d, confirm_destructive=True)
         rows = proj.g.query(
             "MATCH (b:Batch {id:'batch-1'}) RETURN b.status").result_set
         assert rows and rows[0][0] == "quarantined", (
@@ -3931,7 +4470,7 @@ def test_prewipe_snapshot_non_str_id_aborts_before_wipe():
                          " status:'live'})")
             with pytest.raises(RuntimeError,
                                match="could not be captured"):
-                proj.rebuild_all(d)
+                proj.rebuild_all(d, confirm_destructive=True)
             rows = proj.g.query(
                 "MATCH (n:Point) RETURN count(n)").result_set
             assert rows[0][0] == 1, (
@@ -3968,7 +4507,7 @@ def test_prewipe_snapshot_clear_is_atomic_against_a_failed_unlink():
             proj.g.query("CREATE (n:Point {id:'g1', content:'graph-only',"
                          " status:'live', pointKind:'statement'})")
             sidecar = os.path.join(d, ".tortoise-prewipe-snapshot.json")
-            proj.rebuild_all(d)          # completes → sidecar retired
+            proj.rebuild_all(d, confirm_destructive=True)          # completes → sidecar retired
             # Re-plant the pre-wipe payload to stand in for the unlink having
             # failed, then prove a retirement write makes it inert.
             with open(sidecar, "w", encoding="utf-8") as fh:
@@ -3987,7 +4526,7 @@ def test_prewipe_snapshot_clear_is_atomic_against_a_failed_unlink():
             # A legitimate delete AFTER the completed rebuild must not come
             # back: the retired (entry-less) sidecar has nothing to merge.
             proj.g.query("MATCH (n:Point {id:'g1'}) DETACH DELETE n")
-            proj.rebuild_all(d)
+            proj.rebuild_all(d, confirm_destructive=True)
             rows = proj.g.query(
                 "MATCH (n:Point {id:'g1'}) RETURN count(n)").result_set
             assert rows[0][0] == 0, (
@@ -4120,7 +4659,7 @@ def test_prewipe_snapshot_restores_replay_gap_properties():
                 "status:'live', pointKind:'statement', outdated:true, "
                 "expiredAt:'2026-01-01T00:00:00Z', posterior_alpha:0.5, "
                 "posterior_beta:2.5, content_hash:'deadbeef'})")
-            proj.rebuild_all(d)
+            proj.rebuild_all(d, confirm_destructive=True)
             rows = proj.g.query(
                 "MATCH (n:Point {id:'g1'}) RETURN n.outdated, n.expiredAt, "
                 "n.posterior_alpha, n.posterior_beta, n.content_hash"

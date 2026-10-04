@@ -1725,7 +1725,7 @@ def test_cli_drain_accepts_exclude_session_id(tmp_path, monkeypatch, capsys):
     server = _Server()
     monkeypatch.setattr("tortoise.capture_spool.spool_dir", lambda: tmp_path)
     monkeypatch.setattr(cli, "_resolve_config_path",
-                        lambda: (None, {}, "test-key", "http://test"))
+                        lambda *a, **k: (None, {}, "test-key", "http://test"))
     monkeypatch.setattr(cli, "_session_post", lambda *a, **k: server.post)
     assert cli.main(["session", "drain", "--exclude-session-id", "live-resumed"]) == 0
     assert sorted(server.sessions) == ["interrupted-other"]
@@ -1776,7 +1776,7 @@ def test_spool_works_without_any_credentials(tmp_path, monkeypatch):
     transcript.write_text("User: hi\nAssistant: hello\n", encoding="utf-8")
     _isolate(monkeypatch, tmp_path)
     monkeypatch.setattr(cli, "_resolve_config_path",
-                        lambda: (_ for _ in ()).throw(
+                        lambda *a, **k: (_ for _ in ()).throw(
                             AssertionError("spool must not resolve credentials")))
     monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
     assert cli.main(["session", "spool", "--file", str(transcript)]) == 0
@@ -2002,10 +2002,10 @@ def test_session_drain_exits_zero_with_no_config_and_with_a_corrupt_config(
     from tortoise import __main__ as cli
 
     monkeypatch.setattr(cli, "_resolve_config_path",
-                        lambda: (None, {}, None, None))
+                        lambda *a, **k: (None, {}, None, None))
     assert cli.main(["session", "drain"]) == 0, "no config is not an error"
 
-    def corrupt():
+    def corrupt(*a, **k):
         raise cli._ConfigError(str(tmp_path / "credentials.json"))
 
     monkeypatch.setattr(cli, "_resolve_config_path", corrupt)
@@ -2103,7 +2103,7 @@ def test_an_unreadable_spool_ROOT_is_recorded_and_drain_exits_0(tmp_path,
         assert [d["reason"] for d in summary.discarded] == ["spool_unreadable"], (
             "an unreadable ROOT is not an empty spool")
         monkeypatch.setattr(cli, "_resolve_config_path",
-                            lambda: (None, {}, "k", "http://x"))
+                            lambda *a, **k: (None, {}, "k", "http://x"))
         assert cli.main(["session", "drain"]) == 0, (
             "the backgrounded drain must exit 0 even then")
     finally:
@@ -2121,7 +2121,7 @@ def test_session_drain_never_crashes_on_an_unexpected_failure(monkeypatch):
     from tortoise import __main__ as cli
 
     monkeypatch.setattr(cli, "_resolve_config_path",
-                        lambda: (None, {}, "k", "http://x"))
+                        lambda *a, **k: (None, {}, "k", "http://x"))
 
     def boom(*a, **k):
         raise RuntimeError("a bug in a new transport")
@@ -2190,7 +2190,7 @@ def test_session_drain_exits_zero_when_the_config_resolver_itself_raises(
     """
     from tortoise import __main__ as cli
 
-    def unreadable():
+    def unreadable(*a, **k):
         raise PermissionError(13, "Permission denied", "/home/u/.tortoise")
 
     monkeypatch.setattr(cli, "_resolve_config_path", unreadable)

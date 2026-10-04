@@ -189,6 +189,14 @@ jobs:
           # the switch is visible. Only a byte-exact 0 disables escalation; any
           # other value warns and keeps paging.
           ESCALATE_ENABLED: ${{ vars.ESCALATE_ENABLED }}
+          # #4573: the heartbeat KILL SWITCH, wired so an operator can actually
+          # reach it (the "documented but unreachable control" defect review
+          # caught for ESCALATE_ENABLED). Unset expands to EMPTY = enabled, and
+          # the script treats only a byte-exact 0 as off. STEP-level like
+          # ESCALATE_ENABLED. Only this (primary) probe step emits the
+          # heartbeat; the auth step sets HEARTBEAT_EMIT=0 below so one job
+          # writes exactly ONE rolling record.
+          HEARTBEAT_ENABLED: ${{ vars.HEARTBEAT_ENABLED }}
         run: bash .github/scripts/availability-watchdog.sh
       # SECOND TARGET (#3628): the Pages auth surface. `!cancelled()` rather
       # than the default `success()` — the two surfaces fail INDEPENDENTLY, so
@@ -222,6 +230,12 @@ jobs:
           # unkillable. STEP-level, never job-level (same discipline as
           # ESCALATION_CHAT_ID).
           ESCALATE_ENABLED: ${{ vars.ESCALATE_ENABLED }}
+          # #4573: this is the SECOND probe step of the same job, so it must NOT
+          # also write the rolling heartbeat — two writes seconds apart would
+          # rely on GitHub's search index having caught up and could file a
+          # DUPLICATE rolling issue. Exactly one step per job emits; this is it
+          # for the primary (Fly API) step, so the auth step opts out.
+          HEARTBEAT_EMIT: '0'
           PROBE_URL: https://app.premiselabs.co/auth/start
           PROBE_HOST_LABEL: app.premiselabs.co
           # Healthy = 302 with the PKCE challenge in the response headers. The

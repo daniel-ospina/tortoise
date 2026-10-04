@@ -57,8 +57,12 @@ import json
 import math
 import re
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from tests.eval.write_path import grading, schema
+
+if TYPE_CHECKING:  # pragma: no cover — typing only; prescreen imports this module
+    from tests.eval.write_path.prescreen import PreScreen
 
 # ── Pinned judge prompts ────────────────────────────────────────────────────
 # Version bumps invalidate prior judge_pin baselines (schema requires a pin on
@@ -375,6 +379,16 @@ class SalienceJudge:
 
 SEMANTIC_PROMPT_VERSION = "w2-semantic-banded-v1"
 SEMANTIC_JUDGE_PIN = f"{SEMANTIC_PROMPT_VERSION}+{PARAPHRASE_PROMPT_VERSION}"
+# #5106: the deterministic first-stage pre-screen is OFF by default.  When it
+# is ON the judge protocol has changed (the confident ends are no longer the
+# LLM's verdict), so the fix-wave pin discipline requires its own pin —
+# ``SEMANTIC_JUDGE_PIN`` itself is untouched, so a default (screen-off) run's
+# receipt stays byte-identical to the #5085 shape.
+SEMANTIC_PRESCREEN_VERSION = "w2-prescreen-v1"
+SEMANTIC_JUDGE_PIN_PRESCREEN = (
+    f"{SEMANTIC_PROMPT_VERSION}+{PARAPHRASE_PROMPT_VERSION}"
+    f"+{SEMANTIC_PRESCREEN_VERSION}"
+)
 
 # Owner-specified bands (D14 resolution, #5085) as INCLUSIVE lower bounds.
 BAND_SAME_FACT = "same_fact"
@@ -641,6 +655,16 @@ class BandedSalienceJudge:
         # must read the verdict count, not the total.
         self.judge_call_count = 0
         self.paraphrase_call_count = 0
+        # #5106 pre-screen bookkeeping — all zero when no pre-screen is used,
+        # so a default run's snapshot cannot drift from the #5085 shape.
+        self.prescreen_name: str | None = None
+        self.prescreen_screened = 0
+        self.prescreen_same_fact = 0
+        self.prescreen_likely_not = 0
+        self.prescreen_errors = 0
+        self.prescreen_probe_chars_removed = 0
+        self.prescreen_saved_sessions = 0
+        self.prescreen_judge_calls_avoided = 0
         self._logprob_samples: list[float] = []
 
     @property
@@ -775,45 +799,120 @@ class BandedSalienceJudge:
         return probes
 
     def judge_units(
-        self, probes: dict[str, str], memory: list[str]
+        self,
+        probes: dict[str, str],
+        memory: list[str],
+        *,
+        prescreen: PreScreen | None = None,
     ) -> dict[str, dict]:
         """Blind banded judging: ``{probe_id: unit_record}``.
 
         ``unit_record`` = ``{probability, band, votes_yes, votes_total,
         orders: {order: {yes, total, probability}}}``.
+
+        ``prescreen`` (#5106) is an OPTIONAL deterministic first stage.  It is
+        asked about every probe; a ``same_fact`` / ``likely_not`` verdict
+        removes that probe from the LLM prompt, and anything else (including
+        any exception, and any ``abstain``) leaves the unit on the LLM path
+        exactly as before — the stage can only ever *skip* confident work, it
+        can never drop a unit or fail the arm closed.
+
+        The blindness guard runs over the FULL probe dict BEFORE the stage is
+        consulted: the pre-screen is not an exemption from the plan §J4
+        contract, and it consumes the same probe surface the judge does.
         """
         if not probes:
             return {}
         probe_ids = sorted(probes)
         self._guard(probes)
-        yes = {pid: 0 for pid in probe_ids}
-        total = {pid: 0 for pid in probe_ids}
+
+        screened: dict[str, str] = {}
+        if prescreen is not None:
+            self.prescreen_name = getattr(prescreen, "name", "unnamed")
+            for pid in probe_ids:
+                try:
+                    verdict = prescreen.screen(probes[pid], memory)
+                except Exception:
+                    # A misbehaving stage must never take the arm down: the
+                    # unit abstains to the LLM judge (fail OPEN).
+                    self.prescreen_errors += 1
+                    verdict = "abstain"
+                if verdict not in (BAND_SAME_FACT, BAND_LIKELY_NOT):
+                    continue
+                screened[pid] = verdict
+                self.prescreen_screened += 1
+                self.prescreen_probe_chars_removed += len(probes[pid])
+                if verdict == BAND_SAME_FACT:
+                    self.prescreen_same_fact += 1
+                else:
+                    self.prescreen_likely_not += 1
+
+        # Order matters: ``build_banded_prompt`` renders the PROBES block with
+        # ``probes.items()``, so the ACTIVE set must be drawn from ``probes``
+        # itself (insertion order) — never from the sorted ``probe_ids``.  With
+        # nothing screened that makes ``active_probes`` order-identical to
+        # ``probes``, so the screen-off prompt, and therefore the judged
+        # number, stays comparable to #5085.  ``probe_ids`` stays sorted for
+        # the OUTPUT dict only.
+        active_ids = [pid for pid in probes if pid not in screened]
+        # Batching note: the judge asks ONE question per (order, sample) that
+        # covers every probe in the session, so a partial screen removes
+        # tokens but not CALLS; only a fully screened session removes calls.
+        if screened:
+            self.prescreen_saved_sessions = 1 if not active_ids else 0
+            self.prescreen_judge_calls_avoided = (
+                len(self.orders) * self.samples if not active_ids else 0
+            )
+
+        yes = {pid: 0 for pid in active_ids}
+        total = {pid: 0 for pid in active_ids}
         per_order: dict[str, dict[str, dict[str, int]]] = {
-            order: {pid: {"yes": 0, "total": 0} for pid in probe_ids}
+            order: {pid: {"yes": 0, "total": 0} for pid in active_ids}
             for order in self.orders
         }
-        for order in self.orders:
-            user = build_banded_prompt(probes, memory, order=order)
-            for _ in range(self.samples):
-                raw = self._complete(
-                    self._judge_model, system=_BANDED_SYSTEM, user=user
-                )
-                self.judge_call_count += 1
-                self.record_usage(self._judge_model)
-                lp = _snapshot_logprobs(self._judge_model)
-                if lp is not None:
-                    self._logprob_samples.append(lp)
-                verdicts = parse_banded(raw, probe_ids)
-                for pid, preserved in verdicts.items():
-                    total[pid] += 1
-                    per_order[order][pid]["total"] += 1
-                    if preserved:
-                        yes[pid] += 1
-                        per_order[order][pid]["yes"] += 1
+        if active_ids:
+            active_probes = {pid: probes[pid] for pid in active_ids}
+            for order in self.orders:
+                user = build_banded_prompt(active_probes, memory, order=order)
+                for _ in range(self.samples):
+                    raw = self._complete(
+                        self._judge_model, system=_BANDED_SYSTEM, user=user
+                    )
+                    self.judge_call_count += 1
+                    self.record_usage(self._judge_model)
+                    lp = _snapshot_logprobs(self._judge_model)
+                    if lp is not None:
+                        self._logprob_samples.append(lp)
+                    verdicts = parse_banded(raw, active_ids)
+                    for pid, preserved in verdicts.items():
+                        total[pid] += 1
+                        per_order[order][pid]["total"] += 1
+                        if preserved:
+                            yes[pid] += 1
+                            per_order[order][pid]["yes"] += 1
         out: dict[str, dict] = {}
         for pid in probe_ids:
+            if pid in screened:
+                # A screened unit's probability is its DETERMINISTIC verdict
+                # (1.0 preserved / 0.0 not), so the owner band mapping is
+                # unchanged and the receipt's band invariant still holds.
+                probability = 1.0 if screened[pid] == BAND_SAME_FACT else 0.0
+                record = {
+                    "probability": round(probability, 6),
+                    "band": band_for_probability(probability),
+                    "votes_yes": 0,
+                    "votes_total": 0,
+                    "orders": {},
+                    "source": "prescreen",
+                    "prescreen": {
+                        "name": self.prescreen_name,
+                        "verdict": screened[pid],
+                    },
+                }
+                out[pid] = record
+                continue
             probability = yes[pid] / total[pid] if total[pid] else 0.0
-            out[pid] = {
+            record = {
                 "probability": round(probability, 6),
                 "band": band_for_probability(probability),
                 "votes_yes": yes[pid],
@@ -833,7 +932,27 @@ class BandedSalienceJudge:
                     for order in self.orders
                 },
             }
+            if self.prescreen_name is not None:
+                # Only present on a screened run — a default run's unit record
+                # stays byte-identical to the #5085 shape.
+                record["source"] = "judge"
+            out[pid] = record
         return out
+
+    def prescreen_audit(self) -> dict | None:
+        """The pre-screen's own bounded counters (``None`` when unused)."""
+        if self.prescreen_name is None:
+            return None
+        return {
+            "name": self.prescreen_name,
+            "units_screened": self.prescreen_screened,
+            "screened_same_fact": self.prescreen_same_fact,
+            "screened_likely_not": self.prescreen_likely_not,
+            "screen_errors": self.prescreen_errors,
+            "probe_chars_removed": self.prescreen_probe_chars_removed,
+            "sessions_fully_screened": self.prescreen_saved_sessions,
+            "judge_calls_avoided": self.prescreen_judge_calls_avoided,
+        }
 
     def logprob_crosscheck(self) -> dict:
         """Coarse token-logprob cross-check — NOT the answer probability."""

@@ -59,17 +59,146 @@ logger = logging.getLogger("tortoise.oauth")
 # advertises (#2866). `offline_access` is accepted (Claude's connector
 # requests it, and the AS does mint refresh tokens unconditionally) without
 # becoming a default fallback or a PRM-advertised scope. The superset
-# relation is structural. NOTE: scope enforcement is DCR-only today —
-# `validate_authorize_params` takes no `scope` parameter, so the
-# authorize/consent path forwards an unvalidated scope into the minted token
-# (pre-existing, filed as #3128). Do not read this constant as an authorize
-# gate.
+# relation is structural. `validate_scope` reads this list on the
+# authorize/consent/mint paths and `register_client` shares its membership
+# test (#3128), so SCOPES_ACCEPTED is the whole scope policy — never mint a
+# scope that is not in it.
 SCOPES_SUPPORTED = ["mcp"]
 SCOPES_ACCEPTED = [*SCOPES_SUPPORTED, "offline_access"]
 ACCESS_TOKEN_TTL_S = int(os.environ.get("TORTOISE_OAUTH_ACCESS_TTL", "3600"))
 REFRESH_TOKEN_TTL_S = int(os.environ.get("TORTOISE_OAUTH_REFRESH_TTL",
                                           str(30 * 24 * 3600)))
 AUTH_CODE_TTL_S = int(os.environ.get("TORTOISE_OAUTH_CODE_TTL", "600"))
+# ── Retention / GC windows (issue #3036) ────────────────────────────────────
+# Credential hygiene, a DIFFERENT AXIS from the user-content deletion promise:
+# these rows are service-role-only hashed secrets (0016 RLS), never user
+# content. Canonical promise doc: docs/retention-and-deletion.md (which records
+# the same carve-out for the operational event store).
+#
+# Each value is the DEFAULT grace kept AFTER the row's own expires_at, so a row
+# that is revoked but not yet expired lives out its natural TTL first. That is
+# what makes a #2863 soft-revoke an accounting residue rather than a leak. The
+# env override is read and VALIDATED per sweep (see _retention_seconds), never
+# parsed blindly: a negative override would move the cutoff into the future and
+# delete LIVE credentials.
+OAUTH_CODE_RETENTION_S = 86400
+OAUTH_ACCESS_RETENTION_S = 86400
+OAUTH_REFRESH_RETENTION_S = 86400
+
+# Upper bound on any retention window (10 years). A larger override is
+# indistinguishable from "retention off" AND overflows the cutoff arithmetic
+# (``timedelta`` raises OverflowError), which would skip that table forever.
+_MAX_RETENTION_S = 10 * 365 * 86400
+_MAX_RETENTION_STR = str(_MAX_RETENTION_S)
+
+
+def _retention_seconds(env_name: str, default: int) -> int:
+    """Resolve a retention window from the environment, fail-safe (#3036).
+
+    Mirrors ``monitoring.event_retention_interval``: a value that is not a
+    positive whole number of seconds falls back to ``default`` with a warning.
+    This matters because the window is SUBTRACTED from ``now`` to form a
+    DELETE cutoff — a negative or malformed value would otherwise delete live
+    rows (or raise at import, silently disabling retention).
+
+    The parse is deliberately STRICT — ASCII ``str.isdigit`` — because bare
+    ``int()`` also accepts a sign (``+5``), underscore separators (``1_0``)
+    and non-ASCII digit forms (``٣`` = 3). None of those is a window a human
+    meant, and the last two resolve to a far shorter window than intended.
+
+    Out-of-range handling is DIRECTIONAL on purpose: a non-positive or
+    malformed value falls back to ``default``, but a value ABOVE the ceiling
+    is CLAMPED to it. Falling back to the 1-day default for an operator who
+    asked for a longer window would delete EARLIER than requested — the wrong
+    direction for a retention knob.
+    """
+    raw = os.environ.get(env_name)
+    if raw is None:
+        return default
+    if not (raw.isascii() and raw.isdigit()):
+        logger.warning("oauth: %s=%r is not a positive integer — using %ss",
+                       env_name, raw, default)
+        return default
+    # Width check BEFORE int(): CPython refuses a string longer than
+    # ``sys.get_int_max_str_digits()`` (4300) with an uncaught ValueError, and
+    # no digits-only value this wide can be below the ceiling. Compare
+    # SIGNIFICANT digits, not ``len(raw)``: leading zeros inflate the string
+    # without inflating the value, so ``00000086400`` must resolve to 86400
+    # (not clamp) and ``0000000000`` must hit the non-positive branch.
+    significant = raw.lstrip("0") or "0"
+    if len(significant) > len(_MAX_RETENTION_STR):
+        logger.warning("oauth: %s is wider than %d digits — clamping to %ds",
+                       env_name, len(_MAX_RETENTION_STR), _MAX_RETENTION_S)
+        return _MAX_RETENTION_S
+    value = int(significant)
+    if value <= 0:
+        logger.warning("oauth: %s=%r must be positive — using %ss",
+                       env_name, raw, default)
+        return default
+    if value > _MAX_RETENTION_S:
+        logger.warning("oauth: %s=%r exceeds %ds — clamping",
+                       env_name, raw, _MAX_RETENTION_S)
+        return _MAX_RETENTION_S
+    return value
+
+
+# ── Redemption state (issue #3027) ───────────────────────────────────────────
+# `used_at` records that a request CLAIMED a code; it says nothing about what
+# the claim did. These states make the OUTCOME durable, so a failed or lost
+# redemption is distinguishable from a replay, and "did this code already mint
+# a pair?" is answerable from the grants themselves (the `code_id` link).
+# Design: docs/scoping/2026-09-25-3027-oauth-redemption-state.md.
+#
+#   unclaimed → claimed → minted    the pair was handed to the response
+#                       → burned    terminal; the code never mints again
+#   claimed   → unclaimed           a VERIFIED-CLEAN failure re-armed it
+#                                   (#2863's re-arm, now durably recorded)
+#
+# `burned` is written where the claim's residue is terminal: a pre-mint signal, or
+# a reconcile past the grace that ATTEMPTED to revoke a live orphan family
+# (`_rollback_minted` is best-effort — a failed revoke is captured, and the row
+# survives inert under a now-`burned` code until the retention sweep reaches its
+# TTL) or found none AT PROBE TIME (the probe and the settle are not one
+# transaction, so a family minted between them escapes). An outcome the process
+# could not settle stays `claimed` so the reconciler can resolve it — see
+# `_reconcile_claimed_redemption`.
+#
+# Schema invariant (migration 20260925000002) — DIRECTIONAL, deliberately not the
+# biconditional (a biconditional rejects the pre-#3027 writer, which sets
+# `used_at` alone, during the rolling deploy):
+#   used_at IS NULL  ⇒  redemption_state = 'unclaimed'
+# The CLAIM and the RE-ARM set `used_at` and `redemption_state` in ONE statement;
+# a settle only transitions `redemption_state` on a row that is already `claimed`.
+# So the biconditional holds for everything we write, and the DB enforces the
+# direction that matters (no settled row without a claim timestamp).
+REDEMPTION_UNCLAIMED = "unclaimed"
+REDEMPTION_CLAIMED = "claimed"
+REDEMPTION_MINTED = "minted"
+REDEMPTION_BURNED = "burned"
+
+# An outcome-unknown claim is reconciled only once it is older than this. The
+# window does NOT prove the owner is dead — the mutating grant is awaited with no
+# wall-clock bound above it, so a live sibling can outlive any window
+# (`_reconcile_claimed_redemption` spells this out). What the window bounds is
+# WHEN a later request starts taking the claim over; a live sibling that outlives
+# it simply loses the settle CAS and compensates its pair. Set generously so an
+# ordinary request is not aborted for nothing.
+REDEMPTION_CLAIM_GRACE_S = 60
+
+
+def _redemption_grace_s() -> int:
+    """Resolve the reconcile grace window, fail-safe (#3027).
+
+    Same strict parse and DIRECTIONAL fallback as `_retention_seconds`: a
+    malformed or non-positive override falls back to the default (never to a zero
+    window — that would take a claim over the instant it is written, aborting
+    every concurrent sibling for no gain), and an over-long one is clamped. Read
+    per use so the env stays a reversible lever.
+    """
+    return _retention_seconds("TORTOISE_OAUTH_REDEMPTION_GRACE_S",
+                              REDEMPTION_CLAIM_GRACE_S)
+
+
 # Distinct prefixes so the MCP auth middleware can route Bearer tokens without
 # a table scan (tt_ = tenant key, oat_ = OAuth access token). Refresh tokens
 # are never presented to /mcp — the prefix is a debugging aid.
@@ -124,9 +253,21 @@ class OAuthMintAborted(Exception):
 
 
 class OAuthTemporarilyUnavailable(OAuthError):
-    """503 `temporarily_unavailable` — raised ONLY when the grant is established
-    still-usable: by observation where a write may have landed, or constructively
-    where no write was attempted. Never on an unobserved write state."""
+    """503 `temporarily_unavailable` — raised ONLY when retrying cannot double-issue:
+
+      * constructively, where no write was attempted at all (a pre-claim read
+        failed, or the refresh path failed before minting);
+      * by observation, where a write may have landed — the grant is confirmed
+        still-usable (see `_mint_observably_clean` / `_prev_refresh_unclaimed`);
+      * where a conditional claim was observed to match ZERO rows and the
+        failure is a later classification READ (#3027 `_observe_code` returning
+        'unobservable') — nothing was written by this request, and the retry
+        re-runs the same claim CAS, which is what decides.
+
+    Never on an unobserved WRITE state: a claim PATCH that RAISED may have
+    committed (`_consume_state` → 'unknown'), and that stays terminal
+    `invalid_grant`. This distinction is #2863's, not a new one.
+    """
 
     def __init__(self, error_description: str = "Temporary control-plane failure — retry."):
         super().__init__(503, "temporarily_unavailable", error_description)
@@ -139,9 +280,14 @@ def _log_and_capture(exc: BaseException, *, where: str) -> None:
       lane 2 of `_issue_tokens`        → the single capture of the TRIGGERING exception
       lane 1 loser rollback (capture=True)  → the single capture for the loser path
                                                (nothing else captures there)
+      #3027 delivery-gate loss (capture=True) → the single capture for that path
+                                               (the mint succeeded, so nothing has
+                                               captured; the handler only logs)
       lane 2 rollback/observation (capture=False) → log only (lane 2 captured the trigger)
       lane 3 prev-access revoke        → log only (non-decision-bearing hygiene)
-      the two correction-#8 revokes    → each the single capture for its terminal path
+      the three correction-#8 revokes  → each the single capture for its terminal path
+                                        (family revoke / membership revoke /
+                                        poisoned-scope revoke)
       `exchange_auth_code` / `refresh_grant` pre-consume/pre-mint `except Exception`
                                        → this call IS the single capture for that path
       `oauth_token` boundary           → this call IS the single capture for that path
@@ -168,6 +314,51 @@ def _now_iso() -> str:
 def _sha256(value: str) -> str:
     """Hex digest — the stored form for codes/tokens/secrets (never plaintext)."""
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+# ── Scope policy (the single allow-list gate, #3128) ────────────────────────
+
+def _unsupported_scope(scope: str) -> list[str]:
+    """Scope tokens this AS does not accept (empty ⇒ every token is accepted).
+
+    The one membership test shared by the DCR gate (``register_client``) and
+    the authorize/consent/mint gate (``validate_scope``), so those two can
+    never drift from the advertised ``SCOPES_ACCEPTED`` set (#3128). The CIMD
+    document validator (``tortoise/cimd.py``) applies the same test through
+    its own ``supported_scopes`` argument, which is wired to this same
+    constant.
+    """
+    return [s for s in scope.split() if s not in SCOPES_ACCEPTED]
+
+
+def validate_scope(scope) -> str:
+    """The authorize/consent/mint scope gate (#3128).
+
+    Returns the canonical (space-delimited, single-spaced) scope string, or
+    raises ``invalid_scope`` when any requested token is outside
+    ``SCOPES_ACCEPTED``. Per RFC 6749 §3.3 + §4.1.2.1 an unsupported scope is
+    a client error (``invalid_scope``: "The requested scope is invalid,
+    unknown, or malformed") — it is REJECTED, never silently minted onto an
+    authorization code or a token claim. §3.3's alternative ("MAY fully or
+    partially ignore the scope requested") is deliberately not used to
+    intersect with the client's registered scope: #2866 admits
+    ``offline_access`` at the AS level for a client that requests it, and a
+    default ``mcp`` registration would otherwise be silently narrowed — a
+    user-visible revocation of a scope the AS advertises.
+
+    A blank/absent scope falls back to ``SCOPES_SUPPORTED`` (RFC 6749 §3.3
+    pre-defined default). A non-string scope is malformed ⇒ ``invalid_scope``.
+    """
+    blank = scope is None or (isinstance(scope, str) and not scope.split())
+    resolved = " ".join(SCOPES_SUPPORTED) if blank else scope
+    if not isinstance(resolved, str):
+        raise OAuthError(400, "invalid_scope", "scope must be a string.")
+    if _unsupported_scope(resolved):
+        # Deliberately does NOT echo the requested tokens: the value is
+        # attacker-controlled and lands in a redirect query string.
+        raise OAuthError(400, "invalid_scope",
+                         f"Unsupported scope. Supported: {SCOPES_ACCEPTED}")
+    return " ".join(resolved.split())
 
 
 def _new_token(prefix: str) -> str:
@@ -642,8 +833,7 @@ def register_client(cp, body: dict) -> dict:
         scope = " ".join(SCOPES_SUPPORTED)
     if not isinstance(scope, str):
         raise OAuthError(400, "invalid_client_metadata", "scope must be a string.")
-    requested = scope.split()
-    if any(s not in SCOPES_ACCEPTED for s in requested):
+    if _unsupported_scope(scope):
         raise OAuthError(400, "invalid_client_metadata",
                          f"Unsupported scope. Supported: {SCOPES_ACCEPTED}")
 
@@ -709,8 +899,16 @@ def _verify_client_auth(cp, client_id: str, body: dict) -> dict:
 def validate_authorize_params(cp, *, client_id: str, redirect_uri: str | None,
                               response_type: str | None,
                               code_challenge: str | None,
-                              code_challenge_method: str | None) -> dict:
-    """Validate the /oauth/authorize request. Returns the client row."""
+                              code_challenge_method: str | None,
+                              scope: str | None = None) -> dict:
+    """Validate the /oauth/authorize request. Returns the client row.
+
+    #3128: ``scope`` is the requested scope and is validated HERE — on the one
+    path shared by GET /oauth/authorize (page render) and POST /oauth/consent
+    (code mint) — so an out-of-allow-list scope is refused before a code is
+    stored. ``scope or client.get("scope")`` mirrors the mint fallback
+    exactly.
+    """
     client = resolve_client(cp, client_id)
     try:
         if client is None:
@@ -733,6 +931,10 @@ def validate_authorize_params(cp, *, client_id: str, redirect_uri: str | None,
                    for u in registered_uris):
             raise OAuthError(400, "invalid_request",
                              "redirect_uri is not registered for this client.")
+        # #3128: the requested scope is checked against SCOPES_ACCEPTED (the
+        # same set DCR enforces) BEFORE the consent page renders or a code is
+        # minted. A scope the AS does not advertise is a client error.
+        validate_scope(scope or client.get("scope"))
         if not code_challenge or not _valid_pkce(code_challenge):
             raise OAuthError(400, "invalid_request",
                              "code_challenge (PKCE, 43-128 chars) is required.")
@@ -826,6 +1028,13 @@ def issue_auth_code(cp, *, client_id: str, user_id: str, base: str,
         "resource": resource,
         "expires_at": _expires_iso(AUTH_CODE_TTL_S),
         "used_at": None,
+        # #3027: state every new code explicitly. The column has a DB default,
+        # but sending it keeps the PostgREST seam and the in-memory fake in
+        # lockstep (the fake has no column defaults).
+        "redemption_state": REDEMPTION_UNCLAIMED,
+        "redemption_id": None,
+        "redemption_settled_at": None,
+        "redemption_note": None,
         "created_at": _now_iso(),
     })
     return code, org_id
@@ -856,14 +1065,18 @@ def _consume_state(cp, code: str) -> str:
 
 
 def _restore_code(cp, code: str, expected) -> bool:
-    """CAS re-arm (#2863): clear `used_at` ONLY if it still holds the value this
-    request wrote, and only while the code is still redeemable.
+    """CAS re-arm of the claim THIS request owns (#2863, #3027). Clears `used_at`
+    ONLY if it still holds the value this request wrote AND the claim is still
+    ours (`redemption_state='claimed'`), and only while the code is redeemable.
 
     True iff the re-arm is confirmed observable. Any raise / empty result / None
     expectation ⇒ False (terminal) — never a retryable signal on unobserved state.
     The expiry filter mirrors `_consume_state`: the failure path can spend ~20 s
     before the re-arm, so a near-TTL code must not be re-armed into a 503 whose retry
     then returns expired `invalid_grant`.
+
+    The `redemption_state` condition is #3027's FENCE: a reconciler that took the
+    claim over (and burned it) cannot be undone by this request's late re-arm.
     """
     if expected is None:
         return False
@@ -872,8 +1085,17 @@ def _restore_code(cp, code: str, expected) -> bool:
                         select=["used_at", "expires_at"],
                         filters=[("code_hash", "eq", _sha256(code)),
                                  ("used_at", "eq", expected),
+                                 ("redemption_state", "eq", REDEMPTION_CLAIMED),
                                  ("expires_at", "gt", _now_iso())],
-                        json_body={"used_at": None})
+                        json_body={"used_at": None,
+                                   # #3027: clear the redemption state in the SAME
+                                   # CAS, so the durable state can never disagree
+                                   # with `used_at` (the schema constrains them to
+                                   # agree). A re-arm means "unclaimed" again.
+                                   "redemption_state": REDEMPTION_UNCLAIMED,
+                                   "redemption_id": None,
+                                   "redemption_settled_at": None,
+                                   "redemption_note": None})
         return bool(rows)
     except Exception as exc:
         logger.warning("oauth: code re-arm failed: %s", exc)
@@ -931,29 +1153,232 @@ def _prev_refresh_unclaimed(cp, prev_refresh: dict) -> bool:
         return False
 
 
-def _consume_code(cp, code: str) -> dict:
-    """Single-use auth-code redemption (RFC 6749 §4.1.2).
+def _settle_redemption(cp, code_row: dict | None, state: str,
+                       *, note: str | None = None) -> bool:
+    """CAS-settle the claim this request OWNS (#3027). True iff the CAS WON.
 
-    Atomic claim: one conditional UPDATE (``WHERE used_at IS NULL``) with
-    return=representation — a concurrent worker reusing the same code sees
-    zero affected rows and fails invalid_grant (no SELECT-then-PATCH race,
-    PR #1264 review P2).
+    The write is fenced on the claim identity — `id` AND
+    `redemption_state='claimed'` AND (when present) `redemption_id` — so exactly
+    ONE of {the owning request, a reconciler that took the claim over} can record
+    the outcome, and the loser is told so by the return value:
+
+      * `exchange_auth_code` uses this as its DELIVERY GATE — a pair is only
+        returned if the `minted` settle won; on a loss it compensates the pair it
+        minted and reports the failure, so a reconciler can never revoke a family
+        that is about to be delivered, and a late attempt can never resurrect a
+        claim the reconciler already resolved.
+      * `_reconcile_claimed_redemption` takes ownership with the same CAS BEFORE
+        it revokes anything, so it can never revoke a family whose owner then
+        delivers it.
+
+    Best-effort by CONTRACT — never raises (a state-recording failure must not
+    turn a coherent OAuth error into a 500), and the return value is the fence.
+    `used_at` is left untouched: the claim wrote it, and `minted`/`burned` are
+    terminal states that keep it.
     """
-    rows = cp.query("oauth_codes", select=[
-        "code_hash", "client_id", "user_id", "org_id", "redirect_uri",
-        "code_challenge", "code_challenge_method", "scope", "resource",
-        "expires_at", "used_at",
-    ], method="PATCH",
-        filters=[("code_hash", "eq", _sha256(code)), ("used_at", "is", None)],
-        json_body={"used_at": _now_iso()})
+    if not code_row or code_row.get("id") is None:
+        return False
+    filters = [("id", "eq", code_row["id"]),
+               ("redemption_state", "eq", REDEMPTION_CLAIMED)]
+    # A legacy/pre-state row carries no redemption_id; the id+state CAS still
+    # fences it (PostgREST `eq` does not match NULL, so an unconditional filter
+    # would make such a row un-settleable in production while the fake matched it).
+    # (`eq` with a NULL is NOT "match NULL": `_encode` renders it `eq.None`, i.e.
+    # the LITERAL string — a 400 on a `bigint` column and a literal compare on a
+    # `text` column. Either way it matches no real row, so the clause must be
+    # omitted, not passed as NULL.)
+    if code_row.get("redemption_id") is not None:
+        filters.append(("redemption_id", "eq", code_row["redemption_id"]))
+    try:
+        rows = cp.query("oauth_codes", method="PATCH", select=["id"],
+                        filters=filters,
+                        json_body={"redemption_state": state,
+                                   "redemption_settled_at": _now_iso(),
+                                   "redemption_note": note})
+        return bool(rows)
+    except Exception as exc:
+        logger.warning("oauth: redemption settle (%s) failed: %s", state, exc)
+        return False
+
+
+def _observe_code(cp, code: str) -> dict:
+    """READ-ONLY classification of a code after a zero-row claim (#3027).
+
+    Returns the row (so the caller can settle or reconcile it) with an added
+    ``state``: one of 'unclaimed' | 'claimed' | 'minted' | 'burned' | 'expired'
+    | 'missing' | 'unobservable'.
+
+    Never writes, and never raises: the claim PATCH has already been OBSERVED as
+    a zero-row result, so nothing was written on this path, and a failed read is
+    'unobservable' (a retryable signal is then safe — unlike an unobserved
+    WRITE, which #2863 keeps terminal).
+
+    The zero-row observation is load-bearing for that safety, and it rests on the
+    control-plane seam: a select-bearing PATCH is sent with
+    `Prefer: return=representation`, whose genuine zero-match result is a
+    content-bearing `[]`, and a transport failure RAISES rather than returning
+    empty (`supabase_control.query`). So on the normal seam a COMMITTED claim does
+    not arrive here as zero rows.
+
+    Residual, stated rather than hidden: `query` ALSO reads a 2xx with an EMPTY
+    body as `[]`, so an intermediary that stripped a committed PATCH's body would
+    make this look like a zero-row claim. The consequence is bounded and is NOT a
+    double-issue — the retry re-runs the same claim CAS, which is what actually
+    decides — but the signal is then retryable for a code that is in fact
+    consumed, i.e. #2863's "untruthful retry" would be reinstated by the seam.
+    Pinned by `test_empty_body_patch_reads_as_zero_rows` in the fault suite; do
+    not widen the 503 basis further without re-reading it.
+    """
+    try:
+        rows = cp.query("oauth_codes", select=[
+            "id", "used_at", "expires_at", "redemption_state",
+            "redemption_id", "client_id", "org_id",
+        ], filters=[("code_hash", "eq", _sha256(code))])
+    except Exception as exc:
+        logger.warning("oauth: code state observation failed: %s", exc)
+        return {"state": "unobservable"}
     if not rows:
-        # Unknown code, or already claimed (single-use) — the token endpoint
-        # must never distinguish, and must never double-issue.
+        return {"state": "missing"}
+    row = dict(rows[0])
+    if row.get("used_at") is not None:
+        state = row.get("redemption_state")
+        # The schema invariant makes a non-'unclaimed' state the only reachable
+        # value when `used_at` is set. A row observed through a pre-migration
+        # seam carries no state column at all; treat it as 'claimed' — the
+        # reconcilable state — never as terminal.
+        return {**row, "state": state if state in (
+            REDEMPTION_CLAIMED, REDEMPTION_MINTED, REDEMPTION_BURNED)
+            else REDEMPTION_CLAIMED}
+    expires = _parse_ts(row.get("expires_at"))
+    if expires is None or expires < _now():
+        return {**row, "state": "expired"}
+    return {**row, "state": REDEMPTION_UNCLAIMED}
+
+
+def _live_family_for_code(cp, code_row: dict) -> list[tuple[str, str]]:
+    """Every LIVE token row linked to this code (#3027). Raises on read failure.
+
+    A code row with NO id is refused rather than probed: there is no `code_id`
+    value to filter on, and passing NULL would render `code_id=eq.None` — a 400 on
+    the `bigint` column, and on a `text` column a compare against the literal
+    "None". Probing is therefore impossible, NOT "matches every unlinked row".
+    """
+    code_id = code_row.get("id")
+    if code_id is None:
+        raise ValueError("code row carries no id — cannot resolve its family")
+    out: list[tuple[str, str]] = []
+    for table in ("oauth_refresh_tokens", "oauth_access_tokens"):
+        rows = cp.query(table, select=["id"],
+                        filters=[("code_id", "eq", code_id),
+                                 ("revoked_at", "is", None)])
+        out.extend((table, r["id"]) for r in rows if r.get("id") is not None)
+    return out
+
+
+def _reconcile_claimed_redemption(cp, code_row: dict) -> str:
+    """Settle an outcome-unknown claim (#3027). Returns 'burned-orphan' |
+    'burned-clean' | 'inflight' | 'lost-race' | 'unobservable'.
+
+    The durable `code_id` link is the evidence an in-process read cannot supply
+    across requests: it asks the GRANTS whether this code minted, so a later
+    request can resolve a claim whose compensation failed.
+
+    ⛔ There is deliberately NO cross-request re-arm. "Older than the grace"
+    does not prove the owner is dead — the mutating grant is awaited with no
+    wall-clock bound above it, and a control-plane stall (or an operator lowering
+    the grace) can hold an attempt between its claim and its settle for an
+    arbitrarily long time. Re-arming on that guess is exactly how TWO live
+    families get minted for one single-use code: the late owner wakes, mints, and
+    records `minted` over the re-armed row. A residue with no family is therefore
+    BURNED — fail safe; the client re-runs authorization. The common
+    verified-clean failure still re-arms, IN PROCESS, via `_restore_code`.
+
+    Ordering is load-bearing: ownership is taken with a CAS on the claim identity
+    BEFORE anything is revoked. If the owner settles first, this CAS loses
+    ('lost-race') and NOTHING is touched, so a family that is about to be
+    delivered is never revoked. If this CAS wins, the owner's own settle loses and
+    `exchange_auth_code` compensates its pair instead of delivering it.
+    """
+    claimed_at = _parse_ts(code_row.get("used_at"))
+    if claimed_at is None or (_now() - claimed_at).total_seconds() < _redemption_grace_s():
+        return "inflight"
+    try:
+        family = _live_family_for_code(cp, code_row)
+    except Exception as exc:
+        logger.warning("oauth: redemption reconcile read failed: %s", exc)
+        return "unobservable"
+    if not _settle_redemption(cp, code_row, REDEMPTION_BURNED,
+                              note="orphan-revoked" if family else "unresolved"):
+        return "lost-race"
+    if family:
+        # The claim is now ours to decide, so no delivery can follow: these rows
+        # belong to a mint whose response was lost and whose compensation failed.
+        _rollback_minted(cp, family, _now_iso(), capture=True)
+        return "burned-orphan"
+    return "burned-clean"
+
+
+def _consume_code(cp, code: str) -> dict:
+    """Single-use auth-code redemption (RFC 6749 §4.1.2) with the durable
+    redemption state machine (#3027).
+
+    Atomic claim: one conditional UPDATE (``WHERE used_at IS NULL AND
+    redemption_state='unclaimed' AND expires_at > now()``) with
+    return=representation — a concurrent worker reusing the same code sees zero
+    affected rows and cannot double-issue (no SELECT-then-PATCH race, PR #1264
+    review P2). The claim records the timestamp, the state AND a fresh
+    `redemption_id` in the SAME statement, so the durable state can never be
+    half-written relative to the CAS.
+
+    On zero rows the row is re-read READ-ONLY to classify WHY. Every verdict
+    EXCEPT `unobservable` is TERMINAL (`invalid_grant`): a minted code is a
+    replay, and a CLAIMED code is consumed by an attempt that may still be
+    running — a different request must never re-arm it (two live families) and
+    must never report it retryable (the retry can terminate, which #2863 records
+    as the untruthful signal it removed). A `claimed` observation also triggers
+    the lazy reconcile, which settles the residue for good. `unobservable` — the
+    classification READ failed — is a retryable 503 instead, because the claim
+    PATCH was OBSERVED to match zero rows (so this request wrote nothing, and the
+    retry re-runs that same CAS); see `_observe_code`.
+    """
+    for attempt in (1, 2):
+        rows = cp.query("oauth_codes", select=[
+            "id", "code_hash", "client_id", "user_id", "org_id", "redirect_uri",
+            "code_challenge", "code_challenge_method", "scope", "resource",
+            "expires_at", "used_at", "redemption_state", "redemption_id",
+        ], method="PATCH",
+            filters=[("code_hash", "eq", _sha256(code)),
+                     ("used_at", "is", None),
+                     ("redemption_state", "eq", REDEMPTION_UNCLAIMED),
+                     ("expires_at", "gt", _now_iso())],
+            json_body={"used_at": _now_iso(),
+                       "redemption_state": REDEMPTION_CLAIMED,
+                       "redemption_id": secrets.token_urlsafe(16),
+                       "redemption_settled_at": None,
+                       "redemption_note": None})
+        if rows:
+            row = rows[0]
+            # Defence in depth: the claim filter already excludes an expired code.
+            if _parse_ts(row.get("expires_at")) is None or _parse_ts(row["expires_at"]) < _now():
+                _settle_redemption(cp, row, REDEMPTION_BURNED, note="expired")
+                raise OAuthError(400, "invalid_grant", "Authorization code expired.")
+            return row
+        observed = _observe_code(cp, code)
+        state = observed.get("state")
+        if state == REDEMPTION_CLAIMED:
+            verdict = _reconcile_claimed_redemption(cp, observed)
+            logger.info("oauth: code already claimed (%s)", verdict)
+            raise OAuthError(400, "invalid_grant", "Invalid authorization code.")
+        if state == "unclaimed" and attempt == 1:
+            continue                        # lost a claim race — retry exactly once
+        if state == "unobservable":
+            raise OAuthTemporarilyUnavailable(
+                "Could not determine the authorization code's state — retry.")
+        if state == "expired":
+            raise OAuthError(400, "invalid_grant", "Authorization code expired.")
         raise OAuthError(400, "invalid_grant", "Invalid authorization code.")
-    row = rows[0]
-    if _parse_ts(row.get("expires_at")) is None or _parse_ts(row["expires_at"]) < _now():
-        raise OAuthError(400, "invalid_grant", "Authorization code expired.")
-    return row
+    # Unreachable: the loop either returns a claimed row or raises.
+    raise OAuthError(400, "invalid_grant", "Invalid authorization code.")
 
 
 def _assert_org_usable(cp, org_id: str) -> None:
@@ -1027,7 +1452,8 @@ def _org_row(cp, org_id: str) -> dict | None:
 def _issue_tokens(cp, *, client_id: str, user_id: str, org_id: str,
                   scope: str, resource: str | None,
                   prev_refresh: dict | None = None,
-                  prev_access_id: str | None = None) -> dict:
+                  prev_access_id: str | None = None,
+                  code_id: int | None = None) -> dict:
     """Mint an access+refresh pair; rotate (revoke) the previous pair when
     called from the refresh path (D5 rotation).
 
@@ -1038,6 +1464,11 @@ def _issue_tokens(cp, *, client_id: str, user_id: str, org_id: str,
     orphan pair is rolled back so exactly one rotation wins (PR #1264 review
     P2 — no double rotation under concurrent workers).
     """
+    # #3128: the mint is the LAST line for a scope claim. Validating here (in
+    # addition to the authorize/consent gate) means no token row can ever carry
+    # a scope outside SCOPES_ACCEPTED — including a legacy code/refresh row
+    # written before the gate existed, or any future caller of this writer.
+    scope = validate_scope(scope)
     access = _new_token(ACCESS_TOKEN_PREFIX)
     refresh = _new_token(REFRESH_TOKEN_PREFIX)
     refresh_id = secrets.token_urlsafe(16)
@@ -1046,6 +1477,13 @@ def _issue_tokens(cp, *, client_id: str, user_id: str, org_id: str,
     # #2863: appended BEFORE the POST, so a commit-then-lost POST still gets its
     # rollback (the row exists even though the response never arrived).
     minted: list[tuple[str, str]] = []
+    # #3027: the provenance link back to the authorizing code. Omitted (rather
+    # than sent as NULL) for a family with no origin code — a refresh rotation of
+    # one minted before this migration. The column and the claim's
+    # `redemption_state` filter are read unconditionally, so the migration MUST be
+    # applied before this code (the deploy's migration-drift gate is fail-closed
+    # on that ordering).
+    code_link = {"code_id": code_id} if code_id is not None else {}
     try:
         minted.append(("oauth_refresh_tokens", refresh_id))
         cp.query("oauth_refresh_tokens", method="POST", json_body={
@@ -1059,6 +1497,7 @@ def _issue_tokens(cp, *, client_id: str, user_id: str, org_id: str,
             "revoked_at": None,
             "rotated_from": prev_refresh["id"] if prev_refresh is not None else None,
             "created_at": now,
+            **code_link,
         })
         minted.append(("oauth_access_tokens", access_id))
         cp.query("oauth_access_tokens", method="POST", json_body={
@@ -1072,6 +1511,7 @@ def _issue_tokens(cp, *, client_id: str, user_id: str, org_id: str,
             "revoked_at": None,
             "refresh_token_id": refresh_id,
             "created_at": now,
+            **code_link,
         })
         if prev_refresh is not None:
             claimed = cp.query("oauth_refresh_tokens", method="PATCH",
@@ -1162,13 +1602,42 @@ def exchange_auth_code(cp, body: dict, base: str) -> dict:
         scope = code_row.get("scope") or " ".join(SCOPES_SUPPORTED)
         out = _issue_tokens(cp, client_id=client["id"], user_id=code_row["user_id"],
                             org_id=code_row["org_id"], scope=scope,
-                            resource=code_row.get("resource"))
-    except OAuthError:
-        raise                        # an intentional terminal signal — never re-arm
+                            resource=code_row.get("resource"),
+                            code_id=code_row.get("id"))
+        # #3027: record delivery BEFORE returning the pair — and DELIVERY IS
+        # GATED ON THIS CAS. The reconciler takes ownership of a stale claim with
+        # the same CAS before it revokes anything, so exactly one of us can
+        # settle: if we lose, a family we just minted must not be delivered
+        # (it would be revoked out from under the client) and we compensate it
+        # and report the failure instead.
+        if not _settle_redemption(cp, code_row, REDEMPTION_MINTED):
+            minted = [("oauth_refresh_tokens", out["_refresh_id"]),
+                      ("oauth_access_tokens", out["_access_id"])]
+            # capture=True is this path's SINGLE capture (I4): nothing has captured
+            # yet — `_issue_tokens` succeeded — and the handler below only logs. A
+            # failed compensation here leaves a live, never-delivered row, which
+            # must not vanish silently.
+            _rollback_minted(cp, minted, _now_iso(), capture=True)
+            raise OAuthMintAborted(_mint_observably_clean(cp, minted))
+    except OAuthError as exc:
+        # #3027: an intentional terminal signal AFTER the claim burns the code
+        # durably (CAS-fenced on the claim identity, so it cannot overwrite a
+        # reconciler's decision). Without this the row would stay 'claimed' and
+        # the reconciler would later burn a live residue the client already
+        # knows failed. A retryable signal is not a terminal outcome, so
+        # `temporarily_unavailable` never burns.
+        if consumed and not isinstance(exc, OAuthTemporarilyUnavailable):
+            _settle_redemption(cp, code_row, REDEMPTION_BURNED, note="terminal")
+        raise
     except OAuthMintAborted as exc:
         logger.warning("oauth: auth-code mint aborted (recovered=%s)", exc.recovered)
         if exc.recovered and _restore_code(cp, body.get("code", ""), code_row["used_at"]):
             raise OAuthTemporarilyUnavailable() from None
+        # `recovered=False` deliberately does NOT record a terminal state: the
+        # outcome is UNKNOWN, which is precisely what #3027 exists to represent.
+        # The code stays 'claimed' for `_reconcile_claimed_redemption` to resolve
+        # against the durable `code_id` link; burning it here would hide the
+        # orphan from the one mechanism that can revoke it.
         raise OAuthError(400, "invalid_grant",
                          "The authorization code could not be redeemed — re-run "
                          "authorization.") from None
@@ -1204,7 +1673,9 @@ def refresh_grant(cp, body: dict, base: str) -> dict:
 
     Rotating per (user, org): each use revokes the presented token and mints
     a fresh pair. Org suspension revokes the whole (user, org) family;
-    a lapsed membership revokes the presented token.
+    a lapsed membership revokes the presented token. A stored scope no longer
+    in SCOPES_ACCEPTED (#3128) revokes the presented token and terminates the
+    grant with `invalid_grant` — no mint.
     """
     # #2863: wrap every pre-mint read (the FIRST one is `_verify_client_auth` →
     # `oauth_clients`; a wrap starting at the refresh-token SELECT leaves it
@@ -1215,7 +1686,7 @@ def refresh_grant(cp, body: dict, base: str) -> dict:
         refresh_token = body.get("refresh_token", "")
         rows = cp.query("oauth_refresh_tokens", select=[
             "id", "token_hash", "client_id", "user_id", "org_id", "scope",
-            "expires_at", "revoked_at",
+            "expires_at", "revoked_at", "code_id",
         ], filters=[("token_hash", "eq", _sha256(refresh_token))])
         if not rows:
             raise OAuthError(400, "invalid_grant", "Invalid refresh token.")
@@ -1266,12 +1737,36 @@ def refresh_grant(cp, body: dict, base: str) -> dict:
         _log_and_capture(exc, where="refresh_grant pre-mint")
         raise OAuthTemporarilyUnavailable(
             "Temporary control-plane failure before token rotation — retry.") from None
+    # #3128: a refresh row minted before the scope gate (or made stale by a
+    # future narrowing of SCOPES_ACCEPTED) carries a scope the AS no longer
+    # accepts. The mint refuses it — but left as-is the presented token would
+    # be refused forever with no recovery signal. Revoke the poisoned
+    # credential and report terminal invalid_grant so the client re-authorizes
+    # (mirrors the lapsed-membership branch above).
+    try:
+        validate_scope(row.get("scope") or " ".join(SCOPES_SUPPORTED))
+    except OAuthError:
+        try:
+            cp.query("oauth_refresh_tokens", method="PATCH",
+                     filters=[("id", "eq", row["id"])],
+                     json_body={"revoked_at": _now_iso()})
+        except Exception as exc:  # correction #8: the single capture for this path
+            _log_and_capture(exc, where="poisoned-scope revoke")
+        raise OAuthError(400, "invalid_grant",
+                         "The refresh token's scope is no longer supported — "
+                         "re-run authorization.") from None
     try:
         out = _issue_tokens(cp, client_id=row["client_id"], user_id=row["user_id"],
                             org_id=row["org_id"], scope=row.get("scope")
                             or " ".join(SCOPES_SUPPORTED), resource=resource,
                             prev_refresh=row,
-                            prev_access_id=prev_access[0]["id"] if prev_access else None)
+                            prev_access_id=prev_access[0]["id"] if prev_access else None,
+                            # #3027: rotation INHERITS the family's origin code, so
+                            # a live rotated descendant is still discoverable from
+                            # the code the reconciler is resolving. A link that died
+                            # at the first rotation would make the reconciler blind
+                            # to the live family and re-arm a live grant.
+                            code_id=row.get("code_id"))
     except OAuthMintAborted as exc:
         logger.warning("oauth: refresh mint aborted (recovered=%s)", exc.recovered)   # I4: log-only
         if exc.recovered:
@@ -1432,6 +1927,10 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   .providers { display: flex; gap: .75rem; margin-bottom: .75rem; }
   .btn-provider { background: var(--bg); color: var(--text); }
   .btn-provider:hover { border-color: var(--accent); }
+  .btn-provider:disabled { opacity: .45; cursor: not-allowed; }
+  .warn { display: none; color: var(--gold); border: 1px solid var(--border);
+          border-radius: 6px; padding: .6rem .75rem; margin-bottom: .75rem;
+          font-size: 13px; }
   .spinner { color: var(--text-dim); font-size: 13px; margin-top: 1rem; }
 </style>
 </head>
@@ -1456,6 +1955,7 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   <div id="view-signin" style="display:none">
     <h1>Sign in to Tortoise</h1>
     <p class="muted">Sign in to approve this connection.</p>
+    <p class="warn" id="signin-capability" role="status"></p>
     <div class="providers">
       <button class="btn-provider" id="btn-github">GitHub</button>
       <button class="btn-provider" id="btn-google">Google</button>
@@ -1465,9 +1965,14 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     <button class="btn-auth" id="btn-email">Sign in with email</button>
   </div>
   <div class="error" id="error"></div>
+  <!-- #5734: OUTSIDE both views, as a sibling of #error. Inside #view-signin a
+       `display:block` style would still be invisible whenever the consent view is
+       shown, so the refusal's "Retry" would name a control the user cannot see. -->
+  <button class="btn-provider" id="btn-retry-signin"
+          style="display:none;margin-top:.75rem;width:100%">Try again</button>
   <div class="spinner" id="spinner" style="display:none">Verifying session…</div>
 </div>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.112.2/dist/umd/supabase.min.js"
         nonce="__NONCE__"
         onerror="showError('Auth script blocked — please retry.')"></script>
 <script nonce="__NONCE__">
@@ -1483,24 +1988,37 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   // custom storage when persistSession is false, review P0) and
   // setItem/removeItem are REAL writes — getSession() always re-reads
   // storage, so an ingested OAuth/email session must persist to the cookie
-  // or the sign-in fallback loops. detectSessionInUrl stays true so the
-  // provider redirect back with #access_token is ingested.
+  // or the sign-in fallback loops. detectSessionInUrl stays TRUE, but not to
+  // ingest a token fragment: #3496 moved this flow to PKCE, so the provider
+  // returns `?code=` in the QUERY, and the library gates the code exchange on
+  // this flag (an implicit-style fragment return is refused by the bundle).
   // #3503: this page is the ONE place it stays true — it does NOT load
   // website/assets/supabase-session.js (that file's factory sets it false,
-  // because its load-time IIFE is the fragment consumer there), so this
-  // inline client is the sole consumer of the hash and must ingest it.
+  // because its load-time IIFE is the fragment consumer there). loadParams()
+  // below still merges the hash, because a provider REFUSAL arrives there.
   const COOKIE_NAME = "sb-tortoise-auth-token";
-  // #1704: parent-domain cookie storage — a faithful port of the
-  // dashboard's supabaseStorage (website/assets/supabase-session.js):
-  // getItem reads an existing dashboard session (no second login),
-  // setItem/removeItem persist sign-ins here (the OAuth/email fallback
-  // needs a REAL write — getSession() always re-reads storage).
+  // #1704: parent-domain cookie storage — the COOKIE mechanics (name, domain
+  // and secure attributes, size guard; getItem reads an existing dashboard
+  // session so there is no second login; setItem/removeItem are REAL writes,
+  // because getSession() always re-reads storage) are ported from the
+  // dashboard's supabaseStorage (website/assets/supabase-session.js). #3496
+  // SPLITS the provenance: the KEY-IDENTITY ROUTING below is ported from the
+  // blog-admin console's authStorage (website/apps/blog-admin/src/lib/
+  // supabase.ts) — the DASHBOARD bridge (website/assets/supabase-session.js)
+  // has no key routing at all: it writes whatever key it is handed to the
+  // cookie, which is the hole this adapter now closes.
   // Method shorthand so `this` binds to the object (arrow functions
   // would bind window). Size guard + localhost-aware domain/secure
   // attributes mirror the canonical adapter.
   const COOKIE_PATH = "/";
   const COOKIE_DOMAIN = ".premiselabs.co";
   const SIZE_GUARD = 3800;
+  // #3496 item 6: the write-path cap, DERIVED from the rule (never hardcoded —
+  // a literal previously disagreed with the rule by 4 bytes, leaving an untested
+  // band where the code wrote and the browser dropped). Mirrors
+  // website/assets/supabase-session.js:46-47.
+  const COOKIE_LIMIT = 4096; // bytes of `name` + '=' + `value`
+  const SIZE_CAP = COOKIE_LIMIT - COOKIE_NAME.length - 1; // largest value we may write
   const isLocal = () => {
     const h = window.location.hostname;
     if (h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]") return true;
@@ -1513,8 +2031,87 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   };
   const domainAttr = () => (isPremiselabsHost() && !isLocal() ? "; Domain=" + COOKIE_DOMAIN : "");
   const secureAttr = () => (isLocal() ? "" : "; Secure");
+  // #3496: the PKCE code_verifier must NEVER reach the JS-readable
+  // parent-domain jar. Key-identity routing, ported from the blog-admin
+  // console's authStorage contract (website/apps/blog-admin/src/lib/supabase.ts):
+  // ONLY the session key may reach document.cookie; every other key is an
+  // origin-scoped aux credential. The aux chain has NO cookie leg, so the
+  // allowlist is fail-closed by construction.
+  const auxStores = () => {
+    const out = [];
+    try { if (window.sessionStorage) out.push(window.sessionStorage); } catch (e) { /* unavailable */ }
+    try { if (window.localStorage) out.push(window.localStorage); } catch (e) { /* unavailable */ }
+    return out;
+  };
+  const readAux = (key) => {
+    for (const s of auxStores()) {
+      try { const v = s.getItem(key); if (v !== null) return v; } catch (e) { /* next store */ }
+    }
+    return null;
+  };
+  // #3496 A5: the write is proven CLEANABLE in the same store, for the real value
+  // SIZE, before the credential is accepted. The pre-flight probe cannot guarantee
+  // that on its own — it writes a 160-byte payload under its own key, so a store
+  // whose accepted-size band sits between the probe and the real value (or which
+  // refuses removal only once it holds something) would pass the probe and then
+  // orphan the credential. This re-verifies per store, at write time, with a
+  // payload of the REAL length under a THROWAWAY key — and that payload is a
+  // DUMMY of the same length, never the credential itself: a store that accepts
+  // the write but SILENTLY IGNORES removal would otherwise retain the verifier
+  // under `probeKey`, a key no path can ever clean. What that probe cannot prove is
+  // REMOVABILITY OF THE REAL KEY: the credential has to be WRITTEN before its
+  // removal can be observed, so a store that accepts the credential and then
+  // refuses to remove it keeps a copy no path can clean (recorded residual R21 —
+  // a store that discriminates by key is not a conforming browser store). A
+  // re-probe on the REAL key DOES detect that store, but only AFTER the credential
+  // is already written to it, so it cannot un-write it: it skips the store and
+  // copies the same credential into the next one, leaving two copies where the
+  // throwaway-key probe leaves one. The writer therefore keeps the probe, and the
+  // real write is proven by its read-back alone.
+  const writeAux = (key, value) => {
+    const v = String(value);
+    const probe = "x".repeat(v.length);
+    const probeKey = "__tt_wprobe-" + Math.random().toString(16).slice(2).padEnd(32, "0");
+    for (const s of auxStores()) {
+      try {
+        s.setItem(probeKey, probe);
+        if (s.getItem(probeKey) !== probe) throw 0;
+        s.removeItem(probeKey);
+        if (s.getItem(probeKey) !== null) throw 0;   // silently-ignored removal
+        s.setItem(key, v);
+        if (s.getItem(key) !== v) throw 0;
+        return true;
+      } catch (e) {
+        // Best-effort cleanup — BOTH keys. `key` must be cleaned too: the failure
+        // can be the read-back AFTER a successful `setItem(key, v)` (a store that
+        // truncates or normalises what it accepted), and this loop then writes the
+        // same credential into the NEXT store, so without this the first store
+        // would retain a copy in a store that failed verification. Cleanup is not
+        // proof — the read-back above is — so a store reaching here is still skipped.
+        try { s.removeItem(probeKey); } catch (e2) { /* ignore */ }
+        try { s.removeItem(key); } catch (e3) { /* ignore */ }
+      }
+    }
+    return false;   // refuse — never fall through to the cookie jar
+  };
+  const removeAux = (key) => {
+    for (const s of auxStores()) {
+      try { s.removeItem(key); } catch (e) { /* next store */ }
+    }
+  };
+  // #5734: set when the write path REFUSES a session it cannot store (the
+  // over-SIZE_CAP branch below). The refusal is reported on the page and must
+  // SURVIVE the two transitions that can erase it: the terminal fallback (a
+  // `?code` load with no session, which is exactly what a refused write looks
+  // like from the library's side) and the messages the consent flow renders for
+  // a session the user did not just sign in as. Both are live — the second is
+  // why `showConsentOnce()` will not enter the consent view at all while a
+  // refusal is pending. See the #3496 scoping doc, Step 7, which recorded this
+  // as #5734's work rather than #3496's.
+  let writeRefused = false;
   const cookieStorage = {
     getItem(key) {
+      if (key !== COOKIE_NAME) return readAux(key);
       try {
         const parts = document.cookie.split("; ");
         for (const p of parts) {
@@ -1525,6 +2122,7 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
       } catch (e) { return null; }
     },
     setItem(key, value) {
+      if (key !== COOKIE_NAME) { writeAux(key, value); return; }
       if (!value) { this.removeItem(key); return; }
       let encoded = encodeURIComponent(value);
       // Size guard (#1225): a GitHub OAuth session (user_metadata +
@@ -1535,17 +2133,55 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
           const obj = JSON.parse(value);
           delete obj.provider_token;
           delete obj.provider_refresh_token;
+          // #3496 item 6: port the shared bridge's non-essential-claim
+          // narrowing (website/assets/supabase-session.js:111-135).
+          if (obj.user) {
+            delete obj.user.identities;
+            if (obj.user.user_metadata) {
+              const md = obj.user.user_metadata;
+              const keep = {};
+              if (md.display_name) keep.display_name = md.display_name;
+              if (md.avatar_url) keep.avatar_url = md.avatar_url;
+              if (md.full_name) keep.full_name = md.full_name;
+              if (md.name) keep.name = md.name;
+              obj.user.user_metadata = keep;
+            }
+          }
           encoded = encodeURIComponent(JSON.stringify(obj));
         } catch (e) { /* not JSON — leave as-is */ }
         if (encoded.length > SIZE_GUARD + 100) {
           console.warn('sb-tortoise-auth-token session exceeds cookie size cap (' + encoded.length + ' bytes) — session may not bridge subdomains');
         }
+        if (encoded.length > SIZE_CAP) {
+          // A write past the browser's limit is a silent no-op there, so the
+          // caller would believe the session landed. Refuse and REPORT: this
+          // page has no read-back caller, so a console-only refusal is
+          // invisible by construction (#3503/#3496 item 6).
+          console.warn('sb-tortoise-auth-token session exceeds the browser cookie cap (' + encoded.length + ' bytes encoded) — refusing the write');
+          showSignin();
+          // #5734 (option B): the refusal names the CAUSE and the REMEDY, and
+          // stays page-scoped — the limit it hit is THIS page's cookie limit,
+          // not a claim about the browser. Rendered BEFORE `writeRefused` is set:
+          // from that point on the refusal is the page's sticky message.
+          showError("This page can't store the sign-in it just received — the session is "
+            + "larger than this page's cookie limit, so it was not saved. Retry; if it "
+            + "keeps failing, sign in with fewer linked providers.");
+          writeRefused = true;
+          showRetrySignin();
+          return;
+        }
       }
       const expires = new Date(Date.now() + 7 * 24 * 3600 * 1000).toUTCString();
       document.cookie = key + "=" + encoded + domainAttr() + "; Path=" + COOKIE_PATH +
         "; SameSite=Lax" + secureAttr() + "; Expires=" + expires;
+      // #5734: a write LANDED, so no refusal is pending any more. (The paths that
+      // matter for a user moving on — a retry, the email form, a provider click —
+      // clear the flag themselves when they start; this is the semantic clear, so
+      // the flag never outlives the condition it describes.)
+      writeRefused = false;
     },
     removeItem(key) {
+      if (key !== COOKIE_NAME) { removeAux(key); return; }
       document.cookie = key + "=;" + domainAttr() + "; Path=" + COOKIE_PATH +
         "; SameSite=Lax" + secureAttr() + "; Max-Age=0";
     },
@@ -1559,7 +2195,11 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
           storageKey: COOKIE_NAME,
           persistSession: true,   // required for the custom storage to be used
           autoRefreshToken: false,
-          detectSessionInUrl: true,  // OAuth fallback ingests the hash
+          detectSessionInUrl: true,  // gates the PKCE ?code exchange (_initialize)
+          // #3496: RFC 10017 §7.2 — the implicit grant MUST NOT be used by a
+          // browser-based client. Explicit PKCE; the code_verifier is routed to
+          // the origin-scoped aux chain by the adapter above, never the cookie.
+          flowType: "pkce",
         },
       });
     } else {
@@ -1568,10 +2208,41 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   } catch (e) { showError("Auth init failed: " + e.message); }
 
   function showError(msg) {
+    // #5734: while a refused write is pending, THE REFUSAL IS THE MESSAGE.
+    // Every other message this page can render — the consent flow's org
+    // resolution, an expired session, an authorize-request failure, a preview
+    // error from a flow that was ALREADY IN FLIGHT when the refusal landed —
+    // describes an older state, and replacing the refusal with it is exactly the
+    // eraser this issue exists to close. Routing the precedence through ONE
+    // helper is deliberate: it makes "no message replaces a pending refusal" a
+    // property of these two helpers rather than a check every call site has to
+    // remember. `writeRefused` clears when a write lands and at the start of a
+    // new user-initiated attempt, so this is not permanent.
+    //
+    // The retry affordance belongs to the refusal, and it is a sibling of #error
+    // OUTSIDE both views — so once shown it stays visible in whatever view comes
+    // next. Only a message can end its warrant, which makes these two helpers the
+    // owners of it: the refusal re-asserts it below, and every message that is
+    // NOT a refusal drops it (a caller that wants one after its own message calls
+    // `showRetrySignin()` after rendering, never before).
+    if (writeRefused) { showRetrySignin(); return; }
+    hideRetrySignin();
     const el = document.getElementById("error");
     el.textContent = msg; el.classList.add("visible");
   }
-  function hideError() { document.getElementById("error").classList.remove("visible"); }
+  function hideError() {
+    // #5734: the symmetric half of the precedence rule in `showError` — a
+    // transition must not CLEAR the refusal either, nor leave the retry control
+    // behind for a message that does not imply one. In the shipped flow no site
+    // reaches this with a refusal pending (the consent view is not entered while
+    // one is pending, and the only callers outside it — the email and
+    // retry-signin handlers — clear `writeRefused` first), so the guard is
+    // belt-and-braces for a future caller rather than a live guard; it is pinned
+    // DIRECTLY by the over-cap survival test for that reason.
+    if (writeRefused) return;
+    hideRetrySignin();
+    document.getElementById("error").classList.remove("visible");
+  }
   function spinner(on) { document.getElementById("spinner").style.display = on ? "block" : "none"; }
   function redirectBack(params) {
     const sep = PARAMS.redirect_uri.includes("?") ? "&" : "?";
@@ -1607,8 +2278,9 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
 
   // #1701 R1: account-chooser state. orgResource is set ONLY by the picker's
   // change handler — an untouched picker can never authorize (no silent
-  // wrong-org bind). previewInFlight guards concurrent showConsent runs.
-  let previewInFlight = false;
+  // wrong-org bind). previewInFlight holds the RUNNING showConsent flow, so a
+  // concurrent caller is idempotent AND can await what is already running.
+  let previewInFlight = null;
   let orgResource = null;
   let staleRefreshes = 0;   // at most ONE refresh per stale cycle
   const authBtn = () => document.getElementById("btn-auth");
@@ -1627,8 +2299,23 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   async function showConsentOnce() {
     const { data } = await supabaseClient.auth.getSession();
     if (!data.session) { showSignin(); return "nosession"; }
+    // #5734: do NOT present consent for a superseded session. A refused write
+    // means the user's sign-in did not complete, so the only session available is
+    // an older one, and this await is where a refusal that landed DURING the
+    // exchange becomes visible to an already-running flow. Staying on the
+    // sign-in view keeps the refusal and its retry affordance in the view that is
+    // actually shown.
+    if (writeRefused) {
+      // `showSignin()` re-asserts the retry affordance while a refusal is
+      // pending, so this path needs no second call to name the same control.
+      showSignin();
+      return "refused";
+    }
     document.getElementById("view-consent").style.display = "block";
     document.getElementById("view-signin").style.display = "none";
+    // Also drops the retry affordance: this view's messages do not imply one,
+    // and the affordance is a sibling of #error rather than a child of a view, so
+    // it would otherwise show through here (see `showError`/`hideError`).
     hideError();
     document.getElementById("client-line").textContent =
         PARAMS.client_name + " wants to access your Tortoise MCP surface.";
@@ -1686,39 +2373,173 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     }
   }
 
-  async function runConsentFlow() {
-    if (previewInFlight) return;   // concurrent guard (spans the refresh too)
-    previewInFlight = true;
-    orgResource = null;           // never carry a stale selection between runs
-    staleRefreshes = 0;            // one-shot cap per cycle — never sticky across runs
-    disableAuthorize();
-    let result;
-    try {
-      result = await showConsentOnce();
-      if (result === "stale" && staleRefreshes < 1) {
-        // refresh-first recovery (NEVER sign-out): at most ONE refresh per
-        // stale cycle, and the in-flight guard stays held across it so an
-        // onAuthStateChange (INITIAL_SESSION/SIGNED_IN) racing the refresh
-        // cannot double-run and reuse the rotating refresh token.
-        staleRefreshes += 1;
-        const { error } = await supabaseClient.auth.refreshSession();
-        if (!error) result = await showConsentOnce();
+  function runConsentFlow() {
+    // #5734: the concurrent guard hands back the RUNNING flow rather than bare
+    // `undefined`. Its purpose is idempotence for the caller — a second call must
+    // not run a second preview — and resolving early defeats a caller that needs
+    // the flow's RESULT: awaiting the returned promise then resolves before the
+    // flow it did not start has finished, which is a window with no observable in
+    // it. On this page the UI callers fire the flow; the harness is the caller
+    // that awaits it, and returning the in-flight promise makes "await this call"
+    // mean what it says.
+    if (previewInFlight) return previewInFlight;
+    previewInFlight = (async () => {
+      orgResource = null;         // never carry a stale selection between runs
+      staleRefreshes = 0;            // one-shot cap per cycle — never sticky across runs
+      disableAuthorize();
+      let result;
+      try {
+        result = await showConsentOnce();
+        if (result === "stale" && staleRefreshes < 1) {
+          // refresh-first recovery (NEVER sign-out): at most ONE refresh per
+          // stale cycle, and the in-flight guard stays held across it so an
+          // onAuthStateChange (INITIAL_SESSION/SIGNED_IN) racing the refresh
+          // cannot double-run and reuse the rotating refresh token.
+          staleRefreshes += 1;
+          const { error } = await supabaseClient.auth.refreshSession();
+          if (!error) result = await showConsentOnce();
+        }
+      } finally {
+        previewInFlight = null;
       }
-    } finally {
-      previewInFlight = false;
-    }
-    if (result === "stale") showExpiredSignin();
+      if (result === "stale") showExpiredSignin();
+    })();
+    return previewInFlight;
   }
 
   function showSignin() {
+    // #5734: the sign-in view's neutral state. The retry affordance is dropped
+    // here and re-asserted by whoever has a reason to offer one — and, when a
+    // REFUSAL is what is displayed, re-asserted HERE: the refusal's own copy says
+    // "Retry", so any caller that lands on the sign-in view with a refusal
+    // pending (`showExpiredSignin` after a refused refresh write, the no-session
+    // branches of `showConsentOnce` and the authorize handler) must not leave the
+    // user with an instruction and no control. A caller that clears `writeRefused`
+    // before it gets here — the retry handler, the email form, a provider click —
+    // is unaffected, and the email form is unaffected only until the write it
+    // triggers REFUSES: that re-sets the flag, and the no-session branch this
+    // caller then runs has to put the control back.
+    hideRetrySignin();
+    if (writeRefused) showRetrySignin();
     document.getElementById("view-consent").style.display = "none";
     document.getElementById("view-signin").style.display = "block";
   }
 
+  // #3496: the transient params a provider round-trip may leave on the URL.
+  // Stripped with URLSearchParams.delete (not a string replace, so an encoded
+  // `%63ode=` is removed too).
+  const STRIP_PARAMS = ["code", "error", "error_code", "error_description",
+                        "error_uri", "sb_flow_id", "flow_id", "type"];
+  // #3496: defence-in-depth — the return target is rebuilt from the sanitised
+  // query so a transient is never echoed back to the provider. (GoTrue's
+  // `url.Values.Set` makes the "permanent stale-code loop" premise false; this
+  // is canonicalisation, not a loop fix.)
+  function authorizeReturnTo() {
+    const u = new URL(window.location.href);
+    STRIP_PARAMS.forEach((k) => u.searchParams.delete(k));
+    return window.location.origin + AUTHORIZE_PATH + (u.search || "");
+  }
+  // #3496: PKCE cannot be done correctly without WebCrypto (the bundle silently
+  // downgrades to `plain` when crypto.subtle is absent — reachable because this
+  // page deliberately supports LAN-http origins) and cannot be completed without
+  // a writable origin-scoped aux store. Fail CLOSED before the provider
+  // redirect: the library would otherwise navigate and lose the verifier,
+  // costing a full round trip. The probe key is randomised (localStorage is
+  // cross-tab) and LONGER than the longest real verifier key so an item-size cap
+  // cannot slip through. It deliberately does NOT carry the `-code-verifier`
+  // suffix: a store that refuses removal cannot be cleaned, and the one entry it
+  // leaks must not be mistakable for a credential.
+  function pkceIncapable() {
+    if (!(window.crypto && window.crypto.subtle && typeof TextEncoder !== "undefined")) return "no-webcrypto";
+    const payload = "v".repeat(160);
+    const sentinel = "__tt_probe-" + Math.random().toString(16).slice(2).padEnd(89, "0");
+    // The guard is a FAIL-CLOSED approximation of the writer's choice, not the same
+    // test: it probes with its own key and a fixed 160-byte payload, while the
+    // writer probes with the REAL value's length. Where a store's per-item cap sits
+    // between the two (it would hold the ~114-byte verifier but not this probe), the
+    // guard rejects that store and evaluates the next one — and refuses outright if
+    // the store that accepted the probe then cannot remove the sentinel. That is
+    // deliberately STRICTER than the writer, which would have used the first store
+    // successfully; the divergence is a known fail-closed over-refusal recorded with
+    // the refusal UX work (#5734), and it cannot leak a credential in either
+    // direction because the writer re-probes every store it takes. (A5.)
+    for (const store of auxStores()) {
+      let wrote = false;
+      try {
+        store.setItem(sentinel, payload);
+        if (store.getItem(sentinel) !== payload) throw 0;
+        wrote = true;
+        store.removeItem(sentinel);
+        if (store.getItem(sentinel) !== null) throw 0;
+        return null;
+      } catch (e) {
+        if (wrote) return "no-store";
+        try { store.removeItem(sentinel); } catch (e2) { /* best effort */ }
+      }
+    }
+    return "no-store";
+  }
+  // #5734: the page-scoped capability copy, keyed by cause. Every sentence names
+  // THIS PAGE as the subject — never the browser — because this auth surface has
+  // repeatedly asserted browser-level absolutes that a live legacy path
+  // falsified (#4678). The remedy lives in this copy; the SECURITY boundary is
+  // the re-check inside signInWithProvider below.
+  const CAPABILITY = {
+    // The cause is stated as what was OBSERVED, and it must cover BOTH conjuncts
+    // the probe tests — the secure-context crypto (`window.crypto.subtle`) absent
+    // (a non-secure origin, the dominant case) AND `TextEncoder` absent. Naming
+    // only WebCrypto asserts a cause the page's own probe contradicts — the #4678
+    // defect class: an absolute a live path falsifies. The remedy carries the
+    // dominant reason (HTTPS); the closing alternative is real, not decorative
+    // (the email path needs no PKCE).
+    //
+    // The subject of every sentence is THIS PAGE. "Open this page over HTTPS" and
+    // "Allow site storage for this page" name the remedy's target without
+    // attributing the limitation to the browser ("leave private browsing" names
+    // the user's own setting, not a browser-level incapacity).
+    "no-webcrypto": "This page can't start a secure sign-in here — the challenge it must "
+      + "build needs secure-context crypto and text encoding, and this page can't use "
+      + "them. Open this page over HTTPS and retry, or sign in with email and password "
+      + "below.",
+    "no-store": "This page can't start a secure sign-in here — it has no usable site "
+      + "storage in which to keep the sign-in verifier. Allow site storage for this page "
+      + "(or leave private browsing) and reload, or sign in with email and password below.",
+  };
+  const PROVIDER_LABEL = { github: "GitHub", google: "Google" };
+  function renderCapability(incap) {
+    const blocked = !!incap;
+    for (const id of ["btn-github", "btn-google"]) {
+      const b = document.getElementById(id);
+      b.disabled = blocked;
+      if (blocked) b.setAttribute("aria-disabled", "true");
+      else b.removeAttribute("aria-disabled");
+    }
+    const notice = document.getElementById("signin-capability");
+    notice.textContent = blocked ? (CAPABILITY[incap] || CAPABILITY["no-store"]) : "";
+    notice.style.display = blocked ? "block" : "none";
+  }
   async function signInWithProvider(provider) {
+    // #5734: a new user-initiated attempt supersedes a pending refusal, so the
+    // capability refusal below can still report itself.
+    writeRefused = false;
+    const incap = pkceIncapable();
+    if (incap) {
+      // #5734: the load-time probe is an AFFORDANCE only — capability can change
+      // between load and click, so this re-check is the boundary. It also
+      // refreshes the inline affordance to match what is true right now.
+      showSignin();
+      renderCapability(incap);
+      showError("Can't sign in with " + (PROVIDER_LABEL[provider] || provider)
+        + " on this page — see the note above the buttons.");
+      // #5734 (B): an ATTEMPT failed, so offer the retry affordance — its handler
+      // re-probes, which is the only in-page way back after the user grants site
+      // storage (the provider buttons are disabled in this state).
+      showRetrySignin();
+      return;
+    }
     const { error } = await supabaseClient.auth.signInWithOAuth({
       provider: provider,
-      options: { redirectTo: window.location.origin + AUTHORIZE_PATH + window.location.search },
+      options: { redirectTo: authorizeReturnTo() },
     });
     if (error) showError(error.message);
   }
@@ -1726,12 +2547,16 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   document.getElementById("btn-github").onclick = () => signInWithProvider("github");
   document.getElementById("btn-google").onclick = () => signInWithProvider("google");
   document.getElementById("btn-email").onclick = async () => {
+    writeRefused = false;   // a new user-initiated attempt supersedes a refusal
     hideError();
     const email = document.getElementById("email").value.trim();
     const password = document.getElementById("password").value;
     if (!email || !password) { showError("Enter email and password."); return; }
     const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
     if (error) { showError(error.message); return; }
+    // The flow is fired, not awaited: what a caller can observe is the STATE, and
+    // the flow slot (`runConsentFlow` hands back the running flow) is what makes
+    // that state awaitable where it matters.
     runConsentFlow();
   };
 
@@ -1789,15 +2614,189 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     runConsentFlow();
   };
 
+  document.getElementById("btn-retry-signin").onclick = () => {
+    // #5734: a retry re-probes capability — it may have changed since the
+    // attempt that failed (or since load). User-initiated, so it also clears a
+    // pending refusal.
+    writeRefused = false;
+    hideError();
+    renderCapability(pkceIncapable());
+    showSignin();
+  };
+
   document.getElementById("btn-deny").onclick = () =>
       redirectBack({ error: "access_denied", state: PARAMS.state });
 
   // #1701 R1: auto-advance when a session lands after an initial null
-  // (provider redirect hash ingestion / cookie session). runConsentFlow is
+  // (provider redirect `?code` exchange / cookie session). runConsentFlow is
   // in-flight guarded, so a double fire never runs two overlapping previews.
+  // #3496: one terminal state for a failed/declined/refused sign-in. Capture
+  // the load-time transient ONCE, read-only — the library has already consumed
+  // `?code` synchronously inside createClient(), so never rewrite the URL before
+  // it has attempted the code.
+  //
+  // BOTH return channels are read. supabase-js folds the fragment into the
+  // params it parses (`xr(window.location.href)` in the bundle) and
+  // `detectSessionInUrl: true` deliberately keeps the library as the fragment
+  // consumer, so a provider that returns its refusal in the hash reaches the
+  // library but never `.search`. Reading one channel only would leave a
+  // hash-carried refusal on the bare sign-in view with no explanation — the
+  // dead end this terminal state exists to remove.
+  const loadParams = () => {
+    const out = new URLSearchParams(window.location.search);
+    if (window.location.hash.length > 1) {
+      // No try/catch: `new URLSearchParams(<string>)` cannot throw (the string
+      // branch is a straight form-urlencoded parse), so a guard here would be
+      // dead code describing a state that does not exist.
+      new URLSearchParams(window.location.hash.slice(1)).forEach((v, k) => {
+        if (!out.has(k)) out.set(k, v);
+      });
+    }
+    return out;
+  };
+  const LOAD_QUERY = loadParams();
+  // #3496: a provider round trip is evidenced only by PROVIDER-owned markers.
+  // `type` and `flow_id` are generic names a benign authorize GET can carry (the
+  // server ignores unknown params and `authorizeReturnTo` preserves the rest), so
+  // treating them as evidence told a first-time visitor who had done nothing that
+  // their sign-in failed. They stay in STRIP_PARAMS — stripping is cosmetic — and
+  // no longer make `present` true.
+  const TRANSIENT_MARKERS = ["code", "error", "error_code", "error_description",
+                             "error_uri", "sb_flow_id"];
+  const LOAD_TRANSIENT = {
+    present: TRANSIENT_MARKERS.some((k) => LOAD_QUERY.has(k)),
+    error_description: LOAD_QUERY.get("error_description"),
+  };
+  const MSG_BUDGET = 300;   // the bound, in chars INCLUDING the appended ellipsis
+  function boundedText(s, limit = MSG_BUDGET) {
+    if (!s) return "";
+    const t = String(s).replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/g, " ");
+    return t.length > limit ? t.slice(0, Math.max(0, limit - 1)) + "\u2026" : t;
+  }
+  // #5734 (option B): the post-redirect terminal state names its CAUSE and its
+  // REMEDY, per cause, in page-scoped language. A provider-supplied description
+  // is appended inside whatever room the fixed copy leaves, so the rendered
+  // message still satisfies boundedText's bound (one over-long, attacker-
+  // controllable line is why the bound exists).
+  function terminalMessage() {
+    const err = LOAD_QUERY.get("error") || "";
+    const desc = LOAD_TRANSIENT.error_description;
+    let cause, remedy;
+    if (err === "access_denied") {
+      cause = "Sign-in was declined at the provider, so nothing was connected.";
+      remedy = "Retry to pick an account and approve the connection.";
+    } else if (err === "server_error" || err === "temporarily_unavailable") {
+      cause = "The provider reported a temporary failure during sign-in.";
+      remedy = "Retry in a moment.";
+    } else if (err === "login_required" || err === "consent_required"
+               || err === "interaction_required" || err === "account_selection_required") {
+      cause = "The provider needs you to sign in there again.";
+      remedy = "Retry and finish the provider's sign-in.";
+    } else if (err) {
+      cause = "The provider refused this sign-in request (" + boundedText(err, 60) + ").";
+      remedy = "Retry — and start again from your MCP client if it keeps failing.";
+    } else if (LOAD_QUERY.has("code")) {
+      // The library consumed a `?code` and no session landed. Gated on the code
+      // ACTUALLY being present — the branch below is reached for any other
+      // transient, where no code was ever received. The cause states what THIS
+      // CONDITION establishes (a code came back; no session was established) and
+      // not the mechanism: an exchange that completed can still leave no session
+      // when the write is refused, and that case carries its own copy from the
+      // write path (`writeRefused` keeps this branch off it).
+      cause = "This page could not finish the sign-in it had started (a code came back, "
+        + "but no session was established on this page).";
+      remedy = "Retry — and if this page has no writable site storage, allow storage for "
+        + "it and reload.";
+    } else {
+      // Some other transient returned with no provider error and no session — no
+      // code, so nothing was declined and nothing was exchanged.
+      cause = "This page could not finish the sign-in it had started (no session was "
+        + "established).";
+      remedy = "Retry, and start again from your MCP client if it keeps failing.";
+    }
+    let text = cause + " " + remedy;
+    if (text.length > MSG_BUDGET) text = boundedText(text, MSG_BUDGET);
+    if (desc) {
+      const room = MSG_BUDGET - text.length - 3;
+      if (room > 0) text += " (" + boundedText(desc, room) + ")";
+    }
+    return text;
+  }
+  function showRetrySignin() {
+    document.getElementById("btn-retry-signin").style.display = "block";
+  }
+  function hideRetrySignin() {
+    document.getElementById("btn-retry-signin").style.display = "none";
+  }
+  function showTerminalFallback() {
+    showSignin();
+    // #5734: `showError` itself yields to a pending refusal (see its comment), so
+    // this call is a no-op in that state — the refused-write copy names the REAL
+    // cause, and the generic `?code` branch would replace it with one its own
+    // condition cannot establish.
+    showError(terminalMessage());
+    showRetrySignin();
+  }
+  function sanitiseUrl() {
+    try {
+      const u = new URL(window.location.href);
+      STRIP_PARAMS.forEach((k) => u.searchParams.delete(k));
+      if (u.hash.length > 1) {
+        const raw = u.hash.slice(1);
+        // A param list: every `&`-separated part is `name=value` with a NON-EMPTY
+        // name that is not path/route shaped. Testing this by comparing
+        // `new URLSearchParams(raw).toString()` to `raw` is NOT the same test —
+        // that is byte-identity after NORMALISATION, which any value carrying an
+        // escaped character fails, so a provider `error_description` with a space
+        // (`boom%20boom`) took the left-alone branch and kept the transient on the
+        // URL, which is the one case this branch exists for. The NAME test also
+        // keeps `#/route/x?a=1` and `#settings?tab=x` out: both contain `=`, so a
+        // bare "has an `=`" test would re-serialise them to `%2Froute%2Fx%3Fa=1`.
+        // A fragment that is not a param list is left alone, transient included:
+        // that is cosmetic URL-bar residue, not page state (the page derives its
+        // own transient from `LOAD_QUERY`, captured before this runs).
+        const isParamList = raw.split("&").every((p) => {
+          const i = p.indexOf("=");
+          return i > 0 && /^[^/?:=]+$/.test(p.slice(0, i));
+        });
+        if (isParamList) {
+          const h = new URLSearchParams(raw);
+          STRIP_PARAMS.forEach((k) => h.delete(k));
+          const rest = h.toString();
+          u.hash = rest ? "#" + rest : "";
+        }
+      }
+      history.replaceState(null, "", u.pathname + (u.search || "") + u.hash);
+    } catch (e) { /* leave the URL alone */ }
+  }
+
+  // #5734 (option C): probe at LOAD, so an incapable page explains itself and
+  // disables the provider buttons BEFORE the user takes a dead-end action. The
+  // probe is an affordance, never the boundary — signInWithProvider re-checks.
+  //
+  // The probe's documented residual (#3496 R3: "one `__tt_probe-*` entry per
+  // attempt") is a leak whose CARDINALITY this call site changes: `pkceIncapable()`
+  // mints a FRESH randomised sentinel per invocation and, on a store that accepts
+  // the write but cannot remove it, returns "no-store" leaving that sentinel
+  // behind. Probing at load therefore adds one 160-byte non-credential entry per
+  // page load (and one more per click and per retry), not "at most one" — there is
+  // no way to reach a previous probe's key to clean it. It is a sentinel, never a
+  // credential (the key deliberately lacks the `-code-verifier` suffix), it occurs
+  // only on a store that cannot clean itself, and the alternative is worse: a
+  // STABLE key shared across tabs lets one tab's removal make a non-removable
+  // store look removable to another, which is a fail-OPEN on the very check this
+  // probe performs. Recorded as a residual rather than silently bounded away.
+  renderCapability(pkceIncapable());
+
   if (supabaseClient) {
-    supabaseClient.auth.onAuthStateChange((event) => {
-      if (event === "INITIAL_SESSION" || event === "SIGNED_IN") runConsentFlow();
+    supabaseClient.auth.onAuthStateChange(async (event) => {
+      if (event === "INITIAL_SESSION" || event === "SIGNED_IN") {
+        if (LOAD_TRANSIENT.present) {
+          const { data } = await supabaseClient.auth.getSession();
+          if (!data || !data.session) { showTerminalFallback(); sanitiseUrl(); return; }
+        }
+        runConsentFlow();
+      }
     });
     runConsentFlow();
   } else spinner(false);
@@ -1847,3 +2846,84 @@ def consent_page_html(*, client_name: str, scope: str | None,
         .replace("__SUPABASE_ANON_KEY__", _json_for_script(supabase_anon_key)) \
         .replace("__NONCE__", nonce)
     return html, nonce
+
+
+# ── Retention / GC (issue #3036) ────────────────────────────────────────────
+
+def sweep_oauth_retention(cp, *, now: datetime | None = None) -> dict[str, int]:
+    """Hard-delete dead OAuth rows past their retention grace (issue #3036).
+
+    GC for the three token tables 0016 introduced with no TTL sweep. A row is
+    dead once its own ``expires_at`` is in the past (a redeemed or unredeemed
+    code, an expired or revoked access/refresh token); it is then kept for a
+    short forensic grace (``OAUTH_*_RETENTION_S``) before this sweep removes
+    it. Those windows are credential hygiene — a different axis from the
+    user-content deletion promise (``docs/retention-and-deletion.md``).
+
+    Delete order: access rows first, then refresh rows, then codes. That order
+    matters because ``refresh_grant`` DOES dereference the relationship (it
+    looks up the live access row by ``refresh_token_id`` to revoke it): an
+    access row is reaped before any refresh row it points at, so the
+    ``ON DELETE SET NULL`` action added by migration 20260925000001 is a safety
+    net for an out-of-band / manual delete, not this path.
+
+    The invariant that makes the order sufficient is ``ACCESS_TOKEN_TTL_S +
+    access window <= REFRESH_TOKEN_TTL_S + refresh window``. It HOLDS for the
+    shipped defaults; it is NOT enforced, so an operator override that inverts
+    the two TTLs relative to the two windows can leave a LIVE access row
+    pointing at a reap-eligible refresh row, and this sweep then NULLs that
+    back-link via the FK. That is a PROVENANCE loss, not a revocation gap: no
+    read path treats a NULL pointer as a live grant (``refresh_grant``
+    resolves the refresh row by hash first and only then dereferences; the
+    rotation path cannot run once the parent row is gone), and the access
+    token still carries its own ``expires_at``/``revoked_at`` check.
+
+    Each table is swept INDEPENDENTLY: a failure on one table is recorded and
+    the other two are still attempted, so a persistent query fault cannot
+    starve GC for the healthy tables. If any table failed, a RuntimeError is
+    raised AFTER the loop (fail-closed); every table already swept committed,
+    and the un-swept rows keep their past ``expires_at`` so the next cycle
+    retries them.
+
+    Returns, per table, the number of rows OBSERVED as eligible at sweep time.
+    It is a best-effort count, not an exact delete count: the eligibility read
+    is a separate PostgREST request (capped by the project's max-rows) and the
+    DELETE is a second request, so a full read page makes the number a lower
+    bound. Idempotent: a re-run finds nothing and deletes nothing.
+    """
+    now_dt = now or _now()
+
+    def _cutoff(seconds: int) -> str:
+        # Defensive floor: a cutoff of `now` only matches rows already expired.
+        return (now_dt - timedelta(seconds=max(0, int(seconds)))).isoformat()
+
+    plan = (
+        ("oauth_access_tokens", "TORTOISE_OAUTH_ACCESS_RETENTION_S",
+         OAUTH_ACCESS_RETENTION_S),
+        ("oauth_refresh_tokens", "TORTOISE_OAUTH_REFRESH_RETENTION_S",
+         OAUTH_REFRESH_RETENTION_S),
+        ("oauth_codes", "TORTOISE_OAUTH_CODE_RETENTION_S",
+         OAUTH_CODE_RETENTION_S),
+    )
+    observed: dict[str, int] = {}
+    failures: dict[str, str] = {}
+    for table, env_name, default in plan:
+        observed[table] = 0
+        try:
+            cutoff = _cutoff(_retention_seconds(env_name, default))
+            doomed = cp.query(table, select=["id"],
+                              filters=[("expires_at", "lt", cutoff)])
+            if not doomed:
+                continue
+            cp.query(table, method="DELETE",
+                     filters=[("expires_at", "lt", cutoff)])
+            observed[table] = len(doomed)
+        except Exception as exc:  # per-table isolation — sweep the rest
+            failures[table] = str(exc)
+            logger.warning("oauth: retention sweep failed for %s: %s",
+                           table, exc)
+    if failures:
+        raise RuntimeError(
+            "oauth retention sweep failed for "
+            + ", ".join(f"{t}: {failures[t][:200]}" for t in sorted(failures)))
+    return observed

@@ -25,6 +25,11 @@ import { dirname, join } from 'node:path'
 // #4880/#4365: the wizard's agent-facing copy moved to this JSX-free module so
 // the guards below can assert the RENDERED prompt instead of parsing source.
 import { ONBOARDING_INSTRUCTIONS, WIZARD_CAPTIONS, wizardPromptText } from './wizardPrompts.js'
+// #4637: the pin below asserts against the SHARED quote-aware stripper rather
+// than the local `stripBlockAndWholeLineComments` above, which does not remove
+// inline/trailing `//` — a trailing comment carrying the pinned text kept that
+// pin green (the file-wide unification is #3102's).
+import { stripComments } from './testSupport.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const mainJsx = readFileSync(join(here, 'main.jsx'), 'utf8')
@@ -410,8 +415,14 @@ test('#2912: the org eyebrow renders only when an org exists AND its name is kno
   // direct Continue path (`wizardPaused` false) rendering "Your agent takes over
   // from here." beneath a "Not connected yet" heading — the #2364/#2912
   // heading-vs-body contradiction, reassembled.
-  assert.match(head, /if \(wizardStep === 3 && !serverHarnessConnected\) return null/,
-    'the step-3 lede is suppressed whenever no connection was observed')
+  // #3725: both null arms (and the build-fork suppression) are now the pure
+  // `wizardStepSub` helper, so this pin is a CALL-SHAPE backstop only — the
+  // behaviour is executed in wizardFlow.test.js. The head must still derive the
+  // lede from the same `serverHarnessConnected` flag (never `effectivelyPaused`).
+  assert.match(head, /wizardStepSub\(wizardStep, \{ hasOrg: welcomeHasOrg, connected: serverHarnessConnected, buildFork: isBuildFork \}\)/,
+    'the head lede goes through wizardStepSub on the same derived flags as the <h1>')
+  assert.match(head, /if \(headSub === null\) return null/,
+    'a null lede suppresses the <p class="welcome-lede"> entirely')
   assert.doesNotMatch(head, /wizardStep === 3 && effectivelyPaused\) return null/,
     'the lede guard must not key on the local paused flag alone')
 })
@@ -776,11 +787,16 @@ test('#3428/#2937: the not-connected remedy is derived per role, leaf and cap st
 })
 
 test('#3428/#2937: the build-fork done body names no harness and asserts nothing about filing', () => {
-  // review cycle 2 (P1-2): the build fork's step 2 is the SDK call
-  // (`POST /v1/points`), which files NO onboarding step — so the self-fork body
-  // ("hasn't filed anything … head back to Claude Code") is false the moment
-  // the user runs the wizard's own curl, and names a harness this branch never
-  // offered. The build leaf must say neither.
+  // review cycle 2 (P1-2): the self-fork body ("hasn't filed anything … head
+  // back to Claude Code") is false the moment the user runs the wizard's own
+  // curl, and names a harness this branch never offered. The build leaf must
+  // say neither.
+  //
+  // #5378: the older rationale said the build fork's step-2 `POST /v1/points`
+  // "files NO onboarding step". That went stale on 2026-09-22 — #3670 makes
+  // that route file `harness-connected` on an agent credential — so this guard
+  // pins the leaf's SHAPE (no harness, no filing assertion), never the false
+  // claim that the REST route files nothing.
   const src = stripBlockAndWholeLineComments(mainJsx)
   const i = src.indexOf('{wizardStep === 3 && (')
   assert.ok(i > -1, 'the done step renders')
@@ -791,7 +807,8 @@ test('#3428/#2937: the build-fork done body names no harness and asserts nothing
   assert.match(done, /\{isBuildFork \? \(/,
     'the done step branches on the build fork (the self-fork body is false there)')
   assert.match(done, /we can't tell it's connected yet/,
-    'the build body acknowledges that the REST write cannot be observed')
+    'the build body states the honest not-yet-observed case without claiming ' +
+    'what marks a project connected (#3670: the REST route does, on an agent key)')
   assert.match(done, /Keep calling the SDK from your app\./,
     'the build connected redirect names the SDK, not a harness')
   // review cycle 3 (P1-E + P1-F): the not-connected body may not point at a
@@ -1117,12 +1134,14 @@ test('#3428/#2937: the not-connected body states only the observed fact and the 
 })
 
 test('#3428/#2937 (cycle 8 item 9): the not-connected bodies pin their substantive clauses', () => {
-  // review cycle 8 item 9: the build body's disambiguation ("marks a project
-  // connected when a write arrives through its agent tools, not through the
-  // /v1/points REST call") and the self body's clauses were covered only by an
-  // e2e file that is NOT wired into CI, so nothing CI-running pinned the text
-  // that carries the claim. These are the substantive clauses — the ones whose
-  // removal would change the meaning, not the wording.
+  // review cycle 8 item 9: the build body's statement of the write paths that
+  // mark a project connected (the agent tools and the /v1/points REST call —
+  // #3670) and the self body's clauses had, at the time, no CI-running pin;
+  // `tests/e2e/test_dashboard_onboarding.py` covered them, and #4221 has since
+  // wired that file into the `dashboard-e2e` job (ci.yml runs it today). The
+  // "NOT wired into CI" note this comment used to carry was itself stale. These
+  // are the substantive clauses — the ones whose removal would change the
+  // meaning, not the wording.
   const src = stripBlockAndWholeLineComments(mainJsx)
   const i = src.indexOf('{wizardStep === 3 && (')
   assert.ok(i > -1, 'the done step renders')
@@ -1134,8 +1153,13 @@ test('#3428/#2937 (cycle 8 item 9): the not-connected bodies pin their substanti
   assert.ok(buildStart > -1, 'the build not-connected body is located')
   const buildBody = done.slice(buildStart, done.indexOf('</p>', buildStart))
   assert.match(buildBody,
-    /marks a project connected when a write arrives through its agent tools, not\s+through the <code>\/v1\/points<\/code> REST call/,
-    'the build body names the observable that actually marks a project connected')
+    /marks a project connected when a write arrives through its agent tools or\s+the <code>\/v1\/points<\/code> REST call/,
+    'the build body names the write paths that actually mark a project connected — ' +
+    'both the agent tools and the agent-credentialed REST call (#3670)')
+  assert.doesNotMatch(buildBody,
+    /not\s+through the <code>\/v1\/points<\/code> REST call/,
+    'the REST route DOES mark the connection on an agent credential (#3670) — ' +
+    'the false negation must not return')
   assert.match(done,
     /We haven't seen your agent's first write through its Tortoise tools yet — so we can't\s+tell it's connected/,
     'the self body states the missing observation, qualified to the agent-tools write path')
@@ -1490,11 +1514,38 @@ test('#3783: the existing-key affordance routes to the key instead of minting', 
   // review P2: the Overview answered "is a key live" with its own
   // `durableConnect.source === 'rows-durable'` — a second derivation that agreed
   // today but could drift. One question, one gate.
-  const src = stripBlockAndWholeLineComments(mainJsx)
+  // The shared, quote-aware stripper — NOT the local
+  // `stripBlockAndWholeLineComments` above, which leaves inline/trailing `//`
+  // intact, so a trailing comment carrying the pinned text kept a pin green
+  // (the file-wide unification is #3102's).
+  const src = stripComments(mainJsx)
   assert.doesNotMatch(src, /durableConnect\.source === 'rows-durable'/,
     'no surface may re-derive the rows-durable source outside connectKeyGate')
-  assert.match(src, /\{snippetKey \|\| connectGate\.mode === 'existing'/,
-    'the re-entry Overview routes its live-key claim through the gate')
+  // #4637: the Overview's live-key claim is ONE derivation — `ownerKeyLive` of
+  // the gate's mode — and since the cycle-6 restructuring it is not a statement
+  // in main.jsx at all: BOTH owner arms spread `ownerCardProps({ variant,
+  // isBuildFork, connectGate })` from the note module, whose `keyLive` comes from
+  // `ownerKeyLive(connectGate.mode)`. The old inline form tested the gate but ALSO
+  // the in-memory `snippetKey`, which stays truthy after its row is revoked (the
+  // gate's `durableConnectKey` row-truth check drops it), so the card could claim
+  // a key was live with nothing usable behind it. The member arm keeps its own
+  // key-state branch: its two lead-ins assert nothing about which key is usable.
+  //
+  // A source pin is no longer the guard for the derivation: the note module's
+  // render tests EXECUTE `ownerKeyLive`/`ownerCardProps`/`keyTabAffordance`, and
+  // `onboardingEmptyStateKeyNote.test.js` additionally COMPILES these call sites
+  // and asserts the effective props for every gate mode (a spread, an alias or a
+  // wrapped second authority changes the value and fails there). What is pinned
+  // here is the negative that keeps the derivation in the module: main.jsx must
+  // not call the gate authority itself.
+  assert.doesNotMatch(src, /ownerKeyLive\(/,
+    'main.jsx must not derive the live-key fact itself — the note module owns it')
+  assert.equal((src.match(/ownerCardProps\(\{/g) || []).length, 2,
+    'both owner arms must spread the one prop derivation')
+  assert.equal((src.match(/keyTabAffordance\(\{/g) || []).length, 1,
+    'the re-entry affordance must apply the module derivation at exactly one site')
+  assert.match(src, /\(snippetKey \|\| connectGate\.mode === 'existing'/,
+    'the member arm of the re-entry card still consults the gate for its key state')
   // BOTH keyed arms render the derived affordance (no drift between them)
   assert.equal((src.match(/\bwizardKeyAffordance\b/g) || []).length, 4,
     'one definition + exactly three render sites (build fork + shared arm + Codex Desktop arm)')

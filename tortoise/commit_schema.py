@@ -58,8 +58,8 @@ from .ids import content_hash
 from .pack_registry import (
     CANONICAL_POINT_KINDS,
     DECISION_POINT_KINDS,
-    KNOWN_SOURCE_TYPES,
     PackRegistry,
+    registered_source_types,
 )
 from .quota import (
     MAX_ENTITIES,
@@ -67,7 +67,6 @@ from .quota import (
     MAX_PAYLOAD_POINTS,
     MAX_VALUE_POINTS_PER_SESSION,
 )
-from .source_credibility import SOURCE_KIND_DEFAULTS
 
 _logger = logging.getLogger(__name__)
 
@@ -76,7 +75,7 @@ __all__ = [  # noqa: RUF022
     "BUDGET_SOFT", "BUDGET_HARD", "BUDGET_CEILING",
     "REQUIRED_FIELDS", "VALID_COMMIT_STATUSES",
     # vocab
-    "Vocab", "CORE_POINT_KINDS", "CORE_SOURCE_KINDS",
+    "Vocab", "CORE_POINT_KINDS",
     "compile_vocab", "get_vocab", "refresh_vocab",
     # models
     "ProvenanceRef", "Source", "Entity", "Point", "OperatorTarget",
@@ -116,9 +115,16 @@ BUDGET_CEILING = MAX_VALUE_POINTS_PER_SESSION["ceiling"]  # 50 → 402 fail-clos
 CORE_POINT_KINDS: frozenset[str] = frozenset(
     CANONICAL_POINT_KINDS | {"humanApproval", "event"}
 )
-CORE_SOURCE_KINDS: frozenset[str] = frozenset(
-    KNOWN_SOURCE_TYPES | set(SOURCE_KIND_DEFAULTS) | {"agentSession"}
-)
+# The CORE source-kind leg has no module constant on purpose (#2742). It used
+# to be `CORE_SOURCE_KINDS`, an import-time frozenset over the MUTABLE
+# `source_credibility.SOURCE_KIND_DEFAULTS`, so a `register_source_kind_default`
+# call after import was accepted by pack validation (which reads the registry
+# live) but stayed rejected by the Layer-1 gate until the process restarted.
+# `registered_source_types()` is the same union (`KNOWN_SOURCE_TYPES` ∪ every
+# registered kind, incl. the explicitly-registered `agentSession`) and is the
+# helper pack validation already reads, so `compile_vocab()` calls it directly:
+# one definition, read live. A second snapshot is the same defect with a longer
+# fuse.
 
 # The canonical core event-kind set (ONTOLOGY §5 + the derived session
 # events). #1933 (epic #1891): this module-level set is the CORE BASE the
@@ -167,8 +173,8 @@ def compile_vocab(packs_dir: Path | str | None = None,
     today's behaviour, and the mandatory back-compat path when a graph has
     no ``:PackInstall`` records, indicator 3); a collection = only those
     namespaces contribute pack pointKinds/sourceTypes/eventKinds. The CORE
-    legs (CORE_POINT_KINDS / CORE_SOURCE_KINDS / EVENT_KINDS) are never
-    gated — a graph always accepts core vocabulary. This is the WRITE-gate
+    legs (CORE_POINT_KINDS / ``registered_source_types()`` / EVENT_KINDS) are
+    never gated — a graph always accepts core vocabulary. This is the WRITE-gate
     twin of ``compile_value_brief``'s prompt-side gate: both accept the
     output of the same resolver (``pack_state.graph_installed_namespaces``),
     so the set the extractor is *offered* and the set it may *write* are
@@ -200,7 +206,7 @@ def compile_vocab(packs_dir: Path | str | None = None,
         pack_events.update(f"{ns}:{k}" for k in pack.event_kinds)
     return Vocab(
         point_kinds=frozenset(CORE_POINT_KINDS | pack_point),
-        source_kinds=frozenset(CORE_SOURCE_KINDS | pack_sources),
+        source_kinds=frozenset(registered_source_types() | pack_sources),
         event_kinds=frozenset(EVENT_KINDS | pack_events),
     )
 
@@ -366,6 +372,73 @@ def validate_span(span_start: object, span_end: object) -> None:
         )
 
 
+def validate_validity_window(valid_from: object, valid_to: object) -> None:
+    """#5374: a Point's validity window must be well-formed when it is ordered.
+
+    THE ONE HOME for the rule. It is the validity-window analogue of
+    :func:`validate_span`: the span guard covers the integer character-offset
+    axis, this one covers the temporal interval.
+
+    The predicate is the read path's own. ``restore_point_at``'s ``_covers``
+    orders the two bounds with ``tortoise.search_engine._created_sort_key``
+    and gates presence with ``is not None``; this guard uses the SAME measure
+    and the SAME presence predicate, so its boundary IS the read path's. A
+    persisted inverted window (``valid_to < valid_from``) then covers no
+    instant and the point silently disappears from every temporal query.
+
+    Absent bounds are legal — a window may be open-ended — so only a present,
+    orderable pair can be inverted. A bound that ``_created_sort_key`` cannot
+    order (it buckets as ``(1, <text>)``) is deliberately not refused here;
+    unparseable bounds are a separate concern with their own guard (#5360).
+    Such a window can still hide a point from a temporal query, but that hiding
+    is attributable to the unparseable bound rather than to this guard, and
+    refusing it here would be a behaviour change outside this issue. Equality
+    is well-formed: a zero-length ``[t, t]`` window is legal.
+
+    Scope note: this checks the pair it is GIVEN. It does not merge a caller's
+    bound with a stored opposite bound, so a writer that updates one edge of an
+    existing window is not covered by this call alone (#5359).
+
+    Who calls it: ``invalidate_point``, through
+    ``TortoiseSDK._assert_window_start_not_inverted``. That site already
+    refused the same inversion (#5358), so pointing it here re-homes the
+    comparison without adding a refusal. The remaining live Point writers that
+    persist a window are wired by their own issues: ``supersede_point`` by
+    #4021 (and its ``_preview_supersede`` parity by #5506), and
+    ``create_point`` / ``update_point`` caller props plus
+    ``mining._temporal_wire`` by #5359 — which routes all three through
+    ``sdk._refuse_inverted_point_window``, merging a caller's PARTIAL bound
+    with the stored opposite bound before delegating here. The projection
+    fold/replay writers
+    deliberately do NOT call it: a rebuild must REPLAY windows that already
+    exist, including ones that were inverted before a guard existed, so a fold
+    that refused would turn a legacy corruption into a FAILED RESTORE — before
+    the repair path exists. Detecting and repairing such windows is the read
+    path's and audit's concern (#5361). This declaration therefore states the
+    contract; it does not by itself cover every writer.
+
+    Raises ValueError — callers that want a 422/ValueError boundary get one.
+    """
+    if valid_from is None or valid_to is None:
+        return
+    # Imported locally: this module sits on the Layer-1 commit path and needs
+    # only its own models and validators there, so the heavyweight
+    # ``search_engine`` import stays off that path.
+    from .search_engine import _created_sort_key
+    k_from = _created_sort_key(valid_from)
+    k_to = _created_sort_key(valid_to)
+    if k_from[0] != 0 or k_to[0] != 0:
+        # Unparseable/unorderable bound — a separate concern (#5360). Both
+        # sides must be parseable instants before an inversion is decidable.
+        return
+    if k_from[1] > k_to[1]:
+        raise ValueError(
+            f"validFrom ({valid_from!r}) is after validTo ({valid_to!r}) — an "
+            "inverted validity window covers no instant and the point is "
+            "unreachable from every temporal query"
+        )
+
+
 class Point(BaseModel):
     """A single extracted point — content-addressed id, closed kind vocab."""
 
@@ -451,7 +524,11 @@ class Point(BaseModel):
 
 
 class OperatorTarget(BaseModel):
-    """MITIGATES edge-identity triple — the operator MERGE key (PL1)."""
+    """MITIGATES edge-identity triple — the operator MERGE key (PL1).
+
+    #4937: this identifies the operator BRIDGE a mitigation attacks; it is
+    not a peer of the ``Operator`` it belongs to.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -461,8 +538,24 @@ class OperatorTarget(BaseModel):
 
 
 class Operator(BaseModel):
-    """Epistemic operator — IMPL / NAND (direction REQUIRED) / MITIGATES
-    (target + strength [0.10, 0.50] REQUIRED). No op_<sha> ids (PL1)."""
+    """Epistemic operator record — IMPL / NAND, or the MITIGATES bridge-attack.
+
+    ``op_type`` is the WIRE vocabulary of the commit payload's ``operators``
+    array. Its three values are NOT three operator kinds:
+
+    * ``IMPL`` / ``NAND`` — the two operator kinds (a reified operator Point,
+      ``is_operator: true``, carrying direction + an optional label).
+    * ``MITIGATES`` — the wire spelling of a **bridge-attack**: ``target``
+      names the operator bridge it damps and ``strength`` names the dampening
+      (``w_eff = w × (1 − strength)``, weights.py). The commit path routes this
+      record to ``mitigate_operator``, which writes a mitigation Point +
+      ``(op)-[:mitigated_by]->(m)`` — NEVER a generic operator (#4937, the F1
+      ruling on #2552). The spelling is retained for backward compatibility
+      with older clients/extractors; ``target``/``strength`` are REQUIRED on
+      it precisely because it is not a peer operator.
+
+    No op_<sha> ids (PL1).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -588,13 +681,33 @@ class SupersessionRecord(BaseModel):
     for POINT-level refs (E5 #1537 — ``superseded``/``supersedes_by`` are
     content-addressed ``pt_<sha>`` ids, dispatched by prefix at the write
     sites), as a CORRECTS edge via the canonical ``supersede()``. Additive-
-    optional so old clients' payloads still validate (no migration)."""
+    optional so old clients' payloads still validate (no migration) — with
+    ONE deliberate exception (#2243): ``evidence`` is capped at 200 chars, so
+    a client that previously sent longer evidence now gets a 422. The two ref
+    fields stay uncapped on purpose (see the note below)."""
 
     model_config = ConfigDict(extra="forbid")
 
+    # ⛔ ``superseded``/``supersedes_by`` are DELIBERATELY UNCAPPED (#2243):
+    # they carry entity NAMES, and an Object name is IDENTITY — the write
+    # path MERGEs on it and stores it VERBATIM. #5370/#5390 removed the
+    # fold's own 200-char cap on the successor name precisely because it was
+    # LOSSY (a >200-char successor folded to a prefix that names NO Object,
+    # so a live successor rendered "no successor record found"). A
+    # ``max_length`` here would 422 that reproduced, supported case instead.
+    # ``evidence`` is free text (no identity role) and IS capped, mirroring
+    # ``Point.quote`` (≤200, :382) so a malformed batch cannot embed MBs
+    # inside the 8 MiB body cap.
+    #
+    # RESIDUAL (known, deliberate): the uncapped ref fields are interpolated
+    # into the per-record WARN lines (commit_ops.py:525/551/596/633), so a
+    # single WARN can still be body-cap-scale. What the caps DO bound is the
+    # WARN COUNT (≤ MAX_OPERATORS records), which is the amplification the
+    # issue describes; per-WARN size stays bounded only by the 8 MiB request
+    # cap.
     superseded: str = Field(min_length=1)   # existing entity id OR name
     supersedes_by: str = Field(min_length=1)  # the new entity's name
-    evidence: str = Field(default="")
+    evidence: str = Field(default="", max_length=200)
 
 
 class CommitPayload(BaseModel):
@@ -834,6 +947,15 @@ def validate_layer1(
     if len(payload.operators) > MAX_OPERATORS:
         add("operators", f"operator count {len(payload.operators)} exceeds "
             f"MAX_OPERATORS ({MAX_OPERATORS})")
+    # Supersessions (#2243): bound the batch too. The write path's
+    # ``apply_supersessions`` emits ONE WARN PER RECORD (fail-open), so an
+    # unbounded batch amplifies into a warning storm; this count cap is the
+    # load-bearing half of the fix. It mirrors the operators cap (also
+    # MAX_OPERATORS=500) and is the same order as entities (MAX_ENTITIES=500).
+    if len(payload.supersessions) > MAX_OPERATORS:
+        add("supersessions", f"supersession count "
+            f"{len(payload.supersessions)} exceeds MAX_OPERATORS "
+            f"({MAX_OPERATORS})")
 
     # Atomicity shape (per point).
     for i, pt in enumerate(payload.points):

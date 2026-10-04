@@ -15,9 +15,19 @@ Idempotent — uses MERGE, safe to re-run.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"graph-scripts/backfill_references.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python graph-scripts/backfill_references.py`"
+    )
+
 import argparse
 import os
-import sys
 
 # Allow running from worktree root or graph-scripts/ dir
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -27,12 +37,13 @@ from tortoise.projection import FalkorProjection  # noqa: E402
 
 # ── about* edges to follow (ONTOLOGY v2.5→v3.0 migration path) ──
 # Point → Entity: aboutSubject → Subject, aboutObject → Object, aboutEvent → Event,
-# aboutDocument → Document.  We do NOT follow aboutAction (Action dissolved v3.0).
+# aboutDocument → Source.  We do NOT follow aboutAction (Action dissolved v3.0).
+# D10 (ONTOLOGY v3.15 §4.4): a document is a :Source.
 _ABOUT_EDGES = {
     "aboutSubject": "Subject",
     "aboutObject": "Object",
     "aboutEvent": "Event",
-    "aboutDocument": "Document",
+    "aboutDocument": "Source",
 }
 
 # ── Cypher fragments ──────────────────────────────────────────────────
@@ -119,8 +130,8 @@ def main():
     )
     parser.add_argument(
         "--db-uri",
-        default=os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise"),
-        help="FalkorDB URI (default from TORTOISE_DB_URI or docker://:@localhost:16379/tortoise)",
+        default=os.environ.get("TORTOISE_DB_URI", "docker://:@127.0.0.1:16379/tortoise"),
+        help="FalkorDB URI (default from TORTOISE_DB_URI or docker://:@127.0.0.1:16379/tortoise)",
     )
     parser.add_argument(
         "--dry-run", action="store_true",

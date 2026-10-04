@@ -148,6 +148,65 @@ def _reset_graph(db, graph_name: str) -> None:
     db.select_graph(graph_name).query("MATCH (n) DETACH DELETE n")
 
 
+def _sweep_diagnosis(body: dict) -> str:
+    """What a `degraded` sweep actually says, in one line.
+
+    pytest truncates a dict used as the assertion message BEFORE it reaches
+    ``graph_failures`` — the one field that names why a graph was not backed
+    up, and effectively the only place that cause survives: the per-graph
+    error paths return without logging, so the failure message and the app log
+    both carry nothing. Surfacing it explicitly makes a red attributable from
+    the log instead of from a re-run (#5049 — a verdict from ambient machine
+    state must still say what happened).
+
+    Total by construction: this runs while building a failure message, so it
+    must never raise — an exception here would replace the real assertion
+    error and mask the very failure it exists to explain.
+    """
+    if not isinstance(body, dict):
+        return f"sweep body is not a dict: {type(body).__name__}"
+    causes: list[str] = []
+    if body.get("error"):
+        # `enum_failed` puts the cause at the top level with no results map
+        # at all, so a results-only fallback would drop it.
+        causes.append(str(body["error"]))
+    failures = body.get("graph_failures")
+    if isinstance(failures, list):
+        for f in failures:
+            if isinstance(f, dict):
+                causes.append(
+                    f"{f.get('org_id')}/{f.get('graph_id')}: {f.get('error')}")
+    results = body.get("results")
+    if isinstance(results, dict):
+        for tid, res in results.items():
+            if not isinstance(res, dict) or res.get("status") == "backed_up":
+                continue
+            # A non-error status (empty_skipped, data_loss_candidate,
+            # p0_guard_failed, aborted_size_guard) names the cause in
+            # `status` itself; an error result carries `error` as well.
+            detail = res.get("error")
+            causes.append(f"{tid}: {res.get('status')}"
+                          + (f" ({detail})" if detail else ""))
+    incidents = body.get("incidents")
+    if isinstance(incidents, list):
+        # A sweep can report `no_teams` / `no_eligible_teams` with the reason in
+        # `incidents[].kind` (NO_ELIGIBLE_TEAMS, ENUM_DELTA) and nothing in
+        # `error`/`graph_failures`/`results` — so incidents are a cause source too.
+        for inc in incidents:
+            if isinstance(inc, dict) and inc.get("kind"):
+                causes.append(f"incident {inc.get('kind')}")
+    if not causes:
+        # Nothing in the body claims a cause. Say exactly what it carried, and
+        # do not call a normal status a failure: several (no_teams, no_work)
+        # are self-describing outcomes, not errors.
+        causes.append("no cause in error/graph_failures/results/incidents; "
+                      f"top-level keys={sorted(body, key=str)}")
+    return (f"sweep status={body.get('status')} "
+            f"teams={body.get('teams_backed_up')} "
+            f"totals={body.get('graph_totals')} "
+            f"source={body.get('source')} causes=[{'; '.join(causes)}]")
+
+
 def _held_proj_db():
     """A data-plane `db` handle whose SDK is HELD for the session.
 
@@ -395,12 +454,86 @@ class TestDrHeartbeat:
 
 
 class TestDrSweep:
+    def test_sweep_resolves_open_guard_kinds_a_clear_run_did_not_re_emit(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """#3030 wiring + review P2: a conclusive run closes the guard incidents it
+        did NOT re-emit — but only those that are actually OPEN, and it reports what
+        it closed. A subject that is not open is never resolved."""
+        _seed_team("team_x", nodes=2)
+        fake = _FakeAlerts(open_subjects={
+            "ENUM_DELTA": {"_"},
+            "P0_GUARD_FAIL": {"team_x", "team_x:gone"},
+            "SWEEP_NO_COVERAGE": {"_"},
+        })
+        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+
+        r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "backed_up", _sweep_diagnosis(body)
+        assert ("resolve", "ENUM_DELTA", "") in fake.calls
+        assert ("resolve", "P0_GUARD_FAIL", "team_x") in fake.calls
+        # Not open → no resolve call. (This line would hold even without the
+        # open-set check — no candidate is generated for `team_x:gone`; the
+        # open-set check itself is pinned by SWEEP_NO_COVERAGE / NO_ELIGIBLE_TEAMS
+        # never appearing in `incidents_resolved` below.)
+        assert ("resolve", "P0_GUARD_FAIL", "team_x:gone") not in fake.calls
+        assert ("resolve", "SWEEP_NO_COVERAGE", "") not in fake.calls
+        assert ("open_subjects", "ENUM_DELTA", "") in fake.calls
+        assert sorted(body["incidents_resolved"]) == ["ENUM_DELTA", "P0_GUARD_FAIL/team_x"]
+
+    def test_sweep_survives_a_resolve_failure(self, client, dr_env, mem_storage,
+                                              monkeypatch):
+        """A failing close must never fail the sweep request (the incident simply
+        stays open for the next run) nor lose the other resolutions — and it must
+        be REPORTED as unresolved rather than silently vanishing (cycle-3)."""
+        _seed_team("team_x", nodes=2)
+        fake = _FakeAlerts(
+            open_subjects={"ENUM_DELTA": {"_"}, "P0_GUARD_FAIL": {"team_x"}},
+            fail_resolve_kinds={"ENUM_DELTA"},
+        )
+        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+
+        r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
+        assert r.status_code == 200, r.text
+        assert r.json()["incidents_resolved"] == ["P0_GUARD_FAIL/team_x"]
+        assert r.json()["incidents_unresolved"] == ["ENUM_DELTA"]
+
+    def test_sweep_resolves_a_platform_incident_filed_under_the_global_spelling(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """Cycle-3 review P2: the platform subject has two spellings in the store
+        (`_` and a literal `global`), so a matcher that accepts `global` MUST also
+        resolve `global` — passing "" would read `_.json` and clear nothing, which
+        is what the first version of this branch did."""
+        _seed_team("team_x", nodes=2)
+        fake = _FakeAlerts(open_subjects={"ENUM_DELTA": {"global"}})
+        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+
+        r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
+        assert r.status_code == 200, r.text
+        assert ("resolve", "ENUM_DELTA", "global") in fake.calls
+        assert r.json()["incidents_resolved"] == ["ENUM_DELTA/global"]
+
+    def test_sweep_reports_a_listing_outage_instead_of_reading_clean(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """Final-cycle review P2: `open_subjects` fails safe (empty set), which made
+        an R2 LIST outage indistinguishable from "nothing was open" — the endpoint
+        now lists strictly and reports the candidates it could not verify."""
+        _seed_team("team_x", nodes=2)
+        fake = _FakeAlerts(open_subjects={"ENUM_DELTA": {"_"}},
+                           fail_listing_kinds={"ENUM_DELTA"})
+        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+
+        r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
+        assert r.status_code == 200, r.text
+        assert r.json().get("incidents_unresolved") == ["ENUM_DELTA"]
+
     def test_sweep_backs_up_seeded_team(self, client, dr_env, mem_storage):
         _seed_team("team_x", nodes=2)
         r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
         assert r.status_code == 200
         body = r.json()
-        assert body["status"] == "backed_up"
+        assert body["status"] == "backed_up", _sweep_diagnosis(body)
         assert body["teams_backed_up"] == 1
         assert body["results"]["team_x"]["status"] == "backed_up"
         manifests = [k for k in mem_storage.list("backups/team_x/") if k.endswith("manifest.json")]
@@ -452,7 +585,7 @@ class TestDrSweep:
         r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["status"] == "backed_up", body
+        assert body["status"] == "backed_up", _sweep_diagnosis(body)
         assert body["teams_backed_up"] == 2
         assert body["source"] == "supabase"
         assert set(body["results"]) == {"team_s1", "team_s2"}
@@ -860,6 +993,25 @@ class TestDrRebaseline:
         state = json.loads(mem_storage.download("ops/teams/team_x/state.json"))
         assert state["node_count"] == 3
 
+    def test_rebaseline_survives_a_resolve_failure(self, client, dr_env, mem_storage,
+                                                    monkeypatch):
+        """Cycle-2 review P2: `resolve_incident` RAISES on a failed close, and the
+        state write has already succeeded by then — a raise out of the endpoint
+        would 500 a request whose effect was persisted, inviting the operator to
+        retry a write that already happened."""
+        _seed_team("team_x", nodes=3)
+        fake = _FakeAlerts(open_subjects={"DATA_LOSS_CANDIDATE": {"team_x"}},
+                           fail_resolve_kinds={"DATA_LOSS_CANDIDATE", "SIZE_GUARD_ABORT"})
+        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+
+        r = client.post(
+            "/v1/internal/backups/re-baseline", headers=INTERNAL_HEADERS,
+            json={"org_id": "team_x"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "rebaselined"
+        assert json.loads(mem_storage.download("ops/teams/team_x/state.json"))["node_count"] == 3
+
     def test_rebaseline_excludes_projection_bookkeeping_marker(
             self, client, dr_env, mem_storage):
         """#4233 — re-baseline's node_count is ``dump_graph``'s node set, not
@@ -986,7 +1138,6 @@ class TestDrRebaseline:
         assert len(g.query(
             "MATCH (n) RETURN labels(n), properties(n)").result_set) == 7
         assert hb.count_data_nodes(db, "org_settle_source") == 6
-
 
 class TestDrDrill:
     def test_drill_requires_params(self, client, dr_env, mem_storage):
@@ -1467,17 +1618,34 @@ class TestDrAclReconcile:
 # /status → last_drill surfacing.
 
 class _FakeAlerts:
-    """Recording alert-store stub — captures open/resolve calls (no network)."""
+    """Recording alert-store stub — captures open/resolve calls (no network).
 
-    def __init__(self):
+    ``open_subjects`` models the #3030 review contract: the endpoint must LIST
+    what is open (one call per kind) instead of issuing an R2 read per graph.
+    Pass ``{"KIND": {"subject", ...}}`` to declare open incidents.
+    """
+
+    def __init__(self, open_subjects=None, fail_resolve_kinds=(),
+                 fail_listing_kinds=()):
         self.calls: list = []
+        self._open = dict(open_subjects or {})
+        self._fail_resolve = set(fail_resolve_kinds)
+        self.fail_listing_kinds = set(fail_listing_kinds)
 
     def open_incident(self, kind, org_id="", detail=None):
         self.calls.append(("open", kind, org_id, dict(detail or {})))
         return True
 
+    def open_subjects(self, kind, *, strict=False):
+        self.calls.append(("open_subjects", kind, ""))
+        if strict and kind in getattr(self, "fail_listing_kinds", set()):
+            raise RuntimeError("R2 listing outage")
+        return set(self._open.get(kind, set()))
+
     def resolve_incident(self, kind, org_id=""):
         self.calls.append(("resolve", kind, org_id))
+        if kind in self._fail_resolve:
+            raise RuntimeError("alert store down")
         return True
 
 

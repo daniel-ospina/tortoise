@@ -40,9 +40,19 @@ always needs `--yes`.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"graph-scripts/clear_max_sessions_4010.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python graph-scripts/clear_max_sessions_4010.py`"
+    )
+
 import argparse
 import os
-import sys
 
 # Allow running from worktree root or graph-scripts/ dir
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -132,8 +142,12 @@ def test_guard(graph_name: str, yes: bool = False) -> None:
     always resolves to `<ns>_control_plane` (`registry_control_plane`),
     whatever the URI path says. Gating on the URI path would auto-approve a
     run whose path merely LOOKS test-prefixed while the write lands on the
-    shared registry graph. Because that resolved name is never test-prefixed,
-    a real write must always pass `--yes`.
+    shared registry graph. Because that resolved name is never test-prefixed
+    ON THE NO-`path=` CLI PATH THIS SCRIPT USES (the redirect that derives a
+    test-prefixed name needs an explicit `path=`), a real write must always
+    pass `--yes`. An in-test construction WITH an explicit `path=` does derive
+    a `test_`-prefixed, sweepable name (#3634) — so the no-prefix invariant is
+    scoped to the CLI path, not a property of the registry namespace.
     """
     if graph_name.startswith("tortoise_test_") or graph_name.startswith("test_"):
         print(f"✅ Test graph detected ({graph_name}) — proceeding")
@@ -176,9 +190,9 @@ def main() -> int:
     sdk = TortoiseSDK(namespace="registry")
     try:
         reg = sdk._get_registry()
-        target = getattr(reg, "name", "control_plane")
-        # path — `TortoiseSDK(namespace="registry")` derives the registry name
-        # from the NAMESPACE, not from the URI path.
+        target = reg.name
+        # The URI path never names this graph — `TortoiseSDK(namespace="registry")`
+        # derives the registry name from the NAMESPACE, not from the URI path.
         test_guard(target, args.yes)
         print(f"Registry graph (SDK-resolved): {target}")
         report = clear_stored_max_sessions(reg, dry_run=args.dry_run)

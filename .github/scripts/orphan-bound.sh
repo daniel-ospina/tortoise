@@ -19,7 +19,8 @@
 #     A bound of `left` could be satisfied by a leak that inflates its own bound,
 #     and `left` is produced by the very same probe as the workflow's `COUNT`,
 #     one step later — so neither alone can detect a sweep whose own
-#     measurement is broken. A `{reaped, cleared, left, before}` report is
+#     measurement is broken. A `{reaped, exited, cleared, left, before}`
+#     report is
 #     therefore accepted when the count/probe agreement and the accounting
 #     identity hold, with `cleared` a diagnostic flag that does not decide the
 #     verdict at any measured `COUNT` (#4989):
@@ -51,13 +52,21 @@
 #         its own, and not a red: the reds are the measurement-grounded ones
 #         (COUNT above `left`, a broken accounting identity, a failed probe at a
 #         non-zero count, and an error/skipped/unreadable report).
-#       * the sweep's own ACCOUNTING IDENTITY holds: `reaped + left >= before`,
-#         where `before` is the sweep's pre-sweep live count. A sweep that
-#         reaped `reaped` and left `left` must account for at least everything
-#         it started with; servers it reaped that its own report no longer
-#         accounts for mean the SWEEP's measurement is broken, not the count.
+#       * the sweep's own ACCOUNTING IDENTITY holds:
+#         `reaped + exited + left >= before`, where `before` is the sweep's
+#         pre-sweep live count and `exited` (#6984) is the number of servers
+#         the sweep OBSERVED to have exited on their own — a live `candidate`
+#         at discovery whose pid was dead at kill time. A sweep that reaped
+#         `reaped`, watched `exited` shut themselves down, and left `left`
+#         must account for at least everything it started with; servers it
+#         reaped that its own report no longer accounts for mean the SWEEP's
+#         measurement is broken, not the count. `exited` is MEASURED at that
+#         dead-pid branch, never derived as `before - reaped - left`: the
+#         complement form makes the identity a tautology (it holds for EVERY
+#         report), which would retire the guard while appearing to keep it.
 #         Skipped only when `before` is `null` (the probe failed — a distinct
-#         state) or `0`; a report that OMITS `before` is unusable → RED, so the
+#         state) or `0`; a report that OMITS `before` or `exited` is unusable
+#         → RED, so the
 #         control can never be disabled by a report shape change.
 #     One shape disables the bound ENTIRELY — it is NOT a gate. A DEFERRED
 #     end-sweep (`other_suites` non-empty) ran with `only_safe=True`, so `left`
@@ -106,10 +115,11 @@
 #                               this report does not carry, so it does not
 #                               decide the verdict; the same measured-zero rule
 #                               applies at any `cleared`.
-#   {reaped, cleared, left,
-#     before}                  → bound `left`, plus the positive controls above
+#   {reaped, exited, cleared,
+#     left, before}            → bound `left`, plus the positive controls above
 #                               (the count/probe agreement and the
-#                               `reaped + left >= before` accounting identity).
+#                               `reaped + exited + left >= before` accounting
+#                               identity).
 #                               A `cleared: false` report does not red at all:
 #                               it is a `::warning::` diagnostic at ANY
 #                               measured COUNT, because `cleared` reports
@@ -125,7 +135,15 @@
 #                               uncomparably large number (18+ digits, past
 #                               bash's 64-bit integer range) is a usage error →
 #                               exit 2, never a pass.
-#   missing/unreadable report → RED: the residue is unaccounted for.
+#   missing/unreadable report → RED: no USABLE measurement, so the count cannot
+#                               be accounted for. Distinct from the residue reds
+#                               below — neither the absence of a report nor an
+#                               unparseable one is evidence of a residue. The red
+#                               carries the pytest exit code (or says it is
+#                               unknown) so a crashed run is distinguishable
+#                               from a leak, and it names which subtype it is:
+#                               `missing` (no report file) vs `unreadable` (a
+#                               report exists but cannot be used) (#6852).
 #
 # WHAT THIS BOUND DOES NOT CATCH — do not read the table above as "a real leak
 #   reds". The bound IS the sweep's own post-sweep measurement (`left`), and
@@ -142,7 +160,7 @@
 #   independently red it. What the gate DOES red: a leak that appears AFTER the
 #   sweep (`COUNT > left`), an abort or failure that produced no usable report
 #   (`error`, `skipped`), a `probe_failed` at a non-zero count (no `left` to bind
-#   to), an identity violation (`reaped + left < before`), and an
+#   to), an identity violation (`reaped + exited + left < before`), and an
 #   unaccounted/unreadable report. `cleared: false` does NOT red at any count:
 #   it reports whether the sweep's time budget sufficed, which is a function of
 #   runner load and unrelated to the residue, so redding it fires on healthy
@@ -300,24 +318,33 @@ elif (
     isinstance(sweep.get("cleared"), bool)
     and _count(sweep.get("left"))
     and _count(sweep.get("reaped"))
+    and _count(sweep.get("exited"))
     and "before" in sweep
     and (sweep["before"] is None or _count(sweep["before"]))
 ):
     left = sweep["left"]
     reaped = sweep["reaped"]
+    exited = sweep["exited"]
     before = sweep["before"]
     # `before` is REQUIRED for the accounting identity: a report that dropped
     # it would silently disable the one control derived from the sweep itself,
     # so a malformed or older report is `unreadable` -> RED, never a skip.
-    if max(left, reaped, -1 if before is None else before) >= MAX_COMPARABLE:
+    # #6984: `exited` is REQUIRED for the same reason — it is the identity
+    # fourth term (a server that exited on its own). A report that omitted it
+    # would silently restore the false red the term exists to remove, so an
+    # older/malformed report is `unreadable` -> RED.
+    if max(left, reaped, exited,
+           -1 if before is None else before) >= MAX_COMPARABLE:
         print("kind=oversized")
     else:
         print(
-            "kind=report cleared=%s left=%d reaped=%d before=%s others=%d foreign=%d"
+            "kind=report cleared=%s left=%d reaped=%d exited=%d "
+            "before=%s others=%d foreign=%d"
             % (
                 "true" if sweep["cleared"] else "false",
                 left,
                 reaped,
+                exited,
                 "null" if before is None else str(before),
                 others_n,
                 foreign_n,
@@ -332,6 +359,7 @@ kind=""
 cleared=""
 left=""
 reaped=""
+exited=""
 before=""
 others=""
 foreign=""
@@ -341,6 +369,7 @@ for _tok in $HYGIENE_OUT; do
     cleared=*) cleared="${_tok#cleared=}" ;;
     left=*) left="${_tok#left=}" ;;
     reaped=*) reaped="${_tok#reaped=}" ;;
+    exited=*) exited="${_tok#exited=}" ;;
     before=*) before="${_tok#before=}" ;;
     others=*) others="${_tok#others=}" ;;
     foreign=*) foreign="${_tok#foreign=}" ;;
@@ -410,7 +439,7 @@ case "$kind" in
     # is no residue to account for and the failed sweep-side probe is a
     # `::warning::` diagnostic; above zero the residue is unmeasured and
     # unaccounted for, so this reds (kill-downgradable per #1371). This is the
-    # same measured-zero rule the `{reaped, cleared, left, before}` branch
+    # same measured-zero rule the `{reaped, exited, cleared, left, before}` branch
     # applies: `cleared` is a confidence flag about a `left` this report does
     # not carry, so it does not decide the verdict.
     if [ "$COUNT" -eq 0 ]; then
@@ -483,8 +512,8 @@ case "$kind" in
     # control cannot be silently disabled. Both operands are canonical decimal
     # (the parser prints `%d`), so the arithmetic cannot be read as octal.
     if [ "$before" != "null" ] && [ "$before" -gt 0 ]; then
-      if [ "$((reaped + left))" -lt "$before" ]; then
-        red_or_kill_warning "redislite orphan gate: the sweep does not account for the servers it started with — before=$before, reaped=$reaped, left=$left (reaped + left < before); the sweep's own measurement is broken"
+      if [ "$((reaped + exited + left))" -lt "$before" ]; then
+        red_or_kill_warning "redislite orphan gate: the sweep does not account for the servers it started with — before=$before, reaped=$reaped, exited=$exited, left=$left (reaped + exited + left < before); the sweep's own measurement is broken"
       fi
     fi
     if [ "$COUNT" -gt "$left" ]; then
@@ -503,12 +532,37 @@ case "$kind" in
     exit 0
     ;;
   *)
-    # missing / unreadable: no report at all, so the residue is unaccounted for.
-    # A watchdog kill skips the session-end finalizer entirely (#1371).
+    # missing / unreadable: no report at all, so the count cannot be accounted
+    # for. A watchdog kill skips the session-end finalizer entirely (#1371).
     if is_kill_rc; then
       echo "::warning::no redislite-hygiene end-sweep report ($kind) — rc=$RC: a watchdog kill skips the conftest end-sweep, so the count is a kill-path artifact, not a leak (issue #1371)"
       exit 0
     fi
-    red "redislite orphan gate: no usable redislite-hygiene end-sweep report ($kind) — the $COUNT residue is unaccounted for (issue #1005 / epic #1647 E2E-7)"
+    # Not a kill rc. There is no USABLE report, so there is no measurement to
+    # account for the count with — which is NOT the same claim as "a residue was
+    # observed". Say which, and carry the exit that produced it, so a reader
+    # (and the landing rail) can tell a crashed run from a leak (#6852).
+    #
+    # The two subtypes differ and must not share one cause clause: `missing`
+    # means no report file exists (the run may never have reached teardown),
+    # while `unreadable` means the file EXISTS but is malformed or structurally
+    # incomplete — asserting "without writing one" there would be false, since
+    # one was written and the gate could not use it.
+    case "$kind" in
+      missing)
+        if [ -n "${RC:-}" ]; then
+          red "redislite orphan gate: no redislite-hygiene end-sweep report (missing) — the run exited rc=${RC} without writing one, so the $COUNT count is unaccounted for (issue #1005 / epic #1647 E2E-7)"
+        else
+          red "redislite orphan gate: no redislite-hygiene end-sweep report (missing) and the pytest rc is unknown (cancelled/killed?) — the $COUNT count is unaccounted for (issue #1005 / epic #1647 E2E-7)"
+        fi
+        ;;
+      *)
+        if [ -n "${RC:-}" ]; then
+          red "redislite orphan gate: the redislite-hygiene end-sweep report is unreadable ($kind) — the run exited rc=${RC} but its report was unusable, so the $COUNT count is unaccounted for (issue #1005 / epic #1647 E2E-7)"
+        else
+          red "redislite orphan gate: the redislite-hygiene end-sweep report is unreadable ($kind) and the pytest rc is unknown (cancelled/killed?) — the report was unusable, so the $COUNT count is unaccounted for (issue #1005 / epic #1647 E2E-7)"
+        fi
+        ;;
+    esac
     ;;
 esac

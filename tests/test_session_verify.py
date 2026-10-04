@@ -37,6 +37,7 @@ from pathlib import Path
 
 import pytest
 
+from tortoise import hook_install
 from tortoise.capture_install import install_capture
 from tortoise.capture_receipts import capture_receipt_key
 from tortoise.session_verify import (
@@ -1149,6 +1150,122 @@ def test_pi_is_honestly_unverifiable(hosted, setup):
     for text in [doc, _sv.UNVERIFIABLE_REASON["pi"], *pi_comments]:
         for phrase in absolutes:
             assert phrase not in text, (phrase, text[:90])
+
+
+def test_pi_stale_install_is_reported_not_unverifiable(hosted, setup):
+    """The #4680 defect, at the surface that hid it: a present-but-STALE Pi
+    seam used to report ``UNVERIFIABLE-IN-CI`` — indistinguishable from "fine"
+    — while capturing with older logic.  It must instead be a BLOCKING
+    install finding (``stale-artifact``/``unversioned-artifact``), the same
+    way the three shell seams already report ``stale-script``, and nothing may
+    be fired for it.
+
+    Mutation: restore the pre-#4680 ``_static_findings`` Pi branch (existence
+    only, no version comparison) — this REDs: a tampered seam reads
+    UNVERIFIABLE and no finding names the staleness.
+    """
+    home, _bindir, _fake = setup
+    root = _install(home, "pi")
+    # The pre-contract shape: a REAL installed seam with its marker stripped —
+    # present, ours, unmarkered.  The basename is DERIVED from the contract
+    # registry, never re-typed, so a rename of the artifact cannot leave this
+    # test writing a file the installer/detector do not use (#4680 review).
+    seam = root / hook_install.ARTIFACT_CONTRACTS["pi"].install_name
+    seam.write_text(
+        "\n".join(line for line in seam.read_text(encoding="utf-8").splitlines()
+                  if not line.startswith("// tortoise-hook-version:")) + "\n",
+        encoding="utf-8")
+    graph, _url = hosted
+    report = _verify(hosted, home, "pi", root)
+    assert report["links"]["installed"]["status"] == "FAIL", report["links"]
+    detail = report["links"]["installed"]["detail"]
+    assert "not current" in detail
+    assert "unversioned-artifact" in detail
+    assert "tortoise install pi" in detail, (
+        "verify must name the sanctioned repair for the state it reports")
+    assert report["exit_code"] == EXIT_BROKEN
+    assert graph.posts == [], "nothing may be captured for a stale install"
+
+
+def test_pi_clean_install_names_the_static_comparison(hosted, setup):
+    """A CLEAN install must say WHAT was checked (#4710 indicator (2)).
+
+    The status deliberately stays ``UNVERIFIABLE`` — the seam was never fired,
+    and ``test_pi_is_honestly_unverifiable`` pins that — but the sentence a
+    user read said only "not exercised", which is indistinguishable from "not
+    checked at all": a clean install looked exactly like a host that could not
+    be inspected.  The detail now names the static result; the verdict does
+    not move.
+    """
+    home, _bindir, _fake = setup
+    root = _install(home, "pi")
+    report = _verify(hosted, home, "pi", root)
+    installed = report["links"]["installed"]
+    assert installed["status"] == "UNVERIFIABLE-IN-CI", (
+        "the status must NOT move — a static comparison is not a pass")
+    detail = installed["detail"]
+    assert "matches the shipped seam" in detail
+    assert "tortoise-hook-version 1" in detail
+    assert "not a pass" in detail
+    # …and the ruling the detail is prefixed to must still be present.
+    assert "tortoise-capture.test.ts" in detail
+    assert "not firable by this command" in detail
+    assert report["exit_code"] == EXIT_UNVERIFIABLE
+
+
+def test_pi_static_match_sentence_is_earned_not_unconditional(hosted, setup):
+    """The static-match sentence must be withheld when the comparison fails.
+
+    The reachable fabrication path is a NON-BLOCKING marker mismatch: a marker
+    NEWER than the shipped one is reported as an ahead-artifact finding with
+    ``blocking=False``, so ``verify_session_capture`` does NOT return early —
+    it falls through to the non-firable branch, which is exactly where a
+    comparison-free implementation would tell the host its artifact matches
+    the shipped seam (#4710 review).
+
+    ⛔ The marker must be NEWER, not older.  An older marker is a BLOCKING
+    stale-artifact finding, so the run returns at the blocking branch before
+    the non-firable branch is ever reached and this test pins nothing — an
+    earlier version of it used ``0`` and was vacuous: it passed against a
+    no-op helper AND against the pre-change code (measured by the verifier,
+    not assumed).
+    """
+    home, _bindir, _fake = setup
+    root = _install(home, "pi")
+    extension = next(root.glob("*.ts"))
+    extension.write_text(
+        extension.read_text().replace(
+            "// tortoise-hook-version: 1", "// tortoise-hook-version: 9999", 1),
+        encoding="utf-8")
+    report = _verify(hosted, home, "pi", root)
+    installed = report["links"]["installed"]
+    assert installed["status"] == "UNVERIFIABLE-IN-CI", (
+        "an ahead-artifact install is non-blocking by design: it must reach "
+        "the non-firable branch for this test to mean anything")
+    assert "matches the shipped seam" not in installed["detail"]
+    assert "tortoise-hook-version 9999" not in installed["detail"]
+    assert report["exit_code"] == EXIT_UNVERIFIABLE
+
+
+def test_static_result_consumes_the_detector_findings():
+    """The sentence is earned from the DETECTOR's result, not re-derived.
+
+    Guards the invariant found in review (#4710): a helper that tested the
+    marker alone would emit the sentence for a byte-different artifact whose
+    marker matches — safe today only because that finding happens to be
+    BLOCKING, which returns the run before this helper is reached.  Tying the
+    sentence to the detector's own list makes it true by construction: ANY
+    finding withholds it, blocking or not.
+    """
+    from tortoise import session_verify as _sv
+
+    assert _sv._install_static_result("pi", []) is not None
+    assert _sv._install_static_result(
+        "pi", [{"kind": "ahead-artifact", "blocking": False}]) is None
+    assert _sv._install_static_result(
+        "pi", [{"kind": "modified-artifact", "blocking": True}]) is None
+    # A harness with no artifact seam never has one claimed for it.
+    assert _sv._install_static_result("cursor", []) is None
 
 
 def test_pi_ruling_matcher_covers_the_possessive():

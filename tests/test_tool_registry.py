@@ -855,16 +855,28 @@ class TestCapabilityModel:
         assert handler_self_guards("tortoise_probe_helper_guard", _PROBE_SRC)
 
     def test_exemption_set_is_exact(self):
-        """2b: the non-HTTP writer exemption set is exactly NON_HTTP_WRITER_TOOLS —
-        measured over the SERVED set, retired names included (#3883): a retired
-        writer is still callable by name, so it is not exempt from the guard."""
+        """2b: an entry's writer ANNOTATION and its declared `writes` flag must be
+        the same statement — measured over the SERVED set, retired names included
+        (#3883): a retired writer is still callable by name, so it is not exempt
+        from the guard. #4474 removed the last five entries where the two
+        disagreed, so the exemption is empty and the check is restated as the
+        invariant the name list stood for — both directions, any `http_policy`.
+        The rogue probes below prove it can still fire."""
         from tool_surface_capabilities import exemption_set_violations, served_registry
 
-        from tortoise.tool_registry import _rw
-        assert exemption_set_violations(served_registry()) == []
+        from tortoise.tool_registry import _ro, _rw
+        served = served_registry()
+        assert served, "served registry is empty — the check would be vacuous"
+        assert exemption_set_violations(served) == []
+        # `_probe` leaves writes=False, so a writer annotation makes the two
+        # disagree — exactly the #4474 defect — and the check must fire.
         rogue = _probe("tortoise_rogue_writer", "query", annotations=_rw(),
                        http_policy=False)
         assert exemption_set_violations([rogue])
+        # The reverse direction too: a declared writer behind a read annotation.
+        reverse = _probe("tortoise_rogue_reader", "query", annotations=_ro(),
+                         http_policy=False, writes=True)
+        assert exemption_set_violations([reverse])
 
     def test_guard4_rename_simulation_fails_loudly(self):
         """A stale write-surface map (renamed/removed tool, or a declared write
@@ -1191,18 +1203,91 @@ class TestToolIdentity:
 
         Derived over the SERVED set (#3883), exactly like `get_write_tool_names`:
         a retired name still answers, so a write under a retired name must still
-        count as a write. No retired entry is a writer today, so stating it over
-        the served set changes no number — it stops the census from silently
-        shrinking when one is retired."""
+        count as a write. Since #4474 two retired shims are writers, so the
+        served census (47) differs from the live census (45) — the served-set
+        derivation is what keeps a retired writer from being recorded as a
+        read."""
         from tortoise.mcp_server import WRITE_TOOL_NAMES
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
         derived = frozenset(
             t.name for t in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY) if t.writes
         )
         assert derived == WRITE_TOOL_NAMES
-        # 42 is today's declared write census (#4170) — a change here is a
-        # permission change and needs the owner's eye, not a test edit.
-        assert len(WRITE_TOOL_NAMES) == 42, f"write census moved: {len(WRITE_TOOL_NAMES)}"
+        # The write census is HARD-CODED, not derived from the registry: an
+        # assertion whose expected value comes from the thing under test is not
+        # an assertion. #4474 moved it 42 -> 47. The issue predicted 45 because
+        # it counted the LIVE surface only; `get_write_tool_names` covers the
+        # SERVED set (#3883), and two of the five names #4474 flipped
+        # (`tortoise_ingest_corpus`, `tortoise_index_sessions`) are retired
+        # shims that still call the original handler, so they are writers too.
+        # A change to either number is a permission change and needs the
+        # owner's eye, not a test edit.
+        assert len(WRITE_TOOL_NAMES) == 47, f"write census moved: {len(WRITE_TOOL_NAMES)}"
+        live = frozenset(t.name for t in TOOL_REGISTRY if t.writes)
+        assert len(live) == 45, f"live write census moved: {len(live)}"
+
+    def test_gate_refuses_read_scope_for_every_writer_annotated_entry(self):
+        """#4474: a `graphs:read`-only key is REFUSED for EVERY entry whose
+        annotation declares a write.
+
+        The CASE LIST is DERIVED from the registry's own writer annotation, not
+        hand-typed: a future writer added as `_rw()`/`_idem()` without
+        `writes=True` is covered the moment it lands. A test over a hand-typed
+        list of five names would re-create the very defect it exists to catch.
+        The five #4474 flipped are pinned by name so the derivation cannot
+        silently stop covering them, and the derived count is pinned so the loop
+        cannot become vacuous.
+        """
+        from fastmcp.exceptions import AuthorizationError
+
+        from tortoise.mcp_auth import _current_legacy_full_access, _current_scopes
+        from tortoise.mcp_server import _enforce_mcp_tool_scope
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+
+        served = [*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY]
+        writer_annotated = sorted(
+            e.name for e in served
+            if e.annotations is not None and e.annotations.readOnlyHint is False
+        )
+        # 47 = the served writer census (45 live + 2 retired shims). Pinned here
+        # so the derived loop below can never pass by covering nothing.
+        assert len(writer_annotated) == 47, writer_annotated
+        for name in ("tortoise_backfill_v25", "tortoise_dream",
+                     "tortoise_index_sessions", "tortoise_ingest_corpus",
+                     "tortoise_org_create"):
+            assert name in writer_annotated, f"#4474 case dropped: {name}"
+
+        scopes_tok = _current_scopes.set(["graphs:read"])
+        legacy_tok = _current_legacy_full_access.set(False)
+        try:
+            for name in writer_annotated:
+                with pytest.raises(AuthorizationError):
+                    _enforce_mcp_tool_scope(name)
+        finally:
+            _current_scopes.reset(scopes_tok)
+            _current_legacy_full_access.reset(legacy_tok)
+
+    def test_gate_admits_read_scope_for_a_genuine_read_tool(self):
+        """#4474: the refusal above is not an over-correction — a `graphs:read`
+        key still succeeds for a tool that declares `writes=False`."""
+        from tortoise.mcp_auth import _current_legacy_full_access, _current_scopes
+        from tortoise.mcp_server import _enforce_mcp_tool_scope
+        from tortoise.tool_registry import TOOL_REGISTRY
+
+        reads = sorted(
+            e.name for e in TOOL_REGISTRY
+            if e.annotations is not None and e.annotations.readOnlyHint is True
+        )
+        assert reads, "no read-annotated tool in the live registry"
+
+        scopes_tok = _current_scopes.set(["graphs:read"])
+        legacy_tok = _current_legacy_full_access.set(False)
+        try:
+            for name in reads:
+                _enforce_mcp_tool_scope(name)  # must NOT raise
+        finally:
+            _current_scopes.reset(scopes_tok)
+            _current_legacy_full_access.reset(legacy_tok)
 
     def test_quota_gated_tools_are_declared_writers(self):
         """Every _quota_gated wrap site's bound tool declares writes=True."""

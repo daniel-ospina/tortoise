@@ -12,16 +12,42 @@ ownedBy: epistemic-team
 
 # AI Review Merge Gate
 
-`main` branch protection requires the `ai-review-gate` status check on every
-pull request. It replaces the human-approval requirement: merges proceed when
-the code-review skill's AI review is recorded and all required checks are
-green.
+`ai-review-gate` **is** a branch-protection required status context on `main`, and an
+ENTRY condition of the Mergify merge queue, as of 2026-09-29 (#5433). Verified: the live
+required contexts are `pricing-artifact`, `docs`, `test-isolation`, `license-surface`,
+`legal-e2e`, `python-ci-gate`, `ai-review-gate`, and `.mergify.yml` names
+`- check-success=ai-review-gate` in `queue_conditions`. Entry is evaluated against the
+**author PR head** — where this check actually reports — while the synthetic
+`mergify/merge-queue/*` batch deliberately PASSES instead of being evaluated (#5426), so
+naming it at entry cannot deadlock the queue.
+
+Because a required check must also appear in the config guard's record
+(`docs/ci/required-contexts.json`), the queue condition and the record's re-cut must move
+together: the guard's clause-(iv) agreement sub-check reds if the config and the record
+disagree (it is active under `merge` injection). I1 itself — the config's check names vs the
+**live** required set — is read only by `--live` (admin credential), and no workflow runs it,
+so the live half is a deliberate step rather than something CI keeps in sync.
+
+⚠️ **Qualified by #3091:** the check is required, its *harness* is not. Because the gate is
+`pull_request_target`, a PR that weakens it is evaluated by the base revision; with a recorded
+marker it can merge while `ai-review-gate-tests` is red-but-unrequired, after which the weakened
+required check reports Success on later PRs. The enforcement therefore holds only while the gate
+itself is uncompromised — that detection is #3091's open item.
+
+Before #5433 none of that was true — the check was not required and no queue condition
+named it, so nothing on the server-side merge path acted on its conclusion: the enforcers
+were all local (the rail `scripts/admin-merge.sh`, which computes the failing set and
+refuses on a red; `scripts/atomic-land.sh`; and the `review-enforcer` extension). The check
+still ran and read the body; a merge through the queue, or a bare `gh pr merge`, carried an
+unreviewed (or review-invalidated) tree to `main` because no step consulted that verdict. The
+entry condition closes that path.
 
 ## How it works
 
 - The `code-review` skill runs its review gate on the PR.
 - When clean, the review is recorded and evidence is posted to the PR body by
-  `record-review.sh`:
+  `record-review.sh`. The producer half of #1224 will ALSO post the same signed
+  marker to a PR comment (see the #1224 "Producer status" note below):
 
   ```text
   review recorded: reviews/<PR>.json verdict=clean @ <full-sha> (<owner/repo>) sig=<hmac>
@@ -66,16 +92,39 @@ green.
   regardless — that binding is the stronger, pre-#2982 claim, so its `diff=`
   field (if present) is never matched against the live diff.
 
+  **Two channels (#1224).** The marker is read from the PR body AND from the
+  PR's issue comments, because the body is a mutable field any later legitimate
+  edit rewrites — a body-only copy reddens this check on a review that genuinely
+  happened. Channel membership is NOT a trust boundary: the HMAC over the marker
+  text is what makes it unforgeable, the head/diff binding rules are identical
+  for both channels, and comment admission is narrowed to repo-affiliated
+  authors (`OWNER` / `MEMBER` / `COLLABORATOR`). A failed comment fetch fails
+  closed: it can never turn an unreviewed PR into a pass, and the verdict then
+  reports `comments=NOT-READ` so a reader can see the comment side was never
+  examined.
+
+  > **Producer status.** The producer half (agent-infra#1224) is **not deployed**:
+  > measured on 2026-10-02, the installed `~/.pi/agent/scripts/record-review.sh`
+  > contains no comment-posting code and agent-infra `main` carries no
+  > `PR_EVIDENCE_COMMENTS_JQ`, so **no PR comment carries a marker yet** and this
+  > channel changes nothing on its own. The gate is the *consumer* half; it reads
+  > the channel the moment a producer starts writing to it, which is why the two
+  > halves can ship in either order.
+
 ## Why the diff, not just the head sha (#2982)
 
-`strict: true` branch protection requires a PR branch to be up to date with
-`main`. Updating it (`gh pr update-branch`) inserts a merge commit and moves
-the head — but the PR's three-dot diff is byte-identical **whenever `main`'s
+Branch protection on `main` has `strict: false` (verified 2026-09-29), so a PR branch is
+not *required* to be up to date with `main` before merging — a rebase or
+`gh pr update-branch` is a convenience here, not a precondition. The diff-key still earns
+its place, because it is what makes the evidence survive a head move when one happens:
+updating the branch inserts a merge commit and moves the head, but the PR's three-dot
+diff is byte-identical **whenever `main`'s
 advancement did not touch a file the PR also changes** (if it did, the hunk
 context/blob ids change and the evidence is genuinely stale, so a re-record is
-correct). When evidence was keyed only to the head sha, even an untouched
+correct). With evidence keyed only to the head sha, even an untouched
 diff invalidated a still-correct verdict,
-so a green PR could never reach a terminal mergeable state. Keying evidence to
+so a green PR could never reach a terminal mergeable state under `strict: true` (the
+setting this repo does not use). Keying evidence to
 the diff lets the verdict carry forward across a merge-only update. A change
 that actually changes the reviewed diff still invalidates it.
 
@@ -131,7 +180,7 @@ already carries the change.**
 > no hunks and `Binary files … differ` carries no content, so its `index` line
 > is the **only** content-bearing field. Dropping it made two *distinct* binary
 > revisions normalize identically: review binary v1, sign the marker, swap in
-> v2, and the required gate **accepted** an unreviewed binary — a fail-open.
+> v2, and the gate **accepted** an unreviewed binary — a fail-open.
 > The amendment is required by the ruling's own rationale ("the `index` line is
 > redundant with hunk content" — false precisely when there is no hunk content)
 > and is recorded on agent-infra#1362, comment 5806797023. The producer must
@@ -158,7 +207,7 @@ marker whose signed `diff=` equals either:
   recorded.
 
 The legacy arm is mandatory: without it every existing marker breaks and the
-required check reddens fleet-wide. This is a **consumer-first land order** —
+check reddens fleet-wide. This is a **consumer-first land order** —
 the gate is safe to land before or after the producer, and changes nothing
 until the producer starts emitting the normalized digest.
 
@@ -188,7 +237,7 @@ The gate's shell logic runs inline in the workflow (this workflow has no
 checkout step, so it cannot reference a repo script), so
 `.github/scripts/ai-review-gate.test.sh` **extracts the `run:` block verbatim**
 and drives it with a stubbed `gh` and a fabricated HMAC key. It also asserts the
-non-runtime invariants — the required job carries no
+non-runtime invariants — the job carries no
 `if:`/`needs:`/`continue-on-error:`, the trigger stays `pull_request_target`
 with no `paths:` filter, the permissions still grant `pull-requests: read`, and
 the step declares `GH_TOKEN`.
@@ -228,7 +277,7 @@ moves after a record because of new review-fix commits, re-run the code-review
 skill and re-record at the new head. If it moves only because the branch was
 updated against `main` — whether by a merge commit or by a rebase plus
 `--force-with-lease` — the three-dot diff is unchanged and the recorded
-evidence remains valid **for this required check**.
+evidence remains valid **for this check**.
 
 > The local `review-enforcer` extension keeps its own, head-bound merge gate, so
 a plain local merge is still blocked after a merge-only update. That is tracked
@@ -241,13 +290,15 @@ is unambiguous:
 
 | Message says | Cause | Fix |
 |---|---|---|
-| `No AI review evidence found` | no marker in the PR body | run `record-review.sh` |
+| `No AI review evidence found` | no admitted marker in the PR body or in its comments; when the comment read FAILED the message ends `body.` and a `NOTE` says the comment side was not examined | run `record-review.sh` |
 | `is UNSIGNED` | marker has no ` sig=<hmac>` segment at all | re-record with a key configured |
 | `was recorded for '<other>', not …` | marker is bound to a different repo | re-record for this repo |
 | `was found for <other>, not for <repo>` | marker is STALE **and** bound to a different repo | re-record for this repo |
 | `normalises to an empty value` | the configured secret is whitespace-only, so the HMAC key would be the empty (public) string | set a real `AI_REVIEW_GATE_KEY` |
 | `HMAC mismatch` | key or signed text differs; prints `sha256` prefixes of the text it checked | compare the prefix with the recording machine, then re-record |
 | `is stale` | marker is for another head sha, and its `diff=` is absent, could not be hashed live, or matches neither the normalized nor the raw digest | re-run the review, re-record at the new head |
+| `NO marker in this PR's body[ or its admitted comments] is bound to <head>` | the stale verdict, stated as what it examined: `or its admitted comments` appears only when the comment channel was actually read. It prints `candidate marker(s): N` (with their shas), the channel the last candidate came from, the head it expected, and the provenance of BOTH sources (`body=<rest-live\|event-snapshot>`, `comments=<read\|NOT-READ>`) | if `body=event-snapshot` the run judged a body frozen at the event, so re-run the check before acting — a record posted afterwards is invisible to it; if `comments=NOT-READ` the comment side was never examined; otherwise re-record at the head |
+| `the LIVE body could not be used (…)` | the run fell back to the event payload: the REST read failed, or it succeeded and returned an empty body | re-run the check before acting on the verdict; the evidence may still be valid |
 | `live diff hash could not be computed` | the REST diff fetch failed; a `diff=` marker fails closed rather than carrying forward | re-run the job once the API is reachable — the evidence may still be valid |
 | `carries no well-formed 40-hex recorded sha` | marker's `@` field is not a full sha | re-record with a full 40-char head sha |
 | `malformed marker` | signed, but the line shape drifted from what this gate accepts | update the gate/producer together |

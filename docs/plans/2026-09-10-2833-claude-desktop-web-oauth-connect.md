@@ -11,6 +11,12 @@ subjects.team: organisation-design-team
 
 # Claude Desktop/Web OAuth Connect — Implementation Plan (#2833)
 
+> **⚠️ SUPERSEDED PREMISE (2026, #3128):** this plan — and the passages below that state it —
+> asserts `validate_authorize_params` takes **no `scope` parameter**. That was true when written;
+> #3128 added the `scope` parameter and the `validate_scope` allow-list gate on the
+> authorize/consent/mint path. Read every `offline_access` / authorize-scope passage here as
+> historical, not as current behaviour.
+>
 > **⚠️ THIS PLAN WAS DECOMPOSED ON 2026-09-10.** After 2 plan-review cycles, #2833 was
 > re-tiered `task`/`standard` → **`project`/`complex`** and split into four children. The plan is
 > project-shaped and contained a genuine authorization-server bug fix the scoping had not

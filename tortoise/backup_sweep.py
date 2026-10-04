@@ -46,6 +46,7 @@ from typing import Any, Callable  # noqa: UP035
 
 from .backup_config import BackupConfig
 from .hosted_backup import (
+    _delete_backup_objects,
     _is_supabase_source,
     create_backup,
     mirror_backup,
@@ -559,12 +560,14 @@ def read_graph_state(storage, org_id: str, graph_id: str) -> dict[str, Any]:
 
 
 def _delete_uploaded(storage, org_id: str, backup_id: str) -> None:
-    """Best-effort removal of a just-uploaded (guard-rejected) backup."""
-    for suffix in ("dump.enc", "manifest.json"):
-        try:
-            storage.delete(f"backups/{backup_id}/{suffix}")
-        except Exception as e:
-            logger.warning("cleanup of %s/%s failed: %s", backup_id, suffix, e)
+    """Best-effort removal of a just-uploaded (guard-rejected) backup.
+
+    Delegates to :func:`hosted_backup._delete_backup_objects` — the ONE delete
+    implementation (#5062) — so this path deletes the shared object set in the
+    shared order (manifest last, #5062 review F3) and a guard-rejected backup
+    can never leave an orphan ``ledger.json`` behind.
+    """
+    _delete_backup_objects(storage, backup_id)
 
 
 def _sweep_graph_list(source, org_id: str) -> list[dict[str, Any]]:
@@ -718,6 +721,12 @@ def _backup_graph(
         )
         return {"status": "p0_guard_failed", "org_id": org_id, "graph_id": graph_id}
 
+    # #3030 (review): record that the guard demonstrably RAN and PASSED. Callers
+    # must never infer this from a graph being present in the results map — a
+    # graph whose dump errored, was aborted by the size guard, or never resolved
+    # returns BEFORE this line, so "present" does not mean "checked".
+    p0_checked = True
+
     node_count = int(manifest["node_count"])
 
     # ── Empty-content transition guard (no state.json write on fire). ──
@@ -734,10 +743,10 @@ def _backup_graph(
                     "detail": {"previous": prev_node_count, "now": 0, "drop_pct": 100},
                 }
             )
-            return {"status": "data_loss_candidate", "org_id": org_id,
+            return {"p0_checked": p0_checked, "status": "data_loss_candidate", "org_id": org_id,
                     "graph_id": graph_id, "node_count": 0}
         # Steady-0 (chronic empty org) is a signal, never an incident.
-        return {"status": "empty_skipped", "org_id": org_id,
+        return {"p0_checked": p0_checked, "status": "empty_skipped", "org_id": org_id,
                 "graph_id": graph_id, "node_count": 0}
     if prev_node_count > 0 and node_count < prev_node_count * 0.5:
         _delete_uploaded(storage, org_id, manifest.get("backup_id", ""))
@@ -753,7 +762,7 @@ def _backup_graph(
                 },
             }
         )
-        return {"status": "data_loss_candidate", "org_id": org_id,
+        return {"p0_checked": p0_checked, "status": "data_loss_candidate", "org_id": org_id,
                 "graph_id": graph_id, "node_count": node_count}
 
     # ── Per-label drift guard (#661): fires when the overall >50% ratio is
@@ -779,7 +788,7 @@ def _backup_graph(
                     },
                 }
             )
-            return {"status": "data_loss_candidate", "org_id": org_id,
+            return {"p0_checked": p0_checked, "status": "data_loss_candidate", "org_id": org_id,
                     "graph_id": graph_id, "node_count": node_count}
 
     # ── #2319 geo-mirror (env-guarded second-store copy): an ACCEPTED
@@ -796,7 +805,7 @@ def _backup_graph(
             logger.exception(
                 "mirror of %s/%s failed (primary backup durable): %s",
                 org_id, graph_id, e)
-            return {"status": "error", "org_id": org_id,
+            return {"p0_checked": p0_checked, "status": "error", "org_id": org_id,
                     "graph_id": graph_id,
                     "error": f"backup accepted but mirror failed: {e}"}
     else:
@@ -840,12 +849,17 @@ def _backup_graph(
         deleted = []
 
     return {
+        "p0_checked": p0_checked,
         "status": "backed_up",
         "org_id": org_id,
         "graph_id": graph_id,
         "node_count": node_count,
         "pruned": len(deleted),
         "mirror": mirror_result,
+        # #5062: the destination's read-back coverage. `backed_up` is reachable
+        # only through a create_backup whose ledger was read back verified, so
+        # this is evidence, not a restatement of the writer's counters.
+        "coverage": manifest.get("coverage"),
     }
 
 
@@ -930,13 +944,12 @@ def _sweep_org(
             gid = meta.get("graph_id") or ""
             if (gid and gid != "default"
                     and graph_results.get(gid, {}).get("status") == "backed_up"):
-                for suffix in ("dump.enc", "manifest.json"):
-                    try:
-                        storage.delete(f"backups/{bid}/{suffix}")
-                    except Exception as e:
-                        logger.warning(
-                            "custom-era flat cleanup of %s/%s failed: %s",
-                            org_id, bid, e)
+                # ONE delete implementation and ONE object set (#5062 review
+                # F4): the flat pool's objects are the same suffixes as a
+                # nested archive's, so this must not carry its own hardcoded
+                # pair — a flat artifact that carried a ledger.json would
+                # otherwise be orphaned here.
+                _delete_backup_objects(storage, bid)
                 flats.pop(bid, None)
     # #2466: the sweep's index write reconciles purge-erased flat bids (a
     # stale reclassification must never resurrect deleted objects) and prunes
@@ -1374,6 +1387,100 @@ def run_backup_sweep(
     }
 
 
+#: #3030: sweep-emitted guard kinds that a CONCLUSIVE clear run resolves. The
+#: sweep is the authority on its own guards — a run that completed and did not
+#: emit a kind IS the "condition cleared" evidence (delete-to-resolve).
+SWEEP_RESOLVABLE_GLOBAL_KINDS = (
+    "ENUM_DELTA",
+    "NO_ELIGIBLE_TEAMS",
+    "GRAPH_NAME_RESOLUTION_FAIL",
+)
+
+
+def graph_subject(org_id: str, graph_id: str = "") -> str:
+    """The alert-store subject for one graph (#2313): the bare org for the
+    default graph, ``"{org}:{gid}"`` otherwise — the SAME key the watcher and
+    re-baseline use, so open/resolve stay coherent across surfaces."""
+    if not graph_id or graph_id == "default":
+        return org_id
+    return f"{org_id}:{graph_id}"
+
+
+def incident_subject(inc: dict[str, Any]) -> str:
+    """#2313: alert-store subject for a sweep incident.
+
+    Default-graph and org-level incidents keep the bare org subject (the
+    pre-#2313 alert surface). Custom-graph incidents use the per-graph
+    subject ``"{org}:{gid}"`` — the SAME key the watcher uses — so re-baseline
+    and the watcher can open/resolve coherently.
+    """
+    return graph_subject(inc.get("org_id", ""), inc.get("graph_id") or "")
+
+
+def sweep_resolutions(result: dict[str, Any]) -> list[tuple[str, str]]:
+    """The (kind, subject) incidents a CONCLUSIVE sweep run proves CLEARED (#3030).
+
+    Four kinds are emitted by the sweep but had NO resolver on any surface, so
+    once filed they stayed open forever — alert rot, the exact failure mode this
+    channel exists to avoid (live instance: #2821 ``[DR] ENUM_DELTA``, whose own
+    cause #2823 was fixed while the alert could not close).
+
+    Clearing requires POSITIVE EVIDENCE, never the mere absence of an emission
+    (review P0 — the first cut of this function closed live alerts):
+
+    * **Global guards** (`ENUM_DELTA`, `NO_ELIGIBLE_TEAMS`,
+      `GRAPH_NAME_RESOLUTION_FAIL`) need a run that actually LOOKED: at least one
+      team result carrying a graph map. A 0-team/lock-busy run is exactly what
+      ENUM_DELTA reports — resolving it there would silence the #2823
+      silent-degradation class, and it could never re-fire (the guard triggers
+      only on the ``>0 → 0`` transition, which the same run's ops-state write
+      resets).
+    * **`P0_GUARD_FAIL`** is per-graph and cleared only for graphs whose dump
+      demonstrably RAN the guard and passed it (``p0_checked`` — the flag is set
+      only by the post-guard returns). A result that returned earlier —
+      ``aborted_size_guard``, a pre-dump ``error`` — carries no ``p0_checked``,
+      so its P0 incident must stay open. Note the predicate is the FLAG, not the
+      status name: a post-guard mirror failure returns ``status="error"`` *with*
+      ``p0_checked``, and that graph's incident IS cleared.
+    * A **blind** run (``enum_failed``/``error``/``already_running``)
+      resolves nothing: it cannot distinguish "no teams" from "could not look".
+
+    The caller intersects this with the currently OPEN incidents (#3030 review:
+    one list per kind, never an R2 read per graph).
+    """
+    if result.get("status") in ("enum_failed", "error", "already_running"):
+        return []
+    results = result.get("results") or {}
+    # Positive enumeration evidence: the sweep looked and got per-team graph
+    # maps (an empty result set means it had nothing to look at).
+    looked = any(
+        isinstance(res, dict) and isinstance(res.get("graphs"), dict)
+        for res in results.values()
+    )
+    emitted = {
+        (inc.get("kind"), incident_subject(inc))
+        for inc in result.get("incidents", [])
+    }
+    cleared: list[tuple[str, str]] = []
+    if looked:
+        cleared.extend(
+            (kind, "")
+            for kind in SWEEP_RESOLVABLE_GLOBAL_KINDS
+            if (kind, "") not in emitted
+        )
+    for org_id, team_res in results.items():
+        graphs = team_res.get("graphs") if isinstance(team_res, dict) else None
+        if not isinstance(graphs, dict):
+            continue
+        for gid, gres in graphs.items():
+            if not (isinstance(gres, dict) and gres.get("p0_checked")):
+                continue
+            subject = graph_subject(org_id, gid)
+            if ("P0_GUARD_FAIL", subject) not in emitted:
+                cleared.append(("P0_GUARD_FAIL", subject))
+    return cleared
+
+
 # ── #2304 trash purge (delete = quarantine → _GRAPH_PURGE_GRACE_DAYS grace → erasure) ──
 # Owner Option C: tombstoned custom graphs are recoverable (trash restore) for
 # a disclosed grace window, then PHYSICALLY erased: the data-plane namespace
@@ -1487,11 +1594,16 @@ def _purge_graph_storage(storage, org_id: str, graph_id: str,
     graph_name (= the namespace) even after the sweep re-attributed the
     entry to graph_id "" (the classify step maps ACTIVE rows only, so a
     deleted graph's flats lose their gid on the first sweep after delete —
-    #2462 P1). Matching graph_name == namespace recovers those entries;
-    matching the bare NAME is deliberately NOT done (name reuse would
-    misattribute a new graph's flats)."""
+    #2462 P1). Matching graph_name == namespace recovers those entries —
+    but ONLY when that namespace provably belongs to THIS graph (it derives
+    from the gid under the new layout); matching the bare NAME is
+    deliberately NOT done (name reuse would misattribute a new graph's
+    flats), and a namespace that does not derive from the gid may host a
+    LIVE graph, so its flats are preserved + reported (see
+    ``ambiguous_flats``)."""
     out: dict[str, Any] = {"pool_keys": 0, "state_keys": 0,
-                           "flat_keys": 0, "errors": []}
+                           "flat_keys": 0, "ambiguous_flats": [],
+                           "errors": []}
     for prefix in (f"backups/{org_id}/{graph_id}/",
                    f"ops/teams/{org_id}/graphs/{graph_id}/"):
         try:
@@ -1513,16 +1625,48 @@ def _purge_graph_storage(storage, org_id: str, graph_id: str,
     except Exception as e:
         logger.warning("purge %s %s: legacy index unreadable: %s",
                        org_id, graph_id, e)
-    flat_bids = [
-        str(bid) for bid, ent in (index or {}).items()
-        if isinstance(ent, dict) and (
-            str(ent.get("graph_id") or "") == graph_id
-            # #2462: entries re-attributed to "" by the sweep (the classify
-            # step sees ACTIVE rows only) still carry the manifest's
-            # graph_name — the tombstone's gid-keyed namespace.
-            or (namespace
-                and str(ent.get("graph_name") or "") == namespace))
-    ]
+    # MUST NEVER HAPPEN: a purge for graph X must never delete an archive
+    # that is not provably X's. The `graph_name == namespace` fallback is
+    # sound ONLY when the namespace provably derives from THIS graph's id
+    # (the new gid-keyed layout). Under the ownership guard (residual) the
+    # namespace does NOT derive from the gid — which is exactly why the
+    # guard refuses to drop it: a LIVE graph may occupy it (name-based reuse
+    # / drift; the default graph's own name included). Deleting a flat
+    # matched only by that name would erase the live occupant's archive, so
+    # ownership is AMBIGUOUS: preserve and report it, never delete. Mirrors
+    # the namespace guard.
+    gid_namespaces = {f"org_{org_id}_{graph_id}",
+                      f"team_{org_id}_{graph_id}"}
+    ns_trusted = bool(namespace) and namespace in gid_namespaces
+    flat_bids: list[str] = []
+    ambiguous_flats: list[str] = []
+    for bid, ent in (index or {}).items():
+        if not isinstance(ent, dict):
+            continue
+        # An absent/empty gid proves nothing — never match on it (a
+        # tombstone row without an id must not inherit the whole
+        # unresolved population).
+        if graph_id and str(ent.get("graph_id") or "") == graph_id:
+            # The index attributes this archive to THIS gid (gids are never
+            # reused) — provably the purged graph's, whatever its namespace.
+            flat_bids.append(str(bid))
+        elif namespace and str(ent.get("graph_name") or "") == namespace:
+            if ns_trusted:
+                # #2462: entries re-attributed to "" by the sweep (the
+                # classify step sees ACTIVE rows only) still carry the
+                # manifest's graph_name — the tombstone's gid-keyed
+                # namespace.
+                flat_bids.append(str(bid))
+            else:
+                ambiguous_flats.append(str(bid))
+    out["ambiguous_flats"] = ambiguous_flats
+    if ambiguous_flats:
+        logger.warning(
+            "purge %s %s: %d legacy flat archive(s) match namespace %r but "
+            "ownership is ambiguous (the namespace does not derive from "
+            "this graph id) — PRESERVED for operator review: %s",
+            org_id, graph_id, len(ambiguous_flats), namespace,
+            ", ".join(ambiguous_flats[:5]))
     if flat_bids:
         for bid in flat_bids:
             try:

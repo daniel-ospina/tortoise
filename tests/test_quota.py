@@ -8,10 +8,12 @@ from pathlib import Path
 import pytest
 
 from tortoise.quota import (
+    QUOTA_REFUSAL_CODE,
     QuotaCheckError,
     QuotaExceededError,
     count_org_usage,
     enforce_org_limit,
+    quota_refusal_payload,
     resolve_org_limits,
 )
 
@@ -86,8 +88,18 @@ class TestEnforceTeamLimit:
         sdk = TortoiseSDK(db, namespace=f"test_quota_team1_{os.urandom(4).hex()}")
         sdk.create_point("statement", "A")
         limits = {"org_id": "team1", "max_points": 1}
-        with pytest.raises(QuotaExceededError):
+        with pytest.raises(QuotaExceededError) as exc_info:
             enforce_org_limit(limits, "points", sdk=sdk)
+        # #4614: the generic branch reports the resource and the values it
+        # compared — the payload is not a capture-path special case.
+        assert (exc_info.value.resource, exc_info.value.used,
+                exc_info.value.limit) == ("points", 1, 1)
+        payload = quota_refusal_payload(exc_info.value)
+        assert payload["code"] == QUOTA_REFUSAL_CODE
+        assert payload["resource"] == "points"
+        assert payload["used"] == 1 and payload["limit"] == 1
+        assert payload["message"] == "Team points limit reached (1). " \
+            "Upgrade your plan to increase it."
         sdk.close()
 
     def test_below_limit_passes(self, tmp_path):
@@ -353,9 +365,11 @@ class TestSessionsQuota:
 class TestDocumentsQuota:
     """#1726: the documents gate fires on /v1/index/docs ONLY, with the
     derived-constant cap (max_documents = max_points ×
-    _DOCUMENTS_FROM_POINTS_FACTOR — deliberately NOT a pricing.json field)
-    and the discriminator COALESCE(documentKind,'') != 'transcript' (NULL-
-    kind docs COUNT — no leak; session transcripts excluded)."""
+    _DOCUMENTS_FROM_POINTS_FACTOR — deliberately NOT a pricing.json field).
+    D10 (ONTOLOGY v3.15 §4.4): the count is over document-bearing :Source
+    nodes (documentKind IS NOT NULL AND <> 'transcript'); a Source with NO
+    documentKind (session/connector/provenance) is NOT metered, and session
+    transcripts are excluded."""
 
     def _tenant(self, tmp_path, reg_sdk):
         from tortoise.sdk import TortoiseSDK  # noqa: I001
@@ -365,23 +379,63 @@ class TestDocumentsQuota:
         return tid, TortoiseSDK(db, namespace=tid)
 
     def _seed_doc(self, tenant, i: int, kind: str | None) -> None:
+        """Seed a document-bearing :Source (D10: a document IS a :Source).
+
+        kind=None omits documentKind entirely (a session/connector/provenance
+        Source); kind='' mirrors the projection's frontmatter-less doc write
+        (``s.documentKind = coalesce($dk, s.documentKind, '')`` — a null or
+        omitted ``$dk`` lands as the non-null empty string)."""
         if kind is None:
             tenant._get_proj().g.query(
-                "CREATE (d:Document {id:$id, title:$t})",
-                params={"id": f"doc_{i}", "t": f"doc {i}"})
+                "CREATE (s:Source {url:$url, title:$t})",
+                params={"url": f"doc_{i}", "t": f"doc {i}"})
         else:
             tenant._get_proj().g.query(
-                "CREATE (d:Document {id:$id, title:$t, documentKind:$k})",
-                params={"id": f"doc_{i}", "t": f"doc {i}", "k": kind})
+                "CREATE (s:Source {url:$url, title:$t, documentKind:$k})",
+                params={"url": f"doc_{i}", "t": f"doc {i}", "k": kind})
 
-    def test_null_kind_docs_count(self, reg_sdk, tmp_path):
-        """A NULL-kind Document COUNTS toward the documents resource — a
-        frontmatter-less docs-endpoint doc never leaks past the gate."""
+    def test_null_kind_not_counted_kindless_doc_counts(self, reg_sdk, tmp_path):
+        """D10: a :Source with NO documentKind (session/connector/provenance)
+        is NOT a document and must not be metered. A kindless docs-endpoint
+        doc — the projection writes documentKind='' for a frontmatter-less doc
+        — IS document-bearing and COUNTS, so it never leaks past the gate."""
         tid, tenant = self._tenant(tmp_path, reg_sdk)
         try:
             for i in range(3):
                 self._seed_doc(tenant, i, kind=None)
+            assert count_org_usage(tid, "documents", sdk=tenant) == 0
+            for i in range(3, 6):
+                self._seed_doc(tenant, i, kind="")
             assert count_org_usage(tid, "documents", sdk=tenant) == 3
+        finally:
+            tenant.close()
+
+    def test_the_refusal_reports_the_derived_limit(self, reg_sdk, tmp_path):
+        """#4614: the documents cap is DERIVED (`max_points x factor`) and is
+        deliberately NOT in `_RESOURCE_LIMIT_KEYS` — so its refusal must carry
+        the limit the branch actually compared. Reporting the raw `max_points`
+        would understate the bound by the factor, and reporting nothing would
+        leave the caller to prose-match its way to a number.
+        """
+        from tortoise.quota import _DOCUMENTS_FROM_POINTS_FACTOR
+        tid, tenant = self._tenant(tmp_path, reg_sdk)
+        try:
+            limit = 1 * _DOCUMENTS_FROM_POINTS_FACTOR
+            for i in range(limit):
+                self._seed_doc(tenant, i, kind="brief")
+            with pytest.raises(QuotaExceededError) as exc_info:
+                enforce_org_limit(
+                    {"org_id": tid, "max_points": 1}, "documents", sdk=tenant)
+            err = exc_info.value
+            assert err.resource == "documents"
+            assert err.limit == limit, (
+                f"reported {err.limit!r}, but the gate compared {limit!r} "
+                f"(max_points x {_DOCUMENTS_FROM_POINTS_FACTOR})")
+            assert err.used == limit
+            payload = quota_refusal_payload(err)
+            assert payload["code"] == QUOTA_REFUSAL_CODE
+            assert payload["resource"] == "documents"
+            assert payload["limit"] == limit and payload["used"] == limit
         finally:
             tenant.close()
 
@@ -392,6 +446,86 @@ class TestDocumentsQuota:
         try:
             self._seed_doc(tenant, 0, kind="brief")
             self._seed_doc(tenant, 1, kind="transcript")
+            assert count_org_usage(tid, "documents", sdk=tenant) == 1
+        finally:
+            tenant.close()
+
+    def test_b3_legacy_documentcreated_path_cannot_escape_the_cap(
+            self, reg_sdk, tmp_path):
+        """Adversarial B3 (#5026/D10): a document created through the OLD
+        (DocumentCreated) path is a document-bearing :Source and IS metered —
+        it cannot escape the documents cap by being written off the index
+        path. The gate then refuses at the derived cap."""
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
+
+        tid, tenant = self._tenant(tmp_path, reg_sdk)
+        try:
+            assert count_org_usage(tid, "documents", sdk=tenant) == 0
+            log = EventLog(str(tmp_path / "b3_events.jsonl"))
+            api = EventAPI(log, initiated_by="extractor",
+                           projection=tenant._get_proj())
+            api.add_document("doc/b3-legacy.md", "Legacy B3")
+            assert count_org_usage(tid, "documents", sdk=tenant) == 1, \
+                "legacy DocumentCreated doc escaped the :Source documents cap"
+            # derived cap 0*10 == 0 → the single legacy doc is OVER the cap
+            with pytest.raises(QuotaExceededError,
+                               match="documents limit reached"):
+                enforce_org_limit({"org_id": tid, "max_points": 0},
+                                  "documents", sdk=tenant)
+        finally:
+            tenant.close()
+
+    def test_b3_null_document_kind_cannot_escape_the_cap(
+            self, reg_sdk, tmp_path):
+        """Adversarial B3 (#5026/D10): an explicit
+        ``document_kind=None`` (ingest's YAML ``type:`` decodes to None;
+        ``EventAPI.add_document(document_kind=None)``; a null field in a
+        replayed JSONL line) must NOT leave the document Source NULL-kind —
+        the meter reads ``documentKind IS NOT NULL``, so a NULL kind would
+        escape the cap. The projection coerces a null/absent kind to '' on
+        CREATE."""
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
+
+        tid, tenant = self._tenant(tmp_path, reg_sdk)
+        try:
+            assert count_org_usage(tid, "documents", sdk=tenant) == 0
+            log = EventLog(str(tmp_path / "b3_null_events.jsonl"))
+            api = EventAPI(log, initiated_by="extractor",
+                           projection=tenant._get_proj())
+            for i in range(3):
+                api.add_document(f"doc/b3-null-{i}.md", f"Null kind {i}",
+                                 document_kind=None)
+            kinds = tenant._get_proj().g.query(
+                "MATCH (s:Source) WHERE s.url STARTS WITH 'doc/b3-null' "
+                "RETURN s.documentKind").result_set
+            assert kinds and all(r[0] is not None for r in kinds), kinds
+            assert count_org_usage(tid, "documents", sdk=tenant) == 3, \
+                "null-kind document escaped the :Source documents cap"
+            with pytest.raises(QuotaExceededError,
+                               match="documents limit reached"):
+                enforce_org_limit({"org_id": tid, "max_points": 0},
+                                  "documents", sdk=tenant)
+        finally:
+            tenant.close()
+
+    def test_b4_provenance_source_not_over_counted(self, reg_sdk, tmp_path):
+        """Adversarial B4 (#5026/D10): an ordinary connector/provenance
+        :Source (sourceKind + contentHash, NO documentKind) is NOT metered by
+        the documents cap — a COALESCE-to-empty predicate would meter every
+        such node (the #1726 price change D10 forbids)."""
+        tid, tenant = self._tenant(tmp_path, reg_sdk)
+        try:
+            for i in range(4):
+                tenant._get_proj().g.query(
+                    "CREATE (s:Source {url:$url, sourceKind:'github', "
+                    "contentHash:'h', title:$t})",
+                    params={"url": f"https://gh/{i}", "t": f"repo {i}"})
+            assert count_org_usage(tid, "documents", sdk=tenant) == 0, \
+                "provenance Sources were over-counted as documents"
+            # one real document among them still counts exactly once
+            self._seed_doc(tenant, 9, kind="report")
             assert count_org_usage(tid, "documents", sdk=tenant) == 1
         finally:
             tenant.close()
@@ -535,6 +669,116 @@ class TestObjectSubjectQuota:
             tenant.close()
 
 
+# ── #1977: direct event writes count against the quota cap ────────────────
+
+class TestEventQuota:
+    """#1977 (code-review gate on PR #1974, the #1911 fix):
+    ``tortoise_create_event`` is ``_quota_gated("points")``, but the points
+    count did not include the Event label — a DIRECT call defaults to
+    ``is_episodic=None`` and mints a flag-less Event that consumed zero
+    quota, so the gate could never refuse (its failure mode was
+    indistinguishable from its success mode). The count now includes
+    non-episodic Event nodes, mirroring the Point fail-closed R-18 rule;
+    capture-minted Events (stamped ``is_episodic: true``) stay excluded."""
+
+    def _tenant(self, reg_sdk, tmp_path):
+        from tortoise.sdk import TortoiseSDK  # noqa: I001
+        import os
+        return TortoiseSDK(
+            os.path.join(tmp_path, "quota.db"),
+            namespace=_find_org_id(reg_sdk))
+
+    def test_direct_events_count_toward_points(self, reg_sdk, tmp_path):
+        """A direct ``create_event`` (the MCP tool's default shape,
+        ``is_episodic=None``) is a graph node and consumes the node cap."""
+        tid = _find_org_id(reg_sdk)
+        tenant = self._tenant(reg_sdk, tmp_path)
+        try:
+            tenant.create_event("kickoff", "meeting")
+            tenant.create_event("deploy", "deployment")
+            assert count_org_usage(tid, "points", sdk=tenant) == 2
+        finally:
+            tenant.close()
+
+    def test_direct_event_write_402_at_cap(self, reg_sdk, tmp_path):
+        """The gate REFUSES — pre-fix it could never refuse, because the
+        count could not see the Event the write was about to add."""
+        tid = _find_org_id(reg_sdk)
+        tenant = self._tenant(reg_sdk, tmp_path)
+        try:
+            tenant.create_event("e1", "meeting")
+            with pytest.raises(QuotaExceededError, match="points limit reached"):
+                enforce_org_limit(
+                    {"org_id": tid, "max_points": 1}, "points", sdk=tenant)
+        finally:
+            tenant.close()
+
+    def test_event_write_passes_below_cap(self, reg_sdk, tmp_path):
+        """Below the cap the gate still ADMITS — the fix must not turn the
+        points gate into an unconditional refusal for event writers."""
+        tid = _find_org_id(reg_sdk)
+        tenant = self._tenant(reg_sdk, tmp_path)
+        try:
+            tenant.create_event("e1", "meeting")
+            enforce_org_limit(
+                {"org_id": tid, "max_points": 2}, "points", sdk=tenant)
+        finally:
+            tenant.close()
+
+    def test_episodic_event_is_excluded(self, reg_sdk, tmp_path):
+        """The discriminator is the ``is_episodic`` flag, not the label —
+        an episodic Event (what capture/transcript minting stamps) consumes
+        no quota, exactly as an episodic Point does not."""
+        tid = _find_org_id(reg_sdk)
+        tenant = self._tenant(reg_sdk, tmp_path)
+        try:
+            tenant._get_proj().g.query(
+                "CREATE (e:Event {id:'ep1', eventId:'ep1', "
+                "eventKind:'AgentSession', is_episodic:true})")
+            assert count_org_usage(tid, "points", sdk=tenant) == 0
+            # and a flag-less Event beside it counts once
+            tenant.create_event("direct", "meeting")
+            assert count_org_usage(tid, "points", sdk=tenant) == 1
+        finally:
+            tenant.close()
+
+    def test_session_index_event_is_charged(self, reg_sdk, tmp_path):
+        """The session INDEX path (``_session_event_write``) writes its
+        AgentSession Event with ``is_episodic`` UNSET ("no is_episodic on
+        the index path"), so it IS charged. Pins the quota.py #1977 comment:
+        the Event branch is a flag discriminator, NOT a sessionCaptured/
+        AgentSession kind allowlist — only the three writers that explicitly
+        stamp ``is_episodic: true`` (sdk/hosted ``capture_session`` mint, the
+        hosted commit path) stay excluded."""
+        tid = _find_org_id(reg_sdk)
+        tenant = self._tenant(reg_sdk, tmp_path)
+        try:
+            tenant._session_event_write(
+                {"sessionId": "idx_s1", "title": "Indexed"},
+                "body text", "/tmp/idx_s1.md", "ev_idx1", "idx_s1",
+                "hash1", "Indexed", False, None, "idx_s1.md", "idx_s1.md")
+            rows = tenant._get_proj().g.query(
+                "MATCH (e:Event) RETURN e.eventKind, e.is_episodic"
+            ).result_set
+            assert rows == [["AgentSession", None]]
+            assert count_org_usage(tid, "points", sdk=tenant) == 1
+        finally:
+            tenant.close()
+
+    def test_capture_minted_events_stay_excluded(self, reg_sdk, tmp_path):
+        """Regression: the capture path stamps its Events episodic, so the
+        Event branch must not re-charge capture users (the count stays 2 =
+        1 value point + 1 minted Object, exactly as #1911 pinned)."""
+        tid = _find_org_id(reg_sdk)
+        tenant = self._tenant(reg_sdk, tmp_path)
+        try:
+            tenant.capture_session(
+                [{"role": "user", "content": "okay"}], session_id="ev_s1")
+            assert count_org_usage(tid, "points", sdk=tenant) == 2
+        finally:
+            tenant.close()
+
+
 class TestIsEpisodicBackfill:
     """R-18 (DE2E-7 legacy fixture): legacy nodes lack is_episodic → the
     one-query backfill (graph-scripts/backfill_is_episodic.py) stamps them →
@@ -583,11 +827,15 @@ class TestIsEpisodicBackfill:
                 "CREATE (k1:Point {id:'legacy_k1', content:'we decided X', "
                 "pointKind:'decision', is_operator:false, status:'live'})")
             # Pre-backfill: missing flag counts as NON-episodic (fail-closed,
-            # R-18) → 3 legacy Points (p1, p2, k1) inflate the points quota.
-            assert count_org_usage(tid, "points", sdk=tenant) == 3
+            # R-18) → 4 legacy nodes (p1, p2, k1 plus the flag-less
+            # sessionCaptured EVENT — #1977 added the Event label to the
+            # points count under the same R-18 rule) inflate the points
+            # quota. The backfill's Event statement exists for exactly this
+            # kind, so the remedy below covers the Event branch too.
+            assert count_org_usage(tid, "points", sdk=tenant) == 4
             with pytest.raises(QuotaExceededError, match="points limit reached"):
                 enforce_org_limit(
-                    {"org_id": tid, "max_points": 3}, "points", sdk=tenant)
+                    {"org_id": tid, "max_points": 4}, "points", sdk=tenant)
             # Dry-run reports without writing (5 capture artifacts: s, e, src,
             # p1, p2 — NOT k1)
             report = run_backfill(proj, dry_run=True)
@@ -832,14 +1080,25 @@ class TestApiKeySlotParity:
         enforce_org_limit(limits, "api_keys", sdk=reg_sdk)          # 1/2
         assert _count_resource(tid, "api_keys", sdk=reg_sdk) == 1
         _seed("slot-2")
-        with pytest.raises(QuotaExceededError):                       # 2/2 → over
+        with pytest.raises(QuotaExceededError) as unc:                    # 2/2 → over
             enforce_org_limit(limits, "api_keys", sdk=reg_sdk)
+        # #4614: the refusal carries the numbers the gate COMPARED, so a
+        # caller can act on it without parsing the message. `used` is the
+        # counted value at the raise, and `resource`/`limit` name what was
+        # exhausted.
+        assert (unc.value.resource, unc.value.used, unc.value.limit) == (
+            "api_keys", 2, 2)
         enforce_org_limit(limits, "api_keys", sdk=reg_sdk,
                           slot_credit=1)                              # 2-1 → ok
         assert _count_resource(tid, "api_keys", sdk=reg_sdk) == 2
         _seed("slot-3")
-        with pytest.raises(QuotaExceededError):                       # 3-1 → over
+        with pytest.raises(QuotaExceededError) as credited:           # 3-1 → over
             enforce_org_limit(limits, "api_keys", sdk=reg_sdk, slot_credit=1)
+        # The payload follows the CREDIT (`count - slot_credit`), not the raw
+        # count — it reports the left-hand side of the comparison that
+        # actually produced the refusal. Reporting the raw 3 here would
+        # describe a decision the gate did not make.
+        assert (credited.value.used, credited.value.limit) == (2, 2)
         # The credit is applied LITERALLY (`count - slot_credit >= limit`) — it
         # is not clamped, so ONLY the caller's occupancy proof bounds it at 1.
         # Over-crediting admits (the free-slot hazard); under-crediting
@@ -847,3 +1106,109 @@ class TestApiKeySlotParity:
         # silently; the guard itself is the single caller + test_rotate_key's
         # revoked/expired/bootstrap refusals.
         enforce_org_limit(limits, "api_keys", sdk=reg_sdk, slot_credit=4)
+
+
+# ── #4614: the refusal is a distinguishable STATE, not a sentence ──────────
+
+
+class TestStructuredRefusal:
+    """A quota refusal must carry a machine-readable category (#4614).
+
+    The gate answered with a bare prose ``detail``, so no caller could tell a
+    quota refusal from any other 402 without matching the message text — and
+    our own clients are documented as forbidden from doing exactly that
+    (``capture_spool.classify_failure``: *"a capacity/billing refusal is a
+    category, not a string"*). These pin the house payload shape (#2789,
+    `_one_free_org_detail`) so the category cannot be flattened back to prose.
+    """
+
+    def test_carries_the_code_and_the_numbers(self):
+        exc = QuotaExceededError(
+            "Team points limit reached (25000). Upgrade your plan to increase it.",
+            resource="points", used=24965, limit=25000, estimate=1044)
+        payload = quota_refusal_payload(exc)
+        assert payload["code"] == QUOTA_REFUSAL_CODE == "quota_exceeded"
+        assert payload["resource"] == "points"
+        assert payload["used"] == 24965
+        assert payload["limit"] == 25000
+        assert payload["estimate"] == 1044
+        # The prose survives verbatim inside the payload: a human reader — and
+        # the dashboard's `Last attempt — <detail>` sub-line, which flattens a
+        # dict detail to its `message` — loses nothing.
+        assert payload["message"] == str(exc)
+
+    def test_omits_only_what_the_raise_site_did_not_know(self):
+        """An absent number beats a fabricated one.
+
+        The dashboard falls back to `/v1/team`'s allowance when a refusal
+        carries none (`keyAllowance.capLimitFrom`), so inventing a figure
+        would REPLACE a real one with a lie. But a present 0 is a real value
+        (a 0-cap plan refuses every write) and must be kept — dropping it
+        would hide an absolute cap.
+        """
+        payload = quota_refusal_payload(
+            QuotaExceededError("Team graphs limit reached (1)."))
+        assert payload == {
+            "code": QUOTA_REFUSAL_CODE,
+            "message": "Team graphs limit reached (1).",
+        }
+        zero = quota_refusal_payload(
+            QuotaExceededError("Team points limit reached (0).",
+                               resource="points", used=0, limit=0))
+        assert zero["used"] == 0 and zero["limit"] == 0
+
+    def test_a_subclass_category_survives_the_generic_builder(self):
+        """The code lives on the EXCEPTION, so a generic caller cannot
+        mislabel a subclass's refusal as the base category.
+
+        A cohort SPEND cap and a plan NODE cap are both 402s. Reading the
+        first as `quota_exceeded` would send the user to buy a bigger plan
+        that cannot lift it — which is the whole reason the payload exists.
+        """
+        from tortoise.cohort_cost import (
+            COHORT_COST_REFUSAL_CODE,
+            CohortCostCapExceeded,
+        )
+
+        payload = quota_refusal_payload(
+            CohortCostCapExceeded("cohort spend cap reached"))
+        assert payload["code"] == COHORT_COST_REFUSAL_CODE == "cohort_cost_cap"
+        assert payload["code"] != QUOTA_REFUSAL_CODE
+        # It names no resource/limit — and must not invent one.
+        assert "resource" not in payload and "limit" not in payload
+        assert payload["message"] == "cohort spend cap reached"
+
+    def test_the_fields_are_keyword_only(self):
+        """A raise site that knows only its message still works.
+
+        Positional construction would let a message be silently dropped into a
+        numeric field by a caller who did not read the signature.
+        """
+        with pytest.raises(TypeError):
+            QuotaExceededError("msg", "points", 1, 2)
+
+    def test_the_payload_stringifies_to_the_message(self):
+        """#4614: a consumer that only has `str(detail)` must see the sentence.
+
+        The MCP capture twin reads `getattr(e, "detail", ...)` and stringifies
+        it. Editing that handler would red `surface-guard` (CONTRIBUTING: add
+        response fields in the assembly layer, not inside a tool function), so
+        the payload answers `str()` here instead. JSON serialization must be
+        unchanged — `json.dumps` still emits an object.
+        """
+        import json
+
+        payload = quota_refusal_payload(QuotaExceededError(
+            "Team points limit reached (1). Upgrade your plan to increase it.",
+            resource="points", used=1, limit=1))
+        assert isinstance(payload, dict)
+        assert str(payload) == (
+            "Team points limit reached (1). Upgrade your plan to increase it.")
+        assert json.loads(json.dumps(payload)) == {
+            "code": QUOTA_REFUSAL_CODE,
+            "resource": "points",
+            "used": 1,
+            "limit": 1,
+            "message": "Team points limit reached (1). Upgrade your plan "
+                       "to increase it.",
+        }

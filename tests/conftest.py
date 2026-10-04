@@ -67,6 +67,42 @@ os.environ.setdefault("TORTOISE_FAST_ATEXIT", "1")
 import sys  # noqa: E402, I001
 from pathlib import Path  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# ── #3752: private per-session temp root (FIRST, before anything can write) ─
+# The suite used to scratch directly in the SHARED system temp dir (35k
+# entries; ~2k of them test-owned) and socket/pid discovery then scanned that
+# whole tree — 2 minutes at 53% CPU, and a lookup that could match another
+# test's or another session's socket. `install_session_tmpdir()` creates one
+# private root (a `tt_` dir under a SHORT temp base, so ordinary scratch paths
+# stay under the AF_UNIX sun_path cap and the reaper's `tt_`/ephemeral
+# classification still applies), redirects `tempfile.tempdir` + `$TMPDIR` into
+# it, and registers an atexit teardown that removes it wholesale — the leak
+# class is fixed structurally, not per test file.
+#
+# Placement is load-bearing, exactly like TORTOISE_TEST_SESSION above: this
+# must run at CONFTEST IMPORT and BEFORE the `tortoise.embedded_reaper` import
+# below (transitively via `tests._embedded`), because that module resolves
+# `ACTIVE_SUITES_DIR` and `_LOCK_PATH` from the temp dir ONCE, at import time.
+# `TORTOISE_HOST_TMPDIR` (exported by the same call) keeps the marker dir
+# host-global so a production/cron sweep still sees a live suite (#3752),
+# while `_LOCK_PATH` stays in the sweep domain (the private root).
+# The scan guard is installed unconditionally: any test that discovers files by
+# walking the shared temp dir fails loudly, naming itself.
+from tests._tmpdir_hygiene import (  # noqa: E402
+    install_scan_guard,
+    install_session_tmpdir,
+    sweep_stale_session_roots,
+)
+
+install_session_tmpdir()
+# AFTER the redirect, deliberately: this scans HOST_TMPDIR (the module constant,
+# captured before the redirect) and its pid+start probe lazily imports
+# tortoise.embedded_reaper — which must happen only once the private root is
+# the temp dir, or _LOCK_PATH freezes on the shared temp dir for the whole
+# session.
+sweep_stale_session_roots()  # reclaim a SIGKILLed prior run's root, if any
+install_scan_guard()
+
 from tests._embedded import shared_proj  # noqa: E402, F401, I001
 
 # ── Epic #1647 (D-1=A): the test-session signal + redirect env ────────────
@@ -124,11 +160,29 @@ os.environ.setdefault("TORTOISE_TEST_NO_REDIRECT", ",".join(TEST_NO_REDIRECT_STE
 # guards). The overwrite is paired with a 12-hex shape guard: os.urandom(6)
 # always yields 12 hex chars, so the assert can only fire on a broken
 # platform — fail loudly rather than export a malformed nonce.
+#
+# #6323: the re-roll is scoped to a NEW PROCESS, so re-executing this body in
+# the SAME process is idempotent. pytest loads this file as the top-level
+# `conftest`, so `import tests.conftest` is a SECOND module whose body re-runs
+# mid-session; an unconditional re-roll re-points the journal and makes the
+# session read its OWN pre-import journal as a live peer, so
+# `wipe_server(scope=None)` spares graphs the session minted. The owner-pid
+# marker keeps the decision above intact in every other case: an externally
+# pre-set value carries no marker and is still overwritten, and a forked child
+# (marker pid != its own) still mints a fresh nonce exactly as before.
 import re as _re  # noqa: I001, E402
-_SESSION_NONCE = os.urandom(6).hex()
-assert _re.fullmatch(r"[0-9a-f]{12}", _SESSION_NONCE), \
-    f"TORTOISE_TEST_SESSION must be 12 hex (48 bits), got {_SESSION_NONCE!r}"
-os.environ["TORTOISE_TEST_SESSION"] = _SESSION_NONCE
+_SESSION_OWNER_PID = str(os.getpid())
+_prior_nonce = os.environ.get("TORTOISE_TEST_SESSION")
+if (os.environ.get("TORTOISE_TEST_SESSION_OWNER_PID") == _SESSION_OWNER_PID
+        and _prior_nonce
+        and _re.fullmatch(r"[0-9a-f]{12}", _prior_nonce)):
+    _SESSION_NONCE = _prior_nonce
+else:
+    _SESSION_NONCE = os.urandom(6).hex()
+    assert _re.fullmatch(r"[0-9a-f]{12}", _SESSION_NONCE), \
+        f"TORTOISE_TEST_SESSION must be 12 hex (48 bits), got {_SESSION_NONCE!r}"
+    os.environ["TORTOISE_TEST_SESSION"] = _SESSION_NONCE
+    os.environ["TORTOISE_TEST_SESSION_OWNER_PID"] = _SESSION_OWNER_PID
 
 # ── Epic #1647 Task 2 Step 7: the session created-graph journal ───────────
 # The journal path is resolved at CONFTEST IMPORT (cycle-4 P2-9) — product-
@@ -170,6 +224,54 @@ def _p4_uri_required():
     the pre-epic shape — migrated files would construct embedded and
     green-pass on the wrong backend."""
     _assert_p4_uri_required()
+
+
+# ── #4883: per-test isolation for the process-shared routing env vars ──────
+# pytest runs one process, so a test that writes one of these keys with a plain
+# `os.environ[...] = ...` (no monkeypatch, no restore) leaks it into everything after
+# it. `tests/test_uri_env_mutations_declared.py` (#2084) already guards this CLASS, but
+# for `TORTOISE_DB_URI` only, so the leak survived for every other routing key.
+#
+# SCOPE — this closes the leak class. It is NOT the fix for the
+# `test_pack_state.py::TestBackfillScript::test_apply_writes_to_introspection_read_target`
+# flake that #4883 was opened for. That flake's root cause is redislite replaying a
+# `.settings` registry whose recorded socket is gone — a recycled live pid satisfies
+# every check in `_is_redis_running()`, which never validates the socket — so the client
+# is handed a dead path and dies with `ConnectionError: Error 2 connecting to
+# ...redis.socket. No such file or directory`. Tracked as #4879, fix in #4892. The victim
+# passes `db_path` explicitly, so per-test env restoration cannot influence it. Do not
+# read this fixture as evidence that flake is fixed.
+#
+# Function-scoped autouse, and ORDER-INSENSITIVE by construction: this fixture snapshots
+# the pre-test values and `monkeypatch` restores the SAME pre-test values, so the end
+# state is identical whichever teardown runs first. (pytest orders same-scope autouse
+# fixtures by NAME, not declaration order — see the redislite-lane note further down — so
+# nothing here may depend on setup order.) It is therefore a no-op for a correctly
+# isolated test and repairs only a genuine un-restored write.
+_ENV_ISOLATION_PREFIXES = ("TORTOISE_", "SUPABASE_", "PACK_STATE_")
+
+
+def _isolated_env_keys():
+    return [k for k in os.environ if k.startswith(_ENV_ISOLATION_PREFIXES)]
+
+
+@pytest.fixture(autouse=True)
+def _isolate_process_env():
+    """#4883: restore TORTOISE_*/SUPABASE_*/PACK_STATE_* env after every test.
+
+    A test may legitimately CHANGE these (via ``monkeypatch``, which undoes
+    itself) — it may not legitimately LEAK them. Restoring the pre-test value
+    per test makes each test hermetic for the keys the suite routes on, so
+    order-dependent state cannot decide a result.
+    """
+    before = {k: os.environ[k] for k in _isolated_env_keys()}
+    yield
+    for k in _isolated_env_keys():
+        if k not in before:
+            os.environ.pop(k, None)
+    for k, v in before.items():
+        if os.environ.get(k) != v:
+            os.environ[k] = v
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -728,10 +830,13 @@ def _server_graph_hygiene(_redislite_hygiene):
     from tests._embedded import (
         _JOURNAL_FILE,
         _leftover_sweep,
+        _live_graph_names,
+        _owned_survivors,
         _read_journal,
         _session_end_own_sweep,
         _stale_sweep,
         _sweep_proj,
+        _uri_default_graph_name,
     )
     from tortoise.embedded_reaper import _process_start_time, active_suite_markers
 
@@ -782,6 +887,7 @@ def _server_graph_hygiene(_redislite_hygiene):
     # Cycle-5 P2-3: capture the journal size BEFORE the sweep — the sweep
     # deletes the journal, so "journal size" is unreadable after.
     journal_size = len(_read_journal())
+    journal_names = set(_read_journal())
     try:
         own = _session_end_own_sweep(uri, _JOURNAL_FILE, skip_on_non_loopback=True)
     except Exception as exc:
@@ -836,8 +942,66 @@ def _server_graph_hygiene(_redislite_hygiene):
         except Exception as exc:
             print(f"[server-graph-hygiene] GRAPH.LIST bound check skipped: {exc}")
 
+    # ── E2E-7 gate (#3634 Task 5). A SIBLING of the bound-check `if` above and a
+    # direct child of `if not others:` (last-suite-standing only — do NOT widen
+    # that). It gates ONLY on `not others` + the three own-sweep flags, NEVER on
+    # the bound check's `full_sweep` condition (P1-A, Task 5 review): nested
+    # inside that `if`, the gate was DISABLED exactly when the leftover sweep
+    # failed or reported full_sweep=False — i.e. precisely when cleanup was
+    # incomplete and survivors are most likely. It must also stay OUTSIDE every
+    # `try` (an AssertionError under a broad `except Exception` is swallowed and
+    # the gate is vacuous). Short-circuit on `error` too: a sweep that RAISED
+    # sets own={"error": ...} with no `failed` key, so `not own.get("failed")`
+    # alone would run the gate over names a dead sweep left and red the suite
+    # (violating cycle-8 P2-3).
+    # The nesting is DELIBERATE (SIM102): the `if not others` node must remain a
+    # distinct AST ancestor of the gate's Raise (its own guard), not be folded
+    # into the three-flag condition — the placement is itself pinned by
+    # tests/test_server_hygiene_gate.py.
+    if not others:  # noqa: SIM102
+        if not own.get("skipped") and not own.get("failed") and not own.get("error"):
+            # P1-C (Task 5 review): the survivor probe is the ONLY unguarded
+            # server call on the teardown path. Its failure (connection, auth,
+            # maxmemory, LOADING, a stall) must print-and-continue like the
+            # bound check above — an infra failure that reds the suite is
+            # INDISTINGUISHABLE in CI from a real E2E-7 leak, the one signal
+            # this gate exists to make unambiguous. Only the genuine leak
+            # AssertionError below may raise from this block; a failed probe
+            # leaves `live_names` empty, so the gate reports no survivors.
+            live_names: set[str] = set()
+            try:
+                live_names = _live_graph_names(uri)
+            except Exception as exc:
+                print(f"[server-graph-hygiene] E2E-7 survivor probe failed — "
+                      f"gate skipped (infra skip, NOT a leak signal): {exc}")
+            survivors = _owned_survivors(journal_names, live_names,
+                                         _uri_default_graph_name())
+            if survivors:
+                raise AssertionError(
+                    f"E2E-7: {len(survivors)} owned journalled graph(s) survived the "
+                    f"sweep: {sorted(survivors)}")
+
 
 # ── Epic #1647 Task 4 (P2): session-start backend-identity tripwire ────────
+def _poisoned_aof_hint_for_uri(uri: str) -> str | None:
+    """#2961 recovery hint when the backend for ``uri`` shows a poisoned AOF.
+
+    Diagnosis aid for the tripwire's failure path — never raises, never
+    gates a green session, returns None whenever the state cannot be
+    established (no Docker, no matching container, malformed URI).
+    """
+    from urllib.parse import urlparse
+    try:
+        port = urlparse(uri).port or 6379
+    except ValueError:
+        return None
+    try:
+        from tortoise.graph_delete_guard import diagnose_poisoned_aof
+        return diagnose_poisoned_aof(port)
+    except Exception:
+        return None
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _assert_backend_identity():
     """Epic #1647 E2E-6 tripwire: on docker-URI sessions, the session must
@@ -934,6 +1098,17 @@ def _assert_backend_identity():
                 and "health check failed" in str(exc)):
             from tests._embedded import _remove_journal_file
             _remove_journal_file(os.environ.get("TORTOISE_TEST_JOURNAL_FILE", ""))
+            # #2961: at this point a poisoned-AOF crash loop and a genuine
+            # backend outage are INDISTINGUISHABLE — both surface as a
+            # connection-class failure, and the poison path silently blocks
+            # every verification run. When the backend's container log
+            # shows the AOF-load signature, fail with the actionable
+            # recovery steps instead of a bare connection error. Best-effort
+            # only: no Docker / no matching container / a clean log leaves
+            # the original failure untouched.
+            _hint = _poisoned_aof_hint_for_uri(uri)
+            if _hint:
+                raise RuntimeError(f"{exc}\n\n{_hint}") from exc
         raise
     try:
         assert probe._is_embedded is False, (
@@ -1027,6 +1202,38 @@ def _embedded_only_skip_hook(request):
     Delegates to the named helper `_embedded_only_skip` (cycle-5 P2-12) so
     the marker-semantics test drives the exact hook."""
     _embedded_only_skip(request)
+
+
+# ── #5049 rule 4: process globals reset per test ──────────────────────────
+# A test verdict must not depend on process state an earlier test left behind.
+# `tortoise.embedded_lifecycle._atexit_deadline` is a once-armed clock (#4913):
+# the first mid-run seam call anchors a 30 s budget that is never re-armed, so a
+# later test that asserts the seam closed a server reads it as SPENT and takes
+# the budget short-circuit (which returns "handled" while leaving the server
+# RUNNING). `tests/test_embedded_lifecycle.py` already worked around this
+# per-module (#4879); this is the same reset applied suite-wide, and it is the
+# authoritative home. The reset runs BEFORE every test (so an inherited armed
+# clock can never reach a test body) and after. `TORTOISE_API_URL` is deleted
+# too: on a fleet shell it makes the suite non-hermetic — the ask lane fails
+# loud on it (`ask_lane.py:438,848`) and the commit client routes to it
+# (`sdk.py` `_post_commit`). `monkeypatch` restores the env after the test.
+# The `tests._verdict` import is module level (and registered in
+# SHARED_MODULES) so a change to the contract runs the full matrix
+# (`test_ci_selection.py::test_every_conftest_module_level_tests_import_is_shared`).
+from tests._verdict import (  # noqa: E402
+    AMBIENT_ENV_GLOBALS,
+    reset_process_globals,
+)
+
+
+@pytest.fixture(autouse=True)
+def _process_global_isolation(monkeypatch):
+    """#5049 rule 4: reset declared process globals + ambient env per test."""
+    reset_process_globals()
+    for var in AMBIENT_ENV_GLOBALS:
+        monkeypatch.delenv(var, raising=False)
+    yield
+    reset_process_globals()
 
 
 # ── #1930: ambient TORTOISE_PACKS_DIR isolation ───────────────────────────
@@ -1173,6 +1380,33 @@ def _analytics_alert_isolation(monkeypatch, tmp_path):
                         {o: 0 for o in ha._ANALYTICS_OUTCOMES})
     monkeypatch.setattr(ha, "_ANALYTICS_FALLBACK_PATH",
                         str(tmp_path / "analytics_fallback.jsonl"))
+    # #4462: the pooled analytics HTTP client is a process-wide cache. A client
+    # built under one test's monkeypatched ``httpx.Client`` (or env) must not
+    # serve the next test — several tests read the client CONSTRUCTED during
+    # their own run (``instances[0].init_kwargs`` in
+    # ``test_analytics_write_path_resolution``). Swapping the cache dict by
+    # reference makes each test start with an empty cache; monkeypatch restores
+    # the untouched original at teardown.
+    #
+    # Neither client is closed here on purpose. The swap leaves each
+    # unreferenced once monkeypatch restores the attribute at teardown, so GC
+    # reclaims them; calling ``_analytics_http_reset()`` instead would close a
+    # client while a straggling telemetry worker (``_cp_offload`` abandons the
+    # AWAIT on a wait-bound miss but never the daemon worker, CPython #87185)
+    # may still be mid-POST — the #4608 class, which turns a delivered event
+    # into a spurious ``fallback``. A test that builds a REAL client AND emits
+    # closes it in its own ``finally`` (``test_pooled_client_reuses_one_tcp_
+    # connection_across_emits``).
+    monkeypatch.setattr(ha, "_ANALYTICS_HTTP_CACHE",
+                        {"key": None, "client": None})
+    # #3944: the heartbeat and the canary counter are process globals too. The
+    # heartbeat must not leak a delivered timestamp into a later absence test
+    # (it would read FRESH), and the counter must not accumulate across the
+    # suite. The canary TASK itself is armed at TestClient lifespan entry and
+    # sleeps first, so with the production 300 s period it never emits during a
+    # test; tests that mean to exercise it patch the period themselves.
+    monkeypatch.setattr(ha, "_ANALYTICS_LAST_DELIVERED_AT", None)
+    monkeypatch.setattr(ha, "_ANALYTICS_CANARY_ATTEMPTS", 0)
     mon.ANALYTICS_OUTCOME_COUNT.clear()
 
 

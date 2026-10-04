@@ -134,6 +134,9 @@ def resolve_contested_relevance(
         rows = projection.g.query(
             "MATCH (n:Point) WHERE n.id IN $ids "
             "AND (n.is_operator = false OR n.is_operator IS NULL) "
+            # #6976: load-bearing `WITH n` — without it FalkorDB 6.0.0 drops the
+            # id predicate at the re-binding MATCH below (foreign rows).
+            "WITH n "
             "MATCH (c:Point)-[r:NAND]->(n) "
             "OPTIONAL MATCH (src:Point)-[ri:INPUT]->(c) "
             "WITH n, c, r, src, ri "
@@ -1082,8 +1085,10 @@ class GapsRanker:
 # whether the cap was hit.
 
 # Node labels that participate in the knowledge subgraph.
+# D10 (ONTOLOGY v3.15 §4.4): :Document is retired — a document is a :Source,
+# so the Source label already covers it.
 SUBNODE_LABELS = (
-    "Point", "Object", "Subject", "Event", "Source", "Document",
+    "Point", "Object", "Subject", "Event", "Source",
 )
 _SUBNODE_LABEL_WHERE = " OR ".join(f"m:{lab}" for lab in SUBNODE_LABELS)
 
@@ -1193,6 +1198,7 @@ class SubgraphExpander:
         # out: edges FROM frontier nodes (n)-[r]->(m) → record n→m, neighbor m.
         rows = self.projection.g.query(
             f"MATCH (n) WHERE n.id IN $frontier "
+            "WITH n "
             f"MATCH (n)-{edge_decl}->(m) "
             f"WHERE {_SUBNODE_LABEL_WHERE} RETURN n.id, type(r), m.id",
             params={"frontier": frontier},
@@ -1204,6 +1210,7 @@ class SubgraphExpander:
         # in: edges INTO frontier nodes (m)-[r]->(n) → record m→n, neighbor m.
         rows = self.projection.g.query(
             f"MATCH (n) WHERE n.id IN $frontier "
+            "WITH n "
             f"MATCH (m)-{edge_decl}->(n) "
             f"WHERE {_SUBNODE_LABEL_WHERE} RETURN m.id, type(r), n.id",
             params={"frontier": frontier},
