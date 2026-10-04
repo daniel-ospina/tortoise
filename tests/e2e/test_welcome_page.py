@@ -79,12 +79,11 @@ def _unobserved_outcome(*, transport_failures: list[str], post_issued: bool) -> 
     - the form never submitted a request at all — the other PRODUCT condition,
       and the one the pre-#4940 message asserted for all four.
 
-    `net::ERR_ABORTED` is deliberately NOT a product failure. The signup POST is a
-    plain `fetch` with no `AbortController`/`signal` (verified: `signup.html`),
-    so the page cannot abort its own request — an abort is browser/lifecycle
-    cancellation (a navigation superseding the in-flight fetch, context teardown),
-    which is a never-answered request, exactly what #4940's taxonomy buckets as
-    UNAVAILABLE.
+    `net::ERR_ABORTED` is deliberately NOT a product failure: the signup POST is a
+    plain `fetch` carrying no `AbortController`/`signal` (verified: `signup.html`),
+    so nothing in the SIGNUP PATH can abort it — an abort is a navigation or
+    context teardown superseding the in-flight fetch, i.e. a never-answered
+    request, which #4940's taxonomy buckets as UNAVAILABLE.
 
     The verdict is RETURNED rather than acted on so the split itself is pinnable:
     a message-only pin cannot see the buckets collapse, and collapsing them is how
@@ -94,13 +93,7 @@ def _unobserved_outcome(*, transport_failures: list[str], post_issued: bool) -> 
     Run 35780459764 (2026-09-22T20:27:57Z, `main`) failed on the pre-#4940 message
     while the page had loaded and every locator had filled and clicked — a form
     that never submitted because it was never served fails on a locator timeout,
-    not here — and the test had simply waited out its whole 30s budget. The
-    availability watchdog measured the BFF's UPSTREAM host (`api.premiselabs.co`,
-    incident #4682, 18:00–18:28Z, about two hours earlier — a DIFFERENT host from
-    the `app.premiselabs.co` BFF this smoke calls) DOWN in an adjacent window, so
-    the watchdog is NOT the instrument that would have caught this failure, which
-    is why the timeout case is reported as its own condition rather than silently
-    attributed to the host.
+    not here — and the test had simply waited out its whole 30s budget.
     """
     if transport_failures:
         return (
@@ -112,8 +105,9 @@ def _unobserved_outcome(*, transport_failures: list[str], post_issued: bool) -> 
     if post_issued:
         return (
             "unavailable",
-            "the POST to the BFF /auth/signup was issued but no response arrived within "
-            "the poll budget — a reachability/timeout condition, not a signup failure",
+            "the POST to the BFF /auth/signup was issued and no response arrived within "
+            "the poll budget — the smoke cannot distinguish an unreachable host from a "
+            "hung BFF route, so it does not assert a cause",
         )
     return (
         "product",
@@ -122,15 +116,21 @@ def _unobserved_outcome(*, transport_failures: list[str], post_issued: bool) -> 
     )
 
 
-def _unobserved_disposition(verdict: str) -> str:
-    """Map a verdict to what the smoke does with it: `"skip"` or `"fail"`.
+def _dispose_unobserved(verdict: str, message: str, *, skip, fail) -> None:
+    """Hand an unobserved outcome to the runner: UNAVAILABLE skips, anything else fails.
 
-    Split out of the call site so the disposition is a real assertion instead of
-    source text that a mutation can sidestep: swapping the two branches at the
-    call site keeps every asserted string in place while making every unobserved
-    case skip — i.e. a product regression exiting GREEN (#4940 review round 3).
+    The callables are INJECTED rather than referenced so the dispatch is a real
+    assertion against a recording double (test_unobserved_outcome_is_disposed_
+    correctly). Source-text pins could not establish this: swapping the two
+    branches at the call site kept every assertable string, and asserting the
+    order only excluded "fail first" — neither proved that a PRODUCT verdict
+    actually FAILS, so a product regression could exit the suite GREEN (#4940
+    review rounds 3 and 4).
     """
-    return "skip" if verdict == "unavailable" else "fail"
+    if verdict == "unavailable":
+        skip(message)
+        return
+    fail(message)
 
 # Canonical host for the auth surface is tortoise.premiselabs.co (host
 # consolidation 2026-08-17: premiselabs.co 301s /welcome → the tortoise host).
@@ -344,15 +344,24 @@ def test_signup_transport_failure_is_filtered_and_formatted() -> None:
     )
 
 
-def test_unobserved_disposition_maps_verdicts() -> None:
-    """#4940: the skip/fail DECISION is pinned as behaviour, not as source text.
+def test_unobserved_outcome_is_disposed_correctly() -> None:
+    """#4940: the skip/fail DISPATCH is pinned as behaviour, by injection.
 
-    Substring asserts over the call site passed while its two branches were
-    swapped — that mutation makes every unobserved case skip, so a product
-    regression exits GREEN (#4940 review round 3).
+    Source-text pins could not establish this: swapping the two call-site branches
+    kept every assertable string and left a product regression exiting GREEN.
     """
-    assert _unobserved_disposition("unavailable") == "skip"
-    assert _unobserved_disposition("product") == "fail"
+    calls: list[tuple[str, str]] = []
+
+    def _skip(message: str) -> None:
+        calls.append(("skip", message))
+
+    def _fail(message: str) -> None:
+        calls.append(("fail", message))
+
+    _dispose_unobserved("unavailable", "m1", skip=_skip, fail=_fail)
+    _dispose_unobserved("product", "m2", skip=_skip, fail=_fail)
+
+    assert calls == [("skip", "m1"), ("fail", "m2")]
 
 
 def test_live_signup_registers_both_capture_listeners() -> None:
@@ -372,18 +381,32 @@ def test_live_signup_registers_both_capture_listeners() -> None:
     # captured, no `requestfailed` fires, and the `request` listener alone makes
     # the case UNAVAILABLE (skip) — a broken capture would exit GREEN.
     assert 'page.on("response", _on_response)' in src
-    # Registered-but-dead is the failure mode a registration-only pin misses: the
-    # bodies must delegate to the pure, pinned helpers.
-    assert "_signup_transport_failure(req.method, req.url, req.failure)" in src
+    # Each body must filter through the ONE pinned predicate. The response body
+    # reads `resp.request...`, so it needs its own assert: a pin matching only the
+    # `req.` form left `if True:` in the response filter green (#4940 round 4).
     assert "_is_bff_signup_request(req.method, req.url)" in src
-    # The DISPOSITION is pinned as a pure function below, not as source text: a
-    # substring pin over the call site passed while the two branches were swapped.
-    assert "_unobserved_disposition(verdict)" in src
-    # Order matters: FAIL must be the fall-through, not the skip. With the two
-    # branches swapped, every unobserved case skips and a product regression exits
-    # GREEN (measured mutation E) — this is the one property of the call site a
-    # browser-free pin can still assert.
-    assert src.index("pytest.skip(message)") < src.index("pytest.fail(message)")
+    assert "_is_bff_signup_request(resp.request.method, resp.url)" in src
+    # The DISPOSITION is pinned BEHAVIOURALLY by
+    # test_unobserved_outcome_is_disposed_correctly — not as source text here.
+    # What remains is the wiring, which no browser-free test can execute. Scan the
+    # CALL-SITE LINES rather than asserting a substring of `src`: a literal that
+    # quotes the call also matches itself, so a substring assert passes even when
+    # the real call is mutated (measured: swapping the two callables was NOT caught
+    # until this became a line scan).
+    call_lines = [
+        ln.strip()
+        for ln in src.splitlines()
+        if ln.strip().startswith("_dispose_unobserved(verdict, message")
+    ]
+    assert call_lines == [
+        "_dispose_unobserved(verdict, message, skip=pytest.skip, fail=pytest.fail)"
+    ]
+    # #4940 round 4: the tripwire's evidence is captured BEFORE the skip/fail, so a
+    # skip can never discard it. Removing that guard must redden this.
+    assert any(ln.strip() == "if browser_to_supabase:" for ln in src.splitlines()), (
+        "the browser_to_supabase tripwire must be evaluated before the unobserved "
+        "skip/fail, so a skip cannot discard its captured evidence"
+    )
 
 
 def test_unobserved_outcome_splits_verdicts() -> None:
@@ -566,9 +589,16 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
                 transport_failures=transport_failures,
                 post_issued=post_issued["value"],
             )
-            if _unobserved_disposition(verdict) == "skip":
-                pytest.skip(message)
-            pytest.fail(message)
+            # #4940 review round 4: the tripwire's evidence is ALREADY CAPTURED at
+            # this point, and skipping would discard it. A regression that posts to
+            # Supabase AND leaves the BFF unanswered must fail on that evidence, not
+            # be reported as merely UNAVAILABLE.
+            if browser_to_supabase:
+                pytest.fail(
+                    "the browser called Supabase directly instead of going through the "
+                    f"BFF: {browser_to_supabase}"
+                )
+            _dispose_unobserved(verdict, message, skip=pytest.skip, fail=pytest.fail)
         assert signup["status"] == 200, (
             f"live signup returned {signup['status']} — rate-limited or error: "
             f"{signup['body']!r}"
