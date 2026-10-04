@@ -888,13 +888,28 @@ export function writeSpoolEntry(
   }
   const stored = prior ? readSpoolTurns(dir, snapshot.sessionId) : [];
 
+  // #3516 §B: the entry's lane is set-only-when-present and carried forward
+  // (like `model`) — a lane-less re-snapshot must not ERASE a lane the hook
+  // already claimed. The SAME rule as the Python writer, because BOTH legs
+  // read and write this one directory.
+  const lane = snapshot.captureLane ?? prior?.capture_lane;
+  // A snapshot carrying a lane the entry has never had is an UPGRADE, not a
+  // no-op. `sameContent` is content-addressed and the lane is NOT part of the
+  // content, so without this bypass an entry first written lane-less (a
+  // pre-#3516 spool, or an `sessions import` entry the hook then re-captured
+  // byte-identically) would keep its lane-less meta forever — and a WORKING
+  // hook would file as not-live, the false-negative this feature exists to
+  // remove.
+  const laneUpgrade = !!snapshot.captureLane && !prior?.capture_lane;
+
   // Dedup: a snapshot that is byte-identical to what is stored already is a
   // no-op — no rewrite, no re-upload (incremental capture must not amplify
   // identical writes).
   const sameContent =
     prior !== undefined &&
     stored.length === snapshot.turns.length &&
-    prior.content_digest === contentDigest(snapshot.turns);
+    prior.content_digest === contentDigest(snapshot.turns) &&
+    !laneUpgrade;
   if (sameContent) {
     return { written: false, bytes: spoolEntryBytes(dir, snapshot.sessionId), discards };
   }
@@ -915,11 +930,6 @@ export function writeSpoolEntry(
   const appendedBytes = Buffer.byteLength(logText, "utf8");
 
   const now = new Date().toISOString();
-  // #3516 §B: the entry's lane is set-only-when-present and carried forward
-  // (like `model`) — a lane-less re-snapshot must not ERASE a lane the hook
-  // already claimed. The same rule as the Python writer, because BOTH legs
-  // read and write this one directory.
-  const lane = snapshot.captureLane ?? prior?.capture_lane;
   const meta: SpoolMeta = {
     version: 1,
     session_id: snapshot.sessionId,
@@ -942,7 +952,14 @@ export function writeSpoolEntry(
     // (attempts=0) and a genuinely fresh entry starts at zero.
     attempts: clampAttempts(prior?.attempts),
     next_attempt_at_ms: carriedWindow(prior?.next_attempt_at_ms),
-    ...(prior?.filed_key && prior.content_digest === contentDigest(snapshot.turns)
+    // A lane UPGRADE also invalidates the filing marker: `filed_key` is
+    // content-derived (the lane is not part of it), so an entry already filed
+    // lane-less would otherwise keep its marker and be skipped by the drain
+    // forever — the lane would never reach the wire. Mirrors the Python
+    // writer's `and not lane_upgrade`.
+    ...(prior?.filed_key &&
+    prior.content_digest === contentDigest(snapshot.turns) &&
+    !laneUpgrade
       ? { filed_key: prior.filed_key, filed_at: prior.filed_at }
       : {}),
   };

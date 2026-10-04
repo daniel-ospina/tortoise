@@ -641,10 +641,20 @@ test("the spooled lane survives a drain and is never fabricated", async () => {
   //       that never saw a hook reads as live (false-POSITIVE).
   const spool = tmpSpool();
   const server = recordingServer();
-  writeSpoolEntry(spool, { ...snapshot("sess-laned"), captureLane: "hook" });
-  writeSpoolEntry(spool, snapshot("sess-import")); // deliberately lane-less
-  // A lane-less re-snapshot must not ERASE a lane already on disk.
-  writeSpoolEntry(spool, { ...snapshot("sess-laned"), captureLane: undefined });
+  writeSpoolEntry(spool, {
+    ...snapshot("sess-laned", [{ role: "user", content: "hi" }]),
+    captureLane: "hook",
+  });
+  writeSpoolEntry(spool, snapshot("sess-import", [{ role: "user", content: "yo" }]));
+  // A lane-less re-snapshot must not ERASE a lane already on disk. The turns
+  // must GROW: an identical-content re-snapshot short-circuits on the dedup
+  // guard and never reaches the meta construction, so it would prove nothing.
+  writeSpoolEntry(spool, {
+    ...snapshot("sess-laned", [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "hello" },
+    ]),
+  });
 
   assert.equal(
     readSpoolEntry(spool, "sess-laned")?.capture_lane,
@@ -659,6 +669,40 @@ test("the spooled lane survives a drain and is never fabricated", async () => {
     !("capture_lane" in (server.sessions.get("sess-import") ?? {})),
     "a lane-less import entry was stamped with a lane on the wire",
   );
+});
+
+test("a lane upgrade survives the dedup and refiles an ALREADY FILED entry", async () => {
+  // #3516 §B. `sameContent` and `filed_key` are both content-addressed and the
+  // lane is not part of the content, so an entry first captured lane-less can
+  // be covered by a byte-identical hook re-snapshot: without the upgrade rule
+  // the write is a no-op AND the drain skips the entry forever, stranding a
+  // working hook as not-live. Mirrors
+  // tests/test_capture_lane_3516.py::test_spool_lane_upgrade_refiles_an_already_filed_entry.
+  const spool = tmpSpool();
+  const server = recordingServer();
+  const turns = [{ role: "user" as const, content: "same" }];
+
+  writeSpoolEntry(spool, snapshot("sess-upgrade", turns)); // lane-less
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+  assert.ok(
+    readSpoolEntry(spool, "sess-upgrade")?.filed_key,
+    "the first filing left no marker — the test could not prove anything",
+  );
+
+  const res = writeSpoolEntry(spool, {
+    ...snapshot("sess-upgrade", turns),
+    captureLane: "hook",
+  });
+  assert.equal(res.written, true, "the identical-content dedup swallowed the lane upgrade");
+  assert.equal(
+    readSpoolEntry(spool, "sess-upgrade")?.filed_key,
+    undefined,
+    "the filing marker was not invalidated — the entry would be skipped forever",
+  );
+
+  const second = await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 2 });
+  assert.equal(second.filed, 1, "the lane upgrade never reached the wire");
+  assert.equal(server.sessions.get("sess-upgrade")?.capture_lane, "hook");
 });
 
 test("the capture key is content-addressed: changed turns get a new key, a replay does not", () => {

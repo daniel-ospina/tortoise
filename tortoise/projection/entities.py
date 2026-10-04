@@ -1424,8 +1424,11 @@ class _EntityHandlers:
             sets.append("s.created_at=coalesce(s.created_at, $created_at)")
             params["created_at"] = created_at
         # #3516 §B: the producer lane. Folded with coalesce (first writer wins)
-        # to MATCH the live capture write, which is also first-writer-wins — a
-        # plain SET here would make a journal-only replay diverge from live.
+        # to MATCH the live capture write, which is also first-writer-wins. No
+        # producer journals this field YET — the hosted lane, its only writer,
+        # passes no `on_session_merged` (exactly as it does not for
+        # `machine_id`/`model`), so this is a GUARD for the first journaling
+        # lane (the store-sync CLI), not a parity property that holds today.
         lane = ev.get("capture_lane")
         if lane is not None and _annotator_value_ok(lane):
             sets.append("s.capture_lane=coalesce(s.capture_lane, $v_capture_lane)")
