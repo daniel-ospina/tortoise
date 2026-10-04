@@ -132,6 +132,7 @@ from tortoise.sdk import (
     _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING,  # #3892: shared "stored, never extracted" disclosure
     _CAPTURE_NO_PROVIDER_MODE,  # #3892: keyless-capture receipt mode (reused, not reinvented)
     _CAPTURE_NO_PROVIDER_WARNING,  # #3892: the canonical "stored, not extracted" notice
+    _WRITER_CLOCK,  # #3985: the resolution's "falls to the writer's clock" sentinel
     REPORT_HOOK_URL,  # #2335 WI-2: the bug_report.yml report-hook target
     InvertedSupersedeWindow,  # #5363: the named #4021 refusal the commit path maps to 422
     TortoiseSDK,
@@ -152,6 +153,7 @@ from tortoise.sdk import (
     _session_extraction_estimate,  # #1532 D4: v2-aware pre-write quota estimate
     _session_llm_transcript,  # P1 #1529: the shared empty/blank conversation gate
     _supersede_window_end,  # #5363: the ONE inverted-window predicate (pre-write check)
+    _supersede_window_start_source,  # #3985: the ONE home for the stored-start predicate
     _write_session_and_turns,  # #3551: the ONE :Session + turn store writer (shared with sdk.capture_session)
 )
 from tortoise.security import redact_error  # billing webhook + checkout error logging
@@ -13577,7 +13579,6 @@ def _prevalidate_supersede_window(sdk, pr, *, now: str) -> None:
     Raises ``InvertedSupersedeWindow`` — the caller's ``[5]`` boundary maps it
     to the repo's validation posture (422).
     """
-    from .search_engine import _created_sort_key  # lazy — mirrors sdk.py
     proj = sdk._get_proj()
     old_rows = proj.g.query(
         "MATCH (n:Point {id:$id}) RETURN n.validFrom",
@@ -13610,16 +13611,13 @@ def _prevalidate_supersede_window(sdk, pr, *, now: str) -> None:
     # writer's clock, not a fact — so a resolution that would land on it is NOT
     # pre-validated; the boundary decides instead of this check guessing an
     # instant the writer has not chosen yet.
-    # The `stored_vf` test is PRESENCE (`is not None`), matching the
-    # resolver's own predicate (#3985): a numeric `0` IS orderable and the
-    # resolver DOES land on it, so a truthiness test here would defer a
-    # resolution that is not the writer's `now` — minting the successor and
-    # then failing the boundary check, which is the orphan #5363 exists to
-    # prevent.
-    if not (stored_vf is not None
-            and _created_sort_key(stored_vf)[0] == 0) and not (
-            successor_created_at
-            and _created_sort_key(successor_created_at)[0] == 0):
+    # The resolution predicate is SHARED with the writer, not mirrored
+    # (#3985): a duplicated truthiness test drifted and deferred a resolution
+    # that is not the writer's `now`, minting the successor and losing the
+    # #5363 no-orphan guarantee. `_WRITER_CLOCK` is the writer's own answer to
+    # "nothing readable — `now` decides".
+    if _supersede_window_start_source(
+            stored_vf, successor_created_at) is _WRITER_CLOCK:
         return
     _supersede_window_end(
         old_id=pr.existing_id,

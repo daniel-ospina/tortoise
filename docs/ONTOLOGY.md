@@ -44,7 +44,7 @@ doc_status: live
 >   start (`is not None` and `_created_sort_key(...)[0] == 0`), so `0`/`0.0` becomes the
 >   predecessor's `validTo`; where it precedes the predecessor's own start the existing #4021
 >   guard refuses the write rather than persisting an inverted window.
-> - §4.7 (`validTo`): **narrows, and does not resolve,** the v3.13 sentence above. The
+> - §4.7 (`validTo`): **narrows, and does not resolve,** the v3.13 sentence below. The
 >   falsey-**and-unorderable** `""` still falls through to `createdAt`, so `write != read` for
 >   `""` remains. Which of the two is intended — an OPEN window start or an ABSENT one — is an
 >   owner decision over temporal semantics, not a predicate alignment, so it is left open and
