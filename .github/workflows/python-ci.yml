@@ -1290,7 +1290,7 @@ jobs:
               eval/harness/test_harness_benchmark eval/retrieval/test_gate_1349
               eval/retrieval/test_run eval/why_suite/test_why_suite_benchmark
               eval/write_path/test_write_path_runner test_4314_inert_hooks
-              test_abuse_integration test_battery_setup test_capture_install
+              test_abuse_integration test_battery_setup
               test_capture_loop_responsiveness test_ci_selection test_cli_context
               test_dr_endpoints test_embedded_evidence test_ep_selector
               test_epic903_scheduler test_event_provenance test_graph_diagnostics
@@ -1313,7 +1313,7 @@ jobs:
               test_journal_embedding_5004 test_mcp_http test_mcp_route_challenge
               test_monitoring test_operator_idempotency_4971 test_platform_seams
               test_projection test_relationships_bounded test_sdk test_sdk_group3
-              test_sdk_surface test_session_verify test_skip_guard
+              test_sdk_surface test_skip_guard
               test_source_inheritance_own test_surface_manifest
     name: test-slow (${{ matrix.half }})
     # #3239: OUTER cap, strictly above the in-step watchdog below — that kill
@@ -2115,66 +2115,6 @@ jobs:
           exec python3 tools/embedder_provision.py --attempts 5 --backoff 10
       - name: Generate coverage manifest (carve-out — expected nodeids, epic #1647 Task 9)
         run: |
-          python3 - <<'EOF'
-          import sys
-
-          import yaml
-
-          wf = yaml.safe_load(open(".github/workflows/python-ci.yml"))
-          inc = wf["jobs"]["test-carve-out"]["strategy"]["matrix"]["include"]
-          listing = {i["shard"]: set(i["files"].split()) for i in inc}
-          names = {i["shard"]: i["name"] for i in inc}
-          cfg = yaml.safe_load(open("config/ci-surfaces.yml"))
-          exp = {(f[:-3] if f.endswith(".py") else f) for f in cfg["carve_out"]}
-          union = set().union(*listing.values())
-          errs = []
-          if union != exp:
-              errs.append(f"union != carve_out: missing={sorted(exp - union)} "
-                          f"extra={sorted(union - exp)}")
-          entries = sum(len(v) for v in listing.values())
-          if entries != len(union):
-              errs.append(f"a file is in more than one shard: {entries} entries "
-                          f"for {len(union)} files")
-          if names.get(1) != "test-carve-out" or "test-carve-out" not in names.values():
-              errs.append(f"names {sorted(names.values())} lose the "
-                          "`test-carve-out` check identity (lane parity + branch "
-                          "protection key on the name)")
-          gated = {ln.split("::")[0].replace("tests/", "", 1)[:-3]
-                   for ln in open("config/ci-expected-nodeids/platform-gated.txt")
-                   if ln.strip() and not ln.startswith("#")}
-          for g in gated:
-              owners = [s for s, files in listing.items() if g in files]
-              if len(owners) != 1:
-                  errs.append(f"platform-gated {g} is in {len(owners)} shards — "
-                              "the runtime half (#4215) must run exactly once")
-          for s, files in listing.items():
-              if not files:
-                  errs.append(f"shard {s} is empty")
-          if errs:
-              print("❌ carve-out shard drift (#6137):")
-              for e in errs:
-                  print("  -", e)
-              sys.exit(1)
-          print(f"✅ carve-out shards: {len(listing)} shards, {len(union)} files, "
-                f"names {sorted(names.values())}")
-          EOF
-      - name: Resolve this shard's selected files (carve-out shard ${{ matrix.shard }})
-        id: shard
-        # The shard row is the PARTITION of `carve_out`; the selector's
-        # `carve_out` output is the authoritative file list for this job (today
-        # it is always the FULL set — `--emit-push-matrix` emits the whole leg
-        # and the diff-gate only decides whether the job runs at all — so the
-        # intersect below is an identity, deliberately: it is what keeps the
-        # job bound to the selector if that ever narrows to a tier-2
-        # selection, and the empty check below refuses the vacuous green that
-        # an unexpectedly-empty leg would otherwise produce).
-        run: |
-          set +e
-          SELECTED=" ${{ needs.changes.outputs.carve_out }} "
-          if [ -z "$(echo "$SELECTED" | tr -d ' ')" ]; then
-            echo "::error::carve_out_run=true but the selector's carve_out leg is empty — the embedded set has no home; refusing to green vacuously"
-            exit 1
-          fi
           FILES=""
           for f in ${{ matrix.files }}; do FILES="$FILES tests/$f.py"; done
           if [ -z "$FILES" ]; then
@@ -2183,22 +2123,6 @@ jobs:
           fi
           echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
           python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b and not live and not integration" --output /tmp/expected-nodeids.txt
-          # #4215: slice the checked-in platform-gated manifest to THIS shard.
-          # `--manifest-only` reds on any expected nodeid absent from the junit,
-          # so handing the whole file to every shard would false-red the two
-          # that do not collect it; and skip-guard fails closed on a
-          # comment-only manifest, so the two shards that get no nodeids must
-          # not invoke it (the skip-fail guard below gates on that). The
-          # comments (incl. the `allow-skipped` budget) are copied verbatim;
-          # the drift guard above fails closed if the file's owning shard
-          # disappears, which is what keeps "runs in exactly one shard" honest.
-          {
-            grep -E '^[[:space:]]*(#|$)' config/ci-expected-nodeids/platform-gated.txt || true
-            for f in ${{ matrix.files }}; do
-              grep "^tests/$f.py::" config/ci-expected-nodeids/platform-gated.txt || true
-            done
-          } > /tmp/gated-expected.txt
-          echo "gated-expected: $(grep -cvE '^[[:space:]]*(#|$)' /tmp/gated-expected.txt) nodeids for shard ${{ matrix.shard }}"
       - name: Run carve-out suite (embedded, URI unset — E2E-4)
         # The embedded carve-out. Deliberately NO TORTOISE_DB_URI:
         # the carve-out's embedded-specific assertions (recovery, busy-error,
@@ -2223,7 +2147,7 @@ jobs:
           FILES=""
           for f in ${{ matrix.files }}; do FILES="$FILES tests/$f.py"; done
           if [ -z "$FILES" ]; then
-            echo "shard ${{ matrix.shard }}: no selected carve-out file — skipping"
+            echo "no carve-out files selected — skipping"
             echo 0 > "${RUNNER_TEMP:-/tmp}/pytest-rc"
             # #4740: pytest never runs here, so the conftest sweep never writes
             # its report — write the explicit "no-pytest" one rather than
@@ -2231,11 +2155,12 @@ jobs:
             printf '{"sweep":{"skipped":"no-pytest"}}' > "${RUNNER_TEMP:-/tmp}/redislite-hygiene-end.json"
             exit 0
           fi
+          echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
           ( while true; do
               sleep 300
               p=$(grep -c ' PASSED' /tmp/pytest.log 2>/dev/null || true)
               f=$(grep -c ' FAILED' /tmp/pytest.log 2>/dev/null || true)
-              echo "HEARTBEAT: carve-out shard ${{ matrix.shard }} pytest still running — $p passed, $f failed so far"
+              echo "HEARTBEAT: carve-out pytest still running — $p passed, $f failed so far"
             done ) &
           HB_PID=$!
           ulimit -n 65536 || true  # #1988: fd headroom for the embedded suites
@@ -2316,10 +2241,7 @@ jobs:
         # The carve-out's redislite-availability skips are the exempt reason
         # family (embedded/redislite-unavailable) — never a guard trip; a
         # vanished nodeid or a docker-availability skip still reds.
-        # #6137: a shard the selector did not pick ran no pytest at all, so it
-        # has nothing to guard — without this gate the step would parse a
-        # missing /tmp/pytest.log and red on every tier-2 PR.
-        if: always() && steps.shard.outputs.selected == 'true'
+        if: always()
         run: |
           set +e
           RC=""
@@ -2406,9 +2328,7 @@ jobs:
         # `cleared: false` report does not red at any measured COUNT: `cleared`
         # reports whether the sweep's TIME BUDGET sufficed — a function of
         # runner load — not its residue (#4989).
-        # #6137: nothing ran in a shard the selector did not pick, so there is
-        # no sweep report to bound and no leak this job could have caused.
-        if: always() && steps.shard.outputs.selected == 'true'
+        if: always()
         run: |
           set +e
           RC=""

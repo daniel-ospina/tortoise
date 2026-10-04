@@ -27,7 +27,7 @@ version: 1
 # The 1.25x balance band holds at S=9 (`test_real_workflow_halves_are_
 # consistent`): above the floor the extra shards keep shrinking while
 # `test_onboarding_state_split.py` saturates max(shard), and after the #6137
-# relocation the measured ratio is 1.06x at S=9 (1.00x at S=8/7/6) against the
+# relocation the measured ratio is 1.00x at S=9 (1.00x at S=8/7/6) against the
 # band's 1.25x. Going below the 5.18 min floor means splitting that one file
 # (#6133), not adding shards.
 #
@@ -2286,8 +2286,14 @@ slow_files:
 # the packer's own metric, so the removal keeps the fast halves balanced by
 # construction — until the modelled halves fit 16.0 min, which lands all four
 # docker legs at 17.3–18.3 min MEASURED (the modelled-to-measured gap is RC12
-# below). 45 files, 1,563.6s of measured time. Three exclusions, all
+# below). 43 files, 1,604.2s of measured weight. Four exclusions, all
 # load-bearing:
+#   * test_capture_install.py and test_session_verify.py are NOT moved. Both
+#     are reachable only through the `core` fallback surface, so a
+#     `slow_files` home leaves their source's diff selecting neither the
+#     fast nor the slow leg, and
+#     `test_every_named_guard_runs_for_its_own_source` reds on the #7076
+#     class. They stay in the fast pool.
 #   * the `onboarding` surface is EXCLUDED. A `website/*` or docs-only PR
 #     selects `onboarding` and is pinned to `slow_run is False`
 #     (test_ci_selection.py::test_public_site_surface_change_selects_onboarding_
@@ -2327,7 +2333,6 @@ slow_files:
 - test_abuse_integration.py
 - test_battery_r1_seed.py
 - test_battery_setup.py
-- test_capture_install.py
 - test_capture_loop_responsiveness.py
 - test_capture_session.py
 - test_ci_selection.py
@@ -2357,7 +2362,6 @@ slow_files:
 - test_relationships_bounded.py
 - test_sdk_surface.py
 - test_selfhost_health_probe_executor.py
-- test_session_verify.py
 - test_skip_guard.py
 - test_surface_manifest.py
 - test_unjournaled_mutation_class.py
@@ -3448,6 +3452,89 @@ durations:
   # so it cannot mis-balance the LPT pack.
   test_queue_resweep.py: 2.0  # unmeasured
   test_docs_lint_gate.py: 2.0  # unmeasured (#5476: registered under core)
+  # #6137: register the fast pool's unmeasured files. The relocation
+  # removes 43 measured files from the fast pool, which takes
+  # `duration_coverage_issues` from main's 90.1% (667/740) to 89.5% —
+  # under the 90% floor. Every fast-pool file that has no duration key
+  # is registered here: measured from the junit of main run 37225357047
+  # (2026-10-04, fast shards a-i), or carried at the flat 2.0s default
+  # with the `# unmeasured` marker above where no artifact carries a
+  # weight (the #3400/#4221 convention). Same values the packer already
+  # applied (2.0 IS DEFAULT_FAST_WEIGHT) except where measurement
+  # replaced it — the S=9 shards tighten from 1.06x to 1.00x.
+  eval/write_path/test_write_path_prescreen.py: 2.0  # unmeasured
+  eval/write_path/test_write_path_semantic_judge.py: 2.0  # unmeasured
+  test_2500_terminal_ep_backfill.py: 1.7
+  test_3026_oauth_boundaries.py: 0.7
+  test_3660_session_upload_identity.py: 0.1
+  test_3844_annotation_injection.py: 0.1
+  test_3982_date_only_utc.py: 0.1
+  test_4041_breadcrumb_reader.py: 2.4
+  test_4199_dense_scope_coverage.py: 0.6
+  test_4542_retract_fold_decay.py: 0.1
+  test_4647_store_representable.py: 2.0  # unmeasured
+  test_4716_capture_operator_ref_remap.py: 1.2
+  test_4999_vector_mechanism.py: 2.0  # unmeasured
+  test_5359_unchecked_window_writers.py: 0.6
+  test_5361_inverted_window_audit.py: 0.4
+  test_5361_inverted_window_read_path.py: 0.2
+  test_6131_operator_mutation_vocabulary.py: 0.5
+  test_7108_operator_scope_predicate.py: 6.4
+  test_backfill_ghost_members_guard.py: 0.1
+  test_backup_ledger_5062.py: 0.4
+  test_capture_consent.py: 0.3
+  test_capture_graph_ops.py: 0.8
+  test_capture_redaction_sinks_5445.py: 0.1
+  test_capture_secret_redaction_4911.py: 9.7
+  test_capture_validfrom_3945.py: 0.5
+  test_ci_last_failed.py: 1.9
+  test_ci_manifest.py: 7.2
+  test_ci_verdict.py: 0.2
+  test_compute_attribution.py: 2.0  # unmeasured
+  test_connector_scope.py: 0.9
+  test_cypher_regex_guard_3595.py: 0.2
+  test_definite_description_backfill_5059.py: 0.3
+  test_document_source_gold.py: 0.1
+  test_egress_bytes.py: 2.0  # unmeasured
+  test_entry_point_python_guard.py: 4.6
+  test_extractor_embed_coerce_5060.py: 0.2
+  test_graph_name_ownership.py: 0.1
+  test_graph_storage.py: 5.2
+  test_heavy_import_guard.py: 9.2
+  test_hook_run_observation.py: 5.4
+  test_hook_stderr_5919.py: 0.3
+  test_hosted_aboutobject_journal_4240.py: 4.4
+  test_id_predicate_barrier_6976.py: 0.1
+  test_invalidate_inverted_window_5358.py: 0.8
+  test_merge_throughput.py: 5.8
+  test_mergify_config_guard.py: 7.1
+  test_notify_offloop_4456.py: 1.7
+  test_pack_extraction_slots_v31.py: 2.0  # unmeasured
+  test_pr_lead_time.py: 0.2
+  test_pytest_attribution.py: 0.3
+  test_queue_conflict_census.py: 0.5
+  test_queue_window_observe.py: 0.6
+  test_registry_integrity.py: 0.7
+  test_salience_labels_4917.py: 0.1
+  test_sdk_now_iso_single_definition.py: 0.4
+  test_secret_rule_precision_5470.py: 0.1
+  test_server_hygiene_gate.py: 0.2
+  test_session_confirm.py: 0.3
+  test_session_semantic_retrieval.py: 0.4
+  test_source_dedup_registration.py: 0.9
+  test_source_identity.py: 2.0  # unmeasured
+  test_source_kind_runtime_registration.py: 2.0  # unmeasured
+  test_source_version_read_wiring_5199.py: 0.6
+  test_source_version_references_5199.py: 1.1
+  test_subject_binding_1370.py: 2.0  # unmeasured
+  test_subject_layer_read_surfaces_4889.py: 2.0  # unmeasured
+  test_surface_guard_pin_4606.py: 0.9
+  test_uri_requiring_selection.py: 52.7
+  test_uri_username_consumed_3081.py: 0.5
+  test_validity_window_contract_5374.py: 0.8
+  test_value_gate_4899.py: 0.9
+  test_vet_gate_5005.py: 0.5
+  test_vocab_gating_by_graph.py: 2.0  # unmeasured
 
 # ── ON-DEMAND LANE: runs the pipeline, does not gate the merge ────────────
 # A file here is excluded from EVERY pre-merge leg (fast halves, slow, carve-
