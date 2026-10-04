@@ -11,7 +11,7 @@ import {
   harnessAttributionForHarness,
   lastErrorForHarness,
 } from './captureStatus.js'
-import { HARNESS_ATTRIBUTION, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT } from './harnesses.js'
+import { HARNESS_ATTRIBUTION, HARNESS_CAPTURE_SUPPORT } from './harnesses.js'
 
 test('canonical 4-state vocabulary is off → install-pending → waiting → active', () => {
   assert.deepEqual(CAPTURE_STATES, ['off', 'install-pending', 'waiting', 'active'])
@@ -351,12 +351,12 @@ test('#3700: the per-harness attribution is disclosed on the row, not baked into
   // label states what the server OBSERVED (nothing), never the conclusion
   // "not installed" drawn from that absence — the browser cannot stat the
   // user's filesystem, so non-installation is a fact the server cannot have.
+  // The exact-value assertion IS the pin: ANY re-wording, honest or not, moves
+  // the value and reddens here. A regex "class guard" sat beside it and was
+  // DELETED: it matched only the literal old phrasing ("not yet installed"
+  // slipped through), so it added no discriminating power over this line while
+  // reading as though it covered the whole defect class.
   assert.equal(captureStatusLabelForHarness(st, 'cursor'), 'not yet observed')
-  // The guard: #5450 is a COPY defect, so it is pinned on the wording itself —
-  // any future re-wording that re-asserts non-installation fails HERE.
-  assert.ok(!/not[\s-]*install/i.test(HARNESS_CAPTURE_STATUS_LABEL['install-pending']),
-    '#5450: the install-pending label must not assert non-installation from the '
-    + 'ABSENCE of observation (the server observed nothing)')
   assert.equal(captureStatusLabelForHarness(null, 'claude'), 'off')
   assert.equal(captureStatusLabelForHarness({ session_recording: false }, 'claude'), 'off')
 })
