@@ -707,9 +707,22 @@ def test_production_path_publishes_a_nonzero_value_for_a_real_org(
 
 def test_event_retention_loop_awaits_the_cost_refresh():
     """The leg must live INSIDE the hourly ``while True:`` body — a call placed
-    anywhere else fires once per process. Pinned statically because the loop is
-    a closure inside ``_lifespan`` (the established pattern in
-    ``tests/test_3036_oauth_retention.py``)."""
+    anywhere else fires once per process.
+
+    This pins the SHAPE; it is no longer the only pin, because #5381 moved the
+    loop body out of the ``_lifespan`` closure so it can be EXECUTED by
+    ``test_a_raising_step_cannot_kill_the_retention_loop`` below. That runtime
+    test is the stronger guard: it observes the steps actually running on a
+    second iteration.
+
+    #5381 also routes every step through the shared ``_guarded_step`` guard, so
+    the refresh is now an ARGUMENT to an awaited guard rather than a bare
+    ``await _refresh_cost_allocation()``. The invariant is unchanged — awaited,
+    inside the periodic body, never an un-awaited call and never inside a
+    never-invoked nested def — so the assertions below are written against that
+    invariant rather than against the old direct-statement spelling, which
+    alone would have FORBIDDEN the per-step guard.
+    """
     tree = ast.parse((REPO / "tortoise" / "hosted_api.py").read_text(encoding="utf-8"))
     loop = next(
         (n for n in ast.walk(tree)
@@ -721,24 +734,88 @@ def test_event_retention_loop_awaits_the_cost_refresh():
          if isinstance(n, ast.While) and isinstance(n.test, ast.Constant)
          and n.test.value is True), None)
     assert while_loop is not None, "_event_retention_loop has no `while True:`"
-    # The refresh must be an AWAITED call that is a DIRECT statement of the
-    # `while True:` body. Asserting on the bare Name (the previous form) passed
-    # for an UN-AWAITED `_refresh_cost_allocation()` — the exact dead-hook
-    # regression #4493 exists to fix — and for a call inside a never-invoked
-    # nested async def. Both are excluded here: only `await f()` at the top
-    # level of the loop body is accepted.
-    awaited_direct: list[str] = []
-    for stmt in while_loop.body:
-        if (
-            isinstance(stmt, ast.Expr)
-            and isinstance(stmt.value, ast.Await)
-            and isinstance(stmt.value.value, ast.Call)
-            and isinstance(stmt.value.value.func, ast.Name)
-        ):
-            awaited_direct.append(stmt.value.value.func.id)
-    assert "_refresh_cost_allocation" in awaited_direct, (
-        "the cost refresh must be an `await _refresh_cost_allocation()` that is "
-        "a DIRECT statement of the `while True:` body")
+    # It must still be INSIDE the loop body (an un-awaited or pre-loop call was
+    # the #4493 dead-hook regression), and it must be reached by an AWAIT.
+    names = {n.id for n in ast.walk(while_loop) if isinstance(n, ast.Name)}
+    assert "_refresh_cost_allocation" in names, (
+        "the cost refresh must be scheduled INSIDE the hourly while-loop body")
+    guarded = [
+        s for s in ast.walk(while_loop)
+        if isinstance(s, ast.Await)
+        and isinstance(s.value, ast.Call)
+        and isinstance(s.value.func, ast.Name)
+        and s.value.func.id == "_guarded_step"
+    ]
+    assert guarded, (
+        "every periodic step must be awaited THROUGH the `_guarded_step` "
+        "guard, so a step added later cannot kill the loop (#5381)")
+
+
+def test_a_raising_step_cannot_kill_the_retention_loop(monkeypatch, caplog):
+    """#5381: drive the REAL loop, not the step.
+
+    ``_event_retention_loop`` had NO per-iteration guard, so any step that
+    raised ended event retention AND the deleted-team purge for the life of the
+    process. The invariant is "the loop keeps iterating after a step raises",
+    and the only evidence for it is a SUBSEQUENT iteration actually running.
+
+    The sibling test above calls ``_refresh_cost_allocation()`` DIRECTLY and
+    never executes the loop — a bare no-op step passes it — so the loop's own
+    invariant was never asserted by anything.
+    """
+    calls = {"sweep": 0, "purge": 0}
+
+    def _boom(*_a, **_k):
+        calls["sweep"] += 1
+        raise RuntimeError("sweep exploded")
+
+    def _purge(*_a, **_k):
+        calls["purge"] += 1
+
+    async def _noop(*_a, **_k):
+        return None
+
+    async def _inline(fn, *, name, timeout=None):  # no threads in this test
+        return fn()
+
+    monkeypatch.setattr(ha, "run_on_daemon_worker", _inline)
+    monkeypatch.setattr(ha, "_sweep_events", _boom)
+    monkeypatch.setattr(ha, "_purge_deleted_orgs", _purge)
+    monkeypatch.setattr(ha, "_sweep_oauth_retention", lambda *_a, **_k: None)
+    # The 4th step is the one the sibling test owns; keep this test focused.
+    monkeypatch.setattr(ha, "_refresh_cost_allocation", _noop)
+
+    async def _drive():
+        task = asyncio.ensure_future(ha._event_retention_loop(0))
+        try:
+            for _ in range(500):
+                if calls["sweep"] >= 2 and calls["purge"] >= 1:
+                    break
+                await asyncio.sleep(0.01)
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                # The loop task DIED — the defect under test. Swallowed here so
+                # the assertion below reports it with a useful message instead
+                # of an opaque escaped RuntimeError.
+                pass
+
+    with caplog.at_level("WARNING", logger="tortoise.hosted_api"):
+        asyncio.run(_drive())
+
+    assert calls["sweep"] >= 2, (
+        "the loop died on the first raising step — it must iterate AGAIN "
+        f"(sweep ran {calls['sweep']}x)")
+    assert calls["purge"] >= 1, (
+        "a raising step skipped its SIBLINGS — the guard must be per STEP, not "
+        "per iteration")
+    assert any("sweep exploded" in r.getMessage() for r in caplog.records), (
+        "the swallowed failure must be LOGGED, not silently dropped: "
+        + caplog.text)
 
 
 def test_a_failing_refresh_cannot_kill_the_retention_loop(monkeypatch, caplog):
@@ -751,7 +828,9 @@ def test_a_failing_refresh_cannot_kill_the_retention_loop(monkeypatch, caplog):
     # No real metering/DB round trip: this test verifies ONLY the swallow path.
     monkeypatch.setattr(
         ha, "_measured_write_ops_basis", lambda orgs: {o: 1 for o in orgs})
-    # The retention loop has no per-iteration guard: this must NOT raise.
+    # The refresh must swallow its own failure. Since #5381 the loop's
+    # `_guarded_step` also contains a raise, making this the inner of two
+    # layers rather than the only one: this must NOT raise.
     with caplog.at_level("WARNING", logger="tortoise.hosted_api"):
         asyncio.run(ha._refresh_cost_allocation())
     # ... and the failure must have been OBSERVED and swallowed, not silently
