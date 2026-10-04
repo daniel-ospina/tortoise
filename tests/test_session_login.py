@@ -570,11 +570,12 @@ class TestChargeBucketResilience:
         self._limiter_on(monkeypatch)
         from tortoise import hosted_api as ha
         # Simulate the deferred-check-then-charge race: the bucket existed at
-        # check time (pruned to empty), then a concurrent max_entries sweep
-        # deleted it before the charge. setdefault must recreate it, not KeyError.
+        # check time, then a concurrent reclaim deleted it before the charge.
+        # The charge must recreate it — `_bucket_route` returns a fresh list
+        # (no setdefault, no indexing) — not KeyError.
         ip = "203.0.113.7"
-        ha._SESSION_BUCKETS[ip] = []  # created by the deferred check
-        del ha._SESSION_BUCKETS[ip]   # concurrent prune removed it
+        ha._SESSION_BUCKETS[ip] = []  # a tracked (present-but-empty) bucket
+        del ha._SESSION_BUCKETS[ip]   # concurrent reclaim removed it
         # The charge must not raise (it recreates the bucket).
         import asyncio
         asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
