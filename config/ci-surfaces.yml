@@ -1197,6 +1197,10 @@ surfaces:
   - test_derived_names.py
   - test_divergence_conformance.py
   - test_docs_fetcher.py
+  # #2386: the REQUIRED `docs` check's fail-closed changed-markdown detection
+  # (`ci.yml` → `docs` job) and its cli2/config contract. Repo-tooling change,
+  # so `core` (the fallback surface) is the home.
+  - test_docs_lint_gate.py
   - test_doctor.py
   - test_domain_loader_adapter.py
   - test_domain_validators.py
@@ -3212,6 +3216,7 @@ durations:
   # the `# unmeasured` marker until a CI junit artifact carries a measured weight,
   # so it cannot mis-balance the LPT pack.
   test_queue_resweep.py: 2.0  # unmeasured
+  test_docs_lint_gate.py: 2.0  # unmeasured (#5476: registered under core)
 
 # ── ON-DEMAND LANE: runs the pipeline, does not gate the merge ────────────
 # A file here is excluded from EVERY pre-merge leg (fast halves, slow, carve-
