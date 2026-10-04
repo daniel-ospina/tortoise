@@ -91,6 +91,17 @@ class TestTemporal:
         assert p["validFrom"] == "2026-06-01"
         assert p.get("validTo") is None
 
+    def test_inverted_window_rejected(self, sdk):
+        # `test_valid_from_stored` above pins that a WELL-FORMED caller window
+        # passes through verbatim (it still does — the fix narrows pass-through
+        # to well-formed windows, it does not remove it). #5359 adds the
+        # complement: an INVERSION is refused rather than persisted, because
+        # `restore_point_at`'s `_covers` would then cover no instant and the
+        # point would be silently unreachable from every temporal query.
+        with pytest.raises(ValueError):
+            sdk.create_point("statement", "time-bound claim",
+                             validFrom="2026-06-10", validTo="2026-06-01")
+
     def test_no_temporal_fields_backward_compat(self, sdk):
         p = sdk.create_point("statement", "no temporal")
         assert "validFrom" not in p or p.get("validFrom") is None

@@ -117,6 +117,69 @@ class TestUpdateAndEntityProps:
         assert obj.get("objectKind") == "product"
 
 
+# ── search_keys flattening parity across the write paths (#5482) ──────
+
+class TestSearchKeysFlattenedOnEveryWritePath:
+    """#5482: ``search_keys`` must be stored FLAT on a Point by EVERY writer.
+
+    FalkorDB's fulltext index does not index array-valued properties, so a
+    Point whose ``search_keys`` is a list is permanently unfindable by
+    ``queryNodes`` — while the write reports success. ``create_point`` and
+    ``update_point`` flatten via ``_flatten_search_keys_prop``; the generic
+    entity surface (``update_entity``, the ``surface.update_entity`` MCP tool)
+    wrote caller props straight through ``SET n += $props`` and did not.
+    """
+
+    @staticmethod
+    def _stored(sdk, pid):
+        """The RAW graph value of ``search_keys`` — not the SDK's rendering of
+        it, because the defect is precisely a mismatch between the two."""
+        rows = sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.search_keys",
+            params={"id": pid},
+        ).result_set
+        return rows[0][0] if rows else None
+
+    def test_update_entity_flattens_a_list_search_keys(self, sdk):
+        """The defect: a list landed as an ARRAY, so FTS could never match it."""
+        p = sdk.create_point("statement", "flatten target",
+                             search_keys=["alpha", "beta"])
+        sdk.update_entity(p["id"], search_keys=["gamma", "delta"])
+        stored = self._stored(sdk, p["id"])
+        assert stored == "gamma delta", (
+            "update_entity must flatten search_keys to a space-joined string "
+            f"exactly as create_point/update_point do; got {stored!r}")
+
+    def test_an_empty_list_omits_the_key_rather_than_clearing_it(self, sdk):
+        """``_flatten_search_keys_prop`` POPS an empty/blank list, so the key is
+        omitted from the write and any stored value is left ALONE — it does not
+        clear it. Pinned on BOTH update paths, because \"a blank list never
+        writes the key\" is the convention all three writers share and the pop
+        is easy to misread as a clear.
+        """
+        p = sdk.create_point("statement", "empty-list target",
+                             search_keys="keepme")
+        sdk.update_entity(p["id"], search_keys=[])
+        assert self._stored(sdk, p["id"]) == "keepme"
+        sdk.update_point(p["id"], search_keys=[])
+        assert self._stored(sdk, p["id"]) == "keepme"
+
+    def test_update_entity_leaves_a_flat_string_alone(self, sdk):
+        """No-op for scalars — flattening must not rewrite a flat value."""
+        p = sdk.create_point("statement", "scalar target")
+        sdk.update_entity(p["id"], search_keys="already flat")
+        assert self._stored(sdk, p["id"]) == "already flat"
+
+    def test_the_other_two_paths_are_the_parity_baseline(self, sdk):
+        """Pin the two paths that already flattened, so the parity claim above
+        is checked AGAINST them rather than asserted from them."""
+        p = sdk.create_point("statement", "parity create",
+                             search_keys=["one", "two"])
+        assert self._stored(sdk, p["id"]) == "one two"
+        sdk.update_point(p["id"], search_keys=["three", "four"])
+        assert self._stored(sdk, p["id"]) == "three four"
+
+
 # ── Entity arbitrary props persistence (#228) ─────────────────────────
 
 class TestEntityPropsPersisted:

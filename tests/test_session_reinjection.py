@@ -52,6 +52,7 @@ import pytest
 # import the eval ingest first so its register_kind("event") /
 # register_kind("session-transcript") apply.
 import tools.longmem_eval.ingest  # noqa: F401
+from tests import _live_utils
 from tortoise.retrieval import SESSION_TRANSCRIPT_KIND
 from tortoise.sdk import TortoiseSDK
 
@@ -64,7 +65,7 @@ def _falkordb_available() -> bool:
     module never captures it at import (#221 test-isolation lint)."""
     uri = os.environ.get(
         "TORTOISE_DB_URI",
-        "docker://:falkordb@localhost:6379/tortoise_test_matrix").rstrip("/")
+        _live_utils.docker_uri("tortoise_test_matrix")).rstrip("/")
     old = os.environ.get("TORTOISE_DB_URI")
     try:
         os.environ["TORTOISE_DB_URI"] = f"{uri}_probe"
@@ -89,7 +90,7 @@ def _uri() -> str:
     """Current TORTOISE_DB_URI (or the default), read at CALL time."""
     return os.environ.get(
         "TORTOISE_DB_URI",
-        "docker://:falkordb@localhost:6379/tortoise_test_matrix").rstrip("/")
+        _live_utils.docker_uri("tortoise_test_matrix")).rstrip("/")
 
 
 pytestmark = pytest.mark.skipif(

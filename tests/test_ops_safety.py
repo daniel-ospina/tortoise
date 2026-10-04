@@ -23,6 +23,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from tests import _live_utils
 from tortoise.consistency import recover_from_log
 from tortoise.log import EventLog
 from tortoise.projection import FalkorProjection
@@ -244,7 +245,7 @@ def test_rebuild_cli_bypasses_health_gate():
         log.append(_point_event(i))
     proj = FalkorProjection(db_path, skip_health_check=True)
     try:
-        counts = proj.rebuild_all(log_dir)
+        counts = proj.rebuild_all(log_dir, confirm_destructive=True)
         assert counts["nodes"] == 2
     finally:
         proj.close()
@@ -468,7 +469,7 @@ def test_rebuild_all_refuses_a_torn_tail_in_any_journal_file(torn_file):
     try:
         proj.g.query("CREATE (:Canary {id: 'c1'})")
         with pytest.raises(RuntimeError, match="resurrect"):
-            proj.rebuild_all(log_dir)
+            proj.rebuild_all(log_dir, confirm_destructive=True)
         # Refused BEFORE the wipe: the canary is untouched and nothing from
         # either file (including the COMPLETE one) was replayed.
         assert proj.g.query(
@@ -537,7 +538,7 @@ def test_rebuild_all_refuses_a_torn_removal_tail_before_the_wipe():
     try:
         proj.g.query("CREATE (n:Canary {id:'pre-wipe'})")
         with pytest.raises(RuntimeError, match="resurrect"):
-            proj.rebuild_all(log_dir)
+            proj.rebuild_all(log_dir, confirm_destructive=True)
         count = proj.g.query(
             "MATCH (n:Canary) RETURN count(n)").result_set[0][0]
         assert count == 1, "the graph was wiped despite the refusal"
@@ -564,7 +565,7 @@ def test_rebuild_refuses_a_torn_removal_tail_before_the_wipe():
     try:
         proj.g.query("CREATE (n:Canary {id:'pre-wipe'})")
         with pytest.raises(RuntimeError, match="resurrect"):
-            proj.rebuild(EventLog(journal))
+            proj.rebuild(EventLog(journal), confirm_destructive=True)
         canary = proj.g.query(
             "MATCH (n:Canary) RETURN count(n)").result_set[0][0]
         assert canary == 1, "the graph was wiped despite the refusal"
@@ -593,7 +594,7 @@ def test_rebuild_keeps_tolerance_for_a_harmless_torn_tail():
 
     proj = FalkorProjection(db_path, skip_health_check=True)
     try:
-        proj.rebuild(EventLog(journal))
+        proj.rebuild(EventLog(journal), confirm_destructive=True)
         kept = proj.g.query(
             "MATCH (n:Point {id:'kept-1'}) WHERE n.status = 'live' "
             "RETURN count(n)").result_set[0][0]
@@ -894,7 +895,7 @@ def test_reconcile_cli_refuses_a_torn_removal_tail(capsys):
                    full[:full.index('"op"')], torn_last=True)
 
     rc = _cmd_reconcile(argparse.Namespace(
-        db="docker://:falkordb@localhost:6379/tortoise_test_matrix",
+        db=_live_utils.docker_uri("tortoise_test_matrix"),
         log=log_path))
     captured = capsys.readouterr()
     assert rc == 1, f"a refused reconcile must exit non-zero, got {rc!r}"

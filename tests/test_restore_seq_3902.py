@@ -30,6 +30,8 @@ import uuid
 
 import pytest
 
+from tests import _live_utils
+
 # ── Non-embedded (docker/server) gate ────────────────────────────────────
 FALKORDB_AVAILABLE = False
 _WORKING_URI: str | None = None
@@ -63,7 +65,7 @@ def _probe_falkordb(candidates: list[str | None]) -> tuple[bool, str | None]:
 FALKORDB_AVAILABLE, _WORKING_URI = _probe_falkordb([
     os.environ.get("TORTOISE_DB_URI"),
     "docker://:falkordb@localhost:6380/tortoise_test_b5_3902",
-    "docker://:falkordb@localhost:6379/tortoise_test_restore_seq_3902",
+    _live_utils.docker_uri("tortoise_test_restore_seq_3902"),
 ])
 
 pytestmark = pytest.mark.skipif(

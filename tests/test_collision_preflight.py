@@ -11,6 +11,13 @@ Coverage:
   * CLEAN: no hits on any surface -> exit 0, VERDICT: CLEAN
   * one stubbed/real HIT per hit-capable surface -> exit != 0, surface named
   * UNTRUNCATED worktree scan: a hit that a `tail -8` window would hide is found
+  * #6622 a RECORD is not a WORKER: a registered worktree whose directory is
+    gone, or whose `.git` marker is gone, is reported with its basis (`exists=`
+    / `gitdir=` / `age=`) and CANNOT block; a `refs/remotes/<x>/…` ref that NO
+    configured remote's fetch REFSPEC targets (a one-shot fetch cache key, with
+    or without a trailing segment — `pr/6592` and `pr6592` alike) is
+    non-blocking, while a ref inside a namespace a configured remote actually
+    fetches into still blocks
   * number boundary: `3061` does NOT match `30610` (no fabricated collision)
   * PR-body PROSE is not a collision: a closed PR body that merely
     cross-references `#N` (the live #2926/#2754 shapes) is WEAK/non-blocking ->
@@ -383,8 +390,21 @@ CLAIM_COLLISION_CORPUS = {
 }
 
 def _git(repo: Path, *args: str) -> None:
+    # A temp repo has no committer identity, so any git commit through this
+    # helper dies with exit 128 ("Author identity unknown") on a machine with
+    # no global user.email. Set it in the ENVIRONMENT rather than by running
+    # `git config user.email` per repo: the environment covers every temp repo
+    # this module creates, including the ones built inside a test body, and it
+    # cannot be forgotten at a new call site the way a per-repo config can.
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "Test",
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "Test",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+    }
     subprocess.run(["git", *args], cwd=repo, check=True,
-                   capture_output=True, text=True)
+                   capture_output=True, text=True, env=env)
 
 
 def _write_exec(path: Path, body: str) -> Path:
@@ -1437,6 +1457,99 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("[remote branches]", out)
         self.assertIn("refs/remotes/origin/fix/3061-collision", out)
 
+    def test_merge_queue_hash_branch_is_not_a_claim(self):
+        # #3611 (escalation to a BLOCKING surface): `mergify/merge-queue/<hash>`
+        # is a GENERATED branch — created and deleted by the merge queue for
+        # each queued PR — so its name is a hash that can begin with the issue
+        # number. Measured instance: `mergify/merge-queue/6160bad001` made
+        # `collision_preflight 6160` report exit 1 with that queue branch as its
+        # ONLY hit, so an issue nobody held was reported as held and dropped
+        # from the queue.
+        #
+        # The number here LEADS the hex run, which the digest guard deliberately
+        # does NOT exclude (`3061cafe` must stay a live reference), so ORIGIN is
+        # the only thing that can separate these two cases — which is why the
+        # fix tests the namespace rather than loosening the number rule.
+        _git(self.repo, "update-ref",
+             "refs/remotes/origin/mergify/merge-queue/3061bad001", "HEAD")
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertNotIn("do NOT dispatch", out)
+        # The ref WAS present, so a green run is not a fixture artefact.
+        self.assertNotIn("mergify/merge-queue", out)
+
+    def test_lane_branch_leading_a_hex_run_still_collides(self):
+        # Control for the test above: excluding a GENERATED namespace must not
+        # exclude a lane's branch that merely LOOKS hex-ish. `3061cafe` is a
+        # name a lane can write, so it must remain a blocking hit — this pins
+        # the fix against being widened into "nothing hex-looking counts".
+        _git(self.repo, "update-ref",
+             "refs/remotes/origin/fix/3061cafe", "HEAD")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("refs/remotes/origin/fix/3061cafe", out)
+
+    def test_a_lane_branch_under_mergify_not_merge_queue_still_collides(self):
+        # ⛔ THE WIDTH OF THE FILTER IS A FAIL-CLOSED DECISION. A lane CAN create
+        # `mergify/<issue>-name` locally, and any namespace wider than
+        # `mergify/merge-queue/` renders that branch invisible on a BLOCKING
+        # surface: a false CLEAN, which for this tool is strictly worse than a
+        # false COLLISION. This pins the narrower namespace so the filter cannot
+        # be widened again without a decision.
+        for ref in (f"mergify/{ISSUE}-lane", f"mergify/{ISSUE}-lane-local"):
+            with self.subTest(ref=ref):
+                _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", "HEAD")
+                rc, out = self.run_tool()
+                self.assertNotEqual(rc, 0, f"ref={ref!r}\n{out}")
+                self.assertIn("VERDICT: COLLISION", out)
+                self.assertIn(f"refs/remotes/origin/{ref}", out)
+
+    def test_second_mergify_namespace_and_ci_bot_branch_are_not_claims(self):
+        # Two further generated namespaces exist in this repo's real refs.
+        # `mq/merge-queue/` is a second Mergify merge-queue namespace;
+        # `chore/ci-timing-refresh-` is minted by this repo's own workflow from
+        # `git rev-parse --short HEAD`, so a short SHA can LEAD with an issue
+        # number exactly like the hash this filter exists for.
+        for ref in (f"mq/merge-queue/{ISSUE}bad001",
+                    f"chore/ci-timing-refresh-{ISSUE}bad001"):
+            with self.subTest(ref=ref):
+                _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", "HEAD")
+                rc, out = self.run_tool()
+                self.assertEqual(rc, 0, f"ref={ref!r}\n{out}")
+                self.assertIn("VERDICT: CLEAN", out)
+                self.assertNotIn("do NOT dispatch", out)
+                self.assertNotIn(ref, out)
+
+    def test_worktree_on_a_generated_branch_is_still_found_by_its_path(self):
+        # ⛔ THE WORKTREE HALF IS THE LOAD-BEARING ONE. The filter skips only the
+        # BRANCH; the PATH must still be matched in full, or a real worktree on a
+        # generated branch becomes invisible on a BLOCKING surface.
+        self.add_worktree(f"{ISSUE}-queue-wt",
+                          branch=f"mergify/merge-queue/{ISSUE}bad001")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("[local worktrees]", out)
+        self.assertIn(f"{ISSUE}-queue-wt", out)
+
+    def test_ci_timing_branch_with_a_descriptive_tail_is_still_a_claim(self):
+        # `chore/ci-timing-refresh-` sits under the LANE-OWNED `chore/`
+        # namespace, so the bare prefix would be too wide — a lane could write a
+        # descriptive tail. The generator mints a lowercase short SHA, so the
+        # tail is anchored to lowercase hex; anything else stays a claim, because
+        # hiding one on a BLOCKING surface is worse than a false COLLISION.
+        for ref in (f"chore/ci-timing-refresh-{ISSUE}-manual",
+                    f"chore/ci-timing-refresh-{ISSUE}",
+                    f"chore/ci-timing-refresh-{ISSUE}BAd001"):
+            with self.subTest(ref=ref):
+                _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", "HEAD")
+                rc, out = self.run_tool()
+                self.assertNotEqual(rc, 0, f"ref={ref!r}\n{out}")
+                self.assertIn("VERDICT: COLLISION", out)
+                self.assertIn(ref, out)
+
     def test_local_branch_hit(self):
         _git(self.repo, "branch", "fix/3061-collision-preflight")
         rc, out = self.run_tool()
@@ -1459,6 +1572,292 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("000-w3061-hit", out)
         # 1 main worktree + 1 hit + 8 fillers = 10, all enumerated.
         self.assertIn("10 worktree(s) enumerated (untruncated)", out)
+
+    # ── #6622: a RECORD of work is not a WORKER ─────────────────────────────
+
+    def test_unconfigured_remote_namespace_is_a_fetch_cache_not_a_holder(self):
+        # #6622 case 3. `git fetch <url> refs/pull/N/head:refs/remotes/pr/N`
+        # writes a ref whose name is the CACHE KEY, and NO configured remote's
+        # refspec targets `pr`, so the ref records that the PR head was FETCHED
+        # — not that a lane holds the work. Measured on the real repo:
+        # `refs/remotes/pr/*` holds 2,810 refs named `pr/1 … pr/2810`, every one
+        # a PR number. This was a STRONG blocking hit even though the surface's
+        # own note says a remote-tracking ref "is a local fetch cache" and
+        # `_branch_terminal_state` refuses to judge one.
+        #
+        # ⛔ BOTH SHAPES ARE PINNED. `pr/3061` has a namespace segment and a
+        # tail; `pr3061` (ten of which exist on the real repo — `pr2996` …
+        # `pr5343`) is a SINGLE segment. A namespace+tail split demotes only the
+        # first, which left the #6622 class half-closed for #2996/#5327/#5343.
+        for ref in (f"refs/remotes/pr/{ISSUE}", f"refs/remotes/pr{ISSUE}"):
+            with self.subTest(ref=ref):
+                _git(self.repo, "update-ref", ref, "HEAD")
+                rc, out = self.run_tool()
+                self.assertEqual(rc, 0, out)
+                self.assertIn("VERDICT: CLEAN", out)
+                self.assertNotIn("do NOT dispatch", out)
+                # The ref WAS present, so the green verdict is not a fixture
+                # artefact: it is reported, at weak strength, with its basis.
+                self.assertIn(ref, out)
+                self.assertIn("fetch-cache ref", out)
+                self.assertIn("fetch refspec targets", out)
+                # …and the weak summary must NAME this category, not describe it
+                # as "your own work" / "a terminal branch" — a report that
+                # misdescribes what it measured is the class this fix removes.
+                self.assertIn(
+                    "a fetch-cache ref under a namespace no configured remote",
+                    out,
+                )
+
+    def test_a_configured_remotes_branch_still_blocks(self):
+        # CONTROL for the test above, and the guard rail the issue says NOT to
+        # delete: `origin`'s refspec is
+        # `+refs/heads/*:refs/remotes/origin/*`, so a ref there IS a real
+        # remote-tracking BRANCH and must keep blocking. Widening the fix to
+        # "any refs/remotes/* ref is a cache" would be a fail-OPEN on a blocking
+        # surface — the dangerous direction.
+        _git(self.repo, "update-ref",
+             f"refs/remotes/origin/fix/{ISSUE}-configured-control", "HEAD")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn(f"refs/remotes/origin/fix/{ISSUE}-configured-control", out)
+
+    def test_a_namespace_a_non_standard_refspec_fetches_into_still_blocks(self):
+        # ⛔ THE REFSPEC IS THE DISCRIMINATOR, NOT THE REMOTE'S NAME. This pins
+        # the gap a name-comparison leaves open: `origin` is configured, but its
+        # refspec writes `refs/remotes/upstream/*`, so `upstream` IS a live
+        # remote-tracking namespace even though no remote is NAMED `upstream`.
+        # Comparing the path segment to `git remote` would demote a genuine
+        # branch here — a false CLEAN on a blocking surface.
+        _git(self.repo, "config", "remote.origin.fetch",
+             "+refs/heads/*:refs/remotes/upstream/*")
+        _git(self.repo, "update-ref",
+             f"refs/remotes/upstream/fix/{ISSUE}-refspec", "HEAD")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn(f"refs/remotes/upstream/fix/{ISSUE}-refspec", out)
+
+    def test_a_non_glob_refspec_namespace_still_blocks(self):
+        # ⛔ THE NON-GLOB TRAP, pinned. `git remote set-branches origin main`
+        # writes `+refs/heads/main:refs/remotes/origin/main` — a destination with
+        # NO `*`. A parser that skipped the non-glob form left the namespace set
+        # EMPTY, and an empty set demoted EVERY `refs/remotes/…` ref, so this
+        # genuine remote-tracking branch came back CLEAN — a fail-open on a
+        # blocking surface. Taking the PARENT of the destination fixes it, and it
+        # errs WIDE, which on this surface is the safe direction.
+        _git(self.repo, "config", "remote.origin.fetch",
+             "+refs/heads/main:refs/remotes/origin/main")
+        _git(self.repo, "update-ref",
+             f"refs/remotes/origin/fix/{ISSUE}-nonglob", "HEAD")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn(f"refs/remotes/origin/fix/{ISSUE}-nonglob", out)
+
+    def test_a_glob_refspec_whose_star_is_not_last_still_blocks(self):
+        # ⛔ A `*` IS NOT ALWAYS THE LAST SEGMENT OF A DESTINATION.
+        # `+refs/heads/*:refs/remotes/x/*/y` is accepted by git and creates real
+        # tracking refs like `refs/remotes/x/fix/3061-mine/y`. A prefix taken as
+        # the PARENT of that destination keeps the literal `*`
+        # (`refs/remotes/x/*/`), which prefixes NO real ref, so the branch was
+        # demoted to a "fetch-cache ref" — a false CLEAN, and the dangerous
+        # direction. The prefix must stop at the FIRST `*`.
+        _git(self.repo, "config", "remote.origin.fetch",
+             "+refs/heads/*:refs/remotes/x/*/y")
+        _git(self.repo, "update-ref",
+             f"refs/remotes/x/fix/{ISSUE}-midstar/y", "HEAD")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn(f"refs/remotes/x/fix/{ISSUE}-midstar/y", out)
+
+    def test_an_empty_namespace_set_blocks_rather_than_demoting(self):
+        # ⛔ AN EMPTY SET IS NOT "EVERYTHING IS A CACHE" — it is an INABILITY TO
+        # TELL, and it FAILS CLOSED. This is a UNIT pin rather than a CLI one
+        # because the fixture configures `origin`, so the CLI cannot reach the
+        # empty set at all — and that is exactly why the rule needs its own pin.
+        # The empty set arises in a repo configuring NO remote, where a
+        # `refs/remotes/origin/…` ref is indistinguishable between a leftover of
+        # an earlier configuration and a deliberately created ref. Reading the
+        # empty set as a cache demoted all of them — a fail-open on a blocking
+        # surface, and the dangerous direction.
+        mod = _tool_module()
+        self.assertIsNone(
+            mod._fetch_cache_remote(f"refs/remotes/pr/{ISSUE}", set()))
+        self.assertIsNone(
+            mod._fetch_cache_remote(f"refs/remotes/origin/fix/{ISSUE}", set()))
+        self.assertIsNone(
+            mod._fetch_cache_remote(f"refs/remotes/pr{ISSUE}", set()))
+        # ...while a NON-empty set still demotes a namespace OUTSIDE it, so the
+        # fail-closed arm is a floor and not a blanket refusal to demote at all.
+        self.assertEqual(
+            mod._fetch_cache_remote(f"refs/remotes/pr/{ISSUE}",
+                                    {"refs/remotes/origin/"}), "pr")
+
+    def test_an_unreadable_refspec_list_leaves_a_fetch_cache_ref_blocking(self):
+        # FAIL-CLOSED unit pin. `_remote_tracking_namespaces` answers None when
+        # the refspec list cannot be read, and `_fetch_cache_remote` must then
+        # answer None — the BLOCKING answer. Reading an unreadable list as "no
+        # namespaces, so every ref is a cache" would convert every remote hit
+        # into a false CLEAN.
+        mod = _tool_module()
+        live = {"refs/remotes/origin/"}
+        self.assertIsNone(
+            mod._fetch_cache_remote(f"refs/remotes/pr/{ISSUE}", None))
+        self.assertEqual(
+            mod._fetch_cache_remote(f"refs/remotes/pr/{ISSUE}", live), "pr")
+        self.assertEqual(
+            mod._fetch_cache_remote(f"refs/remotes/pr{ISSUE}", live), f"pr{ISSUE}")
+        # A ref INSIDE a live namespace, and a LOCAL branch, are not fetch caches.
+        self.assertIsNone(mod._fetch_cache_remote(
+            f"refs/remotes/origin/fix/{ISSUE}", live))
+        self.assertIsNone(
+            mod._fetch_cache_remote(f"refs/heads/fix/{ISSUE}", live))
+
+    def test_the_entry_point_keeps_a_fetch_cache_ref_blocking_when_git_config_fails(self):
+        # ENTRY-POINT fail-closed coverage. The unit pin above feeds `None`
+        # straight to `_fetch_cache_remote`; this one makes the real
+        # `_remote_tracking_namespaces` call FAIL, so a changed failure return is
+        # caught by the COMPOSITION the tool actually performs rather than by a
+        # test that never reaches it.
+        _git(self.repo, "update-ref", f"refs/remotes/pr/{ISSUE}", "HEAD")
+        stub = _write_exec(self.tmp / "git-stub-no-refspec", (
+            "#!/usr/bin/env bash\n"
+            "set -u\n"
+            'if [ "${1:-}" = "config" ] && [ "${2:-}" = "--get-regexp" ]; then\n'
+            '  echo "git-stub: refusing config --get-regexp" >&2\n'
+            "  exit 128\n"
+            "fi\n"
+            'exec "${REAL_GIT:?REAL_GIT unset}" "$@"\n'
+        ))
+        rc, out = self.run_tool(git_bin=stub,
+                                env_extra={"REAL_GIT": shutil.which("git")})
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn(f"refs/remotes/pr/{ISSUE}", out)
+        # …and the surface says the read failed, rather than presenting a strict
+        # answer as a measured one.
+        self.assertIn("NO fetch-cache ref was demoted", out)
+
+    def test_a_dead_record_is_demoted_only_on_gits_own_lock(self):
+        # #6622 case 1, REVISED after a fresh review found a false CLEAN.
+        #
+        # `git worktree add` registers the record; removing the directory does
+        # NOT deregister it. But a directory that is not on disk is NOT proof the
+        # record is dead: `mv <worktree> <elsewhere>` leaves a fully working
+        # worktree (a linked worktree's `.git` holds an ABSOLUTE `gitdir:`), so
+        # git keeps working from the new path while this listing still reports
+        # the OLD one. Demoting on absence alone therefore reported a LIVE lane as
+        # non-blocking and let the gate exit 0 — the duplicate-ownership
+        # direction this gate exists to prevent.
+        #
+        # The real dead shape, MEASURED in this repo, is an aborted
+        # `git worktree add` left as `locked initializing`. That lock is git's own
+        # "this registration cannot hold work" signal, and it is what demotes.
+        mod = _tool_module()
+        absent = str(self.tmp / "does-not-exist-3061")
+        live, basis = mod._worktree_liveness(absent, "initializing")
+        self.assertFalse(live, basis)
+        self.assertIn("locked=initializing", basis)
+        self.assertIn("cannot hold work", basis)
+        # ⛔ A LOCK IS PRUNE-PROTECTION, NOT LIVENESS. `git worktree lock` exists
+        # for a worktree whose path is EXPECTED to be absent (a portable device, a
+        # network share), and `--porcelain` emits `locked` INSTEAD OF `prunable` —
+        # so a MOVED worktree its owner also locked reports only `locked portable`
+        # and would be demoted if ANY lock counted. It must block.
+        for other_lock in ("portable", "yes", "reason: on a USB stick"):
+            live, basis = mod._worktree_liveness(absent, other_lock)
+            self.assertTrue(live, basis)
+            self.assertIn("prune-protection", basis)
+            self.assertIn("NOT demoted", basis)
+        # ⛔ A LOCK-FREE `prunable` RECORD IS THE MOVED WORKTREE AND MUST BLOCK.
+        live, basis = mod._worktree_liveness(
+            absent, None, "gitdir file points to non-existent location")
+        self.assertTrue(live, basis)
+        self.assertIn("prunable=", basis)
+        self.assertIn("NOT demoted", basis)
+        # ⛔ AND A BARE ABSENCE FAILS CLOSED TOO — no lock, no demotion.
+        live, basis = mod._worktree_liveness(absent)
+        self.assertTrue(live, basis)
+        self.assertIn("no lock, NOT demoted", basis)
+
+    def test_a_moved_live_worktree_still_blocks(self):
+        # ⛔ THE FALSE-CLEAN REGRESSION PIN (fresh review, P1). `mv` a worktree and
+        # it KEEPS WORKING — git resolves it from the new path — while
+        # `git worktree list --porcelain` goes on reporting the OLD path and tags
+        # the record `prunable`. The lane is alive; the gate must say COLLISION.
+        path = self.add_worktree(f"{ISSUE}-moved")
+        moved = path.parent / f"{ISSUE}-moved-elsewhere"
+        path.rename(moved)
+        mod = _tool_module()
+        live, basis = mod._worktree_liveness(str(path))
+        self.assertTrue(live, basis)
+        self.assertIn("NOT demoted", basis)
+        # A plain `mv` leaves a WORKING worktree: its `.git` pointer survives and
+        # still names an absolute gitdir, which is why git keeps working from the
+        # new path while `git worktree list` reports the old one.
+        marker = moved / ".git"
+        self.assertTrue(marker.exists(), "moved worktree lost its marker")
+        self.assertIn("gitdir:", marker.read_text())
+
+    def test_the_entry_point_does_not_demote_an_unlocked_absent_record(self):
+        # ENTRY-POINT polarity: an `rm -rf`'d record that git does NOT report as
+        # locked is NOT demoted, so the pre-dispatch gate still refuses. This is
+        # the direction that must fail CLOSED.
+        path = self.add_worktree(f"{ISSUE}-absent-unlocked")
+        shutil.rmtree(path)
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("exists=no", out)
+        self.assertIn("NOT demoted", out)
+
+    def test_a_worktree_whose_git_marker_is_gone_blocks_without_a_lock(self):
+        # #6622 case 2, REVISED: a `.git` marker that is gone is evidence the
+        # record is not a usable worktree — but it is NOT a lock, so it does not
+        # by itself license a demotion. Same polarity as the moved case.
+        path = self.add_worktree(f"{ISSUE}-no-gitdir")
+        (path / ".git").unlink()
+        mod = _tool_module()
+        live, basis = mod._worktree_liveness(str(path))
+        self.assertTrue(live, basis)
+        self.assertIn("gitdir=no", basis)
+        self.assertIn("NOT demoted", basis)
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("gitdir=no", out)
+
+    def test_an_unreadable_worktree_is_not_demoted(self):
+        # ⛔ UNREADABLE IS NOT ABSENT. `os.path.isdir` answers False for EACCES
+        # and ESTALE as well as for a missing directory, so a demotion keyed on
+        # it would turn a live-but-unreadable worktree into a false CLEAN on a
+        # BLOCKING surface. Pinned here because the shape cannot be reproduced
+        # as the directory's own owner.
+        mod = _tool_module()
+        with mock.patch("os.stat", side_effect=PermissionError("EACCES")):
+            live, basis = mod._worktree_liveness("/some/worktree/3061-x")
+        self.assertTrue(live, basis)
+        self.assertIn("unreadable", basis)
+        # A genuinely ABSENT path is only demoted when git reports it LOCKED.
+        live, basis = mod._worktree_liveness(
+            str(self.tmp / "does-not-exist-3061"), "initializing")
+        self.assertFalse(live)
+        self.assertIn("exists=no", basis)
+        self.assertIn("locked=initializing", basis)
+
+    def test_a_live_worktree_still_blocks_and_reports_its_basis(self):
+        # The guard rail: a LIVE worktree is a real competing claim and must
+        # keep blocking. It now carries its EVIDENCE, so a false hold is visible
+        # at a glance instead of having to be re-derived by hand.
+        self.add_worktree(f"{ISSUE}-live")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("[local worktrees]", out)
+        self.assertIn("exists=yes gitdir=yes age=", out)
 
     def test_issue_assignee_hit(self):
         self.gh_fixtures(issue=self.issue_payload(assignees=("other-agent",)))
@@ -1810,14 +2209,12 @@ class CollisionPreflightTest(unittest.TestCase):
         # issue number, so the hit comes from `closingIssuesReferences` and only
         # the self-identity gate can suppress it.
         _git(self.repo, "checkout", "-q", "-b", "release/hub-work")
-        other = self.tmp / "other-repo"
-        other.mkdir()
-        _git(other, "init", "-q", "-b", "main", "--template=")
-        _git(other, "remote", "add", "origin",
-             "https://github.com/other-owner/other-repo.git")
-        (other / "seed.txt").write_text("seed\n")
-        _git(other, "add", "seed.txt")
-        _git(other, "commit", "-qm", "seed")
+        # ⛔ USE THE SHARED FIXTURE HELPER — do not hand-roll this repo. This
+        # block was an inline copy of `_sibling_repo` that had dropped its two
+        # identity lines (`git config user.email` / `git config user.name`),
+        # which the seed commit below needs. Going through the helper keeps that
+        # in one place, so a hand-rolled copy cannot drop it again.
+        other = self._sibling_repo("other-repo", "other-owner/other-repo")
 
         self.gh_fixtures(open_prs=[{
             "number": 5199, "title": "fix: land the thing",
@@ -2015,7 +2412,7 @@ class CollisionPreflightTest(unittest.TestCase):
         self.gh_fixtures(open_prs=[])
         rc, out = self.run_tool()
         self.assertEqual(rc, 0, out)
-        remote_row = [ln for ln in out.splitlines() if ln.startswith("remote branches")][0]
+        remote_row = next(ln for ln in out.splitlines() if ln.startswith("remote branches"))
         self.assertIn("terminal tests are NOT applied here", remote_row)
         self.assertNotIn("already merged into main", remote_row)
 
@@ -2258,8 +2655,8 @@ class CollisionPreflightTest(unittest.TestCase):
         rc, out = self.run_tool()
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
-        wt_row = [ln for ln in out.splitlines()
-                  if ln.startswith("local worktrees")][0]
+        wt_row = next(ln for ln in out.splitlines()
+                      if ln.startswith("local worktrees"))
         self.assertIn("HIT", wt_row, wt_row)
         self.assertNotIn("merged into origin/main", wt_row)
 
@@ -2385,8 +2782,8 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
         for row_prefix in ("local branches", "local worktrees"):
-            row = [ln for ln in out.splitlines()
-                   if ln.startswith(row_prefix)][0]
+            row = next(ln for ln in out.splitlines()
+                       if ln.startswith(row_prefix))
             self.assertIn("HIT", row, row)
         self.assertNotIn("merged into origin/main", out)
 
@@ -3577,6 +3974,37 @@ class CollisionPreflightTest(unittest.TestCase):
                 self.assertIn("--closed-pr-timeout", out)
                 self.assertNotIn("Traceback", out)
 
+    def test_a_pre_3_12_interpreter_is_usage_not_collision(self):
+        # #4053: the module-level version guard is a PRE-QUERY failure — it runs
+        # before any surface is touched. `SystemExit(<str>)` exits 1, which is
+        # EXIT_COLLISION, so an interpreter mismatch read as "another lane is on
+        # this issue": no VERDICT line, and nothing in the output saying the
+        # check never ran. That is exactly the class the env-typo case above was
+        # fixed for (#3619), left behind on the one path that cannot be reached
+        # by importing the module.
+        #
+        # The guard sits at module scope and deliberately runs before the imports
+        # (#5128), so it cannot be exercised by importing. Execute the source
+        # under a faked `sys.version_info` in a subprocess instead.
+        shim = (
+            "import sys\n"
+            "sys.version_info = (3, 11, 0, 'final', 0)\n"
+            f"exec(compile(open({str(TOOL)!r}).read(), {str(TOOL)!r}, 'exec'))\n"
+        )
+        proc = subprocess.run(
+            [PYTHON, "-c", shim], capture_output=True, text=True, cwd=str(ROOT),
+        )
+        self.assertEqual(proc.returncode, 3, proc.stderr)
+        # 1 is the specific wrong answer: it is indistinguishable from a real
+        # collision to anything gating on `must exit 0`.
+        self.assertNotEqual(proc.returncode, 1)
+        self.assertIn("requires Python >= 3.12", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+        # No VERDICT may be printed. No surface was queried, so emitting one
+        # would be the "confident verdict about a scope it did not establish"
+        # bug this exit-code contract exists to prevent.
+        self.assertNotIn("VERDICT", proc.stdout)
+
 
     # ── JEV claim gate (#5070) ──────────────────────────────────────────────
 
@@ -3662,6 +4090,47 @@ class CollisionPreflightTest(unittest.TestCase):
                 self.assertIn("VERDICT: COLLISION", out)
                 self.assertIn("JEV UNAVAILABLE", out)
                 self.assertIn("fail-closed", out)
+
+    def test_explicit_jev_env_file_does_not_fall_through_to_a_key_on_disk(self):
+        """An explicit JEV env-file override is AUTHORITATIVE (#5278).
+
+        The override used to be PREPENDED to the candidate list, with the
+        implicit ``<cwd>/.env`` still consulted afterwards. So a run that
+        declared a KEYLESS env file picked a key up anyway — and, on a machine
+        carrying one, made a real, billable JEV call while believing it had no
+        credential at all.
+
+        This is hermetic and needs no network: a decoy key is written exactly
+        where an implicit candidate looks (``<cwd>/.env`` — the harness's temp
+        repo), the override names a keyless file, and the tool must report that
+        no ``JEV_API_KEY`` was found. Through the old fall-through it found the
+        decoy and failed with a transport error instead, so this assertion is
+        what pins the invariant — the existing ``no-key`` subtest below does
+        NOT, because in a checkout without a ``.env`` (CI) both behaviours
+        return no key and it passes either way.
+        """
+        body = (
+            "Consolidated under #5063 (one binding from a written claim to the "
+            "system it describes)."
+        )
+        self.gh_fixtures(issue=self.issue_payload(comments=[("test-agent", body)]))
+        # A decoy key at a location the IMPLICIT candidate list would read.
+        (self.repo / ".env").write_text(
+            "JEV_API_KEY=implicit-candidate-decoy\n", encoding="utf-8",
+        )
+        keyless = self.tmp / "keyless.env"
+        keyless.write_text("# deliberately carries no JEV_API_KEY\n", encoding="utf-8")
+
+        rc, out = self.run_tool(env_extra={
+            "COLLISION_PREFLIGHT_JEV": "on",
+            "COLLISION_PREFLIGHT_JEV_ENV_FILE": str(keyless),
+        })
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("JEV UNAVAILABLE", out)
+        # THE DISCRIMINATOR: the run must have found NO key. Had it fallen
+        # through to the decoy it would have attempted a call and reported a
+        # transport failure instead of the missing-key reason.
+        self.assertIn("no JEV_API_KEY", out)
 
     def test_same_body_decides_identically_and_warm_cache_makes_no_call(self):
         self.jev_rules(default=0.03)  # CLEAN

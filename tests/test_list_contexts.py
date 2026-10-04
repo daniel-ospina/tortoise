@@ -15,31 +15,30 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+from tests import _live_utils
 from tortoise.sdk import TortoiseSDK
 
 
-def _docker_falkor_reachable(port: int = 6379) -> bool:
-    """True when a live FalkorDB (Docker) answers on localhost:port.
+def _docker_falkor_reachable(port: int | None = None) -> bool:
+    """True when a live FalkorDB (Docker) answers on the PROVISIONED port.
 
     These tests target the LIVE FalkorDB (per the module docstring) — on the
-    P3 docker lane (fast half) the provisioned passworded service (6379) is
-    up so they RUN; the skip is VISIBLE (never a vacuous return, epic #1647
+    P3 docker lane (fast half) the provisioned passworded service is up so
+    they RUN; the skip is VISIBLE (never a vacuous return, epic #1647
     Task 9) and the reason is intentionally NOT guard-exempt — a downed
     provisioned service flips the guard red (fail-closed, D-4).
+
+    #6673: the service is published on an EPHEMERAL host port (docker
+    `-p 0:6379`), read from tests/_live_utils.py — not the 6379 literal.
     """
-    import socket
-    try:
-        with socket.create_connection(("localhost", port), timeout=1.5):
-            return True
-    except OSError:
-        return False
+    return _live_utils.tcp_reachable(port or _live_utils.docker_port())
 
 
 @pytest.fixture
 def sdk():
     """SDK against the live FalkorDB with a unique namespace per test run."""
     if not _docker_falkor_reachable():
-        pytest.skip("live FalkorDB (docker://localhost:6379) not reachable — provisioned service down (epic #1647)")
+        pytest.skip(f"live FalkorDB (docker://localhost:{_live_utils.docker_port()}) not reachable — provisioned service down (epic #1647)")
     ns = f"test_lc_{uuid.uuid4().hex[:8]}"
     sdk = TortoiseSDK(namespace=ns)
     yield sdk
