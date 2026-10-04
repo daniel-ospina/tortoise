@@ -22872,6 +22872,15 @@ def _store_only_lane(no_provider: bool, extract_enabled: bool) -> str:
     """
     if not extract_enabled:
         return _CAPTURE_EXTRACTOR_LANE_DISABLED
+    # Reaching here means the ONLY store-only reason left is the missing key:
+    # every caller derives `store_only = no_provider or not extract_enabled`, so
+    # `no_provider` holds whenever this branch runs. Assert the precondition
+    # rather than leave a decision-bearing parameter unread — a future edit that
+    # recorded the keyless "none" for a configured-key team is exactly the false
+    # M2-replay diagnosis this value exists to prevent.
+    assert no_provider, (
+        "_store_only_lane(no_provider=False, extract_enabled=True) is not a "
+        "store-only capture — callers never reach it (see the docstring)")
     return "none"
 
 

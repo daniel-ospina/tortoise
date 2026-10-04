@@ -10490,7 +10490,7 @@ function MemorySources(props) {
             When on, sessions from machines that opted in — Claude Code, Codex
             and Cursor via <code>{CAPTURE_OPT_IN_LINE}</code>, or a Pi machine
             with the extension installed — are filed to your Organization's
-            graph as memory{onToggleCaptureExtract
+            graph as memory sources{onToggleCaptureExtract
               ? '; whether they are also extracted into memory is controlled below.'
               : '.'}
           </p>
