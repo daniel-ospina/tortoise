@@ -137,8 +137,8 @@ from tortoise.sdk import (
     TortoiseSDK,
     _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
     _capture_ep_target_ids,  # W5 Phase D (#2104): EP pass targets (minted + first-time folds)
-    _capture_gate_window,  # #4897: strip synthetic markers before the empty/blank gate
     _capture_extraction_window,  # #6246: the shared extraction view (both lanes)
+    _capture_gate_window,  # #4897: strip synthetic markers before the empty/blank gate
     _capture_minted_ids,  # W5 Phase D (#2104): provenance-stamp gate (minted only)
     _capture_redaction_warning,  # #4911: the shared "a secret was redacted" receipt warning
     _capture_resp_error_split,  # #2335 WI-2: customer error contract (headline/diagnostics)

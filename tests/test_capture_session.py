@@ -4037,7 +4037,8 @@ def test_capture_session_hands_both_lanes_the_shared_extraction_window(
     ``_capture_extraction_window``. This drives the DEFAULT lane's real entry
     point and captures the conversation ``_extract_session_v2`` actually
     receives, so deleting the one call site reds this test (and the STORED
-    turn keeps its clipped text).
+    turn keeps its clipped text — plus, since #4897, the marker that makes the
+    cut visible; see the stored assertion below).
     """
     from tortoise import sdk as sdk_mod
     seen: list = []
@@ -4061,11 +4062,24 @@ def test_capture_session_hands_both_lanes_the_shared_extraction_window(
     assert seen[0][1] == "", (
         f"a clipped turn with nothing to say reached the v2 lane: {seen[0][1]!r}")
 
-    # Stored turns are unaffected: turn 1 keeps its clipped 5,000 chars.
+    # The EXTRACTION window must not reach the store: turn 1 keeps its clipped
+    # 5,000 chars. Since #4897 that clip CARRIES the cut marker, so this asserts
+    # the clipped-and-marked shape rather than the bare ``content[:cap]`` this
+    # line asked for before the marker existed — the two issues share this input
+    # shape and disagreed about it (main #6246 expected an unmarked clip; the
+    # #4897 contract is that a cut is never silent).
+    from tortoise.sdk import _CAPTURE_TURN_CAP
+
     rows = sdk._get_proj().g.query(
         "MATCH (t:Point {pointKind:'event'}) RETURN t.content ORDER BY t.id",
     ).result_set
-    assert rows[1][0] == "[user] " + ("X" + " " * 6000)[:5000]
+    stored = rows[1][0]
+    assert stored.startswith("[user] X"), stored
+    assert _TRUNCATION_SENTINEL in stored, (
+        f"the stored turn lost the #4897 cut marker: {stored!r}")
+    assert len(stored) == len("[user] ") + _CAPTURE_TURN_CAP, (
+        "the marker must live INSIDE the window, so a re-applied cap cannot "
+        "cut it off")
 
 
 # ── #4897: a cut turn is MARKED, never silently shortened ──────────────────
