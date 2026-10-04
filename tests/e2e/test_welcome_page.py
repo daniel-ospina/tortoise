@@ -47,6 +47,12 @@ def _is_bff_signup_request(method: str, url: str) -> bool:
     return method == "POST" and url.endswith("/auth/signup")
 
 
+# #4940: Chromium reports a request the PAGE (or its own JS) killed as
+# `net::ERR_ABORTED`. That is a client-side condition and must not be bucketed
+# with host reachability — see `_unobserved_outcome`.
+ABORTED_TRANSPORT = "net::ERR_ABORTED"
+
+
 def _signup_transport_failure(method: str, url: str, failure: str | None) -> str | None:
     """The entry to record for a FAILED BFF signup request, else None.
 
@@ -61,40 +67,60 @@ def _signup_transport_failure(method: str, url: str, failure: str | None) -> str
     return f"{method} {url} — {failure or 'unknown transport failure'}"
 
 
-def _unobserved_signup_message(*, transport_failures: list[str], post_issued: bool) -> str:
-    """Name the condition actually observed, instead of asserting a product cause (#4940).
+def _unobserved_outcome(*, transport_failures: list[str], post_issued: bool) -> tuple[str, str]:
+    """Return `(verdict, message)` for a signup POST that captured NOTHING (#4940).
 
     `page.on("response")` only fires when a request gets an ANSWER, so
-    `signup["status"]` stays `None` for three different situations:
+    `signup["status"]` stays `None` for four different situations, and they do
+    NOT share a verdict:
 
-    - the request DIED at the transport layer (DNS, TLS, connection refused,
-      aborted socket) — a `requestfailed` event was recorded;
+    - the request was ABORTED client-side (`net::ERR_ABORTED`) — the page or its
+      own JS killed the POST. That is a PRODUCT condition, so it FAILS;
+    - the request DIED at the transport layer (DNS, TLS, connection refused) —
+      UNAVAILABLE;
     - the request was ISSUED but never answered (connection blackhole, slow
-      connect timeout) — neither event fires, so only the `request` listener's
-      flag distinguishes this from the next case;
-    - the form never submitted a request at all — the only case that is a
-      product condition.
+      connect timeout) — UNAVAILABLE;
+    - the form never submitted a request at all — the other PRODUCT condition,
+      and the one the pre-#4940 message asserted for all four.
 
-    The pre-#4940 message asserted the third for all three. Run 35780459764
-    (2026-09-22T20:27:57Z, `main`) failed on that message while the page had
-    loaded, every locator had filled and clicked, and the test had simply waited
-    out its whole 30s budget against a host the availability watchdog was
-    independently reporting DOWN in the same window.
+    The verdict is RETURNED rather than acted on so the split itself is pinnable:
+    a message-only pin cannot see the buckets collapse, and collapsing them is how
+    a product regression gets reported as an availability blip and exits the suite
+    green.
+
+    Run 35780459764 (2026-09-22T20:27:57Z, `main`) failed on the pre-#4940 message
+    while the page had loaded and every locator had filled and clicked — a form
+    that never submitted because it was never served fails on a locator timeout,
+    not here — and the test had simply waited out its whole 30s budget. The
+    availability watchdog measured that host DOWN in an ADJACENT window (incident
+    #4682, 18:00–18:28Z, about two hours earlier), so the watchdog is NOT the
+    instrument that answers this failure — which is why the timeout case is
+    reported as its own condition rather than silently attributed to the host.
     """
+    if any(ABORTED_TRANSPORT in entry for entry in transport_failures):
+        return (
+            "product",
+            "the POST to the BFF /auth/signup was ABORTED before any response — a "
+            "client-side condition, not an availability one: "
+            + "; ".join(transport_failures),
+        )
     if transport_failures:
         return (
+            "unavailable",
             "no POST to the BFF /auth/signup got a response — the request failed at the "
             "TRANSPORT layer, so this is a reachability failure, not a signup failure: "
-            + "; ".join(transport_failures)
+            + "; ".join(transport_failures),
         )
     if post_issued:
         return (
+            "unavailable",
             "the POST to the BFF /auth/signup was issued but no response arrived within "
-            "the poll budget — a reachability/timeout condition, not a signup failure"
+            "the poll budget — a reachability/timeout condition, not a signup failure",
         )
     return (
+        "product",
         "no POST to the BFF /auth/signup was observed — the form did not "
-        "submit, or it is still posting straight to Supabase"
+        "submit, or it is still posting straight to Supabase",
     )
 
 # Canonical host for the auth surface is tortoise.premiselabs.co (host
@@ -310,50 +336,76 @@ def test_signup_transport_failure_is_filtered_and_formatted() -> None:
 
 
 def test_live_signup_registers_both_capture_listeners() -> None:
-    """#4940: a deleted listener must redden something.
+    """#4940: a deleted or DEAD listener must redden something.
 
-    Scope, stated so this is not over-read: this pins that the two capture
-    listeners are REGISTERED on the smoke, which is the regression a reviewer
-    demonstrated (deleting `page.on("requestfailed", ...)` left every other pin
-    green). It does not prove the callbacks are reached — no browser-free test
-    can, and pretending otherwise would be the vacuous-guard defect this issue
-    is itself about.
+    Scope, stated so this is not over-read. Pinned here: both listeners are
+    REGISTERED on the smoke, and each delegates to the pinned pure helper that
+    does its work. NOT pinned here: that playwright actually calls them — no
+    browser-free test can, and claiming otherwise would be the vacuous-guard
+    defect this issue is itself about.
     """
     src = inspect.getsource(test_live_signup_no_429_confirmation_required)
     assert 'page.on("requestfailed", _on_requestfailed)' in src
     assert 'page.on("request", _on_request)' in src
+    # Registered-but-dead is the failure mode a registration-only pin misses: the
+    # bodies must delegate to the pure, pinned helpers.
+    assert "_signup_transport_failure(req.method, req.url, req.failure)" in src
+    assert "_is_bff_signup_request(req.method, req.url)" in src
+    # The call site must still SELECT on the verdict and have a reachable FAIL
+    # branch: collapsing it to `pytest.skip` for every unobserved case would let
+    # a product regression exit green, and no browser-free test can reach this
+    # line any other way (round-2 mutation B).
+    assert "verdict, message = _unobserved_outcome(" in src
+    assert 'if verdict == "unavailable":' in src
+    assert "pytest.skip(message)" in src
+    assert "pytest.fail(message)" in src
 
 
-def test_unobserved_signup_message_names_the_transport_condition() -> None:
-    """#4940: the message must not assert a product cause when nothing answered.
+def test_unobserved_outcome_splits_verdicts() -> None:
+    """#4940: the VERDICT split is pinned, not just the message text.
 
-    No browser needed — this pins the branch selection the live smoke relies on.
+    Collapsing the buckets is the failure that matters: if every unobserved case
+    became UNAVAILABLE, a product regression would exit the suite GREEN. This
+    test reddens on that collapse and on the split being reverted to the old
+    single assert.
     """
-    transport = _unobserved_signup_message(
-        transport_failures=[
-            "POST https://app.premiselabs.co/auth/signup — net::ERR_NAME_NOT_RESOLVED"
-        ],
+    signup_url = "https://app.premiselabs.co/auth/signup"
+
+    # A client-side abort is a PRODUCT condition, not availability.
+    verdict, message = _unobserved_outcome(
+        transport_failures=[f"POST {signup_url} — {ABORTED_TRANSPORT}"],
         post_issued=True,
     )
-    assert "TRANSPORT" in transport
-    assert "net::ERR_NAME_NOT_RESOLVED" in transport
+    assert verdict == "product"
+    assert ABORTED_TRANSPORT in message
+
+    # Host/dependency transport death is UNAVAILABLE.
+    verdict, message = _unobserved_outcome(
+        transport_failures=[f"POST {signup_url} — net::ERR_NAME_NOT_RESOLVED"],
+        post_issued=True,
+    )
+    assert verdict == "unavailable"
+    assert "TRANSPORT" in message
+    assert "net::ERR_NAME_NOT_RESOLVED" in message
     # The two fabricated product causes must NOT appear when a transport failure
     # is what actually explains the absence.
-    assert "did not submit" not in transport
-    assert "Supabase" not in transport
+    assert "did not submit" not in message
+    assert "Supabase" not in message
 
     # Issued but never answered (connection blackhole / slow connect timeout): no
     # failure event fires, so this must not fall through to the product cause.
-    timed_out = _unobserved_signup_message(transport_failures=[], post_issued=True)
-    assert "did not submit" not in timed_out
-    assert "Supabase" not in timed_out
-    assert "no response" in timed_out
+    verdict, message = _unobserved_outcome(transport_failures=[], post_issued=True)
+    assert verdict == "unavailable"
+    assert "did not submit" not in message
+    assert "Supabase" not in message
+    assert "no response" in message
 
     # Nothing issued at all IS the product condition — the original wording is
     # right here, and is now selected rather than assumed.
-    product = _unobserved_signup_message(transport_failures=[], post_issued=False)
-    assert "did not submit" in product
-    assert "TRANSPORT" not in product
+    verdict, message = _unobserved_outcome(transport_failures=[], post_issued=False)
+    assert verdict == "product"
+    assert "did not submit" in message
+    assert "TRANSPORT" not in message
 
 
 @LIVE_SIGNUP
@@ -480,22 +532,17 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
         if signup["status"] is None:
             # #4940/#4686: the BFF never ANSWERED. Host availability has its own
             # discriminating monitor (availability-watchdog -> incident issues),
-            # and this smoke's job is the no-429 CONTRACT — so it asserts that
-            # contract only when the BFF actually answers, and reports an
-            # unanswered request as UNAVAILABLE rather than as a product cause.
-            # This is the same verdict split the MCP probe above uses.
-            if transport_failures or post_issued["value"]:
-                pytest.skip(
-                    _unobserved_signup_message(
-                        transport_failures=transport_failures,
-                        post_issued=post_issued["value"],
-                    )
-                )
-            # Nothing was ever issued: that IS the product condition the old
-            # message named — now established rather than assumed.
-            pytest.fail(
-                _unobserved_signup_message(transport_failures=[], post_issued=False)
+            # and this smoke's job is the no-429 CONTRACT — so an availability
+            # condition is reported as UNAVAILABLE. The split itself, including
+            # which cases are PRODUCT failures, lives in `_unobserved_outcome`,
+            # which is pinned below rather than trusted.
+            verdict, message = _unobserved_outcome(
+                transport_failures=transport_failures,
+                post_issued=post_issued["value"],
             )
+            if verdict == "unavailable":
+                pytest.skip(message)
+            pytest.fail(message)
         assert signup["status"] == 200, (
             f"live signup returned {signup['status']} — rate-limited or error: "
             f"{signup['body']!r}"
