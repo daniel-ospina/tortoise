@@ -5656,12 +5656,23 @@ def _print_summary(report: dict[str, Any]) -> None:
                           "(above) — extraction was billing/embedding-limited")
     print("── score ──")
     acc = report["accuracy"]
-    print(f"overall accuracy:        {acc['overall']}")
-    print(f"task-averaged accuracy:  {acc['task_averaged']}")
-    print(f"abstention accuracy:     {acc['abstention']} "
-          f"(n={acc['abstention_n']})")
-    for cat, v in acc["per_category"].items():
-        print(f"  {cat:<28} {v['accuracy']} (n={v['n']})")
+    if acc is None:
+        # #4803: a `--retrieval-only` run carries no accuracy — the reader
+        # and judge never ran — and report.py records that as an explicit
+        # None rather than a zero. Print the line rather than omitting it:
+        # an absent accuracy line is indistinguishable from a run whose
+        # accuracy was fine. The wording is the file's established
+        # "(retrieval-only)" rendering for reader/judge-derived fields
+        # (grep '"n/a (retrieval-only)"' — 4 prior uses in this module) —
+        # the same string #4803's acceptance indicator names.
+        print("accuracy:                n/a (retrieval-only)")
+    else:
+        print(f"overall accuracy:        {acc['overall']}")
+        print(f"task-averaged accuracy:  {acc['task_averaged']}")
+        print(f"abstention accuracy:     {acc['abstention']} "
+              f"(n={acc['abstention_n']})")
+        for cat, v in acc["per_category"].items():
+            print(f"  {cat:<28} {v['accuracy']} (n={v['n']})")
     ret = report["retrieval"]
     if ret.get("session_recall@k") is None:
         print("retrieval recall: NOT PUBLISHED — dataset semantics audit "
