@@ -502,7 +502,6 @@ def collect_anchor_census(
         name_by_id = {str(r[0]): str(r[1] or "") for r in (name_rows or [])}
         rows = proj.g.query(
             "MATCH (o:Object) WHERE o.id IN $ids "
-            "WITH o "  # #6976 — load-bearing: keeps the id predicate bound
             "OPTIONAL MATCH (o)<-[:aboutObject]-(p:Point) "
             "RETURN o.id, collect([p.id, p.session_id, "
             "p.session_date, p.createdAt, p.pointKind])",

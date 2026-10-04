@@ -124,6 +124,11 @@ from tortoise.projection import (
 )
 from tortoise.retention import RESTORE_WINDOW_HOURS as _RESTORE_WINDOW_HOURS  # #4179
 from tortoise.sdk import (
+    _CAPTURE_EXTRACTION_DISABLED_MODE,  # #4258: extraction-turned-off receipt mode
+    _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING,  # #4258: its M2-replay sibling (never the keyless one)
+    _CAPTURE_EXTRACTION_DISABLED_WARNING,  # #4258: its canonical "stored, not extracted" notice
+    _CAPTURE_EXTRACTOR_LANE_DISABLED,  # #4258: the setting-disabled Session lane value
+    _CAPTURE_EXTRACTOR_LANES_RETRYABLE,  # #4258: the shared retry-eligible lane set
     _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING,  # #3892: shared "stored, never extracted" disclosure
     _CAPTURE_NO_PROVIDER_MODE,  # #3892: keyless-capture receipt mode (reused, not reinvented)
     _CAPTURE_NO_PROVIDER_WARNING,  # #3892: the canonical "stored, not extracted" notice
@@ -1473,6 +1478,20 @@ async def _stop_liveness(app) -> None:
             await asyncio.gather(*pending, return_exceptions=True)
 
 
+def _watcher_expected_on_this_host() -> bool:
+    """Whether a backup watcher was EXPECTED on this host.
+
+    The ONE declaration of the hosted-marker test (#4498): the lifespan
+    calls it once at boot to derive BOTH its "no monitor" warning and the
+    module marker ``_WATCHER_EXPECTED`` that ``/health`` publishes, so the two
+    can never disagree about whether this host is supposed to be running a
+    watcher. ``FLY_APP_NAME`` is the same truthiness test the #101 durability
+    guard uses — a deployment that sets it is a hosted deployment and must
+    have backup staleness monitoring.
+    """
+    return bool(os.environ.get("FLY_APP_NAME"))
+
+
 @asynccontextmanager
 async def _lifespan(app):
     """Compose the FastMCP sub-app's lifespan (session manager init) into
@@ -1617,7 +1636,7 @@ async def _lifespan(app):
             # those deployments legitimately leave off: a warning that fires on
             # every healthy non-production boot is training-to-ignore material for
             # the very signal #2922 needed.
-            _watcher_expected = bool(os.environ.get("FLY_APP_NAME"))
+            _watcher_expected = _watcher_expected_on_this_host()
             # #4498: publish it to the module marker `_backup_watcher_health()`
             # reads. The assignment sits ABOVE the `_not_started_reason` branch,
             # so BOTH the `_watcher_expected` true and false cases reach the
@@ -2386,16 +2405,23 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     # keyed on ``<key>@<path>`` (see _bucket_key) — fully separate from the
     # general 100/min bucket.
     PATH_LIMITS = {"/v1/sessions/commit": 300}  # noqa: RUF012
+    # #3124: hard cap on the key space (see the bounded-store policy block
+    # near the shared primitive). The old 60 s periodic prune was the only
+    # bound and was an O(n) sweep over an attacker-supplied key set (guessed
+    # ``tt_`` keys and ``ip:<host>`` for unauthenticated/session-JWT traffic).
+    MAX_BUCKETS = 10_000
 
-    def __init__(self, app, max_per_minute=100, path_limits: dict | None = None):
+    def __init__(self, app, max_per_minute=100, path_limits: dict | None = None,
+                 max_buckets: int | None = None):
         super().__init__(app)
         self.max_per_minute = max_per_minute
         self.path_limits = dict(self.PATH_LIMITS)
         if path_limits:
             # test seam: override the per-path limits (R-13 bucket testing)
             self.path_limits.update(path_limits)
+        self.max_buckets = (
+            self.MAX_BUCKETS if max_buckets is None else max_buckets)
         self._buckets: dict[str, list[float]] = defaultdict(list)
-        self._last_cleanup = time.time()
         self._lock = asyncio.Lock()
         # RATE_LIMIT_DISABLED=1 disables throttling (test env) — the test
         # suite creates >100 points per run against a shared IP bucket,
@@ -2447,19 +2473,15 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         now = time.time()
 
         async with self._lock:
-            # Periodic cleanup: prune empty buckets and buckets older than 60s
-            if now - self._last_cleanup > 60:
-                stale = []
-                for k, v in list(self._buckets.items()):
-                    v[:] = [t for t in v if now - t < 60]
-                    if not v:
-                        stale.append(k)
-                for k in stale:
-                    del self._buckets[k]
-                self._last_cleanup = now
-
-            bucket = self._buckets[key_id]
-            bucket[:] = [t for t in bucket if now - t < 60]
+            # #3124: bounded key space + O(1) hot path, via the SAME
+            # `_bucket_route` policy as the shared primitive. Inactive
+            # insertion-order-head buckets are reclaimed ONLY on the new-key
+            # path (a tracked key is pruned in place and never scans the
+            # store); a new key at a full store is charged to the one shared
+            # overflow bucket (capped at this path's limit) instead of growing
+            # the store. Replaces the old 60 s wholesale O(n) prune.
+            bucket, on_overflow = _bucket_route(
+                self._buckets, key_id, now, 60, self.max_buckets)
 
             if len(bucket) >= limit:
                 # Return the 429 response directly: an HTTPException raised in
@@ -2477,7 +2499,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                     headers={"Retry-After": "60"},
                 )
 
-            bucket.append(now)
+            bucket.append((now, key_id) if on_overflow else now)
+            dest = _BUCKET_OVERFLOW_KEY if on_overflow else key_id
+            self._buckets[dest] = bucket
+            _bucket_touch(self._buckets, dest)
         return await call_next(request)
 
 
@@ -4405,10 +4430,15 @@ def _backup_watcher_health() -> dict:
       * ``disabled`` — no config / kill switch: legitimate, stays ``ok``.
 
     Every state also carries ``expected`` — whether THIS boot expected a
-    backup watcher at all (``_WATCHER_EXPECTED``, hosted marker only; #4498).
-    It makes "expected and absent" visible from /health, but it does NOT
-    affect ``ok``: a hosted deploy that legitimately runs without backups
-    stays ``ok``.
+    backup watcher at all. It is the module marker ``_WATCHER_EXPECTED``,
+    published once in ``_lifespan`` from the shared
+    `_watcher_expected_on_this_host` declaration, so this field and the
+    boot-time "no monitor" warning can never disagree (#4498). It makes
+    "expected and absent" visible from /health, but it does NOT affect ``ok``:
+    on a hosted deploy ``state: "disabled"`` is otherwise indistinguishable
+    from a deployment that deliberately runs without backups, and
+    ``expected: true`` alongside it is the operator's cue to read the boot log.
+    ``disabled`` still stays ``ok`` (#4470's explicit acceptance).
 
     Mirrors the ``db`` block: a sub-dict carrying ``ok``, folded into
     ``status`` by the caller. Never raises and never 5xxes — a dead monitor
@@ -4488,7 +4518,10 @@ async def health():
     shape of silent durability failure, so it rides along in ``backup_watcher``
     and flips ``status`` to "degraded" under the identical rule. A disabled
     sweep (no config / kill switch) stays ``ok`` — only "wanted but failed"
-    degrades.
+    degrades. #4498: the block also carries ``expected`` (``FLY_APP_NAME`` set),
+    so on a host where a watcher was expected, ``{"state": "disabled", "ok":
+    true, "expected": true}`` reads as "wanted, and not running" — the
+    operator's cue to check the boot log for the reason.
     """
     try:
         db = _HEALTH_PROBE.snapshot()
@@ -6336,6 +6369,7 @@ DEFAULT_ONBOARDING_STATE = {
     "github_docs_indexed": False,         # #1726: docs staged + ingested (Slice 1)
     "github_docs_indexed_at": None,       # #1894: last docs index completion (ISO, parity with github_docs_indexed)
     "session_recording": True,            # #1927: default-ON (ToS-covered) — optional off-switch, not a consent gate
+    "capture_extract": True,              # #4258: per-org user setting (default ON, #3892 owner ruling) — off = store the turns, skip extraction
     "demo_created": False,
     "org_created": False,
     "completed_at": None,
@@ -6431,18 +6465,213 @@ def _retain_feed_task(key: str, task: asyncio.Task) -> None:
 
 
 def _normalize_mapped_ipv6(ip):
-    """Return the IPv4 address for an IPv4-mapped IPv6 (::ffff:a.b.c.d or
-    ::ffff:7f00:1), else the input unchanged. Prevents a dual-stack client
-    from presenting two bucket keys for one address (#1081 review P4)."""
-    if isinstance(ip, str) and ip.startswith("::ffff:") and len(ip) > 7:
-        try:
-            import ipaddress as _ipa
-            mapped = _ipa.ip_address(ip).ipv4_mapped
-            if mapped is not None:
-                return str(mapped)
-        except ValueError:
-            pass
-    return ip
+    """Return the IPv4 address for ANY IPv4-mapped IPv6 spelling
+    (``::ffff:a.b.c.d``, ``::ffff:7f00:1``, ``::FFFF:...``,
+    ``0:0:0:0:0:ffff:...``), else the input unchanged. Prevents a dual-stack
+    client from presenting two bucket keys for one address (#1081 review P4).
+
+    #3124 review: the old form tested the literal lowercase ``::ffff:``
+    prefix, so ``::FFFF:1.2.3.4`` and ``0:0:0:0:0:ffff:1.2.3.4`` were NOT
+    normalized and one IPv4 address could still hold two bucket identities.
+    #3130 found exactly that and worked around it in the DCR path only, whose
+    docstring records the shared helper as still defective; normalizing by
+    ``ipv4_mapped`` regardless of case/spelling makes that claim true.
+    """
+    if not isinstance(ip, str) or ":" not in ip:
+        return ip
+    try:
+        import ipaddress as _ipa
+        mapped = _ipa.ip_address(ip).ipv4_mapped
+    except ValueError:  # not an address (e.g. a composite key string)
+        return ip
+    return str(mapped) if mapped is not None else ip
+
+
+# ── Bounded store policy for the shared per-IP bucket primitive (#3124) ──
+# The primitive (and RateLimitMiddleware) pruned only *stale* buckets, so a
+# fresh-key flood pruned nothing — every bucket was charged inside the window.
+# The store then grew for the whole window_s (up to 86 400 s on the signup
+# limiter) and, once over max_entries, every request scanned the whole store
+# (O(n) per request, O(n^2) under a sustained flood). The policy below mirrors
+# #2866's DCR precedent:
+#
+#   owned-key cap .... max_entries (default 10 000) client-keyed buckets
+#   overflow ......... exactly ONE shared bucket per store (reserved key
+#                      _BUCKET_OVERFLOW_KEY), capped at the caller's
+#                      ``limit`` per window
+#   eviction ......... reclaim ONLY buckets whose in-window entries have all
+#                      expired; an ACTIVE key is never evicted
+#   hot path ......... O(1) in store size — no store-wide iteration on any
+#                      check or charge
+#
+# Last-charge ordering (every charge moves its key to the insertion-order
+# tail) makes reclaim O(1) and safe: the head is the least-recently-charged
+# key, so an active head implies every later key is also active. Reclaim stops
+# at the first active head and can never evict an active key — evicting one
+# would reset a victim's consumed budget, the fail-open shape #2866 rejects as
+# alternative C. A NEW key arriving when the owned store is full of active
+# buckets is charged to the shared overflow bucket instead of growing the
+# store; only when that overflow is ALSO at ``limit`` is the request refused
+# (429) — the deliberate, fail-closed store-overflow rejection class. The
+# overflow bucket lives in the SAME caller-owned store (this primitive is
+# polymorphic over 13 call sites, so a second global store cannot be passed
+# without a signature change); capacity counts owned keys only, so the stated
+# bound is owned <= max_entries and len(store) <= max_entries + 1.
+#
+# Per-key overflow attribution (fail-closed, #3124 review). A shared-overflow
+# entry is stored as ``(timestamp, key)``, so routing can tell WHICH key has
+# in-window overflow charges. That one change closes two opposite defects:
+#   * A key that exhausted its budget in the overflow cannot graduate to a
+#     fresh owned bucket while its OWN overflow charges are in-window — it
+#     stays in the overflow until they expire. Without attribution it
+#     graduated as soon as ANY slot freed and got a second full budget (up to
+#     2x its limit in one window — a fail-open regression vs. the pre-#3124
+#     per-key behaviour). Pinned by
+#     ``test_sticky_overflow_blocks_a_second_budget``.
+#   * The stickiness is PER KEY, never store-wide: a key with no overflow
+#     charges takes a free owned slot whenever one exists. A store-wide rule
+#     refused EVERY fresh key for the rest of the window (up to 86 400 s) once
+#     the overflow held any charge — a new-user denial reachable with an empty
+#     owned store. Pinned by
+#     ``test_fresh_key_below_cap_admitted_while_overflow_is_warm``.
+# The overflow still holds at most ``limit`` entries (the ``len >= limit``
+# check is unchanged) and the per-entry scan is O(limit), not O(store).
+#
+# Accepted overflow-regime properties (deliberate, both BOUNDED — a lane must
+# not "fix" either without re-opening the capacity decision):
+#   * Mixed-limit stores. One store may carry keys with different ``limit``s
+#     (``_SENSITIVE_BUCKETS`` is 20/5/5/5 per op; ``RateLimitMiddleware`` is
+#     300/100 per path). The overflow bucket is SHARED, so a high-limit key
+#     class can fill it and a fresh low-limit key then sees ``len >= limit``
+#     and is refused. This can only ever be MORE restrictive than the key's
+#     own budget — never more permissive — so it is fail-closed; it is
+#     reachable only in the genuine store-overflow regime (max_entries active
+#     keys in one window), which is a flood signature. Pinned by
+#     ``test_mixed_limit_overflow_is_fail_closed``.
+#   * ``_forget_bucket_charge`` pops the caller's OWN attributed overflow entry,
+#     so a successful accept refunds exactly its own charge and a forget for a
+#     key that was never charged is a no-op — it cannot refund a FOREIGN
+#     charge. "Successes consume no budget" still holds per store. The ceiling
+#     on the shared bucket is ``limit`` entries of overflow charges shared
+#     across overflow-routed keys; because a success refunds the per-token /
+#     IP / global dimensions, those caps bound FAILED attempts only, and the
+#     real ceiling on "limit + successes" is the outstanding-invite supply (a
+#     success consumes its invite).
+_BUCKET_OVERFLOW_KEY = "\x00overflow"
+
+
+def _bucket_entry_ts(entry) -> float:
+    """Timestamp of a bucket entry. Owned buckets and the DCR stores hold bare
+    floats; the shared overflow holds ``(ts, key)`` pairs so routing can
+    attribute each charge to its key (#3124). One accessor for both layouts
+    keeps `_bucket_prune_window` / `_bucket_reclaim` single-implementation."""
+    return entry[0] if isinstance(entry, tuple) else entry
+
+
+def _bucket_prune_window(bucket: list, now: float, window_s: int) -> list:
+    """In-window entries of `bucket`. The one implementation of the
+    security-relevant window boundary (``now - _bucket_entry_ts(entry) <
+    window_s``) for the hosted_api limiter family: #2866's
+    ``_dcr_prune_window`` delegates here (#3124). NOT the only copy in the
+    repo — ``tortoise/cimd.py`` keeps its own prune for a different
+    (threading) module — so the claim is scoped to this family.
+
+    `_bucket_entry_ts` reads the timestamp from either layout (a bare float, or the
+    shared overflow's ``(ts, key)`` pair), so this stays the ONE boundary
+    predicate for all of them.
+
+    The D10 parity test (``test_t_window_helper_parity_with_primitive``) can
+    no longer be an INDEPENDENT oracle now that both sides call this function
+    (#3124 review), so it asserts against a literal expected table: a mutation
+    of this boundary still fails it."""
+    return [t for t in bucket if now - _bucket_entry_ts(t) < window_s]
+
+
+def _bucket_owned_count(store) -> int:
+    """Client-keyed buckets in `store` — the one shared overflow bucket (if
+    present) does not count against the owned-key cap."""
+    return len(store) - (1 if _BUCKET_OVERFLOW_KEY in store else 0)
+
+
+def _bucket_touch(store, key) -> None:
+    """Move `key` to the insertion-order tail (last-charge ordering) so
+    `_bucket_reclaim` can stop at the first active head. Works on any
+    insertion-ordered mapping (dict/defaultdict/OrderedDict) — the primitive
+    takes a caller-owned store and must not change its type. O(1)."""
+    if not store or next(reversed(store), None) == key:
+        return
+    store[key] = store.pop(key)
+
+
+def _bucket_reclaim(store, now: float, window_s: int, cap: int,
+                    count=None) -> None:
+    """Pop inactive insertion-order-head buckets until the count is below
+    `cap` or the head is active. O(1) at the hot cap; never evicts an active
+    key (#2866 D3/D4 precedent).
+
+    `count` selects the capacity metric and defaults to ``len`` — a NEUTRAL
+    metric that assumes no reserved key. A caller whose store reserves one
+    (the primitive's shared overflow) passes ``_bucket_owned_count`` so the
+    reserved key does not consume a slot; #2866's separate-store layout counts
+    every key and passes ``len``. The default must not encode one caller's
+    layout: an adopter with a DIFFERENT reserved key would silently inherit
+    the primitive's counting semantics and a wrong cap (#3124 review)."""
+    _count = len if count is None else count
+    while _count(store) >= cap:
+        head_key = next(iter(store), None)
+        if head_key is None:
+            return
+        head = store[head_key]
+        if head and now - _bucket_entry_ts(head[-1]) < window_s:
+            return  # active head ⇒ every later key is active too
+        del store[head_key]
+
+
+def _bucket_route(store, key, now: float, window_s: int, cap: int):
+    """Resolve ``(bucket, on_overflow)`` for a check/charge of `key` under
+    the #3124 capacity policy — the ONE routing implementation shared by
+    `_check_ip_bucket_rate_limit`, `_charge_ip_bucket` and
+    `RateLimitMiddleware.dispatch`.
+
+    Does NOT insert: a fresh key returns a NEW empty list that the caller
+    writes back only when it charges (so a deferred check and a 429 leave no
+    store entry behind, #1719). A tracked key is pruned in place. A new key
+    at a full owned store is routed to the single shared overflow bucket
+    instead of growing the owned key space (#2866 reject-new/overflow), so
+    the owned count can never exceed `cap`. The overflow is STICKY PER KEY:
+    a key with its OWN in-window overflow charges stays in the overflow rather
+    than being handed a second full budget, while a key with none takes a free
+    owned slot (a store-wide rule would deny every fresh key until the whole
+    overflow drained). A key equal to the reserved overflow sentinel is routed
+    to the overflow rather than being allowed to own it."""
+    # A client key must NEVER own the reserved slot (#3124 review). If one
+    # could, its bucket would be stored under `_BUCKET_OVERFLOW_KEY` with bare
+    # float entries, and the next fresh-key scan (`entry[1]` on a float) would
+    # raise TypeError -> 500 for the whole window. Unreachable over HTTP today
+    # (h11's field grammar forbids NUL in a header value, and every other key
+    # is a tuple or an IP string), but the reserved-key boundary must be
+    # structural rather than transport-dependent.
+    if key == _BUCKET_OVERFLOW_KEY:
+        overflow = store.get(_BUCKET_OVERFLOW_KEY)
+        if overflow is None:
+            return [], True
+        overflow[:] = _bucket_prune_window(overflow, now, window_s)
+        return overflow, True
+    bucket = store.get(key)
+    if bucket is not None:
+        bucket[:] = _bucket_prune_window(bucket, now, window_s)
+        return bucket, False
+    _bucket_reclaim(store, now, window_s, cap, count=_bucket_owned_count)
+    # Per-key sticky overflow (see the policy block): entries are (ts, key), so
+    # a key is held in the overflow ONLY while its OWN charges are in-window.
+    overflow = store.get(_BUCKET_OVERFLOW_KEY)
+    if overflow is not None:
+        overflow[:] = _bucket_prune_window(overflow, now, window_s)
+        if any(entry[1] == key for entry in overflow):
+            return overflow, True
+    if _bucket_owned_count(store) >= cap:
+        return (overflow if overflow is not None else []), True
+    return [], False
 
 
 async def _check_ip_bucket_rate_limit(
@@ -6457,8 +6686,17 @@ async def _check_ip_bucket_rate_limit(
     Shared by /v1/register (3/hr), sensitive ops (export/org_delete), and
     /v1/agent/signup (2/24h). RATE_LIMIT_DISABLED=1 opts out (test env).
     Raises HTTPException(429) with Retry-After when the window is exhausted.
-    Memory bound: when the store exceeds max_entries, drop buckets whose
-    entries are all older than window_s (dead weight — #750.2 precedent).
+
+    #3124 capacity bound (policy block above the helpers): the store holds at
+    most max_entries client-keyed buckets plus one shared overflow bucket. A
+    new key arriving at a full store is charged to the overflow (capped at
+    `limit`/window) instead of growing the key space, and an overflow-routed
+    key STAYS there while its own charges are in-window (per-key sticky) so it
+    can never be handed a second budget; reclaim drops only fully-expired
+    buckets and never evicts an active key; the hot path does no store-wide
+    iteration. Below the cap, behaviour — including the 429 boundary at
+    `limit` — is unchanged (a fresh key takes a free owned slot even while the
+    overflow is warm).
 
     P1-FIX-1: bucket key is the caller-supplied `key` (required at wrappers)
     — the sensitive-op store is keyed (ip, op) composite; a bare-ip default
@@ -6502,18 +6740,25 @@ async def _check_ip_bucket_rate_limit(
         if key is None:
             key = request.client.host
     # P2-2 (coherence): normalize IPv4-mapped IPv6 so a dual-stack client
-    # cannot present two keys for one address. Handles both dotted-quad
-    # (::ffff:1.2.3.4) and hex (::ffff:7f00:1) forms via ipaddress.
+    # cannot present two keys for one address. Handles every spelling/case of
+    # the mapped form (::ffff:1.2.3.4, ::ffff:7f00:1, ::FFFF:...,
+    # 0:0:0:0:0:ffff:...) via ipaddress (#3124 review).
     ip = _normalize_mapped_ipv6(key)
     now = time.time()
     async with lock:
-        bucket = buckets[ip]
-        bucket[:] = [t for t in bucket if now - t < window_s]
+        # #3124: the shared `_bucket_route` resolves the bucket WITHOUT
+        # inserting on the check path — a fresh key must not be inserted
+        # before the 429 check (the old `buckets[ip]` did exactly that, which
+        # is why a fresh-key flood could never be bounded).
+        bucket, on_overflow = _bucket_route(
+            buckets, ip, now, window_s, max_entries)
         if len(bucket) >= limit:
             # #1081 review P4: ceil — int() floors and can understate (and
             # yield 0 for near-expiry windows); a client retrying exactly at
             # the advertised value must not get a surprise 429.
-            remaining = (math.ceil(bucket[0] + window_s - now)
+            # `_bucket_entry_ts` reads the oldest timestamp from either layout
+            # (a bare float, or the shared overflow's ``(ts, key)`` pair).
+            remaining = (math.ceil(_bucket_entry_ts(bucket[0]) + window_s - now)
                          if retry_after_s is None else retry_after_s)
             raise HTTPException(
                 status_code=429,
@@ -6521,12 +6766,14 @@ async def _check_ip_bucket_rate_limit(
                 headers={"Retry-After": str(remaining)},
             )
         if not defer_charge:
-            bucket.append(now)
-        if len(buckets) > max_entries:
-            stale = [ip for ip, b in buckets.items()
-                     if not any(now - t < window_s for t in b)]
-            for ip in stale:
-                del buckets[ip]
+            # Phase-2 write: a 429 inserted/charged nothing. The deferred path
+            # writes NOTHING here — a 5xx never consumes budget and, unlike
+            # the old defaultdict pre-insertion, leaves no empty bucket
+            # behind (#1719 preserved and strengthened).
+            bucket.append((now, ip) if on_overflow else now)
+            dest = _BUCKET_OVERFLOW_KEY if on_overflow else ip
+            buckets[dest] = bucket
+            _bucket_touch(buckets, dest)
 
 
 async def _charge_ip_bucket(
@@ -6555,24 +6802,24 @@ async def _charge_ip_bucket(
     ip = _normalize_mapped_ipv6(key)
     now = time.time()
     async with lock:
-        # setdefault: the deferred check creates buckets[ip]=[]; a concurrent
-        # request's max_entries prune treats an EMPTY bucket as stale and
-        # deletes it before this charge (botnet regime) — a KeyError here
-        # would replace a terminal 401/403/200 with a 500. A charge is
-        # telemetry and must never alter the response (code-review P2).
-        bucket = buckets.setdefault(ip, [])
-        bucket[:] = [t for t in bucket if now - t < window_s]
+        # #1719 never-raise: no indexing — a concurrent reclaim can delete a
+        # deferred check's bucket before this charge, and a charge is
+        # telemetry, never a failure path (a KeyError here would replace a
+        # terminal 401/403/200 with a 500). #3124: the SAME `_bucket_route`
+        # as the check, so a new key at a full store charges the shared
+        # overflow bucket instead of growing the owned key space.
+        bucket, on_overflow = _bucket_route(
+            buckets, ip, now, window_s, max_entries)
         # #1738 burst bound: a charge must never inflate the bucket past the
         # limiter's limit — drop it (return, no append) when the window is
-        # already full. The 429 boundary is preserved at limit.
+        # already full. The 429 boundary is preserved at limit. The overflow
+        # bucket obeys the same limit, so it cannot outgrow its cap.
         if len(bucket) >= limit:
             return
-        bucket.append(now)
-        if len(buckets) > max_entries:
-            stale = [ip for ip, b in buckets.items()
-                     if not any(now - t < window_s for t in b)]
-            for ip in stale:
-                del buckets[ip]
+        bucket.append((now, ip) if on_overflow else now)
+        dest = _BUCKET_OVERFLOW_KEY if on_overflow else ip
+        buckets[dest] = bucket
+        _bucket_touch(buckets, dest)
 
 
 async def _check_register_rate_limit(request: Request) -> None:
@@ -11364,11 +11611,13 @@ def _capture_abandoned_marker(proj, session_id: str, lane: str) -> None:
     gone). Marking it failed routes that retry into the EXISTING #2335
     TRUE-retry lane, which re-extracts on the convergent v2 ids.
 
-    SCOPE — the retry is closed to the CONVERGENT lanes (v2, and the keyless
-    "none" lane, #3892), and only for IN-PROCESS cancellation:
+    SCOPE — the retry is closed to the CONVERGENT lanes (v2, the keyless
+    "none" lane, and the setting-disabled "disabled" lane — #3892/#4258), and
+    only for IN-PROCESS cancellation:
 
-    * the TRUE-retry gate requires the prior lane to be convergent — v2, or the
-      keyless "none" lane (#3892) — AND the retrying request's
+    * the TRUE-retry gate requires the prior lane to be convergent — v2, the
+      keyless "none" lane, or the setting-disabled "disabled" lane
+      (#3892/#4258) — AND the retrying request's
       `TORTOISE_SESSION_EXTRACTOR != "m2"` (#2473), so an abandoned **m2**
       capture re-POSTed still replays, and so does an abandoned v2 capture
       re-POSTed after the deployment's lane was switched to m2. Both are the
@@ -11430,6 +11679,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     #3892 (owner ruling 2026-09-18): a missing provider key is NOT a gate —
     the capture is stored for every request and ONLY the LLM extraction is
     skipped, reported truthfully as receipt mode "no-provider".
+    #4258 (owner ruling on #3892, comment 5723832861 — user-configurable,
+    default ON; reaffirmed by 5737715963): the SAME store-only outcome is
+    reachable by the USER — onboarding_state.capture_extract=false
+    (per-org, default ON when absent) stores the turns and skips extraction,
+    reported truthfully as receipt mode "extraction-disabled".
     ``request`` is optional (the MCP tool has no HTTP Request) — audit and
     abuse recording degrade to a best-effort stub.
     """
@@ -11456,7 +11710,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # (`_session_recording_allowed` -> `_get_onboarding_state`). It used to run
     # inline here, holding the single event loop for the resolution; it now
     # rides the shared offload seam like the other onboarding reads.
-    recording_ok, rec_layer = await _session_recording_allowed_off_loop(org)
+    # #4258: the SAME worker call also returns the onboarding state, so the
+    # `capture_extract` read below (and the completion disclosure further down)
+    # reuses it — ONE read per capture, not two.
+    recording_ok, rec_layer, _onboard_state = (
+        await _session_recording_allowed_off_loop(org))
     if not recording_ok:
         if rec_layer == "graph":
             # #2302 (recording-on surface): the graph-layer 409 copy names
@@ -11493,6 +11751,15 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # sdk.capture_session (PR #4014) — the hosted lane no longer keeps the
     # pre-#3892 503-first refusal.
     no_provider = not _llm_provider_available()
+    # #4258 (owner ruling on #3892, comment 5723832861 — user-configurable,
+    # default ON; reaffirmed by 5737715963): extraction into memory is a
+    # PER-ORG user setting, default ON. OFF is "store but don't extract" —
+    # the same store-only shape as the keyless path, but under its OWN truthful
+    # reason (a provider may well be configured). `store_only` is the single
+    # predicate every store-only decision below keys on, so the keyless and the
+    # user-disabled cases can never drift apart.
+    extract_enabled = _capture_extract_enabled(org, _onboard_state)
+    store_only = no_provider or not extract_enabled
 
     if len(body.conversation) > MAX_SESSION_TURNS:
         # #2335 WI-1c: the turn-cap refusal is a structured record (the
@@ -11589,28 +11856,30 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # (capture_ok True). A prior FAILED capture (capture_ok False) is
     # RE-ATTEMPTED — extraction runs again. None (legacy, pre-#2335)
     # replays — backward compat with the #1727 invariant.
-    # Review (PR #2473): TRUE retry is gated to a CONVERGENT lane (v2, or the
-    # keyless "none" lane, #3892 — content-addressed pt_<sha> ids + graph
-    # content_hash resolution fold a re-attempt's partial claims onto the same
-    # nodes). The
+    # Review (PR #2473): TRUE retry is gated to a CONVERGENT lane (v2, the
+    # keyless "none" lane, #3892, or the setting-disabled "disabled" lane,
+    # #4258 — content-addressed pt_<sha> ids + graph content_hash resolution
+    # fold a re-attempt's partial claims onto the same nodes). The
     # M2 lane mints non-deterministic time-ULID ids with in-capture-only dedup
     # and folds partial emissions live on raise — re-running M2 over a failed
     # attempt's LIVE ULID claims would mint DUPLICATES (the #1727 hole the
     # replay skip closed). Retry fires only when the prior ran a CONVERGENT
-    # lane (v2, or the keyless "none" lane, #3892) AND this request runs v2
+    # lane (v2, the keyless "none" lane, or the setting-disabled "disabled"
+    # lane — #3892/#4258) AND this request runs v2
     # (env != m2) — otherwise replay (safe no-op).
     # #3892 / #4007: a keyless capture records lane "none" (no lane ran), and
     # a FAILED prior is re-attempted (#2335 TRUE retry) — that is how a session
     # captured without a key gets its memory points once a key appears, on an
     # EXPLICIT re-capture (never automatically). "none" is retry-eligible for
-    # the same reason "v2" is: it minted no claims of its own, and its turn ids
-    # are deterministic, so the re-attempt converges. The m2 exclusion is
+    # the same reason "v2" and "disabled" (#4258) are: none of them minted
+    # claims of its own, and their turn ids are deterministic, so the
+    # re-attempt converges. The m2 exclusion is
     # UNCHANGED and deliberate (see tortoise/sdk.py's retry gate).
     prior_capture_ok = session_row[1]
     prior_capture_extractor = session_row[2]
     retry_failed_capture = (
         session_existed and prior_capture_ok is False
-        and prior_capture_extractor in ("v2", "none")
+        and prior_capture_extractor in _CAPTURE_EXTRACTOR_LANES_RETRYABLE
         and os.environ.get("TORTOISE_SESSION_EXTRACTOR") != "m2")
 
     # Extraction-aware estimate (pre-write, fail-closed count) — review P2,
@@ -11636,7 +11905,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # extraction estimate must not 402-block it — same rationale as the
     # replay skip above. `_check_org_limit(org, "sessions")` still runs, but
     # sessions are unlimited since #4010, so it is vacuous in practice.
-    if (not session_existed or retry_failed_capture) and not no_provider:
+    if (not session_existed or retry_failed_capture) and not store_only:
         est = _session_extraction_estimate(windowed)
         from tortoise.quota import count_org_usage
         sdk_org = _data_sdk(org)
@@ -11920,11 +12189,19 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # that could downgrade a succeeded prior to capture_ok=False.
             state["attempted"] = True
             state["proj"] = proj
-            state["lane"] = "none"
+            # #4258: the SAME derivation as the durable record (see
+            # _store_only_lane) — the two lane writers cannot disagree.
+            state["lane"] = _store_only_lane(no_provider, extract_enabled)
         meta = {
             "provider": None, "route": None, "failover_used": False,
             "errors": [],
-            "warnings": [_CAPTURE_NO_PROVIDER_WARNING],
+            # #4258: when the team ALSO turned extraction off, both reasons
+            # are true and both belong on the receipt — the no-provider branch
+            # wins the MODE (a missing key is the harder blocker), but the
+            # user's own setting must not vanish from the disclosure.
+            "warnings": ([_CAPTURE_NO_PROVIDER_WARNING] if extract_enabled
+                         else [_CAPTURE_NO_PROVIDER_WARNING,
+                               _CAPTURE_EXTRACTION_DISABLED_WARNING]),
             "mode": _CAPTURE_NO_PROVIDER_MODE,
             # #2335 WI-1a: no extractor ran — stats stays ALWAYS-present
             # (additive meta contract), empty here (not fabricated).
@@ -11944,12 +12221,48 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # would be a FALSE statement of this state and would hide the
             # remedy. Disclose it, in the SAME words as sdk.capture_session.
             _replay_warnings.append(_CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING)
+        elif (prior_capture_ok is False
+              and prior_capture_extractor == _CAPTURE_EXTRACTOR_LANE_DISABLED):
+            # #4258: the prior was an EXTRACTION-DISABLED store — a provider
+            # key may well be configured, so the keyless warning above would be
+            # a false diagnosis. Disclose the real reason + remedy under its
+            # OWN words (the m2 lane refuses the re-attempt here too).
+            _replay_warnings.append(
+                _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING)
         meta = {"errors": [], "warnings": _replay_warnings,
                 "mode": "replayed",
                 "route": None, "provider": None,
                 # #2335 WI-1a: hosted replayed carries no extractor_v2
                 # telemetry — stats always-present, empty on replay.
                 "stats": {}}
+    elif not extract_enabled:
+        # #4258 (owner ruling on #3892, comment 5723832861 — user-configurable,
+        # default ON; reaffirmed by 5737715963): the team turned extraction OFF.
+        # The turn loop above already ran UNCHANGED, so the
+        # Session + its turn Points are STORED and searchable; only the LLM
+        # extraction into memory points is skipped — exactly the keyless
+        # shape, reported under its own reason. Placed AFTER the replay
+        # branch: a re-capture of an ALREADY-SUCCEEDED session is honestly a
+        # replay (no extraction ran then either), and a FAILED prior falls
+        # through to here instead of re-attempting an extraction the user
+        # turned off. `lane` is the DISTINCT "disabled" value (never "none",
+        # which the replay disclosure reads as keyless) so a LATER re-capture
+        # with extraction back ON re-attempts through the #2335 TRUE-retry path,
+        # and the #3129 abandoned-marker write persists the RIGHT reason.
+        if state is not None and not session_existed:
+            state["attempted"] = True
+            state["proj"] = proj
+            # the SAME derivation as the durable record (see _store_only_lane)
+            state["lane"] = _store_only_lane(no_provider, extract_enabled)
+        meta = {
+            "provider": None, "route": None, "failover_used": False,
+            "errors": [],
+            "warnings": [_CAPTURE_EXTRACTION_DISABLED_WARNING],
+            "mode": _CAPTURE_EXTRACTION_DISABLED_MODE,
+            # #2335 WI-1a: no extractor ran — stats stays ALWAYS-present
+            # (additive meta contract), empty here (not fabricated).
+            "stats": {},
+        }
     elif os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2":
         if state is not None:
             state["attempted"] = True
@@ -12104,7 +12417,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # TOCTOU: both observe session_existed=False — MERGE onto ONE Event
     # node (the Event projection MERGEs on eventId; the second concurrent
     # writer's create is an idempotent no-op).
-    if not session_existed or (retry_failed_capture and not no_provider):
+    if not session_existed or (retry_failed_capture and not store_only):
         # #2335 WI-2b: a retry re-runs the mint — the deterministic Event id
         # (_session_capture_event_id) converges on the SAME node (MERGE), and
         # the retry-minted points get the provenance stamp + typed-Source
@@ -12306,7 +12619,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # full transcript length on the abuse leg. The retry arm therefore applies
     # only when the retry can EXTRACT (a keyed retry mints points); the
     # grown-transcript arm still covers the keyless case that really writes.
-    if (not session_existed or (retry_failed_capture and not no_provider)
+    if (not session_existed or (retry_failed_capture and not store_only)
             or len(windowed) > prior_turn_count):
         # #2335 WI-2b: a retry writes new extracted points (not a zero-node
         # replay) — metering + abuse records fire for the re-attempt. A keyless
@@ -12572,8 +12885,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # Non-fatal: a checkpoint hiccup never 500s a committed capture (mirrors
     # the receipt block).
     try:
-        legacy_mirror = bool(_get_onboarding_state(
-            org["org_id"]).get("onboarding_complete"))
+        legacy_mirror = bool(
+            _onboard_state.get("onboarding_complete"))
         _cd = _os.write_completed_step(
             proj, org["org_id"], "capture-disclosed",
             status_from_mirror=legacy_mirror)
@@ -12599,6 +12912,15 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # claim an extraction that did not happen) nor "replayed". Checked
         # before `route` for parity with sdk.capture_session.
         effective_mode = _CAPTURE_NO_PROVIDER_MODE
+    elif mode == _CAPTURE_EXTRACTION_DISABLED_MODE:
+        # #4258: the team turned extraction off — turns stored, extraction
+        # skipped by the USER's setting. Its own name for the same reason the
+        # keyless case has one: the causes are different and the receipt must
+        # not conflate them. Checked before `route` so an off setting is never
+        # reported as an "llm" extraction that did not run. (Unlike the keyless
+        # branch this has no SDK counterpart today: sdk.capture_session does
+        # not read the setting — that lane is the deferred follow-up #4288.)
+        effective_mode = _CAPTURE_EXTRACTION_DISABLED_MODE
     elif meta.get("route"):
         effective_mode = f"llm:{meta['route']}"
     elif mode == "replayed":
@@ -12757,13 +13079,17 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # (#4014). A keyless attempt records this ONLY when it CREATES the session:
     # a keyless RE-capture must not rewrite a prior attempt's record (a prior
     # FAILED v2 attempt's lane is the evidence the #2473 M2 exclusion reads).
-    _capture_ok_record = False if no_provider else _capture_ok
+    _capture_ok_record = False if store_only else _capture_ok
+    # #4258: distinguish the TWO store-only causes on the record — "none" is
+    # the keyless lane, "disabled" is the team's setting. Both are
+    # retry-eligible (see _CAPTURE_EXTRACTOR_LANES_RETRYABLE), so a later
+    # re-capture with extraction back ON still converges (#2335 TRUE retry).
     _capture_extractor_record = (
-        "none" if no_provider
+        _store_only_lane(no_provider, extract_enabled) if store_only
         else ("m2" if os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2"
               else "v2"))
     _record_session_state = (
-        (not session_existed) if no_provider
+        (not session_existed) if store_only
         else (not session_existed or retry_failed_capture))
     if _record_session_state:
         # #2335 WI-2b: record the outcome ONLY on a genuine attempt (fresh OR
@@ -12860,7 +13186,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # per-point entries ride the enriched ``resp["points"]`` list (extra
     # wins on merge, D8).
     # #2335 WI-1d: the observation leg (hosted lane tag) — one structured
-    # line per capture; mode covers v2/m2/replayed/error — empty returns pre-emit.
+    # line per capture; mode covers v2/m2/replayed/error/no-provider/
+    # extraction-disabled — empty returns pre-emit.
     try:
         _emit_capture_observation(
             session_id=session_id, lane="hosted",
@@ -13148,9 +13475,7 @@ def _load_commit_graph_state(sdk: TortoiseSDK, payload: CommitPayload):  # noqa:
         mit_rows = proj.g.query(
             "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
             "MATCH (o)-[:IMPL {idx:0}]->(s) WHERE (s:Point OR s:Event) AND s.id = $src "
-            "WITH o, s "  # #6976 — load-bearing: keeps the id predicate bound
             "MATCH (o)-[:IMPL {idx:1}]->(d) WHERE (d:Point OR d:Event) AND d.id = $dst "
-            "WITH o, d "  # #6976 — load-bearing: keeps the id predicate bound
             "MATCH (o)-[:mitigated_by]->(m) RETURN count(m)",
             params={"src": t.src, "dst": t.dst},
         ).result_set
@@ -17519,12 +17844,59 @@ def _resolve_v2_mismatch(token: str, user: dict) -> dict | None:
             "email": inv["email"], "role": inv["role"], "token": token}
 
 
+def _forget_bucket_charge(buckets, key) -> None:
+    """#3124: roll back ONE charge from `buckets` for `key`.
+
+    A successful accept charges exactly one bucket per store (non-deferred
+    path). When the request was routed to the shared overflow bucket (the
+    owned store was full of active keys) the owned key is absent, so the
+    rollback removes one overflow entry instead — count-neutral, so the store
+    bound and the "successful accepts consume no budget" invariant both hold.
+    The refund is exact: the overflow entries carry their key (``(ts, key)``),
+    so this pops the caller's OWN charge and a request that was never charged
+    is a no-op — it can never refund a FOREIGN entry (#3124 review). The
+    existing concurrent-over-removal tolerance (a simultaneous accept's newest
+    entry may be the one popped) is unchanged and documented at the caller.
+
+    A `key` equal to the reserved overflow sentinel is sent straight to the
+    attributed scan: `buckets.get(sentinel)` IS the shared overflow list, so
+    the owned-bucket branch would `pop()` an arbitrary FOREIGN entry (#3124
+    review) — the same structural boundary `_bucket_route` enforces.
+    """
+    if key != _BUCKET_OVERFLOW_KEY:
+        bucket = buckets.get(key)
+        if bucket:
+            bucket.pop()
+            return
+        if key in buckets:
+            # Present but EMPTY — no charge was recorded for this key, so there
+            # is nothing to refund and the shared overflow must not be touched.
+            return
+    overflow = buckets.get(_BUCKET_OVERFLOW_KEY)
+    if not overflow:
+        return
+    # #3124 review: pop THIS key's attributed entry (overflow entries are
+    # ``(ts, key)``), never an arbitrary one — so a forget for a key that was
+    # never charged is a no-op and can never refund a foreign charge.
+    for i in range(len(overflow) - 1, -1, -1):
+        if overflow[i][1] == key:
+            del overflow[i]
+            return
+
+
 def _forget_invite_accept(request: Request, token: str) -> None:
     """Roll back the attempt recorded by _check_invite_accept_rate_limit
     after a SUCCESSFUL accept — attempts (not successes) are what the caps
     bound (#1228-review). Removes the newest entry of each bucket; under
     simultaneous accepts the most recent entry may belong to a concurrent
     request (over-removal is bounded and conservative at invite volume).
+
+    #3124 review: with per-key overflow attribution the refund is exact —
+    `_forget_bucket_charge` pops only the caller's OWN entry — so there is no
+    predicate to mirror here: a request whose check opted out simply has no
+    entry to pop. (An earlier mirror-the-opt-out guard was removed once the
+    primitive enforced this structurally; a convention that cannot be tested
+    independently is a liability, not a safety net.)
     """
     import hashlib as _hashlib
     token_key = _hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
@@ -17539,9 +17911,7 @@ def _forget_invite_accept(request: Request, token: str) -> None:
         (_INVITE_ACCEPT_GLOBAL_BUCKETS, _INVITE_ACCEPT_GLOBAL_LOCK,
          ("invite-accept", "global")),
     ):
-        bucket = buckets.get(key)
-        if bucket:
-            bucket.pop()
+        _forget_bucket_charge(buckets, key)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -18293,7 +18663,6 @@ async def list_pending_invites_for_me(user: dict = Depends(get_current_user)):  
             "MATCH (i:Invitation {email:$email}) "
             "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status = 'pending') "
             "AND (i.expires_at IS NULL OR i.expires_at > $now) "
-            "WITH i "  # #6976 — load-bearing: keeps the status predicate bound
             "MATCH (t:Team {id:i.org_id}) "
             "RETURN i.id, i.org_id, t.name, i.role, i.inviter_email, i.expires_at",
             params={"email": email, "now": now},
@@ -22492,6 +22861,7 @@ _ONBOARDING_DEFAULT_STATE = {
     "github_docs_indexed_at": None,       # #1894: last docs index completion (ISO, parity with github_docs_indexed)
     "demo_created": False,
     "session_recording": True,            # #1927: default-ON (ToS-covered) — optional off-switch, not a consent gate
+    "capture_extract": True,              # #4258: per-org user setting (default ON, #3892 owner ruling) — off = store the turns, skip extraction
     "org_created": False,
     "prompt_pasted": False,
     "onboarding_complete": False,
@@ -22715,7 +23085,8 @@ def _graph_recording_override(org: dict) -> bool | None:
         return None
 
 
-def _session_recording_allowed(org: dict) -> tuple[bool, str]:
+def _session_recording_allowed(org: dict,
+                               state: dict | None = None) -> tuple[bool, str]:
     """C6 #2115 (D-C6-3): the EFFECTIVE session_recording for a capture.
 
     Resolution order: the graph's override (D-C6-1 storage) → when None the
@@ -22723,8 +23094,14 @@ def _session_recording_allowed(org: dict) -> tuple[bool, str]:
     dashboard toggle + MCP tortoise_onboarding_session_recording write).
     Returns (allowed, surface) where surface names the deciding layer for
     the 409 message (``graph`` vs ``org``).
+
+    ``state`` may be passed by a caller that ALREADY read the onboarding
+    state (the capture hot path reads it once for BOTH this flag and
+    ``capture_extract``, #4258) — the read is a blocking control-plane round
+    trip, so it must not be repeated per capture.
     """
-    state = _get_onboarding_state(org["org_id"])
+    if state is None:
+        state = _get_onboarding_state(org["org_id"])
     if not state.get("session_recording"):
         # #1927 master kill (round-1 decision c2): the org-level OFF is
         # the user's explicit opt-out — a per-graph override NEVER re-enables
@@ -22745,8 +23122,79 @@ def _session_recording_allowed(org: dict) -> tuple[bool, str]:
     return True, "team"
 
 
-async def _session_recording_allowed_off_loop(org: dict) -> tuple[bool, str]:
-    """`_session_recording_allowed` off the event loop (#4625, leg 12).
+def _capture_extract_enabled(org: dict, state: dict) -> bool:
+    """#4258 (owner ruling on #3892, comment 5723832861 — user-configurable,
+    default ON; reaffirmed by 5737715963): the EFFECTIVE
+    ``capture_extract`` for a capture — a PER-ORG user setting, default ON.
+
+    Read with an EXPLICIT ``True`` default so an older stored onboarding state
+    (key absent — e.g. a team provisioned before this setting existed) can
+    never silently mean OFF. Deliberately NOT the ``session_recording``
+    polarity: that key is an opt-out, where absence correctly means OFF; this
+    one is read as an opt-in-consumed setting, where absence means ON.
+
+    ``state`` is REQUIRED, with NO fallback read: the read is a blocking
+    control-plane round trip, so the capture hot path reads it ONCE, in the
+    gate-resolution worker, and passes it in (#4258). A fallback here would
+    defeat that one-read invariant AND run the read ON the event loop (#4625)
+    — and the capture path always has the state, so it would be a latent
+    hazard with no caller. (Its sibling ``_session_recording_allowed`` may keep
+    an optional ``state`` because it is reached ONLY from inside the offload
+    worker; this helper is also reached ON the loop, so it may not.)
+    """
+    return bool(state.get("capture_extract", True))
+
+
+def _store_only_lane(no_provider: bool, extract_enabled: bool) -> str:
+    """#4258: the Session lane recorded for a STORE-ONLY capture.
+
+    ONE derivation for BOTH writers of the lane — the durable
+    `_capture_extractor_record` and the #3129 abandoned-capture marker — so they
+    can never disagree. The user setting OUTRANKS the transient missing key when
+    both hold: it is the durable, user-controlled reason, and the M2-replay
+    disclosure keys on this value (diagnosing a configured-key team as keyless
+    would be a false statement, the defect this value exists to prevent). Both
+    lanes are retry-eligible (see `_CAPTURE_EXTRACTOR_LANES_RETRYABLE`).
+    """
+    if not extract_enabled:
+        return _CAPTURE_EXTRACTOR_LANE_DISABLED
+    # Reaching here means the ONLY store-only reason left is the missing key:
+    # every caller derives `store_only = no_provider or not extract_enabled`, so
+    # `no_provider` holds whenever this branch runs. Assert the precondition
+    # rather than leave a decision-bearing parameter unread — a future edit that
+    # recorded the keyless "none" for a configured-key team is exactly the false
+    # M2-replay diagnosis this value exists to prevent.
+    assert no_provider, (
+        "_store_only_lane(no_provider=False, extract_enabled=True) is not a "
+        "store-only capture — callers never reach it (see the docstring)")
+    return "none"
+
+
+def _capture_gate_resolution(org: dict) -> tuple[bool, str, dict]:
+    """#4258 + #4625 leg 12: resolve the recording gate AND read the
+    onboarding state ONCE, so both consumers share that one read.
+
+    The unit of offload is the RESOLUTION (the #3498 design), so the org
+    default read and the per-graph override probe stay in ONE worker — and
+    ``_capture_session_impl`` also gets the state its ``capture_extract`` read
+    (#4258) and its completion disclosure consume, so the hot path reads the
+    control plane ONCE per capture, not twice.
+
+    Sync by design: it is the callable handed to ``_graph_offload``, never
+    awaited inline.
+
+    Read-MOSTLY, not read-only (the #4625 work order §2): in the selfhost lane
+    ``_get_onboarding_state`` auto-materializes defaults, but that write is
+    idempotent, so abandoning the worker on a bound miss is safe.
+    """
+    state = _get_onboarding_state(org["org_id"])
+    recording_ok, rec_layer = _session_recording_allowed(org, state)
+    return recording_ok, rec_layer, state
+
+
+async def _session_recording_allowed_off_loop(org: dict) -> tuple[bool, str, dict]:
+    """`_session_recording_allowed` off the event loop (#4625, leg 12),
+    returning the onboarding state it already read (#4258).
 
     The helper is synchronous END TO END and both of its legs block: its
     ``_get_onboarding_state`` read goes through the blocking
@@ -22764,15 +23212,23 @@ async def _session_recording_allowed_off_loop(org: dict) -> tuple[bool, str]:
     worker for the lane's cold-start allowance, and an over-bound read fails
     closed (503) rather than hanging the capture.
 
+    It returns the state as its THIRD element so ``_capture_session_impl`` can
+    hand that one read to ``_capture_extract_enabled`` and to its completion
+    disclosure (#4258) — the hot path reads the control plane ONCE per
+    capture, not twice. This is the gate's ONLY off-loop wrapper: a wrapper
+    nothing calls is not a fix, so the #4625 registry guard pins every name in
+    ``_ONBOARDING_OFFLOAD_WRAPPERS`` to a real call site.
+
     Read-MOSTLY, not read-only (the #4625 work order §2): in the selfhost lane
     ``_get_onboarding_state`` auto-materializes defaults, but that write is
     idempotent, so abandoning the worker on a bound miss is safe.
     """
     return await _graph_offload(
-        lambda: _session_recording_allowed(org),
+        lambda: _capture_gate_resolution(org),
         op="session_recording_allowed",
         timeout=_monitoring.CONTROL_PLANE_OFFLOAD_TIMEOUT_S,
     )
+
 
 
 def _onboarding_defaults() -> dict:
@@ -23555,6 +24011,9 @@ class OnboardingStatePatchRequest(BaseModel):
     github_indexed_at: str | None = None  # #1894: last github index completion (ISO timestamp, server-stamped)
     demo_created: bool | None = None
     session_recording: bool | None = None
+    # #4258: per-org user setting (default ON, #3892 owner ruling) — off means a
+    # capture stores its turns but skips extraction into memory points.
+    capture_extract: bool | None = None
     org_created: bool | None = None
     prompt_pasted: bool | None = None
     onboarding_complete: bool | None = None
@@ -26874,6 +27333,352 @@ def _clear_github_credentials(org_id: str) -> None:
         "SET t.github_token_enc = null, t.github_org = null",
         params={"id": org_id},
     )
+
+
+# ── Connector CRUD (#2636, epic #2632) ────────────────────────────────────
+# Universal source connectors: GitHub, Slack, Linear, Google Drive, etc.
+# Each connector row stores source_type, scope config, encrypted credentials,
+# and sync state. The pattern is identical across sources — only the
+# extractors differ.
+
+
+# The allowed value sets mirror the CHECK constraints in the migration that
+# owns them (supabase/migrations/20260922000001_connectors.sql). Without a
+# boundary check a bad value reaches PostgREST, whose 4xx raises out of the seam
+# (`SupabaseControlPlane.query` raises on status >= 300, it does not return
+# None) and surfaces as the generic 500 {"detail": "Internal server error"} —
+# a client error reported as a server error (#2642 re-review P2). Validated at
+# the model boundary (422), following the SessionRequest.harness precedent above.
+_CONNECTOR_SOURCE_TYPES = frozenset({
+    "github", "slack", "linear", "google_drive", "confluence", "notion", "asana",
+})
+_CONNECTOR_SYNC_STATUSES = frozenset({"idle", "syncing", "error", "completed"})
+
+
+def _reject_non_finite_json(v, field: str):
+    """Refuse NaN/Infinity inside a JSON body field with 422, not a 500.
+
+    Bodies are parsed from the wire, where NaN/Infinity are not JSON — but
+    this is defence in depth for a directly-constructed model. The endpoint
+    path is guarded by ``_reject_non_finite_body`` ABOVE this, because a
+    validator alone is not enough: FastAPI's 422 body echoes the offending
+    input and Starlette renders it with ``allow_nan=False``, so the error
+    response itself raises (#2642 re-review P2).
+    """
+    if v is not None:
+        try:
+            _json.dumps(v, allow_nan=False)
+        except ValueError:
+            raise ValueError(
+                f"{field} must not contain a non-finite number (NaN/Infinity)"
+            ) from None
+    return v
+
+
+async def _reject_non_finite_body(request: Request) -> None:
+    """Refuse a JSON body that contains NaN/Infinity, BEFORE model validation.
+
+    ``json.loads`` accepts the three non-standard constants, and the parsed
+    value would otherwise reach the control-plane call, where httpx serializes
+    with ``allow_nan=False`` and raises — surfacing the client's malformed body
+    as a generic 500.
+
+    Rejecting it in a DEPENDENCY (which FastAPI solves before the body params)
+    rather than in a model validator is deliberate: the 422 body FastAPI builds
+    echoes the offending ``input``, and Starlette's ``JSONResponse`` renders with
+    ``allow_nan=False``, so a NaN-echoing 422 raises during rendering and the
+    client still gets a 500. Nothing non-finite ever reaches the error body this
+    way.
+
+    The body is parsed REGARDLESS of Content-Type, matching
+    ``_read_internal_json_body`` above and FastAPI's own body parser — which
+    accepts any ``application/*+json`` subtype and any case. A content-type gate
+    here was a fail-open hole: ``application/merge-patch+json`` skipped the check
+    and the 500 came back.
+    """
+    body = await request.body()
+    if not body:
+        return
+
+    def _bad(const: str):
+        raise HTTPException(
+            status_code=422,
+            detail=f"request body must not contain the non-finite number {const}")
+
+    try:
+        _json.loads(body, parse_constant=_bad)
+    except HTTPException:
+        raise
+    except ValueError:
+        # Malformed JSON is FastAPI's 422 to report, not ours.
+        return
+
+
+class ConnectorCreateRequest(BaseModel):
+    source_type: str
+    config: dict | None = None
+
+    @field_validator("source_type")
+    @classmethod
+    def _validate_source_type(cls, v):
+        if v not in _CONNECTOR_SOURCE_TYPES:
+            raise ValueError(
+                f"invalid source_type {v!r} — must be one of "
+                f"{sorted(_CONNECTOR_SOURCE_TYPES)}")
+        return v
+
+    @field_validator("config")
+    @classmethod
+    def _validate_config(cls, v):
+        return _reject_non_finite_json(v, "config")
+
+
+class ConnectorUpdateRequest(BaseModel):
+    config: dict | None = None
+    sync_status: str | None = None
+    sync_cursor: dict | None = None
+    last_error: str | None = None
+
+    # Same 500-instead-of-4xx shape as source_type, on the same migration's
+    # CHECK (sync_status). Mirroring both keeps the twins from re-diverging.
+    @field_validator("sync_status")
+    @classmethod
+    def _validate_sync_status(cls, v):
+        if v is not None and v not in _CONNECTOR_SYNC_STATUSES:
+            raise ValueError(
+                f"invalid sync_status {v!r} — must be one of "
+                f"{sorted(_CONNECTOR_SYNC_STATUSES)}")
+        return v
+
+    @field_validator("config", "sync_cursor")
+    @classmethod
+    def _validate_json_fields(cls, v, info):
+        return _reject_non_finite_json(v, info.field_name)
+
+
+def _require_uuid_connector_id(connector_id: str) -> str:
+    """Reject a non-UUID connector id with 422 BEFORE it reaches the seam.
+
+    ``connectors.id`` is a uuid column, so PostgREST casts the filter literal
+    and a non-UUID one is a 22P02 → HTTP 400 → a RuntimeError out of the seam →
+    the generic 500: a malformed id reported as a server error. Same shape as
+    the #1765 non-UUID ``identity_id`` arm (#2642 re-review P2).
+    """
+    import uuid as _uuid_validate
+    try:
+        _uuid_validate.UUID(connector_id)
+    except ValueError:
+        raise HTTPException(status_code=422,
+                            detail="connector_id must be a UUID") from None
+    # Return the CANONICAL form. Postgres normalizes every accepted literal
+    # (32-hex, braces, `urn:uuid:`) before comparing, so production matches the
+    # stored row either way; without this the fake's string compare diverges and
+    # a non-canonical id reads as absent (#2642 re-review P2).
+    return str(_uuid_validate.UUID(connector_id))
+
+
+@app.get("/v1/connectors")
+async def list_connectors(
+    org: dict = Depends(get_current_org_session_ungated),  # noqa: B008
+):
+    """List all connectors for the authenticated team's org."""
+    from tortoise.supabase_control import (
+        connector_by_org as _sb_conn_by_org,
+    )
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    org_id = org["org_id"]
+    if is_supabase_enabled():
+        # #4350/#3498: ONE thread hop for the listing — the seam is blocking
+        # HTTP against the control plane, so calling it on the loop delays
+        # every other request in the process (the loop-safety guard reddens).
+        return {"connectors": await _cp_offload(
+            lambda: _sb_conn_by_org(get_control_plane(), org_id),
+            op="connector_by_org")}
+    # Self-host has no connector store: the siblings (create/get/patch/delete)
+    # all 501 here. This branch used to read a `:Connector` GRAPH node, which
+    # no endpoint in this PR can ever write, so it could only ever answer [] —
+    # a silently-empty surface that reads as "no connectors" instead of
+    # "unsupported" (#2642 re-review P2).
+    raise HTTPException(status_code=501, detail="Self-host connectors not yet implemented")
+
+
+@app.post("/v1/connectors")
+async def create_connector(
+    body: ConnectorCreateRequest,
+    org: dict = Depends(get_current_org_session_ungated),  # noqa: B008
+    _finite: None = Depends(_reject_non_finite_body),
+):
+    """Create a new connector (no credential yet — OAuth step follows)."""
+    from tortoise.supabase_control import (
+        connector_create as _sb_conn_create,
+    )
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    org_id = org["org_id"]
+    if is_supabase_enabled():
+        try:
+            # #4350/#3498: the seam blocks on HTTP; run it off the loop. Domain
+            # errors propagate unchanged, so the 409 mapping below still holds.
+            row = await _cp_offload(
+                lambda: _sb_conn_create(
+                    get_control_plane(), org_id=org_id,
+                    source_type=body.source_type, config=body.config),
+                op="connector_create")
+        except RuntimeError as e:
+            # The migration declares `idx_connectors_org_source`, one connector
+            # per (org_id, source_type); PostgREST maps the 23505 to HTTP 409.
+            # Surface it as the client error it is instead of letting it fall
+            # through to the generic 500 — the same mapping create_graph uses.
+            if "HTTP 409" in str(e):
+                raise HTTPException(
+                    status_code=409,
+                    detail="A connector for this source type already exists",
+                ) from None
+            raise
+        if not row:
+            raise HTTPException(status_code=500, detail="Failed to create connector")
+        return {"connector": row}
+    raise HTTPException(status_code=501, detail="Self-host connector creation not yet implemented")
+
+
+@app.get("/v1/connectors/{connector_id}")
+async def get_connector(
+    connector_id: str,
+    org: dict = Depends(get_current_org_session_ungated),  # noqa: B008
+):
+    """Get a single connector by id, scoped to the caller's org."""
+    from tortoise.supabase_control import (
+        connector_by_id as _sb_conn_by_id,
+    )
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    org_id = org["org_id"]
+    if is_supabase_enabled():
+        connector_id = _require_uuid_connector_id(connector_id)
+        # org_id is passed INTO the seam: the query runs on the service-role
+        # key (RLS bypassed), so the filter is the only tenancy boundary.
+        # #4350: the seam blocks on HTTP — one thread hop, off the loop.
+        row = await _cp_offload(
+            lambda: _sb_conn_by_id(get_control_plane(), org_id, connector_id),
+            op="connector_by_id")
+        if not row:
+            raise HTTPException(status_code=404, detail="Connector not found")
+        return {"connector": row}
+    raise HTTPException(status_code=501, detail="Self-host not yet implemented")
+
+
+@app.patch("/v1/connectors/{connector_id}")
+async def update_connector(
+    connector_id: str,
+    body: ConnectorUpdateRequest,
+    org: dict = Depends(get_current_org_session_ungated),  # noqa: B008
+    _finite: None = Depends(_reject_non_finite_body),
+):
+    """Update connector config/sync state, scoped to the caller's org."""
+    from tortoise.supabase_control import (
+        connector_update as _sb_conn_update,
+    )
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    org_id = org["org_id"]
+    if is_supabase_enabled():
+        connector_id = _require_uuid_connector_id(connector_id)
+        updates = body.model_dump(exclude_none=True)
+        # #4350: off-loop — the seam blocks on HTTP against the control plane.
+        if not await _cp_offload(
+                lambda: _sb_conn_update(get_control_plane(), org_id,
+                                        connector_id, **updates),
+                op="connector_update"):
+            # No row in THIS org matched — a foreign id is indistinguishable
+            # from an absent one (matches the neighbouring index-job and
+            # invitation endpoints, which 404 on a cross-org id).
+            raise HTTPException(status_code=404, detail="Connector not found")
+        return {"status": "updated"}
+    raise HTTPException(status_code=501, detail="Self-host not yet implemented")
+
+
+@app.delete("/v1/connectors/{connector_id}")
+async def delete_connector(
+    connector_id: str,
+    org: dict = Depends(get_current_org_session_ungated),  # noqa: B008
+):
+    """Delete a connector (disconnect source, clean up), scoped to the org."""
+    from tortoise.supabase_control import (
+        connector_delete as _sb_conn_delete,
+    )
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    org_id = org["org_id"]
+    if is_supabase_enabled():
+        connector_id = _require_uuid_connector_id(connector_id)
+        # #4350: off-loop — the seam blocks on HTTP against the control plane.
+        if not await _cp_offload(
+                lambda: _sb_conn_delete(get_control_plane(), org_id, connector_id),
+                op="connector_delete"):
+            raise HTTPException(status_code=404, detail="Connector not found")
+        return {"status": "deleted"}
+    raise HTTPException(status_code=501, detail="Self-host not yet implemented")
+
+
+@app.post("/v1/connectors/{source_type}/auth")
+async def connector_auth(
+    source_type: str,
+    org: dict = Depends(get_current_org_session_ungated),  # noqa: B008
+):
+    """Initiate OAuth for a connector source type. Returns the authorize URL.
+
+    Dispatches to the correct OAuth flow based on source_type.
+    """
+    org_id = org["org_id"]
+    if source_type == "github":
+        # Reuse the existing GitHub OAuth flow
+        import os as _os
+        import secrets
+        from urllib.parse import urlencode
+        client_id = _os.environ.get("GITHUB_CLIENT_ID")
+        if not client_id:
+            raise HTTPException(status_code=503, detail="GitHub OAuth not configured")
+        state = secrets.token_urlsafe(24)
+        # Store CSRF state with connector context
+        from tortoise.hosted_api import _GITHUB_STATES
+        _GITHUB_STATES[state] = {
+            "org_id": org_id,
+            "org": None,
+            "created_at": __import__("time").time(),
+        }
+        callback = _os.environ.get(
+            "GITHUB_CALLBACK_URL",
+            "https://api.premiselabs.co/v1/onboarding/github/callback",
+        )
+        params = {
+            "client_id": client_id,
+            "redirect_uri": callback,
+            "scope": "repo",
+            "state": state,
+        }
+        auth_url = f"{_GITHUB_AUTHORIZE_URL}?{urlencode(params)}"
+        return {"auth_url": auth_url, "state": state}
+    # A KNOWN source type with no flow yet is "not implemented", not "unknown":
+    # answering 400 for `slack` — a valid, creatable connector type — makes a
+    # false statement about the connector model, the same conflation the list
+    # endpoint's 501 exists to avoid (#2642 re-review P2).
+    if source_type in _CONNECTOR_SOURCE_TYPES:
+        raise HTTPException(
+            status_code=501,
+            detail=f"The {source_type} OAuth flow is not implemented yet",
+        )
+    raise HTTPException(status_code=400, detail=f"Unknown source type: {source_type}")
 
 
 def _cleanup_legacy_docs_corpus(org_id: str,
@@ -30818,14 +31623,17 @@ async def webhooks_stripe(request: Request):
 
 # ── DCR capacity policy (#2866) ────────────────────────────────────────
 # RFC 7591 registration is an unauthenticated write surface. The limiter is
-# intentionally NOT the shared `_check_ip_bucket_rate_limit` primitive: that
-# primitive inserts the bucket (`defaultdict`) BEFORE its 429 check and prunes
-# only *stale* buckets, so an attacker-keyed fresh-key flood grows its store
-# without bound and every request scans the whole store once over
-# `max_entries` (the charge append itself happens after the check; the
-# unbounded growth and the O(n) scan are the defects). The primitive is left
-# byte-identical; the sibling filing tracks it). This limiter states its
-# capacity policy in concrete, falsifiable numbers:
+# intentionally NOT the shared `_check_ip_bucket_rate_limit` primitive: it
+# supplies dimensions that primitive does NOT — a trusted-CIDR carve-out, an
+# anonymous global aggregate, IPv6 /64 key aggregation (D6), and
+# per-dimension derived caps — and so it keeps its own four stores. The
+# store-bound POLICY is now shared: #3124 gave the primitive the same
+# reclaim-inactive / reject-new-shared-overflow / O(1) shape this limiter was
+# built with, and both now call the shared `_bucket_prune_window` /
+# `_bucket_reclaim` helpers. (#2866's note that the primitive was "left
+# byte-identical" and unbounded is superseded by #3124; do NOT delete this
+# limiter's separate stores — the dimensions above are still only here.)
+# This limiter states its capacity policy in concrete, falsifiable numbers:
 #
 #   per bucket (per client IP, or /64 for IPv6) ... 20/hr   (PER_HOUR)
 #   anonymous global aggregate ................... 600/hr   (ANON_AGGREGATE)
@@ -30872,7 +31680,8 @@ async def webhooks_stripe(request: Request):
 # client `Fly-*` headers (assumption 12 — dated re-verification with an
 # operator recipe is #3126, owner @daniel-ospina, 2026-11-15). Sibling
 # filings from this work: #3124 (the shared per-IP primitive + the generic
-# middleware's store are still unbounded), #3125 (`_check_claim_rate_limit`
+# middleware's store — now bounded: reclaim-inactive + reject-new/shared
+# overflow + O(1) hot path), #3125 (`_check_claim_rate_limit`
 # keys on the proxy IP), #3134 (dated measurement of real DCR volume —
 # the 600/1200 aggregates are not load-validated). #3036 already covers
 # oauth_* token-table retention/GC.
@@ -30901,7 +31710,11 @@ _OAUTH_DCR_TRUSTED_CIDRS_DEFAULT = "160.79.104.0/21"
 # Singleton store keys for the aggregate dimensions (malformed client IPs
 # share the constant below, never a per-raw-string bucket).
 _OAUTH_DCR_ANON_KEY = "\x00anon"
-_OAUTH_DCR_OVERFLOW_KEY = "\x00overflow"
+# Alias the shared sentinel rather than re-declaring the literal: the two
+# layouts count differently (in-store layout counts OWNED keys; the DCR
+# separate-store layout counts every key), so the KEY VALUE must not drift
+# (#3124 review).
+_OAUTH_DCR_OVERFLOW_KEY = _BUCKET_OVERFLOW_KEY
 _OAUTH_DCR_MALFORMED_KEY = "anonymous"
 
 _OAUTH_DCR_BUCKETS: OrderedDict[str, list[float]] = OrderedDict()
@@ -30912,9 +31725,13 @@ _OAUTH_DCR_LOCK = asyncio.Lock()
 
 
 def _dcr_prune_window(bucket: list[float], now: float, window_s: int) -> list[float]:
-    """In-window entries of `bucket` (pure; the primitive's window contract is
-    pinned against this by a parity test, D10)."""
-    return [t for t in bucket if now - t < window_s]
+    """In-window entries of `bucket` — delegates to the shared
+    `_bucket_prune_window` (#3124): ONE implementation of the
+    security-relevant window boundary for this limiter family, kept under
+    this name because the DCR path reads it. The D10 parity test asserts
+    against a literal expected table rather than against this function, so
+    the delegation does not make that test a self-comparison."""
+    return _bucket_prune_window(bucket, now, window_s)
 
 
 def _dcr_retry_after_s(bucket: list[float], now: float, window_s: int) -> int:
@@ -30947,10 +31764,12 @@ def _oauth_dcr_normalized_addr(client_ip):
     """`ipaddress` address for `client_ip`, normalizing ANY IPv4-mapped IPv6
     spelling (or None for a malformed address).
 
-    `_normalize_mapped_ipv6` (shared primitive helper, byte-identical to
-    origin/main) matches the literal lowercase ``::ffff:`` prefix, so the
-    structural check here additionally covers ``::FFFF:1.2.3.4`` and
-    ``0:0:0:0:0:ffff:1.2.3.4``. Without it one IPv4 address could hold two
+    `_normalize_mapped_ipv6` (shared primitive helper) historically matched
+    the literal lowercase ``::ffff:`` prefix, so the structural check here
+    additionally covers ``::FFFF:1.2.3.4`` and ``0:0:0:0:0:ffff:1.2.3.4``.
+    #3124 normalizes the shared helper by ``ipv4_mapped`` regardless of
+    spelling, so this path is now a redundant belt-and-braces guard (kept — it
+    must not depend on another module's fix landing). Without it one IPv4 address could hold two
     bucket identities (its own plus the shared ``::/64``) and a non-canonical
     mapped client would collapse into ``::/64`` instead of being keyed — or
     trusted — as the address it actually is.
@@ -31002,15 +31821,13 @@ def _oauth_dcr_store_key(client_ip) -> str:
 def _oauth_dcr_reclaim(store: OrderedDict, now: float, window_s: int,
                        cap: int) -> None:
     """Pop inactive LRU-head buckets until the store is below `cap` or the
-    head is active (D3/D4). By the last-charge ordering invariant an active
-    head implies every later key is active too, so this stops at the first
-    live bucket — it can never evict an active key. O(1) at the hot cap."""
-    while store and len(store) >= cap:
-        head_key = next(iter(store))
-        head = store[head_key]
-        if head and now - head[-1] < window_s:
-            break
-        del store[head_key]
+    head is active (D3/D4) — delegates to the shared `_bucket_reclaim`
+    (#3124) with ``count=len``, because this limiter's overflow lives in a
+    SEPARATE store so every key in `store` counts toward the cap. By the
+    last-charge ordering invariant an active head implies every later key is
+    active too, so this stops at the first live bucket — it can never evict an
+    active key. O(1) at the hot cap."""
+    _bucket_reclaim(store, now, window_s, cap, count=len)
 
 
 def _oauth_dcr_deny(retry_after: int) -> None:
@@ -31149,6 +31966,57 @@ def _oauth_error_response(exc: OAuthError) -> JSONResponse:  # noqa: F821
     return JSONResponse(status_code=exc.status, content=exc.body())
 
 
+def _oauth_unconverted_failure(exc: BaseException, *, where: str) -> JSONResponse:
+    """#3026: a control-plane failure must not escape an OAuth endpoint as a bare
+    500 ``{"detail": "Internal server error"}``.
+
+    The five endpoints below caught only ``OAuthError``, so such a failure
+    reached the global ``Exception`` handler and the consumer got a body it
+    could not act on. This helper backs the ``except Exception`` clause that
+    closes it.
+
+    WHY 503 FOR A ``RuntimeError``: ``SupabaseControlPlane`` documents that
+    non-2xx responses and transport errors raise ``RuntimeError``
+    (``supabase_control.py``, its class docstring), and RFC 6749 defines
+    ``temporarily_unavailable`` for exactly that (§4.1.2.1; §8.5 permits the
+    additional token-endpoint code). A retry is safe here: the
+    reads are reads, ``issue_auth_code`` inserts a fresh self-expiring code,
+    revoke is RFC 7009 idempotent, DCR is a fresh insert, and the CIMD
+    provisioning insert ``validate_authorize_params`` can reach is guarded and
+    idempotent (``_persist_cimd_client``).
+
+    THE LIMIT, stated because this helper cannot make the distinction: a LOCAL
+    bug that raises ``RuntimeError`` is also labelled retryable. The
+    discriminator is a convention, not a proof. It is chosen because the
+    alternative — treating every ``RuntimeError`` as a bug — puts the real
+    outage back on the bare-500 path this issue exists to close.
+
+    WHY THE §5.2 BODY, NOT ``_control_plane_unavailable()``: that helper returns
+    FastAPI's ``{"detail": {...}}`` shape, and these consumers parse the OAuth
+    body — the consent page's own JS reads ``payload.error_description ||
+    payload.error`` (``oauth.py``), so a ``detail`` body would render as a
+    generic "Consent failed" with no cause or remedy. This mirrors
+    ``_oauth_offload``'s ``unavailable`` override for the OAuth lanes.
+
+    ANYTHING ELSE IS A BUG, NOT A RETRY SIGNAL: it keeps the honest 500
+    ``server_error``. ``/oauth/token`` is the exception — its oauth.py helpers
+    WRAP, so its own net can return 500 for everything it catches.
+
+    The exception is CONSUMED here, so the global handler cannot re-shape it.
+    """
+    from tortoise.oauth import (
+        OAuthError,
+        OAuthTemporarilyUnavailable,
+        _log_and_capture,
+    )
+
+    _log_and_capture(exc, where=where)
+    if isinstance(exc, RuntimeError):
+        return _oauth_error_response(OAuthTemporarilyUnavailable())
+    return _oauth_error_response(
+        OAuthError(500, "server_error", "Internal error processing the request."))
+
+
 @app.get("/.well-known/oauth-protected-resource")
 @app.get("/.well-known/oauth-protected-resource/mcp")
 async def oauth_protected_resource(request: Request):
@@ -31181,7 +32049,14 @@ async def oauth_authorize(request: Request):
         consent_page_html,
         validate_authorize_params,
     )
-    cp, enabled = _oauth_control_plane()
+    try:
+        cp, enabled = _oauth_control_plane()
+    except RuntimeError as exc:      # #3026: an unconfigured control plane
+        # must not escape as a bare 500 detail. Acquisition fails BEFORE any
+        # request is made, so it is not a mid-request transport failure — but
+        # the branch immediately below already answers 'OAuth is not usable
+        # right now' with a 503, and this keeps ONE story for that state.
+        return _oauth_unconverted_failure(exc, where="oauth/authorize")
     if not enabled or cp is None:
         raise HTTPException(status_code=503, detail="OAuth not configured")
     params = {
@@ -31238,6 +32113,8 @@ async def oauth_authorize(request: Request):
                 params["redirect_uri"] + sep + urlencode(
                     {"error": exc.error, "state": params["state"]}))
         return _oauth_error_response(exc)
+    except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
+        return _oauth_unconverted_failure(exc, where="oauth/authorize")
     html, nonce = consent_page_html(
         client_name=client.get("client_name") or client["id"],
         scope=params["scope"] or client.get("scope") or "mcp",
@@ -31272,7 +32149,14 @@ async def oauth_consent_preview(request: Request):
     the session JWT + client-declared resource indicator. No state change.
     """
     from tortoise.oauth import OAuthError, consent_preview
-    cp, enabled = _oauth_control_plane()
+    try:
+        cp, enabled = _oauth_control_plane()
+    except RuntimeError as exc:      # #3026: an unconfigured control plane
+        # must not escape as a bare 500 detail. Acquisition fails BEFORE any
+        # request is made, so it is not a mid-request transport failure — but
+        # the branch immediately below already answers 'OAuth is not usable
+        # right now' with a 503, and this keeps ONE story for that state.
+        return _oauth_unconverted_failure(exc, where="oauth/consent/preview")
     if not enabled or cp is None:
         raise HTTPException(status_code=503, detail="OAuth not configured")
     user = await verify_session_jwt(request)
@@ -31281,6 +32165,8 @@ async def oauth_consent_preview(request: Request):
                                request.query_params.get("resource") or None)
     except OAuthError as exc:
         return _oauth_error_response(exc)
+    except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
+        return _oauth_unconverted_failure(exc, where="oauth/consent/preview")
 
 
 @app.post("/oauth/consent")
@@ -31294,7 +32180,14 @@ async def oauth_consent(request: Request):
         issue_auth_code,
         validate_authorize_params,
     )
-    cp, enabled = _oauth_control_plane()
+    try:
+        cp, enabled = _oauth_control_plane()
+    except RuntimeError as exc:      # #3026: an unconfigured control plane
+        # must not escape as a bare 500 detail. Acquisition fails BEFORE any
+        # request is made, so it is not a mid-request transport failure — but
+        # the branch immediately below already answers 'OAuth is not usable
+        # right now' with a 503, and this keeps ONE story for that state.
+        return _oauth_unconverted_failure(exc, where="oauth/consent params")
     if not enabled or cp is None:
         raise HTTPException(status_code=503, detail="OAuth not configured")
     try:
@@ -31318,6 +32211,8 @@ async def oauth_consent(request: Request):
             op="oauth_consent_params")
     except OAuthError as exc:
         return _oauth_error_response(exc)
+    except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
+        return _oauth_unconverted_failure(exc, where="oauth/consent params")
     # The browser session JWT — same JWKS/ES256+RS256 verification the session
     # endpoints use (D2: reuse session_auth verify; no new auth stack).
     user = await verify_session_jwt(request)
@@ -31333,6 +32228,8 @@ async def oauth_consent(request: Request):
         )
     except OAuthError as exc:
         return _oauth_error_response(exc)
+    except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
+        return _oauth_unconverted_failure(exc, where="oauth/consent mint")
     return {"code": code, "state": body.get("state"),
             "redirect_uri": body["redirect_uri"]}
 
@@ -31393,7 +32290,14 @@ async def oauth_token(request: Request):
 async def oauth_revoke(request: Request):
     """RFC 7009 token revocation (D5 — explicit client-initiated revocation)."""
     from tortoise.oauth import OAuthError, revoke_token
-    cp, enabled = _oauth_control_plane()
+    try:
+        cp, enabled = _oauth_control_plane()
+    except RuntimeError as exc:      # #3026: an unconfigured control plane
+        # must not escape as a bare 500 detail. Acquisition fails BEFORE any
+        # request is made, so it is not a mid-request transport failure — but
+        # the branch immediately below already answers 'OAuth is not usable
+        # right now' with a 503, and this keeps ONE story for that state.
+        return _oauth_unconverted_failure(exc, where="oauth/revoke")
     if not enabled or cp is None:
         raise HTTPException(status_code=503, detail="OAuth not configured")
     from urllib.parse import parse_qs
@@ -31408,6 +32312,8 @@ async def oauth_revoke(request: Request):
         revoke_token(cp, body)
     except OAuthError as exc:
         return _oauth_error_response(exc)
+    except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
+        return _oauth_unconverted_failure(exc, where="oauth/revoke")
     return Response(status_code=200, content="")
 
 
@@ -31418,7 +32324,14 @@ async def oauth_dcr_register(request: Request):
     connectors) without operator-issued client_ids.
     """
     from tortoise.oauth import OAuthError, register_client
-    cp, enabled = _oauth_control_plane()
+    try:
+        cp, enabled = _oauth_control_plane()
+    except RuntimeError as exc:      # #3026: an unconfigured control plane
+        # must not escape as a bare 500 detail. Acquisition fails BEFORE any
+        # request is made, so it is not a mid-request transport failure — but
+        # the branch immediately below already answers 'OAuth is not usable
+        # right now' with a 503, and this keeps ONE story for that state.
+        return _oauth_unconverted_failure(exc, where="oauth/register")
     if not enabled or cp is None:
         raise HTTPException(status_code=503, detail="OAuth not configured")
     await _check_oauth_dcr_rate_limit(request)
@@ -31433,6 +32346,8 @@ async def oauth_dcr_register(request: Request):
         reg = register_client(cp, body)
     except OAuthError as exc:
         return _oauth_error_response(exc)
+    except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
+        return _oauth_unconverted_failure(exc, where="oauth/register")
     return JSONResponse(status_code=201, content=reg)
 
 
