@@ -3039,7 +3039,10 @@ class _EntityHandlers:
 
         Returns the QueryResult (the caller uses ``nodes_created`` for the
         counter-authority outcome); ``proj.apply`` threads it for
-        ``create_source``'s index-path consumers.
+        ``create_source``'s index-path consumers. #5024 P1-A: the result's
+        sole row carries ``previousProps`` — the node's properties as the
+        statement found them (``null`` for a create), captured inside the
+        write so the SDK's record decision cannot use a stale snapshot.
         """
         sid = ev.get("id")
         url = ev.get("url", "")
@@ -3059,7 +3062,22 @@ class _EntityHandlers:
         canonical = normalize_source_url(raw_key)
         search_text = ev.get("_searchText") or ev.get("title")
         run_clause = ", s.__runId = $rid" if merge_run_id is not None else ""
+        # ── #5024 P1-A: the pre-write state, captured ATOMICALLY ───────────
+        # `create_source`'s record DECISION needs the state the write found,
+        # not a snapshot read before it: the ON MATCH bump below is gated on
+        # the STORED hash, so a concurrent writer between a separate pre-read
+        # and this MERGE made the decision compare against a hash the write
+        # never saw (measured: a h-1->h-0 transition suppressed as a no-op
+        # while the live node moved to h-0 — fail-OPEN toward suppression).
+        # `OPTIONAL MATCH` + `WITH` run BEFORE the `MERGE` in the SAME
+        # statement, so `_prev_props` IS the committed pre-write state and no
+        # other statement can interleave (null when the node did not exist),
+        # and the `RETURN` hands it back on the write's own QueryResult. The
+        # written node is untouched by this prefix — the ON CREATE/ON MATCH
+        # clauses are byte-identical to before.
         r = self.g.query(
+            "OPTIONAL MATCH (_prev:Source {url: $url}) "
+            "WITH _prev, properties(_prev) AS _prev_props "
             "MERGE (s:Source {url: $url}) "
             "ON CREATE SET s.id = coalesce($id, $url), "
             "              s.canonicalUrl = $cu, "
@@ -3100,10 +3118,10 @@ class _EntityHandlers:
             # #5024: same rule as `ingestedAt` above — the recorded instant,
             # never the replay clock (measured divergence: ...57.016262 live vs
             # ...57.079810 rebuilt). A re-materialisation now emits
-            # `SourceVersioned` (which carries its own `at`), so this branch is
-            # the LEGACY path for journals written before that record existed;
-            # keeping `coalesce($updatedAt, $now)` makes both records replay to
-            # the same node.
+            # `SourceVersioned` (which carries its own `updatedAt`), so this
+            # branch is the LEGACY path for journals written before that record
+            # existed; keeping `coalesce($updatedAt, $now)` makes both records
+            # replay to the same node.
             "           s.updatedAt = CASE WHEN $hash IS NULL THEN s.updatedAt "
             "                     WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
             "                     THEN coalesce($updatedAt, $now) ELSE s.updatedAt END, "
@@ -3124,7 +3142,12 @@ class _EntityHandlers:
             # D10 (§4.4/§9.5 Q3): `format` is a Source property now; a caller
             # supplying it must land on the node, overwriting an existing value
             # (parity with the old open-passthrough write it replaces).
-            "           s.format = coalesce($fmt, s.format)",
+            "           s.format = coalesce($fmt, s.format) "
+            # #5024 P1-A: the atomic pre-write capture above rides the write's
+            # own result. `null` (a create) is a REAL value here, not a
+            # swallowed failure — the caller no longer has a pre-read that can
+            # fail and be mistaken for "no node".
+            "RETURN _prev_props AS previousProps",
             params={
                 "url": key, "id": sid or key,
                 "cu": canonical,
@@ -3185,6 +3208,9 @@ class _EntityHandlers:
         fact, recoverable by replay"*. So the record carries
         `previousContentHash` — which version this one superseded, the fact that
         makes the prior version addressable once the single node has moved on.
+        The transition instant is NOT a separate ``at`` key: the record carries
+        it as its own ``updatedAt`` (minted by the producer with the same single
+        clock the live write used), and the fold reads exactly that.
         In-place by design: a second `:Source` per version is explicitly ruled
         out, so the history lives in the record and the node holds the CURRENT
         version.

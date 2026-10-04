@@ -24280,26 +24280,6 @@ class TortoiseSDK:
             _reject_unrepresentable_number(_key, _value)
         proj = self._get_proj()
         proj._source_merge_result = None
-        # ── #5024 (T6): the pre-write read the RECORD DECISION needs ──────
-        # The MERGE below bumps version/updatedAt/contentHash IN PLACE when the
-        # hash differs and journals nothing of its own, so the record has to be
-        # chosen here, from the stored state. One read, before the write; the
-        # resolver is the SAME one the writer uses, so a URL variant cannot
-        # make this read miss the node the write will merge into.
-        _stored_before = None
-        try:
-            from tortoise.source_identity import resolve_source_key
-            _rows = proj.g.query(
-                "MATCH (s:Source {url: $u}) RETURN properties(s)",
-                params={"u": resolve_source_key(proj.g, url)},
-            ).result_set
-            if _rows:
-                _stored_before = _rows[0][0]
-        except Exception:  # noqa: BLE001, RUF100
-            # Best-effort: a failed pre-read must never take the write down —
-            # it only degrades the record DECISION, and `None` falls through to
-            # the pre-#5024 always-emit behaviour (fail-safe toward recording).
-            _stored_before = None
         # ── #5024 (T6): ONE clock for the transition ────────────────
         # `_upsert_source`'s ON MATCH sets `updatedAt = coalesce($updatedAt,
         # $now)` where `$now` is `_now_iso()` called INSIDE the fold. Reading
@@ -24311,6 +24291,23 @@ class TortoiseSDK:
         ev["updatedAt"] = _now_iso()
         result = self._create_entity("Source", url, ev, "SourceCreated",
                                      _skip_sanitize=True)
+        # ── #5024 P1-A: the pre-write state the RECORD DECISION needs ──────
+        # Taken from the WRITE'S OWN statement (`_upsert_source` captures it
+        # with `OPTIONAL MATCH`/`WITH` before its `MERGE` and returns it as
+        # `previousProps`), so it is the state the write actually found. A
+        # separate pre-read here was a DIFFERENT read from the one the write's
+        # `ON MATCH` hash gate evaluated: a competing writer in that window
+        # made the decision compare the incoming hash against a value the
+        # node no longer had, and the branch below suppressed a real
+        # transition (fail-OPEN toward suppression). `None` now means only
+        # "the statement found no node" — never a swallowed read failure — so
+        # the create arm is entered on real evidence. This also removes the
+        # unconditional extra round trip (plus its internal `resolve_source_key`)
+        # that P2-B flagged on the no-journal path.
+        _stored_before = None
+        _written = proj._source_merge_result
+        if _written is not None and getattr(_written, "result_set", None):
+            _stored_before = _written.result_set[0][0]
         # ── #5024 (T6): journal the write by WHAT IT CHANGED ────────────────
         # Pre-#5024 this emitted a plain `SourceCreated` on EVERY call, so a
         # re-check that found the same bytes still appended a journal line
@@ -24461,8 +24458,60 @@ class TortoiseSDK:
         """
         if not stored:
             return False
+        from .projection.entities import _is_persistable_prop_value
+        proj = self._get_proj()
+        # ── #5024 P1-B: MIRROR THE WRITER, do not re-derive it ─────────────
+        # The earlier cut compared the raw payload against the stored node and
+        # ignored only `ingestedAt`/`updatedAt`, so it disagreed with
+        # `_upsert_source` on three classes of key and appended a record on
+        # EVERY identical re-check (measured `2 -> 3 -> 4`): a URL variant
+        # (`url` is resolved to the node's canonical spelling), a same-hash
+        # retitle (the writer GATES `title`/`_searchText`/`updatedAt` behind
+        # the hash diff, false in this arm), and a key the writer drops
+        # (`content` is retired, `meta={...}` is not persistable).
+        #
+        # This arm is reached only when the incoming hash is falsy OR equal to
+        # the stored one — but NOT only when the writer's gate is closed: a
+        # falsy non-None hash (`""` — `hosted_api` passes `contentHash=... or
+        # ""`) still opens `$hash IS NOT NULL AND s.contentHash <> $hash`, so
+        # `contentHash` MUST stay compared below. When the gate IS open the
+        # comparison returns "changed" on the hash alone, so the hash-gated
+        # fields can be skipped without ever suppressing the change.
+        _fixed_unchanged = self._SOURCE_NOOP_IGNORED_KEYS | {
+            # Hash-gated: `_upsert_source` only writes these on the hash-diff
+            # branch, which the `contentHash` comparison already detects.
+            "title", "_searchText",
+            # Create-only or server-managed.
+            "version", "sourceKind", "externalId", "ingestedAt",
+            "previousContentHash", "canonicalUrl", "urlAliases",
+        }
+        # The fixed-clause keys that DO change on a non-hash-diff write or that
+        # carry the hash-diff itself (`coalesce($x, s.x)` / the `contentHash`
+        # CASE). They are in `_SOURCE_HANDLED` (so `_persist_extra_props`
+        # skips them) but MUST be compared here: an existing item's
+        # `format`/`source_path` update lands live, and `contentHash` is the
+        # gate every other fixed field rides.
+        _fixed_compared = {"format", "source_path", "contentHash"}
+        # The writer's OWN passthrough predicate (`_persist_extra_props`): a
+        # payload key outside this skip-set, with a persistable non-None value,
+        # is what actually lands on the node.
+        _dropped = (proj._META_KEYS | proj._SOURCE_HANDLED
+                    | proj._DOC_RETIRED_KEYS)
+        stored_aliases = stored.get("urlAliases") or []
         for k, v in payload.items():
-            if k in self._SOURCE_NOOP_IGNORED_KEYS:
+            if k in _fixed_unchanged or v is None:
+                continue
+            if k == "url":
+                # The MERGE key. The writer resolves the inbound spelling to
+                # the ONE canonical node and only ever ADDS the raw spelling
+                # to `urlAliases`; it never rewrites `s.url`. So a differing
+                # payload `url` is a change iff the raw is neither the node's
+                # url nor an existing alias (the first URL-variant write).
+                if v != stored.get("url") and v not in stored_aliases:
+                    return False
+                continue
+            if k not in _fixed_compared and (
+                    k in _dropped or not _is_persistable_prop_value(v)):
                 continue
             prop = self._SOURCE_PAYLOAD_ALIASES.get(k, k)
             if prop not in stored:
@@ -24474,9 +24523,7 @@ class TortoiseSDK:
                 # while the live node gained `{'bar': ''}`, so the rebuild lost
                 # it. That is fail-OPEN toward suppression, the opposite of
                 # this test's declared polarity.
-                if v is not None:
-                    return False
-                continue
+                return False
             # Type-AWARE: `True == 1` in Python but not in the graph — see
             # `_same_journal_value`. A plain `!=` here was the round-2 fail-open.
             if not self._same_journal_value(stored[prop], v):

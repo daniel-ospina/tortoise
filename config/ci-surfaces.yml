@@ -934,8 +934,10 @@ surfaces:
   # arm. **Deliberately NOT dual-registered with `eval`** (contrast
   # `test_journal_embedding_5004.py` above): this file pins no embedding path,
   # so an `embeddings.py`-only PR cannot leave a guard here unrun. The
-  # fail-before/pass-after evidence: 12 of the 21 fail on the unfixed base and
-  # all 21 pass here.
+  # fail-before/pass-after evidence: 12 of the original 21 fail on the unfixed
+  # base and all pass here; the 9 review-round-6 pins (P1-A competing write,
+  # the three P1-B writer-mirror cases, the falsy-hash gate, both P2-B cases,
+  # the P2-A torn tail, P2-C) each fail on the unfixed base and pass here.
   - test_source_rematerialisation_5024.py
   # #5199: the derivation-link version anchor (`sourceVersion` on a derivation
   # `references` link) — `tortoise/projection/edges.py` + `tortoise/projection/entities.py`
@@ -3072,7 +3074,7 @@ durations:
   test_provenance_extractedfrom_3263.py: 2.2
   test_rebuild_turn_points_3947.py: 4.5
   test_source_version_extractedfrom_5038.py: 38.5  # #5256: 33 tests; docker lane (#1647 default) — not carve_out-registered; locally measured
-  test_source_rematerialisation_5024.py: 20.0  # #5024: 21 tests, docker FalkorDB; locally measured (11-30s across runs, fleet-contention sensitive)
+  test_source_rematerialisation_5024.py: 20.0  # #5024: 30 tests (21 + 9 review-round-6 pins), docker FalkorDB; locally measured (11-30s across runs, fleet-contention sensitive)
   test_restore_seq_3902.py: 0.8
   test_retention_promise.py: 2.7
   test_retired_tools.py: 0.2

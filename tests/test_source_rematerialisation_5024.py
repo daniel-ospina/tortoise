@@ -271,13 +271,29 @@ def test_a_same_hash_write_that_changes_an_extra_is_still_journalled(src):
     assert _props(sdk, _URL)["summary"] == live
 
 
-def test_a_hashless_write_is_still_recorded(src):
-    """The JOINT-E2E bundle path carries no hash and must not lose its write."""
+def test_a_hashless_retitle_that_changes_nothing_is_repeat_safe(src):
+    """The JOINT-E2E bundle path carries no hash — and its retitle is a no-op.
+
+    The hashless write is 'recorded' only when it CHANGES something. Its
+    `title` is hash-gated by the writer (`WHEN $hash IS NULL THEN s.title`),
+    so a hashless re-check that merely re-sends a different `title` leaves the
+    node byte-identical — and (P1-B) a record for every such re-check is the
+    unbounded-growth defect, not durability. `contentHash` is preserved (the
+    JOINT-E2E contract) and the node still rebuilds field for field.
+
+    A hashless write that DOES change something (a new extra) is still
+    recorded — see `test_a_hashless_write_that_changes_an_extra_is_still_recorded`.
+    """
     events, sdk = src
     sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
     n = len(_records(events))
+    before = _props(sdk, _URL)
     sdk.create_source(_URL, "document", title="v1")   # no contentHash
-    assert len(_records(events)) == n + 1
+    assert len(_records(events)) == n, (
+        "a hashless retitle the writer drops still appended a record — the "
+        "journal grows on every re-check (P1-B)")
+    assert _props(sdk, _URL) == before, (
+        "the hashless write was supposed to leave the node unchanged")
     assert _props(sdk, _URL)["contentHash"] == "h-0", (
         "a hash-less write must preserve the stored hash (the JOINT-E2E "
         "contract)")
@@ -575,3 +591,291 @@ def test_a_hashless_write_that_changes_an_extra_is_still_recorded(src):
     assert live["summary"] == "new", "the extra was not written live"
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert _props(sdk, _URL) == live
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 8. review round 6 — P1-A: the record decision must come from the WRITE
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_a_competing_write_cannot_suppress_the_transition(src, monkeypatch):
+    """P1-A — a hash-changing write must never be classified from a stale read.
+
+    Before this fix `create_source` pre-read `_stored_before` BEFORE the write
+    and compared the incoming hash against it, while the writer's `ON MATCH`
+    hash gate is evaluated later, at MERGE time. A second writer to the same
+    url in that window made the two disagree, and the branch fell through to
+    the no-op test — which, against the STALE snapshot, proved "unchanged" —
+    so a real transition emitted NOTHING. Reproduced (the reviewer's exact
+    scenario): live `h-0`/version 3, journal ending at `h-0 -> h-1`, rebuilt
+    `h-1`/version 2 — DIVERGENT.
+
+    The competing write is injected at `_create_entity`, i.e. exactly between
+    the old pre-read and the MERGE, and exactly once (the nested write must not
+    recurse into the injector again).
+    """
+    events, sdk = src
+    base = {"title": "v0", "contentHash": "h-0", "summary": "s"}
+    sdk.create_source(_URL, "document", **base)
+
+    import tortoise.sdk as sdkmod
+    orig = sdkmod.TortoiseSDK._create_entity
+    seen = {"n": 0}
+
+    def _inject(self, label, id_val, props, event_type, **kw):
+        seen["n"] += 1
+        if seen["n"] == 1:
+            # the competing writer: lands between the pre-read and the MERGE
+            sdk.create_source(_URL, "document", title="v0",
+                              contentHash="h-1", summary="s")
+        return orig(self, label, id_val, props, event_type, **kw)
+
+    monkeypatch.setattr(sdkmod.TortoiseSDK, "_create_entity", _inject)
+    # A's payload is byte-identical to the stale snapshot, so the OLD no-op
+    # test proved "unchanged" and suppressed its own real h-1 -> h-0 write.
+    sdk.create_source(_URL, "document", **base)
+
+    transitions = [(t["previousContentHash"], t["contentHash"])
+                   for t in _of_type(events, "SourceVersioned")]
+    assert transitions == [("h-0", "h-1"), ("h-1", "h-0")], (
+        f"the live hash timeline is not fully recorded: {transitions} — a "
+        f"transition was suppressed against a stale pre-write snapshot (P1-A)")
+
+    live = _props(sdk, _URL)
+    assert (live["contentHash"], live["version"]) == ("h-0", 3)
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    rebuilt = _props(sdk, _URL)
+    assert (rebuilt["contentHash"], rebuilt["version"]) == ("h-0", 3), (
+        "derived != replay(journal) after a competing write — the last "
+        "transition was unrecorded (P1-A)")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 9. review round 6 — P1-B: the no-op test must MIRROR the writer
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_a_url_variant_recheck_is_repeat_safe(src):
+    """P1-B — the first variant records its alias; the repeats record NOTHING.
+
+    `_upsert_source` resolves the inbound spelling to the canonical node and
+    only ADDS the raw spelling to `urlAliases`. The old no-op test compared the
+    payload `url` against the node's url, so every variant re-check looked like
+    a change and appended a record (measured `2 -> 3 -> 4`) while the node —
+    `urlAliases` stable after the first — did not move.
+    """
+    events, sdk = src
+    sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
+    variant = _URL.replace("https://example.test/", "https://example.test:443/")
+    n = len(_records(events))
+    sdk.create_source(variant, "document", title="v0", contentHash="h-0")
+    after_first = len(_records(events))
+    assert after_first == n + 1, (
+        "the FIRST variant write adds the spelling to `urlAliases` — a real "
+        "change that MUST be recorded or the rebuilt node loses the alias")
+    for _ in range(3):
+        sdk.create_source(variant, "document", title="v0", contentHash="h-0")
+    assert len(_records(events)) == after_first, (
+        f"an identical URL-variant re-check appended "
+        f"{len(_records(events)) - after_first} record(s) — the journal grows "
+        f"on every re-check (P1-B)")
+    live = _props(sdk, _URL)
+    assert live["version"] == 1
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    assert _props(sdk, _URL) == live
+
+
+def test_a_same_hash_retitle_is_repeat_safe(src):
+    """P1-B — the writer PRESERVES `title` on a same-hash write, so nothing
+    changed and nothing may be recorded (measured `2 -> 3 -> 4` before)."""
+    events, sdk = src
+    sdk.create_source(_URL, "document", title="A", contentHash="h-0")
+    n = len(_records(events))
+    for _ in range(3):
+        sdk.create_source(_URL, "document", title="B", contentHash="h-0")
+    assert len(_records(events)) == n, (
+        "a same-hash retitle the writer preserves still appended a record "
+        "(P1-B)")
+    live = _props(sdk, _URL)
+    assert live["title"] == "A", (
+        "the writer is supposed to preserve title on a same-hash write")
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    assert _props(sdk, _URL) == live
+
+
+def test_a_writer_dropped_key_recheck_is_repeat_safe(src):
+    """P1-B — a key the writer cannot persist is not a change.
+
+    `content` is retired (`_DOC_RETIRED_KEYS`) and a `dict` extra is not
+    persistable (`_persist_extra_props`'s own predicate), so neither reaches
+    the node. The old no-op test re-derived the persistence rule instead of
+    reusing it and appended a record on every re-check (`1 -> 2 -> 3 -> 4`)
+    while the node never gained the key.
+    """
+    events, sdk = src
+    sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
+    n = len(_records(events))
+    for _ in range(3):
+        sdk.create_source(_URL, "document", title="v0", contentHash="h-0",
+                          content="body")
+        sdk.create_source(_URL, "document", title="v0", contentHash="h-0",
+                          meta={"a": 1})
+    assert len(_records(events)) == n, (
+        f"a re-check carrying a writer-dropped key appended "
+        f"{len(_records(events)) - n} record(s) (P1-B)")
+    live = _props(sdk, _URL)
+    assert "content" not in live and "meta" not in live, (
+        "the writer is supposed to drop `content`/non-persistable extras")
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    assert _props(sdk, _URL) == live
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 9b. review round 6 — P1-B: a falsy non-None hash still opens the gate
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_a_falsy_non_none_hash_write_is_not_suppressed(src):
+    """`contentHash=""` DOES open the writer's hash gate — so it must record.
+
+    `hosted_api` re-ingests with `contentHash=src.contentHash or ""`, so an
+    empty-string hash is production-reachable. The writer's gate is
+    `$hash IS NOT NULL AND s.contentHash <> $hash` — `""` is NOT NULL, so the
+    node moves to `contentHash=""` and bumps `version`. The versioned arm only
+    fires for a TRUTHY hash, so this write reaches the no-op test: a predicate
+    that blanket-skipped `contentHash` (a plausible reading of "hash-gated")
+    would suppress the record and the rebuild would revert to the old hash.
+    """
+    events, sdk = src
+    sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
+    n = len(_records(events))
+    sdk.create_source(_URL, "document", title="v0", contentHash="")
+    assert len(_records(events)) == n + 1, (
+        "a `contentHash=''` write changed the node but appended no record")
+    live = _props(sdk, _URL)
+    assert (live["contentHash"], live["version"]) == ("", 2)
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    assert _props(sdk, _URL) == live, (
+        "the `contentHash=''` transition did not survive replay")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 10. review round 6 — P2-B: no pre-read to fail, no wasted round trip
+# ══════════════════════════════════════════════════════════════════════════
+
+_PRE_READ_SQL = "MATCH (s:Source {url: $u}) RETURN properties(s)"
+
+
+def test_a_failed_pre_read_cannot_downgrade_a_transition_to_a_create(
+        src, monkeypatch):
+    """P2-B — the old pre-read swallowed its own failure into the CREATE arm.
+
+    `_stored_before = None` on ANY exception took the create arm, so a
+    hash-CHANGING write journalled `SourceCreated` and silently dropped
+    `previousContentHash`. The pre-state now comes from the write statement, so
+    there is no separate read to fail. The injector raises on the REMOVED pre-read
+    query only; the fix never issues it.
+    """
+    events, sdk = src
+    sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
+
+    g = sdk._get_proj().g
+    orig_query = type(g).query
+
+    def _boom(self, query, *a, **kw):
+        if _PRE_READ_SQL in query:
+            raise RuntimeError("injected pre-read failure")
+        return orig_query(self, query, *a, **kw)
+
+    monkeypatch.setattr(type(g), "query", _boom)
+    sdk.create_source(_URL, "document", title="v1", contentHash="h-1")
+
+    assert len(_of_type(events, "SourceCreated")) == 1, (
+        "a failed pre-read downgraded the transition to SourceCreated (P2-B)")
+    assert [(t["previousContentHash"], t["contentHash"])
+            for t in _of_type(events, "SourceVersioned")] == [("h-0", "h-1")]
+    live = _props(sdk, _URL)
+    assert (live["contentHash"], live["version"]) == ("h-1", 2)
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    assert _props(sdk, _URL) == live
+
+
+def test_a_journal_less_sdk_does_not_pre_read_the_source(tmp_path, monkeypatch):
+    """P2-B — no event log means nothing to decide, so there is no pre-read.
+
+    The removed pre-read (plus its internal `resolve_source_key`) ran on EVERY
+    `create_source` even when `_event_log_path is None`, where `_emit_event` is
+    a no-op — a new unconditional round trip on the hottest ingest path.
+    """
+    sdk = TortoiseSDK(str(tmp_path / "nojournal.db"))
+    try:
+        g = sdk._get_proj().g
+        seen: list[str] = []
+        orig_query = type(g).query
+
+        def _rec(self, query, *a, **kw):
+            seen.append(query)
+            return orig_query(self, query, *a, **kw)
+
+        monkeypatch.setattr(type(g), "query", _rec)
+        sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
+        offenders = [q for q in seen if _PRE_READ_SQL in q]
+        assert not offenders, (
+            f"a journal-less SDK issued the pre-write read {len(offenders)} "
+            f"time(s) (P2-B): {offenders}")
+    finally:
+        sdk.close()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 11. review round 6 — P2-A: a torn transition must not block recovery
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_a_torn_source_versioned_tail_is_tolerated(src, tmp_path):
+    """P2-A — a crash mid-append of a transition must not refuse recovery.
+
+    `SourceVersioned` folds through the IDENTICAL MERGE + SET as
+    `SourceCreated` (the type pre-#5024 used for this same transition, whose
+    torn tail WAS tolerated), so it belongs in
+    `TORN_TAIL_HARMLESS_EVENT_TYPES`. Absent, a torn transition raised
+    `TornTailResurrectionError`, blocking `rebuild_all`/`recover_from_log`/
+    `backup.restore` — a silent tightening of the recovery posture.
+    """
+    _events, sdk = src
+    legacy = tmp_path / "torn"
+    legacy.mkdir()
+    complete = [
+        json.dumps({"type": "SourceCreated", "url": _URL, "id": _URL,
+                    "contentHash": "h-0", "sourceKind": "document",
+                    "title": "v0"}),
+        json.dumps({"type": "SourceVersioned", "url": _URL, "id": _URL,
+                    "contentHash": "h-1", "previousContentHash": "h-0",
+                    "sourceKind": "document", "title": "v1"}),
+    ]
+    torn = ('{"event_id": "01J", "ts": "2026-01-01T00:00:00+00:00", '
+            f'"type": "SourceVersioned", "url": "{_URL}", '
+            '"contentHash": "h-2", "previousCont')
+    (legacy / "torn.jsonl").write_text("\n".join(complete) + "\n" + torn)
+
+    sdk._get_proj().rebuild_all(str(legacy), confirm_destructive=True)
+    p = _props(sdk, _URL)
+    assert (p["contentHash"], p["version"]) == ("h-1", 2), (
+        "the torn transition must be dropped, leaving the last COMPLETE record")
+
+
+def test_the_transition_documentation_names_the_key_the_record_carries():
+    """P2-C — the documentation must name `updatedAt`, not a phantom `at`.
+
+    `docs/event-catalog.md` and the record itself both carry the instant as
+    `updatedAt`; the state comment beside the `updatedAt` CASE claimed the
+    record "carries its own `at`", a key that does not exist (the issue's own
+    test asserts `"at" not in transitions[-1]`). The fold's docstring must say
+    the same thing the payload does.
+    """
+    from pathlib import Path
+
+    from tortoise.projection import entities as _ent
+    src = Path(_ent.__file__).read_text()
+    assert "carries its own `at`" not in src, (
+        "the state comment still claims a phantom `at` key (P2-C)")
+    assert "which carries its own `updatedAt`" in src, (
+        "the state comment must name the key the record actually carries")
+    doc = _ent._EntityHandlers._fold_source_versioned.__doc__ or ""
+    assert "updatedAt" in doc, "the docstring must name the recorded key"
