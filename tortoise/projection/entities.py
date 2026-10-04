@@ -1500,7 +1500,7 @@ class _EntityHandlers:
     def _delete(self, pid: str) -> None:
         self.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": pid})
 
-    def _retract(self, pid: str) -> None:
+    def _retract(self, pid: str, now: str | None = None) -> None:
         """Mark a Point as retracted instead of hard-deleting (#689).
 
         Retracted points are hidden from normal reads (get_point, query,
@@ -1511,11 +1511,20 @@ class _EntityHandlers:
         DETACH DELETE. Points retracted before this change are irrecoverably
         lost (the content existed only in the projection, and the projection
         deleted it). Future retractions leave this tombstone.
+
+        ``now`` (#5048, recorded from #4666) is the record's own ``ts`` — the
+        instant the producer minted and wrote to the node. The fold must
+        REPLAY it, not read its own clock: ``updatedAt`` is RECORDED
+        (docs/durability-posture.md), so a rebuild that called ``_now_iso()``
+        here stamped the rebuild's wall-clock onto every retracted point and
+        agreed with neither the live node nor the producer's record. ``None``
+        keeps the old behaviour for a caller with no record in hand (and for
+        a legacy record predating the field).
         """
         self.g.query(
             "MATCH (n:Point {id:$id}) SET n.status = 'retracted', n.updatedAt = $now, "
             f"{decay_clause('n')}",
-            params={"id": pid, "now": _now_iso()},
+            params={"id": pid, "now": now or _now_iso()},
         )
 
     def _fold_point_restamp(self, ev: dict, *,

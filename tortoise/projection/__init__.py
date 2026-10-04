@@ -3050,11 +3050,18 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
             # one — a divergence on EVERY retract, and the #330 parity
             # contract this function owns. ``VACUITY_BELIEF`` is the single
             # declaration both arms render, so they cannot re-drift.
-            # (``updatedAt`` is the one prop this fold still does not
-            # stamp; that divergence is a #5048 symptom — recorded from
-            # #4666 — not this one.)
+            # #5048 (recorded from #4666): ``updatedAt`` is now stamped too,
+            # from the RECORD's instant. Before this it was the one prop this
+            # fold did not stamp at all, so the pure fold kept the point's
+            # ORIGINAL stamp while ``rebuild_all`` held this replay's clock
+            # and the live node held the producer's — three values for one
+            # retraction. ``None`` (legacy record) falls through to the
+            # point's existing stamp, matching the graph arm's ``_now_iso()``
+            # fallback only in that both are "no record, no authority".
             p["status"] = "retracted"
             p.update(VACUITY_BELIEF)
+            if ev.get("ts"):
+                p["updatedAt"] = ev["ts"]
     elif t == "PointsMerged":
         # #331 (review r2): `or []` also covers an explicit "merge_ids": null
         # in the log — dict.get(key, []) only covers the missing key.
@@ -4259,7 +4266,9 @@ class FalkorProjection(
                 # #331 (review r2): NO event_id fallback — an event id is not
                 # a point id, and the fallback diverged from _apply_one (the
                 # fold is the single source of truth, module contract).
-                self._retract(rid)
+                # #5048: the RECORDED instant, so the rebuilt `updatedAt` is
+                # the producer's, not this replay's clock.
+                self._retract(rid, now=ev.get("ts"))
         elif t == "PointPromoted":
             # #785: re-apply the full promoted snapshot (status live +
             # reviewed + promotedAt) — rebuild parity for reviewer-gated
@@ -5695,7 +5704,9 @@ class FalkorProjection(
                     # tombstone still applies.
                     _retr_anchor = last_ann_drop_seq.get(("Point", rid))
                     if _retr_anchor is None or seq > _retr_anchor:
-                        self._retract(rid)
+                        # #5048: the RECORDED instant — parity with
+                        # `rebuild_all`'s pass-1b and with the live writer.
+                        self._retract(rid, now=ev.get("ts"))
             elif t == "PointPromoted":
                 # #785: rebuild parity — re-apply the promoted snapshot.
                 p = ev.get("point")
