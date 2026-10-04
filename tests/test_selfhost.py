@@ -376,9 +376,11 @@ class TestHealthTruthMCP:
         unit-level in test_onboarding_gate_short_circuits_on_selfhost — a
         sys.modules diff here would be vacuous once an earlier file in the
         same pytest process imported hosted_api.)"""
-        import tempfile
-
-        tmp = tempfile.gettempdir()
+        # #3752: discovery is scoped to the private per-session temp root
+        # (`scan_root()` refuses the shared system temp dir), never the host
+        # tree — a stray-db assertion must not depend on ambient host state.
+        from tests._tmpdir_hygiene import scan_root
+        tmp = scan_root()
         stray_before = {f for f in os.listdir(tmp) if f.startswith("tortoise.db")}
 
         tc = _client_for_env(monkeypatch, tmp_path, TORTOISE_API_KEY="k")

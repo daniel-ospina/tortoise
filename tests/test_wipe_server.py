@@ -1,6 +1,7 @@
 # tests/test_wipe_server.py
 """Unit surface: server-mode wipe_server() + session journal + sweeps
 (epic #1647 Task 2, D-4 — the hermeticity core)."""
+import logging
 import os
 import subprocess
 import sys
@@ -17,6 +18,7 @@ from tests._embedded import (
     wipe,
     wipe_server,
 )
+from tortoise.graph_delete_guard import graph_exists, safe_graph_delete
 
 
 def _docker_reachable(host: str | None = None,
@@ -82,11 +84,14 @@ class _FakeGraph:
 
 
 class _FakeDb:
-    def __init__(self, fail_delete=()):
+    def __init__(self, fail_delete=(), graphs=()):
         self.detached: list[str] = []
         self.deleted: list[str] = []
         self._fail_delete = set(fail_delete)
-        self.graphs: list[str] = []
+        # #2961: the sweep's drop is now presence-gated (GRAPH.LIST first),
+        # so a fake must model which graphs the server actually holds —
+        # otherwise every drop is correctly skipped as already-absent.
+        self.graphs: list[str] = list(graphs)
         # #3214 deterministic window hooks (both one-shot, fired once):
         # on_list_graphs — the peer mints just as the sweep ENUMERATES;
         # on_first_detach — the peer mints after enumeration, mid-loop.
@@ -453,6 +458,75 @@ def test_wipe_server_failure_is_collected(server_proj, monkeypatch):
     # injected failure is never raised for it (#3074/#3214).
     with pytest.raises(RuntimeError, match="test_ws_wipe_target"):
         wipe_server(server_proj, scope={"test_ws_wipe_target"})
+
+
+def test_wipe_server_refusal_is_collected():
+    """#2961 review P2: a lock refusal must fail loud, never no-op.
+
+    ``safe_graph_delete`` returns False for BOTH "already absent" (fine —
+    nothing to detach) and "the guard refused because it could not take the
+    cross-process lock" (the wipe did NOT happen). A silent no-op here loses
+    the test's isolation, and ``_wipe_or`` still advances the wiped cursor as
+    if the wipe had happened. Reachable shape: a server at ``maxmemory`` with
+    ``noeviction`` rejects SET (OOM) while GRAPH.LIST still succeeds.
+    """
+
+    class _OOMConn:
+        def execute_command(self, *a, **k):
+            if a and a[0] == "SET":
+                raise RuntimeError(
+                    "OOM command not allowed when used memory > 'maxmemory'")
+            return None
+
+    db = _FakeDb(graphs=["test_ws_refused"])
+    db.connection = _OOMConn()
+    proj = _FakeProj(db=db)
+    with pytest.raises(RuntimeError, match="REFUSED"):
+        wipe_server(proj, scope={"test_ws_refused"})
+    assert db.detached == [], "a refused sweep must transmit no DETACH"
+    assert db.deleted == [], "a refused sweep must transmit no GRAPH.DELETE"
+
+
+def test_wipe_refusal_is_logged_not_silent(caplog):
+    """Report P3: wipe() stays best-effort, but a refusal must not be SILENT."""
+    class _OOMConn:
+        def execute_command(self, *a, **k):
+            if a and a[0] == "SET":
+                raise RuntimeError("OOM")
+            return None
+
+    db = _FakeDb(graphs=["test_ws_w"])
+    db.connection = _OOMConn()
+    proj = _FakeProj(db=db)
+    proj._is_embedded = True  # wipe() is embedded-only by contract
+    proj._graph_name = "test_ws_w"
+    with caplog.at_level("WARNING"):
+        wipe(proj)  # best-effort: must NOT raise
+    assert any("REFUSED to clear" in r.message for r in caplog.records), \
+        "a refused wipe must say so — silent was the defect"
+
+
+def test_wipe_server_phase2_refusal_is_collected():
+    """Report P3: the DROP phase's refusal must also fail loud, not no-op."""
+    class _Conn:
+        def __init__(self):
+            self.sets = 0
+
+        def execute_command(self, *a, **k):
+            if a and a[0] == "SET":
+                self.sets += 1
+                if self.sets > 1:
+                    raise RuntimeError("OOM")
+                return True  # phase 1 acquires; phase 2 is refused
+            return None
+
+    db = _FakeDb(graphs=["test_ws_p2"])
+    db.connection = _Conn()
+    proj = _FakeProj(db=db)
+    with pytest.raises(RuntimeError, match=r"GRAPH\.DELETE failed"):
+        wipe_server(proj, scope={"test_ws_p2"}, drop=True)
+    assert db.detached == ["test_ws_p2"], "phase 1 detaches"
+    assert db.deleted == [], "a refused phase 2 must transmit no GRAPH.DELETE"
 
 
 def test_drop_delete_uses_command_vector(monkeypatch):
@@ -877,7 +951,8 @@ def test_sweep_delete_error_logs_and_continues(tmp_path):
     still RAISES (D-4/P2-7 intact — pinned elsewhere)."""
     journal = tmp_path / "session.graphs.jsonl"
     journal.write_text("test_ws_ok\ntest_ws_bad\n")
-    db = _FakeDb(fail_delete={"test_ws_bad"})
+    db = _FakeDb(fail_delete={"test_ws_bad"},
+                 graphs=["test_ws_ok", "test_ws_bad"])
     res = _sweep_drop(_FakeProj(db), str(journal), drop=True)
     assert res["failed"] == ["test_ws_bad"]
     assert res["dropped"] == ["test_ws_ok"]
@@ -891,13 +966,14 @@ def test_sweep_partial_delete_failure_keeps_journal(tmp_path):
     subsequent clean sweep drops the remainder and ONLY THEN removes it."""
     journal = tmp_path / "session.graphs.jsonl"
     journal.write_text("test_ws_first\ntest_ws_second\n")
-    db = _FakeDb(fail_delete={"test_ws_second"})
+    db = _FakeDb(fail_delete={"test_ws_second"},
+                 graphs=["test_ws_first", "test_ws_second"])
     res1 = _sweep_drop(_FakeProj(db), str(journal), drop=True)
     assert res1["dropped"] == ["test_ws_first"]
     assert res1["journal_removed"] is False
     assert journal.exists()
     # second sweep (the next session's stale sweep): both succeed → removed
-    db2 = _FakeDb()
+    db2 = _FakeDb(graphs=["test_ws_first", "test_ws_second"])
     res2 = _sweep_drop(_FakeProj(db2), str(journal), drop=True)
     assert res2["journal_removed"] is True
     assert not journal.exists()
@@ -923,7 +999,10 @@ def test_sweep_preserves_non_owned_graphs(monkeypatch, tmp_path):
         "this pin must not depend on an ambient TORTOISE_DB_URI"
     journal = tmp_path / "session.graphs.jsonl"
     journal.write_text("test_ws_ours\nteam_acme\ntortoise\nx\n")
-    db = _FakeDb()
+    # #2961: the drop is presence-gated (GRAPH.LIST first), so the fake must
+    # model the names the server actually holds — including the two the
+    # sweep must PRESERVE, so "never detached" cannot pass vacuously.
+    db = _FakeDb(graphs=["test_ws_ours", "team_acme", "tortoise", "x"])
     res = _sweep_drop(_FakeProj(db), str(journal), drop=True)
     assert res["dropped"] == ["test_ws_ours", "team_acme"]
     assert res["preserved"] == ["tortoise", "x"]
@@ -946,7 +1025,10 @@ def test_sweep_preserved_warning_reports_journal_kept(
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     journal = tmp_path / "session.graphs.jsonl"
     journal.write_text("test_ws_bad\ntortoise\n")
-    db = _FakeDb(fail_delete={"test_ws_bad"})
+    # #2961: an owned name is only ATTEMPTED when present in GRAPH.LIST, so
+    # the fake must list it for the injected failure to fire at all.
+    db = _FakeDb(fail_delete={"test_ws_bad"},
+                 graphs=["test_ws_bad", "tortoise"])
     with caplog.at_level(logging.WARNING):
         res = _sweep_drop(_FakeProj(db), str(journal), drop=True)
     assert res["preserved"] == ["tortoise"]
@@ -1014,7 +1096,11 @@ def test_sweep_owns_org_namespace_by_name(monkeypatch, tmp_path):
         "org_acme\n"
         "team_ws_journal_drop\n"
     )
-    db = _FakeDb()
+    # #2961: presence-gated drops — the fake must list the four journaled
+    # names or every drop is correctly skipped and `deleted` stays empty.
+    db = _FakeDb(graphs=[
+        "test_something_ours", "org_journalled", "org_acme",
+        "team_ws_journal_drop"])
     res = _sweep_drop(_FakeProj(db), str(journal), drop=True)
     assert res["dropped"] == [
         "test_something_ours", "org_journalled", "org_acme",
@@ -1039,7 +1125,7 @@ def test_sweep_skips_uri_default_graph(monkeypatch, tmp_path):
     assert default == "tortoise_test_matrix"
     journal = tmp_path / "session.graphs.jsonl"
     journal.write_text(f"{default}\ntest_ws_own_graph\n")
-    db = _FakeDb()
+    db = _FakeDb(graphs=[default, "test_ws_own_graph"])
     res = _sweep_drop(_FakeProj(db), str(journal), drop=True)
     assert res["dropped"] == ["test_ws_own_graph"]
     assert default not in db.deleted, \
@@ -1062,6 +1148,57 @@ def test_is_missing_graph_error_matches_real_server_text():
         RuntimeError("connection refused")) is False
 
 
+def test_wipe_server_tolerates_a_graph_dropped_by_an_unguarded_peer():
+    """#2961 review P2: the guard closes the window only against GUARDED peers.
+    An unguarded peer that issues GRAPH.DELETE directly can still win the race
+    between wipe_server's presence read and its delete, and the server answers
+    with the missing-graph error. That is idempotent SUCCESS (cycle-5 P2-3),
+    not a sweep failure — without the tolerance a benign concurrent delete reds
+    the sweep. The counterpart — a GENUINE error in this SAME delete loop must
+    still collect — is test_wipe_server_collects_a_genuine_drop_failure; the
+    older test_wipe_server_failure_is_collected injects its failure in the
+    DETACH phase and so never reaches this loop."""
+
+    class _Gone:
+        def __init__(self, name):
+            self._name = name
+
+        def query(self, q, *a, **k):
+            return types.SimpleNamespace(result_set=[])
+
+        def delete(self):
+            raise RuntimeError("Invalid graph operation on empty key")
+
+    db = _FakeDb(graphs=["test_ws_race"])
+    db.select_graph = lambda name: _Gone(name)
+    proj = _FakeProj(db=db)
+    wipe_server(proj, scope={"test_ws_race"}, drop=True)  # must NOT raise
+
+
+def test_wipe_server_collects_a_genuine_drop_failure():
+    """Review P3: the COUNTERPART to the tolerance test. The delete loop must
+    still COLLECT a genuine command error — a blanket `except: continue` would
+    silently swallow real GRAPH.DELETE failures, which is exactly why the
+    comment reads "only genuine command errors collect". Without this test the
+    collect branch of that loop is unpinned in either direction."""
+
+    class _Broken:
+        def __init__(self, name):
+            self._name = name
+
+        def query(self, q, *a, **k):
+            return types.SimpleNamespace(result_set=[])
+
+        def delete(self):
+            raise RuntimeError("connection reset by peer")
+
+    db = _FakeDb(graphs=["test_ws_broken"])
+    db.select_graph = lambda name: _Broken(name)
+    proj = _FakeProj(db=db)
+    with pytest.raises(RuntimeError, match=r"GRAPH\.DELETE failed"):
+        wipe_server(proj, scope={"test_ws_broken"}, drop=True)
+
+
 def test_sweep_dedupes_journal_entries(tmp_path):
     """Review P2-2: duplicate journal entries (the per-test backup seam
     re-appends the same module-level names every test) drop once — the
@@ -1069,7 +1206,7 @@ def test_sweep_dedupes_journal_entries(tmp_path):
     from tests._embedded import _sweep_drop
     journal = tmp_path / "dup.graphs.jsonl"
     journal.write_text("test_ws_dup_a\ntest_ws_dup_a\ntest_ws_dup_b\n")
-    db = _FakeDb()
+    db = _FakeDb(graphs=["test_ws_dup_a", "test_ws_dup_b"])
     res = _sweep_drop(_FakeProj(db), str(journal), drop=True)
     assert res["dropped"] == ["test_ws_dup_a", "test_ws_dup_b"]
     assert db.deleted == ["test_ws_dup_a", "test_ws_dup_b"]
@@ -1093,7 +1230,7 @@ def test_stale_sweep_recycled_pid_marker_journal_dead(monkeypatch, tmp_path):
         f"pid={os.getpid()}\nstart=1.0\n")  # start mismatch → recycled
     j = adir / f"{nonce}.graphs.jsonl"
     j.write_text("test_ws_recycled_graph\n")
-    db = _FakeDb()
+    db = _FakeDb(graphs=["test_ws_recycled_graph"])
     monkeypatch.setattr("tests._embedded._proj_for_uri",
                         lambda uri: _FakeProj(db))
     assert er.active_suite_markers() == []  # the recycled marker is NOT live
@@ -1115,7 +1252,7 @@ def test_concurrent_suite_end_sweep_leaves_other_suite_graphs(monkeypatch, tmp_p
     j_b = adir / "nonce_b.graphs.jsonl"
     j_a.write_text("test_ws_a_graph\n")
     j_b.write_text("test_ws_b_graph\n")
-    db = _FakeDb()
+    db = _FakeDb(graphs=["test_ws_a_graph", "test_ws_b_graph"])
     monkeypatch.setattr("tests._embedded._proj_for_uri",
                         lambda uri: _FakeProj(db))
     # A's END sweep drops ONLY journal A's set — B's graph untouched
@@ -1264,8 +1401,18 @@ def test_leftover_team_strays_refused_on_shared_docker(uri_env, monkeypatch):
         assert legacy_stray in remaining, "pre-rename product graph must survive"
     finally:
         for name in (stray, legacy_stray):
-            proj.db.select_graph(name).query("MATCH (n) DETACH DELETE n")
-            proj.db.select_graph(name).delete()
+            # #2961: presence-gated + locked. A blind DETACH followed by a
+            # GRAPH.DELETE is the phantom-creating sequence, and this cleanup
+            # runs against a SHARED server — the same shape the guard removes.
+            # Review P3: a refusal must not be SILENT. These are journal-blind
+            # org_*/team_* strays, and _sweep_team_strays refuses product
+            # namespaces on a shared URI without the opt-in, so nothing retries
+            # them.
+            if not safe_graph_delete(proj.db, name, detach=True, drop=True) \
+                    and graph_exists(proj.db, name):
+                logging.getLogger(__name__).warning(
+                    "cleanup: the graph-delete guard REFUSED to drop %r — no "
+                    "sweep retries it", name)
         proj.close()
 
 
@@ -1304,8 +1451,13 @@ def test_leftover_team_strays_refused_on_test_matrix_uri(uri_env, monkeypatch):
             "eval question graphs (product-namespace) must survive a " \
             "concurrent session's sweep"
     finally:
-        proj.db.select_graph(stray).query("MATCH (n) DETACH DELETE n")
-        proj.db.select_graph(stray).delete()
+        # #2961: presence-gated + locked (shared server). Review P3: a refusal
+        # must not be silent — see the note on the sibling cleanup above.
+        if not safe_graph_delete(proj.db, stray, detach=True, drop=True) \
+                and graph_exists(proj.db, stray):
+            logging.getLogger(__name__).warning(
+                "cleanup: the graph-delete guard REFUSED to drop %r — no "
+                "sweep retries it", stray)
         proj.close()
 
 

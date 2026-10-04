@@ -1,6 +1,7 @@
 # Issue template chooser config
 #
 # Structured bug reports use .github/ISSUE_TEMPLATE/bug_report.yml.
+# Internal agent findings use .github/ISSUE_TEMPLATE/agent_finding.yml.
 # Everything else (questions, ideas, general beta feedback) belongs in
 # GitHub Discussions — see the contact links below.
 # See docs/beta-feedback.md for the full channel + triage guide (#1199).

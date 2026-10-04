@@ -396,6 +396,14 @@ jobs:
           # so the run step cannot drift (single source of truth).
           echo "$SLOW_IGNORES" > /tmp/pmv-slow-ignores
           python3 tools/skip-guard.py --emit-manifest "tests/" --marker "not track_b" --ignore tests/e2e $SLOW_IGNORES --output /tmp/pmv-expected-nodeids.txt
+      - name: Provide rsync for the deploy-step test (#7026)
+        # This job runs the whole suite, so it selects
+        # tests/test_pages_bindings.py and needs the tool the shipped deploy
+        # step shells out to. Guarded like every other pytest-path step here:
+        # on the dedup-skip path this job deliberately runs NOTHING, so an
+        # unguarded apt-get would be the one way that no-op job could red.
+        if: needs.dedup-check.outputs.skip != 'true'
+        uses: ./.github/actions/ensure-rsync
       # #2216: GRAPH.COPY "could not fork" — NOT a code regression.
       # The dr_endpoints / writer_inventory restore tests (TestDrDrill::*,
       # TestCreateTeam::test_backup_round_trip_dashboard_created_team) can fail
@@ -459,6 +467,14 @@ jobs:
           wait $HB_PID 2>/dev/null || true
           echo "==================== pytest summary (tail) ===================="
           tail -n 300 /tmp/pmv-pytest.log
+          # #3470: the `tail -n` above is a LINE-COUNT window, not a result —
+          # post-summary interpreter-exit noise fills it and pushes BOTH the
+          # session summary and the `-r fEs` report above the cut, so the log
+          # stops saying whether the leg finished. This leg carries no nodeid
+          # grep either, so the tail was its ONLY attribution channel. Read the
+          # summary from the FULL log instead, and name the INCOMPLETE case out
+          # loud. One definition: .github/scripts/pytest-attribution.sh.
+          bash .github/scripts/pytest-attribution.sh --log /tmp/pmv-pytest.log --rc "$rc"
           # 124 = timeout SIGINT kill; 137 = -k 10 SIGKILL after pytest
           # ignored INT mid-test; 2 = pytest's own SIGINT summary — the
           # count banner must print for all three (#880).

@@ -33,6 +33,7 @@ from tortoise.retrieval import (
     ASK_CONTEXT_TOKEN_CAP_ENV,
     ASK_POOL_SIZE_ENV,
     ASK_RETRIEVAL_LIMIT_ENV,
+    ASK_SEARCH_KEYS_PRF_ENV,
     BYTES_PER_TOKEN_FLOOR,
     DEFAULT_ASK_CONTEXT_ITEM_CAP,
     DEFAULT_ASK_CONTEXT_TOKEN_CAP,
@@ -573,6 +574,25 @@ def test_ask_lane_threads_the_resolved_caps_into_retrieval(monkeypatch):
     # env-knob default — the lane passes it explicitly, so it must apply it.
     assert sdk.query_kwargs["pool_size"] == max(
         DEFAULT_ASK_POOL_SIZE, DEFAULT_ASK_RETRIEVAL_LIMIT * 2)
+
+
+def test_ask_lane_search_keys_prf_is_off_by_default_but_still_switchable(
+        monkeypatch):
+    """#4593 fail-safe: the ask lane must NOT default the A4 PRF lever ON
+    while its delta is unmeasured. The SDK parameter default was already
+    ``False``, so a product default of ON was the defect — and the harm
+    hypothesis is falsifiable (PRF is average-positive but per-query a coin
+    flip: one 108-user study measured 20.9% of queries helped and 25.6%
+    harmed, harm ~2x as costly). The lever stays AVAILABLE: an explicit ``1``
+    must still resolve True, because that is the measurement's ON arm."""
+    monkeypatch.delenv(ASK_SEARCH_KEYS_PRF_ENV, raising=False)
+    sdk = _FakeSDK()
+    _run(sdk, monkeypatch)
+    assert sdk.query_kwargs["search_keys_prf"] is False
+
+    sdk = _FakeSDK()
+    _run(sdk, monkeypatch, **{ASK_SEARCH_KEYS_PRF_ENV: 1})
+    assert sdk.query_kwargs["search_keys_prf"] is True
 
 
 def test_ask_lane_passes_the_resolved_byte_cap_to_assembly(monkeypatch):

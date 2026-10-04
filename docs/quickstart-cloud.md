@@ -34,24 +34,61 @@ tortoise signup
 
 2 free anonymous teams per IP per 24h (3rd → 429 with a retry window); on a shared network or need more? Contact support@premiselabs.co.
 
-## 2. Connect your agent (MCP, streamable-http)
+## 2. Connect your agent (MCP over HTTP)
 
-The hosted endpoint is `https://api.premiselabs.co/mcp/`, and it only speaks **streamable-http** — that's the only correct hosted pattern. Auth is a Bearer header with your API key.
+The hosted endpoint is `https://api.premiselabs.co/mcp/`. The transport is **Streamable HTTP**, and in
+client JSON config its value is `"http"`.
 
-Add this to your client's `.mcp.json` (Claude Code, Cursor, and most MCP clients read this file):
+> ⚠️ Never set an entry's `type` to `"streamable-http"`. That is a Claude Code alias for this
+> transport, not a second one: Cursor's CLI can silently drop a whole config file that uses it,
+> leaving you with no error and no connection. If your client requires a `type`, use `"http"`;
+> Cursor and Pi omit `type` entirely and infer the transport from `url`.
+
+Auth is a Bearer header that reads your key from the environment — never paste the literal key into a
+config file, because config files get committed.
+
+**Claude Code** — add to `.mcp.json` in your project. Claude Code requires `"type": "http"` (a `url`
+entry with no `type` is read as stdio and the server is skipped):
 
 ```json
 {
   "mcpServers": {
     "tortoise": {
-      "type": "streamable-http",
+      "type": "http",
       "url": "https://api.premiselabs.co/mcp/",
       "headers": {
-        "Authorization": "Bearer tt_YOUR_KEY"
+        "Authorization": "Bearer ${TORTOISE_API_KEY}"
       }
     }
   }
 }
+```
+
+A project-scope `.mcp.json` stays **⏸ Pending approval** in Claude Code until you
+approve it once — start `claude` in the project and allow the prompt, or run
+`/mcp` (`claude mcp reset-project-choices` resets the choice).
+
+**Cursor** — add to `.cursor/mcp.json`. Cursor expands `${env:…}` and infers the transport from `url`,
+so the entry carries **no** `type`:
+
+```json
+{
+  "mcpServers": {
+    "tortoise": {
+      "url": "https://api.premiselabs.co/mcp/",
+      "headers": {
+        "Authorization": "Bearer ${env:TORTOISE_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+Export the key you were shown in step 1 so the header resolves — the config file holds the *reference*,
+not the secret:
+
+```bash
+export TORTOISE_API_KEY="tt_..."   # the key from step 1; add to your shell profile to persist
 ```
 
 **Codex** instead:

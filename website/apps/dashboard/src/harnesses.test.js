@@ -2,6 +2,7 @@
 // no jsdom/React needed) (#1998 W2 — universal command, surface 5).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import {
   HARNESS_ORDER, HARNESS_NAMES, HARNESS_SELF_INSTALL, HARNESS_TEACH_HUMAN,
   UNIVERSAL_COMMAND, UNIVERSAL_COMMAND_HARNESSES,
@@ -10,9 +11,10 @@ import {
   HARNESS_COPY_LABEL, HARNESS_CONTINUE_LABEL,
   HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON,
   HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CAPTURE_SEAM,
-  PI_CAPTURE_INSTALL,
+  PI_CAPTURE_INSTALL, CLAUDE_CAPTURE_NOTE, CODEX_CAPTURE_INSTALL,
   HARNESS_OAUTH, CANONICAL_MCP_URL, ONBOARDING_INSTRUCTIONS_URL, SKILLS_CLAIM,
   SKILLS_LIST,
+  CAPTURE_OPT_IN_ENV, CAPTURE_OPT_IN_LINE, CLAUDE_WEB_FILING, HARNESS_CAPTURE_REQUIRES_OPT_IN,
   HARNESS_FAMILIES, HARNESS_FAMILY_IDS, harnessFamilyOf, preferredSurface,
   harnessDisplayName, knownHarnessName,
 } from './harnesses.js'
@@ -425,4 +427,150 @@ test('#3713: the Pi install disables a pre-existing tortoise-capture/ (no double
   // non-negotiable: never recursively delete user files from the install snippet.
   assert.doesNotMatch(pi, /rm\s+-/,
     'the collision guard must never `rm` with flags — a bare `rm` can only unlink the symlink')
+})
+
+// #3615 made every in-repo hook fail closed on an explicit per-machine opt-in,
+// but the six hand-authored instalments of capture copy kept telling users that
+// capture simply happened: the built bundle shipped the old claim and
+// `TORTOISE_CAPTURE` zero times (#3661). The fix states the truth once
+// (`captureInstallNote`) and this test makes the drift unrepeatable.
+//
+// Mutation-checked: restoring the old sentence in the source (sed) REDs the
+// negative leg; the built bundle went from 0 → 1 `TORTOISE_CAPTURE` with the old
+// claim going to 0. Note the claude-web surface is deliberately NOT in the
+// opt-in list: capture there is the agent's own tortoise_session_capture call,
+// refused by the team off-switch — demanding the env var there would be the
+// mirror of the bug this test exists for (an overstatement of the gate).
+test('#3661: every capture surface names the opt-in, and none claims capture happens by default', () => {
+  // The surface set is DERIVED from the module, not hand-listed: a new capture
+  // seam that forgot the variable must RED, and a hand-maintained list would
+  // silently stop covering it. `HARNESS_CAPTURE_INSTALL` is the capture-snippet
+  // registry, and `HARNESS_CAPTURE_REQUIRES_OPT_IN` declares per seam whether
+  // the opt-in gates it (Pi's extension is the one that does not).
+  // The name is pinned as a LITERAL, not compared only against the module's own
+  // constant: `text.includes(CAPTURE_OPT_IN_ENV)` alone stays green if someone
+  // renames the constant on both sides, telling users to export a variable the
+  // hook never reads. The literal is pinned cross-language on the Python side
+  // (tests/test_session_capture_e2e.py passes it straight into
+  // `capture_consent_enabled`), so both ends agree on the spelling.
+  const OPT_IN_NAME = 'TORTOISE_CAPTURE'
+  assert.equal(CAPTURE_OPT_IN_ENV, OPT_IN_NAME,
+    'the disclosed variable must be the one tortoise/capture_consent.py reads')
+  assert.equal(CAPTURE_OPT_IN_LINE, `${OPT_IN_NAME}=1`)
+  assert.deepEqual(Object.keys(HARNESS_CAPTURE_REQUIRES_OPT_IN).sort(),
+    Object.keys(HARNESS_CAPTURE_INSTALL).sort(),
+    'every capture seam must declare whether the per-machine opt-in gates it')
+  // The VALUES are the fact, not the map's private business: this map decides the
+  // shipped success-screen sentence, so a wrong value is a false promise. Pin the
+  // whole map — otherwise `pi: true` or `claude: false` are unfalsifiable
+  // (the hook seams file nothing until TORTOISE_CAPTURE=1; installing the Pi
+  // extension IS its opt-in — tests/test_pi_capture_hooks.py pins that decision).
+  assert.deepEqual(HARNESS_CAPTURE_REQUIRES_OPT_IN,
+    { claude: true, codex: true, cursor: true, pi: false },
+    'the per-seam opt-in map decides the capture PROMISE — its values are load-bearing')
+  for (const [h, gated] of Object.entries(HARNESS_CAPTURE_REQUIRES_OPT_IN)) {
+    const snippet = HARNESS_CAPTURE_INSTALL[h]
+    assert.ok(snippet.includes(OPT_IN_NAME),
+      `HARNESS_CAPTURE_INSTALL.${h} must name ${OPT_IN_NAME} — after #3615 the hooks file no session without it (#3661)`)
+    if (gated) {
+      // naming the variable is not enough: the user has to be told the syntax.
+      assert.ok(snippet.includes(CAPTURE_OPT_IN_LINE),
+        `HARNESS_CAPTURE_INSTALL.${h} must show the line to run (${CAPTURE_OPT_IN_LINE})`)
+    }
+    // A wizard snippet that carries ANY capture copy inherits the duty — the
+    // trigger is the copy itself, not an exact match with the row's snippet:
+    // HARNESS_INSTALL.claude's install block differs by a comment line from
+    // HARNESS_CAPTURE_INSTALL.claude, so an `includes(snippet)` test silently
+    // skipped the PRIMARY seam (caught in review). Cursor's wizard body is MCP
+    // config only, so it is correctly skipped.
+    const install = HARNESS_INSTALL[h]
+    if (typeof install === 'function') {
+      const body = install(KEY)
+      if (/capture/i.test(body)) {
+        assert.ok(body.includes(OPT_IN_NAME),
+          `HARNESS_INSTALL.${h} carries capture copy, so it must name ${OPT_IN_NAME}`)
+      }
+    }
+  }
+  // The wizard snippets that embed a capture step must carry the SAME note the
+  // Memory-sources row shows — the de-duplication is the claim, so these are
+  // pinned against the constant ITSELF, not a substring match. (A substring test
+  // silently skipped claude: its install block differs from the row's snippet by
+  // one comment line, so dropping the note from HARNESS_INSTALL.claude left the
+  // suite green — caught in review.) Cursor is deliberately absent: its wizard
+  // body is MCP config only, and its capture step is a wizard STEP, asserted
+  // through HARNESS_STEPS.cursor above.
+  assert.ok(HARNESS_INSTALL.claude(KEY).includes(CLAUDE_CAPTURE_NOTE),
+    'HARNESS_INSTALL.claude must embed the shared Claude capture note')
+  assert.ok(HARNESS_INSTALL.codex(KEY).includes(CODEX_CAPTURE_INSTALL),
+    'HARNESS_INSTALL.codex must embed the shared Codex capture step')
+  assert.ok(HARNESS_INSTALL.pi(KEY).includes(PI_CAPTURE_INSTALL),
+    'HARNESS_INSTALL.pi must embed the shared Pi capture step')
+  // The connect-wizard steps (the archived LEGACY_WIZARD_ARCHIVED render, a
+  // retained rollback path) carry the Cursor scope disclosure in prose.
+  assert.ok(HARNESS_STEPS('cursor', KEY)
+    .map((s) => (typeof s === 'string' ? s : JSON.stringify(s))).join('\n').includes(OPT_IN_NAME),
+  'HARNESS_STEPS.cursor carries the Cursor capture disclosure, so it must name the opt-in')
+  // The local-spool claim is PER SEAM: only the Claude Code seam spools without
+  // consent (session-turn.sh runs `tortoise session spool` ungated). Codex and
+  // Cursor route through `sessions import`, which refuses BEFORE it can write —
+  // telling those users their transcript is in a Tortoise spool would be this
+  // issue's own defect class, so pin the asymmetry.
+  assert.match(HARNESS_CAPTURE_INSTALL.claude, /capture-spool/,
+    'the Claude seam DOES spool locally without consent — its copy must disclose that')
+  for (const h of ['codex', 'cursor']) {
+    assert.doesNotMatch(HARNESS_CAPTURE_INSTALL[h], /capture-spool/,
+      `HARNESS_CAPTURE_INSTALL.${h} must not claim a local spool — its seam refuses before anything is written`)
+    // The same claim could reach users through the archived wizard's prose
+    // steps, so the asymmetry is pinned THERE too — as a FORWARD guard.
+    // Only Cursor has a step list today (`HARNESS_STEPS` is a lookup, not a
+    // registry: it returns undefined for claude/codex/pi, i.e. there is no step
+    // to pin). Asserting on the empty string would be false assurance — it can
+    // never fail — so the absent case is skipped explicitly, and a future
+    // Codex step that claims a Tortoise spool REDs here instead.
+    const steps = HARNESS_STEPS(h, KEY)
+    if (!Array.isArray(steps)) continue
+    assert.doesNotMatch(steps
+      .map((s) => (typeof s === 'string' ? s : JSON.stringify(s))).join('\n'), /capture-spool/,
+    `HARNESS_STEPS.${h} must not claim a local spool either — same seam, same refusal`)
+  }
+  // The negative half is a SOURCE scan, not a list of rendered values: the
+  // claude-web filing paragraph is gated off (HARNESS_CAPTURE_SUPPORT['claude-web']
+  // is false — disabled-with-reason), so no rendered-value assertion and no
+  // snapshot can reach it, and a hand-maintained surface list silently stops
+  // covering a newly added one. Scanning the module covers every branch, live or
+  // gated. LIMIT, stated: it recognises the two phrasings the stale copy actually
+  // used, so a fresh PARAPHRASE evades it — this repo deliberately rejects
+  // semantic copy-nets (wizardPrompts.test.js header: eight reviews found ~41
+  // defects in the net and none in the product), so the exact-match snapshot is
+  // the guard for rendered copy and this scan is the backstop for gated branches.
+  // The server-policy sentence is unaffected — it says `default-ON`, which is
+  // TRUE of the organization toggle and is not the old claim.
+  const src = readFileSync(new URL('./harnesses.js', import.meta.url), 'utf8')
+  assert.doesNotMatch(src, /recording is\s+ON by default|files every session/i,
+    'harnesses.js still claims capture happens by default somewhere — #3615 made ' +
+    'every in-repo hook fail closed on the explicit opt-in; state it via captureInstallNote')
+  // The gated-off claude-web paragraph is reachable by no render, so it is pinned
+  // as the exported constant itself (the source scan above is the only other net).
+  assert.match(CLAUDE_WEB_FILING, /nothing is filed unless you call it/,
+    'the claude-web filing paragraph must state that filing is the agent\'s own call')
+  // The refusal fact and the variable's ABSENCE are load-bearing: this path is
+  // gated by the agent's own call plus the team toggle, NOT by TORTOISE_CAPTURE,
+  // so the paragraph must keep the 409 and must never name the hook's variable
+  // (a phrase-shape regex alone left "can refuse the file" green after the 409
+  // was deleted — caught in review).
+  assert.match(CLAUDE_WEB_FILING, /409/,
+    'the claude-web filing paragraph must keep the server-side refusal (409) — the toggle can only refuse')
+  assert.doesNotMatch(CLAUDE_WEB_FILING, /TORTOISE_CAPTURE/,
+    'the claude-web path is not gated by TORTOISE_CAPTURE — its paragraph must not name the variable')
+  assert.doesNotMatch(CLAUDE_WEB_FILING, /on by default/i,
+    'the claude-web filing paragraph must not claim capture happens by default')
+  // The one deliberate exception, pinned so a future edit cannot quietly
+  // generalize the hook wording onto Pi: its extension reads no
+  // TORTOISE_CAPTURE (installing it IS the opt-in), so its copy must state the
+  // install IS the opt-in rather than telling the user to export the variable.
+  assert.match(HARNESS_CAPTURE_INSTALL.pi, /Installing this extension IS the opt-in/,
+    'the Pi seam has no consent gate — its copy must say installing it IS the opt-in')
+  assert.doesNotMatch(HARNESS_CAPTURE_INSTALL.pi, /Filing is OFF until this machine opts in/,
+    'the Pi seam must not carry the hook wording: it reads no TORTOISE_CAPTURE')
 })

@@ -227,6 +227,7 @@ def _graph_entity_keywords(content: str) -> list[str]:
         from urllib.parse import urlparse
 
         from tortoise.config import parse_uri_userinfo, raw_uri_userinfo
+        from tortoise.cypher_guard import guarded_client  # #3595: guard seam
         parsed = urlparse(uri)
         host = parsed.hostname or 'localhost'
         port = parsed.port or 16379
@@ -249,9 +250,12 @@ def _graph_entity_keywords(content: str) -> list[str]:
             # AuthenticationError — which the handler below used to swallow
             # as "the graph has no matching entities", silently dropping
             # every graph term from the extracted keywords.
-            _graph_db = FalkorDB(host=host, port=port,
-                                 username=username, password=password,
-                                 ssl=(parsed.scheme == 'rediss'))
+            # #3595: construct through the ONE guard seam, so this handle is
+            # guarded like every other client the package builds — the guard
+            # follows the handle, not one call site.
+            _graph_db = guarded_client(FalkorDB, host=host, port=port,
+                                       username=username, password=password,
+                                       ssl=(parsed.scheme == 'rediss'))
         g = _graph_db.select_graph('tortoise')
         rows = g.query('MATCH (n) WHERE (n:Object OR n:Subject) AND n.name IS NOT NULL RETURN DISTINCT n.name').result_set
         # Re-arm the outage latch: the graph is demonstrably healthy again, so

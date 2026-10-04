@@ -73,7 +73,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
-import { dirname, join, relative, resolve } from 'node:path'
+import { dirname, join, relative, resolve, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildSync } from 'esbuild'
 import { parse } from '@babel/parser'
@@ -897,6 +897,37 @@ function functionFiles() {
 }
 
 /**
+ * The `_headers` files this suite audits — a named list, but one that CANNOT
+ * silently fall behind the set that ships: `headersFiles()` derives the real set
+ * from the tree and the test below fails if the two disagree in either
+ * direction. Before that test existed the list was inlined at each use site, so
+ * a third `_headers` file (a new Pages project, or a second one in this project)
+ * would have shipped with no CSP and no duplicate/`no-store` audit at all, while
+ * every check stayed green — a fail-open, because the guard's coverage was a
+ * hand-maintained copy of a fact the tree already held.
+ */
+const AUDITED_HEADERS = [
+  'website/_headers',
+  'website/apps/dashboard/public/_headers',
+]
+
+/**
+ * Every `_headers` file under `website/` — DERIVED, not a literal list, so a new
+ * Pages project's `_headers` is found rather than invisible to every check. The
+ * walk matches the file NAME the Cloudflare Pages contract requires (a `_headers`
+ * file in the project's output root); it deliberately does not try to guess which
+ * projects are deployed, because a file that ships is exactly the thing that must
+ * not be missed, and an extra match fails the staleness assertion loudly rather
+ * than being skipped.
+ */
+function headersFiles() {
+  return walk(websiteRoot)
+    .filter((f) => basename(f) === '_headers')
+    .map((f) => relative(repoRoot, f))
+    .sort()
+}
+
+/**
  * Every `functions/` tree under `website/` — DERIVED, not a literal list, so a new
  * Pages project's tree is scanned rather than invisible to every check. A tree in
  * a third project fails closed on its own: `auditedPolicyModule` maps only the two
@@ -1295,7 +1326,7 @@ test('_headers values are byte-identical to the stamped constants', () => {
   // discarded by every scan above — while the edge JOINS matching rules and
   // repeated header lines, so the served header would carry the beacon-less value
   // and block the beacon with the whole suite green. Duplicates must not exist.
-  for (const rel of ['website/_headers', 'website/apps/dashboard/public/_headers']) {
+  for (const rel of AUDITED_HEADERS) {
     assert.deepEqual(
       headerDuplicates(rel),
       [],
@@ -1303,6 +1334,47 @@ test('_headers values are byte-identical to the stamped constants', () => {
         `the edge (and dropped by this scan), so it is never a no-op`,
     )
   }
+})
+
+// ── 4a-bis. the `_headers` set is DERIVED, so a new one cannot ship unaudited ─
+//
+// Every check above works from `AUDITED_HEADERS`. That list is hand-written, and
+// a hand-written list is a copy of a fact the tree already holds — so it can fall
+// behind. The failure this closes is concrete and was live on `main`: add a third
+// `_headers` file (a new Pages project, or a second one in this project) and it
+// ships with no CSP, no `no-store` and no duplicate audit, while all 13 checks
+// stay green because none of them had ever heard of the file. The guard's coverage
+// was the copy, not the tree.
+//
+test('every `_headers` file that ships is audited (the set is derived, not listed)', () => {
+  const derived = headersFiles()
+
+  // Positive control FIRST. A walk that silently returns nothing would make both
+  // assertions below vacuous — this suite would pass on a tree with no `_headers`
+  // at all, which is the "empty pass" the sibling guard also refuses.
+  assert.ok(
+    derived.length >= 2,
+    `expected to find the two shipped \`_headers\` files, found ${derived.length} ` +
+      `(${JSON.stringify(derived)}) — the walk is broken, so the two assertions below ` +
+      `would pass vacuously`,
+  )
+
+  assert.deepEqual(
+    derived.filter((rel) => !AUDITED_HEADERS.includes(rel)),
+    [],
+    'these `_headers` files ship but are not in AUDITED_HEADERS — add them, and audit them: ' +
+      'on a Pages surface a `_headers` file is the ONLY place a static CSP can be declared, ' +
+      'and Functions responses bypass it entirely, so a file missing from this list is a ' +
+      'surface with no policy and no `no-store` check at all',
+  )
+
+  assert.deepEqual(
+    AUDITED_HEADERS.filter((rel) => !derived.includes(rel)).sort(),
+    [],
+    'these AUDITED_HEADERS entries no longer exist in the tree — drop them: an entry that ' +
+      'outlives its file reads as coverage while auditing nothing, so a deleted surface ' +
+      'would look protected forever',
+  )
 })
 
 // ── 4b. every policy admits the PLATFORM-INJECTED beacon ──────────────────

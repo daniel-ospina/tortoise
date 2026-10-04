@@ -1255,6 +1255,13 @@ def _ontology_object_kinds() -> set[str]:
     text = (REPO_ROOT / "docs" / "ONTOLOGY.md").read_text(encoding="utf-8")
     section = text.split(_OBJECT_KIND_SECTION, 1)[1]
     block = section.split("```", 2)[1]
+    # split() leaves the opening fence LINE at the head of the captured block:
+    # an unlabelled fence contributes an empty line, and a LABELLED one
+    # contributes its info string — which was then read as the first kind.
+    # Labelling the fences for MD040 turned the language "text" into a kind and
+    # reddened this guard on main (#6927 -> #6929). The fence line is not block
+    # content, so drop it either way.
+    block = block.split("\n", 1)[1] if "\n" in block else ""
     kinds: set[str] = set()
     for line in block.splitlines():
         line = line.split("#", 1)[0]
