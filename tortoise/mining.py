@@ -432,8 +432,21 @@ class ConversationMiner:
           - explicit-replacement cues → replacement candidate; after review
             + promotion the prior is superseded (CORRECTS + outdated:true)
 
-        validFrom = session frontmatter date (R5 — NOT ingest time); fallback
-        ingestedAt (documented).
+        validFrom = session frontmatter date (R5 — NOT ingest time). An
+        **undated** session stamps no ``validFrom`` at all: the valid-time
+        start is left absent, which ``docs/ONTOLOGY.md`` §4.7 defines as an
+        **open/unbounded start** — the honest representation when the date is
+        unknown, and never the write wall clock (transaction time, a
+        different fact). ``createdAt`` still carries the ingest instant on
+        the transaction-time axis (#3654).
+
+        The cost of going absent, stated rather than implied: an **undated
+        successor** contributes no ``validFrom``, so ``supersede_point``
+        resolves the predecessor's ``validTo`` from the successor's
+        ``createdAt`` and the two windows **overlap** — a query inside the
+        overlap reports ``ambiguous`` rather than a single point. That is
+        the §4.7 trade (honesty over a fabricated contiguous window) and
+        never a wrong answer.
 
         Returns {"wired_nand": n, "candidates": n, "replacement_candidates": n}.
         """
@@ -443,14 +456,35 @@ class ConversationMiner:
         # Normalize the session date to an ISO-8601 string: YAML frontmatter
         # can yield datetime.date objects ('date: 2026-07-01') which crash the
         # SET, and non-ISO strings corrupt ORDER BY chronology (#1080 review).
-        if session_date is None:
-            vf = _now()
+        if session_date is None or not str(session_date).strip():
+            # No valid-time start to write — §4.7 absent ⇒ open start.
+            # The EMPTY string is the other undated form and must land here
+            # too: it reaches this method when a caller passes ``""`` or when
+            # the frontmatter carries an empty ``startedAt`` (``date or
+            # startedAt`` yields None for a MISSING date, but an empty
+            # ``startedAt`` survives the ``or``). Stamping it would write
+            # ``validFrom=""`` — a bound ``_covers`` cannot order against any
+            # PARSEABLE query instant, so the point is invisible to every
+            # normal ``restore_point_at`` query. Precisely: it is hidden from
+            # parseable queries only — an unparseable ``at_date`` still matches
+            # it by lexicographic accident, the same boundary ``sdk.py``
+            # records on its read path. ``""`` is neither absent nor a start,
+            # so it is strictly worse than the wall clock this fallback
+            # replaced (#3654).
+            vf = None
         elif hasattr(session_date, "isoformat"):
             # YAML frontmatter dates arrive as datetime.date/datetime objects
             # ('date: 2026-07-01') — normalize to ISO-8601 (#1080 review).
             vf = session_date.isoformat()
         else:
-            vf = str(session_date)
+            # STRIP, don't just test the stripped form. Undated-ness above is
+            # decided on `str(...).strip()`, so storing it unstripped would
+            # write `" 2026-07-01"` — an unorderable bound `_covers` cannot
+            # match against any parseable query instant, hiding the point from
+            # every normal `restore_point_at` query, i.e. the same harm as the
+            # `""` case above. Whitespace carries no meaning around an ISO
+            # instant.
+            vf = str(session_date).strip()
         report = {"wired_nand": 0, "candidates": 0, "replacement_candidates": 0}
         wired_pairs: set[tuple[str, str]] = set()  # (newer, older) — one NAND per pair
         # #5359: the miner writes only the START, so the effective window is
@@ -471,13 +505,21 @@ class ConversationMiner:
             content, kind, status = rows[0]
             if kind != "decision" or status != "draft" or not content:
                 continue
-            # validFrom: real session date, not ingest time (R5).
-            _refuse_inverted_point_window(
-                proj.g, {"validFrom": vf}, point_id=pid)
-            proj.g.query(
-                "MATCH (n:Point {id:$id}) SET n.validFrom = $vf",
-                params={"id": pid, "vf": vf},
-            )
+            # validFrom: the session date when the frontmatter carries one
+            # (R5 — real session date, not ingest time). An undated session
+            # writes nothing: §4.7 reads an absent validFrom as an open
+            # start, so the NAND/candidate logic below is unchanged (#3654).
+            if vf is not None:
+                # #5359: the miner writes only the START, so refuse when it
+                # would INVERT the window against a STORED validTo. On the
+                # undated leg nothing is proposed, so there is no window to
+                # check — hence inside the branch, not before it.
+                _refuse_inverted_point_window(
+                    proj.g, {"validFrom": vf}, point_id=pid)
+                proj.g.query(
+                    "MATCH (n:Point {id:$id}) SET n.validFrom = $vf",
+                    params={"id": pid, "vf": vf},
+                )
             low = content.lower()
             if not any(c in low for c in self._TEMPORAL_REFUTE_CUES):
                 continue
@@ -1166,8 +1208,9 @@ def mine_corpus_with_sdk(
         # wiring, wrong per-session event content, re-mine stacking).
         api.current_run = ulid()
         try:
-            # #786: session frontmatter date becomes validFrom (R5 — real
-            # session date, not ingest time); fallback ingestedAt.
+            # #786: session frontmatter date becomes validFrom (R5) when
+            # present; when absent, no validFrom is stamped at all — an
+            # absent start is open/unbounded (§4.7, #3654).
             session_date = None
             try:
                 from .session_indexer import _parse_frontmatter
