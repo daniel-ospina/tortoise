@@ -334,6 +334,15 @@ export function buildCapturePayload(args: {
   source: string;
   machineId: string;
   model?: string;
+  /**
+   * #3516 §B: the lane of the SPOOL ENTRY being drained — never a constant.
+   * The lane describes the entry's PRODUCER, not the process doing the
+   * draining: `flushSpool` drains entries written by other legs, and a
+   * hardcoded 'hook' here would stamp a lane on a lane-less backfill/import
+   * entry — defeating falsifiability in the false-POSITIVE direction. The
+   * in-process hook passes 'hook' when it SPOOLS (see `spoolSnapshot`).
+   */
+  captureLane?: string;
 }): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     harness: HARNESS,
@@ -341,14 +350,8 @@ export function buildCapturePayload(args: {
     source: args.source,
     conversation: args.turns,
     machine_id: args.machineId,
-    // #3516 §B: this is the IN-PROCESS HOOK lane, so it claims 'hook'. The
-    // store-sync backstop posts the same session_id with 'store_sync'; the
-    // lane is the ONLY discriminator that makes the hook-liveness check
-    // falsifiable — without it a run whose hook is dead greens. The server
-    // stores it first-writer-wins, so a later store-sync drain cannot relabel
-    // a live hook session as not-live.
-    capture_lane: "hook",
   };
+  if (args.captureLane) payload.capture_lane = args.captureLane;
   if (args.model) payload.model = args.model;
   return payload;
 }
@@ -492,6 +495,11 @@ export interface SpoolMeta {
   source: string;
   machine_id: string;
   model?: string;
+  /** #3516 §B: the PRODUCER lane ('hook'). Set-only-when-present, carried
+   *  forward. The Python leg forwards it to `/v1/sessions` verbatim, so an
+   *  entry spooled by the Pi hook must carry it — or a later drain files the
+   *  capture lane-less and a WORKING hook reads as not-live (#3515 piece 8). */
+  capture_lane?: string;
   created_at: string;
   updated_at: string;
   turns_count: number;
@@ -524,6 +532,9 @@ export interface SpoolSnapshot {
   source: string;
   machineId: string;
   model?: string;
+  /** #3516 §B: the lane this snapshot's PRODUCER claims ('hook' for the
+   *  in-process hook). Omitted/undefined = no lane — never fabricated. */
+  captureLane?: string;
 }
 
 export interface SpoolBounds {
@@ -904,6 +915,11 @@ export function writeSpoolEntry(
   const appendedBytes = Buffer.byteLength(logText, "utf8");
 
   const now = new Date().toISOString();
+  // #3516 §B: the entry's lane is set-only-when-present and carried forward
+  // (like `model`) — a lane-less re-snapshot must not ERASE a lane the hook
+  // already claimed. The same rule as the Python writer, because BOTH legs
+  // read and write this one directory.
+  const lane = snapshot.captureLane ?? prior?.capture_lane;
   const meta: SpoolMeta = {
     version: 1,
     session_id: snapshot.sessionId,
@@ -911,6 +927,7 @@ export function writeSpoolEntry(
     source: snapshot.source,
     machine_id: snapshot.machineId,
     ...(snapshot.model ? { model: snapshot.model } : {}),
+    ...(lane ? { capture_lane: lane } : {}),
     created_at: prior?.created_at ?? now,
     updated_at: now,
     turns_count: snapshot.turns.length,
@@ -1235,6 +1252,9 @@ export async function flushSpool(
         source: meta.source,
         machineId: meta.machine_id,
         model: meta.model,
+        // The ENTRY's lane, not this process's: a lane-less import entry
+        // drained here must stay lane-less.
+        captureLane: meta.capture_lane,
       });
       const res = await postCapture(cfg, payload, doFetch, opts.timeoutMs);
       if (res.ok) {
@@ -1434,6 +1454,9 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
           source: sourceName(manager?.getSessionFile?.()),
           machineId: deriveMachineId(),
           model: modelLabel(ctx?.model),
+          // #3516 §B: this IS the in-process hook, so the entry it spools
+          // claims 'hook' — the drain later forwards it verbatim.
+          captureLane: "hook",
         },
         bounds,
       );

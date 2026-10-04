@@ -805,7 +805,15 @@ def write_spool_entry(
     # keeps the filing marker (the prior branch was unreachable above when the
     # digests matched and the lengths matched — retained for a window shift that
     # lands on identical content).
-    if prior and prior.get("content_digest") == new_digest and prior.get("filed_key"):
+    # A lane UPGRADE must also invalidate the filing marker: `filed_key` is
+    # content-derived (the lane is not part of it), so an entry that was
+    # already filed LANE-LESS would otherwise keep its marker, be skipped by
+    # `_flush_one`, and stay lane-less forever — the exact outcome the
+    # `lane_upgrade` dedup guard exists to prevent (#3516 §B review). Clearing
+    # it makes the entry re-POSTable; the server's coalesce makes that
+    # idempotent.
+    if (prior and prior.get("content_digest") == new_digest
+            and prior.get("filed_key") and not lane_upgrade):
         meta["filed_key"] = prior["filed_key"]
         meta["filed_at"] = prior.get("filed_at")
 

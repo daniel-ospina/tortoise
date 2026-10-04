@@ -252,6 +252,7 @@ test("buildCapturePayload carries harness + session_id (the idempotency key)", (
     source: "2026-01-01_abc",
     machineId: "deadbeef",
     model: "deepseek/deepseek-v4-flash",
+    captureLane: "hook",
   });
   assert.equal(payload.harness, HARNESS);
   assert.equal(payload.session_id, "sess-42");
@@ -262,10 +263,28 @@ test("buildCapturePayload carries harness + session_id (the idempotency key)", (
   // Session property is what the dashboard renders; dropping this line shipped
   // silently because no assertion read it (mutation: delete it — suite green).
   assert.equal(payload.model, "deepseek/deepseek-v4-flash");
-  // #3516 §B: the in-process hook claims its lane. Without this the server
-  // stores no lane and the hook-liveness check reports a WORKING hook as
-  // not-live (mutation: delete it — the assertion must go red).
+  // #3516 §B: the ENTRY's lane reaches the wire. The in-process hook spools
+  // with 'hook'; dropping this stores no lane and the hook-liveness check
+  // reports a WORKING hook as not-live (mutation: delete it — must go red).
   assert.equal(payload.capture_lane, "hook");
+});
+
+test("buildCapturePayload forwards the ENTRY's lane, never a hardcoded one", () => {
+  // #3516 §B: the lane describes the spool ENTRY's producer, not the process
+  // doing the draining. flushSpool drains entries written by other legs, so a
+  // hardcoded 'hook' would stamp a lane on a lane-less backfill/import entry —
+  // the false-POSITIVE half of falsifiability.
+  const base = {
+    sessionId: "s",
+    turns: [{ role: "user" as const, content: "x" }],
+    source: "t",
+    machineId: "m",
+  };
+  assert.equal(buildCapturePayload({ ...base, captureLane: "hook" }).capture_lane, "hook");
+  assert.ok(
+    !("capture_lane" in buildCapturePayload(base)),
+    "a lane-less entry was stamped with a lane on the wire",
+  );
 });
 
 test("sourceName is a basename only (never a full path)", () => {
@@ -610,6 +629,36 @@ test("replaying a spooled session twice produces one session and posts once", as
   assert.equal(second.skipped, 1, "the replay must be a recorded skip, not a second POST");
   assert.equal(server.posts(), 1, "replaying the SAME content must issue ONE POST");
   assert.equal(server.sessions.size, 1, "and the server must hold ONE session");
+});
+
+test("the spooled lane survives a drain and is never fabricated", async () => {
+  // #3516 §B. The Pi hook spools WITH a lane; the drain happens later and may
+  // be run by the PYTHON leg (`tortoise session drain`) over this same
+  // directory. Two falsifiability bugs, in opposite directions:
+  //   (a) the entry's lane is dropped on the drain → a WORKING hook reads as
+  //       not-live (false-NEGATIVE);
+  //   (b) a lane-less import entry drained here is stamped 'hook' → a capture
+  //       that never saw a hook reads as live (false-POSITIVE).
+  const spool = tmpSpool();
+  const server = recordingServer();
+  writeSpoolEntry(spool, { ...snapshot("sess-laned"), captureLane: "hook" });
+  writeSpoolEntry(spool, snapshot("sess-import")); // deliberately lane-less
+  // A lane-less re-snapshot must not ERASE a lane already on disk.
+  writeSpoolEntry(spool, { ...snapshot("sess-laned"), captureLane: undefined });
+
+  assert.equal(
+    readSpoolEntry(spool, "sess-laned")?.capture_lane,
+    "hook",
+    "a lane-less re-snapshot erased the lane",
+  );
+
+  const res = await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+  assert.equal(res.filed, 2, "both entries should be filed");
+  assert.equal(server.sessions.get("sess-laned")?.capture_lane, "hook");
+  assert.ok(
+    !("capture_lane" in (server.sessions.get("sess-import") ?? {})),
+    "a lane-less import entry was stamped with a lane on the wire",
+  );
 });
 
 test("the capture key is content-addressed: changed turns get a new key, a replay does not", () => {

@@ -266,6 +266,57 @@ def test_spool_lane_survives_a_lane_less_resnapshot(tmp_path, monkeypatch):
         "a lane-less re-snapshot ERASED the stored lane")
 
 
+def test_spool_lane_upgrade_refiles_an_already_filed_entry(tmp_path, monkeypatch):
+    """A lane upgrade must also INVALIDATE the filing marker. `filed_key` is
+    content-derived (the lane is not part of it), so an entry already filed
+    LANE-LESS would keep its marker, be skipped by the drain, and stay
+    lane-less forever — the same outcome the dedup guard exists to prevent
+    (review P2)."""
+    import tortoise.capture_spool as spool
+
+    root = tmp_path / "spool"
+    monkeypatch.setattr(spool, "spool_dir", lambda: root)
+    sid = "3516-spool-refile"
+    turns = [{"role": "user", "content": "same"}]
+    spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid, turns=turns, source="t", machine_id="m"))
+
+    posts: list[dict] = []
+    spool.flush_spool(root, lambda p: (posts.append(dict(p)),
+                                       spool.PostOutcome(ok=True, status=200))[1],
+                      only_session_id=sid)
+    assert posts and "capture_lane" not in posts[0]
+    assert spool.read_spool_meta(root, sid).get("filed_key"), (
+        "the first filing did not stamp a marker — the test cannot prove anything")
+
+    # The hook now re-snapshots the SAME content, claiming its lane.
+    spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid, turns=turns, source="t", machine_id="m",
+        capture_lane="hook"))
+    posts2: list[dict] = []
+    spool.flush_spool(root, lambda p: (posts2.append(dict(p)),
+                                       spool.PostOutcome(ok=True, status=200))[1],
+                      only_session_id=sid)
+    assert posts2, "the lane upgrade was never re-POSTed — it stranded in the spool"
+    assert posts2[0].get("capture_lane") == "hook"
+
+
+def test_journal_fold_keeps_the_first_lane():
+    """A journal-only replay must converge on the SAME lane as the live write.
+    Two SessionRecorded events for one session, the later claiming
+    `store_sync` — the fold is first-writer-wins, matching the live coalesce
+    (review P2; without this a revert of the fold hunk is invisible)."""
+    sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
+    proj = sdk._get_proj()
+    assert proj._fold_session_recorded({
+        "type": "SessionRecorded", "id": "3516-fold", "capture_lane": "hook"}) == 1
+    assert proj._fold_session_recorded({
+        "type": "SessionRecorded", "id": "3516-fold",
+        "capture_lane": "store_sync"}) == 1
+    assert _session_lane(sdk, "3516-fold") == "hook", (
+        "replay diverged from live: the fold relabelled the lane")
+
+
 def test_spool_lane_upgrade_survives_identical_content_dedup(tmp_path, monkeypatch):
     """A hook re-snapshot of byte-IDENTICAL turns must still stamp the lane: the
     content-dedup early-return would otherwise swallow it and the entry would
