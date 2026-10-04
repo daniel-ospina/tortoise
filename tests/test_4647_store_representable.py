@@ -614,6 +614,21 @@ class TestNonFiniteDecimalNamesTheKeyBeforeTheRangeCheck:
             TortoiseSDK.mitigate_operator(sdk, "op1", "why", strength=D("NaN"))
         assert "strength" in str(exc.value), str(exc.value)
 
+    def test_record_calibration(self):
+        from unittest import mock
+
+        from tortoise.sdk import TortoiseSDK
+
+        sdk = self._bare()
+        with mock.patch.object(TortoiseSDK, "_get_proj", autospec=True) as proj:
+            with pytest.raises(ValueError) as exc:
+                TortoiseSDK.record_calibration(
+                    sdk, precision=D("NaN"), mean_grounding_delta=0.01,
+                    sample_size=1)
+            assert "precision" in str(exc.value), str(exc.value)
+            # the guard must precede the range/gate checks and the write.
+            assert not proj.return_value.g.query.called
+
 
 class TestDirectWriterSitesAreGuardedRoundTwo:
     """Cycle-6 P1/P2: three more raw-Cypher writers bypass ``_sanitize_props``.
