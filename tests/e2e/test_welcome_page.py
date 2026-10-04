@@ -45,7 +45,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 def _is_bff_signup_request(method: str, url: str) -> bool:
     """True for the BFF call this monitor watches (`POST /auth/signup`).
 
-    ONE predicate governs all three listeners (issue/response/requestfailed), so
+    ONE predicate governs all three listeners (request/response/requestfailed), so
     the filter the pins exercise is the filter that actually gates the verdict.
     """
     return method == "POST" and url.endswith("/auth/signup")
@@ -69,7 +69,7 @@ def _unobserved_outcome(*, transport_failures: list[str], post_issued: bool) -> 
     """Return `(verdict, message)` for a signup POST that captured NOTHING (#4940).
 
     `page.on("response")` only fires when a request gets an ANSWER, so
-    `signup["status"]` stays `None` for four different situations, and they do
+    `signup["status"]` stays `None` for three different situations, and they do
     NOT share a verdict:
 
     - the request DIED at the transport layer (DNS, TLS, connection refused) —
@@ -77,7 +77,7 @@ def _unobserved_outcome(*, transport_failures: list[str], post_issued: bool) -> 
     - the request was ISSUED but never answered (connection blackhole, slow
       connect timeout, client-side abort) — UNAVAILABLE;
     - the form never submitted a request at all — the other PRODUCT condition,
-      and the one the pre-#4940 message asserted for all four.
+      and the one the pre-#4940 message asserted for all three.
 
     `net::ERR_ABORTED` is deliberately NOT a product failure: the signup POST is a
     plain `fetch` carrying no `AbortController`/`signal` (verified: `signup.html`),
@@ -98,9 +98,10 @@ def _unobserved_outcome(*, transport_failures: list[str], post_issued: bool) -> 
     if transport_failures:
         return (
             "unavailable",
-            "no POST to the BFF /auth/signup got a response — the request failed at the "
-            "TRANSPORT layer, so this is a reachability failure, not a signup failure: "
-            + "; ".join(transport_failures),
+            "no POST to the BFF /auth/signup got a response — the request did not "
+            "complete at the TRANSPORT layer (observed: "
+            + "; ".join(transport_failures)
+            + "), so the smoke does not assert a cause",
         )
     if post_issued:
         return (
@@ -364,12 +365,13 @@ def test_unobserved_outcome_is_disposed_correctly() -> None:
     assert calls == [("skip", "m1"), ("fail", "m2")]
 
 
-def test_live_signup_registers_both_capture_listeners() -> None:
-    """#4940: a deleted or DEAD listener must redden something.
+def test_live_signup_registers_all_capture_listeners() -> None:
+    """#4940: a deleted, dead, or wrong-wired listener must redden something.
 
-    Scope, stated so this is not over-read. Pinned here: both listeners are
-    REGISTERED on the smoke, and each delegates to the pinned pure helper that
-    does its work. NOT pinned here: that playwright actually calls them — no
+    Scope, stated so this is not over-read. Pinned here: all three listeners are
+    REGISTERED, each body filters through the pinned predicate, the captured
+    assignments and the verdict INPUTS are the real values, and the tripwire guard
+    precedes the skip/fail. NOT pinned: that playwright calls them — no
     browser-free test can, and claiming otherwise would be the vacuous-guard
     defect this issue is itself about.
     """
@@ -407,6 +409,24 @@ def test_live_signup_registers_both_capture_listeners() -> None:
         "the browser_to_supabase tripwire must be evaluated before the unobserved "
         "skip/fail, so a skip cannot discard its captured evidence"
     )
+    # Round 5: the CAPTURE must actually record. A dead `_on_response` body left
+    # every other pin green while a real non-200 answer was never captured — so
+    # `status` stayed None, the case became UNAVAILABLE, and a 429 regression
+    # exited GREEN with the no-429 contract unverified.
+    assert 'signup["status"] = resp.status' in src
+    assert 'signup["body"] = resp.text()[:400]' in src
+    # Round 5: the verdict INPUTS must be the live values, not constants. Verified
+    # green mutations: `post_issued=True` turned a "form never submitted" PRODUCT
+    # regression into a SKIP; dropping `post_issued["value"] = True` turned an
+    # issued-but-unanswered outage into a PRODUCT FAIL.
+    assert "post_issued=post_issued[\"value\"]" in src
+    assert 'post_issued["value"] = True' in src
+    # Round 5: the guard must PRECEDE the dispatch, not merely exist. Moved after
+    # it, the skip raises first and the tripwire's evidence is discarded again —
+    # the exact round-4 defect, back and green.
+    assert src.index("if browser_to_supabase:") < src.index(
+        "_dispose_unobserved(verdict, message"
+    ), "the tripwire guard must run before the unobserved skip/fail"
 
 
 def test_unobserved_outcome_splits_verdicts() -> None:
