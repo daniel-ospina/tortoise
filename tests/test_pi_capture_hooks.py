@@ -553,8 +553,13 @@ def test_extension_marker_output_matches_the_python_marker(tmp_path):
 
 
 _BLANK_PROBE = r'''
+import { readFileSync } from "node:fs";
 import { clipTurnContent, BLANK_CHARS, TRUNCATION_SENTINEL } from {{EXT_URI}};
-const inputs = JSON.parse(process.env.PROBE_INPUTS);
+// Read the fixtures from a FILE, not from the environment: escaped, the blank
+// fixtures are >128 KB of JSON, which exceeds Linux's MAX_ARG_STRLEN for one
+// string and made this probe die with E2BIG on the node argv in CI while
+// passing on a roomier dev box.
+const inputs = JSON.parse(readFileSync(process.env.PROBE_INPUTS_FILE, "utf8"));
 const out = inputs.map((s) => {
   const clipped = clipTurnContent(s);
   return {
@@ -609,8 +614,10 @@ def test_extension_clipper_blankness_matches_the_python_clipper(tmp_path):
         _BLANK_PROBE.replace("{{EXT_URI}}", json.dumps(EXTENSION.as_uri())),
         encoding="utf-8",
     )
+    (tmp_path / "blank-fixtures.json").write_text(
+        json.dumps(fixtures), encoding="utf-8")
     env = _scrubbed_env(str(tmp_path))
-    env["PROBE_INPUTS"] = json.dumps(fixtures)
+    env["PROBE_INPUTS_FILE"] = str(tmp_path / "blank-fixtures.json")
     proc = subprocess.run(
         [node, "blank-probe.mjs"],
         capture_output=True, text=True, cwd=str(tmp_path), timeout=120, env=env,
