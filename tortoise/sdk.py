@@ -39,7 +39,7 @@ import stat
 from collections.abc import Callable
 from contextvars import ContextVar
 from time import monotonic as _monotonic
-from typing import Any
+from typing import Any, ClassVar
 
 from .domain_loader import known_kinds, register_kind
 from .cross_lens import DEFAULT_THRESHOLD
@@ -20900,7 +20900,8 @@ class TortoiseSDK:
 
     def _create_entity(self, label: str, id_val: str, props: dict, event_type: str,
                        *, _skip_sanitize: bool = False,
-                       is_episodic: bool | None = None) -> dict:
+                       is_episodic: bool | None = None,
+                       _return_apply_result: bool = False) -> dict | tuple[dict, object]:
         """Generic entity creation. Applies to graph via projection
         (FalkorDB); SDK-created Events additionally journal EventRecorded
         via ``_emit_event`` (#2061); SDK-created Objects journal
@@ -20917,6 +20918,15 @@ class TortoiseSDK:
         fail-closed on the sanctioned key (the sanitizer's own docstring carves
         out ``api.add_document(source_path=)``; create_source(source_path=) is
         the mirror route).
+
+        ``_return_apply_result=True`` (#5024 P2-2): return
+        ``(entity, apply_result)`` instead of ``entity``, so the Source MERGE's
+        ``QueryResult`` reaches its ONE consumer (``create_source``) ON THIS
+        CALL'S RETURN VALUE. It must never ride a projection-level slot: a slot
+        is shared by every call on the SDK, so two threads sharing one SDK on
+        DIFFERENT urls — which take different per-url locks and can therefore
+        interleave — could swap each other's captured pre-write state and lose
+        a real version transition.
         """
         # #329: id + sourcePath/source_path are server-managed — reject.
         # is_episodic is ALSO server-managed (#1486, quota discriminator) —
@@ -21063,11 +21073,6 @@ class TortoiseSDK:
             event["createdAt"] = now_iso()
         # Apply through projection (writes to FalkorDB)
         apply_result = proj.apply(event)
-        if label == "Source":
-            # epic #900 T3: thread the conditional-MERGE QueryResult so
-            # create_source can attribute the counter-authority outcome
-            # (nodes_created) from the single statement (pin b).
-            proj._source_merge_result = apply_result
         if label == "Event":
             # #2061: journal EventRecorded so SDK-created Events survive
             # rebuild_all (fold parity for Event-input operators).
@@ -21162,7 +21167,13 @@ class TortoiseSDK:
             proj.create_owned_by(canonical_id, props["ownedBy"])
         if props.get("managedBy"):
             proj.create_managed_by(canonical_id, props["managedBy"])
-        return self._get_entity(canonical_id)
+        entity = self._get_entity(canonical_id)
+        if _return_apply_result:
+            # #5024 P2-2: the conditional-MERGE QueryResult travels on THIS
+            # call's return value to `create_source` (the only consumer),
+            # never a projection-level slot shared across threads.
+            return entity, apply_result
+        return entity
 
     def _get_entity(self, id_val: str) -> dict:
         # NOTE (issue #327): Session/APIKey/Org/Tag nodes are intentionally
@@ -24174,14 +24185,32 @@ class TortoiseSDK:
           - the Source MERGE is CONDITIONAL (single statement, pin b): the ON
             MATCH version/updatedAt/contentHash/title/``_searchText`` bump
             fires ONLY when the stored contentHash differs (a stub Source with
-            NULL contentHash is completed). The MERGE outcome (via
-            ``proj._source_merge_result`` nodes_created) is the counter
-            authority for the index path.
+            NULL contentHash is completed). The write's own QueryResult
+            carries ``previousProps`` (the pre-write node) and is returned ON
+            THIS CALL to ``create_source`` (#5024 P2-2) — never a shared
+            projection slot. The index path's counter authority is a
+            POST-MERGE re-read of ``s.__runId``/``s.version`` in
+            ``_index_source_merge``, not a MERGE stats counter.
           - JOURNALING CONTRACT (a) (cycle-18): the write path emits a
             SourceCreated JSONL line on EVERY write (emit-on-every-write — a
             create-only cadence would revert updated Sources to create-time
             state post-rebuild); replay re-MERGEs by url and the hash-diff-gated
             bump lands at the live converged value.
+            **#5024 (T6) supersedes the cadence, not the reason.** Emit-on-
+            every-write was the right shape for a journal that had no record
+            for a version transition, and it cost the two things §9.6 buys:
+            a no-op re-check appended a line (the log grew on re-checks), and
+            because the record said nothing about the transition, `updatedAt`
+            and `ingestedAt` were re-read from the clock AT REPLAY TIME and
+            diverged from the live node (measured `...57.016262` vs
+            `...57.079810`). The cadence is now per-OUTCOME — `SourceCreated`
+            (create / stub completion), `SourceVersioned` (a real hash
+            transition, carrying `previousContentHash`),
+            or NOTHING (a re-check that found what we already hold). The
+            invariants the old contract protected are unchanged; see
+            `docs/durability-posture.md` → *`:Source` — recorded vs
+            recomputable, field by field* (R2) and
+            `docs/architecture/STORAGE-ARCHITECTURE.md` §9.6.
         """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         if not url or not url.strip():
@@ -24263,23 +24292,279 @@ class TortoiseSDK:
         # later cannot bypass a guard that runs after all of them.
         for _key, _value in ev.items():
             _reject_unrepresentable_number(_key, _value)
-        proj = self._get_proj()
-        proj._source_merge_result = None
-        result = self._create_entity("Source", url, ev, "SourceCreated",
-                                     _skip_sanitize=True)
-        # Journaling contract (a): emit-on-every-write SourceCreated. Best-
-        # effort (no-op when no event_log_path configured) — never crashes the
-        # write (mirrors _emit_event's discipline). The internal run token
-        # never rides the journaled payload.
+        # ── #5024 (T6): ONE clock for the transition ────────────────
+        # `_upsert_source`'s ON MATCH sets `updatedAt = coalesce($updatedAt,
+        # $now)` where `$now` is `_now_iso()` called INSIDE the fold. Reading
+        # the clock TWICE (once here for the record, once in the fold for the
+        # live node) is precisely how `updatedAt` diverged live vs replayed
+        # before this change. So the instant is minted ONCE, rides the payload
+        # as `updatedAt`, the fold's `coalesce` picks it up, and the record
+        # carries the SAME string — live and replay cannot disagree.
+        ev["updatedAt"] = _now_iso()
+        # #5024 P2-2: the pre-state rides THIS CALL's own return value, not a
+        # projection-level slot. A slot is shared by every call on the SDK, so
+        # two threads sharing one SDK on DIFFERENT urls (different per-url
+        # locks, so they can interleave) could swap each other's
+        # `previousProps` and lose a real transition.
+        result, _written = self._create_entity(
+            "Source", url, ev, "SourceCreated",
+            _skip_sanitize=True, _return_apply_result=True)
+        # ── #5024 P1-A: the pre-write state the RECORD DECISION needs ──────
+        # Taken from the WRITE'S OWN statement (`_upsert_source` captures it
+        # with `OPTIONAL MATCH`/`WITH` before its `MERGE` and returns it as
+        # `previousProps`), so it is the state the write actually found. A
+        # separate pre-read here was a DIFFERENT read from the one the write's
+        # `ON MATCH` hash gate evaluated: a competing writer in that window
+        # made the decision compare the incoming hash against a value the
+        # node no longer had, and the branch below suppressed a real
+        # transition (fail-OPEN toward suppression). `None` now means only
+        # "the statement found no node" — never a swallowed read failure — so
+        # the create arm is entered on real evidence. This also removes the
+        # unconditional extra round trip (plus its internal `resolve_source_key`)
+        # that P2-B flagged on the no-journal path.
+        _stored_before = None
+        if _written is not None and getattr(_written, "result_set", None):
+            _stored_before = _written.result_set[0][0]
+        # ── #5024 (T6): journal the write by WHAT IT CHANGED ────────────────
+        # Pre-#5024 this emitted a plain `SourceCreated` on EVERY call, so a
+        # re-check that found the same bytes still appended a journal line
+        # (measured: 12 -> 13 lines on a no-op re-check). §9.6 bounds a version
+        # at "three timestamps and a hash", so the re-check must be REPEAT-SAFE:
+        #
+        #   node did not exist, or a stub is being completed  -> SourceCreated
+        #   a non-empty hash DIFFERS from the stored one       -> SourceVersioned
+        #   nothing about the write would change the node      -> emit NOTHING
+        #
+        # The last arm is NOT "same hash": a hash-identical call may still
+        # carry a new `summary`/`topics`, and those ride the payload into
+        # `_persist_extra_props` on replay — suppressing THAT record would
+        # trade log growth for a live!=replay divergence. So the no-op test is
+        # over the payload's OWN keys, and anything it cannot prove unchanged
+        # is RECORDED (fail-safe polarity: an unnecessary record is cheaper
+        # than a lost change).
         try:
             payload = {k: v for k, v in ev.items() if k != "_merge_run_id"}
-            self._emit_event("SourceCreated", id=url, **payload)
+            _new_hash = payload.get("contentHash")
+            _old_hash = (_stored_before or {}).get("contentHash")
+            if _stored_before is None or (not _old_hash and _new_hash):
+                # CREATE (no node), or a JOINT-E2E stub completion (#1032).
+                #
+                # The `_new_hash` guard is load-bearing, not decoration. A
+                # hashless create stores `contentHash = coalesce($hash,'') = ''`,
+                # so `not _old_hash` stays TRUE on that node forever — and an
+                # incoming payload that ALSO carries no hash took this arm
+                # unconditionally, pre-empting the no-op test below. Measured:
+                # 5 identical `create_source(url, "document")` calls appended 5
+                # records and changed nothing (version stayed 1). Production-
+                # reachable: `hosted_api.py` re-ingests with
+                # `contentHash=anchor` (None when no provenance ref carries a
+                # hash) and with `contentHash=src.contentHash or ""`.
+                #
+                # A stub COMPLETED by a real hash still records (that is the
+                # #1032 contract, pinned by
+                # `test_a_stub_completion_still_emits_a_create`); a hashless
+                # re-check now falls through to the no-op test, which suppresses
+                # it only if the write really does leave the node unchanged.
+                self._emit_event("SourceCreated", id=url, **payload)
+            elif _new_hash and _new_hash != _old_hash:
+                # The version transition. `previousContentHash` is the whole
+                # point: it is what makes the PRIOR version addressable after
+                # the node has moved on (`ONTOLOGY` §4.6 *Versioning*). The
+                # transition instant is NOT a separate key — the payload's own
+                # `updatedAt` (minted above, one clock) IS it, and the fold
+                # reads exactly that. The record deliberately carries no
+                # recomputed ordinal: the replay reproduces `version` through
+                # the SAME hash-diff gate the live write used, so recording it
+                # as well would be a second derivation that can disagree.
+                self._emit_event(
+                    "SourceVersioned", id=url,
+                    previousContentHash=_old_hash, **payload,
+                )
+            elif self._source_payload_is_noop(payload, _stored_before):
+                # Genuine re-check: the caller re-sent what we already hold.
+                # Nothing is journalled, and nothing changed live either.
+                pass
+            else:
+                # Same hash, but the payload carries something new (a retitled
+                # summary, a new topic list). Record it so the extras survive a
+                # rebuild — the pre-#5024 behaviour.
+                self._emit_event("SourceCreated", id=url, **payload)
         except Exception:  # noqa: BLE001, RUF100
-            _logger.warning("SourceCreated journal emission failed for %s — continuing", url)
+            _logger.warning("source journal emission failed for %s — continuing", url)
         # Write events invalidate the inheritance gate + reliability cache
         self._invalidate_inheritance_gate_for_source(url)
         self._clear_reliability_cache(url)
         return result
+
+    # #5024 (T6): payload keys the node stores under another spelling. A key
+    # that is absent here and absent from the node is compared by name; a key
+    # this map cannot place is treated as "cannot prove unchanged" and the
+    # write is RECORDED (see `_source_payload_is_noop`).
+    _SOURCE_PAYLOAD_ALIASES: ClassVar[dict[str, str]] = {
+        "source_path": "sourcePath",
+    }
+    # Keys that are written ON CREATE only, or that the producer regenerates on
+    # every call — they cannot make an existing node differ, so they never
+    # disqualify a no-op.
+    _SOURCE_NOOP_IGNORED_KEYS: frozenset = frozenset({
+        "ingestedAt", "_merge_run_id", "id",
+        # #5024: minted by the producer on EVERY call (the one clock the write
+        # and the record share). It is not a fact the caller asserted, so it
+        # can never make an otherwise-identical re-check "different" — and
+        # leaving it in the comparison suppressed repeat-safety entirely
+        # (measured: the no-op still emitted a `SourceCreated`).
+        "updatedAt",
+    })
+
+    @staticmethod
+    def _same_journal_value(a, b) -> bool:
+        """#5024: TYPE-AWARE equality for the repeat-safety test.
+
+        Plain `==` is fail-OPEN here, because Python folds the type away:
+        `True == 1 == 1.0`, while FalkorDB stores a bool and an int as distinct
+        values. Measured before this guard::
+
+            sdk.create_source(url, "document", contentHash="h-0", flag=True)
+            sdk.create_source(url, "document", contentHash="h-0", flag=1)
+
+          -> 0 records appended, live `flag = 1` (int), rebuilt `flag = True`.
+
+        A live write with no record is exactly the fail-open this function's
+        polarity forbids (the repo has already been bitten by the same
+        `isinstance(True, int)` trap — see `BELIEF_BOOL_PROPS` in
+        `projection/entities.py`). Containers are compared recursively for the
+        same reason: `[1] == [1.0]` is True and the two serialise differently.
+
+        NaN compares unequal to itself, so a NaN payload is always recorded —
+        fail-safe, and consistent with the #5004 embedding guards.
+
+        DELIBERATE over-recording (declared, not a bug): a payload `tuple`
+        against a stored `list` (the reader returns a list, so an identical
+        re-check spelled `topics=("a","b")` records once) and a value the graph
+        cannot persist at all (`dict`/`bytes`/`set`). Both cost one extra
+        record and neither changes the node — the safe direction for a test
+        whose failure mode is a LOST write.
+        """
+        if type(a) is not type(b):
+            return False
+        if isinstance(a, (list, tuple)):
+            return len(a) == len(b) and all(
+                TortoiseSDK._same_journal_value(x, y)
+                for x, y in zip(a, b, strict=True))
+        if isinstance(a, dict):
+            return a.keys() == b.keys() and all(
+                TortoiseSDK._same_journal_value(a[k], b[k]) for k in a)
+        return a == b
+
+    def _source_payload_is_noop(self, payload: dict,
+                                stored: dict | None) -> bool:
+        """#5024 (T6): would this write leave an EXISTING `:Source` unchanged?
+
+        The repeat-safety test behind acceptance 1: a re-check that finds the
+        same bytes must journal nothing, or the log grows on every re-check
+        (§9.6 bounds a version at "three timestamps and a hash").
+
+        Deliberately NOT "the hash is equal": a hash-identical call may still
+        carry a new `summary`/`topics`, and those ride the payload into
+        `_persist_extra_props` on replay. Suppressing THAT record would trade
+        log growth for a live != replay divergence, which is the defect class
+        this lane exists to remove. So the test is over the payload's OWN keys,
+        and its polarity is FAIL-SAFE TOWARD RECORDING: anything it cannot
+        prove unchanged returns False (an unnecessary record is cheaper than a
+        lost change).
+        """
+        if not stored:
+            return False
+        from .projection.entities import _is_persistable_prop_value
+        proj = self._get_proj()
+        # ── #5024 P1-B: MIRROR THE WRITER, do not re-derive it ─────────────
+        # The earlier cut compared the raw payload against the stored node and
+        # ignored only `ingestedAt`/`updatedAt`, so it disagreed with
+        # `_upsert_source` on three classes of key and appended a record on
+        # EVERY identical re-check (measured `2 -> 3 -> 4`): a URL variant
+        # (`url` is resolved to the node's canonical spelling), a same-hash
+        # retitle (the writer GATES `title`/`_searchText`/`updatedAt` behind
+        # the hash diff, false in this arm), and a key the writer drops
+        # (`content` is retired, `meta={...}` is not persistable).
+        #
+        # This arm is reached only when the incoming hash is falsy OR equal to
+        # the stored one — but NOT only when the writer's gate is closed: a
+        # falsy non-None hash (`""` — `hosted_api` passes `contentHash=... or
+        # ""`) still opens `$hash IS NOT NULL AND s.contentHash <> $hash`, so
+        # `contentHash` MUST stay compared below. When the gate IS open the
+        # comparison returns "changed" on the hash alone, so the hash-gated
+        # fields can be skipped without ever suppressing the change.
+        _fixed_unchanged = self._SOURCE_NOOP_IGNORED_KEYS | {
+            # Hash-gated: `_upsert_source` only writes these on the hash-diff
+            # branch, which the `contentHash` comparison already detects.
+            "title", "_searchText",
+            # ON CREATE only (`sourceKind`/`externalId`/`ingestedAt` have no
+            # ON MATCH assignment) or never a node property at all
+            # (`previousContentHash`). `version` also rides the hash-diff CASE,
+            # covered by the `contentHash` comparison.
+            "version", "sourceKind", "externalId", "ingestedAt",
+            "previousContentHash",
+            # ⛔ These two are NOT "create-only": `_upsert_source`'s ON MATCH
+            # mutates BOTH — it APPENDS the raw spelling to `urlAliases` and
+            # does `coalesce(s.canonicalUrl, $cu)`. `urlAliases` is covered by
+            # the `url` branch below, which mirrors the writer's append exactly
+            # (including a same-url write onto a node that carries no aliases).
+            # `canonicalUrl` is writer-derived from the resolved key and never
+            # rides a payload (`_persist_extra_props` drops it — it is in
+            # `_SOURCE_HANDLED`), so no payload key can express it; the
+            # resolver's own adopt-on-touch backfill is a pre-existing,
+            # separately-unrecorded mutation (`source_identity.py`).
+            "canonicalUrl", "urlAliases",
+        }
+        # The fixed-clause keys that DO change on a non-hash-diff write or that
+        # carry the hash-diff itself (`coalesce($x, s.x)` / the `contentHash`
+        # CASE). They are in `_SOURCE_HANDLED` (so `_persist_extra_props`
+        # skips them) but MUST be compared here: an existing item's
+        # `format`/`source_path` update lands live, and `contentHash` is the
+        # gate every other fixed field rides.
+        _fixed_compared = {"format", "source_path", "contentHash"}
+        # The writer's OWN passthrough predicate (`_persist_extra_props`): a
+        # payload key outside this skip-set, with a persistable non-None value,
+        # is what actually lands on the node.
+        _dropped = (proj._META_KEYS | proj._SOURCE_HANDLED
+                    | proj._DOC_RETIRED_KEYS)
+        stored_aliases = stored.get("urlAliases") or []
+        for k, v in payload.items():
+            if k in _fixed_unchanged or v is None:
+                continue
+            if k == "url":
+                # The MERGE key. The writer resolves the inbound spelling to
+                # the ONE canonical node and never rewrites `s.url`; its
+                # ON MATCH appends the RAW spelling to `urlAliases` whenever
+                # that spelling is not already there. So this write changes the
+                # node iff the raw is absent from the aliases — whether or not
+                # it equals `s.url` (P3-1: a node that carries no aliases gains
+                # one even on a same-url write). The earlier test ALSO required
+                # `v != stored["url"]`, which missed exactly that
+                # legacy/partially-adopted node and suppressed a real alias
+                # addition with no record.
+                if v not in stored_aliases:
+                    return False
+                continue
+            if k not in _fixed_compared and (
+                    k in _dropped or not _is_persistable_prop_value(v)):
+                continue
+            prop = self._SOURCE_PAYLOAD_ALIASES.get(k, k)
+            if prop not in stored:
+                # The key is not on the node at all. `_persist_extra_props`
+                # skips ONLY `None`, so an empty string or list IS written and
+                # the node CHANGES. An earlier cut treated `""`/`[]`/`{}` as
+                # "no representation" and returned no-op for them — measured:
+                # a same-hash write with a new `""` extra appended NO record
+                # while the live node gained `{'bar': ''}`, so the rebuild lost
+                # it. That is fail-OPEN toward suppression, the opposite of
+                # this test's declared polarity.
+                return False
+            # Type-AWARE: `True == 1` in Python but not in the graph — see
+            # `_same_journal_value`. A plain `!=` here was the round-2 fail-open.
+            if not self._same_journal_value(stored[prop], v):
+                return False
+        return True
 
     def set_source_tier(self, url: str, tier: str) -> dict:
         """Set (or change) a Source's credibility tier — non-destructive.

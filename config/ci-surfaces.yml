@@ -922,6 +922,31 @@ surfaces:
   # never run.
   - test_source_fts.py
   - test_source_identity.py
+  # #5024 (T6): the `:Source` version transition must be JOURNALLED and
+  # REPEAT-SAFE — a changed `contentHash` writes a `SourceVersioned` record
+  # carrying `previousContentHash`, a no-op re-fetch writes NOTHING, and a
+  # `rebuild_all` reproduces the node field for field. `core` is the arm that
+  # owns the change: `tortoise/projection/entities.py` (where `_upsert_source`
+  # and `_fold_source_versioned` live) selects `core`, per
+  # `python3 tools/ci_selection.py --changed tortoise/projection/entities.py`.
+  # `tortoise/sdk.py` and `tortoise/projection/__init__.py` are SHARED_MODULES
+  # (already the full matrix), so 2 of the 3 changed modules need no separate
+  # arm. **Deliberately NOT dual-registered with `eval`** (contrast
+  # `test_journal_embedding_5004.py` above): this file pins no embedding path,
+  # so an `embeddings.py`-only PR cannot leave a guard here unrun. The
+  # fail-before/pass-after evidence: 12 of the original 21 fail on the unfixed
+  # base and all pass here; the 9 review-round-6 pins (P1-A competing write,
+  # the three P1-B writer-mirror cases, the P1-B hashless-retitle
+  # repeat-safety case, both P2-B cases, the P2-A torn tail, P2-C) each fail
+  # on the unfixed base `b7aef81b4` and pass here; the two review-round-2 pins
+  # (P2-2 the per-call pre-state, P3-1 the alias the writer adds) fail on the
+  # reviewed head `304e8601c` and pass here.
+  # ⛔ `test_a_falsy_non_none_hash_write_is_not_suppressed` is NOT one of the
+  # base-failing pins: it PASSES at `b7aef81b4` in both lanes. It is a FORWARD
+  # guard against a plausible future regression (a no-op predicate that
+  # blanket-skips `contentHash` as "hash-gated"), not fail-before evidence —
+  # do not count it among the pins that fail on the unfixed base.
+  - test_source_rematerialisation_5024.py
   # #5199: the derivation-link version anchor (`sourceVersion` on a derivation
   # `references` link) — `tortoise/projection/edges.py` + `tortoise/projection/entities.py`
   # select the `core` surface, so the guard for the anchor runs with the code it
@@ -3059,6 +3084,7 @@ durations:
   test_provenance_extractedfrom_3263.py: 2.2
   test_rebuild_turn_points_3947.py: 4.5
   test_source_version_extractedfrom_5038.py: 38.5  # #5256: 33 tests; docker lane (#1647 default) — not carve_out-registered; locally measured
+  test_source_rematerialisation_5024.py: 20.0  # #5024: 30 tests (21 + 9 review-round-6 pins), docker FalkorDB; locally measured (11-30s across runs, fleet-contention sensitive)
   test_restore_seq_3902.py: 0.8
   test_retention_promise.py: 2.7
   test_retired_tools.py: 0.2
