@@ -39,13 +39,23 @@ Also:
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/ci_selection.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/ci_selection.py`"
+    )
+
 import argparse
 import ast
 import json
 import math
 import os
 import re
-import sys
 from pathlib import Path
 
 # 1.4.0 (#6135): the fast pool is split into N shards (config `fast_shards`)
@@ -113,6 +123,27 @@ DEFAULT_FAST_SHARDS = 2
 # 26 = a..z is therefore also the hard ceiling on S.
 MAX_FAST_SHARDS = 26
 
+# W37: the CARVE-OUT pool's shard count (`config/ci-surfaces.yml::carve_shards`).
+#
+# WHY IT EXISTS. `test-carve-out` was ONE unsharded job and WAS the CI critical
+# path until W37 sharded it: measured over 23 PR runs and 3 successful main runs
+# (2026-09-30), its work was min 16.0m / p50 16.9m against a median run wall of
+# 18.6m — 91% of the wall. Meanwhile the fast band is already split nine ways,
+# so the wall was `max(9 fast shards, 1 carve-out)`, and the carve-out was the
+# pole in EVERY run examined (`test (b)`, which the objective names, ends at
+# +10.5m; it was never the pole). Sharding it converts that `max` into a
+# comparable term.
+#
+# ABSENCE KEEPS THE CURRENT SHAPE, and this is the one place this key differs
+# from `fast_shards`. There, absence means the historical S=2; here the
+# historical shape is ONE job, so absence means 1 and an unadopted repo is
+# byte-identical to today. A single shard is therefore legal (unlike
+# `fast_shards >= 2`) — removing the key must always be a safe rollback.
+DEFAULT_CARVE_SHARDS = 1
+# Same ceiling as the fast band, for the same reason: labels are positional
+# letters, and the rail's lane-parity subtracts main's names from the PR's.
+MAX_CARVE_SHARDS = 26
+
 # #6135: the per-shard WATCHDOG budget. The watchdog is PER-LEG, so a smaller
 # shard needs a smaller budget — inheriting the old 55m means a hung 6.6-minute
 # shard is detected 8× later than it should be, holding the REQUIRED aggregate
@@ -122,8 +153,16 @@ MAX_FAST_SHARDS = 26
 # budget was hit by a ~30m shard (factor ~1.0 too tight — #798), and 55m for a
 # ~30m shard (factor 1.8) has held since. 2.0 is that factor with a small
 # margin. The FLOOR is 2.9× the largest single fast file (`310.7 s`), so the
-# watchdog can never kill a shard below the #6133 floor; the CEILING keeps the
-# validated 55m if S is ever lowered back toward 2.
+# watchdog can never kill a shard below the #6133 floor.
+#
+# ⛔ 1.8 IS NO LONGER ACCEPTED (#6145). The CEILING can clamp a budget BELOW
+# `WATCHDOG_HEADROOM`, and `watchdog_headroom_issues` now REDS that state —
+# wired into `--integrity`, so the REQUIRED `manifest-integrity` check refuses
+# it. Lowering S back toward 2 is therefore an integrity FAILURE, not the
+# ceiling "keeping the validated 55m"; the remedy is a DELIBERATE ceiling raise
+# or a re-split (see the OVERRIDES line on #6145). The ceiling deliberately
+# stays 55m so the worst-case leg stays inside the job's outer
+# `timeout-minutes` — the invariant REFUSES rather than widening it.
 WATCHDOG_HEADROOM = 2.0
 WATCHDOG_FLOOR_MIN = 15
 WATCHDOG_CEILING_MIN = 55
@@ -178,6 +217,13 @@ SHARED_MODULES = (
     # `tests/test_ci_selection.py::test_every_conftest_module_level_tests_import_is_shared`.
     "tests/_tmpdir_hygiene.py",
     "tests/_embedded.py",
+    # #5049: the verdict contract (`tests/_verdict.py`) is imported at conftest
+    # MODULE level and hands the suite-wide per-test process-global reset to
+    # every surface's tests. It is not a `test_*.py` file, so the manifest never
+    # classifies it; without this entry a change to the contract would select
+    # `core` only and a break it induced in an api/eval/ep test would never run
+    # on the PR that made it (the #1349/#3332/#3910 under-selection class).
+    "tests/_verdict.py",
     "pyproject.toml",
     "requirements.txt",
     ".github/workflows/python-ci.yml",
@@ -366,6 +412,14 @@ SOURCE_PATTERNS = {
                    # (tests/test_ci_selection.py) the moment this branch merged main.
                    "website/404.html",
                    "website/apps/dashboard/public/invite-accept.html",
+                   # The design-partner one-pager. `noindex`, so it is out of the
+                   # #3950 blog guard's scope — but NOT out of the element-id
+                   # uniqueness guard, whose scope is every served document: a
+                   # noindex page is still a page whose own script runs, and
+                   # duplicate ids are invalid in it. Without this entry a PR
+                   # touching only this page selects no surface and the id guard
+                   # never executes on it.
+                   "website/design-partners-intro.html",
                    # The shared href extractor both blog-guard layers call
                    # (tests/test_website_docs_consistency.py here, and
                    # tests/e2e/test_legal_pages.py in the separate `legal-e2e`
@@ -554,15 +608,17 @@ SOURCE_PATTERNS = {
             # false`) and the gate never ran on precisely the PR that can break
             # it. Named here because a SOURCE_PATTERNS match beats the
             # non-python skip. A docs-only hand-edit of the generated file still
-            # skips the matrix by the repo's deliberate docs-PR policy — see
-            # tortoise #4454.
+            # skips THIS matrix by the repo's deliberate docs-PR policy; that
+            # direction is covered instead by the required `docs` job, which runs
+            # `tools/bridge_table.py --check` on every PR (#4454).
             "tools/bridge_table.py",
             # #4282 Phase 0.3: `tools/mcp_rename_table.py` GENERATES
             # `docs/product/mcp-rename-table.md` and `test_mcp_rename_table.py`
             # (registered in `api` + `core`) is the drift gate. Same shape as the
             # 0.1 entry directly above and the same reason: a generator-only edit
             # is swallowed by the flat `tools/` prefix and the gate never runs on
-            # the PR that can break it (#4454 covers a docs-only hand-edit).
+            # the PR that can break it (a docs-only hand-edit is covered by the
+            # required `docs` job's `--check` instead — #4454).
             "tools/mcp_rename_table.py",
             # #4282 Phase 0.3b: `tools/sdk_rename_table.py` GENERATES
             # `docs/product/sdk-rename-table.md`, and `test_sdk_rename_table.py`
@@ -579,8 +635,9 @@ SOURCE_PATTERNS = {
             # (registered in `api` AND `core`) is the drift gate. Same gap as the bridge
             # table above: `tools/` is in NON_PYTHON_PREFIXES, so a generator-only edit
             # selected NO surface and the gate never ran on the PR that can break it.
-            # A docs-only hand-edit of the generated doc still skips the matrix by the
-            # repo's deliberate docs-PR policy (tortoise #4454).
+            # A docs-only hand-edit of the generated doc still skips THIS matrix by the
+            # repo's deliberate docs-PR policy; the required `docs` job runs
+            # `tools/sdk_surface.py --check` on every PR instead (#4454).
             "tools/sdk_surface.py",
             # #5373: `tools/registry_integrity.py` is the fail-closed validator
             # paired with `merge=union` on the two config registries, and
@@ -652,6 +709,17 @@ SOURCE_PATTERNS = {
 CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.py",
              "tortoise/projection/edges.py",
              "tools/tmpdir_sweep.py",
+             # queue_resweep: `tools/` is in NON_PYTHON_PREFIXES, so a
+             # tools/queue_resweep.py-only change was filtered out BEFORE the
+             # "not matched -> core" fallback and took the docs-only early return —
+             # `select(["tools/queue_resweep.py"])` yielded NO surface, so the guard
+             # registered under `core` never ran on the file it guards (the
+             # #1349/#3332/#3616 silent-drop class, and exactly the false "the core
+             # fallback covers it" claim #3261 removed from this file). The CORE_ALSO
+             # entry makes `_selection_relevant()` keep the path, so `core` (and this
+             # tool's own guard) is selected. Pinned by
+             # tests/test_ci_selection.py::test_queue_resweep_tool_change_selects_core_not_tier1.
+             "tools/queue_resweep.py",
              # #6138 review P1: the queue-conflict census owns
              # tests/test_queue_conflict_census.py, which is `core`-registered,
              # but `tools/` is swallowed by NON_PYTHON_PREFIXES and no
@@ -807,6 +875,25 @@ TOOL_CARVEOUTS = (
     # SOURCE_PATTERNS entry matches it, so it lands in the unknown-path branch
     # -> FULL matrix (fail closed) — the safe default for a destructive-ref tool.
     "tools/branch_reaper.py",
+    # #7017: the container-engine probe (tools/engine_probe.py) owns
+    # tests/test_engine_probe.py. Exact same silent-drop class as the two
+    # reaper carve-outs below: the flat "tools/" prefix in
+    # NON_PYTHON_PREFIXES would swallow an engine_probe-only change, `changed`
+    # comes back empty, select() takes the docs-only path, and the probe's
+    # suite never runs on the PR that changes it. No SOURCE_PATTERNS entry
+    # matches it, so it lands in the unknown-path branch -> FULL matrix
+    # (fail closed) — the safe default for the tool that decides whether a
+    # graph failure is a graph failure at all.
+    "tools/engine_probe.py",
+    # #6868: the wedged-CI-run reaper (tools/run_reaper.py) owns
+    # tests/test_run_reaper.py. Exact same silent-drop class as the
+    # branch-reaper carve-out above: the flat "tools/" prefix in
+    # NON_PYTHON_PREFIXES would swallow a reaper-only change, `changed` comes
+    # back empty, select() takes the docs-only path, and the run-reaper's
+    # mutation tests never run on the PR that changes it. No SOURCE_PATTERNS
+    # entry matches it, so it lands in the unknown-path branch -> FULL matrix
+    # (fail closed) — the safe default for a tool that CANCELS CI runs.
+    "tools/run_reaper.py",
     # #2573: the CI embedder gate (tools/embedder_provision.py) owns
     # tests/test_embedder_provision.py. Same silent-drop class as the
     # preflight carve-out above: no SOURCE_PATTERNS entry matches it, so a
@@ -846,6 +933,47 @@ TOOL_CARVEOUTS = (
     # Pinned by
     # test_ci_selection.test_run_with_eval_keys_tool_change_fails_closed_to_full.
     "tools/run-with-eval-keys.sh",
+    # #4503: the edge census/probe (tools/edge_census.py) owns
+    # tests/test_4503_edge_relationship_accounting.py. Same silent-drop class
+    # as every carve-out above: the flat "tools/" prefix in
+    # NON_PYTHON_PREFIXES swallows the path, `changed` comes back empty, and
+    # select() takes the docs-only return (surfaces=[] -> tier-1 smoke) — so
+    # the instrument's own guard tests would never run on the PR that changes
+    # the instrument. Verified live before adding: `--changed-files
+    # tools/edge_census.py` returned `"surfaces": []`. No SOURCE_PATTERNS
+    # entry matches the path, so it lands in the unknown-path branch -> FULL
+    # matrix (fail closed), the same treatment tools/finding_provenance.py and
+    # tools/embedded_evidence.py get. Pinned by
+    # test_ci_selection.test_edge_census_tool_change_fails_closed_to_full.
+    "tools/edge_census.py",
+    # #5050: the measured-durations-map validator (tools/ci_manifest.py) owns
+    # tests/test_ci_manifest.py. Same silent-drop class as the
+    # collision-preflight carve-out above: no SOURCE_PATTERNS entry matches the
+    # path, so a validator-only change is swallowed by the flat "tools/" prefix
+    # in NON_PYTHON_PREFIXES, `changed` comes back empty, and select() takes the
+    # docs-only return — the validator's own verdict-boundary tests would never
+    # run on the PR that changes the validator. Registering
+    # tests/test_ci_manifest.py under `surfaces: core` does NOT cover this: the
+    # early docs-only return bypasses the `matched.add("core")` fallback, so a
+    # tool-only change selects NO surface at all. It lands in the unknown-path
+    # branch -> FULL matrix (fail closed). Pinned by
+    # test_ci_selection.test_ci_manifest_tool_change_fails_closed_to_full.
+    "tools/ci_manifest.py",
+    # #5050: the sole writer of the measured `durations` map (tools/ci_timing.py)
+    # is pinned by the same suites as the validator it feeds:
+    # tests/test_ci_manifest.py holds the `VALUE_FLOOR ==
+    # ci_timing.DURATIONS_VALUE_FLOOR_S` pin and the one-decimal render pin
+    # (`test_the_floor_is_the_writers_own`,
+    # `test_the_writers_precision_is_the_one_this_check_assumes`) — the two
+    # contracts the validator ASSUMES about the writer — and
+    # tests/test_ci_timing.py covers the writer's refresh path. A writer-only
+    # change matches no SOURCE_PATTERNS entry, so without this carve-out the
+    # flat "tools/" prefix swallows it, `changed` comes back empty and select()
+    # takes the docs-only return — a writer drift would merge green and red
+    # `main` with neither suite having run. It lands in the unknown-path branch
+    # -> FULL matrix (fail closed). Pinned by
+    # test_ci_selection.test_ci_timing_tool_change_fails_closed_to_full.
+    "tools/ci_timing.py",
 )
 
 
@@ -919,8 +1047,21 @@ def slow_leg_by_surface(manifest: dict) -> dict[str, set[str]]:
     tests pin the per-surface splits."""
     slow = set(manifest.get("slow_files", []))
     carve = set(manifest.get("carve_out", []))
+    # #6884: the test-slow legs are URI-empty on a tier-2 PR too (python-ci.yml
+    # :1367-1368; :600-602 for the fast job — URI is set only when full==true),
+    # and they build their collect-only input from `slow_selected`. A
+    # `uri_requiring` file in `slow_selected` therefore contributes no tests to
+    # that step, and when it is the leg's ONLY file the collect step exits 5 and
+    # fails unattributably — the same shape as the fast lane, which is what
+    # stranded #6390. Subtracting HERE is single-definition: this function has
+    # exactly one consumer (the tier-2 selection), while `push_legs` builds its
+    # own legs, so the push lane still runs these files (asserted in
+    # tests/test_uri_requiring_selection.py). No file is in both lanes today;
+    # the guard test pins that, and handles a future relocation rather than
+    # forbidding it.
+    uri_requiring = uri_requiring_files(manifest)
     by_surface: dict[str, set[str]] = {}
-    for f in sorted(slow - carve):
+    for f in sorted(slow - carve - uri_requiring):
         by_surface.setdefault(classify_test_file(f, manifest), set()).add(f)
     return by_surface
 
@@ -1004,7 +1145,16 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
     if not changed:
         # docs-only PR -> tier 1 (curated smoke) only; no slow/carve surface
         # is touched, so both diff-gated legs skip (#2147/#2148).
-        return {"surfaces": [], "full": False, "test_files": sorted(tier1),
+        # #6884: the `uri_requiring` subtraction applies HERE TOO. This returns
+        # before the tier-2 subtraction below, and a URI-less leg cannot run a
+        # module-skipping file no matter which exit selected it. The tier-1
+        # smoke set contains none today, so this is behaviour-neutral — it keeps
+        # the rule in ONE place instead of depending on that staying true, and
+        # the guard test pins it by injecting one into tier-1 (a plain arm on a
+        # docs-only vector could not fail: with tier1 ∩ uri_requiring == []
+        # the output is byte-identical with and without the subtraction).
+        return {"surfaces": [], "full": False,
+                "test_files": sorted(set(tier1) - uri_requiring_files(manifest)),
                 "slow_files": sorted(slow),
                 "slow_run": False, "carve_out_run": False,
                 "slow_selected": []}
@@ -1058,11 +1208,34 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
     files -= slow  # #1371: slow files never run in the fast gate
     # #1988: carve-out (embedded-only) files run in the dedicated carve-out
     # job — on tier-2 PR legs the fast-matrix process runs everything embedded
-    # (URI unset) and exhausts its redislite spawn budget before the late
+    # (URI empty) and exhausts its redislite spawn budget before the late
     # embedded suites (RedisLiteServerStartError); the carve-out job gives
     # them a fresh process. The carve-out job now runs on PRs too.
     carve = set(manifest.get("carve_out", []))
     files -= carve
+    # #6884: the MIRROR of the carve-out subtraction above. A `carve_out` file
+    # cannot run in a URI-SET leg; these cannot run in a URI-EMPTY one, and the
+    # tier-2 PR legs ARE URI-empty BY DESIGN — both the URI and EXPECT_URI are
+    # emptied, which is what keeps the E2E-6 tripwire INERT on the tier-2 shape
+    # (it arms only when full==true, where both are set; python-ci.yml:600-602
+    # and 1367-1368; epic #1647 Task 9, cycle-6 P2-8), so 'provision the URI' is
+    # a reversal of a recorded
+    # decision, not an available fix. Handed to such a leg each of these
+    # module-skips at import, so it collects ZERO tests and `pytest
+    # --collect-only` exits 5; the fail-closed manifest guard then kills the leg
+    # BEFORE any test runs, and because that is outside the test step there is
+    # no `FAILED <nodeid>` for the merge rail to attribute — it refuses for want
+    # of a failure identity (the #6798 shape; #6390 was clean-reviewed AT HEAD,
+    # `mergeable=true`, `behind=0`, and still unlandable). A shard left with no
+    # files hits the empty-shard branch at python-ci.yml:652 ('no selected files
+    # for this shard - no manifest (guard skips)') and greys out green having run
+    # nothing — honest only because a tier-2 selection cannot get that small
+    # (`tier1` is 31 files against `fast_shards: 9`), which is a margin, not a
+    # guarantee this comment should claim.
+    #
+    # Tier-2 ONLY: the `full` path returned above and keeps these files, because
+    # a full leg HAS the URI.
+    files -= uri_requiring_files(manifest)
     # #2147/#2148 tier-2: test-slow runs the slow files owned by the matched
     # surfaces (slow_selected — carve-out files excluded: they run in the
     # carve-out job when it triggers, never the docker slow legs); test-carve-
@@ -1288,6 +1461,31 @@ def on_demand_files(manifest: dict) -> set[str]:
     return set(manifest.get("on_demand") or [])
 
 
+def uri_requiring_files(manifest: dict) -> set[str]:
+    """#6884: modules that cannot COLLECT in a URI-EMPTY leg.
+
+    Each module-skips at import when `TORTOISE_DB_URI` is empty — present and
+    empty, the shape the tier-2 leg actually sets — so in a
+    tier-2 PR leg (URI-empty by design) it collects ZERO tests and
+    `pytest --collect-only` exits 5 — the fail-closed manifest guard then kills
+    the leg before any test runs, with no `FAILED <nodeid>` for the merge rail
+    to attribute. Read through ONE definition, like `on_demand_files`: the
+    subtraction happens on two tier-2 paths (the docs-only early return and the
+    main surface path) plus the slow lane, and three independent
+    `manifest.get("uri_requiring", [])` reads are three places for the lane to
+    be half-adopted.
+
+    The `or []` is REQUIRED, not defensive: `uri_requiring:` with no entries
+    parses to None, not [] — YAML's empty value — and `set(None)` raises
+    TypeError in the `changes` job, i.e. on the single path all PR CI goes
+    through. That is reachable at the lane's terminal state: the day the last
+    URI-gated module is fixed, a lane empties the list. (Same trap and same fix
+    as `on_demand_files`; the None form is pinned by
+    tests/test_uri_requiring_selection.py.)
+    """
+    return set(manifest.get("uri_requiring") or [])
+
+
 def fast_pool(manifest: dict) -> list[str]:
     """#3400: the full-matrix fast pool — every manifest-classified file that
     is not slow, env-broken, or carve-out. Single source of truth for the
@@ -1355,6 +1553,100 @@ def fast_shard_issues(manifest: dict) -> list[str]:
     return []
 
 
+def carve_shard_count(manifest: dict) -> int:
+    """W37: the carve-out pool's shard count, floored to 1 (the unsharded
+    job) when the declaration is absent or malformed. Same fail-safe polarity
+    as `fast_shard_count` — an unreadable count falls back to the SHAPE THAT
+    EXISTS TODAY, never to a number nobody chose."""
+    raw = manifest.get("carve_shards", DEFAULT_CARVE_SHARDS)
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return DEFAULT_CARVE_SHARDS
+    if raw < 1 or raw > MAX_CARVE_SHARDS:
+        return DEFAULT_CARVE_SHARDS
+    return raw
+
+
+def carve_shard_issues(manifest: dict) -> list[str]:
+    """W37: fail-closed validation of the `carve_shards` declaration.
+
+    `fast_shards` demands >= 2 because a shard pool of one is not a pool. Here
+    1 is MEANINGFUL: it is the unsharded job this repo ran until now, and it is
+    what removing the key must give back, so a rollback is a key deletion rather
+    than a rewrite. Absence is 'not adopted'; an EXPLICIT null is a typo, not an
+    absence — same distinction, and the same reason, as `fast_shard_issues`.
+    """
+    if "carve_shards" not in manifest:
+        return []
+    raw = manifest.get("carve_shards")
+    if raw is None:
+        return ["carve_shards is explicitly null — remove the key to mean "
+                "'one unsharded job', or set an integer in [1, "
+                f"{MAX_CARVE_SHARDS}] (a null silently drops the pool to 1)"]
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return [f"carve_shards must be an integer, got {raw!r}"]
+    if raw < 1:
+        return [f"carve_shards must be >= 1 (1 is the unsharded job; 0 would "
+                f"delete the lane), got {raw}"]
+    if raw > MAX_CARVE_SHARDS:
+        return [f"carve_shards must be <= {MAX_CARVE_SHARDS} (the a..z label "
+                f"ceiling), got {raw}"]
+    return []
+
+
+def carve_shard_entries(manifest: dict) -> list[dict]:
+    """W37: the carve-out set packed into `carve_shards` LPT bins.
+
+    Uses `build_shard_entries`, the SAME pack the tier-2 fast lane uses
+    (`split_fast_gate` + `shard_watchdog_minutes`) — the carve-out gets the
+    established mechanism rather than a second one.
+
+    ⛔ THE FIRST SHARD'S JOB NAME IS THE BARE `test-carve-out`, and that is
+    load-bearing, not cosmetic. The merge rail's lane-parity subtracts main's
+    job names from the PR's, so an unadopted main holds `test-carve-out` and a
+    PR that renamed it to `test-carve-out (a)` would be missing one of main's
+    names and refuse EVERY merge until it landed. Keeping the bare name on
+    shard 0 (and `(b)`, `(c)`, … on the rest) makes the shard set a strict
+    SUPERSET of main's names — the same property `fast_shards` relies on when
+    it keeps `a` and `b`.
+    """
+    count = carve_shard_count(manifest)
+    carve = sorted(carve_out_files(manifest))
+    entries = build_shard_entries(carve, _durations_map(manifest), count)
+    labels = shard_labels(len(entries))
+    for i, e in enumerate(entries):
+        # `suffix` is the workflow's `name:` tail: '' for shard 0 (so the check
+        # is exactly `test-carve-out`), ' (b)'/ ' (c)' after that.
+        e["suffix"] = "" if i == 0 else f" ({labels[i]})"
+        # `label` is the ARTIFACT-name tail, and it must NOT be `suffix`: suffix
+        # carries a leading space and parentheses, and `github.job` is the BASE
+        # job id for every matrix leg, so an upload named `pytest-log-${{ github.job }}`
+        # is the SAME name for every shard — upload-artifact@v4 then 409s and,
+        # because the step is continue-on-error, the shard logs vanish silently
+        # (#6263 pins exactly this).
+        e["label"] = labels[i]
+    return entries
+
+
+def carve_matrix_include(entries: list[dict]) -> dict:
+    """W37: the GHA matrix the `test-carve-out` job expands.
+
+    Emitted COMPLETE, like `fast_matrix_include`: the shard set is the
+    selector's contract, never a workflow literal. `files` is SPACE-JOINED
+    (the workflow's `for f in ${{ matrix.files }}` shape) and, like the fast
+    band, the names are BARE (no `.py`) — the workflow re-adds the extension.
+    """
+    return {"include": [
+        {
+            "suffix": e["suffix"],
+            # Distinct per leg, and filesystem-safe — the artifact name tail.
+            "label": e["label"],
+            "files": " ".join(e["files"]),
+            "watchdog_minutes": e["watchdog_minutes"],
+        }
+        for e in entries
+    ]}
+
+
 def shard_labels(count: int) -> list[str]:
     """#6135: positional shard labels `a`, `b`, `c`, …
 
@@ -1374,10 +1666,16 @@ def shard_watchdog_minutes(est_seconds: float) -> int:
 
     Correctness, not tuning: the watchdog is per-leg, so inheriting the old
     55m lets a hung ~7-minute shard hold the REQUIRED aggregate red for 55
-    minutes. `WATCHDOG_HEADROOM` is the factor the old 55m budget already
-    validated (55m for a ~30m shard), the floor keeps a small shard above the
-    #6133 floor (the largest single file), and the ceiling keeps the validated
-    budget if S is lowered again.
+    minutes. The factor behind the budget and both clamps are owned by the
+    constants block above (which carries their provenance and the #6145 rule) —
+    this function only applies them; the floor keeps a small shard above the
+    #6133 floor (the largest single file).
+
+    ⛔ The CEILING does NOT "keep the validated budget" (#6145): it deliberately
+    stays 55m so the worst-case leg fits the job's outer `timeout-minutes`, and a
+    clamp that drops the budget below `WATCHDOG_HEADROOM` is an integrity FAILURE
+    (`watchdog_headroom_issues`), not a retained one. The remedy is a deliberate
+    ceiling raise or a re-split — see the OVERRIDES record on #6145.
     """
     try:
         minutes = float(est_seconds) / 60.0
@@ -1393,6 +1691,107 @@ def shard_watchdog_minutes(est_seconds: float) -> int:
     return int(min(max(raw, WATCHDOG_FLOOR_MIN), WATCHDOG_CEILING_MIN))
 
 
+def watchdog_headroom(est_seconds: float, watchdog_minutes: int) -> float:
+    """#6145: the headroom the EMITTED budget actually retains (`budget / est`).
+
+    `shard_watchdog_minutes()` builds the budget from `WATCHDOG_HEADROOM`, but the
+    FLOOR and CEILING clamps can deliver a different multiple than the one it was
+    built from: upward at the floor (intended — the floor exists to clear the
+    #6133 single-file time) and DOWNWARD at the ceiling, which is the hazard.
+
+    Returns 0.0 for an unusable estimate: the budget is then the floor, and
+    "headroom over an unknown estimate" is not a number anyone should act on.
+    """
+    try:
+        minutes = float(est_seconds) / 60.0
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(minutes) or minutes <= 0:
+        return 0.0
+    return float(watchdog_minutes) / minutes
+
+
+def watchdog_headroom_issues(manifest: dict) -> list[str]:
+    """#6145 / #4819 option 2: NAMED issues where a shard's emitted budget retains
+    LESS headroom than the factor the budget is built from.
+
+    This closes the CEILING half of the gap #4819 recorded and nobody checked —
+    "the watchdog value and the shard count: nothing checks that [they are
+    consistent]". A budget that silently drifts TIGHTER than the factor it is
+    built from is the state in which a shard that fits its own declared estimate
+    is killed, and it is reachable today: at a 30.62-minute estimate
+    `ceil(30.62 * 2) = 62` is clamped to the 55-minute ceiling — an EFFECTIVE
+    1.80x — which the ceiling's own comment treated as "the validated budget"
+    rather than as a breach, and which
+    `tests/test_ci_selection.py::test_watchdog_is_per_shard_and_scales_with_the_shard`
+    asserts without ever computing the margin.
+
+    ⛔ SCOPE — ONE direction, and it is not the direction the observed kills came
+    from. The two axes are independent and only ONE is visible here:
+
+    - What the check sees: the DECLARED `est_seconds` and the emitted budget. It
+      fires iff the ceiling clamped the budget below that factor AT THE
+      PUBLISHED PRECISION — `round(budget / est_min, 2) < 2.0`, i.e. a declared
+      estimate above ~27.57 min. A shard whose DECLARED estimate exceeds that is
+      flagged even when the estimate is perfectly accurate, and one whose
+      declared estimate stays within it passes even when the estimate is far too
+      low. A clamp inside the 2-dp quantum (est in ~(27.500, 27.569] min) passes
+      by design, because the value the matrix publishes reads a compliant 2.0.
+    - What it cannot see: the ACTUAL runtime. The observed kills are the other
+      axis — a shard that ran ~2.11x its declared cost (the shape #6145
+      measured) — and a shard like that passes if its DECLARED value is in
+      range. So a green `manifest-integrity` means "the emitted budgets are
+      consistent with their own declared factors", NOT "the watchdog sizing is
+      sound", and this change covers neither the kills nor the runner-pool
+      capacity deficit behind them (#5215 / #6792).
+
+    The floor direction is intentionally not an issue: the floor binding is the
+    normal, intended case (it clears the #6133 single-file time), not a breach.
+
+    Fail-closed and NAMED, so a shard that cannot fit its budget is flagged at
+    SELECTION time instead of being killed at run time (#6145's sizing contract:
+    "a shard unable to fit is flagged rather than silently killed"). The estimate
+    and the budget therefore move together: raising an estimate (or lowering the
+    shard count) past the ceiling's reach REDS this check, and the remedy is a
+    deliberate ceiling raise or a re-split — never a silent kill. "Fail-closed"
+    includes the extreme: an estimate so large that the ratio rounds to `0.00`
+    still fires, because the SENTINEL is read from the UNROUNDED value. A `0.00`
+    on a PASSING row therefore means one thing only — that the leg has no usable
+    estimate (an empty leg) — and never that its margin was too small to report.
+    """
+    issues = []
+    for s in push_legs(manifest)["shards"]:
+        budget = s["watchdog_minutes"]
+        est = s["est_seconds"]
+        # #6145: decide on the SAME value the matrix PUBLISHES (2 dp, the same
+        # rounding the emitters apply). A gate comparing an exact ratio while
+        # emitting a rounded one would refuse a manifest whose own emitted row
+        # read a compliant 2.0 — and its message would say "2.00x, below the
+        # 2.0x", contradicting itself at exactly the boundary this check exists
+        # to police. Decision, message and emission are therefore ONE value; the
+        # cost is that a sub-0.005 excursion is inside the reporting quantum.
+        #
+        # The SENTINEL test reads the UNROUNDED value. `raw == 0.0` is
+        # `watchdog_headroom`'s "no usable estimate" answer (est <= 0, or a
+        # non-finite one), and it is NOT the same thing as a genuine ratio small
+        # enough to round to 0.00: testing the ROUNDED value for truthiness would
+        # FAIL OPEN on an estimate large enough to collapse the ratio onto the
+        # sentinel — the guard would skip the very leg it exists to name, and
+        # would publish `0.00` on a row it passed.
+        raw = watchdog_headroom(est, budget)
+        headroom = round(raw, 2)
+        if raw and headroom < WATCHDOG_HEADROOM:
+            issues.append(
+                f"shard {s['name']}: its emitted budget retains "
+                f"{headroom:.2f}x, below the {WATCHDOG_HEADROOM:.1f}x it is built "
+                f"from — the shard may still fit the {budget}m wall, but the "
+                f"budget no longer holds that factor (est={est:.1f}s = "
+                f"{est / 60.0:.2f} min; the {WATCHDOG_CEILING_MIN}m ceiling "
+                f"clamped it). Raise the ceiling deliberately or re-split the "
+                f"shards (#6145/#4819)")
+    return issues
+
+
 def push_legs(manifest: dict) -> dict:
     """#1472/#6135: partition every manifest-classified file into exactly one
     push leg (fast shards / slow / env_broken / carve_out), duration-balanced
@@ -1406,8 +1805,10 @@ def push_legs(manifest: dict) -> dict:
     leg and emitted as their own leg (the URI-unset carve-out job's file list).
 
     Each shard entry carries its `est_seconds` (the LPT bin weight, the
-    declared test time) and the `watchdog_minutes` derived from it — the
-    per-leg budget is a property of the SHARD, not a workflow literal.
+    declared test time), the `watchdog_minutes` derived from it, and the
+    `watchdog_headroom` that budget actually retains relative to that estimate
+    (#6145) — the per-leg budget is a property of the SHARD, not a workflow
+    literal.
     """
     slow = set(manifest.get("slow_files", []))
     carve_out = carve_out_files(manifest)
@@ -1435,9 +1836,18 @@ def push_legs(manifest: dict) -> dict:
         names = [f[len("tests/"):].replace(".py", "") for f in bin_files]
         names += extras[i::len(labels)]
         est = sum(_duration_weight(durations.get(f + ".py")) for f in names)
+        # #6145: derive the budget from the ROUNDED estimate — the value the
+        # matrix publishes — so the estimate, the budget and the emitted
+        # headroom are mutually consistent. The builder and the integrity check
+        # must not read the same quantity at two different precisions; that
+        # mismatch is how a boundary value slips through the gate, and the
+        # ceiling boundary is exactly what the gate polices.
+        est = round(est, 1)
+        budget = shard_watchdog_minutes(est)
         shards.append({"name": label, "files": sorted(names),
-                       "est_seconds": round(est, 1),
-                       "watchdog_minutes": shard_watchdog_minutes(est)})
+                       "est_seconds": est,
+                       "watchdog_minutes": budget,
+                       "watchdog_headroom": round(watchdog_headroom(est, budget), 2)})
     strip = lambda xs: sorted(x.replace(".py", "") for x in xs)  # noqa: E731
     return {"shards": shards,
             # Epic #1647 Task 9: slow carve-out files (test_reaper et al.)
@@ -1445,6 +1855,15 @@ def push_legs(manifest: dict) -> dict:
             "slow": strip(slow - carve_out),
             "env_broken": sorted(ENV_BROKEN_FILES),
             "carve_out": strip(carve_out),
+            # W37: the same set, packed. `carve_out` is KEPT above because the
+            # `changes` job publishes it as its `carve_out` output and several
+            # pins read this emitted key; `leg_coverage_issues` enforces the
+            # coverage contract over the same set, read from the manifest rather
+            # than from this leg. The partition itself — the shards must cover
+            # `carve_out` exactly, never re-derive it — is pinned by
+            # `tests/test_ci_selection.py::test_carve_out_matrix_partitions_the_leg`;
+            # no check in THIS module enforces it.
+            "carve_shards": carve_shard_entries(manifest),
             # Not a push leg: emitted so leg_coverage_issues() can account for
             # the file. Nothing in python-ci.yml consumes this key — that is
             # the POINT of the lane.
@@ -1462,13 +1881,16 @@ def all_shard_files(legs: dict) -> list[str]:
 def build_shard_entries(files: list[str], durations: dict,
                         shards: int) -> list[dict]:
     """#6135: an LPT pack of `files` into `shards` labelled entries, each
-    carrying its packed estimate and the per-shard watchdog derived from it.
+    carrying its packed estimate, the per-shard watchdog derived from it, and
+    the headroom that budget retains (#6145).
 
-    Used by the tier-2 `--split` path. `push_legs()` inlines the same pack (it
-    must round-robin `push_extra` across the shards in the same pass), so the
-    shared seam that keeps the two lanes' shard budgets in agreement is
-    `shard_watchdog_minutes()`, NOT this function — editing the packing here
-    changes only the tier-2 lane.
+    Used by the tier-2 `--split` path AND by `carve_shard_entries()` (the W37
+    carve-out lane, which `push_legs()` routes through). `push_legs()` itself
+    inlines the same pack for the fast shards (it must round-robin `push_extra`
+    across the shards in the same pass), so the shared seam that keeps every
+    lane's shard budgets in agreement is `shard_watchdog_minutes()`, NOT this
+    function — but editing the packing here DOES change both the tier-2 `--split`
+    lane and the carve-out lane, not the fast shards.
     """
     bins = split_fast_gate(files, durations, shards=shards)
     labels = shard_labels(len(bins))
@@ -1478,9 +1900,12 @@ def build_shard_entries(files: list[str], durations: dict,
         names = sorted((f[len("tests/"):] if f.startswith("tests/") else f)
                        .replace(".py", "") for f in bin_files)
         est = sum(_duration_weight(durations.get(n + ".py")) for n in names)
+        est = round(est, 1)  # #6145: the budget follows the published estimate
+        budget = shard_watchdog_minutes(est)
         entries.append({"name": label, "files": names,
-                        "est_seconds": round(est, 1),
-                        "watchdog_minutes": shard_watchdog_minutes(est)})
+                        "est_seconds": est,
+                        "watchdog_minutes": budget,
+                        "watchdog_headroom": round(watchdog_headroom(est, budget), 2)})
     return entries
 
 
@@ -1495,10 +1920,19 @@ def fast_matrix_include(shards: list[dict]) -> dict:
     """
     include = []
     for i, s in enumerate(shards):
+        # #6145: carry the headroom alongside the budget so the margin a leg was
+        # actually given is VISIBLE in the matrix — the ceiling can silently
+        # deliver less than the factor the budget was built from, and an
+        # implicit margin cannot be audited.
+        headroom = s.get("watchdog_headroom")
+        if headroom is None:
+            headroom = watchdog_headroom(s.get("est_seconds", 0.0),
+                                         s["watchdog_minutes"])
         include.append({
             "half": s["name"],
             "files": " ".join(s["files"]),
             "watchdog_minutes": s["watchdog_minutes"],
+            "watchdog_headroom": round(float(headroom), 2),
             "canary_producer": i == len(shards) - 1,
         })
     return {"include": include}
@@ -1735,7 +2169,13 @@ def workflow_halves_issues(manifest: dict, halves: dict[str, list[str]],
         # measured map) and this is the only check that catches it —
         # `leg_coverage_issues()` and `fast_files_absent_from_halves()` both
         # pass when one half is empty.
-        ratio = float("inf") if lo <= 0 else hi / lo
+        # #6145, same root as `watchdog_headroom_issues`: decide at the
+        # precision the message PRINTS. Comparing the exact ratio and then
+        # rendering both operands at 2 dp let a fire inside (1.25, 1.255) print
+        # "ratio 1.25x, tolerance 1.25x" — a diagnosis that reads as compliant
+        # while the gate refuses. Decision and message are one value; the cost
+        # is that a sub-0.005 excursion is inside the reporting quantum.
+        ratio = float("inf") if lo <= 0 else round(hi / lo, 2)
         if lo <= 0 or ratio > HALF_DURATION_IMBALANCE_RATIO:
             issues.append(
                 f"matrix halves duration-imbalanced: "
@@ -2713,6 +3153,127 @@ def render_surface_audit(report: dict) -> str:
     return NL.join(lines)
 
 
+def _ci_manifest_module():
+    """The ``tools.ci_manifest`` module, reusing an already-loaded copy.
+
+    ``ci_manifest`` imports this module back for the manifest helpers, so the
+    import is lazy and must not create a second copy under a different name
+    (which would split module state under pytest). The RUNNING module is probed
+    FIRST: ``python3 tools/ci_manifest.py`` executes that file as ``__main__``,
+    which is under neither ``tools.ci_manifest`` nor ``ci_manifest``, so a
+    name-only lookup imported a SECOND copy of the same file.
+    """
+    import sys as _sys
+    main = _sys.modules.get("__main__")
+    if main is not None and hasattr(main, "check"):
+        _file = getattr(main, "__file__", None)
+        if _file:
+            try:
+                if Path(_file).resolve() == (REPO / "tools" / "ci_manifest.py").resolve():
+                    return main
+            except OSError:  # pragma: no cover - defensive
+                pass
+    for _name in ("tools.ci_manifest", "ci_manifest"):
+        mod = _sys.modules.get(_name)
+        if mod is not None and hasattr(mod, "check"):
+            return mod
+    for path in (str(REPO), str(REPO / "tools")):
+        if path not in _sys.path:
+            _sys.path.insert(0, path)
+    try:
+        from tools import ci_manifest as mod
+    except ImportError:  # pragma: no cover - module shipped with the repo
+        import ci_manifest as mod
+    return mod
+
+
+def _manifest_contract_issues(manifest: dict) -> list[str]:
+    """#5050: the measured-durations-map contract, as RED issues only.
+
+    Delegated to ``tools/ci_manifest.py`` so the map's checks live in ONE place
+    and cannot be half-wired: this call replaces the three direct
+    ``duration_issues``/``leg_coverage_issues``/``duration_coverage_issues``
+    calls that used to sit in the ``--integrity`` composition, and adds the
+    plausibility/freshness checks the validator contributes (any weight the
+    writer could not have rendered — sub-floor, finer precision, or negative —
+    a non-empty map whose every weight is the `0.0` sentinel, and a stale
+    capture date).
+
+    `ci_manifest.map_issues` also carries main's TWO newer manifest checks —
+    `fast_shard_issues` (#6135, the top-level `fast_shards` declaration) and
+    `duplicate_entries` (#2913/#5373, the same-surface `merge=union` gate) —
+    because they landed beside this change and the union of the two pipelines
+    must not drop either. Composing them here keeps the branch's invariant
+    (every check reachable from ONE place) while keeping main's coverage.
+
+    An ImportError is reported as an issue, never swallowed: returning ``[]``
+    would leave ``--integrity`` GREEN with none of these checks having run —
+    the "silent omission with every gate green" class they exist to kill.
+
+    The validator's UNKNOWN verdict is printed as a NOTICE rather than added to
+    ``problems`` — for every reason EXCEPT the one observed defect below. The
+    states are genuinely different: a RED map is observed to be wrong, while
+    UNKNOWN means the map's fidelity could not be observed. The notice keeps
+    the genuinely-UNKNOWN cases visible instead of silent and preserves this
+    gate's documented polarity (an absent map must not hard-fail a repo that
+    never adopted it; pinned by
+    ``test_null_or_non_mapping_durations_reports_instead_of_tracebacking``):
+    failing on absence would red ``manifest-integrity`` repo-wide until a weekly
+    data refresh landed — refusing honest merges for a state no lane owns.
+
+    ABSENCE ONLY is softened, and absence is the KEY'S. A
+    ``durations_captured_at`` that is PRESENT but unparseable is a MALFORMED
+    manifest value — an OBSERVED defect — and is added to ``problems`` (RED).
+    The predicate is structural: ``durations_captured_at not in manifest`` is
+    the sole non-gating case; otherwise ``ci_manifest._parse_captured_at``
+    decides, and a ``None`` verdict there is RED. So ``""``, an explicit
+    ``null``, ``"   "``, ``"not-a-date"``, ``0``, ``[]`` and ``{}`` are ALL
+    red, while a MISSING key stays the notice. Softening any present
+    unparseable value would invert fail-closed: a stale-but-parseable stamp is
+    RED, so degrading that same value to ``'not-a-date'`` would turn exit 1
+    into exit 0 — strictly worse data, strictly better verdict — and a
+    one-character typo would silently disable the staleness control at this,
+    the only CI-invoked, entry point. The strict exit-2 verdict for the
+    genuinely-UNKNOWN states lives in ``tools/ci_manifest.py``, which no
+    workflow invokes yet: this enforcing entry point exits 0 on an ABSENT
+    stamp until #6091 lets a refresh carry a real date. The promotion is
+    decided and worded in ONE place — ``ci_manifest.unparseable_stamp_issue`` —
+    so this gate and ``ci_timing.integrity_problems`` cannot disagree.
+    """
+    try:
+        module = _ci_manifest_module()
+        red, unknown = module.check(manifest)
+    except ImportError as exc:  # pragma: no cover - module shipped with the repo
+        return [
+            "the #5050 durations-map validator (tools/ci_manifest.py) could "
+            f"not be imported — the map's value/coverage/partition/staleness "
+            f"checks DID NOT RUN: {exc}"
+        ]
+    # #6243 review cycle 3: the promotion is STRUCTURAL. `unparseable_stamp_issue`
+    # decides from the PARSER's verdict plus the KEY's presence — never a
+    # hand-rolled value tuple (which exempted `""` and an explicit `null`, so a
+    # blanked stamp read as absence and exited 0 while the same stale value
+    # exited 1), and never a substring of another module's reason string (which
+    # a reword silently disabled). It is computed FIRST, because it also decides
+    # which UNKNOWN reasons stay non-gating.
+    stamp_issue = module.unparseable_stamp_issue(manifest)
+    promoted: set[str] = set()
+    if stamp_issue is not None:
+        red = [*red, stamp_issue]
+        # One condition must not be reported as BOTH "not gating this run" and
+        # RED, and an OBSERVED defect must not travel the soft channel.
+        # `staleness` owns the stamp's reason, so it names exactly the ones this
+        # promotion replaces — by IDENTITY, not by their wording. (An explicit
+        # `null` reaches `staleness`'s absent branch, so that reason is
+        # suppressed here too; the missing-key case never promotes.)
+        promoted = set(module.staleness(manifest)[1])
+    for reason in unknown:
+        if reason in promoted:
+            continue
+        print(f"⚠ durations map UNKNOWN (not gating this run): {reason}")
+    return red
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--changed-files", default="", help="newline-separated changed files")
@@ -2739,16 +3300,34 @@ def main() -> int:
 
     if args.integrity:
         missing = integrity(manifest)
-        # #3407 review P1: `duration_issues` must run BEFORE `leg_coverage_issues`.
-        # The latter calls `push_legs()` -> `split_fast_gate()`, so a malformed
+        # #3407 review P1: `duration_issues` must run BEFORE `leg_coverage_issues`
+        # — the latter calls `push_legs()` -> `split_fast_gate()`, so a malformed
         # durations value used to raise inside the packer before the check that
-        # names it had run — fail-closed, but with no diagnosis. (Belt and
-        # braces: `_duration_weight` also coerces, so the packer can no longer
-        # raise at all.)
+        # names it had run (fail-closed, but with no diagnosis; `_duration_weight`
+        # now coerces as well, so the packer cannot raise at all). That order is
+        # preserved inside `ci_manifest.map_issues`, which owns the composition
+        # as of #5050: the map's checks (`duration_issues`, `leg_coverage_issues`,
+        # `duration_coverage_issues`), main's two newer manifest checks
+        # (`fast_shard_issues` for the top-level `fast_shards` declaration and
+        # `duplicate_entries` for the same-surface `merge=union` gate — both
+        # landed beside this one while it was open, so BOTH were folded into the
+        # same one place rather than being re-added here), plus the
+        # plausibility/freshness checks the validator adds (any weight the writer
+        # could not have rendered — sub-floor, finer precision, or negative — a
+        # non-empty map whose every weight is the `0.0` sentinel, and a stale
+        # capture date) are called from ONE place, so they cannot be half-wired
+        # into one entry point and missing from the other.
+        #
+        # `watchdog_headroom_issues` is the EXCEPTION, and deliberately composed
+        # here instead: `ci_manifest` does not own it (main added it after this
+        # validator was cut, and `ci_manifest.map_issues` composes only the five
+        # above). It is re-added at this call site so the union of the two
+        # pipelines drops neither — the same rule the two folded-in checks
+        # followed. Both entry points compose it, so it stays single-sourced.
         problems = missing + slow_file_issues(manifest) \
-            + fast_shard_issues(manifest) \
-            + duration_issues(manifest) + leg_coverage_issues(manifest) \
-            + duration_coverage_issues(manifest) + duplicate_entries(manifest)
+            + _manifest_contract_issues(manifest) \
+            + carve_shard_issues(manifest) \
+            + watchdog_headroom_issues(manifest)
         # #1472: the matrix must come from the selector derivation — when it
         # does, the #1266 halves-parse tie check is
         # subsumed (the derivation guarantees no slow leaks / dupes / dead
@@ -2804,6 +3383,7 @@ def main() -> int:
             "fast_matrix": fast_matrix_include(legs["shards"]),
             "shards": legs["shards"],
             "carve_out": legs["carve_out"],
+            "carve_matrix": carve_matrix_include(legs["carve_shards"]),
         }))
         return 0
 

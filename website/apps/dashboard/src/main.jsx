@@ -13,7 +13,7 @@ import { errorMessage, headerUpgradeEligible, nudgeRoute, shouldNudgeUpgrade } f
 // card, the usage bar, and the at/near-limit nudge). Pure, node --test
 // unit-tested (nodeUsage.test.js).
 import { nextUpgradePlan, nodeBarColor, nodeNudge, nodeUsage, nodeUsageText } from './nodeUsage.js'
-import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
+import { CANONICAL_MCP_URL, CAPTURE_OPT_IN_LINE, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_REQUIRES_OPT_IN, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
 // #4880/#4365: the wizard's agent-facing copy is a RENDERED value the guards
 // assert — main.jsx is JSX and cannot be imported by `node --test`, so parsing
 // it as source is the mechanism that produced five false greens.
@@ -530,7 +530,7 @@ function SettingsTab(props) {
             the deep link from the Overview empty state moves focus here
             (WCAG 2.4.3 / 2.4.11) and scroll-margin-top keeps it clear. */}
         <h3 id="settings-memory-heading" tabIndex={-1}>Memory sources</h3>
-        <p className="dim small">Choose what Tortoise remembers — sources you switch on index to this Organization's graph; session recording is on by default and can be turned off any time.</p>
+        <p className="dim small">Choose what Tortoise remembers — sources you switch on index to this Organization's graph. Session recording is permission for this Organization: it is on unless you switch it off, but each machine's Claude Code, Codex or Cursor hooks still opt in separately (<code>{CAPTURE_OPT_IN_LINE}</code>) before they file anything — on a Pi machine, installing the extension is the opt-in. Turning this on grants the permission; it is not the switch.</p>
         <MemorySources {...memorySourcesProps} />
       </section>
 
@@ -541,7 +541,7 @@ function SettingsTab(props) {
       <section className="settings-home" aria-labelledby="settings-capture-heading">
         <h3 id="settings-capture-heading">Captured sessions</h3>
         <p className="dim small">
-          When session recording is on, sessions from tools with capture installed are filed to this Organization as memory sources — extraction of those captures into memory is controlled by the toggle in Memory sources.
+          When session recording is on, sessions from machines that opted in — Claude Code, Codex and Cursor via <code>{CAPTURE_OPT_IN_LINE}</code>, or a Pi machine with the extension installed — are filed to this Organization as memory sources; extraction of those captures into memory is controlled by the toggle in Memory sources.
         </p>
         {/* #4258: the extraction-off state is honest on this home too — a row
             reading "0 extracted" must be distinguishable from a failure or a
@@ -7937,18 +7937,24 @@ function claimIntentInFlight() {
                       {isBuildFork ? (
                         // #3428/#2937 (lane B3, review cycle 2 P1-2): the build
                         // fork never offers a harness — its step 2 is the SDK
-                        // call (`POST /v1/points`). That write files a point but
-                        // files NO onboarding step: no REST route reaches
-                        // `_maybe_onboarding_auto_complete()` (only the MCP tools
-                        // do — verified 2026-09-16, and reported to the lane
-                        // orchestrator as its own defect). The self-fork body is
+                        // call (`POST /v1/points`). The self-fork body is
                         // therefore false twice here: "hasn't filed anything" is
                         // false the moment the user runs the wizard's own curl,
                         // and the harness name is the untouched 'claude' default
                         // on a branch that never offered Claude. This body names
-                        // the SDK call the user actually has, asserts nothing
-                        // about filing, and ties the live update to the agent
-                        // tools that CAN file the step.
+                        // the SDK call the user actually has and asserts nothing
+                        // about filing.
+                        //
+                        // #5378: the rationale that used to sit here ("no REST
+                        // route reaches `_maybe_onboarding_auto_complete()` —
+                        // only the MCP tools do", verified 2026-09-16) went
+                        // STALE on 2026-09-22. #3670 made `POST /v1/points` file
+                        // `harness-connected` when the credential is an agent's
+                        // and the key is not graph-bound
+                        // (`hosted_api.py::_maybe_file_harness_connected`), and
+                        // the build fork's step 2 IS that call — so this body
+                        // must not claim the REST route cannot mark the
+                        // connection.
                         serverHarnessConnected ? (
                           <>
                             <p aria-hidden="true" style={{ fontSize: 26, lineHeight: 1.2, margin: '0 0 0.15rem' }}>✓</p>
@@ -7969,8 +7975,8 @@ function claimIntentInFlight() {
                           // self arm).
                           <p className="dim" style={{ lineHeight: 1.6 }}>
                             Your project's graph is set up, but we can't tell it's connected yet — Tortoise
-                            marks a project connected when a write arrives through its agent tools, not
-                            through the <code>/v1/points</code> REST call. Connect an agent to Tortoise
+                            marks a project connected when a write arrives through its agent tools or
+                            the <code>/v1/points</code> REST call. Connect an agent to Tortoise
                             and {wizardConnectPollStalled
                               ? "we'll show it as soon as we can check"
                               : 'it shows up here on its own'}.
@@ -8019,7 +8025,16 @@ function claimIntentInFlight() {
                                     installed seam" class is pinned by the
                                     harness registry's tests, not here. */}
                                 {doneCaptureClaim === 'present' && "Tortoise is capturing your agent's sessions. "}
-                                {doneCaptureClaim === 'future' && "Tortoise will capture your agent's sessions. "}
+                                {/* #3661: a capture PROMISE is only honest for the seams the opt-in
+                                    does not gate. The install probe proves an install was observed,
+                                    not that capture will happen — a hook seam files nothing until
+                                    this machine exports TORTOISE_CAPTURE=1, so the sentence names
+                                    what is still required instead of promising the capture. Pi is
+                                    the exception (installing the extension IS its opt-in), which is
+                                    why the map decides rather than a blanket clause. */}
+                                {doneCaptureClaim === 'future' && (HARNESS_CAPTURE_REQUIRES_OPT_IN[wizardHarness]
+                                  ? `Tortoise will capture your agent's sessions once this machine opts in (export ${CAPTURE_OPT_IN_LINE}). `
+                                  : "Tortoise will capture your agent's sessions. ")}
                                 {doneCaptureClaim === 'install-pending' && `Session capture is ${doneCaptureStatusLabel}. `}
                                 You can ask your agent to query it, use it to make decisions, and embed it in your workflows.
                               </p>
@@ -10472,8 +10487,10 @@ function MemorySources(props) {
         <div className="toggle-body">
           <h4>Agent session recording</h4>
           <p>
-            When on, sessions from tools with capture installed are filed to your
-            graph as a memory source{onToggleCaptureExtract
+            When on, sessions from machines that opted in — Claude Code, Codex
+            and Cursor via <code>{CAPTURE_OPT_IN_LINE}</code>, or a Pi machine
+            with the extension installed — are filed to your Organization's
+            graph as memory{onToggleCaptureExtract
               ? '; whether they are also extracted into memory is controlled below.'
               : '.'}
           </p>

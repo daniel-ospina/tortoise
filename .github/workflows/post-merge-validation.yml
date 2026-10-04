@@ -396,6 +396,14 @@ jobs:
           # so the run step cannot drift (single source of truth).
           echo "$SLOW_IGNORES" > /tmp/pmv-slow-ignores
           python3 tools/skip-guard.py --emit-manifest "tests/" --marker "not track_b" --ignore tests/e2e $SLOW_IGNORES --output /tmp/pmv-expected-nodeids.txt
+      - name: Provide rsync for the deploy-step test (#7026)
+        # This job runs the whole suite, so it selects
+        # tests/test_pages_bindings.py and needs the tool the shipped deploy
+        # step shells out to. Guarded like every other pytest-path step here:
+        # on the dedup-skip path this job deliberately runs NOTHING, so an
+        # unguarded apt-get would be the one way that no-op job could red.
+        if: needs.dedup-check.outputs.skip != 'true'
+        uses: ./.github/actions/ensure-rsync
       # #2216: GRAPH.COPY "could not fork" — NOT a code regression.
       # The dr_endpoints / writer_inventory restore tests (TestDrDrill::*,
       # TestCreateTeam::test_backup_round_trip_dashboard_created_team) can fail

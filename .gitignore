@@ -92,6 +92,7 @@ data/kind_index/*
 .tortoise-prewipe-snapshot.json
 .tortoise-prewipe-*.tmp
 .venv
+.pytest_cache/
 
 # #5373: the SDK rename table is GENERATED from `sdk.py` (AST line numbers) and two
 # docs, and it is a function of a file every lane edits. Committing it made any two

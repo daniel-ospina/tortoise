@@ -183,7 +183,11 @@ def migrate(force: bool = False) -> dict:
             remove_stale_aof(target)
             proj = FalkorProjection(target, allow_nonstandard_path=True)
             try:
-                rebuild_counts = proj.rebuild_all(events_dir)
+                # #2944 L1: migration intentionally wipes the (fresh/partial)
+                # embedded target and replays from the source's JSONL — an
+                # explicit, deliberate destructive step, so the token is
+                # passed at this entry point.
+                rebuild_counts = proj.rebuild_all(events_dir, confirm_destructive=True)
             finally:
                 proj.close()
             # #4641: the JSONL rebuild path is one of the three routes that

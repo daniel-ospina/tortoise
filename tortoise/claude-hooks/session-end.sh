@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tortoise-hook-version: 7
+# tortoise-hook-version: 8
 # Tortoise session capture for Claude Code — SessionEnd hook (#564).
 #
 # #3615 (generation bump 3→4): the capture step now requires the explicit

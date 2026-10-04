@@ -16,7 +16,16 @@ For Beta(α,β) weight x^(α-1)*(1-x)^(β-1) on [0,1]:
   Mapping: scipy a = β-1, scipy b = α-1 (swapped convention)
 """
 import numpy as np
-from scipy.special import roots_jacobi
+
+from tortoise.heavy_imports import import_scipy_special
+
+# #7014: a cold scipy import must not overlap an in-process torch import, or
+# scipy's array-API dispatch raises on a partially-initialized ``torch`` — the
+# exact race the TF-IDF fallback swallowed and returned ``[]`` for. Imported at
+# module level as before, just through the shared lock-taking helper instead of
+# a bare ``from scipy.special import roots_jacobi`` (see
+# ``tortoise/heavy_imports.py``).
+roots_jacobi = import_scipy_special().roots_jacobi
 
 
 def gauss_jacobi_01(n: int, alpha: float, beta: float):
