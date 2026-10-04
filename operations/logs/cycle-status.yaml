@@ -212,3 +212,60 @@ verdicts_cycle_16:
 # body; corrections recorded in the CHANGELOG only. Existing annotations frozen, not stripped.
 # What would change #5's mind: a P0 in gate BEHAVIOUR, or an orphaned reference that corresponds to
 # a MISSING deliverable rather than a stale one. Cycle 13 found the latter (5 orphans) and no P0.
+
+# 2026-09-26: a SEPARATE loop (issue #5199, skill: code-review) exited cycle-cap on PR #5207.
+# The keys above belong to the #3467 plan-review loop and are UNTOUCHED: a fixed shared path
+# cannot hold two loops' exits, and overwriting would drop a prior record (the skill forbids
+# dropping remaining issues). The #5199 record follows as COMMENTS — YAML comments cannot
+# change this document's parse (verified: exit_reason still reads the #3467 stop).
+#
+# exit_reason: cycle-cap
+# clean: false            # NOT clean — the cap was hit, not a clean verdict
+# skill: code-review
+# pr: 5207
+# branch: docs/5199-version-scope
+# area: 'the #5199 version-note READER — sdk.py::get_provenance_chain + search_engine.py::currency_status'
+# head_at_exit: 9d0f27f74a5489d29283fb3b15cff7fef3943f1d   # plus the ops commit that adds this block
+# cycles: 10
+# issues_per_cycle: ['3 (0/3/0/0)','5 (0/0/5/0)','3 (0/0/2/1)','2 (0/1/0/1)','3 (0/0/2/1)','3 (0/0/2/1)',
+#                     '4 (0/0/0/4)','4 (0/0/2/2)','7 (0/0/1/6)','6 (0/0/2/4)']
+#   # BASIS: the leading number is the DISTINCT-after-dedup count (the trailing tuple is its P0/P1/P2/P3
+#   # split) — one basis throughout, as the #3467 block above requires. Do not mix bases, and do not
+#   # read this sequence as indexing PR #5207's narrative review table: that table gives the read-wiring
+#   # loop SEVEN rows (rounds 4-10) for a loop recorded here as TEN cycles, and the counts differ from
+#   # cycle 3 onward (table: 3,5,4,4,7,6,6). The array is what the detectors read; the table is a
+#   # narrative summary. The two were never reconciled until the 2026-09-26 reviewer flagged it — the
+#   # numbers here are AS RECORDED at exit, not recomputed after the fact.
+# files_changed_per_cycle: [5, 4, 5, 5, 4, 3, 3, 3, 3, 6]
+# detector_fired: honest-stuck   # ⚠️ CORRECTED 2026-09-26 (was ''). The original line asserted that NONE
+#   # of the three layers fired. That was false. The §920b honest-stuck predicate is "issues_per_cycle
+#   # non-decreasing for 3 consecutive cycles", and the array above is non-decreasing across cycles 4-6
+#   # (2, 3, 3). The signal was therefore MET mid-loop. It was never TESTED: the loop computed no
+#   # detector input on any cycle, so nothing acted on it and the run continued to the cap — which is
+#   # why exit_reason stays cycle-cap (that is genuinely what stopped the loop). The skill's prescribed
+#   # action on this signal is escalate-to-human, so the escalation is 4 cycles late, not absent.
+#   # §966 warns that this field "is never empty when exit_reason names a detector" and reads as "no
+#   # layer fired" — the one assertion it must not make falsely. It is also the field the #3467 loop
+#   # used for a qualified claim ("none since the extension"), so an absolute `''` was the outlier.
+# detector_evaluated: false      # the loop computed no detector input on ANY cycle; honest-stuck is
+#                                # derived here FROM the recorded counts, not from a live evaluation
+# fingerprint_recurrence_last_cycle: null   # not computed — nothing was evaluated per cycle
+#
+# ⚠️ THE CAP WAS REACHED. Cycle 10 returned 6 findings (no P0/P1, 2 P2 + 4 P3). All six were
+# fixed and VERIFIED by a pre-commit VGATE dispatch (PASS, 6 verified files) — but NOT
+# re-reviewed, because the re-review would have been cycle 11. Per the skill, "fixing without
+# re-reviewing = no review", so NO clean attestation is recorded for #5207 at this head.
+#
+# remaining_issues: []    # none OPEN. The residual is procedural, not a defect:
+# residual.kind: unreviewed-fix-set
+# residual.needed: 'a human acknowledgement, or one authorised extra cycle, before the PR is
+#                   treated as review-complete; the merge rail will read BLOCKED on the review gate'
+#
+# The ANCHOR half of the same PR ran its own loop earlier and DID exit clean (`NO ISSUES FOUND`,
+# cycle 3 at 52e703f89, re-recorded at 93b6f0dd6). That verdict does NOT cover the read wiring.
+#
+# evidence:
+#   - '99 passed (read-wiring, references-5199, references-edge, sdk-rename-table)'
+#   - 'ruff clean; sdk rename table current (150 public methods); surface manifest OK (82 tool rows)'
+#   - 'every one of the reader ORDER BY 7 key terms has a test whose named mutation fails it'
+#   - 'the linkRecordedVersion and linkRelation mutants fail 6 and 1 tests respectively'

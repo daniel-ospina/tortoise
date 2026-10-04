@@ -237,9 +237,10 @@ def test_supersede_valid_from_cross_format_disagreement_refused(sdk):
     """A disagreement ACROSS formats (date-only kwarg vs offset-aware stored
     value) is still caught — the guard is not a raw string compare.
 
-    The two dates are a full day apart, deliberately: a date-only value parses
-    as LOCAL midnight, so a same-day pair would compare equal on a UTC host and
-    unequal elsewhere — a host-timezone-dependent assertion is not a test.
+    The two dates are a full day apart, deliberately, so the assertion measures
+    the cross-format DISAGREEMENT and not the day boundary. (A date-only value
+    now anchors to UTC midnight — #3982 — so the spacing no longer varies by
+    host; it is kept because the disagreement is the property under test.)
     """
     old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
     new = _make_point(sdk, content="claim v2",
@@ -254,8 +255,8 @@ def test_supersede_valid_from_same_day_instant_disagreement_refused(sdk):
     The two literals the GUARD COMPARES — the kwarg and the successor's stored
     ``validFrom`` — carry an explicit time and offset, so nothing depends on the
     host timezone. (The predecessors' date-only ``validFrom`` above is never
-    passed to the guard; date-only parses as LOCAL midnight, the #3982
-    behaviour, so it is deliberately kept out of the comparison.) Four
+    passed to the guard, so it is deliberately kept out of the comparison; it
+    anchors to UTC midnight under #3982.) Four
     properties:
 
       * same day, different instant → REFUSED. Without this, a guard weakened
@@ -483,6 +484,136 @@ def test_supersede_both_sides_unparseable_refused(sdk):
         with pytest.raises(ValueError, match="disagrees"):
             sdk.supersede_point(old["id"], new["id"], valid_from=bad)
         assert "validTo" not in _props(sdk, old["id"])
+
+
+def _future_instant():
+    """A probe instant relative to NOW.
+
+    The #5360 fix bounds a predecessor's window at the successor's
+    ``createdAt``, so a probe pinned to a literal calendar date would begin
+    falling INSIDE that window as the clock advanced and redden CI on a date
+    that has nothing to do with the fix.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    return (datetime.now(UTC) + timedelta(days=365)).isoformat()
+
+
+def test_supersede_no_kwarg_unparseable_stored_start_is_normalised(sdk):
+    """#5360: the NO-KWARG path must not persist an UNORDERABLE window end.
+
+    The sibling tests above all pass ``valid_from=``, so they exercise the
+    KWARG path and its agreement guard. The no-kwarg path resolves the end from
+    the successor's STORED ``validFrom``, and it used to accept any TRUTHY value
+    — so a present-but-unparseable stored start (``"not-a-date"``) was written
+    RAW as ``old.validTo``.
+
+    That end is unorderable (``_created_sort_key`` keys it ``(1, text)``), which
+    breaks BOTH guards at once:
+
+      * the #4021 inversion guard skips an unorderable successor, so its
+        ``end >= start`` invariant is trivially satisfied while the end names no
+        instant; and
+      * ``_covers`` cannot exclude it either, because ``(1, x) < (0, epoch)`` is
+        False — so the predecessor was treated as covering EVERY later instant,
+        the exact overlap class #3980 exists to prevent, on the one path #3980
+        does not guard.
+
+    The fix makes the stored-start branch require ORDERABILITY, so a value with
+    no instant falls through to ``successor_created_at`` — the same treatment a
+    FALSEY stored start already gets (#3985). The first assertion is the
+    discriminating one: it FAILS on the unfixed code, where ``end`` is the raw
+    ``"not-a-date"``.
+    """
+    from tortoise.search_engine import _created_sort_key
+
+    old = _make_point(sdk, content="unord v1", validFrom="2026-06-01")
+    new = _make_point(sdk, content="unord v2", validFrom="not-a-date")
+    assert _props(sdk, new["id"])["validFrom"] == "not-a-date"
+
+    sdk.supersede_point(old["id"], new["id"])  # NO kwarg — the unguarded path
+
+    end = _props(sdk, old["id"])["validTo"]
+    assert _created_sort_key(end)[0] == 0, (
+        f"an UNORDERABLE end {end!r} was persisted — the window has no "
+        "orderable boundary, so no query instant can exclude it (#5360)"
+    )
+    assert end != "not-a-date"
+
+    # The harm, measured on the read path: the predecessor must NOT be treated
+    # as covering an instant after its own end. The probe is RELATIVE — see
+    # ``_future_instant``.
+    out = sdk.restore_point_at(new["id"], _future_instant())
+    assert out["found"] is False, (
+        "the predecessor covered a later instant — its end is still unbounded"
+    )
+
+
+def test_supersede_string_kwarg_with_no_stored_start_is_normalised(sdk):
+    """#5360, the STRING-kwarg route.
+
+    The call-site agreement guard is reachable only when the successor HAS a
+    stored ``validFrom`` to disagree with, so a successor with NO stored start
+    bypassed it entirely and ``str(valid_from)`` was persisted RAW — the same
+    unbounded window as the reported no-kwarg route, by a different road.
+
+    The NUMERIC kwarg is deliberately NOT covered here: it stays exempt, because
+    the guard tests ``isinstance(valid_from, str)`` so that
+    ``test_window_end_numeric_kwarg_resolved_before_measure`` (B3) keeps its
+    pinned meaning.
+    """
+    from tortoise.search_engine import _created_sort_key
+
+    old = _make_point(sdk, content="unord kw v1", validFrom="2026-06-01")
+    new = _make_point(sdk, content="unord kw v2")  # NO stored validFrom
+    assert _props(sdk, new["id"]).get("validFrom") is None
+
+    sdk.supersede_point(old["id"], new["id"], valid_from="not-a-date")
+
+    end = _props(sdk, old["id"])["validTo"]
+    assert _created_sort_key(end)[0] == 0, (
+        f"an UNORDERABLE end {end!r} was persisted via the string-kwarg route"
+    )
+    # The predecessor must not be the point in force at a far-future instant.
+    # It appears in the CHAIN legitimately (it is history), so assert on
+    # ``valid_point`` rather than on the whole response.
+    out = sdk.restore_point_at(new["id"], _future_instant())
+    assert out["valid_point"]["id"] == new["id"], (
+        f"the predecessor was still in force — its end is unbounded: {out}"
+    )
+
+
+def test_supersede_unparseable_successor_created_at_is_normalised(sdk):
+    """#5360, the THIRD route (found in the third review cycle).
+
+    ``createdAt`` is a normal CALLER prop — ``create_point`` documents that
+    api.py, ingest.py and the source-inheritance path all pass one — so an
+    unparseable one is reachable through the public API. The no-kwarg fallback
+    used to persist it RAW as the predecessor's END: the same unbounded window
+    as the other two routes.
+    """
+    from tortoise.search_engine import _created_sort_key
+
+    old = _make_point(sdk, content="unord ca v1", validFrom="2026-06-01")
+    new = _make_point(sdk, content="unord ca v2", createdAt="not-a-date")
+    assert _props(sdk, new["id"])["createdAt"] == "not-a-date"
+
+    sdk.supersede_point(old["id"], new["id"])  # NO kwarg
+
+    end = _props(sdk, old["id"])["validTo"]
+    assert _created_sort_key(end)[0] == 0, (
+        f"an UNORDERABLE end {end!r} was persisted via the createdAt fallback"
+    )
+
+
+def test_supersede_no_kwarg_orderable_stored_start_is_still_used(sdk):
+    """The #5360 guard must not break the path it guards: an ORDERABLE stored
+    start is still taken verbatim (the anti-vacuity companion — a fix that fell
+    through unconditionally would pass the test above and fail here)."""
+    old = _make_point(sdk, content="ord v1", validFrom="2026-06-01")
+    new = _make_point(sdk, content="ord v2", validFrom="2026-06-10")
+    sdk.supersede_point(old["id"], new["id"])  # NO kwarg
+    assert _props(sdk, old["id"])["validTo"] == "2026-06-10"
 
 
 def test_invalidate_point_stamps_withdrawal(sdk):
@@ -771,6 +902,175 @@ def test_window_end_equal_start_allowed():
                        stored_vf="2026-06-10T00:00:00Z") == "2026-06-10T00:00:00Z"
 
 
+def test_window_end_falsey_but_present_orderable_start_is_used():
+    """#3985 — a FALSEY-but-PRESENT, ORDERABLE start is the successor's real
+    window start, not an absent one.
+
+    ``stored_vf`` is the successor's own stored ``validFrom``, and the read
+    path reads it with ``_covers``'s ``is not None`` presence predicate, so a
+    numeric ``0`` is the epoch-0 instant there.  This resolver gated on
+    truthiness, so it skipped ``0`` and fell back to ``successor_created_at`` —
+    a value INSIDE the read path's ``[epoch 0, ∞)`` successor window.  The
+    predecessor's end then landed inside the successor's window and
+    ``restore_point_at`` reported a 2-candidate ``ambiguous`` instead of the
+    successor.
+
+    Value that makes it fail: ``stored_vf = 0`` (or ``0.0``).  Pre-fix both
+    assertions below see the ``successor_created_at`` fallback
+    (``'2026-09-28T00:00:00+00:00'``); post-fix they see ``0`` / ``0.0``.
+    The fixture reaches the value — ``create_point`` accepts any caller
+    ``validFrom`` and stores it verbatim, so ``0`` is a real graph state (the
+    probe that pinned this issue created one and read back ``validFrom == 0``;
+    the #5358 sibling's ``test_falsey_but_present_valid_from_is_a_real_past_
+    start`` writes the same value through the public path).
+
+    An OPEN predecessor window is the shape where the fixed branch is
+    observable as a plain value: there is no start to compare against, so no
+    inversion is possible and the resolution's answer is the return value.
+    """
+    created = "2026-09-28T00:00:00+00:00"
+    assert _window_end(None, stored_vf=0, successor_created_at=created) == 0
+    assert _window_end(None, stored_vf=0.0, successor_created_at=created) == 0.0
+    # `False` is an int subclass -> keys `(0, 0.0)`, i.e. orderable, and is
+    # PRESENT, so it is a real window start too (the read path agrees).
+    assert _window_end(None, stored_vf=False,
+                       successor_created_at=created) is False
+    # Contiguity: an epoch-0 predecessor is the SAME instant, so the guard's
+    # strictly-before test does not fire and write == read exactly.
+    assert _window_end(0, stored_vf=0, successor_created_at=created) == 0
+    # Control — the fallback still applies when there is no stored start.
+    assert _window_end(None, stored_vf=None,
+                       successor_created_at=created) == created
+
+
+def test_prevalidate_mirrors_the_resolver_for_a_falsey_but_orderable_start():
+    """#3985 — the hosted pre-write check must share the resolver's PRESENCE
+    predicate for ``stored_vf``, not truthiness.
+
+    ``hosted_api._prevalidate_supersede_window`` was written when a falsey
+    ``stored_vf`` fell through to the writer's ``now``.  #3985 makes the
+    resolver land on the KNOWN instant ``0`` instead, so a truthiness test in
+    the mirror defers a resolution that is NOT ``now``: the successor is
+    minted, and the refusal arrives only at the last-resort boundary — losing
+    the #5363 no-orphan guarantee the pre-check exists to give.
+
+    Fails before the fix: the pre-check returns early, so nothing raises.
+    """
+    from types import SimpleNamespace
+
+    from tortoise.hosted_api import _prevalidate_supersede_window
+    from tortoise.sdk import InvertedSupersedeWindow
+
+    class _G:
+        def query(self, cypher, params=None):
+            if "n.validFrom, n.createdAt" in cypher:
+                # the successor: stored start is 0 (epoch-0), no createdAt
+                return SimpleNamespace(result_set=[[0, None]])
+            # the predecessor's own stored start
+            return SimpleNamespace(result_set=[["2026-06-01"]])
+
+    proj = SimpleNamespace(g=_G())
+
+    class _SDK:
+        def _get_proj(self):
+            return proj
+
+        def _find_point_by_content(self, content, *, pointKind=None):
+            return "succ-id"  # a dedup target exists -> existing_id truthy
+
+    pr = SimpleNamespace(
+        existing_id="old-id",
+        supersede_id="succ-id",
+        point=SimpleNamespace(content="c", pointKind="statement", when=None),
+    )
+    with pytest.raises(InvertedSupersedeWindow):
+        _prevalidate_supersede_window(
+            _SDK(), pr, now="2026-09-28T00:00:00+00:00")
+
+
+def test_supersede_refuses_epoch0_successor_over_a_dated_predecessor(sdk):
+    """#3985 end-to-end — the overlap is gone, replaced by the honest refusal.
+
+    The issue's own reproduction: a successor created with ``validFrom=0`` and
+    a predecessor dated ``'2026-06-01'``, superseded with NO ``valid_from``
+    kwarg (the documented fallback chain).
+
+    Measured on the pre-fix code, exactly as the issue reports: the supersede
+    SUCCEEDS with ``old.validTo == <successor.createdAt>``, and
+    ``restore_point_at`` then returns ``ambiguous=True`` with two candidates —
+    the successor's ``[0 .. None]`` window CONTAINS the predecessor's
+    ``['2026-06-01' .. createdAt]``.
+
+    Post-fix the same call raises, because epoch-0 precedes ``'2026-06-01'``: the
+    resolution now hands the guard the successor's real start, and the guard's
+    existing strictly-before test refuses the inverted window (#4021's
+    contract).  The refusal is the fix — a silent two-candidate ambiguity is
+    replaced by an error that names the route out.
+
+    Value that makes it fail: the successor's ``validFrom = 0``.  The fixture
+    reaches it — ``create_point`` stores it verbatim, asserted below so a
+    future change that normalises it away cannot let this test pass vacuously.
+
+    The refusal must leave the predecessor UNTOUCHED: it is raised before any
+    mutation, so no event is journaled and no half-write survives.
+    """
+    old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
+    new = _make_point(sdk, content="claim v2", validFrom=0)
+
+    assert _props(sdk, new["id"])["validFrom"] == 0, (
+        "the fixture must reach the epoch-0 start for this to mean anything"
+    )
+
+    with pytest.raises(ValueError, match="inverted window"):
+        sdk.supersede_point(old["id"], new["id"])  # NO valid_from kwarg
+
+    # No half-write: the predecessor still carries its original window and is
+    # not superseded, so a caller can retry with a repair rather than having
+    # to reverse a mutation.
+    op = _props(sdk, old["id"])
+    assert op["validFrom"] == "2026-06-01"
+    assert op.get("validTo") is None, f"predecessor was stamped: {op!r}"
+    assert op.get("status") != "superseded"
+
+
+def test_window_end_unorderable_starts_fall_through_to_createdat():
+    """#3985 x #5360 — the #3985 fix must change EXACTLY ONE case.
+
+    The natural "tidier" spelling of the fix is ``stored_vf is not None``,
+    and it is wrong in both directions.  This test pins the inputs that
+    distinguish the predicates, so a later simplification is caught rather
+    than silently re-introducing a worse bug:
+
+    - ``''`` is falsey AND unorderable.  ``is not None`` would take it and
+      stamp the predecessor's end ``''``, which ``_covers`` reads as an OPEN
+      end (``(1, text) < (0, instant)`` is False) — so the predecessor would
+      cover every later instant and the successor would NEVER become the
+      answer.  That is worse than today's honest absence.  It must stay on the
+      ``successor_created_at`` fallback.
+    - ``'TBD'`` is TRUTHY but unorderable.  ``#5360`` (which landed on main
+      after ``#3985`` was opened) sends this to the ``successor_created_at``
+      fallback too: a present-but-unorderable start names no instant, so
+      persisting it would leave the window unbounded.  So ``#3985`` changes
+      exactly ONE case — a FALSEY but ORDERABLE start (``0``), which the
+      sibling test ``test_window_end_falsey_but_present_orderable_start_is_used``
+      covers.
+
+    Value that makes it fail: ``''`` and ``'TBD'`` as the stored successor
+    start.  ``create_point`` stores any caller ``validFrom`` verbatim, so the
+    public path stores either.  ``test_unparseable_predecessor_start_matches_
+    the_sibling_5358`` calls that same ``create_point`` with a ``'TBD'``
+    ``validFrom`` — in the PREDECESSOR slot; the storage path is
+    position-independent, so the successor slot is reachable the same way.
+    """
+    created = "2026-09-28T00:00:00+00:00"
+    # falsey + unorderable: fallback, NOT the stored ''
+    assert _window_end("2026-06-01", stored_vf="",
+                       successor_created_at=created) == created
+    # truthy + unorderable: #5360 sends it to the fallback too, NOT 'TBD'
+    assert _window_end("2026-06-01", stored_vf="TBD",
+                       successor_created_at=created) == created
+
+
 def test_window_end_falsey_or_unparseable_start_refused():
     """B4/B5 — the PRESENCE predicate is ``is not None`` and the measure is
     ``_created_sort_key`` (the read path's), not truthiness.
@@ -886,13 +1186,13 @@ def test_window_end_numeric_kwarg_resolved_before_measure():
     start exists (``(1, text)`` never equals ``(0, float)``).
 
     The self-check below is the discriminator and it is HOST-INDEPENDENT:
-    ``_created_sort_key`` parses a date-only string on a NAIVE datetime, so
-    ``'2026-06-10'`` keys as LOCAL midnight (+/- 14 h across real timezones).
-    The raw epoch is therefore asserted to precede it, rather than assumed."""
+    ``_created_sort_key`` anchors a date-only string to UTC midnight (#3982),
+    so ``'2026-06-10'`` keys as that instant on every host. The raw epoch is
+    therefore asserted to precede it, rather than assumed."""
     raw = 1780000000.0  # a fixed epoch comfortably before old_vf's instant
     assert _created_sort_key(raw) < _created_sort_key("2026-06-10"), (
         "the raw-vs-resolved discriminator needs a raw epoch strictly before "
-        "the predecessor's (host-local) start"
+        "the predecessor's (UTC-anchored) start"
     )
     out = _window_end("2026-06-10", valid_from=raw)
     # (a) the resolved (persisted) value keys unparseable, so it is NOT an

@@ -14,6 +14,8 @@ Hermetic: every tree is a scratch directory; the live I1 read is injected.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -35,6 +37,22 @@ SIX = [
     "test-isolation",
 ]
 CHEAP_FIVE = [c for c in SIX if c != "python-ci-gate"]
+
+# The REAL tree's required set, written as a LITERAL on purpose. A test that derived the
+# expectation from the config (or from the record it is checking) would agree with any
+# drift in either, so it could not catch the record losing a name — the failure I1's
+# agreement clause exists for. #5433 added `ai-review-gate` here and to the queue's entry
+# conditions in the same change; the two are one decision, which is why the record and
+# `.mergify.yml` cannot be landed apart.
+LIVE_SEVEN = [
+    "ai-review-gate",
+    "docs",
+    "legal-e2e",
+    "license-surface",
+    "pricing-artifact",
+    "python-ci-gate",
+    "test-isolation",
+]
 
 DEFAULT_SETTINGS = """\
 repository:
@@ -62,7 +80,11 @@ def _write(path: Path, text: str) -> None:
 
 
 def merge_config(**overrides: object) -> dict:
-    """The LIVE post-#5384 shape: `merge` injection, five cheap entry checks."""
+    """The #5384-era shape: `merge` injection, the fixture's cheap checks at entry.
+
+    The fixture set is `CHEAP_FIVE`; the live entry set is not fixed by this file (it
+    gained `ai-review-gate` in #5433), which is why the shape is named, not counted.
+    """
     rule: dict = {
         "name": "main",
         "queue_conditions": [
@@ -208,14 +230,14 @@ def test_real_tree_record_matches_head_digest() -> None:
     record = mcg._load_record(ROOT)
     assert record is not None, f"{mcg.RECORD_REL} must exist"
     assert record["gate_digest"] == mcg.gate_digest(ROOT)
-    assert sorted(record["required_contexts"]) == sorted(SIX)
+    assert sorted(record["required_contexts"]) == sorted(LIVE_SEVEN)
 
 
 def test_real_tree_i1_live_read_was_recorded() -> None:
-    """I1's record is provenance: it must name the live six and its source sha."""
+    """I1's record is provenance: it must name the live required set and its source sha."""
     record = mcg._load_record(ROOT)
     assert record is not None
-    assert sorted(record.get("live_observed_contexts") or []) == sorted(SIX)
+    assert sorted(record.get("live_observed_contexts") or []) == sorted(LIVE_SEVEN)
     assert record.get("live_result") == "SATISFIED"
 
 
@@ -314,11 +336,60 @@ def test_clause_vi_check_named_in_no_pull_request_job(tmp_path: Path) -> None:
     assert clause(root, "vi") == 1
 
 
+def test_trigger_predicates_answer_different_questions() -> None:
+    """`_has_pull_request` (is it emitted on a PR?) ≠ `_has_pull_request_strict` (does it see the PR?).
+
+    The failure this pins: collapsing clause (vi)'s widened emission test onto clause (vii)'s
+    "runs against the PR's tree" test. `pull_request_target` loads the workflow from the BASE
+    revision, so a validator hosted there never validates the PR — and an
+    `if: github.event_name == 'pull_request'` guard inside it is FALSE (the step is skipped while
+    a static reader counts it as running). Sharing the widened predicate certified a union
+    validator that cannot see the union; clause (vii) is inert today, so this is the cheap place
+    to hold the distinction.
+    """
+    assert mcg._has_pull_request("pull_request") is True
+    assert mcg._has_pull_request("pull_request_target") is True
+    assert mcg._has_pull_request_strict("pull_request") is True
+    assert mcg._has_pull_request_strict("pull_request_target") is False
+    assert mcg._has_pull_request_strict({"pull_request_target": {"types": ["opened"]}}) is False
+    assert mcg._has_pull_request_strict(["pull_request_target"]) is False
+    assert mcg._has_pull_request_strict(None) is False
+
+
 def test_clause_vi_push_only_workflow_does_not_emit(tmp_path: Path) -> None:
     workflows = default_workflows()
     workflows["ci.yml"]["on"] = "push"
     root = make_tree(tmp_path, merge_config(), workflows=workflows)
     assert clause(root, "vi") == 1
+
+
+def test_clause_vi_pull_request_target_emitter_counts(tmp_path: Path) -> None:
+    """A `pull_request_target` workflow counts as PR-emitting; `workflow_run` does not.
+
+    This pins the PREDICATE, on the fixture tree: the same `ci.yml` job is accepted when
+    its trigger is `pull_request_target` (it reports against the PR head, so it can satisfy
+    a `check-success` at entry) and refused when it is `workflow_run`-only. The real-tree
+    consequence — this repo's `ai-review-gate` is `pull_request_target`-only and was refused
+    as "no PR-triggered workflow job", removing the enforcement point #5433 adds — is pinned
+    by `test_real_tree_clauses_i_to_vii_pass`, which runs clause (vi) over the committed
+    `.mergify.yml`.
+    """
+    workflows = default_workflows()
+    workflows["ci.yml"]["on"] = {"pull_request_target": {"types": ["opened"]}}
+    root = make_tree(tmp_path, merge_config(), workflows=workflows)
+    assert clause(root, "vi") == 0
+
+    workflows["ci.yml"]["on"] = {"workflow_run": {"workflows": ["CI"]}}
+    root = make_tree(tmp_path, merge_config(), workflows=workflows)
+    assert clause(root, "vi") == 1
+
+
+def test_clause_vi_string_pull_request_target_counts(tmp_path: Path) -> None:
+    """The bare-string trigger form is recognised too, not just the mapping form."""
+    workflows = default_workflows()
+    workflows["ci.yml"]["on"] = "pull_request_target"
+    root = make_tree(tmp_path, merge_config(), workflows=workflows)
+    assert clause(root, "vi") == 0
 
 
 # --- clause (vii): the TH4 union validator ---------------------------------
@@ -393,6 +464,34 @@ def test_clause_vii_union_without_invocation_is_red(tmp_path: Path) -> None:
     assert clause(root, "vii") == 1
 
 
+def test_clause_vii_pull_request_target_host_is_not_a_validator(tmp_path: Path) -> None:
+    """A union validator must run against the PR'S TREE; `pull_request_target` cannot.
+
+    The failure this pins (and that the predicate unit test above cannot): clause (vii) must
+    USE the strict predicate, not clause (vi)'s widened one. A `pull_request_target`-only
+    required workflow loads the BASE revision, so the validator it hosts never sees the PR's
+    union — certifying it would report a fail-closed validator over a tree it cannot read.
+    Reverting the caller to the widened predicate left every other test green, so this fixture
+    is the only thing holding the decision.
+    """
+    root, _ = union_tree(tmp_path, "python3 tools/registry_integrity.py")
+    wf = root / ".github" / "workflows" / "python-ci.yml"
+    doc = yaml.safe_load(wf.read_text(encoding="utf-8"))
+    doc["on"] = {"pull_request_target": {"types": ["opened"]}}
+    wf.write_text(yaml.safe_dump(doc), encoding="utf-8")
+    assert clause(root, "vii") == 1
+
+
+def test_clause_vii_pull_request_host_still_validates(tmp_path: Path) -> None:
+    """Control for the test above: the same tree with `pull_request` is accepted."""
+    root, _ = union_tree(tmp_path, "python3 tools/registry_integrity.py")
+    wf = root / ".github" / "workflows" / "python-ci.yml"
+    doc = yaml.safe_load(wf.read_text(encoding="utf-8"))
+    doc["on"] = ["push", "pull_request"]
+    wf.write_text(yaml.safe_dump(doc), encoding="utf-8")
+    assert clause(root, "vii") == 0
+
+
 def test_clause_vii_help_only_is_red(tmp_path: Path) -> None:
     root, _ = union_tree(tmp_path, "python3 tools/registry_integrity.py --help")
     assert clause(root, "vii") == 1
@@ -418,6 +517,132 @@ def test_clause_vii_nested_gitattributes_is_not_missed(tmp_path: Path) -> None:
     root = make_tree(tmp_path, merge_config())
     _write(root / "docs" / ".gitattributes", UNION_ATTRS)
     assert clause(root, "vii") == 1
+
+
+def _git(root: Path, *args: str) -> None:
+    """Run git with the AMBIENT configuration removed.
+
+    A global `core.excludesFile`, or a `GIT_DIR`/`GIT_WORK_TREE` left behind by a
+    wrapper, would redirect these calls at the OUTER repository — changing what
+    the fixture tracks (so the test's verdict comes from the machine, #5049) or
+    staging fixture files into a real repo's index. Neither is reachable through
+    an inherited environment.
+    """
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")
+    }
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    proc = subprocess.run(
+        ["git", *args], cwd=root, capture_output=True, text=True, env=env
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+def _own_git_repo(root: Path) -> None:
+    """Make `root` a real work tree — the guard reads the TRACKED set there.
+
+    `.worktrees/` is ignored, exactly as it is in this repository, so a nested
+    worktree is untracked by construction rather than by the guard's guess.
+    """
+    _write(root / ".gitignore", ".worktrees/\n")
+    _git(root, "init", "-q")
+    _git(root, "add", "-A")
+
+
+def test_clause_vii_verdict_does_not_depend_on_nested_worktrees(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A nested worktree is NOT this repository, so it cannot move the verdict.
+
+    Observed 2026-09-28: the hub checkout, carrying
+    `.worktrees/merge-strategy-fix/.gitattributes` (`merge=union` on the two
+    registries), reported clause (vii) DIVERGED naming
+    `.worktrees/merge-strategy-fix/config/ci-surfaces.yml`, while the SAME commit
+    in CI passed. The local verdict is what a lane diagnosing a red `main` reads,
+    so a verdict that tracks which worktrees happen to exist on the machine both
+    misleads the lane that trusts it and discredits the lane that dismisses it.
+
+    The third assertion keeps the fix from being vacuous: the scan must still see
+    the REPOSITORY's own tracked `.gitattributes` at depth, so a clause that was
+    simply switched off would fail here instead of passing. The fourth pins the
+    FAIL-OPEN reading git's view introduces: `GIT_INDEX_FILE` aimed at nothing
+    makes `git ls-files` exit 0 with EMPTY output, which would report "no union"
+    while a tracked union is active — ambient env must not redirect the read.
+    """
+    root = make_tree(tmp_path, merge_config())
+    nested = root / ".worktrees" / "merge-strategy-fix"
+    _write(nested / ".gitattributes", UNION_ATTRS)
+    _write(nested / "config" / "ci-surfaces.yml", "leaked: true\n")
+    _own_git_repo(root)
+
+    with_nested = clause(root, "vii")
+
+    (nested / ".gitattributes").unlink()
+    (nested / "config" / "ci-surfaces.yml").unlink()
+    (nested / "config").rmdir()
+    nested.rmdir()
+    without_nested = clause(root, "vii")
+
+    assert with_nested == without_nested == 0
+
+    # ... and the scoped set is the REPOSITORY's, not "nothing": a TRACKED
+    # `.gitattributes` at depth is still found, and its GLOB is still expanded
+    # against the tracked set (the git-sourced path the walk case never takes).
+    _write(root / "docs" / "product" / ".gitattributes", "config/*.yml merge=union\n")
+    _write(root / "docs" / "product" / "config" / "ci-surfaces.yml", "x: 1\n")
+    _git(root, "add", "-A")
+    assert clause(root, "vii") == 1
+
+    monkeypatch.setenv("GIT_INDEX_FILE", str(tmp_path / "not-an-index"))
+    assert clause(root, "vii") == 1
+
+
+def test_clause_vii_missing_index_is_not_a_pass(tmp_path: Path) -> None:
+    """The ON-DISK route to a silently-empty read, which nothing pinned.
+
+    `git ls-files --cached` exits **0 with EMPTY stdout** when the index is
+    missing, so the "resolved to NOTHING" guard is the only thing between that
+    and a clause reporting "no union" while a tracked union is active. Removing
+    that guard left ALL 142 tests green, i.e. this fail-open was one line from
+    shipping unnoticed. The test pins the CODE, not the mechanism: the clause
+    must not PASS.
+    """
+    root = make_tree(tmp_path, merge_config(), attrs=UNION_ATTRS)
+    _write(root / "config" / "ci-surfaces.yml", "x: 1\n")
+    _own_git_repo(root)
+    (root / ".git" / "index").unlink()  # `ls-files` now exits 0, EMPTY
+    with pytest.raises(mcg.GuardUnreadable):
+        clause(root, "vii")
+
+
+def test_clause_vii_gitdir_info_attributes_is_not_missed(tmp_path: Path) -> None:
+    """`$GIT_DIR/info/attributes` is part of the sanctioned form and was
+    entirely untested — deleting the whole read left the suite green. A union
+    declared there is a fail-open when missed.
+    """
+    root = make_tree(tmp_path, merge_config())
+    _write(root / ".git" / "info" / "attributes", "config/*.yml merge=union\n")
+    _write(root / "config" / "ci-surfaces.yml", "x: 1\n")
+    assert clause(root, "vii") == 1
+
+
+def test_clause_vii_tracked_but_deleted_attributes_is_a_pass(tmp_path: Path) -> None:
+    """The `is_file()` filter on the tracked set is deliberate, not incidental.
+
+    A tracked-but-deleted `.gitattributes` is not on disk; reading it would
+    raise `GuardUnreadable`, i.e. a false RED on a working tree that merely
+    carries an uncommitted deletion — the "a lane reads a red that is not real"
+    failure class this change exists to fix. Dropping the filter was invisible
+    to the whole suite.
+    """
+    root = make_tree(tmp_path, merge_config(), attrs=UNION_ATTRS)
+    _write(root / "config" / "ci-surfaces.yml", "x: 1\n")
+    _own_git_repo(root)
+    os.remove(root / ".gitattributes")  # still tracked, no longer on disk
+    assert clause(root, "vii") == 0
 
 
 def test_clause_vii_single_fail_propagating_invocation_is_green(tmp_path: Path) -> None:
@@ -1052,15 +1277,40 @@ def test_mutation_gate_definition_change_is_not_silent(tmp_path: Path) -> None:
 def test_static_is_hermetic_head_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """cycle 10: I10 is HEAD-computed — no base ref, no diff, no fetch, no shell.
 
-    Proven by mutation: if any static path shelled out, this would raise.
+    Proven by mutation: every shelled-out call is refused EXCEPT the one
+    sanctioned read.
+
+    Scoped by the nested-worktree fix. Clause (vii) reads the TRACKED set with
+    `git ls-files` — the plan's own cycle-8(a) form
+    (`docs/plans/2026-09-26-5215-merge-throughput.md`:
+    `git ls-files -z '*.gitattributes' '.gitattributes'` plus
+    `$GIT_DIR/info/attributes`) — and that is why the scan stopped being a
+    filesystem walk: the walk descended into other lanes' worktrees under
+    `.worktrees/` and made clause (vii)'s verdict depend on the machine. The read
+    is of THIS tree's index: not a ref, not a diff, not a fetch. I10 is the clause
+    cycle 10 argued the no-shell property FOR (every diff-based form was defeated
+    and the fetch machinery deleted), so the ceiling is kept exact rather than
+    abandoned: only `git ls-files` is allowed, and a NEW `subprocess.run` call
+    anywhere on the static path still raises. (The primitive is `subprocess.run`
+    because that is what the static path uses; a future `Popen`/`check_output`
+    would need its own pin.)
     """
     root = make_tree(tmp_path, merge_config())
+    _own_git_repo(root)  # a real work tree, so the one sanctioned read succeeds
+    real_run = subprocess.run
+    shells: list[list[str]] = []
 
-    def boom(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("the static clauses must not shell out")
+    def recording_run(*args: object, **kwargs: object) -> object:
+        words = args[0]
+        assert isinstance(words, list), words
+        if words[:3] != ["git", "-C", str(root)] or words[3] != "ls-files":
+            raise AssertionError(f"the static clauses must not shell out: {words!r}")
+        shells.append(list(words))
+        return real_run(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(mcg.subprocess, "run", boom)
+    monkeypatch.setattr(mcg.subprocess, "run", recording_run)
     assert mcg.run_static(root)[0] == 0
+    assert len(shells) == 1
 
 
 # ---------------------------------------------------------------------------

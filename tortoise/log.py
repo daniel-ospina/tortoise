@@ -89,16 +89,17 @@ from pathlib import Path
 #   * ``PointAdded`` / ``OperatorAdded`` are members, but their fold reaches
 #     ``n.status = coalesce($st, n.status, 'live')`` with ``$st`` taken from the
 #     payload (projection/entities.py:770, :795) and ``create_point`` accepts
-#     every value in ``POINT_STATUS_VALUES`` (sdk.py:3489) — a BORN-TERMINAL
-#     create (``_born_terminal``, sdk.py:3655, a first-class case: see #2422)
-#     journals ``status`` in its ``PointAdded`` point snapshot (sdk.py:3828). A
+#     every value in ``POINT_STATUS_VALUES`` — a BORN-TERMINAL
+#     create (``_born_terminal``, a first-class case: see #2422)
+#     journals ``status`` in its ``PointAdded`` point snapshot. A
 #     torn born-terminal ``PointAdded`` for an id an EARLIER record left live is
 #     therefore a resurrection this classifier tolerates. ``n.content=$content``
 #     and the operator ``n.direction=$dir`` (entities.py:766, :825) are the same
 #     family on the same re-create composition, and so is an owned-null
-#     ``embedding`` (re-capture of a deterministic turn id — ``turn_id =
-#     f"{session_id}_t{i}"``, sdk.py:1106 — with changed content and nothing
-#     encoded, whose snapshot journals the read-back ``None``, sdk.py:1130):
+#     ``embedding`` (re-capture of a deterministic turn id — the
+#     ``f"{session_id}_t{i}"`` form ``sdk._capture_turn_id`` mints — with
+#     changed content and nothing
+#     encoded, whose snapshot journals the read-back ``None``):
 #     the replay then keeps a stale vector the live write cleared. It is NOT a
 #     first-order path (unlike ``EventRecorded``'s connector leg, which every
 #     connector ingest reaches, or ``SessionRecorded`` above): every arm needs a
@@ -143,8 +144,15 @@ TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
     # Object / subject lane additions (MERGE + SET; an object or subject
     # upsert clears the DERIVED embedding so it is recomputed).
     "ObjectRegistered", "SubjectAdded",
-    # Source lane addition (MERGE + SET only).
-    "SourceCreated",
+    # Source lane additions (MERGE + SET only). `SourceVersioned` is the
+    # #5024 T6 re-materialisation record: `_fold_source_versioned` delegates to
+    # the IDENTICAL `_upsert_source` fold `SourceCreated` already rides
+    # (MERGE + SET, hash-diff-gated, no removal), so its loss cannot revive
+    # state by the module's own criterion. Before #5024 that same transition
+    # was journalled as `SourceCreated`, whose torn tail was tolerated —
+    # refusing the new type would be a silent tightening of the recovery
+    # posture (it blocks `rebuild_all`/`recover_from_log`/`backup.restore`).
+    "SourceCreated", "SourceVersioned",
     # Bookkeeping records: ``_NO_PROJECTION_FOLD`` (projection/__init__.py:
     # 1868) — recognized and INTENTIONALLY not folded by any dispatcher
     # (``apply``/``_apply_one``/``rebuild_all`` pass over them), so their loss
@@ -170,7 +178,7 @@ TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
 #                  ``_annotator_value_ok`` (projection/__init__.py:1790-1792,
 #                  the same sentence for ``annotate_operator``/``update_point``
 #                  with ``x=None``). ``update_point(id, confidence=None)``
-#                  journals ``"confidence": null`` (sdk.py:6162-6164), so a
+#                  journals ``"confidence": null``, so a
 #                  torn ``PointRevised`` that drops a CLEAR leaves the stale
 #                  prior live and the rebuild disagrees with the live graph.
 #                  Unlike ``EventRecorded`` this needs no prefix-inference
@@ -193,7 +201,7 @@ TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
 #                     payload (projection/entities.py:1261-1266; the only gate
 #                     is payload PRESENCE — ``val is not None and
 #                     _annotator_value_ok(val)``), and the SDK emits it as one of
-#                     the capture's TRAILING records (sdk.py:4844) with
+#                     the capture's TRAILING records with
 #                     ``capture_ok=False`` on a failed or keyless capture. A
 #                     dropped tear restores ``capture_ok=NULL``, which
 #                     ``hosted_api`` reads as the legacy "presumed captured"

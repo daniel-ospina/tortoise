@@ -75,7 +75,10 @@ those follow-ups.
 Shipped as an optimisation loop (baseline → lever → measure → keep/revert):
 - **A1** sparse numeric-token policy (ask-lane-only; SAME-VALUE money),
 - **A4** additive `search_keys` PRF expansion (OR-cap budget — original
-  tokens always keep their slots),
+  tokens always keep their slots; **default OFF since #4593** — the library
+  parameter default was already `False`, only the ask lane flipped it ON
+  unmeasured, so the lane is now the fail-safe side until the two-pass
+  measurement lands; `TORTOISE_ASK_SEARCH_KEYS_PRF=1` still turns it on),
 - **A5** evidence-mark boost before assembly (stored `has_answer` marks;
   product graphs currently carry none — zero marks = no-op),
 - **A3** ask-lane fusion weights/k knobs (default = shared global),
