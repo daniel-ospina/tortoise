@@ -124,6 +124,11 @@ from tortoise.projection import (
 )
 from tortoise.retention import RESTORE_WINDOW_HOURS as _RESTORE_WINDOW_HOURS  # #4179
 from tortoise.sdk import (
+    _CAPTURE_EXTRACTION_DISABLED_MODE,  # #4258: extraction-turned-off receipt mode
+    _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING,  # #4258: its M2-replay sibling (never the keyless one)
+    _CAPTURE_EXTRACTION_DISABLED_WARNING,  # #4258: its canonical "stored, not extracted" notice
+    _CAPTURE_EXTRACTOR_LANE_DISABLED,  # #4258: the setting-disabled Session lane value
+    _CAPTURE_EXTRACTOR_LANES_RETRYABLE,  # #4258: the shared retry-eligible lane set
     _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING,  # #3892: shared "stored, never extracted" disclosure
     _CAPTURE_NO_PROVIDER_MODE,  # #3892: keyless-capture receipt mode (reused, not reinvented)
     _CAPTURE_NO_PROVIDER_WARNING,  # #3892: the canonical "stored, not extracted" notice
@@ -6336,6 +6341,7 @@ DEFAULT_ONBOARDING_STATE = {
     "github_docs_indexed": False,         # #1726: docs staged + ingested (Slice 1)
     "github_docs_indexed_at": None,       # #1894: last docs index completion (ISO, parity with github_docs_indexed)
     "session_recording": True,            # #1927: default-ON (ToS-covered) — optional off-switch, not a consent gate
+    "capture_extract": True,              # #4258: per-org user setting (default ON, #3892 owner ruling) — off = store the turns, skip extraction
     "demo_created": False,
     "org_created": False,
     "completed_at": None,
@@ -11364,11 +11370,13 @@ def _capture_abandoned_marker(proj, session_id: str, lane: str) -> None:
     gone). Marking it failed routes that retry into the EXISTING #2335
     TRUE-retry lane, which re-extracts on the convergent v2 ids.
 
-    SCOPE — the retry is closed to the CONVERGENT lanes (v2, and the keyless
-    "none" lane, #3892), and only for IN-PROCESS cancellation:
+    SCOPE — the retry is closed to the CONVERGENT lanes (v2, the keyless
+    "none" lane, and the setting-disabled "disabled" lane — #3892/#4258), and
+    only for IN-PROCESS cancellation:
 
-    * the TRUE-retry gate requires the prior lane to be convergent — v2, or the
-      keyless "none" lane (#3892) — AND the retrying request's
+    * the TRUE-retry gate requires the prior lane to be convergent — v2, the
+      keyless "none" lane, or the setting-disabled "disabled" lane
+      (#3892/#4258) — AND the retrying request's
       `TORTOISE_SESSION_EXTRACTOR != "m2"` (#2473), so an abandoned **m2**
       capture re-POSTed still replays, and so does an abandoned v2 capture
       re-POSTed after the deployment's lane was switched to m2. Both are the
@@ -11430,6 +11438,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     #3892 (owner ruling 2026-09-18): a missing provider key is NOT a gate —
     the capture is stored for every request and ONLY the LLM extraction is
     skipped, reported truthfully as receipt mode "no-provider".
+    #4258 (owner ruling on #3892, comment 5723832861 — user-configurable,
+    default ON; reaffirmed by 5737715963): the SAME store-only outcome is
+    reachable by the USER — onboarding_state.capture_extract=false
+    (per-org, default ON when absent) stores the turns and skips extraction,
+    reported truthfully as receipt mode "extraction-disabled".
     ``request`` is optional (the MCP tool has no HTTP Request) — audit and
     abuse recording degrade to a best-effort stub.
     """
@@ -11456,7 +11469,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # (`_session_recording_allowed` -> `_get_onboarding_state`). It used to run
     # inline here, holding the single event loop for the resolution; it now
     # rides the shared offload seam like the other onboarding reads.
-    recording_ok, rec_layer = await _session_recording_allowed_off_loop(org)
+    # #4258: the SAME worker call also returns the onboarding state, so the
+    # `capture_extract` read below (and the completion disclosure further down)
+    # reuses it — ONE read per capture, not two.
+    recording_ok, rec_layer, _onboard_state = (
+        await _session_recording_allowed_off_loop(org))
     if not recording_ok:
         if rec_layer == "graph":
             # #2302 (recording-on surface): the graph-layer 409 copy names
@@ -11493,6 +11510,15 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # sdk.capture_session (PR #4014) — the hosted lane no longer keeps the
     # pre-#3892 503-first refusal.
     no_provider = not _llm_provider_available()
+    # #4258 (owner ruling on #3892, comment 5723832861 — user-configurable,
+    # default ON; reaffirmed by 5737715963): extraction into memory is a
+    # PER-ORG user setting, default ON. OFF is "store but don't extract" —
+    # the same store-only shape as the keyless path, but under its OWN truthful
+    # reason (a provider may well be configured). `store_only` is the single
+    # predicate every store-only decision below keys on, so the keyless and the
+    # user-disabled cases can never drift apart.
+    extract_enabled = _capture_extract_enabled(org, _onboard_state)
+    store_only = no_provider or not extract_enabled
 
     if len(body.conversation) > MAX_SESSION_TURNS:
         # #2335 WI-1c: the turn-cap refusal is a structured record (the
@@ -11589,28 +11615,30 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # (capture_ok True). A prior FAILED capture (capture_ok False) is
     # RE-ATTEMPTED — extraction runs again. None (legacy, pre-#2335)
     # replays — backward compat with the #1727 invariant.
-    # Review (PR #2473): TRUE retry is gated to a CONVERGENT lane (v2, or the
-    # keyless "none" lane, #3892 — content-addressed pt_<sha> ids + graph
-    # content_hash resolution fold a re-attempt's partial claims onto the same
-    # nodes). The
+    # Review (PR #2473): TRUE retry is gated to a CONVERGENT lane (v2, the
+    # keyless "none" lane, #3892, or the setting-disabled "disabled" lane,
+    # #4258 — content-addressed pt_<sha> ids + graph content_hash resolution
+    # fold a re-attempt's partial claims onto the same nodes). The
     # M2 lane mints non-deterministic time-ULID ids with in-capture-only dedup
     # and folds partial emissions live on raise — re-running M2 over a failed
     # attempt's LIVE ULID claims would mint DUPLICATES (the #1727 hole the
     # replay skip closed). Retry fires only when the prior ran a CONVERGENT
-    # lane (v2, or the keyless "none" lane, #3892) AND this request runs v2
+    # lane (v2, the keyless "none" lane, or the setting-disabled "disabled"
+    # lane — #3892/#4258) AND this request runs v2
     # (env != m2) — otherwise replay (safe no-op).
     # #3892 / #4007: a keyless capture records lane "none" (no lane ran), and
     # a FAILED prior is re-attempted (#2335 TRUE retry) — that is how a session
     # captured without a key gets its memory points once a key appears, on an
     # EXPLICIT re-capture (never automatically). "none" is retry-eligible for
-    # the same reason "v2" is: it minted no claims of its own, and its turn ids
-    # are deterministic, so the re-attempt converges. The m2 exclusion is
+    # the same reason "v2" and "disabled" (#4258) are: none of them minted
+    # claims of its own, and their turn ids are deterministic, so the
+    # re-attempt converges. The m2 exclusion is
     # UNCHANGED and deliberate (see tortoise/sdk.py's retry gate).
     prior_capture_ok = session_row[1]
     prior_capture_extractor = session_row[2]
     retry_failed_capture = (
         session_existed and prior_capture_ok is False
-        and prior_capture_extractor in ("v2", "none")
+        and prior_capture_extractor in _CAPTURE_EXTRACTOR_LANES_RETRYABLE
         and os.environ.get("TORTOISE_SESSION_EXTRACTOR") != "m2")
 
     # Extraction-aware estimate (pre-write, fail-closed count) — review P2,
@@ -11636,7 +11664,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # extraction estimate must not 402-block it — same rationale as the
     # replay skip above. `_check_org_limit(org, "sessions")` still runs, but
     # sessions are unlimited since #4010, so it is vacuous in practice.
-    if (not session_existed or retry_failed_capture) and not no_provider:
+    if (not session_existed or retry_failed_capture) and not store_only:
         est = _session_extraction_estimate(windowed)
         from tortoise.quota import count_org_usage
         sdk_org = _data_sdk(org)
@@ -11920,11 +11948,19 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # that could downgrade a succeeded prior to capture_ok=False.
             state["attempted"] = True
             state["proj"] = proj
-            state["lane"] = "none"
+            # #4258: the SAME derivation as the durable record (see
+            # _store_only_lane) — the two lane writers cannot disagree.
+            state["lane"] = _store_only_lane(no_provider, extract_enabled)
         meta = {
             "provider": None, "route": None, "failover_used": False,
             "errors": [],
-            "warnings": [_CAPTURE_NO_PROVIDER_WARNING],
+            # #4258: when the team ALSO turned extraction off, both reasons
+            # are true and both belong on the receipt — the no-provider branch
+            # wins the MODE (a missing key is the harder blocker), but the
+            # user's own setting must not vanish from the disclosure.
+            "warnings": ([_CAPTURE_NO_PROVIDER_WARNING] if extract_enabled
+                         else [_CAPTURE_NO_PROVIDER_WARNING,
+                               _CAPTURE_EXTRACTION_DISABLED_WARNING]),
             "mode": _CAPTURE_NO_PROVIDER_MODE,
             # #2335 WI-1a: no extractor ran — stats stays ALWAYS-present
             # (additive meta contract), empty here (not fabricated).
@@ -11944,12 +11980,48 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # would be a FALSE statement of this state and would hide the
             # remedy. Disclose it, in the SAME words as sdk.capture_session.
             _replay_warnings.append(_CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING)
+        elif (prior_capture_ok is False
+              and prior_capture_extractor == _CAPTURE_EXTRACTOR_LANE_DISABLED):
+            # #4258: the prior was an EXTRACTION-DISABLED store — a provider
+            # key may well be configured, so the keyless warning above would be
+            # a false diagnosis. Disclose the real reason + remedy under its
+            # OWN words (the m2 lane refuses the re-attempt here too).
+            _replay_warnings.append(
+                _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING)
         meta = {"errors": [], "warnings": _replay_warnings,
                 "mode": "replayed",
                 "route": None, "provider": None,
                 # #2335 WI-1a: hosted replayed carries no extractor_v2
                 # telemetry — stats always-present, empty on replay.
                 "stats": {}}
+    elif not extract_enabled:
+        # #4258 (owner ruling on #3892, comment 5723832861 — user-configurable,
+        # default ON; reaffirmed by 5737715963): the team turned extraction OFF.
+        # The turn loop above already ran UNCHANGED, so the
+        # Session + its turn Points are STORED and searchable; only the LLM
+        # extraction into memory points is skipped — exactly the keyless
+        # shape, reported under its own reason. Placed AFTER the replay
+        # branch: a re-capture of an ALREADY-SUCCEEDED session is honestly a
+        # replay (no extraction ran then either), and a FAILED prior falls
+        # through to here instead of re-attempting an extraction the user
+        # turned off. `lane` is the DISTINCT "disabled" value (never "none",
+        # which the replay disclosure reads as keyless) so a LATER re-capture
+        # with extraction back ON re-attempts through the #2335 TRUE-retry path,
+        # and the #3129 abandoned-marker write persists the RIGHT reason.
+        if state is not None and not session_existed:
+            state["attempted"] = True
+            state["proj"] = proj
+            # the SAME derivation as the durable record (see _store_only_lane)
+            state["lane"] = _store_only_lane(no_provider, extract_enabled)
+        meta = {
+            "provider": None, "route": None, "failover_used": False,
+            "errors": [],
+            "warnings": [_CAPTURE_EXTRACTION_DISABLED_WARNING],
+            "mode": _CAPTURE_EXTRACTION_DISABLED_MODE,
+            # #2335 WI-1a: no extractor ran — stats stays ALWAYS-present
+            # (additive meta contract), empty here (not fabricated).
+            "stats": {},
+        }
     elif os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2":
         if state is not None:
             state["attempted"] = True
@@ -12104,7 +12176,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # TOCTOU: both observe session_existed=False — MERGE onto ONE Event
     # node (the Event projection MERGEs on eventId; the second concurrent
     # writer's create is an idempotent no-op).
-    if not session_existed or (retry_failed_capture and not no_provider):
+    if not session_existed or (retry_failed_capture and not store_only):
         # #2335 WI-2b: a retry re-runs the mint — the deterministic Event id
         # (_session_capture_event_id) converges on the SAME node (MERGE), and
         # the retry-minted points get the provenance stamp + typed-Source
@@ -12306,7 +12378,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # full transcript length on the abuse leg. The retry arm therefore applies
     # only when the retry can EXTRACT (a keyed retry mints points); the
     # grown-transcript arm still covers the keyless case that really writes.
-    if (not session_existed or (retry_failed_capture and not no_provider)
+    if (not session_existed or (retry_failed_capture and not store_only)
             or len(windowed) > prior_turn_count):
         # #2335 WI-2b: a retry writes new extracted points (not a zero-node
         # replay) — metering + abuse records fire for the re-attempt. A keyless
@@ -12572,8 +12644,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # Non-fatal: a checkpoint hiccup never 500s a committed capture (mirrors
     # the receipt block).
     try:
-        legacy_mirror = bool(_get_onboarding_state(
-            org["org_id"]).get("onboarding_complete"))
+        legacy_mirror = bool(
+            _onboard_state.get("onboarding_complete"))
         _cd = _os.write_completed_step(
             proj, org["org_id"], "capture-disclosed",
             status_from_mirror=legacy_mirror)
@@ -12599,6 +12671,15 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # claim an extraction that did not happen) nor "replayed". Checked
         # before `route` for parity with sdk.capture_session.
         effective_mode = _CAPTURE_NO_PROVIDER_MODE
+    elif mode == _CAPTURE_EXTRACTION_DISABLED_MODE:
+        # #4258: the team turned extraction off — turns stored, extraction
+        # skipped by the USER's setting. Its own name for the same reason the
+        # keyless case has one: the causes are different and the receipt must
+        # not conflate them. Checked before `route` so an off setting is never
+        # reported as an "llm" extraction that did not run. (Unlike the keyless
+        # branch this has no SDK counterpart today: sdk.capture_session does
+        # not read the setting — that lane is the deferred follow-up #4288.)
+        effective_mode = _CAPTURE_EXTRACTION_DISABLED_MODE
     elif meta.get("route"):
         effective_mode = f"llm:{meta['route']}"
     elif mode == "replayed":
@@ -12757,13 +12838,17 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # (#4014). A keyless attempt records this ONLY when it CREATES the session:
     # a keyless RE-capture must not rewrite a prior attempt's record (a prior
     # FAILED v2 attempt's lane is the evidence the #2473 M2 exclusion reads).
-    _capture_ok_record = False if no_provider else _capture_ok
+    _capture_ok_record = False if store_only else _capture_ok
+    # #4258: distinguish the TWO store-only causes on the record — "none" is
+    # the keyless lane, "disabled" is the team's setting. Both are
+    # retry-eligible (see _CAPTURE_EXTRACTOR_LANES_RETRYABLE), so a later
+    # re-capture with extraction back ON still converges (#2335 TRUE retry).
     _capture_extractor_record = (
-        "none" if no_provider
+        _store_only_lane(no_provider, extract_enabled) if store_only
         else ("m2" if os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2"
               else "v2"))
     _record_session_state = (
-        (not session_existed) if no_provider
+        (not session_existed) if store_only
         else (not session_existed or retry_failed_capture))
     if _record_session_state:
         # #2335 WI-2b: record the outcome ONLY on a genuine attempt (fresh OR
@@ -12860,7 +12945,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # per-point entries ride the enriched ``resp["points"]`` list (extra
     # wins on merge, D8).
     # #2335 WI-1d: the observation leg (hosted lane tag) — one structured
-    # line per capture; mode covers v2/m2/replayed/error — empty returns pre-emit.
+    # line per capture; mode covers v2/m2/replayed/error/no-provider/
+    # extraction-disabled — empty returns pre-emit.
     try:
         _emit_capture_observation(
             session_id=session_id, lane="hosted",
@@ -22489,6 +22575,7 @@ _ONBOARDING_DEFAULT_STATE = {
     "github_docs_indexed_at": None,       # #1894: last docs index completion (ISO, parity with github_docs_indexed)
     "demo_created": False,
     "session_recording": True,            # #1927: default-ON (ToS-covered) — optional off-switch, not a consent gate
+    "capture_extract": True,              # #4258: per-org user setting (default ON, #3892 owner ruling) — off = store the turns, skip extraction
     "org_created": False,
     "prompt_pasted": False,
     "onboarding_complete": False,
@@ -22712,7 +22799,8 @@ def _graph_recording_override(org: dict) -> bool | None:
         return None
 
 
-def _session_recording_allowed(org: dict) -> tuple[bool, str]:
+def _session_recording_allowed(org: dict,
+                               state: dict | None = None) -> tuple[bool, str]:
     """C6 #2115 (D-C6-3): the EFFECTIVE session_recording for a capture.
 
     Resolution order: the graph's override (D-C6-1 storage) → when None the
@@ -22720,8 +22808,14 @@ def _session_recording_allowed(org: dict) -> tuple[bool, str]:
     dashboard toggle + MCP tortoise_onboarding_session_recording write).
     Returns (allowed, surface) where surface names the deciding layer for
     the 409 message (``graph`` vs ``org``).
+
+    ``state`` may be passed by a caller that ALREADY read the onboarding
+    state (the capture hot path reads it once for BOTH this flag and
+    ``capture_extract``, #4258) — the read is a blocking control-plane round
+    trip, so it must not be repeated per capture.
     """
-    state = _get_onboarding_state(org["org_id"])
+    if state is None:
+        state = _get_onboarding_state(org["org_id"])
     if not state.get("session_recording"):
         # #1927 master kill (round-1 decision c2): the org-level OFF is
         # the user's explicit opt-out — a per-graph override NEVER re-enables
@@ -22742,8 +22836,79 @@ def _session_recording_allowed(org: dict) -> tuple[bool, str]:
     return True, "team"
 
 
-async def _session_recording_allowed_off_loop(org: dict) -> tuple[bool, str]:
-    """`_session_recording_allowed` off the event loop (#4625, leg 12).
+def _capture_extract_enabled(org: dict, state: dict) -> bool:
+    """#4258 (owner ruling on #3892, comment 5723832861 — user-configurable,
+    default ON; reaffirmed by 5737715963): the EFFECTIVE
+    ``capture_extract`` for a capture — a PER-ORG user setting, default ON.
+
+    Read with an EXPLICIT ``True`` default so an older stored onboarding state
+    (key absent — e.g. a team provisioned before this setting existed) can
+    never silently mean OFF. Deliberately NOT the ``session_recording``
+    polarity: that key is an opt-out, where absence correctly means OFF; this
+    one is read as an opt-in-consumed setting, where absence means ON.
+
+    ``state`` is REQUIRED, with NO fallback read: the read is a blocking
+    control-plane round trip, so the capture hot path reads it ONCE, in the
+    gate-resolution worker, and passes it in (#4258). A fallback here would
+    defeat that one-read invariant AND run the read ON the event loop (#4625)
+    — and the capture path always has the state, so it would be a latent
+    hazard with no caller. (Its sibling ``_session_recording_allowed`` may keep
+    an optional ``state`` because it is reached ONLY from inside the offload
+    worker; this helper is also reached ON the loop, so it may not.)
+    """
+    return bool(state.get("capture_extract", True))
+
+
+def _store_only_lane(no_provider: bool, extract_enabled: bool) -> str:
+    """#4258: the Session lane recorded for a STORE-ONLY capture.
+
+    ONE derivation for BOTH writers of the lane — the durable
+    `_capture_extractor_record` and the #3129 abandoned-capture marker — so they
+    can never disagree. The user setting OUTRANKS the transient missing key when
+    both hold: it is the durable, user-controlled reason, and the M2-replay
+    disclosure keys on this value (diagnosing a configured-key team as keyless
+    would be a false statement, the defect this value exists to prevent). Both
+    lanes are retry-eligible (see `_CAPTURE_EXTRACTOR_LANES_RETRYABLE`).
+    """
+    if not extract_enabled:
+        return _CAPTURE_EXTRACTOR_LANE_DISABLED
+    # Reaching here means the ONLY store-only reason left is the missing key:
+    # every caller derives `store_only = no_provider or not extract_enabled`, so
+    # `no_provider` holds whenever this branch runs. Assert the precondition
+    # rather than leave a decision-bearing parameter unread — a future edit that
+    # recorded the keyless "none" for a configured-key team is exactly the false
+    # M2-replay diagnosis this value exists to prevent.
+    assert no_provider, (
+        "_store_only_lane(no_provider=False, extract_enabled=True) is not a "
+        "store-only capture — callers never reach it (see the docstring)")
+    return "none"
+
+
+def _capture_gate_resolution(org: dict) -> tuple[bool, str, dict]:
+    """#4258 + #4625 leg 12: resolve the recording gate AND read the
+    onboarding state ONCE, so both consumers share that one read.
+
+    The unit of offload is the RESOLUTION (the #3498 design), so the org
+    default read and the per-graph override probe stay in ONE worker — and
+    ``_capture_session_impl`` also gets the state its ``capture_extract`` read
+    (#4258) and its completion disclosure consume, so the hot path reads the
+    control plane ONCE per capture, not twice.
+
+    Sync by design: it is the callable handed to ``_graph_offload``, never
+    awaited inline.
+
+    Read-MOSTLY, not read-only (the #4625 work order §2): in the selfhost lane
+    ``_get_onboarding_state`` auto-materializes defaults, but that write is
+    idempotent, so abandoning the worker on a bound miss is safe.
+    """
+    state = _get_onboarding_state(org["org_id"])
+    recording_ok, rec_layer = _session_recording_allowed(org, state)
+    return recording_ok, rec_layer, state
+
+
+async def _session_recording_allowed_off_loop(org: dict) -> tuple[bool, str, dict]:
+    """`_session_recording_allowed` off the event loop (#4625, leg 12),
+    returning the onboarding state it already read (#4258).
 
     The helper is synchronous END TO END and both of its legs block: its
     ``_get_onboarding_state`` read goes through the blocking
@@ -22761,15 +22926,23 @@ async def _session_recording_allowed_off_loop(org: dict) -> tuple[bool, str]:
     worker for the lane's cold-start allowance, and an over-bound read fails
     closed (503) rather than hanging the capture.
 
+    It returns the state as its THIRD element so ``_capture_session_impl`` can
+    hand that one read to ``_capture_extract_enabled`` and to its completion
+    disclosure (#4258) — the hot path reads the control plane ONCE per
+    capture, not twice. This is the gate's ONLY off-loop wrapper: a wrapper
+    nothing calls is not a fix, so the #4625 registry guard pins every name in
+    ``_ONBOARDING_OFFLOAD_WRAPPERS`` to a real call site.
+
     Read-MOSTLY, not read-only (the #4625 work order §2): in the selfhost lane
     ``_get_onboarding_state`` auto-materializes defaults, but that write is
     idempotent, so abandoning the worker on a bound miss is safe.
     """
     return await _graph_offload(
-        lambda: _session_recording_allowed(org),
+        lambda: _capture_gate_resolution(org),
         op="session_recording_allowed",
         timeout=_monitoring.CONTROL_PLANE_OFFLOAD_TIMEOUT_S,
     )
+
 
 
 def _onboarding_defaults() -> dict:
@@ -23552,6 +23725,9 @@ class OnboardingStatePatchRequest(BaseModel):
     github_indexed_at: str | None = None  # #1894: last github index completion (ISO timestamp, server-stamped)
     demo_created: bool | None = None
     session_recording: bool | None = None
+    # #4258: per-org user setting (default ON, #3892 owner ruling) — off means a
+    # capture stores its turns but skips extraction into memory points.
+    capture_extract: bool | None = None
     org_created: bool | None = None
     prompt_pasted: bool | None = None
     onboarding_complete: bool | None = None
@@ -31492,6 +31668,57 @@ def _oauth_error_response(exc: OAuthError) -> JSONResponse:  # noqa: F821
     return JSONResponse(status_code=exc.status, content=exc.body())
 
 
+def _oauth_unconverted_failure(exc: BaseException, *, where: str) -> JSONResponse:
+    """#3026: a control-plane failure must not escape an OAuth endpoint as a bare
+    500 ``{"detail": "Internal server error"}``.
+
+    The five endpoints below caught only ``OAuthError``, so such a failure
+    reached the global ``Exception`` handler and the consumer got a body it
+    could not act on. This helper backs the ``except Exception`` clause that
+    closes it.
+
+    WHY 503 FOR A ``RuntimeError``: ``SupabaseControlPlane`` documents that
+    non-2xx responses and transport errors raise ``RuntimeError``
+    (``supabase_control.py``, its class docstring), and RFC 6749 defines
+    ``temporarily_unavailable`` for exactly that (§4.1.2.1; §8.5 permits the
+    additional token-endpoint code). A retry is safe here: the
+    reads are reads, ``issue_auth_code`` inserts a fresh self-expiring code,
+    revoke is RFC 7009 idempotent, DCR is a fresh insert, and the CIMD
+    provisioning insert ``validate_authorize_params`` can reach is guarded and
+    idempotent (``_persist_cimd_client``).
+
+    THE LIMIT, stated because this helper cannot make the distinction: a LOCAL
+    bug that raises ``RuntimeError`` is also labelled retryable. The
+    discriminator is a convention, not a proof. It is chosen because the
+    alternative — treating every ``RuntimeError`` as a bug — puts the real
+    outage back on the bare-500 path this issue exists to close.
+
+    WHY THE §5.2 BODY, NOT ``_control_plane_unavailable()``: that helper returns
+    FastAPI's ``{"detail": {...}}`` shape, and these consumers parse the OAuth
+    body — the consent page's own JS reads ``payload.error_description ||
+    payload.error`` (``oauth.py``), so a ``detail`` body would render as a
+    generic "Consent failed" with no cause or remedy. This mirrors
+    ``_oauth_offload``'s ``unavailable`` override for the OAuth lanes.
+
+    ANYTHING ELSE IS A BUG, NOT A RETRY SIGNAL: it keeps the honest 500
+    ``server_error``. ``/oauth/token`` is the exception — its oauth.py helpers
+    WRAP, so its own net can return 500 for everything it catches.
+
+    The exception is CONSUMED here, so the global handler cannot re-shape it.
+    """
+    from tortoise.oauth import (
+        OAuthError,
+        OAuthTemporarilyUnavailable,
+        _log_and_capture,
+    )
+
+    _log_and_capture(exc, where=where)
+    if isinstance(exc, RuntimeError):
+        return _oauth_error_response(OAuthTemporarilyUnavailable())
+    return _oauth_error_response(
+        OAuthError(500, "server_error", "Internal error processing the request."))
+
+
 @app.get("/.well-known/oauth-protected-resource")
 @app.get("/.well-known/oauth-protected-resource/mcp")
 async def oauth_protected_resource(request: Request):
@@ -31524,7 +31751,14 @@ async def oauth_authorize(request: Request):
         consent_page_html,
         validate_authorize_params,
     )
-    cp, enabled = _oauth_control_plane()
+    try:
+        cp, enabled = _oauth_control_plane()
+    except RuntimeError as exc:      # #3026: an unconfigured control plane
+        # must not escape as a bare 500 detail. Acquisition fails BEFORE any
+        # request is made, so it is not a mid-request transport failure — but
+        # the branch immediately below already answers 'OAuth is not usable
+        # right now' with a 503, and this keeps ONE story for that state.
+        return _oauth_unconverted_failure(exc, where="oauth/authorize")
     if not enabled or cp is None:
         raise HTTPException(status_code=503, detail="OAuth not configured")
     params = {
@@ -31581,6 +31815,8 @@ async def oauth_authorize(request: Request):
                 params["redirect_uri"] + sep + urlencode(
                     {"error": exc.error, "state": params["state"]}))
         return _oauth_error_response(exc)
+    except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
+        return _oauth_unconverted_failure(exc, where="oauth/authorize")
     html, nonce = consent_page_html(
         client_name=client.get("client_name") or client["id"],
         scope=params["scope"] or client.get("scope") or "mcp",
@@ -31615,7 +31851,14 @@ async def oauth_consent_preview(request: Request):
     the session JWT + client-declared resource indicator. No state change.
     """
     from tortoise.oauth import OAuthError, consent_preview
-    cp, enabled = _oauth_control_plane()
+    try:
+        cp, enabled = _oauth_control_plane()
+    except RuntimeError as exc:      # #3026: an unconfigured control plane
+        # must not escape as a bare 500 detail. Acquisition fails BEFORE any
+        # request is made, so it is not a mid-request transport failure — but
+        # the branch immediately below already answers 'OAuth is not usable
+        # right now' with a 503, and this keeps ONE story for that state.
+        return _oauth_unconverted_failure(exc, where="oauth/consent/preview")
     if not enabled or cp is None:
         raise HTTPException(status_code=503, detail="OAuth not configured")
     user = await verify_session_jwt(request)
@@ -31624,6 +31867,8 @@ async def oauth_consent_preview(request: Request):
                                request.query_params.get("resource") or None)
     except OAuthError as exc:
         return _oauth_error_response(exc)
+    except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
+        return _oauth_unconverted_failure(exc, where="oauth/consent/preview")
 
 
 @app.post("/oauth/consent")
@@ -31637,7 +31882,14 @@ async def oauth_consent(request: Request):
         issue_auth_code,
         validate_authorize_params,
     )
-    cp, enabled = _oauth_control_plane()
+    try:
+        cp, enabled = _oauth_control_plane()
+    except RuntimeError as exc:      # #3026: an unconfigured control plane
+        # must not escape as a bare 500 detail. Acquisition fails BEFORE any
+        # request is made, so it is not a mid-request transport failure — but
+        # the branch immediately below already answers 'OAuth is not usable
+        # right now' with a 503, and this keeps ONE story for that state.
+        return _oauth_unconverted_failure(exc, where="oauth/consent params")
     if not enabled or cp is None:
         raise HTTPException(status_code=503, detail="OAuth not configured")
     try:
@@ -31661,6 +31913,8 @@ async def oauth_consent(request: Request):
             op="oauth_consent_params")
     except OAuthError as exc:
         return _oauth_error_response(exc)
+    except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
+        return _oauth_unconverted_failure(exc, where="oauth/consent params")
     # The browser session JWT — same JWKS/ES256+RS256 verification the session
     # endpoints use (D2: reuse session_auth verify; no new auth stack).
     user = await verify_session_jwt(request)
@@ -31676,6 +31930,8 @@ async def oauth_consent(request: Request):
         )
     except OAuthError as exc:
         return _oauth_error_response(exc)
+    except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
+        return _oauth_unconverted_failure(exc, where="oauth/consent mint")
     return {"code": code, "state": body.get("state"),
             "redirect_uri": body["redirect_uri"]}
 
@@ -31736,7 +31992,14 @@ async def oauth_token(request: Request):
 async def oauth_revoke(request: Request):
     """RFC 7009 token revocation (D5 — explicit client-initiated revocation)."""
     from tortoise.oauth import OAuthError, revoke_token
-    cp, enabled = _oauth_control_plane()
+    try:
+        cp, enabled = _oauth_control_plane()
+    except RuntimeError as exc:      # #3026: an unconfigured control plane
+        # must not escape as a bare 500 detail. Acquisition fails BEFORE any
+        # request is made, so it is not a mid-request transport failure — but
+        # the branch immediately below already answers 'OAuth is not usable
+        # right now' with a 503, and this keeps ONE story for that state.
+        return _oauth_unconverted_failure(exc, where="oauth/revoke")
     if not enabled or cp is None:
         raise HTTPException(status_code=503, detail="OAuth not configured")
     from urllib.parse import parse_qs
@@ -31751,6 +32014,8 @@ async def oauth_revoke(request: Request):
         revoke_token(cp, body)
     except OAuthError as exc:
         return _oauth_error_response(exc)
+    except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
+        return _oauth_unconverted_failure(exc, where="oauth/revoke")
     return Response(status_code=200, content="")
 
 
@@ -31761,7 +32026,14 @@ async def oauth_dcr_register(request: Request):
     connectors) without operator-issued client_ids.
     """
     from tortoise.oauth import OAuthError, register_client
-    cp, enabled = _oauth_control_plane()
+    try:
+        cp, enabled = _oauth_control_plane()
+    except RuntimeError as exc:      # #3026: an unconfigured control plane
+        # must not escape as a bare 500 detail. Acquisition fails BEFORE any
+        # request is made, so it is not a mid-request transport failure — but
+        # the branch immediately below already answers 'OAuth is not usable
+        # right now' with a 503, and this keeps ONE story for that state.
+        return _oauth_unconverted_failure(exc, where="oauth/register")
     if not enabled or cp is None:
         raise HTTPException(status_code=503, detail="OAuth not configured")
     await _check_oauth_dcr_rate_limit(request)
@@ -31776,6 +32048,8 @@ async def oauth_dcr_register(request: Request):
         reg = register_client(cp, body)
     except OAuthError as exc:
         return _oauth_error_response(exc)
+    except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
+        return _oauth_unconverted_failure(exc, where="oauth/register")
     return JSONResponse(status_code=201, content=reg)
 
 

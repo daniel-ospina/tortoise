@@ -530,9 +530,10 @@ test('#3428/#2937: the shipped bundle does not carry the deleted click-writer', 
   // exact literal, so a reviewer mutation-verified that (a) extracting the
   // checkpoint POST into a parameterized helper and (b) putting a writer with the
   // exact literal in a code-split chunk each reinstated the writer with the whole
-  // guard set green — and the e2e that would catch it is not wired into CI (see
-  // the PR note: wiring it into `dashboard-e2e` is the real close). So audit what
-  // is actually SERVED, EVERY script, not just the entry chunk.
+  // guard set green — the gap this assertion exists to catch regardless. (The e2e
+  // IS wired into CI now: `dashboard-e2e` has run the onboarding specs since
+  // #4221; an earlier note here said it was not wired, and that note was stale.)
+  // So audit what is actually SERVED, EVERY script, not just the entry chunk.
   //
   // The probe is the serialized checkpoint body the writer POSTed. It is absent
   // (0) from every shipped script in the current bundle and PRESENT in a bundle
