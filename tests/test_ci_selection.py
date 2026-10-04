@@ -2623,6 +2623,42 @@ def test_carve_out_env_gated_inverse_of_uri():
             f"{job_name}: the run step must map TORTOISE_TEST_CARVE_OUT"
 
 
+def test_carve_out_lane_provisions_the_embedder_offline():
+    """#4387: the carve-out lane runs the dense leg, so it must provision the
+    embedder the way every other suite-running job does (cache + REQUIRED
+    provision) and run the suite OFFLINE.
+
+    Measured failure this pins: with the suite-wide egress guard installed and
+    no HF_HUB_OFFLINE on this lane, an uncached `SentenceTransformer()` load
+    RETRIES against huggingface.co instead of failing fast, and
+    test_longmem_runner.py re-attempts the load once per test — so the shard is
+    killed by the 15m watchdog with 0 failures (rc=124), leaving the merge rail
+    no failure identity to read (#6798). The request/backoff/test counts
+    observed on the pre-`pytest_configure` revision are not restated here: this
+    docstring and two comments carried three copies of them, which is what
+    drifts. A lane that
+    instead SKIPS the dense assertion trips the skip-guard's
+    embedder-unavailable family (#2573). Both outcomes are reds, so the lane
+    must be provisioned, not merely offline.
+    """
+    wf = _load_python_ci()
+    steps = wf["jobs"]["test-carve-out"]["steps"]
+    names = [s.get("name") or "" for s in steps]
+    cache_i = next(i for i, n in enumerate(names)
+                   if n.startswith("Cache HF embedding model"))
+    prov_i = next(i for i, n in enumerate(names)
+                  if n.startswith("Embedding model REQUIRED"))
+    run_i = next(i for i, n in enumerate(names)
+                 if n.startswith("Run carve-out suite"))
+    assert cache_i < prov_i < run_i, \
+        "the carve-out lane must cache + provision the embedder before the suite"
+    env = steps[run_i].get("env") or {}
+    assert env.get("HF_HUB_OFFLINE") == "1", \
+        "the carve-out suite step must set HF_HUB_OFFLINE=1"
+    assert env.get("TRANSFORMERS_OFFLINE") == "1", \
+        "the carve-out suite step must set TRANSFORMERS_OFFLINE=1"
+
+
 def test_pmv_job_carries_uri_manifest_guard():
     """Epic #1647 Task 10 Step 1a (P1-9 + cycle-2 P2-14 + cycle-4 P2-11):
     post-merge-validation is now a docker lane — job-level TORTOISE_DB_URI +

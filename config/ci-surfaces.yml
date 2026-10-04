@@ -71,6 +71,11 @@ surfaces:
   # the same reason: everything it pins (the canary loop, `_analytics_heartbeat_
   # block`, the /status block) lives in tortoise/hosted_api.py, which selects `api`.
   - test_analytics_sink_absence.py
+  # #4387: the egress guard's stubs are keyed to the analytics sink path and the
+  # JWKS path — both owned by tortoise/hosted_api.py / session_auth.py, which
+  # select `api`. Dual-registered with `core` (below) so a hosted_api.py-only
+  # change runs the file that pins how those paths are intercepted.
+  - test_hermetic_egress_guard.py
   - test_backups_v1_alias.py
   - test_battery_parity_executors.py
   - test_battery_parity_hash.py
@@ -867,6 +872,7 @@ surfaces:
   - test_embed_metering.py   # #4488: the tally/middleware/hook + the registry-lane writer/reader (dual with `api`/`eval`)
   - test_embedder_provision.py
   - test_embedding_model_required.py   # #4861: the REQUIRED-embedder contract (core: embeddings.py + exceptions.py)
+  - test_hermetic_egress_guard.py  # #4387: pins the suite-wide egress guard installed by tests/conftest.py — a conftest change already forces `full`, so this registration exists to keep the guard's own file in the surface it protects
   - test_embedded_evidence.py
   - test_installer_preserves_foreign_skill_content.py
   - test_lifecycle_guards.py        # #2498: shared lifecycle guard — also runs on a tortoise/live.py-only change (terminal vocabulary pin)
@@ -2400,6 +2406,7 @@ durations:
   test_shared_state_imports.py: 0.1
   test_shared_state_monitoring.py: 0.1
   test_shared_state_recovery.py: 0.2
+  test_hermetic_egress_guard.py: 2.0  # #4387: no CI junit measurement exists for this file yet (a file that never ran cannot appear in an artifact), so it takes the #3400 flat 2.0s default. Refresh from the first post-merge run that includes it. Do NOT drop the row without re-deriving the 90% floor at that head (#4348 trap) — and NO figure is restated here on purpose; this row's comment asserted one for three review rounds and each base merge re-staled it.
   test_license_surface_consumer.py: 0.3
   test_installer_preserves_foreign_skill_content.py: 0.6
   test_backup_watcher_health.py: 0.2
