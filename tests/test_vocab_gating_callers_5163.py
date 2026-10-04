@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
@@ -745,3 +746,55 @@ class TestS5WritePathGateIsGraphScoped:
         canonical = _object_kind_forms(self._master({"dev"}))
         assert [f for f in canonical if f.lower().startswith("dev:")], (
             "the canonical lowercase install must still be admitted")
+
+
+class TestGateMemoIsBoundedAndThreadSafe:
+    """#5339 review (P2): the gate memos are tenant-growable, so the cap must
+    evict; and the evict-and-insert must be ATOMIC — the first cut's inline
+    ``if len(d) >= cap: d.pop(next(iter(d)))`` was a check-then-act that raised
+    ``KeyError`` out of the "the gate must never raise" S5 write-gate helpers
+    under the capture pool's threads."""
+
+    def test_lru_evicts_the_least_recently_used(self):
+        from tortoise._gate_memo import GateMemo
+
+        m = GateMemo(maxsize=3)
+        for k in ("a", "b", "c"):
+            m.put_if_absent(k, k.upper())
+        assert m.get("a") == "A"  # refresh a's recency
+        m.put_if_absent("d", "D")  # evicts the LRU (b)
+        assert m.get("b") is None
+        assert [m.get(k) for k in ("a", "c", "d")] == ["A", "C", "D"]
+        assert len(m) == 3
+
+    def test_put_if_absent_returns_the_stored_value(self):
+        from tortoise._gate_memo import GateMemo
+
+        m = GateMemo()
+        assert m.put_if_absent("k", "first") == "first"
+        assert m.put_if_absent("k", "second") == "first"
+        assert m.get("k") == "first"
+
+    def test_concurrent_evict_insert_never_raises(self):
+        from tortoise._gate_memo import GateMemo
+
+        m = GateMemo(maxsize=4)
+        errors: list[str] = []
+
+        def worker(n: int) -> None:
+            try:
+                for i in range(2000):
+                    key = f"{n}-{i % 8}"
+                    m.put_if_absent(key, key)
+                    m.get(key)
+            except Exception as e:
+                errors.append(repr(e))
+
+        threads = [threading.Thread(target=worker, args=(n,))
+                   for n in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert not errors, f"GateMemo raised under concurrency: {errors[:3]}"
+        assert len(m) <= 4

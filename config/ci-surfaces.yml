@@ -595,10 +595,10 @@ surfaces:
   # change selects `api`, so this registration runs the door's 422 assertion.
   # `core` is the arm that actually fires for a value_extractor.py /
   # commit_schema.py / kind_classifier.py / extractor_v2.py change (the default
-  # surface); the `sdk`/`classify` arms cover a selection that NAMES those
-  # surfaces — not a source change, since `tortoise/sdk.py` is a SHARED_MODULE
-  # (full matrix) and `classify` has no SOURCE_PATTERNS entry (see
-  # tools/ci_selection.py).
+  # surface); the `classify` arm is a selection that NAMES that surface (it has
+  # no SOURCE_PATTERNS entry), while `sdk` is also reachable from a source
+  # change via SOURCE_PATTERNS["sdk"] — and `tortoise/sdk.py` itself is a
+  # SHARED_MODULE (full matrix). See tools/ci_selection.py.
   - test_vocab_gating_callers_5163.py
   battery:
   - test_battery_arms.py
@@ -1995,9 +1995,10 @@ surfaces:
   - test_version_vector.py
   # #5163: this file pins the SDK's local v1 enforcer wiring + client-side
   # Layer-1 pre-check. NOTE: `tortoise/sdk.py` is a SHARED_MODULE, so a sdk.py
-  # change selects the FULL matrix, not the `sdk` surface (and it is not in
-  # SOURCE_PATTERNS["sdk"]) — this arm covers a selection that names `sdk`
-  # directly, not the source change. Dual with `api`/`core`.
+  # change selects the FULL matrix — every surface, `sdk` included — and sdk.py
+  # itself is not in SOURCE_PATTERNS["sdk"]; this arm is additionally selected
+  # directly by the SOURCE_PATTERNS["sdk"] sources (tortoise/models.py,
+  # ids.py, crypto.py, retrieval.py, ...). Dual with `api`/`core`.
   - test_vocab_gating_callers_5163.py
   classify:
   # Issue #1695 (extractor-v3 classify-later): the kind-classification and

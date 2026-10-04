@@ -71,6 +71,7 @@ from typing import Any
 
 from . import value_gate as _value_gate  # #4899: the S2.2b identifier-only predicate
 from . import vet_gate as _vet_gate  # #5005: S2.2 VET (stdlib-only module)
+from ._gate_memo import GateMemo
 from .env_truthy import is_truthy  # #4097: the declared truthy contract
 
 # ── The v2 master list (design doc §3) ─────────────────────────────────────
@@ -5628,17 +5629,9 @@ _POINT_FALLBACK = {"kind": "statement"}
 #: exactly the premise #2714/#5163 invalidated — the S5 write gate admitted
 #: EVERY pack's declared kinds on EVERY graph, so a graph with only `dev:`
 #: installed could still mint `marketing:*`.
-_PACK_EVENT_FORMS: dict[frozenset[str] | None, set[str]] = {}
-
-#: Cap on the gate-keyed memos (#5339 review, P2). The key space is
-#: tenant-growable (``graph_kind_namespaces`` mines namespaces from the
-#: graph's data, and ``POST /v1/objects`` persists an unvalidated
-#: ``objectKind``), so an uncapped dict grows one entry per distinct
-#: installed-namespace set. Oldest gate evicted (dict insertion order) —
-#: a recompute, never a wrong answer. Shared by ``_PACK_EVENT_FORMS`` /
-#: ``_PACK_OBJECT_FORMS``; the sibling caps live in ``commit_schema`` and
-#: ``value_extractor``.
-_MAX_GATE_MEMOS = 64
+#: Bounded + LRU + thread-safe via ``GateMemo`` (``tortoise/_gate_memo.py``) —
+#: the key space is tenant-growable and this gate must never raise (#5339).
+_PACK_EVENT_FORMS = GateMemo()
 
 
 def _installed_pack_ns(master: dict) -> frozenset[str] | None:
@@ -5704,9 +5697,7 @@ def _event_kind_forms(master: dict) -> set[str]:
         except Exception:  # noqa: BLE001, RUF100 — never let the write
             # gate raise (fail-open to the master-forms-only gate)
             pack_forms = set()
-        if len(_PACK_EVENT_FORMS) >= _MAX_GATE_MEMOS:
-            _PACK_EVENT_FORMS.pop(next(iter(_PACK_EVENT_FORMS)))
-        _PACK_EVENT_FORMS[gate] = pack_forms
+        pack_forms = _PACK_EVENT_FORMS.put_if_absent(gate, pack_forms)
     return forms | pack_forms
 
 
@@ -5717,7 +5708,8 @@ def _event_kind_forms(master: dict) -> set[str]:
 #: lane's FIX A mirror). Full + bare forms, case-folded. Cached per INSTALLED
 #: namespace set, never once per process (see ``_PACK_EVENT_FORMS`` — the
 #: same #5163 review P1: an unkeyed global admitted every pack on every graph).
-_PACK_OBJECT_FORMS: dict[frozenset[str] | None, set[str]] = {}
+#: Bounded + LRU + thread-safe via ``GateMemo`` (``tortoise/_gate_memo.py``).
+_PACK_OBJECT_FORMS = GateMemo()
 
 
 def _object_kind_forms(master: dict) -> set[str]:
@@ -5753,9 +5745,7 @@ def _object_kind_forms(master: dict) -> set[str]:
         except Exception:  # noqa: BLE001, RUF100 — never let the write
             # gate raise (fail-open to the master-forms-only gate)
             pack_forms = set()
-        if len(_PACK_OBJECT_FORMS) >= _MAX_GATE_MEMOS:
-            _PACK_OBJECT_FORMS.pop(next(iter(_PACK_OBJECT_FORMS)))
-        _PACK_OBJECT_FORMS[gate] = pack_forms
+        pack_forms = _PACK_OBJECT_FORMS.put_if_absent(gate, pack_forms)
     return forms | pack_forms
 
 

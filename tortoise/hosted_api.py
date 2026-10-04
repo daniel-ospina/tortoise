@@ -14247,17 +14247,19 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     #
     # #5339 review (P1): ``graph_installed_namespaces`` is a WHOLE-GRAPH read
     # (the :PackInstall rows plus ``graph_kind_namespaces``' per-property
-    # scans — O(nodes), documented to run per call), and this handler is
-    # ``async``, so running it inline parks the event loop for every commit —
-    # the #3086/#3060 class this very handler already off-loads for its SDK
-    # open and its point-count check. Both the SDK open and the gate read go
-    # through the graph pool.
+    # scans — O(nodes), documented to run per call), and ``compile_vocab`` on a
+    # cold or evicted memo is a filesystem walk + YAML parse of every manifest
+    # (~40 ms). This handler is ``async``, so running either inline parks the
+    # event loop — the #3086/#3060 class this very handler already off-loads
+    # for its SDK open and its point-count check. Resolve the gate AND compile
+    # the vocab in ONE offloaded unit through the graph pool.
     _require_scope(org, "graphs:write", "commit_session")
     sdk = await _data_sdk_offloaded(org)
-    _gate_namespaces = await _graph_offload(
-        lambda: graph_installed_namespaces(sdk), op="commit_gate_namespaces")
-    result, payload = validate_payload_dict(
-        raw, vocab=compile_vocab(installed_namespaces=_gate_namespaces))
+    _gate_vocab = await _graph_offload(
+        lambda: compile_vocab(
+            installed_namespaces=graph_installed_namespaces(sdk)),
+        op="commit_gate_vocab")
+    result, payload = validate_payload_dict(raw, vocab=_gate_vocab)
     if result.code == "missing_required_fields":
         raise HTTPException(
             status_code=400,

@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
@@ -41,8 +42,31 @@ from tortoise.heavy_imports import import_tfidf_vectorizer  # #5718 lock-taking 
 DEFAULT_CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "kind_index"
 
 #: Load-once memoized built indexes: cache_key → KindIndex.
-_INDEX_CACHE: dict[str, KindIndex] = {}
+#:
+#: BOUNDED + LRU (#5339 review): #5163 threads ``installed_namespaces`` into
+#: ``compile_kind_index_spec``, so the spec — and therefore this content-hash
+#: key — now varies per graph. Each entry holds the full float64 ``vectors`` +
+#: ``_norm`` matrices for one gate (megabytes), and the key space is
+#: tenant-growable, so an uncapped memo accumulates one index per distinct
+#: installed-namespace set for the process lifetime. Eviction drops the
+#: in-memory copy only; a later ``load`` re-reads/re-builds it. (The persisted
+#: ``data/kind_index/*.npz`` files are NOT swept here — disk retention is a
+#: separate follow-up.)
+_INDEX_CACHE: dict[str, KindIndex] = OrderedDict()
 _INDEX_LOCK = threading.Lock()
+_MAX_MEMOIZED_INDEXES = 16
+
+
+def _memoize_index(key: str, idx: KindIndex) -> None:
+    """Insert under the lock with LRU eviction (#5339 review): the
+    evict-and-insert is atomic, so a concurrent capture worker cannot lose a
+    check-then-pop race and raise ``KeyError`` out of the classifier."""
+    with _INDEX_LOCK:
+        if key in _INDEX_CACHE:
+            _INDEX_CACHE.move_to_end(key)
+        _INDEX_CACHE[key] = idx
+        while len(_INDEX_CACHE) > _MAX_MEMOIZED_INDEXES:
+            _INDEX_CACHE.popitem(last=False)
 
 
 def _clear_index_cache() -> None:
@@ -169,8 +193,7 @@ class KindIndex:
         if persist:
             idx.persist(cache_dir=cache_dir)
         if memoize:
-            with _INDEX_LOCK:
-                _INDEX_CACHE[key] = idx
+            _memoize_index(key, idx)
         return idx
 
     @classmethod
@@ -197,6 +220,7 @@ class KindIndex:
                     # embedder rebuilds good (persist=True).
                     _INDEX_CACHE.pop(key, None)
                 else:
+                    _INDEX_CACHE.move_to_end(key)
                     return cached
         path = cls._path_for(key, cache_dir)
         if not path.exists():
@@ -216,8 +240,7 @@ class KindIndex:
                 json.loads(str(data["metadata"])),
                 degraded=False,
             )
-        with _INDEX_LOCK:
-            _INDEX_CACHE[key] = idx
+        _memoize_index(key, idx)
         return idx
 
     # ── persistence ────────────────────────────────────────────────────────

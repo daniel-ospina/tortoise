@@ -16,6 +16,8 @@ import re
 from collections.abc import Collection
 from pathlib import Path
 
+from tortoise._gate_memo import GateMemo
+
 # ── The value brief: compiled vocab + semantics (the #954 contract) ─────────
 
 def compile_value_brief(packs_dir: Path | str | None = None,
@@ -57,14 +59,17 @@ def compile_value_brief(packs_dir: Path | str | None = None,
       write gate fall through to ``build_master_list()`` (the union) while
       the classify-later index in the same call IS gated (#5202);
     * ``extract_session_v2``'s classifier-construction ``except`` sets
-      ``classify_later = False`` and continues on the legacy union master —
-      an explicit FAIL-OPEN;
+      ``classify_later = False`` and continues on the master it was HANDED —
+      the ungated union when the caller passed none (the SDK v2 path), the
+      caller's gated tenant master otherwise — so the FAIL-OPEN belongs to
+      the no-master caller, not to the ``except``;
     * ``hosted_api._capture_session_impl`` catches a ``build_master_list``
       failure and proceeds with the default vocabulary.
 
     The claim this docstring makes is narrower: every seam that RESOLVES the
     gate wires the result through, and none of them converts a resolver
-    failure into the union.
+    failure into a SILENT union. The classifier seam in bullet 2 is the one
+    documented exception — it records the error and continues.
 
     ``tenant_manifests`` (#2031 — hosted per-tenant custom packs) is an
     ADDITIVE overlay: ``{namespace: full manifest yaml}`` compiled through
@@ -264,7 +269,6 @@ def compile_kind_index_spec(packs_dir: Path | str | None = None,
     import copy
 
     from tortoise.pack_registry import default_packs_dir
-    global _KIND_SPEC_CACHE
     packs_dir = (Path(packs_dir) if packs_dir else default_packs_dir()).resolve()
     # #5163: the graph gate. None = no gate (catalog union). Frozen so the
     # memo key is hashable and two equal gates share one slot.
@@ -362,23 +366,18 @@ def compile_kind_index_spec(packs_dir: Path | str | None = None,
             spec[k] = {"text": k, "section": section,
                        "description": "", "synonyms": [], "examples": [],
                        "nearMisses": []}
-    if len(_KIND_SPEC_CACHE) >= _MAX_GATE_MEMOS:
-        _KIND_SPEC_CACHE.pop(next(iter(_KIND_SPEC_CACHE)))
-    _KIND_SPEC_CACHE[_memo_key] = spec
+    _KIND_SPEC_CACHE.put_if_absent(_memo_key, spec)
     return copy.deepcopy(spec)
 
 
 #: Load-once memo for the enforcer's objectKind set, KEYED BY THE GATE
 #: (#5163): the set is a function of the graph's installed namespaces, so a
 #: single process-global slot would serve a dev-only graph the catalog union
-#: (and vice versa). ``None`` = no gate (the union).
-#:
-#: !! BOUNDED (#5339 review, P2): the key space is tenant-growable
-#: (``graph_kind_namespaces`` mines namespaces from the graph's data), so the
-#: oldest gate is evicted at ``_MAX_GATE_MEMOS`` — a recompute, never a wrong
-#: answer. The sibling caps live in ``commit_schema`` and ``extractor_v2``.
-_VOCAB_CACHE: dict[frozenset[str] | None, set[str]] = {}
-_MAX_GATE_MEMOS = 64
+#: (and vice versa). ``None`` = no gate (the union). Bounded + LRU +
+#: thread-safe via ``GateMemo`` (``tortoise/_gate_memo.py``) — the key space is
+#: tenant-growable, and the first-cut inline cap was a check-then-act that
+#: could raise ``KeyError`` out of the enforcer (#5339 review).
+_VOCAB_CACHE = GateMemo()
 
 
 #: Load-once memo for the kind-index spec, keyed by ``(RESOLVED packs dir,
@@ -387,15 +386,15 @@ _MAX_GATE_MEMOS = 64
 #: pack manifest; the key keeps a custom-dir call from poisoning the
 #: default-dir memo and vice versa — cycle-3 P2 unkeyed memo — and the gate
 #: from #5163 keeps a gated graph's spec from leaking to an ungated caller).
+#: Bounded + LRU + thread-safe via ``GateMemo`` (``tortoise/_gate_memo.py``).
 #: Mirrors ``_MASTER_LIST_CACHE`` / ``_VOCAB_CACHE``.
-_KIND_SPEC_CACHE: dict[tuple[str, frozenset[str] | None], dict] = {}
+_KIND_SPEC_CACHE = GateMemo()
 
 
 def _clear_kind_spec_cache() -> None:
     """Test hook — clear ALL memoized kind-index specs (cross-test
     isolation; the per-session re-parse is exactly what the memo avoids)."""
-    global _KIND_SPEC_CACHE
-    _KIND_SPEC_CACHE = {}
+    _KIND_SPEC_CACHE.clear()
 
 
 def _object_kind_vocab(installed_namespaces: Collection[str] | None = None
@@ -410,7 +409,6 @@ def _object_kind_vocab(installed_namespaces: Collection[str] | None = None
     those namespaces contribute. The memo is keyed by the gate, so a
     dev-only graph is never served the union's set from a process-global
     slot."""
-    global _VOCAB_CACHE
     cache_key = (None if installed_namespaces is None
                  else frozenset(installed_namespaces))
     cached = _VOCAB_CACHE.get(cache_key)
@@ -423,10 +421,7 @@ def _object_kind_vocab(installed_namespaces: Collection[str] | None = None
             vocab.add(kind)                       # bare form
             vocab.add(kind.lower())              # case-folded
             vocab.add(f"{ns}:{kind.lower()}")   # namespaced + folded
-        if len(_VOCAB_CACHE) >= _MAX_GATE_MEMOS:
-            _VOCAB_CACHE.pop(next(iter(_VOCAB_CACHE)))
-        _VOCAB_CACHE[cache_key] = vocab
-        cached = vocab
+        cached = _VOCAB_CACHE.put_if_absent(cache_key, vocab)
     return cached
 
 

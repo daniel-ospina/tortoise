@@ -53,6 +53,7 @@ from pydantic import (
     model_validator,
 )
 
+from ._gate_memo import GateMemo
 from .file_indexer import provenance_basename
 from .ids import content_hash
 from .pack_registry import (
@@ -219,14 +220,11 @@ def compile_vocab(packs_dir: Path | str | None = None,
         if cached is not None:
             return cached
         vocab = _compile_vocab_uncached(None, installed_namespaces)
-        with _vocab_lock:
-            # Read AND write under the lock (#5339 review P2): the former
-            # `setdefault` then `[key]` let a concurrent `refresh_vocab()`
-            # clear() land in between, raising KeyError out of the
-            # write-gate path. `setdefault` returns the stored value.
-            if len(_vocab_gate_cache) >= _MAX_GATE_MEMOS:
-                _vocab_gate_cache.pop(next(iter(_vocab_gate_cache)))
-            return _vocab_gate_cache.setdefault(key, vocab)
+        # Atomic evict-and-insert under the memo's own lock (#5339 review):
+        # the first-cut `len`/`next(iter)`/`pop` was a check-then-act that a
+        # concurrent capture worker could lose, raising KeyError out of the
+        # write gate. `put_if_absent` also refreshes recency (LRU).
+        return _vocab_gate_cache.put_if_absent(key, vocab)
     return _compile_vocab_uncached(packs_dir, installed_namespaces)
 
 
@@ -264,16 +262,13 @@ _vocab_cache: Vocab | None = None
 #: ~40 ms of registry load + YAML parse per request ON THE EVENT LOOP. ``None``
 #: is a real key — the ungated catalogue union. Cleared by ``refresh_vocab``.
 #:
-#: !! BOUNDED (#5339 review, P2). The key space is tenant-growable
-#: (``graph_kind_namespaces`` unions namespaces mined from the graph's data,
-#: and ``POST /v1/objects`` persists an unvalidated ``objectKind``), so one
-#: entry per distinct installed-namespace set would grow without bound in a
-#: multi-tenant process. ``_MAX_GATE_MEMOS`` evicts the oldest gate (dict
-#: insertion order) — a recompute, never a wrong answer. The same cap is
-#: applied to ``value_extractor._VOCAB_CACHE`` / ``_KIND_SPEC_CACHE`` and
-#: ``extractor_v2._PACK_OBJECT_FORMS`` / ``_PACK_EVENT_FORMS``.
-_vocab_gate_cache: dict[frozenset[str] | None, Vocab] = {}
-_MAX_GATE_MEMOS = 64
+#: Bounded, LRU and thread-safe via ``GateMemo`` (``tortoise/_gate_memo.py``):
+#: the key space is tenant-growable (``graph_kind_namespaces`` mines namespaces
+#: from the graph's data, and ``POST /v1/objects`` persists an unvalidated
+#: ``objectKind``), and the first-cut inline ``len``/``pop`` cap was a
+#: check-then-act that could raise ``KeyError`` out of the write gate
+#: (#5339 review).
+_vocab_gate_cache = GateMemo()
 
 
 def get_vocab() -> Vocab:
