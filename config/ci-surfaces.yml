@@ -936,8 +936,16 @@ surfaces:
   # so an `embeddings.py`-only PR cannot leave a guard here unrun. The
   # fail-before/pass-after evidence: 12 of the original 21 fail on the unfixed
   # base and all pass here; the 9 review-round-6 pins (P1-A competing write,
-  # the three P1-B writer-mirror cases, the falsy-hash gate, both P2-B cases,
-  # the P2-A torn tail, P2-C) each fail on the unfixed base and pass here.
+  # the three P1-B writer-mirror cases, the P1-B hashless-retitle
+  # repeat-safety case, both P2-B cases, the P2-A torn tail, P2-C) each fail
+  # on the unfixed base `b7aef81b4` and pass here; the two review-round-2 pins
+  # (P2-2 the per-call pre-state, P3-1 the alias the writer adds) fail on the
+  # reviewed head `304e8601c` and pass here.
+  # ⛔ `test_a_falsy_non_none_hash_write_is_not_suppressed` is NOT one of the
+  # base-failing pins: it PASSES at `b7aef81b4` in both lanes. It is a FORWARD
+  # guard against a plausible future regression (a no-op predicate that
+  # blanket-skips `contentHash` as "hash-gated"), not fail-before evidence —
+  # do not count it among the pins that fail on the unfixed base.
   - test_source_rematerialisation_5024.py
   # #5199: the derivation-link version anchor (`sourceVersion` on a derivation
   # `references` link) — `tortoise/projection/edges.py` + `tortoise/projection/entities.py`

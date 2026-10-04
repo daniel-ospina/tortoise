@@ -20900,7 +20900,8 @@ class TortoiseSDK:
 
     def _create_entity(self, label: str, id_val: str, props: dict, event_type: str,
                        *, _skip_sanitize: bool = False,
-                       is_episodic: bool | None = None) -> dict:
+                       is_episodic: bool | None = None,
+                       _return_apply_result: bool = False) -> dict | tuple[dict, object]:
         """Generic entity creation. Applies to graph via projection
         (FalkorDB); SDK-created Events additionally journal EventRecorded
         via ``_emit_event`` (#2061); SDK-created Objects journal
@@ -20917,6 +20918,15 @@ class TortoiseSDK:
         fail-closed on the sanctioned key (the sanitizer's own docstring carves
         out ``api.add_document(source_path=)``; create_source(source_path=) is
         the mirror route).
+
+        ``_return_apply_result=True`` (#5024 P2-2): return
+        ``(entity, apply_result)`` instead of ``entity``, so the Source MERGE's
+        ``QueryResult`` reaches its ONE consumer (``create_source``) ON THIS
+        CALL'S RETURN VALUE. It must never ride a projection-level slot: a slot
+        is shared by every call on the SDK, so two threads sharing one SDK on
+        DIFFERENT urls — which take different per-url locks and can therefore
+        interleave — could swap each other's captured pre-write state and lose
+        a real version transition.
         """
         # #329: id + sourcePath/source_path are server-managed — reject.
         # is_episodic is ALSO server-managed (#1486, quota discriminator) —
@@ -21063,11 +21073,6 @@ class TortoiseSDK:
             event["createdAt"] = now_iso()
         # Apply through projection (writes to FalkorDB)
         apply_result = proj.apply(event)
-        if label == "Source":
-            # epic #900 T3: thread the conditional-MERGE QueryResult so
-            # create_source can attribute the counter-authority outcome
-            # (nodes_created) from the single statement (pin b).
-            proj._source_merge_result = apply_result
         if label == "Event":
             # #2061: journal EventRecorded so SDK-created Events survive
             # rebuild_all (fold parity for Event-input operators).
@@ -21162,7 +21167,13 @@ class TortoiseSDK:
             proj.create_owned_by(canonical_id, props["ownedBy"])
         if props.get("managedBy"):
             proj.create_managed_by(canonical_id, props["managedBy"])
-        return self._get_entity(canonical_id)
+        entity = self._get_entity(canonical_id)
+        if _return_apply_result:
+            # #5024 P2-2: the conditional-MERGE QueryResult travels on THIS
+            # call's return value to `create_source` (the only consumer),
+            # never a projection-level slot shared across threads.
+            return entity, apply_result
+        return entity
 
     def _get_entity(self, id_val: str) -> dict:
         # NOTE (issue #327): Session/APIKey/Org/Tag nodes are intentionally
@@ -24174,9 +24185,12 @@ class TortoiseSDK:
           - the Source MERGE is CONDITIONAL (single statement, pin b): the ON
             MATCH version/updatedAt/contentHash/title/``_searchText`` bump
             fires ONLY when the stored contentHash differs (a stub Source with
-            NULL contentHash is completed). The MERGE outcome (via
-            ``proj._source_merge_result`` nodes_created) is the counter
-            authority for the index path.
+            NULL contentHash is completed). The write's own QueryResult
+            carries ``previousProps`` (the pre-write node) and is returned ON
+            THIS CALL to ``create_source`` (#5024 P2-2) — never a shared
+            projection slot. The index path's counter authority is a
+            POST-MERGE re-read of ``s.__runId``/``s.version`` in
+            ``_index_source_merge``, not a MERGE stats counter.
           - JOURNALING CONTRACT (a) (cycle-18): the write path emits a
             SourceCreated JSONL line on EVERY write (emit-on-every-write — a
             create-only cadence would revert updated Sources to create-time
@@ -24278,8 +24292,6 @@ class TortoiseSDK:
         # later cannot bypass a guard that runs after all of them.
         for _key, _value in ev.items():
             _reject_unrepresentable_number(_key, _value)
-        proj = self._get_proj()
-        proj._source_merge_result = None
         # ── #5024 (T6): ONE clock for the transition ────────────────
         # `_upsert_source`'s ON MATCH sets `updatedAt = coalesce($updatedAt,
         # $now)` where `$now` is `_now_iso()` called INSIDE the fold. Reading
@@ -24289,8 +24301,14 @@ class TortoiseSDK:
         # as `updatedAt`, the fold's `coalesce` picks it up, and the record
         # carries the SAME string — live and replay cannot disagree.
         ev["updatedAt"] = _now_iso()
-        result = self._create_entity("Source", url, ev, "SourceCreated",
-                                     _skip_sanitize=True)
+        # #5024 P2-2: the pre-state rides THIS CALL's own return value, not a
+        # projection-level slot. A slot is shared by every call on the SDK, so
+        # two threads sharing one SDK on DIFFERENT urls (different per-url
+        # locks, so they can interleave) could swap each other's
+        # `previousProps` and lose a real transition.
+        result, _written = self._create_entity(
+            "Source", url, ev, "SourceCreated",
+            _skip_sanitize=True, _return_apply_result=True)
         # ── #5024 P1-A: the pre-write state the RECORD DECISION needs ──────
         # Taken from the WRITE'S OWN statement (`_upsert_source` captures it
         # with `OPTIONAL MATCH`/`WITH` before its `MERGE` and returns it as
@@ -24305,7 +24323,6 @@ class TortoiseSDK:
         # unconditional extra round trip (plus its internal `resolve_source_key`)
         # that P2-B flagged on the no-journal path.
         _stored_before = None
-        _written = proj._source_merge_result
         if _written is not None and getattr(_written, "result_set", None):
             _stored_before = _written.result_set[0][0]
         # ── #5024 (T6): journal the write by WHAT IT CHANGED ────────────────
@@ -24481,9 +24498,23 @@ class TortoiseSDK:
             # Hash-gated: `_upsert_source` only writes these on the hash-diff
             # branch, which the `contentHash` comparison already detects.
             "title", "_searchText",
-            # Create-only or server-managed.
+            # ON CREATE only (`sourceKind`/`externalId`/`ingestedAt` have no
+            # ON MATCH assignment) or never a node property at all
+            # (`previousContentHash`). `version` also rides the hash-diff CASE,
+            # covered by the `contentHash` comparison.
             "version", "sourceKind", "externalId", "ingestedAt",
-            "previousContentHash", "canonicalUrl", "urlAliases",
+            "previousContentHash",
+            # ⛔ These two are NOT "create-only": `_upsert_source`'s ON MATCH
+            # mutates BOTH — it APPENDS the raw spelling to `urlAliases` and
+            # does `coalesce(s.canonicalUrl, $cu)`. `urlAliases` is covered by
+            # the `url` branch below, which mirrors the writer's append exactly
+            # (including a same-url write onto a node that carries no aliases).
+            # `canonicalUrl` is writer-derived from the resolved key and never
+            # rides a payload (`_persist_extra_props` drops it — it is in
+            # `_SOURCE_HANDLED`), so no payload key can express it; the
+            # resolver's own adopt-on-touch backfill is a pre-existing,
+            # separately-unrecorded mutation (`source_identity.py`).
+            "canonicalUrl", "urlAliases",
         }
         # The fixed-clause keys that DO change on a non-hash-diff write or that
         # carry the hash-diff itself (`coalesce($x, s.x)` / the `contentHash`
@@ -24503,11 +24534,16 @@ class TortoiseSDK:
                 continue
             if k == "url":
                 # The MERGE key. The writer resolves the inbound spelling to
-                # the ONE canonical node and only ever ADDS the raw spelling
-                # to `urlAliases`; it never rewrites `s.url`. So a differing
-                # payload `url` is a change iff the raw is neither the node's
-                # url nor an existing alias (the first URL-variant write).
-                if v != stored.get("url") and v not in stored_aliases:
+                # the ONE canonical node and never rewrites `s.url`; its
+                # ON MATCH appends the RAW spelling to `urlAliases` whenever
+                # that spelling is not already there. So this write changes the
+                # node iff the raw is absent from the aliases — whether or not
+                # it equals `s.url` (P3-1: a node that carries no aliases gains
+                # one even on a same-url write). The earlier test ALSO required
+                # `v != stored["url"]`, which missed exactly that
+                # legacy/partially-adopted node and suppressed a real alias
+                # addition with no record.
+                if v not in stored_aliases:
                     return False
                 continue
             if k not in _fixed_compared and (

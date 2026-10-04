@@ -879,3 +879,93 @@ def test_the_transition_documentation_names_the_key_the_record_carries():
         "the state comment must name the key the record actually carries")
     doc = _ent._EntityHandlers._fold_source_versioned.__doc__ or ""
     assert "updatedAt" in doc, "the docstring must name the recorded key"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 8b. review round 2 — P2-2: the pre-state is PER CALL, not a shared slot
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_a_concurrent_write_to_another_url_cannot_swap_the_pre_state(
+        src, monkeypatch):
+    """P2-2 — the captured pre-state must not ride a projection-level slot.
+
+    One SDK shared by two threads takes a DIFFERENT per-url lock per url
+    (`_source_merge_lock_for`), so a write to url B can interleave with a write
+    to url A. While the pre-write state rode `proj._source_merge_result`, B's
+    write overwrote that slot AFTER A's MERGE had captured A's state and BEFORE
+    A's `create_source` read it — so A classified its own h-0 -> h-1 transition
+    against B's pre-state and journalled a plain `SourceCreated`, losing the
+    `previousContentHash` that keeps the prior version addressable.
+
+    A real two-thread race is not required: the injector performs B's write at
+    exactly the interleaving point (inside A's `_create_entity`, after A's
+    `apply`), which is the faithful deterministic injection of the swap.
+    """
+    events, sdk = src
+    other = "https://example.test/doc/other"
+    sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
+
+    import tortoise.sdk as sdkmod
+    orig = sdkmod.TortoiseSDK._create_entity
+    state = {"injected": False}
+
+    def _inject(self, label, id_val, props, event_type, **kw):
+        out = orig(self, label, id_val, props, event_type, **kw)
+        if (label == "Source" and not state["injected"]
+                and props.get("url") == _URL):
+            # The other thread's write to a DIFFERENT url lands here — after
+            # A's MERGE captured its pre-state, before A reads it.
+            state["injected"] = True
+            sdk.create_source(other, "document", title="B", contentHash="h-1")
+        return out
+
+    monkeypatch.setattr(sdkmod.TortoiseSDK, "_create_entity", _inject)
+    sdk.create_source(_URL, "document", title="v1", contentHash="h-1")
+
+    transitions = [(t["previousContentHash"], t["contentHash"])
+                   for t in _of_type(events, "SourceVersioned")
+                   if t.get("url") == _URL]
+    assert transitions == [("h-0", "h-1")], (
+        f"A's transition was classified against another url's pre-state: "
+        f"{transitions} — the pre-state is per call, not a shared slot (P2-2)")
+
+    live = _props(sdk, _URL)
+    assert (live["contentHash"], live["version"]) == ("h-1", 2)
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    rebuilt = _props(sdk, _URL)
+    assert (rebuilt["contentHash"], rebuilt["version"]) == ("h-1", 2)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 12. review round 2 — P3-1: a real alias addition must be recorded
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_a_node_without_aliases_records_the_alias_the_writer_adds(src):
+    """P3-1 — `urlAliases` is NOT create-only, so a same-url write can change it.
+
+    `_upsert_source`'s ON MATCH appends the raw spelling to `urlAliases`
+    whenever it is absent — including when the incoming `url` EQUALS the
+    node's `url` and the node carries no aliases. That is a partially-adopted
+    legacy graph: `canonicalUrl` is already set (so the resolver's
+    adopt-on-touch backfill, which only fires when `canonicalUrl IS NULL`, is
+    skipped) while `urlAliases` was never written. The no-op test skipped
+    `urlAliases` as "create-only" AND required `v != stored["url"]` before
+    treating a url as a change, so this write's real alias addition was
+    journalled by nothing — a rebuild lost it (fail-open toward suppression,
+    the defect class this lane exists to remove).
+    """
+    events, sdk = src
+    # A pre-canonical node: canonical identity adopted, alias list never written.
+    sdk._get_proj().g.query(
+        "CREATE (:Source {url:$u, canonicalUrl:$cu, contentHash:'h-0', version:1})",
+        params={"u": _URL, "cu": _URL})
+    n = len(_records(events))
+
+    sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
+
+    live = _props(sdk, _URL)
+    assert live["urlAliases"] == [_URL], (
+        "the writer appends the raw spelling to `urlAliases` on this write")
+    assert len(_records(events)) == n + 1, (
+        f"the alias the writer added live was not recorded "
+        f"({len(_records(events)) - n} records) — a rebuild loses it (P3-1)")
