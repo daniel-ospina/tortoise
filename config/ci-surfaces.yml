@@ -431,6 +431,7 @@ surfaces:
   - test_oauth_token_fault.py  # #2863: /oauth/token fault-injection suite (fake CP + local HTTPServer seam)
   - test_oauth_redemption_state.py  # #3027: durable redemption state machine + reconciler (fake CP, no live DB)
   - test_3036_oauth_retention.py  # #3036: oauth_* retention/GC sweep (fake CP, no live DB)
+  - test_3026_oauth_boundaries.py  # #3026: the five OAuth endpoints' transient-failure boundary (fake CP via #2863's harness; asserts no bare 500 detail reaches a consumer)
   - test_pricing_tiers.py
   - test_probe_reset_inflight_4608.py  # #4608: a probe reset/rebuild must not close a handle an in-flight probe still queries (hosted_api + selfhost)
   - test_provisioning_edge_function.py
@@ -1025,6 +1026,7 @@ surfaces:
   - test_onboarding_truth_surface.py  # #3670/#3671/#3681: dual-registered (api+core) — pins tortoise/hosted_api.py
   - test_restore_container_recovery.py
   - test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan
+  - test_destructive_wipe_guard.py
   - test_session_attribution.py
   - test_ci_selection.py
   # #6884: pins the `uri_requiring` declaration (re-derived BEHAVIOURALLY — it
@@ -1828,6 +1830,7 @@ surfaces:
   - test_website_docs_consistency.py  # #3332: checks each public page against its canonical source (status vocab, EP mechanism, ontology link)
   sdk:
   - test_5359_unchecked_window_writers.py
+  - test_7108_operator_scope_predicate.py
   # #3849: the ask_lane-only selection leg. `tortoise/ask_lane.py` maps to
   # `sdk`, so these two must be dual-registered here or they stop running on
   # an ask_lane-only PR (a SOURCE_PATTERNS match REPLACES the core fallback).
@@ -2461,6 +2464,30 @@ durations:
   eval/retrieval/test_oracle.py: 5.7
   longmem_eval/test_context_assembly_leakage.py: 5.2
   test_ep_directional.py: 5.7
+  # #2944: new file. NOT gate-required. Measured at 4a453a352 (the base merge):
+  # the fast pool is 729 files and duration coverage is 663/729 = 90.95% WITH
+  # this row vs 662/729 = 90.81% WITHOUT it — both clear the 0.90 floor, so the
+  # gated `--integrity` step (`tools/ci_selection.py`,
+  # `duration_coverage_issues`) returns [] either way. Those counts move as
+  # main lands test files, so the claim to re-check is only that removing this
+  # row does not push coverage below 0.90. (An earlier revision claimed the row
+  # was REQUIRED by a 544/605 = 89.92% floor breach. That was TRUE when written:
+  # this branch's own merge 006acbec2 sat at 544/605 = 89.92%, one file under
+  # the floor, and the row took it to 545/605 = 90.08% (4b2e5e225). Main's #3400
+  # durations refresh then grew the map to 720 weights / 729 fast files, so the
+  # row is no longer gate-required — the earlier claim was SUPERSEDED by that
+  # refresh, not wrong.)
+  #
+  # The value is a LOCAL measurement (31 tests; the file held 30 when the row
+  # was added, 66.7s at fleet load) and no CI
+  # leg has collected it, so the row carries `# unmeasured` per the convention
+  # above. It is carried (rather than left to the flat 2.0s default) for LPT
+  # packing accuracy: the durations map has 720 entries, median 1.5s
+  # (fast-pool subset 663, median 1.3s), so 66.7s is ~44x the median. Refresh
+  # from the first post-merge main junit run that includes it — the BARE marker
+  # form is deliberate, because the refresh writer (`tools/ci_timing.py`,
+  # `re.fullmatch(r"[ \t]*#\s*unmeasured", tail)`) can only clear a bare marker.
+  test_destructive_wipe_guard.py: 66.7  # unmeasured
   test_extractor_reliability.py: 5.5
   test_acl_graph_users.py: 9.8
   test_battery_exposure_liveness.py: 5.9

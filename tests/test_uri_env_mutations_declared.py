@@ -87,6 +87,11 @@ _TESTS_ROOT = Path(__file__).resolve().parent
 DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # ── DELIBERATE_EMBEDDED_LANE: SDK-level tests force the embedded lane so
     #    the constructions never ride the URI (the delenv IS the point) ──────
+    # #2944: the two embedded allow-path tests force the embedded lane so the
+    # REAL wipe+replay runs against a temp DB file — a URI redirect would
+    # fold the assertion onto a shared server graph. The delenv IS the point;
+    # the fixture-param monkeypatch auto-restores (no lane leak).
+    "test_destructive_wipe_guard.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     # #2724 churn-wave hygiene (2026-09-09): the two #2600 Phase 1 Task 1
     # apikey-verify unit tests (TestRegistryApikeyVerifyRawCreatedBy at
     # :163/:184) force the embedded lane (delenv the URI, then pin
@@ -167,6 +172,12 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
                               r'monkeypatch\.setenv\s*\(\s*"TORTOISE_DB_URI"'],
     "test_directional_impl.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_directional_impl_fix.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
+    # #7108: module-level live probe (os.environ set + restore, DELIBERATE_URI —
+    # the probe is what asserts the docker lane is reachable at all) + a per-test
+    # fresh-URI fixture (raw os.environ set + save/restore) giving each test its
+    # OWN graph, so the operator-scope assertions cannot see a neighbour's
+    # residue. No monkeypatch site is declared, because this file has none.
+    "test_7108_operator_scope_predicate.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     # C3-1 #2567: docker-lane coverage-loop tests — module-level live probe
     # (set + restore) + per-test fresh-graph fixture (the test_entity_key_
     # expansion pattern; the monkeypatch.setenv is auto-restored).

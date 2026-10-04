@@ -218,7 +218,7 @@ class TestIngestGuardAfterRebuild:
                 "MATCH (n:Point {id:$id}) RETURN n.content_hash",
                 params={"id": pid}).result_set[0][0] is not None
 
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
             # Premise (fixed by the #2795 re-derivation): the rebuild
             # PRESERVES the hash while preserving the terminal status, so the
@@ -250,7 +250,7 @@ class TestIngestGuardAfterRebuild:
             pid = sdk.create_point("statement", content)["id"]
             sdk.retract_point(pid)
 
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
             # Deliberately construct the NULL-hash condition the fallback
             # exists for — the rebuild itself no longer produces it (#2795).
@@ -297,7 +297,7 @@ class TestIngestGuardAfterRebuild:
             assert row == ["superseded", True], (
                 "supersede_point must stamp status AND the flag (#3142)")
 
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             # The rebuild preserves both the status and the hash (#2795), so
             # the primary MATCH is exercised.
             row = sdk._get_proj().g.query(
@@ -340,7 +340,7 @@ class TestIngestGuardAfterRebuild:
                 "invalidate_point must NOT terminalize the status")
             assert row[1] is True, "invalidate_point must set the flag"
 
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             self._assert_bundle_local_ref_rejected(sdk, content)
         finally:
             sdk.close()

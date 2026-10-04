@@ -81,7 +81,7 @@ def _dims(sdk: TortoiseSDK, pid: str) -> dict:
 
 
 def _rebuild(sdk: TortoiseSDK, events) -> None:
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
 
 def _journal(events) -> list[dict]:
