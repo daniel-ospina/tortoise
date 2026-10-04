@@ -28,8 +28,8 @@ import contextlib
 import hashlib
 import json
 import os
-import tempfile
 import threading
+import uuid
 from pathlib import Path
 
 import numpy as np
@@ -259,33 +259,27 @@ class KindIndex:
         the temp path — a fixed ``.<key>.tmp.npz`` made the loser's ``replace``
         hit an already-renamed source and raise ``FileNotFoundError`` out of
         ``build``; #5339 review. kind_names stored as a unicode array — no
-        pickle)."""
+        pickle).
+
+        The temp is created with ``os.open(..., 0o666)``, so the KERNEL applies
+        the process umask and the persisted file keeps the mode the pre-#5339
+        ``np.savez`` produced (``0o666 & ~umask``); ``tempfile.mkstemp``'s
+        forced 0600 would have narrowed it. The umask is never read: it is
+        process-global, so an ``os.umask(0)``/restore dance on this path either
+        races across the capture pool or leaks umask 0 on an interrupt.
+        """
         key = cache_key_for(self._spec_of())
         path = self._path_for(key, cache_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
-        # mkstemp hands each writer its OWN temp path (and the suffix ends in
-        # .npz so savez does not append a second one).
-        fd, tmp_name = tempfile.mkstemp(
-            dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp.npz")
+        # A per-writer unique temp in the SAME directory (so ``replace`` is
+        # atomic). ``O_EXCL`` on a uuid4 name keeps it collision-free without
+        # mkstemp (whose 0600 mode is the thing being avoided).
+        tmp_name = path.parent / (
+            f".{path.stem}.{os.getpid()}.{uuid.uuid4().hex}.tmp.npz")
+        fd = os.open(tmp_name, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o666)
+        os.close(fd)
         tmp = Path(tmp_name)
         try:
-            # mkstemp creates 0600. Reproduce the pre-#5339 mode for a fresh
-            # index (np.savez's ``0o666 & ~umask``), or keep the mode of an
-            # index ALREADY on disk clamped by the umask — so a shared cache
-            # dir keeps group/other read (mirrors
-            # ``hook_install._atomic_write_text``) without ever widening past
-            # the operator's umask, and without keeping a world-writable index
-            # world-writable (#5339 review).
-            umask = os.umask(0)
-            os.umask(umask)
-            try:
-                base = path.stat().st_mode & 0o777
-            except OSError:
-                # Raced away (or absent): ``exists()``+``stat()`` would raise
-                # here with mkstemp's temp already created and the unlink
-                # below unreachable (mirrors hook_install's guarded stat).
-                base = 0o666
-            os.fchmod(fd, base & ~umask)
             np.savez(
                 tmp,
                 kind_names=np.asarray(self.kind_names, dtype=str),
@@ -295,11 +289,8 @@ class KindIndex:
             )
             tmp.replace(path)
         finally:
-            # Close mkstemp's fd (np.savez re-opened the path itself), and a
-            # failed save or a raised mode step leaves no stray temp behind;
-            # after a successful replace ``tmp`` no longer exists.
-            with contextlib.suppress(OSError):
-                os.close(fd)
+            # A failed save leaves no stray temp behind; after a successful
+            # replace ``tmp`` no longer exists.
             if tmp.exists():
                 with contextlib.suppress(OSError):
                     tmp.unlink()

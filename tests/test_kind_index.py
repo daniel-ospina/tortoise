@@ -418,36 +418,47 @@ class TestIndexMemoIsBoundedAndThreadSafe:
         assert not errors, f"persist raised under concurrency: {errors[:3]}"
         written = tmp_path / f"{cache_key_for(spec)}.npz"
         assert written.exists()
-        # mkstemp creates 0600; persist() must restore the umask default so a
-        # shared cache dir keeps group/other read (#5339 review).
-        assert written.stat().st_mode & 0o044, \
-            "the persisted index lost group/other read" 
+        # No stray per-writer temps survive.
+        assert not list(tmp_path.glob(".*.tmp.npz"))
 
-    def test_persist_mode_matches_umask_and_preserves_existing(self, spec, tmp_path):
-        """#5339 review: mkstemp creates 0600, so `persist()` must restore the
-        pre-#5339 mode (`0o666 & ~umask`) for a fresh index, keep an existing
-        index's own mode, and CLAMP by the umask — never widen past it and
-        never leave a world-writable index world-writable."""
+    @pytest.mark.parametrize("umask,mode", [
+        (0o022, 0o644),
+        (0o077, 0o600),
+        (0o002, 0o664),
+    ])
+    def test_persist_mode_is_the_kernel_umask_default(self, spec, tmp_path,
+                                                      umask, mode):
+        """#5339 review: the temp is created via ``os.open(..., 0o666)`` so the
+        KERNEL applies the umask — the persisted index keeps the pre-#5339
+        ``np.savez`` mode (``0o666 & ~umask``) instead of mkstemp's forced
+        0600. The umask is never read on this path (an ``os.umask(0)`` dance
+        races across the capture pool or leaks umask 0 on an interrupt)."""
         import os
         import stat as _stat
 
         idx = KindIndex.build(spec, encoder=StubEncoder(), persist=False)
         path = tmp_path / f"{cache_key_for(spec)}.npz"
-
-        def _mode() -> int:
-            return _stat.S_IMODE(path.stat().st_mode)
-
-        old_umask = os.umask(0o022)
+        old_umask = os.umask(umask)
         try:
             idx.persist(cache_dir=tmp_path)
-            assert _mode() == 0o644, "a fresh index gets the umask default"
-            os.chmod(path, 0o640)
-            idx.persist(cache_dir=tmp_path)
-            assert _mode() == 0o640, "an existing index's mode is preserved"
-            # A restrictive umask clamps an existing index's mode.
-            os.umask(0o077)
-            os.chmod(path, 0o644)
-            idx.persist(cache_dir=tmp_path)
-            assert _mode() == 0o600, "the umask clamps, it never widens"
         finally:
             os.umask(old_umask)
+        assert _stat.S_IMODE(path.stat().st_mode) == mode
+
+    def test_persist_leaves_no_temp_when_the_save_raises(self, spec, tmp_path,
+                                                        monkeypatch):
+        """#5339 review: the finally-unlink is the reason the mode step sits in
+        the same try — a raising save must leave no ``.tmp.npz`` behind and
+        must not create the destination."""
+        import numpy as np
+
+        idx = KindIndex.build(spec, encoder=StubEncoder(), persist=False)
+
+        def boom(*a, **k):
+            raise RuntimeError("save failed")
+
+        monkeypatch.setattr(np, "savez", boom)
+        with pytest.raises(RuntimeError):
+            idx.persist(cache_dir=tmp_path)
+        assert not list(tmp_path.glob(".*.tmp.npz")), "a stray temp leaked"
+        assert not (tmp_path / f"{cache_key_for(spec)}.npz").exists()
