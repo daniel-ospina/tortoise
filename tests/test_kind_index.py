@@ -416,4 +416,9 @@ class TestIndexMemoIsBoundedAndThreadSafe:
         for t in threads:
             t.join()
         assert not errors, f"persist raised under concurrency: {errors[:3]}"
-        assert (tmp_path / f"{cache_key_for(spec)}.npz").exists()
+        written = tmp_path / f"{cache_key_for(spec)}.npz"
+        assert written.exists()
+        # mkstemp creates 0600; persist() must restore the umask default so a
+        # shared cache dir keeps group/other read (#5339 review).
+        assert written.stat().st_mode & 0o044, \
+            "the persisted index lost group/other read" 

@@ -266,7 +266,15 @@ class KindIndex:
         # .npz so savez does not append a second one).
         fd, tmp_name = tempfile.mkstemp(
             dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp.npz")
-        os.close(fd)
+        try:
+            # mkstemp creates 0600; restore the process-umask default (0644),
+            # or the mode of an index already on disk, so a shared cache dir
+            # does not silently lose group/other read (#5339 review — mirrors
+            # hook_install._atomic_write_text).
+            mode = (path.stat().st_mode & 0o777) if path.exists() else 0o644
+            os.fchmod(fd, mode)
+        finally:
+            os.close(fd)
         tmp = Path(tmp_name)
         try:
             np.savez(

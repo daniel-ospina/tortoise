@@ -5,9 +5,13 @@ One implementation for the six gate-keyed memos:
 ``_KIND_SPEC_CACHE``, ``extractor_v2._PACK_EVENT_FORMS`` /
 ``_PACK_OBJECT_FORMS``, and ``kind_index._INDEX_CACHE``.
 
-Five are keyed by a frozenset of installed namespaces; the sixth
-(``kind_index._INDEX_CACHE``) is keyed by the content hash of the gated spec
-(``kind_index.cache_key_for``) — both key spaces are **tenant-growable**
+Five are keyed by the installed-namespace gate — four as a bare
+``frozenset | None`` (``commit_schema._vocab_gate_cache``,
+``value_extractor._VOCAB_CACHE``, ``extractor_v2._PACK_EVENT_FORMS`` /
+``_PACK_OBJECT_FORMS``) and one contained in a tuple
+(``value_extractor._KIND_SPEC_CACHE``, keyed by ``(packs_dir, gate)``); the
+sixth (``kind_index._INDEX_CACHE``) is keyed by the content hash of the gated
+spec (``kind_index.cache_key_for``). Every key space is **tenant-growable**
 (``pack_state.graph_kind_namespaces`` mines namespaces from unvalidated graph
 data, and ``POST /v1/objects`` persists an unvalidated ``objectKind`` — see
 #5475). Two properties follow, and both were defects in the first cut of the
