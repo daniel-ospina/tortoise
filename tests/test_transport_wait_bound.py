@@ -727,8 +727,17 @@ def _parse_sse(text: str):
 #: the tolerance with the window AT THE SAME TIME, keeping the regression margin
 #: (``pre``) well above it.
 #: ``pre`` is also NOT free to shrink: the sibling test's regression floor is
-#: ``0.75 * bound``, so ``pre / bound`` must stay well above 1/4 or a seam-local
-#: interval would satisfy it and the test would stop discriminating.
+#: ``0.75 * bound``, so ``pre / bound`` must stay above 1/4 or a seam-local
+#: interval would satisfy it and the test would stop discriminating. Both tests
+#: ENFORCE a MARGIN over that knife edge (each asserts the cost it PAID is
+#: ``>= 0.30 * bound``), keyed to ``bound`` rather than to this constant so the
+#: check cannot shrink with the value it polices.
+#: COVERAGE NOTE: widening the window also ends this file's INCIDENTAL proximity
+#: to the seam's ``remaining = max(0.0, ...)`` clamp — ``remaining`` is now
+#: ~1.0 s and never ≤ 0 here. The clamp's flag-UNSET half (production-reachable
+#: when the SSE starts inside the window) is therefore covered by no test in
+#: this file. That is a pre-existing gap this change does not close; it is
+#: recorded so the widening does not hide the loss of that accidental exercise.
 _PRE_SSE_COST_S = 0.5
 
 
@@ -869,8 +878,8 @@ def test_mcp_seam_spends_the_transport_deadline_not_a_fresh_one(
     legible refusal — the exact failure this unit exists to eliminate.
 
     This mounts the REAL parent app (``WaitBoundMiddleware`` included) over the
-    MCP sub-app and injects a 0.2 s pre-SSE cost, then asserts the caller only
-    waits the bound (+ε). The sibling SSE test mounts the MCP app with NO parent
+    MCP sub-app and injects a pre-SSE cost (``_PRE_SSE_COST_S`` — 0.2 s in the
+    measurement above), then asserts the caller only waits the bound (+ε). The sibling SSE test mounts the MCP app with NO parent
     middleware, which is precisely why it could not see this.
 
     ⚠️ The live constants are LARGER than the measurement above (bound 1.5 s,
@@ -884,8 +893,7 @@ def test_mcp_seam_spends_the_transport_deadline_not_a_fresh_one(
     window is now 1.0 s — 10x the old one, and ~4x the largest startup tail
     measured — and it is deliberately not wider; see ``_PRE_SSE_COST_S`` for the
     measured reason (drift grows with the window against an absolute slack).
-    The property under test (one deadline, not two) and every assertion are
-    unchanged; only the clock the property is observed on is wider.
+    Only the clock the property is observed on is wider.
     """
     from contextlib import asynccontextmanager
 
@@ -908,7 +916,7 @@ def test_mcp_seam_spends_the_transport_deadline_not_a_fresh_one(
         async with mcp_app.lifespan(mcp_app):
             yield
 
-    pre_sse_ran: list[bool] = []
+    pre_sse_paid_s: list[float] = []
 
     class _PreSseCost:
         """A realistic pre-SSE cost (org resolution / rate limit / routing)."""
@@ -918,8 +926,12 @@ def test_mcp_seam_spends_the_transport_deadline_not_a_fresh_one(
 
         async def __call__(self, scope, receive, send):
             if scope["type"] == "http":
-                pre_sse_ran.append(True)
+                _t0 = time.perf_counter()
                 await asyncio.sleep(_PRE_SSE_COST_S)
+                # Record the interval ACTUALLY paid, not merely that the cost was
+                # entered: both tests' discriminating power rests on the
+                # MAGNITUDE of this cost.
+                pre_sse_paid_s.append(time.perf_counter() - _t0)
             await self.app(scope, receive, send)
 
     parent = Starlette(lifespan=_lifespan, routes=[Mount("/mcp", app=mcp_app)])
@@ -948,9 +960,19 @@ def test_mcp_seam_spends_the_transport_deadline_not_a_fresh_one(
     # bound below is satisfied by construction and would stay green even if the
     # seam regressed to a fresh deadline. Exactly once — `/mcp/` avoids the 307
     # that would route through this cost twice.
-    assert pre_sse_ran == [True], (
-        f"the injected pre-SSE cost ran {len(pre_sse_ran)} time(s), not once — "
-        "without it this test measures nothing")
+    # The rig must have run AND paid, and the floor must clear the KNIFE EDGE:
+    # it is keyed to ``bound`` — which the test sets independently — never to
+    # ``_PRE_SSE_COST_S`` (a threshold derived from the guarded constant shrinks
+    # with it and goes green, re-creating the vacuity this guard exists to
+    # close), and it sits ABOVE 1/4 of the bound because at exactly 1/4 the
+    # sibling's ``0.75 * bound`` floor is satisfied by a seam-local interval and
+    # would stop discriminating.
+    # Exactly once: `/mcp/` avoids the 307 that would route through it twice.
+    assert len(pre_sse_paid_s) == 1 and pre_sse_paid_s[0] >= 0.30 * bound, (
+        f"the injected pre-SSE cost ran {len(pre_sse_paid_s)} time(s) for "
+        f"{pre_sse_paid_s} s — it must run EXACTLY once and pay at least "
+        f"{0.30 * bound:.3f} s, or the seam's remaining deadline approaches the "
+        "whole bound and the bounds below stop discriminating")
     assert body["result"]["isError"] is True, (
         "the tool returned success — the seam did not spend the transport's "
         "remaining deadline")
@@ -961,6 +983,11 @@ def test_mcp_seam_spends_the_transport_deadline_not_a_fresh_one(
     # `remaining` collapsed to ~0, i.e. every call refused the moment it
     # arrives) are different defects, and the upper bound alone cannot see the
     # second. Drift only INFLATES the wait, so this side cannot flake.
+    # REACH, stated rather than assumed: this floor separates the collapsed case
+    # while startup + drift stays under `bound - 0.15 - _PRE_SSE_COST_S` (0.85 s
+    # at the live constants). Above that band a collapsed-`remaining` seam would
+    # pass here, and the sibling test's floor does NOT cover it — its threshold
+    # (`0.75 * bound`) is LOWER than this one, so it goes blind earlier.
     assert elapsed >= bound - 0.15, (
         f"caller-visible wait {elapsed:.3f}s is BELOW the {bound}s bound — the "
         "seam refused on a collapsed remaining deadline instead of spending "
@@ -982,8 +1009,8 @@ def test_mcp_breach_reports_the_caller_visible_interval(
     ⚠️ As in the sibling one-deadline test, the live constants are larger than
     that measurement (bound 1.5 s, pre-SSE 0.5 s, tool 1.5 s) so the app's
     startup cannot lose the race with the middleware's deadline and mask the
-    seam (#4883). The assertions are unchanged, and ``pre / bound`` is kept at
-    1/3 so the ``0.75 * bound`` floor below still separates the two quantities
+    seam (#4883). ``pre / bound`` is kept at 1/3 so the ``0.75 * bound`` floor
+    below still separates the two quantities
     it exists to separate: the seam-local interval (1.0 s here) stays BELOW the
     floor (1.125 s) while the caller-visible one (1.5 s) clears it by 375 ms.
     """
@@ -998,7 +1025,7 @@ def test_mcp_breach_reports_the_caller_visible_interval(
     bound = 1.5
     monkeypatch.setattr(ma, "_TRANSPORT_WAIT_BOUND_S", bound)
     seen: list = []
-    pre_sse_ran: list[bool] = []
+    pre_sse_paid_s: list[float] = []
     monkeypatch.setattr(ha, "_track_analytics_event",
                         lambda org, ev, props: seen.append((ev, props)))
 
@@ -1017,8 +1044,10 @@ def test_mcp_breach_reports_the_caller_visible_interval(
 
         async def __call__(self, scope, receive, send):
             if scope["type"] == "http":
-                pre_sse_ran.append(True)
+                _t0 = time.perf_counter()
                 await asyncio.sleep(_PRE_SSE_COST_S)
+                # The interval ACTUALLY paid — see the sibling test's note.
+                pre_sse_paid_s.append(time.perf_counter() - _t0)
             await self.app(scope, receive, send)
 
     parent = Starlette(lifespan=_lifespan, routes=[Mount("/mcp", app=mcp_app)])
@@ -1039,10 +1068,13 @@ def test_mcp_breach_reports_the_caller_visible_interval(
         ms._pending_mcp_wait_bound.clear()
 
     assert r.status_code == 200, r.text
-    assert pre_sse_ran == [True], (
-        f"the injected pre-SSE cost ran {len(pre_sse_ran)} time(s), not once — "
-        "with no pre-SSE cost the seam-local and caller-visible intervals "
-        "coincide, so the floor below would pass vacuously")
+    # Same independent-keyed floor, with the same margin over the 1/4 knife
+    # edge, as the sibling test above (see its note).
+    assert len(pre_sse_paid_s) == 1 and pre_sse_paid_s[0] >= 0.30 * bound, (
+        f"the injected pre-SSE cost ran {len(pre_sse_paid_s)} time(s) for "
+        f"{pre_sse_paid_s} s — it must run EXACTLY once and pay at least "
+        f"{0.30 * bound:.3f} s, else the seam-local and caller-visible intervals "
+        "coincide and the floor below passes vacuously")
     breach = [p for e, p in seen if e == ha._TRANSPORT_WAIT_BOUND_EVENT]
     assert len(breach) == 1, breach
     emitted = breach[0]["latency_ms"]

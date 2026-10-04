@@ -60,7 +60,7 @@ def sup(tmp_path):
 
 
 def _rebuild(sdk, events_dir) -> None:
-    sdk._get_proj().rebuild_all(str(events_dir))
+    sdk._get_proj().rebuild_all(str(events_dir), confirm_destructive=True)
 
 
 def _corr(proj, old_id: str, new_id: str) -> int:
@@ -582,7 +582,7 @@ def _apply_replay(sdk, events_dir) -> None:
     ``backup.restore`` are independent replay loops wired to the SAME shared
     plan (``plan_point_restamp_folds`` + ``apply_journal_point_restamp``);
     they are exercised by their own suites, not here."""
-    sdk._get_proj().rebuild(EventLog(str(events_dir / "events.jsonl")))
+    sdk._get_proj().rebuild(EventLog(str(events_dir / "events.jsonl")), confirm_destructive=True)
 
 
 def test_apply_replay_folds_invalidate(sup):

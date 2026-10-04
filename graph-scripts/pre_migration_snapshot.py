@@ -17,10 +17,20 @@ Usage:
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"graph-scripts/pre_migration_snapshot.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python graph-scripts/pre_migration_snapshot.py`"
+    )
+
 import argparse
 import os
 import subprocess
-import sys
 import time  # noqa: F401
 from datetime import datetime, timezone
 
@@ -37,10 +47,12 @@ def _parse_uri(uri: str) -> dict:
     from tortoise.config import parse_uri_userinfo
     parsed = urlparse(uri)
     # #3039: decode userinfo through the single shared rule.
-    _username, password = parse_uri_userinfo(uri)
+    username, password = parse_uri_userinfo(uri)
     return {
         "host": parsed.hostname or "localhost",
         "port": parsed.port or 16379,
+        # #3081: the username MUST travel with the password — see audit_graph.py.
+        "username": username or "",
         "password": password or "",
         "graph": parsed.path.lstrip("/") or "tortoise",
     }
@@ -49,14 +61,23 @@ def _parse_uri(uri: str) -> dict:
 # ── BGSAVE trigger ────────────────────────────────────────────────────
 
 def trigger_bgsave(host: str = "localhost", port: int = 16379,
-                   password: str = "") -> dict:
+                   password: str = "", *, username: str) -> dict:
     """Trigger FalkorDB BGSAVE and return status.
+
+    ``username`` is keyword-only and REQUIRED, with no default. It previously
+    defaulted to ``""``, which turned a dropped credential into a silent
+    authentication as the DEFAULT user — #3081 — and was the reason a static
+    AST guard was needed to police the call sites. With the default gone, any
+    call site that fails to pass it fails loudly with ``TypeError``, which
+    covers every spelling (positional, keyword, ``*args``, ``**kwargs``,
+    ``functools.partial``) rather than the ones a matcher happens to enumerate.
 
     Returns {"ok": bool, "message": str, "timestamp": str}
     """
     try:
         from falkordb import FalkorDB
-        db = FalkorDB(host=host, port=port, password=password or None,
+        db = FalkorDB(host=host, port=port, username=username or None,
+                      password=password or None,
                       socket_connect_timeout=5, socket_timeout=120)
         result = db.connection.execute_command("BGSAVE")
         ts = datetime.now(timezone.utc).isoformat()  # noqa: UP017
@@ -68,15 +89,19 @@ def trigger_bgsave(host: str = "localhost", port: int = 16379,
 
 
 def check_rdb(host: str = "localhost", port: int = 16379,
-              password: str = "") -> dict:
+              password: str = "", *, username: str) -> dict:
     """Check FalkorDB persistence state via CONFIG GET + DBSIZE + LASTSAVE.
+
+    ``username`` is keyword-only and REQUIRED — see ``trigger_bgsave`` for why
+    the silent default was removed.
 
     Returns {"ok": bool, "dir": str, "dbfilename": str, "dbsize": int,
              "lastsave": int, "lastsave_utc": str}
     """
     try:
         from falkordb import FalkorDB
-        db = FalkorDB(host=host, port=port, password=password or None,
+        db = FalkorDB(host=host, port=port, username=username or None,
+                      password=password or None,
                       socket_connect_timeout=5, socket_timeout=120)
 
         # CONFIG GET dir
@@ -275,7 +300,8 @@ def main() -> int:
     # ── Step 1: BGSAVE ──────────────────────────────────────────────
     if args.trigger_bgsave:
         print("[1] Triggering BGSAVE...")
-        result = trigger_bgsave(cfg["host"], cfg["port"], cfg["password"])
+        result = trigger_bgsave(cfg["host"], cfg["port"], cfg["password"],
+                                username=cfg["username"])
         if result["ok"]:
             print(f"    ✓ {result['message']}")
             print(f"    Triggered at: {result['timestamp']}")
@@ -302,7 +328,8 @@ def main() -> int:
     else:
         print(f"    Docker check failed: {rdb.get('error', 'unknown')}")
         print("    Trying SDK-level check...")
-        rdb2 = check_rdb(cfg["host"], cfg["port"], cfg["password"])
+        rdb2 = check_rdb(cfg["host"], cfg["port"], cfg["password"],
+                         username=cfg["username"])
         if rdb2.get("ok"):
             print(f"    RDB dir:     {rdb2['dir']}")
             print(f"    RDB file:    {rdb2['dbfilename']}")

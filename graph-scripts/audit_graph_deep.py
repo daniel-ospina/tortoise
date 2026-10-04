@@ -4,10 +4,20 @@
 HISTORICAL ONE-SHOT — queries the removed context field (see #49);
 connection now env-based (TORTOISE_DB_URI).
 """
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"graph-scripts/audit_graph_deep.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python graph-scripts/audit_graph_deep.py`"
+    )
+
 from falkordb import FalkorDB  # noqa: I001
 from collections import defaultdict  # noqa: F401
 import os
-import sys
 
 # Repo-root import (matches the sibling graph-scripts).
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -21,10 +31,16 @@ def _parse_uri(uri: str) -> dict:
     parsed = urlparse(uri)
     # #3039: decode userinfo through the single shared rule — urlparse does
     # NOT percent-decode, and FalkorDB(...) does not either.
-    _username, password = parse_uri_userinfo(uri)
+    username, password = parse_uri_userinfo(uri)
     return {
         "host": parsed.hostname or "localhost",
         "port": parsed.port or 16379,
+        # #3081: the username MUST travel with the password. Binding it to
+        # `_username` and returning only the password made a named-user URI
+        # (redis://user:pw@host) authenticate as the DEFAULT user — the same
+        # misleading AuthenticationError/NOPERM family this block's #3039 rule
+        # already guards the password half of.
+        "username": username or "",
         "password": password or "",
         "graph": parsed.path.lstrip("/") or "tortoise",
     }
@@ -53,6 +69,7 @@ def _connect(key: str):
     """
     if key not in _CONN:
         client = FalkorDB(host=_cfg["host"], port=_cfg["port"],
+                          username=_cfg["username"] or None,
                           password=_cfg["password"] or None)
         _CONN.update({"DB": client, "G": client.select_graph(_cfg["graph"])})
     return _CONN[key]

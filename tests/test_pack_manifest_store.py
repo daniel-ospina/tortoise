@@ -698,7 +698,7 @@ class TestRebuildDurability:
 
         events = tmp_path / "events"
         events.mkdir()
-        sdk._get_proj().rebuild_all(str(events))
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
         assert get_tenant_manifests(sdk) == before_manifests, (
             "the real :PackManifest did not survive rebuild_all (#2814)")

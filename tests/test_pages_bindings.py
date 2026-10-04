@@ -306,6 +306,10 @@ PREFLIGHT = "Preflight — required Pages bindings exist"
 #: `tortoise-dashboard`, so the same gate is wired with a different project.
 DASHBOARD_PREFLIGHT = "Preflight — required Pages bindings exist (tortoise-dashboard)"
 DASHBOARD_DEPLOY = "Deploy to Cloudflare Pages (tortoise-dashboard project)"
+#: #2691 — the onboarding skills-mirror parity check. It guards the DASHBOARD's
+#: mirror, so it belongs to `deploy-dashboard`; in the `deploy` job it blocked
+#: the unrelated marketing deploy instead.
+ONBOARDING_PARITY = "Onboarding instructions are staged for the dashboard deploy"
 PROBE = "Post-deploy — sign-in is actually reachable"
 DEPLOY = "Deploy to Cloudflare Pages (premise-labs project)"
 #: #3620 — the pre-upload gate that every tracked top-level entry under
@@ -2780,6 +2784,46 @@ def test_the_marketing_job_no_longer_builds_the_blog_admin_console() -> None:
     assert not any("blog admin SPA" in n for n in names), (
         "the marketing deploy job still builds the blog admin SPA"
     )
+
+
+def test_the_onboarding_parity_check_guards_the_dashboard_job_only() -> None:
+    """#2691: the check guards the DASHBOARD's skills mirror, so it must fail the
+    dashboard job — not the marketing deploy.
+
+    The failure it prevents, named: the check lived in `deploy`, so a parity
+    break (the onboarding SKILL.md and its dashboard mirror disagreeing) failed
+    the premise-labs marketing deploy instead of the dashboard that consumed the
+    mirror. That is the coupling the issue reports, and it is the same class as
+    `test_the_marketing_job_no_longer_builds_the_blog_admin_console` above — a
+    step guarding one surface must not sit in the other surface's job.
+    """
+    assert ONBOARDING_PARITY not in [s.get("name", "") for s in _deploy_steps()], (
+        "the onboarding parity check is back in the marketing `deploy` job — it "
+        "blocks the landing deploy for a dashboard-mirror failure (#2691)"
+    )
+    dashboard = _dashboard_steps()
+    names = [s.get("name", "") for s in dashboard]
+    assert ONBOARDING_PARITY in names, "the onboarding parity check disappeared"
+    assert names.index(ONBOARDING_PARITY) < names.index(DASHBOARD_DEPLOY), (
+        "the mirror must be checked BEFORE the upload that publishes it"
+    )
+    # The BUILD is what copies `public/` into `dist/`, so a check placed after
+    # it would publish the very mirror the step guards. Pin the build, not just
+    # the upload.
+    assert names.index(ONBOARDING_PARITY) < names.index("Build dashboard (vite)"), (
+        "the mirror must be checked BEFORE the build that stages public/ into dist/"
+    )
+    # The check's substance is its three assertions; a step that kept only its
+    # name would still pass the placement checks above.
+    code = _strip_bash_comments(
+        next(s for s in dashboard if s.get("name") == ONBOARDING_PARITY)["run"]
+    )
+    assert "test -s tortoise/onboarding/SKILL.md" in code
+    assert (
+        "cmp tortoise/onboarding/SKILL.md" in code
+        and "website/apps/dashboard/public/skills/tortoise-onboarding/SKILL.md" in code
+    ), "the byte-identity parity assertion is gone"
+    assert "website/apps/dashboard/public/install-tortoise-skills.sh" in code
 
 
 def _dashboard_preflight_script(tmp_path: Path) -> Path:

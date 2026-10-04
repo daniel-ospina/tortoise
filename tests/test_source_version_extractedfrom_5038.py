@@ -115,7 +115,7 @@ def _journal_point(log_path, pid: str) -> dict:
 
 def _rebuilt(sdk, events):
     """Wipe + replay into the same graph handle; return the fresh read surface."""
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     return sdk._get_proj()
 
 
@@ -760,7 +760,7 @@ def test_malformed_carrier_payload_contributes_no_anchor_and_no_crash(prov):
                           "status": "live", **extra},
             }) + "\n")
 
-    sdk._get_proj().rebuild_all(str(events))  # must NOT raise
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)  # must NOT raise
     proj = _proj(sdk)
     for pid, extra in entries:
         assert _node_transit(proj, pid) == "ABSENT", pid
@@ -795,7 +795,7 @@ def test_carrier_without_an_extractedfrom_is_not_written(prov):
                       "sourceVersionTransit": [[DOC, "h9"]]},
         }) + "\n")
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     proj = _proj(sdk)
     assert _node_transit(proj, "stray-carrier") == "ABSENT", \
         "a carrier with no extractedFrom edge must not be written"
@@ -829,7 +829,7 @@ def test_carrier_keeps_only_the_points_own_refs(prov):
                       "sourceVersionTransit": [[DOC, "h1"], [DOC2, "h2"]]},
         }) + "\n")
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     proj = _proj(sdk)
     assert _node_transit(proj, "mixed-carrier") == [[DOC, "h1"]], \
         "a pair for a non-referenced source must be filtered out"
@@ -861,7 +861,7 @@ def test_carrier_with_only_foreign_keys_is_not_written(prov):
                       "sourceVersionTransit": [[DOC, "h9"]]},
         }) + "\n")
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     proj = _proj(sdk)
     assert _node_transit(proj, "foreign-only") == "ABSENT", \
         "an all-foreign carrier must be dropped, not written as []"
@@ -894,7 +894,7 @@ def test_blank_key_pair_is_dropped(prov):
                       "sourceVersionTransit": [["   ", "h9"]]},
         }) + "\n")
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     proj = _proj(sdk)
     assert _node_transit(proj, "blank-key") == "ABSENT", \
         "a pair keyed by a blank ref must not be written"
@@ -952,7 +952,7 @@ def test_consistency_gate_compares_the_transit(prov):
     sdk, events, log_path = prov
     sdk.create_source(DOC, "document", contentHash="h1")
     p = sdk.create_point("statement", "claim", extractedFrom=DOC)
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     result = check_consistency(str(log_path), _proj(sdk))
     assert result["ok"], result

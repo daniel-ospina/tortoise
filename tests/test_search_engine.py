@@ -558,8 +558,11 @@ class TestR2OrUnionAndSearchKeys:
             raw.query("CALL db.idx.fulltext.drop('Point')")
         except Exception:
             pass
-        # legacy state: single-field index + list-valued search_keys
-        raw.query("CALL db.idx.fulltext.createNodeIndex('Point', 'content')")
+        # legacy state: single-field index + list-valued search_keys.
+        # #H05: the Cypher-native DDL -- FalkorDB 6.0.0 rejects the historical
+        # multi-field procedure (`expected at most 1`), while the DDL is
+        # accepted by 4.16.7 / 4.20.x / 6.0.0 alike.
+        raw.query("CREATE FULLTEXT INDEX FOR (n:Point) ON (n.content)")
         raw.query(
             "CREATE (n:Point {id:'legacy-pb', "
             "content:'personal best 5K time is 27:12', "
@@ -592,6 +595,63 @@ class TestR2OrUnionAndSearchKeys:
                 "flat value mangled by re-run"
             hits = run_fts_query(proj.g, "fastest 5k", limit=10)
             assert "legacy-pb" in {h[0] for h in hits}
+        finally:
+            proj.close()
+
+    def test_event_legacy_migration_runs_and_mints_the_marker(self):
+        """#5440 / #6380: the Event drop->recreate migration was DEAD on every
+        engine this repo supports.
+
+        It dropped via the single hardcoded name ``dropIndex``, which is
+        unregistered on 4.20.4 and on 6.x, so the call raised, the surrounding
+        ``except`` swallowed it, and ``MERGE (m:Meta {key:'event_fts_v2'})``
+        never ran -- the legacy subject-only index was never migrated. This
+        asserts the migration actually COMPLETES: the marker is minted and the
+        Event ``name`` (the field the migration adds) becomes searchable.
+        """
+        from falkordb import FalkorDB
+
+        from tortoise.projection import FalkorProjection
+        reset_circuit_breakers()
+        client = FalkorDB(host=_live_utils.service_host(),
+                          port=_live_utils.legacy_port())
+        gname = f"tortoise_test_event_migrate_{os.urandom(4).hex()}"
+        from tests._embedded import _journal_append
+        _journal_append(gname)
+        raw = client.select_graph(gname)
+        raw.query("MATCH (n) DETACH DELETE n")
+        for drop in ("db.idx.fulltext.drop", "db.idx.fulltext.dropIndex"):
+            try:
+                raw.query(f"CALL {drop}('Event')")
+                break
+            except Exception:
+                continue
+        # LEGACY state: a SUBJECT-ONLY Event index, and no event_fts_v2 marker
+        raw.query("CREATE FULLTEXT INDEX FOR (n:Event) ON (n.subject)")
+        raw.query(
+            "CREATE (n:Event {eventId:'legacy-mig-1', "
+            "subject:'standup notes', name:'zeta'})")
+        # booting the projection runs _ensure_indexes -> the migration
+        proj = FalkorProjection.from_uri(_live_utils.legacy_uri(gname))
+        try:
+            marker = proj.g.query(
+                "MATCH (m:Meta {key:'event_fts_v2'}) RETURN m.v").result_set
+            assert marker and marker[0][0] is True, (
+                "the Event migration did not run: event_fts_v2 was never "
+                "minted. On engines that register `db.idx.fulltext.drop` "
+                "this isolates #5440 (the old hardcoded `dropIndex` is not "
+                "registered there); on 6.x the multi-field procedure create "
+                "fails one step earlier for the same root cause.")
+            hits = proj.g.query(
+                "CALL db.idx.fulltext.queryNodes('Event','zeta')"
+            ).result_set
+            assert hits, (
+                "the migrated Event index does not answer on `name` -- the "
+                "drop->recreate did not widen the field set")
+            # and the catalogue must agree the field is indexed at all
+            ev = [r for r in proj.g.query("CALL db.indexes()").result_set
+                  if r and r[0] == "Event"]
+            assert ev and "name" in (ev[0][2] or {}), ev
         finally:
             proj.close()
 
