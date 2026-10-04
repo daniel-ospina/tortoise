@@ -323,7 +323,7 @@ def test_shape_matches_live_apply_oracle(sup, tmp_path, name, seed_content,
         _seed(sdk, pid, seed_content)
     _write_journal(events, records)
     expected = _oracle(tmp_path, records, pid, seed_content)
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     actual = _read_derived(sdk, pid)
     assert actual == expected, (
         f"{name}: rebuild_all diverged from the live apply() oracle "
@@ -348,7 +348,7 @@ def test_seed_deleted_by_journal_is_gone(sup, tmp_path):
             params={"id": pid}).result_set[0][0]
     finally:
         oracle.close()
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     rebuilt_rows = sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) RETURN count(n)",
         params={"id": pid}).result_set[0][0]
@@ -366,7 +366,7 @@ def test_live_journaled_point_round_trips(sup, tmp_path):
     pid = sdk.create_point("statement", "HELLO")["id"]
     before = _read_derived(sdk, pid)
     assert before["content_hash"] is not None
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert _read_derived(sdk, pid) == before
 
 
@@ -378,9 +378,9 @@ def test_rebuild_is_idempotent_for_graph_only_derived(sup, tmp_path):
     records = [_point_added(pid, "")]
     _write_journal(events, records)
     expected = _oracle(tmp_path, records, pid, "SEED")
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     first = _read_derived(sdk, pid)
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert _read_derived(sdk, pid) == first == expected
 
 
@@ -422,7 +422,7 @@ def test_sidecar_recovery_keeps_the_durable_content_hash(sup, tmp_path):
         "session_snapshot": [],
         "session_point_links": [],
     })
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert _read_derived(sdk, pid)["content_hash"] == content_hash("SEED")
 
 
@@ -472,7 +472,7 @@ def test_sidecar_recovery_prefers_the_live_capture_over_stale_leftover(
         "session_point_links": [],
     })
     expected = _oracle(tmp_path, [_point_added(pid, "")], pid, "NEW")
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert _read_derived(sdk, pid) == expected
 
 
@@ -532,7 +532,7 @@ def test_failed_restore_still_retires_the_sidecar(sup, tmp_path):
         return real_query(cypher, params=params, timeout=timeout)
 
     with mock.patch.object(inner, "query", _inject):
-        proj.rebuild_all(str(events))
+        proj.rebuild_all(str(events), confirm_destructive=True)
     # The premise must be SELF-VERIFIED: if the restore clause string ever
     # changes, the injection would silently stop firing and this test would
     # pass without exercising a failed restore (round-6 review).
@@ -542,7 +542,7 @@ def test_failed_restore_still_retires_the_sidecar(sup, tmp_path):
     # The unrelated, successfully-restored id must NOT come back on rebuild #2.
     proj.g.query(
         "MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": good})
-    proj.rebuild_all(str(events))
+    proj.rebuild_all(str(events), confirm_destructive=True)
     assert proj.g.query(
         "MATCH (n:Point {id:$id}) RETURN count(n)",
         params={"id": good}).result_set[0][0] == 0
@@ -577,7 +577,7 @@ def test_revise_before_recreate_is_unchanged(sup, tmp_path):
     records = [_point_revised(pid, "R"), _point_deleted(pid),
                _point_added(pid, "Z")]
     _write_journal(events, records)
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     state = _read_derived(sdk, pid)
     assert state["content"] == "Z"
     assert state["content_hash"] == content_hash("Z")

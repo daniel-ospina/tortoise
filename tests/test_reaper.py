@@ -19,6 +19,12 @@ from pathlib import Path
 
 import pytest
 
+# #3752: discovery must target the PRIVATE per-session temp root, never the
+# shared system temp dir. `scan_root()` asserts the isolation is installed and
+# refuses to hand back the shared tree, so the delta-sweep fixtures below can
+# no longer silently degrade into an O(whole-host) scan that also matches
+# another test's (or another session's) redis.socket / redis.pid.
+from tests._tmpdir_hygiene import scan_root
 from tortoise.embedded_reaper import (
     _parse_min_uptime,
     discover,
@@ -58,7 +64,7 @@ def _clean_redislite_residue():
         except Exception:
             pass
         dirs: set[str] = set()
-        tmp = tempfile.gettempdir()
+        tmp = scan_root()  # #3752: private root, never the shared temp dir
         try:
             for entry in os.scandir(tmp):
                 if entry.is_dir() and (
@@ -110,7 +116,7 @@ def _sweep_stale_residue():
     definition (crashed run, killed server) — remove it so later tests in
     this module see the same clean state a fresh CI runner would.
     """
-    tmp = tempfile.gettempdir()
+    tmp = scan_root()  # #3752: private root, never the shared temp dir
     try:
         for entry in os.scandir(tmp):
             if not entry.is_dir():
@@ -5055,9 +5061,9 @@ def test_sweep_until_cleared_healthy_path():
     from tortoise.embedded_reaper import sweep_until_cleared
 
     responses = iter([_scan_aware([{"pid": 1}]), _scan_aware([])])
-    total, cleared = sweep_until_cleared(
+    total, cleared, exited = sweep_until_cleared(
         responses.__next__, deadline=1030.0, clock=lambda: 1000.0)
-    assert (total, cleared) == (1, True)
+    assert (total, cleared, exited) == (1, True, 0)
 
 
 def test_sweep_until_cleared_already_expired_deadline_is_not_cleared():
@@ -5065,9 +5071,9 @@ def test_sweep_until_cleared_already_expired_deadline_is_not_cleared():
     on its first record and returns []. `not acted` must not read as clear."""
     from tortoise.embedded_reaper import sweep_until_cleared
 
-    total, cleared = sweep_until_cleared(
+    total, cleared, exited = sweep_until_cleared(
         lambda: _scan_aware([]), deadline=999.0, clock=lambda: 1000.0)
-    assert (total, cleared) == (0, False)
+    assert (total, cleared, exited) == (0, False, 0)
 
 
 def test_sweep_until_cleared_spent_budget_after_work_is_not_cleared():
@@ -5082,9 +5088,9 @@ def test_sweep_until_cleared_spent_budget_after_work_is_not_cleared():
         _scan_aware([{"pid": 2}]),
         _scan_aware([]),
     ])
-    total, cleared = sweep_until_cleared(
+    total, cleared, exited = sweep_until_cleared(
         responses.__next__, deadline=1030.0, clock=lambda: 9999.0)
-    assert (total, cleared) == (1, False)
+    assert (total, cleared, exited) == (1, False, 0)
 
 
 def test_sweep_until_cleared_truncated_scan_is_not_cleared():
@@ -5092,10 +5098,10 @@ def test_sweep_until_cleared_truncated_scan_is_not_cleared():
     with budget remaining (`.complete` is fail-closed False)."""
     from tortoise.embedded_reaper import sweep_until_cleared
 
-    total, cleared = sweep_until_cleared(
+    total, cleared, exited = sweep_until_cleared(
         lambda: _scan_aware([], complete=False), deadline=1030.0,
         clock=lambda: 1000.0)
-    assert (total, cleared) == (0, False)
+    assert (total, cleared, exited) == (0, False, 0)
 
 
 def test_build_end_sweep_report_defaults_to_the_real_monotonic_clock():
@@ -5145,9 +5151,9 @@ def test_hygiene_report_threads_cleared_verbatim():
         _hygiene_report,
     )
 
-    assert _hygiene_report(0, False, 1, 5)["cleared"] is False
-    assert _hygiene_report(1, True, 13, 22)["cleared"] is True
-    report = _hygiene_report(0, False, 1, 5)
+    assert _hygiene_report(0, False, 1, 5, 0)["cleared"] is False
+    assert _hygiene_report(1, True, 13, 22, 3)["cleared"] is True
+    report = _hygiene_report(0, False, 1, 5, 0)
     assert set(report) == set(_HYGIENE_REPORT_FIELDS)
     assert tuple(report) == _HYGIENE_REPORT_FIELDS
 
@@ -5212,7 +5218,8 @@ def test_build_end_sweep_report_reads_probe_before_and_after_the_sweep():
     assert calls == [5, 3], (
         "the probe must be called exactly twice — before the sweep, then after"
     )
-    assert report == {"reaped": 1, "cleared": True, "left": 3, "before": 5}
+    assert report == {"reaped": 1, "exited": 0, "cleared": True,
+                      "left": 3, "before": 5}
     assert tuple(report) == _HYGIENE_REPORT_FIELDS
 
 
@@ -5232,6 +5239,67 @@ def test_build_end_sweep_report_threads_the_sweep_outcome():
     )
     assert report["reaped"] == 0
     assert report["cleared"] is False
+
+
+def test_reap_counts_a_candidate_that_exited_on_its_own():
+    """#6984: `exited` is MEASURED at the dead-pid branch, not derived.
+
+    A `candidate` whose pid dies between discovery and the kill attempt is the
+    natural exit the gate's accounting identity used to read as a broken sweep.
+    `reap()` counts it on the acted list's `exited` attribute. A record with no
+    pid is not a server and must not be counted — otherwise the identity could
+    be satisfied by non-servers, weakening it.
+    """
+    from tortoise.embedded_reaper import reap
+
+    dead = {"classification": "candidate", "pid": 99999999,
+            "socket_path": "/tmp/nonexistent-6984-dead.sock"}
+    acted = reap([dead], dry_run=False)
+    assert len(acted) == 0, "a dead pid must never be acted on"
+    assert acted.exited == 1, "the observed natural exit must be counted"
+
+    no_pid = {"classification": "candidate", "pid": None,
+              "socket_path": "/tmp/nonexistent-6984-nopid.sock"}
+    acted_none = reap([no_pid], dry_run=False)
+    assert acted_none.exited == 0, "a record with no pid is not a server"
+
+
+def test_sweep_until_cleared_accumulates_observed_natural_exits():
+    """#6984: `exited` sums the natural exits observed across iterations.
+
+    A single iteration's count would drop an exit observed in an earlier
+    iteration (the loop re-runs `run_one` until it acts on nothing), leaving the
+    gate's identity short by exactly that many.
+    """
+    from tortoise.embedded_reaper import sweep_until_cleared
+
+    first = _scan_aware([{"pid": 1}])
+    first.exited = 2
+    second = _scan_aware([])
+    second.exited = 1
+    total, cleared, exited = sweep_until_cleared(
+        iter([first, second]).__next__, deadline=1030.0,
+        clock=lambda: 1000.0)
+    assert (total, cleared, exited) == (1, True, 3)
+
+
+def test_build_end_sweep_report_threads_observed_natural_exits():
+    """#6984: the gate's identity term reaches the report verbatim.
+
+    `before` and `left` are the two probe readings; the natural-exit count the
+    sweep observed sits between them. A builder that dropped it leaves the gate
+    with the pre-#6984 identity and re-introduces the false red.
+    """
+    from tortoise.embedded_reaper import build_end_sweep_report
+
+    empty = _scan_aware([])
+    empty.exited = 4
+    report = build_end_sweep_report(
+        iter([empty]).__next__, deadline=1030.0, probe=lambda: 6,
+        clock=lambda: 1000.0)
+    assert report["exited"] == 4
+    assert report == {"reaped": 0, "exited": 4, "cleared": True,
+                      "left": 6, "before": 6}
 
 
 def test_conftest_sweep_returns_build_end_sweep_report():

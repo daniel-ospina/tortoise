@@ -26,10 +26,12 @@ What is pinned:
   * fail-closed on an EMPTY base (git reads `...HEAD` as `HEAD...HEAD` — an empty
     diff with exit 0, the silent green one input over);
   * fail-closed on an UNRESOLVABLE base (the #2386 defect itself);
-  * the changed `.md` set is reported, and the `$GITHUB_OUTPUT` encoding is
-    multi-line safe;
-  * an empty changed set produces `files=` — NOT a truthy newline heredoc, which
-    would run markdownlint with NO file args and lint the WHOLE repo;
+  * the changed `.md` set is reported as a NUL-delimited list under
+    `$RUNNER_TEMP` with a `count=` `$GITHUB_OUTPUT` value — the #4449 data
+    contract the main-health path already uses (a filename is data, never shell
+    text);
+  * an empty changed set produces `count=0`, so both lint steps skip — the
+    linter is never invoked with no file args, which would lint the WHOLE repo;
   * the job keeps the required-check shape: name `docs`, and NO `needs`/`if`
     (a skipped required job reports Success, so either would re-create the same
     "required check that cannot fail" defect one level up);
@@ -149,6 +151,10 @@ def _run_detection(
 
     env = {key: value for key, value in os.environ.items() if key in ("PATH", "HOME", "LANG")}
     env["GITHUB_OUTPUT"] = str(output)
+    # The step writes its NUL list under `$RUNNER_TEMP` (the #4449 data contract,
+    # shared with the main-health path); point it at tmp_path so the test can
+    # read the list back.
+    env["RUNNER_TEMP"] = str(tmp_path)
     if base is not None:
         env["BASE_SHA"] = base
 
@@ -162,22 +168,18 @@ def _run_detection(
     return proc, output.read_text(encoding="utf-8")
 
 
-def _output_files(text: str) -> str:
-    """The `files` value from a `$GITHUB_OUTPUT` file, in either encoding."""
-    lines = text.splitlines()
-    for index, line in enumerate(lines):
-        if line == "files=":
-            return ""
-        if line.startswith("files<<"):
-            delimiter = line[len("files<<") :]
-            assert delimiter, f"empty heredoc delimiter in GITHUB_OUTPUT: {text!r}"
-            collected: list[str] = []
-            for following in lines[index + 1 :]:
-                if following == delimiter:
-                    return "\n".join(collected)
-                collected.append(following)
-            raise AssertionError(f"unterminated heredoc in GITHUB_OUTPUT: {text!r}")
-    raise AssertionError(f"no `files` entry in GITHUB_OUTPUT: {text!r}")
+def _output_count(text: str) -> str:
+    """The `count` value from a `$GITHUB_OUTPUT` file."""
+    for line in text.splitlines():
+        if line.startswith("count="):
+            return line[len("count=") :]
+    raise AssertionError(f"no `count` entry in GITHUB_OUTPUT: {text!r}")
+
+
+def _changed_list(tmp_path: Path) -> list[str]:
+    """The changed `.md` list the step wrote, read back from its NUL file."""
+    raw = (tmp_path / "pr-md.nul").read_text(encoding="utf-8")
+    return [entry for entry in raw.split("\0") if entry]
 
 
 # ── the required-check shape ─────────────────────────────────────────────────
@@ -237,6 +239,10 @@ def test_detection_step_is_executable_fail_closed_shell():
         "test_every_changed_set_diff_disables_rename_detection) requires "
         "--no-renames on this diff (#4378)"
     )
+    assert "--diff-filter" in code and "ACMR" in code, (
+        "the PR list must keep only paths that exist on disk (#4449/#5215): a "
+        "deleted (or renamed-away) .md names a path lychee hard-errors on"
+    )
     assert "::error::" in code, (
         "the step must fail LOUDLY when it cannot compute the changed set (#2386)"
     )
@@ -260,11 +266,13 @@ def test_detection_reports_changed_markdown(tmp_path: Path):
 
     proc, output = _run_detection(tmp_path, repo, base)
     assert proc.returncode == 0, proc.stderr
-    assert _output_files(output).splitlines() == ["a.md", "b.md"]
+    assert _output_count(output) == "2"
+    # `./`-prefixed NUL entries: a filename is data, never shell text (#4449).
+    assert _changed_list(tmp_path) == ["./a.md", "./b.md"]
 
 
 def test_detection_reports_nothing_when_no_markdown_changed(tmp_path: Path):
-    """A clean empty result must be encoded as `files=` (falsy)."""
+    """A clean empty result must be `count=0`, so both lint steps skip."""
     repo = _repo(tmp_path)
     (repo / "a.md").write_text("# a\n", encoding="utf-8")
     base = _commit(repo, "base")
@@ -273,12 +281,12 @@ def test_detection_reports_nothing_when_no_markdown_changed(tmp_path: Path):
 
     proc, output = _run_detection(tmp_path, repo, base)
     assert proc.returncode == 0, proc.stderr
-    assert output.splitlines() == ["files="], (
-        f"the empty result must be the falsy `files=`; got {output!r}. A truthy "
-        "multi-line value here would make the `files != ''` gate pass and run "
-        "markdownlint with no args — i.e. lint the WHOLE repo (#2386)"
+    assert output.splitlines() == ["count=0"], (
+        f"the empty result must be `count=0`; got {output!r}. A truthy value here "
+        "would make the `count != '0'` gate pass and run the linter with no args "
+        "— i.e. lint the WHOLE repo (#2386)"
     )
-    assert _output_files(output) == ""
+    assert _changed_list(tmp_path) == []
 
 
 def test_detection_fails_closed_on_empty_base(tmp_path: Path):
@@ -327,7 +335,7 @@ def test_detection_fails_closed_on_unresolvable_base(tmp_path: Path):
 
 def test_lint_step_uses_cli2_and_the_repo_config():
     """cli2 reads `.markdownlint-cli2.jsonc`; v1 cli silently ignored it."""
-    run = _step(LINT_STEP)["run"]
+    run = _code(_step(LINT_STEP)["run"])
     assert "markdownlint-cli2" in run, (
         "the lint step must use markdownlint-cli2 (#2386): v1 markdownlint-cli "
         "cannot parse the repo's JSONC config and falls back to defaults"
@@ -355,7 +363,9 @@ def test_lint_steps_are_gated_so_an_empty_set_lints_nothing(name: str):
     return an empty set would turn a docs-only check into a full-repo lint.
     """
     step = _step(name)
-    assert step.get("if") == "steps.changed.outputs.files != ''", (
-        f"{name!r} must stay gated on a non-empty changed set (#2386); "
-        f"got if={step.get('if')!r}"
+    assert step.get("if") == (
+        "${{ !inputs.main_health && steps.changed.outputs.count != '0' }}"
+    ), (
+        f"{name!r} must stay gated on the PR path and a non-empty changed set "
+        f"(#2386); got if={step.get('if')!r}"
     )

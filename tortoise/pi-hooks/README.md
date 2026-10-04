@@ -29,12 +29,16 @@ cp <path-to-tortoise>/tortoise/pi-hooks/tortoise-capture.ts \
    ~/.pi/agent/extensions/tortoise-capture.ts
 ```
 
-Pi auto-discovers `~/.pi/agent/extensions/*.ts` on the next start. Capture is
-**on by default** (ToS-covered, the same default as the Claude Code hooks); the
-server refuses the capture POST with a 409 while the organization has agent
-sessions switched off (Memory sources > Agent sessions). There is no
-`autoCapture`-style default-false flag: installing the extension *is* the
-opt-in.
+Pi auto-discovers `~/.pi/agent/extensions/*.ts` on the next start. Installing
+the extension *is* the opt-in — there is deliberately no `autoCapture`-style
+default-false flag — and it is the one IN-REPO capture seam that reads no
+`TORTOISE_CAPTURE`, unlike the in-repo Claude Code, Codex and Cursor hooks,
+which file nothing until the machine sets `TORTOISE_CAPTURE=1` (#3615). (The
+agent-infra `reflect-hook` is the other ungated producer and lives outside this
+repo — agent-infra#1117.) The server can still refuse the capture POST with a
+409 while the organization has agent sessions switched off (Memory sources >
+Agent sessions; that toggle is default-ON, ToS-covered, and can only refuse —
+never enable).
 
 ## Migration: the install must not leave two capture producers (#3713)
 

@@ -98,14 +98,25 @@ NOT re-implemented here — it is already asserted by
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/mergify_config_guard.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/mergify_config_guard.py`"
+    )
+
 import argparse
 import ast
 import hashlib
 import json
+import os
 import re
 import shlex
 import subprocess
-import sys
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -138,6 +149,13 @@ LIVE_FRESH_DAYS = 90
 # deleted or renamed silently (#5649 is the residual for a PR that edits the
 # pinning test or the workflow together with the clause body).
 CLAUSE_IDS = ("i", "ii", "iii", "iv", "v", "vi", "vii", "viii")
+
+# Clause (vii) reads the repository's tracked file list from `git ls-files`. That
+# is the one subprocess on the static path, so it carries a bound: an
+# unresponsive git (stalled mount, a credential prompt) must not hang the
+# required `manifest-integrity` job with output indistinguishable from a slow
+# run. On timeout the read is treated as FAILED, not as an empty result.
+GIT_TIMEOUT_S = 120
 
 # I11 clause (1): files that may legitimately name `.github/settings.yml`. The
 # guard READS it (I10's projection includes it) and its test proves that reading
@@ -350,12 +368,50 @@ def _triggers(doc: dict) -> Any:
     return None
 
 
+# A check emitted by a workflow triggered this way is emittable AT QUEUE ENTRY: entry is
+# evaluated against the author PR head, and these triggers run on the same pull-request
+# events (`opened`/`synchronize`/`reopened`/`edited`) and report their check-runs against
+# that head. The difference between them is which revision of the workflow is loaded and
+# which secrets it may see — not whether a PR run produces the check. Deliberately NOT
+# extended to `push`/`workflow_run`: those are not PR-scoped, so a check emitted only by
+# them still cannot be relied on at entry (clause (vi)'s failure, kept red).
+#
+# This arm exists because `ai-review-gate` — this repo's review-record gate, and the ENTRY
+# condition #5433 added to `.mergify.yml` — is `pull_request_target`-only, so the stricter
+# spelling refused the one check the enforcement point needs, on a predicate that did not
+# model how the check is emitted.
+PR_TRIGGERS = ("pull_request", "pull_request_target")
+
+
 def _has_pull_request(triggers: Any) -> bool:
+    """Emission test for clause (vi): does a PR run produce this workflow's checks?
+
+    True for either PR trigger. Use `_has_pull_request_strict` where the question is
+    whether the job RUNS AGAINST THE PR'S TREE — see its docstring.
+    """
+    if isinstance(triggers, str):
+        return triggers in PR_TRIGGERS
+    if isinstance(triggers, (list, dict)):
+        return any(trigger in triggers for trigger in PR_TRIGGERS)
+    return False
+
+
+def _has_pull_request_strict(triggers: Any) -> bool:
+    """`pull_request` ONLY — the predicate for "runs against the PR's own tree".
+
+    The two triggers are NOT interchangeable for that question. `pull_request_target`
+    loads the workflow from the BASE revision and, absent an explicit checkout of the
+    PR head, runs base code — so a job hosted there never validates the PR's tree, and
+    an `if: github.event_name == 'pull_request'` predicate inside it is FALSE (the step
+    is skipped while a static reader counts it as running). Clause (vi) only asks
+    whether a check is EMITTED on a PR (so it takes both triggers), while
+    `_validator_candidates` (clause (vii)) asks whether the validator SEES the PR —
+    which only `pull_request` supports. Keeping the two questions on one widened
+    predicate would have certified a union validator that cannot see the union.
+    """
     if isinstance(triggers, str):
         return triggers == "pull_request"
-    if isinstance(triggers, list):
-        return "pull_request" in triggers
-    if isinstance(triggers, dict):
+    if isinstance(triggers, (list, dict)):
         return "pull_request" in triggers
     return False
 
@@ -503,17 +559,177 @@ def _iso(moment: datetime) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _attributes_files(root: Path) -> list[Path]:
+def _walk_files(root: Path) -> list[Path]:
+    """Filesystem fallback for a root that is NOT inside a git work tree."""
+    return sorted(
+        path for path in root.rglob("*") if path.is_file() and ".git" not in path.parts
+    )
+
+
+def _git_env() -> dict[str, str]:
+    """The environment for the guard's OWN git reads: no ambient `GIT_*` set.
+
+    `git ls-files` must read THIS checkout's index, but `GIT_DIR`,
+    `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR` and the object-dir
+    overrides redirect which repository and index it reads. A redirected or
+    non-existent index makes `ls-files` exit 0 with EMPTY output — which would
+    read as "no managed attributes file sets merge=union" while a tracked union
+    IS active: a FAIL-OPEN in the clause. The guard runs inside a workflow the
+    PR itself can edit, so ambient environment must not be able to point the
+    read somewhere else.
+
+    All `GIT_*` go, not just the three redirections — including `GIT_CONFIG_*`,
+    which is read-affecting (a `safe.directory` carried that way is a real
+    container pattern). That is deliberate: honouring ambient config here would
+    let the environment shape the read, and the cost is fail-CLOSED — the read
+    fails, `_has_git_link` sees the checkout, and the clause reports UNAVAILABLE
+    rather than a silent pass.
+    """
+    return {
+        key: value for key, value in os.environ.items() if not key.startswith("GIT_")
+    }
+
+
+def _has_git_link(root: Path) -> bool:
+    """True when `root` carries a git link: `.git` FILE, or a `.git` DIR with HEAD.
+
+    A linked worktree carries `.git` as a FILE pointing at its real gitdir; a
+    normal checkout carries a `.git` DIRECTORY that always contains `HEAD`.
+    Deliberately NOT `(root / ".git").exists()`: a fixture or a stray directory
+    merely NAMED `.git` (the `test_git_dir_is_never_unioned` tree) is not a
+    repository, and calling it one would turn the non-git fallback into a hard
+    failure for every such tree.
+    """
+    git = root / ".git"
+    return git.is_file() or (git / "HEAD").is_file()
+
+
+def _is_work_tree(root: Path) -> bool:
+    """True when `root` is inside a git work tree — a probe, not the scan itself.
+
+    Only consulted when `git ls-files` FAILED, and only as a positive signal: it
+    cannot answer under `dubious ownership` (every git command fails together),
+    which is why `_repository_files` treats `root/.git` as the other positive.
+    """
+    try:
+        probe = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+            check=False,
+            timeout=GIT_TIMEOUT_S,
+            env=_git_env(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return probe.returncode == 0 and probe.stdout.strip() == b"true"
+
+
+def _repository_files(root: Path) -> list[Path]:
+    """The REPOSITORY'S OWN files under `root`: git's tracked set when there is one.
+
+    A plain filesystem walk descends into anything nested inside the working
+    directory — including OTHER LANES' worktrees under `.worktrees/`, which are
+    not part of this repository at all. Reading their `.gitattributes` made
+    clause (vii) report a union this tree does not have, so the verdict depended
+    on which worktrees happened to exist on the machine. Observed 2026-09-28:
+    the hub checkout — carrying `.worktrees/merge-strategy-fix/.gitattributes`,
+    `merge=union` on the two registries — failed clause (vii) naming
+    `.worktrees/merge-strategy-fix/config/ci-surfaces.yml`, while the SAME
+    commit passed in CI: `DIVERGED` reported for a repository that is not.
+
+    `git ls-files` is git's answer for the TRACKED set — the files a merge on the
+    refs actually carries, and what this guard gates: CI checks out clean and the
+    queue merges refs, so neither ever sees a developer's untracked working-tree
+    file. The plan for this precondition named this form already
+    (`docs/plans/2026-09-26-5215-merge-throughput.md`, cycle 8(a)):
+    `git ls-files -z '*.gitattributes' '.gitattributes'` plus
+    `$GIT_DIR/info/attributes`.
+
+    DELIBERATE NARROWING, stated because it is NOT a property git has: an
+    UNTRACKED `.gitattributes` in the working tree is not seen. Git DOES consult
+    the working tree when resolving the built-in `merge` attribute
+    (gitattributes(5)), so such a file can drive a LOCAL merge — but it is not
+    part of the repository, cannot be merged, and so is not part of the gate this
+    guard asserts. Do not read the tracked-only read as "git cannot see it".
+
+    Falls back to the walk only when `root` is NOT a git work tree (the test
+    fixtures, a tarball export) — the caller's previous behaviour, which
+    over-reads rather than under-reads. That test is NOT "did the read fail" but
+    "does this checkout have a git": `root/.git` (a directory, or the file a
+    linked worktree carries) counts, so a checkout whose git cannot run at all —
+    `dubious ownership`, an unreadable `.git`, git missing from `PATH`, an index
+    that resolves to nothing — RAISES instead of quietly walking into the
+    worktrees again and re-reporting the false DIVERGED. (Declared residuals: a
+    `--root` aimed at a SUBDIRECTORY of such a checkout has no `.git` of its own
+    and would walk, and a truncated index that still parses into a partial list
+    is not detected; the guard is invoked on a repository root, and a corrupt
+    checkout is not an attacker capability when the same actor can edit this
+    guard.)
+    """
+    proc: subprocess.CompletedProcess[bytes] | None = None
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "--cached", "-z"],
+            capture_output=True,
+            check=False,
+            timeout=GIT_TIMEOUT_S,
+            env=_git_env(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        proc = None
+    if proc is not None and proc.returncode == 0:
+        names = [
+            name
+            for name in proc.stdout.decode("utf-8", "surrogateescape").split("\0")
+            if name
+        ]
+        # A tracked-but-deleted path is not on disk: keep the previous
+        # `is_file()` filter so the unioned set names only files that exist here.
+        resolved = sorted(path for name in names if (path := root / name).is_file())
+        if resolved or not _has_git_link(root):
+            return resolved
+        # A real checkout of a repository tracks SOMETHING on disk, so a
+        # git-linked root whose tracked list RESOLVES to nothing is unreadable
+        # evidence, not an answer. `git ls-files --cached` exits 0 with an EMPTY
+        # stdout when `.git/index` is missing or empty, and with unresolvable
+        # entries when it is truncated; accepting either would report "no managed
+        # attributes file sets merge=union" while a tracked union is active.
+        # `_git_env` closes the ENV route to the same emptiness; this is the
+        # on-disk one. DECLARED RESIDUAL: a truncated index that still parses
+        # into a non-empty PARTIAL list is not detected — a corrupt checkout is
+        # not an attacker capability here (whoever can truncate the runner's
+        # index can edit this guard), so it is disclosed, not defended.
+        detail = "the tracked file list resolved to NOTHING"
+    elif not _is_work_tree(root) and not _has_git_link(root):
+        return _walk_files(root)
+    else:
+        detail = (
+            proc.stderr.decode("utf-8", "replace").strip()[:200]
+            if proc is not None
+            else "git could not be run"
+        )
+    raise GuardUnreadable(
+        f"`git ls-files` could not be read in {root} ({detail}) and the root IS a "
+        "work tree — refusing to fall back to a filesystem walk, which reads "
+        "other lanes' worktrees under `.worktrees/` and reports DIVERGED for a "
+        "repository that is not"
+    )
+
+
+def _attributes_files(
+    root: Path, repository_files: list[Path] | None = None
+) -> list[Path]:
     """Every managed attributes file (cycle 8(a)): `.gitattributes` at any depth,
     plus `$GIT_DIR/info/attributes`. A nested `docs/product/.gitattributes`
     carrying `merge=union` must not escape the precondition.
+
+    The caller may pass the repository's own file list so ONE `git ls-files` read
+    serves both the attribute scan and the glob expansion — two reads could
+    disagree if the index moved between them. Omitting it reads once, for a
+    standalone caller.
     """
-    files: list[Path] = []
-    for path in sorted(root.rglob(".gitattributes")):
-        if ".git" in path.parts:
-            continue
-        if path.is_file():
-            files.append(path)
+    own = _repository_files(root) if repository_files is None else repository_files
+    files: list[Path] = [path for path in own if path.name == ".gitattributes"]
     git_dir = root / ".git"
     if git_dir.is_dir():
         info = git_dir / "info" / "attributes"
@@ -631,7 +847,8 @@ def _attr_glob_regex(pattern: str) -> re.Pattern[str]:
 
 def _unioned_files(root: Path) -> set[str]:
     unioned: set[str] = set()
-    files = sorted(_attributes_files(root), key=lambda p: len(p.parts))
+    own_files = _repository_files(root)
+    files = sorted(_attributes_files(root, own_files), key=lambda p: len(p.parts))
     # Macros are inherited DOWNWARD (a root `[attr]` is visible to a nested
     # file), and expand TRANSITIVELY (`[attr]b a` where `a` is a macro).
     macros: dict[str, list[str]] = {}
@@ -678,13 +895,10 @@ def _unioned_files(root: Path) -> set[str]:
             pat = prefix + body if anchored else prefix + "**/" + body
             if any(ch in pat for ch in "*?["):
                 regex = _attr_glob_regex(pat)
-                for match in sorted(root.rglob("*")):
-                    if ".git" in match.parts:
-                        continue
-                    if match.is_file() and regex.match(
-                        match.relative_to(root).as_posix()
-                    ):
-                        unioned.add(match.relative_to(root).as_posix())
+                for match in own_files:
+                    rel = match.relative_to(root).as_posix()
+                    if regex.match(rel):
+                        unioned.add(rel)
                 # A glob matching nothing contributes nothing (git unions nothing).
             else:
                 # No glob metachar: a `\x` escape names the literal `x`
@@ -825,7 +1039,7 @@ def _validator_candidates(docs: dict[str, dict], required_workflow: str, closure
     """
     candidates: list[dict] = []
     for workflow, doc in docs.items():
-        if workflow != required_workflow or not _has_pull_request(_triggers(doc)):
+        if workflow != required_workflow or not _has_pull_request_strict(_triggers(doc)):
             continue
         jobs = doc.get("jobs")
         if not isinstance(jobs, dict):
@@ -1402,7 +1616,7 @@ def _clause_iii(doc: dict) -> tuple[int, str]:
 
 
 def _clause_iv(doc: dict, record: dict | None) -> tuple[int, str]:
-    """I2b: under `merge` injection the five cheap contexts are explicit
+    """I2b: under `merge` injection the cheap contexts are explicit
     `check-success` ENTRY conditions (the merge-time injected path accepts
     neutral/skipped — the named residual of E1)."""
     active = [rule for rule in doc["queue_rules"] if _effective_mode(rule) == "merge"]
@@ -1471,16 +1685,25 @@ def _clause_v(doc: dict) -> tuple[int, str]:
 
 def _clause_vi(doc: dict, emitters: list[dict]) -> tuple[int, str]:
     """Emission (structural): every check named in either list maps to a job's
-    effective name in a workflow with a `pull_request` trigger."""
+    effective name in a workflow with a `pull_request` OR `pull_request_target` trigger.
+
+    Both are PR-scoped and both report their check-runs against the PR head, so both
+    can satisfy a `check-success` at queue entry — which is the property this clause
+    exists to protect (a check no PR run emits would block entry forever).
+    `pull_request_target` was added in #5433: this repo's own review gate is
+    `pull_request_target`-only, so the narrower spelling refused the one check the
+    enforcement point needs. For the DIFFERENT question — does the job run against the
+    PR's own tree — see `_has_pull_request_strict`.
+    """
     required = sorted({name for _, name, _ in _all_check_pairs(doc["queue_rules"])})
     pr_names = {e["name"] for e in emitters if e["has_pr"]}
     missing = [name for name in required if name not in pr_names]
     if missing:
         return (
             EXIT_DIVERGED,
-            f"named checks with no pull_request-emitting workflow job: {missing}",
+            f"named checks with no PR-triggered workflow job: {missing}",
         )
-    return EXIT_OK, f"{required} are emitted on a pull_request workflow"
+    return EXIT_OK, f"{required} are emitted on a pull_request/pull_request_target workflow"
 
 
 def _clause_viii_a(root: Path, record: dict | None) -> tuple[int, str]:

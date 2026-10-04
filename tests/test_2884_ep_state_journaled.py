@@ -162,7 +162,7 @@ def test_b_rebuild_all_replays_the_belief_state(journaled):
         assert before[pid]["posterior_alpha"] is not None, before
         assert before[pid]["confidence"] is not None, before
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     after = _state(sdk, ids)
     for pid in ids:
@@ -414,7 +414,7 @@ def test_f3_baseline_clear_replays_over_the_prior_posterior(journaled):
     _run_dream(sdk, ids)                       # journals real posteriors
     sdk.set_point_baseline(ids[0], 5.0, 1.0)   # live clear of posteriors
     assert _state(sdk, [ids[0]])[ids[0]]["posterior_alpha"] is None
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert _state(sdk, [ids[0]])[ids[0]]["posterior_alpha"] is None, (
         "rebuild resurrected the pre-baseline posterior")
 
@@ -465,7 +465,7 @@ def test_f3_assess_source_decay_is_journaled(journaled):
     assert last["confidence"] == 0.5, last
     assert last["posterior_alpha"] == 1.0, last
     assert last["posterior_beta"] == 1.0, last
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     st = _state(sdk, [first["assessment_point_id"]])[
         first["assessment_point_id"]]
     assert st["confidence"] == 0.5, st
@@ -483,7 +483,7 @@ def test_f4_update_point_belief_props_folded_on_replay(journaled):
     sdk.update_point(ids[0], confidence=0.123, posterior_alpha=4.5)
     assert _state(sdk, [ids[0]])[ids[0]]["confidence"] == pytest.approx(0.123)
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     st = _state(sdk, [ids[0]])[ids[0]]
     assert st["confidence"] == pytest.approx(0.123), st
     assert st["posterior_alpha"] == pytest.approx(4.5), st
@@ -610,7 +610,7 @@ def test_a2_promote_belief_props_agree_across_rebuild(journaled):
     assert _state(sdk, [pid])[pid]["confidence"] == pytest.approx(0.5)
     assert _state(sdk, [pid])[pid]["posterior_alpha"] == pytest.approx(3.0)
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     st = _state(sdk, [pid])[pid]
     assert st["confidence"] == pytest.approx(0.5), st
     assert st["posterior_alpha"] == pytest.approx(3.0), st
@@ -632,7 +632,7 @@ def test_a3_invalidate_decay_respects_journal_order(journaled):
     _raw_append(events, sdk, "PointInvalidated", id=pid, corrected_by=corr)
     _raw_append(events, sdk, "ConfidenceChanged", id=pid, confidence=0.25)
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     st = _state(sdk, [pid])[pid]
     assert st["confidence"] == pytest.approx(0.25), st
     # The invalidate's OTHER half still folded (its decay, then outdated).
@@ -659,7 +659,7 @@ def test_a5_assess_source_outdated_flag_survives_rebuild(journaled):
             if r["type"] == "ConfidenceChanged" and r["id"] == oid]
     assert recs and recs[-1].get("outdated") is True, recs
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert _outdated(sdk, oid) is True, "rebuilt graph lost the outdated flag"
 
 
@@ -681,7 +681,7 @@ def test_a7_belief_fold_drops_across_delete_recreate(journaled):
                        "status": "live"})
     _raw_append(events, sdk, "ConfidenceChanged", id=pid, confidence=0.3)
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     graph = _state(sdk, [pid])[pid]
     assert graph["confidence"] == pytest.approx(0.3), graph
     assert graph["posterior_alpha"] is None, (
@@ -721,7 +721,7 @@ def test_a7_revise_belief_props_drop_across_delete_recreate(journaled):
     _raw_append(events, sdk, "PointRevised", id=pid, new_content="c4",
                 confidence=0.3)
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     graph = _state(sdk, [pid])[pid]
     assert graph["confidence"] == pytest.approx(0.3), graph
     assert graph["posterior_alpha"] is None, (
@@ -783,7 +783,7 @@ def test_2884_supersede_decay_folds_at_its_own_journal_seq(journaled):
     live = _state(sdk, [a])[a]
     assert live["confidence"] == pytest.approx(0.25)
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     post = _state(sdk, [a])[a]
     assert post["confidence"] == pytest.approx(0.25), (
         f"rebuild let the trailing supersede sweep clobber the later belief "
@@ -802,7 +802,7 @@ def test_2884_supersede_sweep_does_not_clobber_posterior_clear(journaled):
     assert live["posterior_alpha"] is None
     assert live["posterior_beta"] is None
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     post = _state(sdk, [a])[a]
     assert post["posterior_alpha"] is None, (
         f"trailing supersede decay resurrected the cleared posterior: {post}")
@@ -819,7 +819,7 @@ def test_2884_supersede_decay_still_applies_without_later_write(journaled):
     assert live["confidence"] == pytest.approx(0.5)
     assert live["posterior_alpha"] == pytest.approx(1.0)
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     post = _state(sdk, [a])[a]
     assert post["confidence"] == pytest.approx(0.5), (
         f"supersede decay was dropped instead of moved: live={live} post={post}")
@@ -840,7 +840,7 @@ def test_2884_bare_same_id_reemit_keeps_belief_state(journaled):
     live = _state(sdk, [pid])[pid]
     assert live["confidence"] == pytest.approx(0.9)
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     post = _state(sdk, [pid])[pid]
     assert post["confidence"] == pytest.approx(0.9), (
         f"a bare same-id re-emit dropped the belief fold: live={live} "
@@ -863,7 +863,7 @@ def test_2884_supersede_decay_survives_bare_same_id_reemit(journaled):
     live = _state(sdk, [a])[a]
     assert live["confidence"] == pytest.approx(0.5)
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     post = _state(sdk, [a])[a]
     assert post["confidence"] == pytest.approx(0.5), (
         f"a bare same-id re-emit suppressed the live supersede decay: "
@@ -891,7 +891,7 @@ def test_2884_invalidate_decay_survives_bare_same_id_reemit(journaled):
     live = _state(sdk, [pid])[pid]
     assert live["confidence"] == pytest.approx(0.5)
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     post = _state(sdk, [pid])[pid]
     assert post["confidence"] == pytest.approx(0.5), (
         f"a bare same-id re-emit suppressed the live invalidate decay: "
@@ -918,7 +918,7 @@ def test_2884_retract_decay_drops_across_delete_recreate(journaled):
                 point={"id": pid, "content": "c2", "pointKind": "",
                        "status": "live"})
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     post = _state(sdk, [pid])[pid]
     assert post["posterior_alpha"] is None, (
         f"the pre-recreation retract decayed the FRESH incarnation: {post}")
@@ -952,7 +952,7 @@ def test_2884_promote_belief_props_drop_across_delete_recreate(journaled):
                 point={"id": pid, "content": "c2", "pointKind": "",
                        "status": "live"})
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     post = _state(sdk, [pid])[pid]
     assert post["posterior_alpha"] is None, (
         f"the pre-recreation promote wrote a dead belief onto the FRESH "

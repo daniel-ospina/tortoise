@@ -1529,6 +1529,53 @@ def test_cli_spool_writes_the_spool_and_NEVER_touches_the_network(tmp_path, monk
     ]
 
 
+def test_cli_spool_marks_an_over_cap_turn_with_its_true_total(tmp_path, monkeypatch):
+    """#4897 review round 15, P3: the spool leg's per-turn clip is PINNED.
+
+    `_spool_transcript` (the spool write behind `session spool` / `session
+    capture`) clips through the SDK's ONE definition
+    (`_clip_capture_turn_content`). Reverting it to a bare
+    `t["content"][:5000]` left the WHOLE suite green: the spool then held a
+    silently cut turn with no marker and no true total — exactly the defect
+    #4897 exists to end, on the durable path whose entire job is to survive an
+    interrupted session and be replayed later.
+
+    MUTATION THAT REDS THIS: replace the clip in `_spool_transcript` with
+    `t["content"][:5000]` (or drop the clip entirely) — the marker assertion
+    fails.
+    """
+    import tortoise.__main__ as cli
+    from tortoise.sdk import (
+        _CAPTURE_TRUNCATION_SENTINEL,
+        _CAPTURE_TURN_CAP,
+        _capture_truncation_marker,
+    )
+
+    _isolate(monkeypatch, tmp_path)
+    over = _CAPTURE_TURN_CAP + 1234
+    long = "a" * over
+    transcript = tmp_path / "t.claude.jsonl"
+    transcript.write_text(f"User: hi\nAssistant: {long}\n", encoding="utf-8")
+
+    def exploding_post(api_key, api_url):
+        def handle(payload):  # pragma: no cover - must never be called
+            raise AssertionError("session spool must not touch the network")
+        return handle
+
+    monkeypatch.setattr(cli, "_session_post", exploding_post)
+    assert cli.main(["session", "spool", "--file", str(transcript),
+                     "--session-id", "sess-mark"]) == 0
+
+    turns = read_spool_turns(tmp_path / "spool", "sess-mark")
+    long_turn = next(t for t in turns if t["role"] == "assistant")
+    assert _CAPTURE_TRUNCATION_SENTINEL in long_turn["content"], (
+        "the spool stored a silently cut turn: "
+        f"{long_turn['content'][-60:]!r}")
+    assert _capture_truncation_marker(over) in long_turn["content"], (
+        "the marker must carry the turn's TRUE length, not the window width")
+    assert len(long_turn["content"]) == _CAPTURE_TURN_CAP
+
+
 def test_an_interrupted_claude_session_is_recovered_without_session_end(tmp_path, monkeypatch):
     """The Claude-leg acceptance, WITHOUT assuming `session capture` ever ran.
 

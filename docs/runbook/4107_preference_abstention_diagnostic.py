@@ -161,10 +161,13 @@ def measure(*, replay: bool) -> dict:
             qdate = _to_iso_date(q.get("question_date") or "")
 
             # (1) deterministic fused rank of the gold turn in the ask pool.
-            # The retrieval knobs are resolved exactly as the lane resolves
-            # them, so the rank is measured on the SAME retrieval the lane
-            # runs under — not on a hardcoded default that an ambient env
-            # override would silently diverge from.
+            # A1/A3/A5 are resolved exactly as the lane resolves them, so the
+            # rank is measured on the SAME retrieval the lane runs under —
+            # not on a hardcoded default that an ambient env override would
+            # silently diverge from. A4 is the exception: this diagnostic PINS
+            # the PRF arm ON (its own arm; an explicit env still wins), so the
+            # rank describes the PRF-ON posture — since #4593 the LANE
+            # defaults that lever OFF until its delta is measured.
             from tortoise.retrieval import (
                 ASK_FUSION_K_ENV,
                 ASK_FUSION_WEIGHTS_ENV,
@@ -191,7 +194,7 @@ def measure(*, replay: bool) -> dict:
                 include_terminal=True,
                 leg_trace=leg_trace,
                 keep_numeric=ask_env_bool("TORTOISE_ASK_NUMERIC_TOKENS", True),
-                search_keys_prf=ask_env_bool("TORTOISE_ASK_SEARCH_KEYS_PRF", True),
+                search_keys_prf=ask_env_bool("TORTOISE_ASK_SEARCH_KEYS_PRF", True),  # A4 pinned ON (lane defaults OFF, #4593)
                 fusion_weights=ask_env_weights(ASK_FUSION_WEIGHTS_ENV, None),
                 fusion_k=ask_env_int(ASK_FUSION_K_ENV, 60),
             )
