@@ -60,7 +60,7 @@ def test_rebuild_all_with_merges():
 
         proj = FalkorProjection(_tmp("g_merge.db"), graph_name="test")
         try:
-            result = proj.rebuild_all(d)
+            result = proj.rebuild_all(d, confirm_destructive=True)
             assert result["nodes"] == 1  # pid2 merged away
             assert result["edges"] == 0
         finally:

@@ -153,7 +153,7 @@ def test_live_and_rebuild_agree_on_inferred_extractedfrom(prov):
     live = _provenance(sdk._get_proj())
     assert live, "guard: the live graph must have provenance to rebuild"
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert _provenance(sdk._get_proj()) == live, \
         "extractedFrom diverged between live write and rebuild"
 
@@ -171,7 +171,7 @@ def test_rebuild_preserves_session_source_is_episodic(prov):
             "RETURN coalesce(s.is_episodic, false)").result_set[0][0])
 
     assert _is_episodic(sdk._get_proj()) is True, "live Source not episodic"
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert _is_episodic(sdk._get_proj()) is True, \
         "rebuilt Source lost is_episodic"
 
@@ -216,7 +216,7 @@ def test_dedup_hit_does_not_leave_prop_only_provenance(prov):
 
     # And whatever the surface is, live and rebuild must still agree.
     live = _provenance(proj)
-    proj.rebuild_all(str(events))
+    proj.rebuild_all(str(events), confirm_destructive=True)
     assert _provenance(proj) == live
 
 
@@ -243,7 +243,7 @@ def test_session_source_kind_is_agentsession(prov):
         }
 
     assert _kinds(sdk._get_proj()) == {"agentSession"}
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert _kinds(sdk._get_proj()) == {"agentSession"}, \
         "replay minted the session Source with a different sourceKind"
 
@@ -290,7 +290,7 @@ def test_multi_source_survives_rebuild(prov):
                          extractedFrom=refs)
     live = _sources_of(sdk._get_proj(), p["id"])
     assert live == set(refs), "guard: the live fan-out must exist to rebuild"
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert _sources_of(sdk._get_proj(), p["id"]) == set(refs)
 
 

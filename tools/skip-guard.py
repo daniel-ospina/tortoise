@@ -8,7 +8,8 @@ a matching probe), the run must flip RED — the historical silent-green masked 
 #1382 EP regression class for days.
 
 Usage:
-  python3 tools/skip-guard.py <path-to-pytest.log> [--manifest <expected-nodeids.txt>] [--junitxml <path>]
+  python3 tools/skip-guard.py <path-to-pytest.log> [--manifest <expected-nodeids.txt>]
+                              [--scope "<space-joined files>"] [--junitxml <path>] [--manifest-only]
   python3 tools/skip-guard.py --emit-manifest "<space-joined $FILES>" [--marker <expr>] [--output <path>] [--ignore <path>]...
 
 Manifest GENERATION mode (epic #1647 Task 6 — the coverage-manifest
@@ -96,6 +97,21 @@ Coverage-manifest mode (epic #1647 Task 3 — the skip-guard inversion):
                                      e2e module. Use this where the property is
                                      "the frozen nodeid set is still COLLECTED
                                      (and the tests that must run, run)".
+  --scope "<space-joined files>"     restrict the frozen set to the nodeids whose
+                                     FILE is listed. The manifest is always
+                                     passed VERBATIM (never a grep-derived temp
+                                     file, which a tree could silently
+                                     redefine); only what THIS invocation must
+                                     observe shrinks — for a lane that runs one
+                                     SHARD of a repo-level frozen set. A scope
+                                     naming no frozen nodeid is a legitimate
+                                     empty requirement for a shard that owns
+                                     none, and the guard prints the filtered
+                                     count (and says so when the requirement is
+                                     empty) so a wrong scope is not silent.
+                                     Requires --manifest: with no frozen set
+                                     there is nothing to narrow, so the
+                                     combination fails closed (exit 2).
 
   Every expected nodeid must appear as a junitxml <testcase> — passed OR
   skipped-with-reason; a missing nodeid (deselected, file dropped from $FILES,
@@ -137,9 +153,21 @@ Coverage-manifest mode (epic #1647 Task 3 — the skip-guard inversion):
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/skip-guard.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/skip-guard.py`"
+    )
+
+import os
 import re
 import subprocess
-import sys
+import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -154,6 +182,94 @@ _MANIFEST_MARKER_DEFAULT = "not track_b"
 # deselected) in 0.03s", "9/13 tests collected (4 deselected)") never
 # contain "::".
 _COLLECT_NODEID_RE = re.compile(r"^[^\s:]+::")
+
+# ── The collection-completion proof (#6898) ──────────────────────────────
+# pytest's exit code is NOT a reliable statement about collection. Concretely,
+# two shapes red a shard for a run that collected perfectly:
+#   * ``rc=5`` — EXIT_NOTESTSCOLLECTED: collection SUCCEEDED and matched
+#     nothing (e.g. a diff that selects files whose tests are all outside the
+#     ``-m`` marker). The tool already treats this as normal everywhere else
+#     (see the rc-in-(0, 5) assertion in tests/test_skip_guard.py).
+#   * ``rc=-6`` — the interpreter aborts AT EXIT, after the nodeid list has
+#     already been printed (issue #6898).
+# So the manifest must not be derived from the exit code at all. Instead a
+# `pytest_collection_modifyitems` hook writes it, because that hook is only
+# reached by a collection that ran to completion. But that hook is NOT
+# sufficient alone: an unimportable module yields rc=2 ("Interrupted: 1 error
+# during collection") and STILL reaches the hook with the errored module
+# dropped, so the nodeid list alone would fail OPEN on a genuine collection
+# error.
+#
+# The exit code is NOT an acceptable second half of that test (P1, PR #7072
+# review). `rc < 0` means only that the interpreter was SIGNALLED, at ANY
+# point: a shutdown SIGABRT masks a collection error just as easily as it
+# follows a clean collection. Measured: `ImportError` + an atexit SIGABRT
+# yields rc=-6 with a hook file present but EMPTY — accepted by
+# (file exists) AND (rc<0), certifying a broken collection. So the second half
+# is WITNESSED, not inferred: the hook counts pytest's own CollectReports
+# (`pytest_collectreport(report).failed`) and writes the count next to the
+# nodeids. Those reports are authoritative — a module that fails to import
+# produces a failed report BEFORE `pytest_collection_modifyitems` runs (and
+# when a conftest cannot be loaded at all, the hook never runs and no file is
+# written). Completion is therefore (file exists) AND (errors == 0). The write
+# is atomic for the same reason: a manifest that exists must be complete,
+# never half-written.
+_MANIFEST_HOOK_SOURCE = '''\
+"""Written by tools/skip-guard.py for a single --emit-manifest run (#6898)."""
+import os
+from pathlib import Path
+
+import pytest
+
+# pytest's AUTHORITATIVE collection verdict: one CollectReport per collector,
+# `failed` set when that collector raised (import error, syntax error, a
+# conftest/collector error). Counting them here — instead of inferring "no
+# collection error" from the process exit code — is what stops an at-shutdown
+# abort (rc<0) from masking a real collection error: the count is written to
+# the nodeid file during collection, so it survives the later SIGABRT.
+_collect_errors = []
+
+
+@pytest.hookimpl()
+def pytest_collectreport(report):
+    # `failed` is the documented CollectReport property; `outcome` is the
+    # field it derives from. Either marks a collector that raised.
+    if getattr(report, "failed", False) or getattr(report, "outcome", None) == "failed":
+        _collect_errors.append(getattr(report, "nodeid", ""))
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config, items):
+    # trylast: pytest's own `-m`/`-k` filtering is a DEFAULT-priority
+    # pytest_collection_modifyitems (it is not decorated tryfirst; the tryfirst
+    # on _pytest/mark is pytest_cmdline_main). pluggy runs same-priority hooks
+    # in reverse registration order, so an untagged `-p` plugin would run
+    # BEFORE the mark plugin and snapshot the UNFILTERED items. Running last
+    # means we see the DESELECTED set — the same set the run step executes.
+    # (Verified: dropping trylast leaks the deselected nodeids into the manifest.)
+    out = os.environ.get("_FTS_MANIFEST_NODEIDS")
+    if not out:
+        return
+    tmp = out + ".part"
+    body = "\\n".join(i.nodeid for i in items)
+    Path(tmp).write_text(
+        "# collection: errors=%d\\n%s" % (len(_collect_errors), body),
+        encoding="utf-8")
+    os.replace(tmp, out)
+'''
+_COLLECT_ERROR_RC = 2
+
+# The error count the hook writes as the FIRST line of its nodeid file, e.g.
+# ``# collection: errors=0``. The leading ``#`` keeps it out of the nodeid set
+# for any consumer that filters comment lines, and its presence is the proof
+# that the count was witnessed rather than defaulted: _parse_hook_nodeids
+# fails closed (errors=None -> refuse) when the line is absent.
+_MANIFEST_ERRORS_MARK = "# collection: errors="
+
+# Written into the manifest header by _write_manifest and required by the
+# consumer before it will accept an EMPTY expected-set: the marker is only
+# ever written when collection provably completed (#6898).
+_MANIFEST_COMPLETION_MARK = "# collection: completed"
 
 
 # A skip line: "SKIPPED" + a reason (both formats above).
@@ -687,6 +803,29 @@ def collect_only_nodeids(text: str) -> list[str]:
     return out
 
 
+def _parse_hook_nodeids(text: str) -> tuple[list[str], int | None]:
+    """Split the hook-written file into (nodeids, collect_errors).
+
+    The file's first line is the ``# collection: errors=<n>`` marker (see
+    ``_MANIFEST_ERRORS_MARK``); every other non-blank line is a nodeid. When
+    the marker is absent or unparseable, ``collect_errors`` is ``None`` — the
+    authoritative count is MISSING, which must fail closed rather than default
+    to zero (an old hook, or a truncated write, is not evidence of success).
+    """
+    errors: int | None = None
+    nodeids: list[str] = []
+    for line in text.splitlines():
+        if line.startswith(_MANIFEST_ERRORS_MARK):
+            try:
+                errors = int(line[len(_MANIFEST_ERRORS_MARK):].strip())
+            except ValueError:
+                errors = None
+            continue
+        if line.strip():
+            nodeids.append(line)
+    return nodeids, errors
+
+
 def emit_manifest(files: list[str], marker: str, output: Path,
                   runner=None, ignores: tuple[str, ...] = ()) -> int:
     """Generate the expected-nodeid manifest for the given file list.
@@ -705,25 +844,76 @@ def emit_manifest(files: list[str], marker: str, output: Path,
     - empty files -> exit 0, NO output file (the CI guard skips manifest
       mode on empty $FILES — a "no selected files" run writes no junitxml,
       so a manifest would false-red every expected nodeid).
-    - collect-only failure -> propagate rc, NO output file (a vanished
+    - collection did NOT complete -> propagate rc, NO output file (a vanished
       manifest must never vacuous-green; the consumer reds on it).
+
+    Completion is judged by TWO conditions together, because neither alone is
+    sufficient:
+      1. the hook-written nodeid file EXISTS — this rules out a signal that
+         killed the interpreter mid-collection; and
+      2. the hook counted ZERO failed CollectReports — pytest's own
+         authoritative collection verdict.
+    The process exit code is NOT one of those conditions. ``rc < 0`` says only
+    that the interpreter was signalled at SOME point, so a shutdown SIGABRT
+    masks a collection error as easily as it follows a clean one (P1, PR
+    #7072 review: `ImportError` + atexit SIGABRT yields rc=-6 with an EMPTY
+    hook file — accepted by a file-exists/rc<0 rule, certifying a broken
+    collection). ``rc`` survives only as a secondary signal for the positive,
+    non-normal exits (0/5 are normal; anything else positive fails closed).
+    Measured: an unimportable module yields rc=2 and STILL reaches the hook
+    (the errored module is dropped and the remaining items are collected), so
+    the file alone would fail OPEN on a genuine collection error — it is the
+    error COUNT that refuses it; and the marker matching nothing yields rc=5
+    while collecting perfectly, so rc alone would refuse a clean run.
     """
     if not files:
         print("emit-manifest: no files — no manifest written (guard skips)")
         return 0
+    nodeids_file = None
+    rc, collected, _err = None, "", ""
+    collect_errors: int | None = None
     cmd = [sys.executable, "-m", "pytest", *files, "--collect-only", "-q",
            "-m", marker, "-p", "no:cacheprovider",
            *[f"--ignore={ig}" for ig in ignores]]
     if runner is None:
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        rc, collected = proc.returncode, proc.stdout
-        _err = proc.stderr
+        # The hook is delivered out-of-tree via -p + PYTHONPATH so the run's
+        # own conftest is untouched and nothing is written into the repo.
+        with tempfile.TemporaryDirectory() as _td:
+            (Path(_td) / "_fts_manifest_hook.py").write_text(
+                _MANIFEST_HOOK_SOURCE, encoding="utf-8")
+            nodeids_file = str(Path(_td) / "nodeids.txt")
+            env = dict(os.environ)
+            env["_FTS_MANIFEST_NODEIDS"] = nodeids_file
+            env["PYTHONPATH"] = _td + (
+                os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+            proc = subprocess.run(
+                [*cmd, "-p", "_fts_manifest_hook"],
+                capture_output=True, text=True, env=env)
+            rc, collected = proc.returncode, proc.stdout
+            _err = proc.stderr
+            # Read INSIDE the TemporaryDirectory: the completion proof is the
+            # file the hook wrote, and it must be read before it is cleaned up.
+            if Path(nodeids_file).exists():
+                nodeids, collect_errors = _parse_hook_nodeids(
+                    Path(nodeids_file).read_text(encoding="utf-8"))
+            else:
+                nodeids = None
     else:
         rc, collected = runner(cmd)
-        _err = ""
-    if rc != 0:
-        print(f"emit-manifest: collect-only failed (rc={rc}) — no manifest "
-              f"written (fail-closed)", file=sys.stderr)
+        nodeids = collect_only_nodeids(collected)
+        # The injectable runner returns only (rc, stdout) — it has no collect
+        # reports — so rc is the only available signal and any non-normal exit
+        # (including a negative one) counts as a collection failure here.
+        collect_errors = 0 if rc in (0, 5) else 1
+    if (nodeids is None or collect_errors != 0
+            or (rc >= 0 and rc not in (0, 5))):
+        if collect_errors:
+            _why = (f"collect-only reported {collect_errors} collection "
+                    f"error(s)")
+        else:
+            _why = "collect-only did not COMPLETE"
+        print(f"emit-manifest: {_why} (rc={rc}) — no manifest written "
+              f"(fail-closed)", file=sys.stderr)
         # Surface the swallowed reason — a fail-closed gate that hides WHICH
         # file failed collection turns every runner hiccup into archaeology.
         # Print the tail of pytest's captured stderr/stdout (best-effort).
@@ -733,11 +923,25 @@ def emit_manifest(files: list[str], marker: str, output: Path,
                 print(f"emit-manifest: -- {_label} tail --", file=sys.stderr)
                 for _ln in _lines[-20:]:
                     print(f"  {_ln[:300]}", file=sys.stderr)
-        return rc
-    nodeids = collect_only_nodeids(collected)
+        return rc or _COLLECT_ERROR_RC
+    nodeids = [n for n in nodeids if n.strip()]
+    return _write_manifest(nodeids, output, marker)
+
+
+def _write_manifest(nodeids: list[str], output: Path, marker: str) -> int:
+    """Write the expected-nodeid manifest, carrying its completion proof.
+
+    The `# collection: completed <n>` line is what makes an EMPTY manifest
+    trustworthy, and it is written on the only path that can reach here — the
+    one where collection provably completed (#6898). Without it a consumer
+    seeing no nodeids cannot tell "collection completed and found nothing"
+    from "the generator emitted nothing", so it must fail closed on both; with
+    it, `expected=0` is evidence rather than absence.
+    """
     lines = [
         f"# expected nodeids — epic #1647 Task 6 coverage manifest "
         f"(from the run step's verbatim $FILES x `-m {marker}` collect-only)",
+        f"{_MANIFEST_COMPLETION_MARK} {len(nodeids)}",
         *nodeids,
         "",
     ]
@@ -804,6 +1008,60 @@ def main(argv: list[str]) -> int:
     manifest_only = "--manifest-only" in argv
     if manifest_only:
         argv = [a for a in argv if a != "--manifest-only"]
+    # `--scope` (#6804): restrict WHICH frozen nodeids this invocation must see.
+    # Needed because the frozen manifest is REPO-LEVEL while this job runs ONE
+    # shard of it — comparing the whole file against one shard's junitxml reds
+    # every shard that does not run its siblings (measured on the sharding PR:
+    # shards 0 and (b) reddened on a run whose pytest was green — the frozen
+    # file belongs to shard (c)).
+    #
+    # ⛔ The filter must NOT live in the manifest argument. A `--manifest` that is
+    # a grep-derived TEMP file is a set the tree can silently redefine, which is
+    # the #4207 defect this guard exists to kill; tests/test_ci_guard_invocation.py
+    # asserts `--manifest` resolves to a COMMITTED frozen path, and it is right to.
+    # So the frozen path is passed verbatim and the shard's subset is expressed
+    # here instead: `expected` stays the frozen set, and only the SUBSET required
+    # of this run shrinks. An empty scope result is legitimate (a shard owning no
+    # nodeid in the frozen set requires none) and must NOT be confused with an
+    # empty MANIFEST, which stays fail-closed below.
+    scope: set[str] | None = None
+    _stripped: list[str] = []
+    _i = 0
+    while _i < len(argv):
+        _a = argv[_i]
+        if _a.startswith("--scope="):
+            _v = _a.split("=", 1)[1]
+            _i += 1
+        elif _a == "--scope":
+            if _i + 1 >= len(argv):
+                print(f"❌ {argv[0]}: --scope requires a value", file=sys.stderr)
+                return 2
+            _v = argv[_i + 1]
+            _i += 2
+        else:
+            _stripped.append(_a)
+            _i += 1
+            continue
+        scope = {p for p in _v.split() if p}
+    if scope is not None and not scope:
+        # Fail CLOSED on an EMPTY scope, for the same reason the
+        # `--manifest-only` branch below fails closed without a manifest: the
+        # flag means "assert the frozen set is intact AND that THIS shard
+        # observed its slice", so an empty scope asserts nothing while still
+        # printing success. `--scope` is substituted from the shard matrix
+        # (`--scope "$SCOPE"` built from `${{ matrix.files }}`), so an
+        # unexpanded or empty variable arrives as `--scope ''` rather than as
+        # an absent flag — and absence is the ONLY spelling that legitimately
+        # means "no scope". This is deliberately NARROWER than the check
+        # further down: a scope that names real files which merely do not
+        # intersect the frozen set is still a legitimate pass (announced on
+        # stderr), while a scope naming NO file at all is a caller bug.
+        print("❌ --scope requires at least one file path — an empty scope "
+              "would require no frozen nodeid and report success without "
+              "asserting anything", file=sys.stderr)
+        return 2
+    if scope is not None:
+        argv = _stripped
     log_path, manifest_path, junit_path = _parse_args(argv)
     if manifest_only and manifest_path is None:
         # Fail CLOSED without a manifest: the flag's whole meaning is "assert the
@@ -822,11 +1080,25 @@ def main(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return 2
+    if scope is not None and manifest_path is None:
+        # `--scope` narrows the required subset of the FROZEN set, so it has no
+        # meaning without `--manifest`. Accepting it and then silently ignoring
+        # it is the same no-op class as `--manifest-only` with no manifest
+        # (cycle-5/cycle-7 findings): the caller believes a scoped check ran
+        # when nothing was scoped at all.
+        print(
+            f"❌ {argv[0]}: --scope requires --manifest <expected-nodeids.txt> "
+            "— the flag narrows which FROZEN nodeids this run must observe, and "
+            "with no manifest there is no frozen set to narrow; silently "
+            "dropping it would report a scoped check that never happened.",
+            file=sys.stderr,
+        )
+        return 2
     if log_path is None:
         print(
             f"usage: {argv[0]} <path-to-pytest.log> "
-            "[--manifest <expected-nodeids.txt>] [--junitxml <path>] "
-            "[--manifest-only]\n"
+            "[--manifest <expected-nodeids.txt>] [--scope \"<space-joined files>\"] "
+            "[--junitxml <path>] [--manifest-only]\n"
             f"       {argv[0]} --emit-manifest \"<space-joined $FILES>\" "
             "[--marker <expr>] [--output <path>]\n"
             "exit 0 = no live-FalkorDB skips (or no log / no manifest); "
@@ -855,12 +1127,62 @@ def main(argv: list[str]) -> int:
                 print(f"   - {line!r}", file=sys.stderr)
             return 1
         if not expected:
-            print("❌ manifest contains no expected nodeids (empty or "
-                  "comment-only) — an empty expected-set must not "
-                  "vacuous-green (it would report zero missing nodeids by "
-                  "construction); the manifest generator emitted nothing.",
-                  file=sys.stderr)
-            return 1
+            # #6898: an empty expected-set has TWO meanings and only one is a
+            # bug. If the generator emitted nothing at all the expected-set is
+            # unknowable and this must stay red (which is what the check was
+            # written for). But when the manifest CARRIES the completion
+            # marker, collection provably ran to the end and genuinely matched
+            # nothing — every selected module skipped at collection, e.g. a
+            # URI-gated docker-lane module on a PR leg that runs embedded by
+            # design. Then expected=0 with 0 observed is consistent, not a
+            # vacuous green, and the run's own rc already decided whether the
+            # skips were legitimate. Same distinction the scope branch below
+            # makes: an empty required set is a legitimate pass when it is
+            # KNOWN to be empty, never when the set is merely unknowable.
+            _text = open(manifest_path, encoding="utf-8", errors="replace").read()  # noqa: SIM115
+            if _MANIFEST_COMPLETION_MARK not in _text:
+                print("❌ manifest contains no expected nodeids (empty or "
+                      "comment-only) and carries NO completion marker — an "
+                      "empty expected-set must not vacuous-green (it would "
+                      "report zero missing nodeids by construction); the "
+                      "manifest generator emitted nothing.",
+                      file=sys.stderr)
+                return 1
+            print("✅ manifest declares a COMPLETED collection with zero "
+                  "expected nodeids — every selected module skipped at "
+                  "collection, so nothing was expected and nothing is "
+                  "missing (see the run's own rc for whether those skips "
+                  "were legitimate).")
+        if scope is not None:
+            # The frozen set is intact (checked non-empty above); this only
+            # narrows what THIS run must observe. A scope naming no frozen
+            # nodeid yields an empty required set — a shard that owns none of
+            # the frozen tests — which is a legitimate pass, NOT the vacuous
+            # green the check above forbids (that check ran on the frozen set).
+            # The frozen set must never lose its owner SILENTLY. Exiting 0
+            # without a word makes a shard that required nothing
+            # indistinguishable in the CI log from one that required the whole
+            # set and passed — and that silence is what would hide a frozen
+            # nodeid whose file belongs to NO shard (every shard would happily
+            # require nothing, forever). test_ci_selection.py pins that the
+            # shard scopes COVER the frozen files; the count line below names
+            # the scope and what it filtered, and the empty case is announced
+            # on stderr.
+            frozen_count = len(expected)
+            expected = {n for n in expected
+                        if n.split("::", 1)[0] in scope}
+            print(
+                f"scope: {frozen_count - len(expected)} of {frozen_count} frozen "
+                f"nodeid(s) filtered out by --scope={sorted(scope)}; "
+                f"{len(expected)} required of this run."
+            )
+            if not expected:
+                print(f"ℹ skip-guard: --scope required none of the {frozen_count} "
+                      f"frozen nodeid(s) for this run (files: "
+                      f"{sorted(scope)}). This shard owns none of "
+                      f"{manifest_path!r} — nothing to require, asserting the "
+                      f"frozen set is unchanged is still checked above.",
+                      file=sys.stderr)
         observed: set[str] = set()
         skipped_tests: set[str] = set()
         falkor_violations: list[str] = []

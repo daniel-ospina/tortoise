@@ -84,6 +84,17 @@ Usage:
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/ask_shape_rate.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/ask_shape_rate.py`"
+    )
+
 import argparse
 import atexit
 import contextlib
@@ -94,7 +105,6 @@ import json
 import os
 import re
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -114,6 +124,14 @@ from tools.ask_spotcheck import (  # noqa: E402
     _to_iso_date,
     _turn_present,
 )
+
+#: #5534: THIS ruler is A4-bearing, so its seeding default is the OPT-IN —
+#: ``search_keys`` seeded on every store it builds (overridable with
+#: ``--no-search-keys``, which reproduces the defect shape). Deliberately a
+#: TOOL-local constant: the LIBRARY default
+#: (``ask_spotcheck.SEED_SEARCH_KEYS_BY_DEFAULT``) stays ``False`` (the
+#: capture-exact shape) so no non-A4 caller's store moves.
+A4_SEED_SEARCH_KEYS_DEFAULT = True
 
 # Post-#3929 ask-surface seam: ``sdk.ask`` was REMOVED (the ask pipeline moved
 # to ``tortoise/ask_lane.py``, which now owns the entry point ``run_ask_lane``
@@ -1418,9 +1436,15 @@ def known_green(*, n_questions: int | None = None) -> dict:
 
 # ── seed phase ──────────────────────────────────────────────────────────────
 
-def seed_timing(questions: list[dict], n: int = 1) -> dict:
+def seed_timing(questions: list[dict], n: int = 1, *,
+                search_keys: bool) -> dict:
     """Time ``_seed_memory`` — the unmeasured cost that dominates wall-clock.
-    Step 1 of the run: report this BEFORE launching the full 21."""
+    Step 1 of the run: report this BEFORE launching the full 21.
+
+    ``search_keys`` is REQUIRED (never defaulted): #5534's opt-in is explicit,
+    so a caller cannot silently seed a different store from the library
+    (capture-exact) default. The value is recorded in the result.
+    """
     from tortoise.sdk import TortoiseSDK
     measured = []
     for q in questions[:n]:
@@ -1428,7 +1452,7 @@ def seed_timing(questions: list[dict], n: int = 1) -> dict:
         db = _fresh_db("phase")
         t0 = time.monotonic()
         sdk = TortoiseSDK(db)
-        _seed_memory(sdk, q)
+        _seed_memory(sdk, q, search_keys=search_keys)
         dt = time.monotonic() - t0
         sdk.close()
         measured.append({"question_id": q.get("question_id"), "turns": turns,
@@ -1439,6 +1463,7 @@ def seed_timing(questions: list[dict], n: int = 1) -> dict:
     if measured and measured[0]["turns"]:
         per_turn = measured[0]["seed_s"] / measured[0]["turns"]
     return {"measured": measured,
+            "search_keys": search_keys,
             "total_turns_all_21": total_turns,
             "extrapolated_full_21_s": (round(per_turn * total_turns, 1)
                                        if per_turn else None)}
@@ -1481,10 +1506,16 @@ def _fault_record(question: dict, error: str, attempts: int) -> dict:
 
 def _run_arm(questions: list[dict], *, arm: str, probe: ProbeReader | None,
              blank: bool, retired_substitution: bool,
+             search_keys: bool,
              mutation=None, limit: int | None = None,
              expected_error_prefix: str | None = None) -> list[dict]:
     """Seed + run one movement-control arm over the fixture (bounded by
-    ``limit``). Deterministic transports; no provider calls."""
+    ``limit``). Deterministic transports; no provider calls.
+
+    ``search_keys`` is REQUIRED and rides EVERY arm the same way, so a
+    movement arm's store is the SAME store the live rate was measured on
+    (comparability) and is never silently the capture-exact default.
+    """
     import tortoise.sdk as sdk_mod
     records = []
     subset = questions[:limit] if limit else questions
@@ -1502,7 +1533,7 @@ def _run_arm(questions: list[dict], *, arm: str, probe: ProbeReader | None,
             if retired_substitution:
                 ask_lane_mod._ask_reader_complete = _retired_reader_complete
             try:
-                _seed_memory(sdk, q)
+                _seed_memory(sdk, q, search_keys=search_keys)
                 if mutation is not None:
                     mutation(sdk, q)
                 import tortoise.mcp_server as mcp_mod
@@ -1554,10 +1585,27 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
                      else "un-embedded-backlog"),
             "seeder": "tools.ask_spotcheck._seed_memory",
             "embed": SEED_TURNS_EMBEDDED_BY_DEFAULT,
+            # #5534: the E3 ``search_keys`` substrate A4 harvests. A false
+            # here means the A4 A/B on this store is STRUCTURALLY ZERO (the
+            # lever has no input), so the mode must ride the receipt — a
+            # receipt that does not name it cannot distinguish "A4 is inert"
+            # from "A4 was never measured". The EFFECTIVE value of THIS run
+            # comes from the flag (not the library default, which is now the
+            # capture-exact OFF): the ruler defaults to the A4 behaviour.
+            "search_keys": bool(args.search_keys),
+            "a4_input": (
+                "A4-BEARING: search_keys seeded — the PRF lever has an "
+                "input, so an A4 A/B on this store can be non-zero"
+                if args.search_keys else
+                "NON-A4: no search_keys on the store — the PRF lever is "
+                "structurally inert and any A4 A/B here is a guaranteed "
+                "zero, NOT a measurement"),
             "note": ("embedded = turn Points carry the product's own vector "
                      "via encode_batch_for_store/required_embedding_dim "
                      "(#4194/#4304); un-embedded-backlog = #4197's pre-#4194 "
-                     "store, where the dense leg is inert"),
+                     "store, where the dense leg is inert; search_keys = the "
+                     "E3 alias substrate A4's PRF expansion harvests from the "
+                     "first-pass top-5 hits (#5534)"),
         },
         # Which store the rate was measured against. The docker selector
         # (TORTOISE_ASK_SHAPE_DB_URI) is a substrate change the SDK branches
@@ -1606,7 +1654,8 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
         _real_arc = ask_lane_mod._ask_reader_complete
 
         if args.phase_seed:
-            st = seed_timing(questions, n=args.phase_seed)
+            st = seed_timing(questions, n=args.phase_seed,
+                             search_keys=args.search_keys)
             receipt["seed_phase"] = st
             print(f"[seed-phase] {st['measured'][0]['question_id']}: "
                   f"{st['measured'][0]['seed_s']}s for "
@@ -1624,6 +1673,7 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
             print("[movement] baseline (deterministic probe)...")
             base = _run_arm(questions, arm="base", probe=ProbeReader(),
                             blank=False, retired_substitution=False,
+                            search_keys=args.search_keys,
                             limit=args.movement_limit)
             mov["baseline"] = {"l1_pn": _pn(base, "l1_abstain"),
                                "l2_pn": _pn(base, "l2_provenance"),
@@ -1632,20 +1682,24 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
             print("[movement] M1 (drop CONTAINS edges)...")
             m1 = _run_arm(questions, arm="m1", probe=ProbeReader(),
                           blank=False, retired_substitution=False,
+                          search_keys=args.search_keys,
                           mutation=lambda sdk, q: mutate_m1_drop_contains(sdk),
                           limit=args.movement_limit)
             print("[movement] M2 (blank output, retired substitution)...")
             m2 = _run_arm(questions, arm="m2", probe=None, blank=True,
                           retired_substitution=True,
+                          search_keys=args.search_keys,
                           limit=args.movement_limit)
             print("[movement] M2-control (blank output, fixed fail-loud)...")
             m2c = _run_arm(questions, arm="m2c", probe=None, blank=True,
                            retired_substitution=False,
+                           search_keys=args.search_keys,
                            expected_error_prefix="AskReaderUnavailable",
                            limit=args.movement_limit)
             print("[movement] M3 (drop gold sessions' turns)...")
             m3 = _run_arm(questions, arm="m3", probe=ProbeReader(),
                           blank=False, retired_substitution=False,
+                          search_keys=args.search_keys,
                           mutation=mutate_m3_drop_gold_turns,
                           limit=args.movement_limit)
             mov["M1"] = movement_report(base, m1, "l2_provenance")
@@ -1757,7 +1811,7 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
                 ask_lane_mod._reset_ask_reader_cache_for_tests()
                 sdk = sdk_mod.TortoiseSDK(_fresh_db(f"live_{attempt}"))
                 try:
-                    _seed_memory(sdk, q)
+                    _seed_memory(sdk, q, search_keys=args.search_keys)
                     import tortoise.mcp_server as mcp_mod
                     with _shipping_handlers(sdk):
                         rec = evaluate_question(sdk, q, reader_mode="live",
@@ -2023,6 +2077,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--movement-limit", type=int, default=None,
                     help="bound the movement arms to the first N questions")
     ap.add_argument("--seed-timing-questions", type=int, default=1)
+    # #5534: the E3 ``search_keys`` substrate A4's PRF gate harvests. This
+    # ruler is A4-BEARING, so it opts in EXPLICITLY and defaults to the A4
+    # behaviour; the LIBRARY default (``ask_spotcheck._seed_memory``) stays
+    # OFF (the capture-exact shape) so no non-A4 caller's store moves.
+    ap.add_argument("--no-search-keys", dest="search_keys",
+                    action="store_false",
+                    default=A4_SEED_SEARCH_KEYS_DEFAULT,
+                    help="seed the #5534 defect shape (no search_keys on the "
+                         "store) — the A4 A/B then measures nothing")
     args = ap.parse_args(argv)
 
     pin = assert_tree_pin(_REPO_ROOT, args.pin_sha)
@@ -2037,7 +2100,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.mode == "seed-timing":
             assert_embedder()
-            st = seed_timing(questions, n=args.seed_timing_questions)
+            st = seed_timing(questions, n=args.seed_timing_questions,
+                             search_keys=args.search_keys)
             print(json.dumps(st, indent=2))
             return EXIT_ADOPT
 

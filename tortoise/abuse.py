@@ -7,8 +7,8 @@ that sees BOTH dashboard mints and the signup ``provision_org`` RPC).
 Rules (env-overridable thresholds):
 - R1  point_create: SUM(weight) > 500 / 1h   -> stage-1 flag, stage-2 suspend
 - R2  key_create:   count    > 10  / 24h     -> stage-1 flag, stage-2 suspend
-- R3  reads:        > 100 / 5min per-key OR per-org -> notify Owner only
-- R4  geo:          first unseen CF-IPCountry per org -> notify Owner
+- R3  reads:        > 100 / 5min per-key OR per-org -> ops alert (Telegram-only, #3639)
+- R4  geo:          first unseen CF-IPCountry per org -> ops alert (Telegram-only)
 - R8 signup_velocity: N anon signups/IP/window (breach >= threshold) ->
                      notify ops only (Telegram; never suspends)
 
@@ -41,6 +41,21 @@ because a failed evaluation or a failed suspension is otherwise
 indistinguishable from "the engine decided not to enforce". The remaining
 telemetry / notification / durability swallows stay debug-only;
 ``DECISION_FAULT_LANES`` declares the boundary and why.
+
+Notification volume (#3631): an R1/R2 flag or suspend alert is emitted ONLY
+after the corresponding store write persists — a store read/write failure
+REDUCES notification volume, never increases it (the 2026-09-14 storm was a
+swallowed ``flag_org`` write failure that notified on every evaluation, 401
+alerts in 3h). The ALERT is also bounded to once per ``(org, rule)`` per
+STAGE per staging window in-process, so neither a read that raises nor one that
+returns a stale ``None`` (replica lag) can re-notify per evaluation (the stage
+distinction is what lets the stage-2 suspend alert still escalate a stage-1
+flag alert). The claim is released when the engine observes the episode end (a
+clean window), so a genuinely NEW episode alerts again. The durable store
+remains authoritative for staging; the in-process map bounds ONE process, so
+the honest ceiling across replicas is ``N replicas × 1`` per window — a global
+cap needs shared state (Redis/DB) and is deliberately out of scope here.
+(The notify-only rules R3/R4/R8 have no flag to persist.)
 """
 from __future__ import annotations
 
@@ -75,6 +90,100 @@ def _int_env(name: str, default: int) -> int:
         return int(v) if v and v.strip().isdigit() else default
     except (TypeError, ValueError):
         return default
+
+
+#: #5493 review P2-3: window misconfigurations already warned about, keyed
+#: ``(name, raw_env_value)``. These readers sit on request hot paths — the
+#: unauthenticated signup limiter re-reads its window 2-3x per request — so an
+#: unlatched warning lets a misconfig be driven to arbitrary log volume by
+#: traffic. The operator needs the FIRST occurrence of each distinct
+#: misconfiguration, not one line per read (mirrors ``_WIDTH_MISMATCH_WARNED``
+#: in ``embeddings.py`` and ``_DEV_PEPPER_WARNED`` in ``auth.py``).
+_WINDOW_WARNED: set[tuple[str, str | None]] = set()
+_WINDOW_WARN_LOCK = threading.Lock()
+
+
+def _negative_env(raw: str | None) -> bool:
+    """True when ``raw`` parses as a negative int.
+
+    ``_int_env`` gates on ``isdigit()``, which rejects ``"-1"`` — it therefore
+    returns the knob's DEFAULT, and before #5493's review it did so SILENTLY,
+    leaving the operator-facing promise (a non-positive window is reported)
+    false for the negative half. This is the test that makes it true. A value
+    that does not parse at all is not negative and keeps its existing
+    (unreported) default.
+    """
+    if raw is None:
+        return False
+    try:
+        return int(raw) < 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _window_env(name: str, default: int) -> int:
+    """Env-tunable rate-limit WINDOW, floored so a non-positive value can
+    never fail OPEN (#5493).
+
+    A window is the one limiter knob whose non-positive value *disables*
+    protection instead of tightening it — and it does so in one of two
+    shapes, depending on where the window is applied:
+
+    * **Hosted bucket limiter** (``_check_ip_bucket_rate_limit``): the bucket
+      is pruned (``now - t < window_s``) and THEN compared to the limit. A
+      non-positive window empties it on every request, ``len(bucket) >=
+      limit`` is never reached, and every request is allowed, FOREVER — the
+      fail-open this floor exists to remove.
+    * **In-process velocity trackers** (``ReadVelocityTracker``,
+      ``SignupVelocityTracker``, ``RecoveryVelocityTracker``): the prune runs
+      BEFORE the append and the comparison runs AFTER it, so a non-positive
+      window never prunes and the bucket collapses to this request's sample.
+      ``len(bucket)`` is then ``1``, which clears neither
+      ``ReadVelocityTracker``'s strict ``> threshold`` nor the signup/recovery
+      ``>= threshold`` against the configured thresholds (>1): the breach
+      signal NEVER FIRES — silently disabled — and the notify-dedup test
+      ``now - last < window_s`` is never true, so the once-per-window dedup is
+      defeated too. (Not an allow-everything fail-open here; a lose-the-signal
+      one.)
+
+    Either way ``0`` is a second, undocumented off-switch — the intended one
+    is ``RATE_LIMIT_DISABLED=1`` — so a non-positive window falls back to the
+    knob's DEFAULT (always at least one second). The precedent for an
+    out-of-range env value degrading to its default is the ``max(1,
+    _int_env(...))`` guard on the capture/dream/scorecard executors
+    (``hosted_api.py:210``, and the same pattern at 223/1589/1599). A warning
+    names the variable, the raw value, and the value actually used, and is
+    emitted ONCE per distinct misconfiguration (see ``_WINDOW_WARNED``) —
+    never once per read.
+
+    Do NOT "simplify" this back to ``_int_env``. ``_int_env`` is shared with
+    the THRESHOLD/limit knobs, where a non-positive value is a legitimate
+    fail-CLOSED deny-all (``len(bucket) >= 0`` is always true) — the floor
+    belongs to the window knobs alone, so it lives here and not in
+    ``_int_env``.
+
+    ``_int_env`` treats a NEGATIVE value as unset (its ``isdigit()`` gate) and
+    yields ``default`` — so a negative never arrives as a negative. The RAW
+    value is therefore inspected too: ``"0"`` (and ``"00"``) reaches the
+    warning path as a non-positive ``value``, while a negative is detected by
+    ``_negative_env``. BOTH warn through the same latch, and neither changes
+    the value returned — a non-positive window always yields the knob's
+    default.
+    """
+    raw = os.environ.get(name)
+    value = _int_env(name, default)
+    if value > 0 and not _negative_env(raw):
+        return value
+    fallback = default if default > 0 else 1
+    with _WINDOW_WARN_LOCK:
+        first = (name, raw) not in _WINDOW_WARNED
+        _WINDOW_WARNED.add((name, raw))
+    if first:
+        logger.warning(
+            "%s=%r is not a valid rate-limit window (must be a positive number "
+            "of seconds); using %d so the limiter cannot fail open (#5493)",
+            name, raw, fallback)
+    return fallback
 
 
 def abuse_disabled() -> bool:
@@ -256,7 +365,10 @@ def _parse_ts(value) -> datetime | None:
 
 
 def _org_email(store, org_id: str) -> str | None:
-    """Best-effort owner email so R3/R4 notify the OWNER, not just ops."""
+    """Best-effort owner email. Retained for the caller shape only — abuse
+    alerts are Telegram-only since #3639, so ``notify_abuse`` no longer reads
+    the ``email`` key (removing the now-dead call sites is a #3646 follow-up).
+    """
     try:
         return store.org_email(org_id) if org_id else None
     except Exception:
@@ -599,18 +711,63 @@ class AbuseEngine:
 
     def __init__(self, store):
         self.store = store
+        # In-process alert dedup (#3631): (org, rule, stage) -> the instant the
+        # alert budget for that key re-opens. Bounds ONE process; the durable
+        # store remains authoritative for staging and is the cross-replica gate.
+        self._last_notified: dict[tuple[str, str, str], datetime] = {}
+        self._notify_lock = threading.Lock()
+
+    def _claim_notify(self, org_id: str, rule: str, stage: str,
+                      now: datetime, window_s: int) -> bool:
+        """True only if no alert of this ``stage`` for ``(org_id, rule)`` was
+        emitted within the last ``window_s`` seconds (#3631 target a).
+
+        Keyed by stage as well as ``(org, rule)``: the two-stage machine is
+        SUPPOSED to emit a stage-1 flag alert and, a window later, a stage-2
+        suspend alert — sharing one key would swallow the escalation. Each
+        entry stores its OWN expiry, so pruning never evicts a long-window
+        (R2, 24h) claim by a short-window (R1, 1h) caller's clock.
+        """
+        key = (org_id, rule, stage)
+        with self._notify_lock:
+            expires = self._last_notified.get(key)
+            if expires is not None and expires > now:
+                return False
+            self._last_notified[key] = now + timedelta(seconds=window_s)
+            if len(self._last_notified) > 10_000:
+                self._last_notified = {
+                    k: exp for k, exp in self._last_notified.items()
+                    if exp > now}
+            return True
+
+    def _release_notify(self, org_id: str, rule: str, stage: str) -> None:
+        """Re-arm the alert budget for a stage when its episode ENDS, so a
+        genuinely NEW episode alerts again. The claim is per-EPISODE, not a
+        wall-clock cooldown (#3631) — without this release, a burst that
+        recycles inside the previous episode's window would re-flag durably but
+        stay silent to ops.
+
+        An out-of-band un-suspend (the ``abuse_unsuspend`` RPC writes a
+        ``flag_clear`` with no in-process caller here) is not observed until the
+        next clean window, so a re-breach before then may be muted for up to
+        ``window_s``. That is the deliberate conservative side: releasing on a
+        bare ``None`` would re-open the stale-read storm this claim exists to
+        stop.
+        """
+        with self._notify_lock:
+            self._last_notified.pop((org_id, rule, stage), None)
 
     def point_threshold(self) -> int:
         return _int_env("TORTOISE_ABUSE_POINT_THRESHOLD", 500)
 
     def point_window_s(self) -> int:
-        return _int_env("TORTOISE_ABUSE_POINT_WINDOW_S", 3600)
+        return _window_env("TORTOISE_ABUSE_POINT_WINDOW_S", 3600)
 
     def key_threshold(self) -> int:
         return _int_env("TORTOISE_ABUSE_KEY_THRESHOLD", 10)
 
     def key_window_s(self) -> int:
-        return _int_env("TORTOISE_ABUSE_KEY_WINDOW_S", 86400)
+        return _window_env("TORTOISE_ABUSE_KEY_WINDOW_S", 86400)
 
     def record_point_create(self, org_id: str, n: int = 1,
                             now: datetime | None = None) -> str | None:
@@ -650,12 +807,22 @@ class AbuseEngine:
         if total <= threshold:
             # Clean window → end any active flag episode for this rule, so a
             # later burst starts fresh (re-flag, never a stale-flag suspend).
+            ended = False
             try:
                 if self.store.latest_flag_at(org_id, rule) is not None:
                     self.store.flag_clear(org_id, rule, now=now)
+                ended = True
             except Exception as e:
                 report_abuse_decision_fault(
                     "clean_window_episode_end", org_id, rule, e)
+            if ended:
+                # Episode CONFIRMED over: re-arm the alert budget so a NEW
+                # episode alerts again (#3631 — per-episode, not a wall-clock
+                # cooldown). NOT released when the episode-end read/write
+                # FAILED — a store failure must reduce alert volume, never
+                # increase it, so the claim is left to expire on its own.
+                self._release_notify(org_id, rule, EVENT_FLAG)
+                self._release_notify(org_id, rule, EVENT_SUSPEND)
             return None
         details = {"rule": rule, "count": total,
                    "threshold": threshold, "window_s": window_s}
@@ -663,9 +830,11 @@ class AbuseEngine:
             flagged_at = self.store.latest_flag_at(org_id, rule)
         except Exception as e:
             report_abuse_decision_fault("latest_flag_at", org_id, rule, e)
+            # Unreadable anchor → treat as a fresh episode for STAGING, but the
+            # alert itself stays bounded by _claim_notify (#3631 target a).
             flagged_at = None
         if flagged_at is None:
-            return self._flag(org_id, rule, details, now)
+            return self._flag(org_id, rule, details, now, window_s)
         flagged_at = _ensure_aware(flagged_at)
         age_s = (now - flagged_at).total_seconds()
         if age_s < window_s:
@@ -683,22 +852,44 @@ class AbuseEngine:
                 "rule_event_between", org_id, rule, e)
             continuity = True  # fail-safe toward the conservative path
         if not continuity:
-            return self._flag(org_id, rule, details, now)
+            return self._flag(org_id, rule, details, now, window_s)
         try:
             self.store.suspend_org(org_id, details, now=now)
         except Exception as e:
             report_abuse_decision_fault("suspend_org", org_id, rule, e)
             return "breach"
         mark_suspended(org_id)
-        self._notify("abuse_suspended", org_id, details)
+        if self._claim_notify(org_id, rule, EVENT_SUSPEND, now, window_s):
+            self._notify("abuse_suspended", org_id, details)
         return "suspend"
 
-    def _flag(self, org_id: str, rule: str, details: dict,
-              now: datetime) -> str:
+    def _flag(self, org_id: str, rule: str, details: dict, now: datetime,
+              window_s: int) -> str:
+        """Stage-1 flag. The notification is CONTINGENT on the flag having
+        been persisted (#3631 target b): a store write failure must reduce
+        alert volume, never increase it — the pre-fix swallow notified on
+        every evaluation, because a never-persisted flag also reads as None.
+
+        The alert is ALSO bounded to once per ``(org, rule)`` per staging
+        window (#3631 target a) even when the durable anchor is unreliable —
+        a read that returns a stale ``None`` (replica lag) or raises would
+        otherwise re-flag and re-notify on every evaluation. Staging is still
+        store-authoritative; this bounds the ALERT only.
+        """
         try:
             self.store.flag_org(org_id, rule, details, now=now)
         except Exception as e:
+            # #4872 (main): a failed flag write is a DECISION fault — surface it
+            # to the operator instead of swallowing it; keep #3631's guarantee
+            # that a non-persisted flag must never amplify abuse alerts.
             report_abuse_decision_fault("flag_org", org_id, rule, e)
+            logger.warning(
+                "abuse: flag NOT persisted for %s/%s — suppressing the abuse "
+                "notification (a store failure must never amplify alerts, "
+                "#3631)", org_id, rule)
+            return "flag"
+        if not self._claim_notify(org_id, rule, EVENT_FLAG, now, window_s):
+            return "flag"  # alert budget for this (org, rule)/window is spent
         self._notify("abuse_flag", org_id, details)
         return "flag"
 
@@ -728,7 +919,7 @@ class ReadVelocityTracker:
     def __init__(self, threshold: int | None = None, window_s: int | None = None):
         self.threshold = threshold if threshold is not None else _int_env(
             "TORTOISE_ABUSE_READ_THRESHOLD", 100)
-        self.window_s = window_s if window_s is not None else _int_env(
+        self.window_s = window_s if window_s is not None else _window_env(
             "TORTOISE_ABUSE_READ_WINDOW_S", 300)
         self._by_key: dict[str, list[float]] = defaultdict(list)
         self._by_org: dict[str, list[float]] = defaultdict(list)
@@ -838,7 +1029,7 @@ class SignupVelocityTracker:
         self.threshold = threshold if threshold is not None else _int_env(
             "TORTOISE_ABUSE_SIGNUP_THRESHOLD",
             _int_env("TORTOISE_SIGNUP_IP_LIMIT", 2))  # P3-5: defaults follow allowance
-        self.window_s = window_s if window_s is not None else _int_env(
+        self.window_s = window_s if window_s is not None else _window_env(
             "TORTOISE_ABUSE_SIGNUP_WINDOW_S", 86400)
         self._by_ip: dict[str, list[float]] = defaultdict(list)
         self._notified: dict[str, float] = {}  # bare ip -> last notify ts
@@ -967,7 +1158,7 @@ class RecoveryVelocityTracker:
         self.threshold = threshold if threshold is not None else _int_env(
             "TORTOISE_ABUSE_RECOVER_THRESHOLD",
             _int_env("TORTOISE_RECOVER_IP_LIMIT", 5))
-        self.window_s = window_s if window_s is not None else _int_env(
+        self.window_s = window_s if window_s is not None else _window_env(
             "TORTOISE_ABUSE_RECOVER_WINDOW_S", 86400)
         self._by_ip: dict[str, list[float]] = defaultdict(list)
         self._notified: dict[str, float] = {}  # bare ip -> last notify ts
@@ -1070,8 +1261,8 @@ def resolve_country(headers) -> str | None:
 def check_new_country(org_id: str, country: str | None, store,
                       now: float | None = None) -> bool:
     """True when the country is new for the org (records auth_ip + notifies
-    the OWNER, flood-capped). Seen-set cached in-process (24h TTL); durable
-    lookup on cache miss."""
+    ops, flood-capped). Seen-set cached in-process (24h TTL); durable lookup
+    on cache miss."""
     if abuse_disabled() or not org_id or not country:
         return False
     now = now if now is not None else time.time()

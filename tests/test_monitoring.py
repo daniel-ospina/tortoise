@@ -370,10 +370,15 @@ class TestProbeDb:
         bare = monitoring.probe_db(BareTimeoutSDK())
         assert bare["ok"] is False
         assert bare["error"] == "probe setup timeout after 0.5s", bare
+        # #3683: the CALLABLE raised, so the probe has an observation — the
+        # synthesized spelling must NOT also decide the status (a message-less
+        # raised timeout and a messaged one are the same phase fact).
+        assert bare["observed"] is True, bare
         # A timeout WITH its own message keeps it (more informative).
         messaged = monitoring.probe_db(MessagedTimeoutSDK())
         assert messaged["ok"] is False
         assert "timed out" in messaged["error"], messaged
+        assert messaged["observed"] is True, messaged
         # A TimeoutError is never retried (a hung DB stays hung).
         assert calls["n"] == 1, calls
 
@@ -440,7 +445,7 @@ class TestProbeDb:
             seen.append((timeout, setup_timeout))
             if len(seen) == 1:
                 clock.t += 2.5  # the attempt consumed its deadline
-            return False, "transient", True
+            return False, "transient", True, True
 
         monkeypatch.setattr(monitoring, "_probe_once", fake_probe_once)
         result = monitoring.probe_db(object(), setup_timeout=2.0)
@@ -472,7 +477,7 @@ class TestProbeDb:
         def fake_probe_once(sdk, timeout=None, setup_timeout=None):
             seen.append((timeout, setup_timeout))
             clock.t += overrun  # 1.0 = exactly the deadline, 1.2 = overrun
-            return False, "connection refused", True
+            return False, "connection refused", True, True
 
         monkeypatch.setattr(monitoring, "_probe_once", fake_probe_once)
         result = monitoring.probe_db(object(), setup_timeout=0.0)
@@ -498,9 +503,9 @@ class TestProbeDb:
             seen.append((timeout, setup_timeout))
             if len(seen) == 1:
                 clock.t += 1.39  # transient failure LATE in the shared budget
-                return False, "NXDOMAIN / connection refused", True
+                return False, "NXDOMAIN / connection refused", True, True
             # The remainder (~0.01s) is far below the cold-start it must redo.
-            return False, f"probe setup timeout after {timeout}s", False
+            return False, f"probe setup timeout after {timeout}s", False, False
 
         monkeypatch.setattr(monitoring, "_probe_once", fake_probe_once)
         result = monitoring.probe_db(object())
@@ -625,7 +630,7 @@ class TestMetricsFunction:
         result = monitoring.metrics()
         assert result["status"] == "unknown"
         assert result["falkordb"] == "no_sdk_registered"
-        assert result["db"] == {"ok": None, "latency_ms": 0.0,
+        assert result["db"] == {"ok": None, "observed": False, "latency_ms": 0.0,
                                 "error": "no_sdk_registered"}
         assert result["graph_size"] == 0
 
@@ -648,6 +653,7 @@ class TestMetricsFunction:
         assert result["status"] == "degraded"
         assert "connection refused" in result["falkordb"]
         assert result["db"]["ok"] is False
+        assert result["db"]["observed"] is True
         assert "connection refused" in result["db"]["error"]
 
     def test_includes_uptime(self):
@@ -914,6 +920,80 @@ class TestGraphSizeMeasurementIsBoundedAndReported:
         assert result["graph_size_error"] is not None
 
 
+class TestProbeNeverAskedStatus:
+    """#3683: a probe that never reached the reachability query is reported
+    ``unknown`` ("could not tell"), never ``degraded`` — ``degraded`` means an
+    OBSERVED failure, and the ``metrics()`` docstring already reserved the
+    state. The defect was that ``db["ok"] is False`` mapped EVERY probe
+    failure to degraded, so interleavings A and B (the shared probe slot held
+    for the whole allowance) were only distinguishable in error prose.
+
+    The held-slot reproductions of BOTH interleavings live in
+    ``TestProbeQueueIsolation`` and ``TestProbeSetupBudget`` at the
+    ``_probe_once`` layer; these pin
+    the mapping the issue asks for at the ``metrics()`` layer, plus the
+    observed-failure control that must NOT move.
+    """
+
+    def test_never_asked_probe_reports_unknown_not_degraded(self, monkeypatch):
+        """Interleaving A's shape through ``metrics()``: the explicit
+        allowance is consumed by the cold-start, so the reachability question
+        was never asked. The report must be the documented non-verdict."""
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
+        sdk = SlowColdStartSDK(delay=0.2)
+        result = monitoring.metrics(sdk=sdk, setup_timeout=0.05)
+        assert result["status"] == "unknown", result
+        assert result["db"]["ok"] is None
+        assert result["db"]["observed"] is False
+        assert result["db"]["error"].startswith(
+            monitoring._PROBE_SETUP_TIMEOUT_MSG), result["db"]["error"]
+        assert result["graph_size"] == 0
+        assert result["graph_size_error"] is not None
+        # ran_query == 0 is the PROOF the DB was never contacted.
+        assert sdk.query_calls == 0
+
+    def test_observed_failure_still_degrades(self):
+        """CONTROL for the routing: a real raised failure (the DB was
+        contacted and refused) keeps ``degraded`` — the fix must not blunt
+        the signal for a genuinely broken DB."""
+        result = monitoring.metrics(sdk=FakeSDK(db_ok=False))
+        assert result["status"] == "degraded"
+        assert result["db"]["observed"] is True
+        assert "connection refused" in result["db"]["error"]
+
+    def test_saturated_backlog_refusal_is_not_an_observation(self, monkeypatch):
+        """#3683 review: a submission REFUSED by a saturated worker backlog
+        never ran ``_setup``, so the DB was never contacted — that is an
+        UNOBSERVED probe, not a degraded one (mirrors the query-phase
+        refusal branch). Pinned because the setup-phase refusal shares the
+        ``concurrent.futures.TimeoutError`` base with a callable that raised."""
+        import threading
+        import time
+
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
+        release = threading.Event()
+        worker = monitoring._SingleSlotWorker(
+            "test-saturated-backlog", workers=1, max_backlog=1)
+        monkeypatch.setattr(monitoring, "_PROBE_WORKER", worker)
+        try:
+            worker.submit(lambda: release.wait(10))  # occupy the single slot
+            time.sleep(0.05)
+            worker.submit(lambda: None)  # fill the 1-deep backlog
+
+            class Stub:
+                def _get_proj(self):
+                    return None
+
+            ok, error, transient, observed = monitoring._probe_once(
+                Stub(), timeout=0.05)
+            assert ok is False
+            assert observed is False, (ok, error, observed)
+            assert transient is False, transient
+            assert "backlog full" in error, error
+        finally:
+            release.set()
+
+
 class TestProbeSetupBudget:
     """#3143: the probe's cost is the projection cold-start, not `RETURN 1`.
 
@@ -939,6 +1019,7 @@ class TestProbeSetupBudget:
         sdk = SlowColdStartSDK(delay=0.2)
         result = monitoring.probe_db(sdk)
         assert result["ok"] is False
+        assert result["observed"] is False  # #3683: never reached the query
         assert "setup timeout" in result["error"], result["error"]
         assert sdk.query_calls == 0
 
@@ -955,7 +1036,11 @@ class TestProbeSetupBudget:
         refactor that had ``metrics()`` resolve the allowance itself (the
         natural 'make all callers benefit' change) would give this surface a
         multi-second cold-start; this pins the explicit ``setup_timeout=None``
-        it forwards AND the resulting degraded status."""
+        it forwards AND the resulting status. #3683 CORRECTION: that status is
+        now ``unknown``, not ``degraded`` — the cold-start overran so the
+        reachability query never ran, which is NOT an observed failure (the
+        bound and the HTTP surface are unchanged; only the label moved to the
+        documented "could not tell" state)."""
         monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
         forwarded = {}
         real_probe_db = monitoring.probe_db
@@ -967,7 +1052,9 @@ class TestProbeSetupBudget:
         monkeypatch.setattr(monitoring, "probe_db", spy_probe_db)
         result = monitoring.metrics(sdk=SlowColdStartSDK(delay=0.2))
         assert forwarded["setup_timeout"] is None, forwarded
-        assert result["status"] == "degraded"
+        assert result["status"] == "unknown"
+        assert result["db"]["ok"] is None
+        assert result["db"]["observed"] is False
         assert "setup timeout" in result["db"]["error"]
         assert result["graph_size"] == 0  # no taxonomy round-trip on a failed probe
 
@@ -1352,7 +1439,7 @@ class TestProbeQueueIsolation:
                 return proj
 
         try:
-            ok, error, transient = monitoring._probe_once(
+            ok, error, transient, observed = monitoring._probe_once(
                 OccupiedSlotSDK(), timeout=query_budget,
                 setup_timeout=ALLOWANCE)
 
@@ -1365,6 +1452,9 @@ class TestProbeQueueIsolation:
             assert error == "probe setup timeout after 3.0s", error
             assert "probe timeout after" not in error, error
             assert transient is False, transient
+            # #3683: and the probe never OBSERVED anything, so the report is
+            # the documented `unknown`, never a false `degraded`.
+            assert observed is False, observed
             assert ran["query"] == 0, (
                 "the queued query RAN — the blocker did not hold the slot")
         finally:
@@ -1443,16 +1533,32 @@ class TestRecordFunctions:
         monitoring.record_error()
         assert _counter_value(monitoring.ERROR_COUNT) == before + 2
 
-    def test_record_cost_by_team(self):
-        before_e = _counter_value(monitoring.TEAM_COST, {"team": "eldato"})
-        before_a = _counter_value(monitoring.TEAM_COST, {"team": "app-team"})
+    def test_record_cost_sets_the_allocation_idempotently(self):
+        """#4493: ``TEAM_COST`` is a Gauge and ``record_cost`` SETS.
 
-        monitoring.record_cost("eldato", 150)
-        monitoring.record_cost("eldato", 50)
-        monitoring.record_cost("app-team", 75)
+        The old contract was ``.inc`` on a Counter — cumulative, and with no
+        production caller the series could never move off 0. The per-team cost
+        figure is a recurring ALLOCATION recomputed on every refresh, so it can
+        go down at a period rollover: Prometheus' rule is "if the value can go
+        down, it is a gauge", and a set is the only shape that is idempotent
+        across refreshes (an increment would double-count on every tick).
 
-        assert _counter_value(monitoring.TEAM_COST, {"team": "eldato"}) == before_e + 200
-        assert _counter_value(monitoring.TEAM_COST, {"team": "app-team"}) == before_a + 75
+        Note ``team_cost_cents()`` reads the Gauge's BARE sample name — the
+        ``_counter_value`` helper filters ``_total`` and would read every Gauge
+        as 0, the exact dead-hook signature this metric was rescued from.
+        """
+        monitoring.clear_team_cost()
+        try:
+            monitoring.record_cost("org-a", 150)
+            monitoring.record_cost("org-a", 50)   # replaces — never accumulates
+            monitoring.record_cost("org-b", 75)
+            monitoring.record_cost("org-c", -5)   # clamped — never a credit
+
+            assert monitoring.team_cost_cents() == {
+                "org-a": 50, "org-b": 75, "org-c": 0,
+            }
+        finally:
+            monitoring.clear_team_cost()
 
 
 class TestMetricsEndpoint:
@@ -1464,7 +1570,27 @@ class TestMetricsEndpoint:
         body = generate_latest()
         assert b"tortoise_requests_total" in body
         assert b"tortoise_errors_total" in body
-        assert b"tortoise_team_cost_cents" in body
+
+    def test_generate_latest_exposes_the_team_cost_gauge_as_a_bare_sample(self):
+        """#4493: the per-team cost family is a GAUGE, so its sample name
+        carries no ``_total`` suffix.
+
+        The previous assertion — ``b"..._cents{" in body or b"..._cents " in
+        body`` — could NEVER fail: the ``# TYPE tortoise_team_cost_cents
+        gauge`` comment line satisfies the second disjunct, and the OLD
+        Counter's ``..._cents_total`` sample satisfied it too. Record a value
+        and assert the real bare-sample line, and that no counter-shaped
+        sample exists.
+        """
+        from prometheus_client import generate_latest
+        monitoring.clear_team_cost()
+        try:
+            monitoring.record_cost("t", 7)
+            body = generate_latest()
+        finally:
+            monitoring.clear_team_cost()
+        assert b'tortoise_team_cost_cents{team="t"} 7' in body, body
+        assert b"tortoise_team_cost_cents_total" not in body
 
 
 class TestProbeWorkerNoLeak:
@@ -1496,9 +1622,50 @@ class TestProbeWorkerNoLeak:
         after = sum(1 for t in threading.enumerate() if t.is_alive())
         # Old shape: +8 (one ThreadPoolExecutor worker per call). New shape:
         # at most the single shared daemon probe worker.
+        # #3683: this is a COUNT of threads, which is only a PROXY for the real
+        # property (one pool, created once, eagerly, with a FIXED width and a
+        # bounded backlog, so hung calls queue instead of spawning). At
+        # ``workers > 1`` the constant below would have to be the width, or a
+        # correct change would fail here with a "threads leaked" message. The
+        # real property is pinned separately by
+        # ``test_same_worker_recovers_after_a_released_hang``.
         assert after - before <= 1, (
             f"{after - before} threads leaked for 8 hung probes — "
             "per-call ThreadPoolExecutor regressed")
+
+    def test_same_worker_recovers_after_a_released_hang(self, monkeypatch):
+        """#3683: the property behind the count above — ONE pool, created
+        once, serves the next call after a hang is released, with NO
+        ``_reset_probe_worker()``. This is what must hold at any width; a
+        count assertion alone cannot tell a fixed-width pool from a leak."""
+        import threading
+        import time
+
+        release = threading.Event()
+
+        class ReleaseSDK:
+            def _get_proj(self):
+                release.wait(5.0)
+                proj = MagicMock()
+                proj.g.query.return_value = MagicMock(result_set=[[1]])
+                return proj
+
+            def taxonomy(self):
+                return {"Point": 3}
+
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
+        monitoring._reset_probe_worker()
+        assert monitoring.probe_db(ReleaseSDK())["ok"] is False  # times out
+        release.set()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if monitoring.probe_db(ReleaseSDK())["ok"] is True:
+                break
+            time.sleep(0.02)
+        else:
+            raise AssertionError(
+                "the shared probe worker never recovered — a reset was needed, "
+                "so the pool is not the process-lifetime worker it claims")
 
 
 class TestHealthProbe:
