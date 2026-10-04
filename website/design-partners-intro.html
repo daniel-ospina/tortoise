@@ -7,10 +7,10 @@
   <meta name="description" content="Tortoise is context and reasoning infrastructure for agents. Computational memory that connects state, events, evidence and beliefs — so agents align with the bigger picture, reason around tradeoffs, and understand downstream consequences.">
   <meta name="theme-color" content="#060b14">
   <!-- noindex, deliberately — but NOT because a search visitor would be
-       stranded. It carries a masthead link home and footer links to /privacy and
-       /tos, so there is a way back. The reason is that this is an OUTREACH
-       DOCUMENT delivered by link to specific prospective design partners, not a
-       discovery page: an indexed copy would compete in search with the public
+       stranded. It carries a home link in its top bar and footer links to
+       /privacy and /tos, so there is a way back. The reason is that this is an
+       OUTREACH DOCUMENT delivered by link to specific prospective design
+       partners, not a discovery page: an indexed copy would compete in search with the public
        marketing pages that are written to be found, and would surface a
        point-in-time document long after its contents have moved on. It is also
        why it is absent from sitemap-product.xml — a noindex page listed in a
@@ -20,7 +20,8 @@
        This also keeps the page out of the #3950 blog-discoverability guard's
        scope by that guard's OWN declared rule (a `<meta name="robots"
        content="noindex">` page declares itself out) — rather than by adding a
-       /blog link, which would contradict the deliberate no-nav design. -->
+       /blog link to it. The chrome links the product, not the blog: this is
+       an outreach document, and its reader is on their way to the product. -->
   <meta name="robots" content="noindex,follow">
   <link rel="canonical" href="https://tortoise.premiselabs.co/design-partners-intro">
   <link rel="icon" type="image/png" href="/logo.png">
@@ -83,11 +84,26 @@
     a { color: var(--accent); text-decoration: none; }
     a:hover { text-decoration: underline; text-underline-offset: 3px; }
 
-    /* ── Masthead — the mark, and nothing else ────────────────────────── */
-    .masthead { padding: 2rem 0 0; }
+    /* ── Top bar — the mark left, an explicit way home right ─────────────
+       The mark is a home link, but only to a reader who already treats a logo
+       as one. "Home" says it outright, and sits at the far end so the bar
+       reads as chrome rather than as a second title beside the mark. */
+    .masthead {
+      /* 1.5rem horizontally, NOT the `padding: 2rem 0 0` shorthand: this rule
+         follows `.wrap` at equal specificity, so a zero horizontal value wins and
+         the bar renders with no gutter — its ends level with the column edge
+         instead of with the content inside it. */
+      padding: 2rem 1.5rem 0;
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 1rem;
+    }
     .masthead .logo { display: inline-block; line-height: 0; }
     .masthead .logo img { height: 34px; width: auto; display: block; opacity: 0.9; }
     .masthead .logo:hover { text-decoration: none; opacity: 1; }
+
+    .masthead .topbar { display: flex; align-items: center; gap: 1.25rem; font-size: 0.78rem; }
+    .masthead .topbar a { color: var(--text-dim); }
+    .masthead .topbar a:hover { color: var(--accent); text-decoration: none; }
 
     /* ── Title block ──────────────────────────────────────────────────── */
     .doc { padding: 3.5rem 0 4rem; }
@@ -155,14 +171,6 @@
     .play svg { width: 24px; height: 24px; margin-left: 3px; }
     .overlay:hover .play { transform: scale(1.06); background: #22d3ee; }
 
-    /* Every transition the facade declares must also be switched off here —
-       respecting the preference only inside the canvas left the play badge and
-       the frame border still animating on hover. */
-    @media (prefers-reduced-motion: reduce) {
-      .play, .overlay { transition: none; }
-      .overlay:hover .play { transform: none; }
-    }
-
     .video figcaption {
       margin-top: 0.8rem;
       font-size: 0.7rem; letter-spacing: 0.12em;
@@ -218,10 +226,34 @@
     .more { display: grid; grid-template-columns: 1fr 1fr; gap: 2.5rem 3rem; }
     .more p { font-size: 0.9rem; }
 
+    /* ── CTA — the one action the document asks for ───────────────────── */
+    .cta-row { margin-top: 2.75rem; }
+    .cta {
+      display: inline-block;
+      background: var(--accent);
+      color: #04121a;
+      font-size: 0.85rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      padding: 0.8rem 1.5rem;
+      border-radius: 0.5rem;
+      transition: background .2s, transform .2s;
+    }
+    .cta:hover {
+      background: #22d3ee; color: #04121a;
+      text-decoration: none; transform: translateY(-1px);
+    }
+
     /* ── Footer ───────────────────────────────────────────────────────── */
-    footer {
+    /* `footer.wrap`, NOT a bare `footer`: the element also carries `.wrap`, whose
+       `padding: 0 1.5rem` shorthand out-specifies an element-only selector (class
+       beats element), so a `footer`-only padding was silently discarded and the
+       footer rendered at zero vertical padding — flush against its own rule and
+       against the bottom of the document. Same conflict the masthead fixes above;
+       this one is scoped in rather than left as the other half of it. */
+    footer.wrap {
       border-top: 1px solid var(--border);
-      padding: 1.75rem 0 3rem;
+      padding: 1.75rem 1.5rem 3rem;
       font-size: 0.7rem;
       color: var(--text-dim);
       display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem;
@@ -240,6 +272,18 @@
       .outcomes, .profile, .more { grid-template-columns: 1fr; gap: 1.9rem; }
       .outcomes { gap: 0.6rem; }
     }
+
+    /* ── Reduced motion — MUST stay the LAST block in this stylesheet ────
+       These overrides are equal-specificity, so SOURCE ORDER decides: a
+       transition declared after this block wins against it. That is not
+       hypothetical — the CTA was added below this block's old position and its
+       transition/transform silently survived the preference. Every transition
+       this stylesheet declares is switched off here. */
+    @media (prefers-reduced-motion: reduce) {
+      .play, .overlay, .cta { transition: none; }
+      .overlay:hover .play { transform: none; }
+      .cta:hover { transform: none; }
+    }
   </style>
 </head>
 <body>
@@ -252,6 +296,9 @@
       <a class="logo" href="/" aria-label="Tortoise — home">
         <img src="/logo.png" alt="Premise Labs" onerror="this.style.display='none'">
       </a>
+      <nav class="topbar" aria-label="Site navigation">
+        <a href="/">Home</a>
+      </nav>
     </div>
 
     <!-- ══ Title + video ═══════════════════════════════════════════════ -->
@@ -376,6 +423,16 @@
             <p><a href="mailto:hello@premiselabs.co">hello@premiselabs.co</a></p>
           </div>
         </div>
+
+        <!-- The document named the website in plain text and never linked it,
+             so a reader who finished it had no next action. The CTA ends the
+             LAST section deliberately: it is what a reader who has read to the
+             bottom does next. Absolute URL rather than "/": this document
+             exists to point a prospect at the product website, and on a
+             preview host a relative "/" is not the product surface. -->
+        <p class="cta-row">
+          <a class="cta" href="https://tortoise.premiselabs.co">See product website →</a>
+        </p>
       </div>
     </section>
 
