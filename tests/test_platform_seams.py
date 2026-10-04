@@ -404,6 +404,79 @@ def _hook_run(env, harness: str, stdin: str, tmp: Path):
     )
 
 
+def _minimal_path(tmp_path) -> Path:
+    """A PATH with ONLY the tools the hook uses (plus ``python3``) — no
+    ``tortoise`` binary and no venv ``bin`` can leak in from the host."""
+    utils = tmp_path / "utils"
+    utils.mkdir()
+    for tool, path in (("cat", "/bin/cat"), ("bash", "/bin/bash"),
+                       ("tr", "/usr/bin/tr"), ("head", "/usr/bin/head"),
+                       ("dirname", "/usr/bin/dirname"),
+                       ("grep", "/usr/bin/grep"),
+                       ("mkdir", "/bin/mkdir"), ("date", "/bin/date"),
+                       ("mktemp", "/usr/bin/mktemp"), ("rm", "/bin/rm"),
+                       ("python3", sys.executable)):
+        (utils / tool).symlink_to(path)
+    return utils
+
+
+def test_volunteer_turn_hook_resolves_the_owning_venv_for_a_wheel_layout(
+        tmp_path):
+    """#2385 item 3: a WHEEL install puts the hook in
+    ``<venv>/lib/python3.x/site-packages/tortoise/claude-hooks/``, so the
+    source-checkout ``<module>/.venv/bin/tortoise`` probe can never match and
+    the module fallback runs the AMBIENT ``python3`` — which does not have the
+    wheel's dependencies — injecting nothing while reporting success. The hook
+    must resolve the venv that OWNS the module dir (``pyvenv.cfg``) and run
+    its console script.
+
+    The fake package's ``__init__`` raises, so the ambient-interpreter module
+    fallback can never accidentally succeed: only the owning venv's console
+    script can produce the block."""
+    venv = tmp_path / "venv"
+    site = venv / "lib" / "python3.12" / "site-packages"
+    hooks = site / "tortoise" / "claude-hooks"
+    hooks.mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text("home = /usr\n")
+    (site / "tortoise" / "__init__.py").write_text(
+        "raise ImportError('wheel deps are not on the ambient interpreter')\n")
+    hooked = hooks / "volunteer-turn.sh"
+    hooked.write_text(_HOOK.read_text(encoding="utf-8"), encoding="utf-8")
+    hooked.chmod(0o755)
+    (venv / "bin").mkdir()
+    console = venv / "bin" / "tortoise"
+    console.write_text(
+        "#!/bin/bash\n"
+        "cat > /dev/null\n"
+        "printf '%s\\n' '- **Wheel reflex** → point/pt_wheel123 — owning "
+        "venv'\n",
+        encoding="utf-8")
+    console.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "PATH": str(_minimal_path(tmp_path)),
+        "HOME": str(tmp_path / "home"),
+        "VIRTUAL_ENV": "",
+        "TORTOISE_SRC_DIR": "",
+        "TORTOISE_DB_URI": "",
+        "TORTOISE_DB_PATH": str(tmp_path / "wheel.db"),
+        "TORTOISE_SECRET_PEPPER": "test-static-pepper",
+    }
+    r = subprocess.run(
+        [str(hooked), "codex"],
+        input=json.dumps({"prompt": "what do we know about the wheel?"}),
+        env=env, cwd=str(tmp_path), capture_output=True, text=True,
+        timeout=180,
+    )
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    ctx = out["hookSpecificOutput"]["additionalContext"]
+    assert "pt_wheel123" in ctx, (
+        f"the wheel hook must reach the OWNING venv's console script, got "
+        f"{ctx!r} (stderr={r.stderr!r})")
+
+
 def test_volunteer_turn_hook_codex_contract(env, tmp_path):
     """Codex/Claude UserPromptSubmit stdin JSON → hookSpecificOutput with
     additionalContext carrying the reflex block."""
@@ -596,6 +669,99 @@ def test_install_codex_leaves_foreign_volunteer_hook_untouched(tmp_path):
     cmd = cfg["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
     assert cmd == foreign  # live foreign hook untouched
     assert len(cfg["hooks"]["UserPromptSubmit"]) == 1
+
+
+def test_uninstall_never_deletes_config_the_installer_did_not_write(tmp_path):
+    """#2383 (weak ownership markers): ``--uninstall`` must delete ONLY
+    registrations this installer can PROVE it wrote.
+
+    The old ownership marker was a substring (``"volunteer-turn.sh" in
+    command``), so ``--uninstall`` silently DESTROYED config the install half
+    explicitly refuses to rewrite (R2):
+
+      * a user's WRAPPER of the script (firejail / venv-pinned),
+      * another product's LIVE ``volunteer-turn.sh`` at a different path,
+      * a cline hook that merely MENTIONS the script name in a comment.
+
+    MUST NEVER HAPPEN: an uninstall never removes a registration it cannot
+    prove it created.  The positive control (our own registration is still
+    removed) is the other half of the pin — a refusal that also refuses our
+    own hook would pass every survival assertion while breaking the command.
+    """
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+
+    # (a) codex: a user WRAPPER of our script survives --uninstall.
+    wrap_dir = tmp_path / "wrap"
+    wrapped = ("'/usr/local/bin/firejail' "
+               "'/opt/tortoise/volunteer-turn.sh' codex")
+    wrap_cfg = {"hooks": {"UserPromptSubmit": [
+        {"hooks": [{"type": "command", "command": wrapped}]}]}}
+    (wrap_dir / ".codex").mkdir(parents=True)
+    (wrap_dir / ".codex" / "hooks.json").write_text(json.dumps(wrap_cfg))
+    r = _run(["install", "codex", "--dir", str(wrap_dir), "--uninstall"],
+             env)
+    assert "Traceback" not in r.stderr
+    assert r.returncode == 1, r.stdout
+    assert json.loads((wrap_dir / ".codex" / "hooks.json").read_text()) \
+        == wrap_cfg, "a user wrapper was destroyed by --uninstall"
+
+    # (b) codex: another product's LIVE hook at a different path survives.
+    biz_dir = tmp_path / "foreign"
+    foreign_dir = biz_dir / "gbrain"
+    foreign_dir.mkdir(parents=True)
+    foreign_script = foreign_dir / "volunteer-turn.sh"
+    foreign_script.write_text("#!/usr/bin/env bash\n")
+    foreign = f"'{foreign_script}' codex"
+    foreign_cfg = {"hooks": {"UserPromptSubmit": [
+        {"hooks": [{"type": "command", "command": foreign}]}]}}
+    (biz_dir / ".codex").mkdir()
+    (biz_dir / ".codex" / "hooks.json").write_text(json.dumps(foreign_cfg))
+    r = _run(["install", "codex", "--dir", str(biz_dir), "--uninstall"], env)
+    assert "Traceback" not in r.stderr
+    assert r.returncode == 1, r.stdout
+    assert json.loads((biz_dir / ".codex" / "hooks.json").read_text()) \
+        == foreign_cfg, "another product's live hook was destroyed"
+
+    # (c) cline: a user hook that merely MENTIONS the script survives.
+    men_dir = tmp_path / "mention"
+    men_hook = men_dir / ".cline" / "hooks" / "UserPromptSubmit"
+    men_hook.parent.mkdir(parents=True)
+    user_text = ("#!/usr/bin/env bash\n"
+                 "# I also have the tortoise volunteer-turn.sh installed\n"
+                 'echo "my own logging hook"\n')
+    men_hook.write_text(user_text)
+    r = _run(["install", "cline", "--dir", str(men_dir), "--uninstall"], env)
+    assert "Traceback" not in r.stderr
+    assert r.returncode == 1, r.stdout
+    assert men_hook.exists() and men_hook.read_text() == user_text, \
+        "a user cline hook was destroyed by a mention of our script name"
+
+    # (d) positive control — OUR OWN registrations are still removed.
+    own_dir = tmp_path / "own"
+    for harness in ("codex", "claude"):
+        assert _run(["install", harness, "--dir", str(own_dir)],
+                    env).returncode == 0
+        r = _run(["install", harness, "--dir", str(own_dir), "--uninstall"],
+                 env)
+        assert r.returncode == 0, (harness, r.stderr)
+    own_cfg = json.loads(
+        (own_dir / ".codex" / "hooks.json").read_text())
+    assert "UserPromptSubmit" not in (own_cfg.get("hooks") or {}), own_cfg
+    # claude keeps the capture seam's own per-turn hook (#3963) — the read
+    # half alone must be gone.
+    cl_cfg = json.loads(
+        (own_dir / ".claude" / "settings.json").read_text())
+    cmds = [h.get("command", "")
+            for e in cl_cfg.get("hooks", {}).get("UserPromptSubmit", [])
+            for h in e.get("hooks", [])]
+    assert not any("volunteer-turn.sh" in c for c in cmds), cmds
+    own_cline = tmp_path / "own-cline"
+    assert _run(["install", "cline", "--dir", str(own_cline)],
+                env).returncode == 0
+    r = _run(["install", "cline", "--dir", str(own_cline), "--uninstall"],
+             env)
+    assert r.returncode == 0, r.stderr
+    assert not (own_cline / ".cline" / "hooks" / "UserPromptSubmit").exists()
 
 
 # ── #3808 R27 — the read-half failure boundary is TOTAL, not a list ──────

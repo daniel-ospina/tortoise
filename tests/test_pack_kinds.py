@@ -195,6 +195,30 @@ class TestKindExpansion:
         expanded = registry.expand_kind("dev:code")
         assert expanded == ["dev:code"]
 
+    # ── #6146: expansion is ADDITIVE, never a replacement ────────────────
+
+    def test_expansion_always_contains_its_own_argument(self, registry):
+        """`kind in expand_kind(kind)` for every kind the registry knows.
+
+        The failure this prevents, observed 2026-09-28: `query(kind="issue")`
+        returned [] while 23 live points carried the bare `issue` kind, because
+        the bare form was replaced by `['dev:issue','pm:issue']` and the read
+        path builds `n.pointKind IN [...]` from this list. A wrong-empty is
+        indistinguishable from a true-empty to the caller.
+
+        The universe is DERIVED from the registry (every declared kind, both
+        namespaced and bare) so this cannot pass by my having guessed the right
+        names.
+        """
+        namespaced = {k for ks in registry.list_all_kinds().values() for k in ks}
+        bare = {k.split(":", 1)[1] for k in namespaced if ":" in k}
+        universe = namespaced | bare
+        # `dev:issue`/`pm:issue` and the bare `issue` are all in here; assert the
+        # universe is real so a broken derivation cannot pass by being empty.
+        assert {"issue", "dev:issue", "pm:issue"} <= universe, sorted(universe)
+        for kind in sorted(universe):
+            assert kind in registry.expand_kind(kind), kind
+
 
 class TestSubclassValidation:
     def test_valid_subclass(self):
@@ -1231,6 +1255,13 @@ def _ontology_object_kinds() -> set[str]:
     text = (REPO_ROOT / "docs" / "ONTOLOGY.md").read_text(encoding="utf-8")
     section = text.split(_OBJECT_KIND_SECTION, 1)[1]
     block = section.split("```", 2)[1]
+    # split() leaves the opening fence LINE at the head of the captured block:
+    # an unlabelled fence contributes an empty line, and a LABELLED one
+    # contributes its info string — which was then read as the first kind.
+    # Labelling the fences for MD040 turned the language "text" into a kind and
+    # reddened this guard on main (#6927 -> #6929). The fence line is not block
+    # content, so drop it either way.
+    block = block.split("\n", 1)[1] if "\n" in block else ""
     kinds: set[str] = set()
     for line in block.splitlines():
         line = line.split("#", 1)[0]

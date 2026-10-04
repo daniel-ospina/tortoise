@@ -115,10 +115,59 @@ BRIDGE_SCRIPT = 'src="/assets/supabase-session.js"'
 # so the emptiness is not vacuous. See #3559 for the backlog.
 PAGES: list[Path] = []
 
+# ── #3496: key-identity routing (allowlist of ONE key) ────────────────────
+# The router lives in the write/remove paths of each session adapter: exactly
+# one key-left comparison, against that file's session-key constant. The
+# operator polarity differs because the two adapters route the OTHER direction:
+# oauth.py sends a non-session key to the aux stores and never to the cookie
+# (so `!==` on both methods); blog-admin always clears its local copy first and
+# clears the cookie only when the key IS the session key (so `===` on remove).
+_ROUTER_KEY_CMP = re.compile(r"\bkey\s*(===|!==)\s*([A-Za-z_$][\w$]*)")
+_ROUTER_SHAPE_PREDICATE = re.compile(
+    r"\.endsWith\(|\.startsWith\(|\.slice\(|\.charAt\(|\.includes\("
+    r"|RegExp|\.test\(\s*key\b|\.match\(|typeof\s+key\b|\bkey\s*\["
+)
+_ROUTER_CASES = [
+    (OAUTH, "COOKIE_NAME", {"setItem": "!==", "removeItem": "!=="}),
+    (BLOG_ADMIN, "STORAGE_KEY", {"setItem": "!==", "removeItem": "==="}),
+]
+
 
 def _read(path: Path) -> str:
     assert path.exists(), f"missing file: {path}"
     return path.read_text(encoding="utf-8")
+
+
+def _strip_js_comments(src: str) -> str:
+    """Blank out `//` and `/* */` comments so a text assertion below matches
+    CODE, not prose. A comment quoting the pre-#3930 destination must neither
+    red this test nor satisfy its positive pin (#3930 review).
+
+    A PARTIAL port of src/testSupport.js::stripComments, not a mirror: it keeps
+    that function's `:`-prefixed-`//` guard (so `https://` inside a string
+    survives) but has no quote/template awareness — a `//` inside a `'`/`"`/` `
+    literal IS treated as a comment here, where the JS original preserves it.
+    Verified byte-identical on today's main.jsx; do not reuse this for a file
+    where `//` appears inside a string.
+    """
+    out = []
+    i = 0
+    n = len(src)
+    while i < n:
+        c = src[i]
+        nxt = src[i + 1] if i + 1 < n else ""
+        if c == "/" and nxt == "/" and not (out and out[-1] == ":"):
+            while i < n and src[i] != "\n":
+                i += 1
+        elif c == "/" and nxt == "*":
+            i += 2
+            while i < n and not (src[i] == "*" and i + 1 < n and src[i + 1] == "/"):
+                i += 1
+            i += 2
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
 
 
 def _extract_helper(text: str, name: str) -> str:
@@ -158,13 +207,22 @@ def _extract_helper(text: str, name: str) -> str:
 
 
 def _extract_fn_body(text: str, name: str) -> str:
-    """Extract a named function/method body (any style: `name(key, value) {`,
-    `name: function (key, value) {`, `function name() {`, or
-    `var name = function (...) {`) up to the matching close brace, including
-    the signature line. Does NOT match call sites (`name(...);` — no `{`)."""
+    r"""Extract a named function/method body (any style: `name(key, value) {`,
+    `name: function (key, value) {`, `function name() {`,
+    `var name = function (...) {`, or the TS object-property form
+    `name: (key: string) => {`) up to the matching close brace, including the
+    signature line. Does NOT match call sites (`name(...);` — no `{`).
+
+    #3496: the sigil group was `(?:\:\s*function\s*|\=)` — it required the word
+    `function` after a colon, so the blog-admin adapter's typed arrow form
+    (`setItem: (key: string, value: string) => {`) matched nothing. The group is
+    now `(?::|=)\s*(?:function\s*)?`, a strict SUPERSET of the old one, so every
+    previously supported style still resolves to the same body. Extended in
+    place rather than forked: a second extractor is a second place for the
+    brace-matching to be wrong."""
     m = re.search(
         rf"(?:var\s+|function\s+)?{re.escape(name)}\s*"
-        rf"(?:(?:\:\s*function\s*|\=)\s*(?:function\s*)?)?\([^)]*\)\s*(?:=>\s*)?{{",
+        rf"(?:(?::|=)\s*(?:function\s*)?)?\([^)]*\)\s*(?:=>\s*)?{{",
         text,
     )
     assert m, f"missing function: {name}"
@@ -182,6 +240,35 @@ def _extract_fn_body(text: str, name: str) -> str:
     raise AssertionError(f"unbalanced function body: {name}")
 
 
+def _drop_semicolons_outside_strings(s: str) -> str:
+    """Drop `;` ONLY when it is not inside a '...' / "..." / `...` literal.
+
+    Escapes are honoured, so `'\\';'` does not open a phantom literal. Used by
+    `_normalize_helper` so that a semicolon's role as a STATEMENT terminator is
+    erased while its role as a cookie-attribute separator is preserved.
+    """
+    out: list[str] = []
+    quote: str | None = None
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if quote is not None:
+            out.append(c)
+            if c == "\\" and i + 1 < len(s):
+                out.append(s[i + 1])
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+        elif c in "'\"`":
+            quote = c
+            out.append(c)
+        elif c != ";":
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def _normalize_helper(src: str) -> str:
     """Collapse a helper declaration to a comparable token stream so the ES5
     shared-bridge form (`var f = function () { return X; };`), the ES6 oauth.py
@@ -197,8 +284,13 @@ def _normalize_helper(src: str) -> str:
     # normalize the signature: ES5 `function ()` == ES6 `() =>`
     s = s.replace("function ()", "() =>").replace("function()", "() =>")
     # drop semicolons BEFORE unwrapping so oauth's trailing `;` can't defeat
-    # the `$` anchor on the expression-body regex
-    s = s.replace(";", "")
+    # the `$` anchor on the expression-body regex. Quote-AWARE: a blanket
+    # `.replace(";", "")` also mangles the cookie attribute STRINGS
+    # (`'; Domain='` → `' Domain='`), so a lost `;` — the exact #1857/#1225
+    # production break this parity guard exists to catch, because the browser
+    # then folds Domain into the cookie VALUE and the cookie silently goes
+    # host-only — compared EQUAL (cycle-6 review).
+    s = _drop_semicolons_outside_strings(s)
     # unwrap expression bodies: `() => (X)` → `() => X` (dashboard/oauth style)
     s = re.sub(r"\(\s*\)\s*=>\s*\((.*?)\)$", r"() => \1", s, flags=re.DOTALL)
     # unwrap single-return block bodies: `() => { return X; }` → `() => X`
@@ -227,6 +319,24 @@ def test_adapters_share_host_conditional_attribute_logic() -> None:
     """
     helpers = ("isLocal", "isPremiselabsHost", "domainAttr", "secureAttr")
     copies = [("shared", _read(SHARED)), ("dash", _read(DASHBOARD)), ("oauth", _read(OAUTH))]
+    # NON-VACUITY SELF-GUARD (cycle-6 review; tightened in cycle 7): the
+    # extraction and the normalizer are the test's own machinery, and nothing here
+    # asserted either works — stubbing `_extract_helper` to `return ""` left all 14
+    # tests green, and a stub returning a NON-EMPTY constant still did, because the
+    # loop compares each copy against the first. So also assert the extractor
+    # TRACKS the requested name: two different helpers must extract differently.
+    probe = _extract_helper(copies[0][1], "domainAttr")
+    assert probe.strip(), "_extract_helper returned nothing — this test would be vacuous"
+    assert _extract_helper(copies[0][1], "domainAttr") != _extract_helper(copies[0][1], "secureAttr"), (
+        "_extract_helper ignores the requested name — the parity loop would compare "
+        "the same string to itself and could never see drift"
+    )
+    assert _normalize_helper(probe) != _normalize_helper(probe.replace("Domain", "Nope")), (
+        "_normalize_helper does not distinguish semantic drift — this test would be vacuous"
+    )
+    assert _normalize_helper("var f = function () { return X; };") == _normalize_helper(
+        "const f = () => X"
+    ), "_normalize_helper must still equate the ES5 and ES6 spellings"
     for name in helpers:
         normalized = [
             (label, _normalize_helper(_extract_helper(text, name)))
@@ -343,24 +453,46 @@ def test_auth_bounce_preserves_search_params() -> None:
     OAuth-error banner reads ?error=... — plus the #1909 error fragment.
 
     #4054 retarget: the bridge's global `window.bounceToAuth` is gone; main.jsx
-    now owns a local same-origin bounce (`window.location.replace("/auth" +
-    search + hash)`), and installs no cross-origin fallback. The
-    param-preservation intent is unchanged, so it is asserted on the two call
+    now owns a local same-origin bounce, and installs no cross-origin fallback.
+    The param-preservation intent is unchanged, so it is asserted on the two call
     sites that carry it; the old degraded `https://tortoise.premiselabs.co/auth`
     fallback assertion is REMOVED because that path no longer exists.
+
+    #3930 retarget: the destination literal moved into the pure `authBounceTarget`
+    module (which also carries the requested PATHNAME as `/auth`'s `next`). The
+    target is still a same-origin `/auth` navigation; the assertion follows the
+    shape so a revert of either half reds this test. `authBounce.test.js` and
+    `test_admin_return_to.py` own the behaviour.
     """
     dash = _read(DASHBOARD)
+    norm = _strip_js_comments(dash)
     # Both bounce sites (the 401-provision path and the mount gate) pass the
     # search string and the #1909 error fragment through the local helper.
-    assert dash.count("bounceToAuth(window.location.search, oauthErrorHash())") >= 2, (
+    # Counted on the COMMENT-STRIPPED source: on raw source a commented-out call
+    # site keeps the count at 2, so half the bounce could be deleted and this
+    # test would still pass (cycle-6 review).
+    assert norm.count("bounceToAuth(window.location.search, oauthErrorHash())") >= 2, (
         "the auth bounce must preserve search params + the #1909 error fragment "
         "(both the 401-provision and the mount-gate bounce)"
     )
     # The bounce target is same-origin now — the cross-origin bridge hop (and its
-    # separate fallback) is gone.
-    assert 'window.location.replace("/auth" + search + hash)' in dash, (
+    # separate fallback) is gone. It is built by the pure module from THIS
+    # document's pathname, so the destination can never name another origin.
+    # Whitespace-tolerant: a prettier re-wrap of the call must not red this.
+    # Comments are stripped first: `_read` returns raw source, so an assertion
+    # on it can be satisfied (or reddened) by PROSE. Ported from
+    # src/testSupport.js::stripComments, same `:`-prefixed-`//` guard for URLs.
+    norm = _strip_js_comments(dash).replace('"', "'")
+    assert re.search(
+        r"authBounceTarget\(\{\s*pathname:\s*window\.location\.pathname,\s*search,\s*errorHash:\s*hash\s*\}\)",
+        norm,
+    ), (
         "the bounce must be the same-origin /auth navigation that consumes the "
-        "preserved search/hash"
+        "preserved search/hash (and, since #3930, the pathname)"
+    )
+    # The pre-#3930 destination, matched as CODE — see _strip_js_comments.
+    assert not re.search(r"location\.replace\(\s*['\"]/auth['\"]\s*\+", norm), (
+        "the pathname-dropping destination is back (#3930)"
     )
 
 
@@ -429,7 +561,11 @@ def test_cookie_write_templates_wire_conditionals_in_every_adapter() -> None:
             start = text.index(body)
             spans.append((start, start + len(body)))
         spans.sort()
-        for wm in re.finditer(r"document\.cookie\s*=", text):
+        # `=(?!=)` — an ASSIGNMENT only. A bare `document\.cookie\s*=` also matches
+        # the READ comparators (`document.cookie === ''`), so a legitimate guard in
+        # a reader was reported as an unwatched WRITE (cycle-8 review; same root
+        # cause as `_cookie_templates` below).
+        for wm in re.finditer(r"document\.cookie\s*=(?!=)", text):
             wpos = wm.start()
             assert any(a <= wpos < b for a, b in spans), (
                 f"{path.name}: document.cookie write at offset {wpos} is NOT inside a "
@@ -540,8 +676,15 @@ def test_blog_admin_adapter_keeps_host_conditional_cookie_scope() -> None:
 
 
 def test_adapters_write_and_remove_cookie_with_same_attributes() -> None:
-    """Attribute-sequence drift (Path/SameSite/Secure/Max-Age/expiry) breaks a
-    sibling reader even when the constants match.
+    """The write/remove templates must agree on the COOKIE_PATH value expression
+    and on the ORDER of the appended attributes (Domain, Path, SameSite, Expires
+    for the write; Domain, Path, SameSite, Max-Age for the removal) — a reordered
+    or inlined template breaks a sibling reader even when the constants match.
+
+    Scope, stated exactly: this compares the constant's value and the attribute
+    SEQUENCE and the Path-source expression. It does NOT compare the Max-Age /
+    Expires VALUES (`7 * 24 * 3600 * 1000` is checked by presence, and the
+    expiry expression is not compared across the two files).
 
     #4054 retarget: parity is between the two copies that still implement the
     SESSION adapter — the shared bridge and the oauth.py inline port. The
@@ -569,6 +712,70 @@ def test_adapters_write_and_remove_cookie_with_same_attributes() -> None:
     assert "7 * 24 * 3600 * 1000" in shared and "7 * 24 * 3600 * 1000" in oauth
     # storageKey parity — the cookie name written/read must be the same on both sides
     assert "storageKey" in shared and "storageKey" in oauth
+    # ATTRIBUTE-SEQUENCE parity — the claim in this test's docstring. The
+    # presence checks above pass on a REORDERED template, which is the drift
+    # named here (a reader parsing `Name=Value; Domain=…; Path=…` breaks on a
+    # different order even when every attribute is present).
+    # SCOPED TO THE `document.cookie` STATEMENTS (cycle-7 review): matching the
+    # whole file also picked up `domainAttr`'s own `'; Domain='`, and then an
+    # unrelated `; Foo=1` in a COMMENT shifted the slice and false-red the guard.
+    def _cookie_templates(text: str) -> list[str]:
+        """The `document.cookie = …` WRITE/REMOVE statements, joined across their
+        wrapped lines.
+
+        Matches an assignment only (`=(?!=)`) so the READ comparators
+        `document.cookie == ""` / `=== ""` are not parsed as malformed writes
+        (cycle-8 review), and tolerates any spacing around the `=`.
+        """
+        out: list[str] = []
+        write_re = re.compile(r"document\.cookie\s*=(?!=)")
+        lines = text.splitlines()
+        for n, line in enumerate(lines):
+            if write_re.search(line):
+                # join the wrapped statement up to its terminating `;`. The cap is
+                # generous (12 lines) because the previous 5-line window silently
+                # truncated a legitimately reflowed template (cycle-8 review).
+                parts: list[str] = []
+                for nxt in lines[n : n + 12]:
+                    parts.append(nxt)
+                    if nxt.rstrip().endswith(";"):
+                        break
+                out.append(" ".join(parts))
+        return out
+
+    attr_pat = re.compile(r";\s*([A-Za-z-]+)=")
+    tpl_shared = _cookie_templates(_strip_js_comments(shared))
+    tpl_oauth = _cookie_templates(_strip_js_comments(oauth))
+    assert tpl_shared and tpl_oauth, "no document.cookie templates found — this guard is vacuous"
+    # Non-vacuity: every write/remove statement must have been FOUND, or a
+    # statement that slipped the matcher would simply stop being checked (cycle-8
+    # review: a `document.cookie=` without the space escaped the order guard).
+    assert len(tpl_shared) == len(re.findall(r"document\.cookie\s*=(?!=)", _strip_js_comments(shared))), (
+        "a shared document.cookie write was not captured"
+    )
+    assert len(tpl_oauth) == len(re.findall(r"document\.cookie\s*=(?!=)", _strip_js_comments(oauth))), (
+        "an oauth document.cookie write was not captured"
+    )
+    for label, templates in (("shared", tpl_shared), ("oauth", tpl_oauth)):
+        for t in templates:
+            is_remove = "Max-Age=0" in t
+            want = ["Path", "SameSite", "Max-Age"] if is_remove else ["Path", "SameSite", "Expires"]
+            seq = attr_pat.findall(t)
+            assert seq == want, (
+                f"{label}: attribute order drifted in a {'remove' if is_remove else 'write'} "
+                f"template: {seq} != {want} — {t!r}"
+            )
+            # Domain is appended by the helper call, so its POSITION is asserted
+            # rather than its literal: it must come before the first `; Path=`.
+            assert t.index("domainAttr()") < t.index("; Path="), (
+                f"{label}: Domain must be appended before Path — {t!r}"
+            )
+            # Path must be composed from the CONSTANT in EVERY template, not an
+            # inlined literal in one of them (cycle-7 review).
+            assert "COOKIE_PATH" in t, (
+                f"{label}: Path must be composed from COOKIE_PATH, not an inlined "
+                f"literal — {t!r}"
+            )
 
 
 def test_shared_script_syntax() -> None:
@@ -616,10 +823,76 @@ def test_adapters_share_size_guard_and_localhost_handling() -> None:
         assert "SIZE_GUARD + 100" in text, (
             f"{path}: must warn only when still over SIZE_GUARD + 100"
         )
+        # #3496: the refusal threshold must be DERIVED from the browser rule,
+        # not a literal that merely equals it today (#3503 P3). Both session
+        # adapters must use the SAME derivation — a second, independently
+        # chosen cap is exactly how one copy drifts from the other, and the
+        # shared bridge's own harness (test_session_bridge_fragment_retention.py)
+        # only pins the shared COPY.
+        assert re.search(r"COOKIE_LIMIT\s*=\s*4096", text), (
+            f"{path}: COOKIE_LIMIT must be the browser rule (4096 bytes of "
+            "`name` + '=' + `value`)"
+        )
+        assert re.search(
+            r"SIZE_CAP\s*=\s*COOKIE_LIMIT\s*-\s*COOKIE_NAME\.length\s*-\s*1", text
+        ), (
+            f"{path}: SIZE_CAP must be DERIVED from COOKIE_LIMIT and the cookie "
+            "name length; a literal equal to today's value re-opens the #3503 P3 "
+            "drift"
+        )
     # main.jsx keeps the host-conditional helpers for the marker, so it must
     # still recognise the local origins.
     dash = _read(DASHBOARD)
     assert "localhost" in dash and "127.0.0.1" in dash
+
+
+def test_key_identity_router_allows_only_the_session_key() -> None:
+    """#3496: the write/remove paths route by key IDENTITY, allowlisting ONE
+    key (the session key). The PKCE code_verifier must never reach the
+    JS-readable parent-domain jar, and the rule that keeps it out must not be a
+    denylist of verifier-shaped names.
+
+    Why identity and not shape: a denylist (`.endsWith("-code-verifier")`, a
+    regex on the key) is an OPEN set whose default is the credential jar — every
+    name it has not yet heard of is written to the cookie. supabase-js alone has
+    three verifier key shapes (`<key>-code-verifier`,
+    `<key>-flow-<id>-code-verifier`, `<key>-flows-code-verifier`), and it owns
+    the writer, so the next one arrives without a change here. Routing by
+    comparison against the session-key CONSTANT is closed by construction —
+    `_ROUTER_CASES` is the authority on the operator per method (oauth sends a
+    non-session key to the aux chain on BOTH methods; blog-admin always clears
+    its local copy first and clears the cookie only when the key IS the session
+    key, so its `removeItem` polarity is `===`).
+
+    Both halves are asserted, so neither can pass vacuously: (1) EXACTLY ONE
+    key-left comparison per method, and it must name that file's session-key
+    constant; (2) NO string-shape predicate on `key` in those bodies. The
+    behavioural counterpart — the cookie jar actually observed receiving no
+    verifier write — is tests/test_oauth_consent_pkce.py invariants 3 and 12.
+
+    `getItem` is EXCLUDED deliberately: it parses the cookie header with
+    `p.slice(0, eq) === key`, which is reading, not routing, and the write/remove
+    paths are where a credential can land in the jar.
+    """
+    for path, session_key, methods in _ROUTER_CASES:
+        text = _read(path)
+        for name, operator in methods.items():
+            body = _extract_fn_body(text, name)
+            found = _ROUTER_KEY_CMP.findall(body)
+            assert found == [(operator, session_key)], (
+                f"{path.name}:{name}: expected exactly one key comparison "
+                f"`key {operator} {session_key}`, found {found} — the router is "
+                "an allowlist of ONE; a second comparison, a different "
+                "identifier, or a different polarity is a second routing rule "
+                "(#3496)"
+            )
+            shape = _ROUTER_SHAPE_PREDICATE.findall(body)
+            assert shape == [], (
+                f"{path.name}:{name}: string-shape predicate(s) on `key`: "
+                f"{shape} — a denylist of verifier-shaped names defaults INTO "
+                "the credential jar for every name it has not heard of; route by "
+                "key identity instead (#3496)"
+            )
 
 
 def test_no_page_is_left_on_the_legacy_bridge() -> None:

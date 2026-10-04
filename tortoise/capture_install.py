@@ -123,6 +123,22 @@ missing its ``type`` are all **not** ours in both modules; treating any of them
 as ours would leave a project capturing nothing while reporting a successful
 install.
 
+The *merge orchestration* is the one half deliberately NOT delegated (#3915).
+#3808 preferred delegating it to #3866's
+:func:`tortoise.hook_install._merge_settings`, but that function has no refusal
+arm for a ``"hooks"`` that is present and is neither a JSON object nor
+``null`` (a ``null`` or an absent ``"hooks"`` is coerced identically by both
+modules, and so is not delegation-blocking): it REPLACES the user's value with
+``{}`` and merges into the replacement, where
+:func:`merge_capture_hooks` raises and :func:`install_capture` turns that into
+the documented refusal with the user's bytes untouched — the same
+never-clobber contract ``test_claude_install_refuses_to_clobber_invalid_settings``
+pins for unparsable JSON.  Delegating would route both harnesses through the
+clobbering arm, so the classifier, the entry-shape reader and the two
+predicates are shared and the merge is pinned to #3866 by
+``test_non_dict_hooks_is_refused_by_both_modules_and_blocks_merge_delegation``
+instead.
+
 The same one-definition rule governs whether a hook is *runnable*: this
 module's exec-bit repair asks :func:`tortoise.hook_install._has_owner_exec_bit`
 — the predicate ``detect_install``/``upgrade_install`` use — instead of
@@ -999,6 +1015,51 @@ def _install_claude(root: Path, *, dry_run: bool) -> InstallResult:
         changed = True
 
     return InstallResult(harness, changed=changed, actions=tuple(actions))
+
+
+def legacy_extension_obstacle(harness: str,
+                              root: str | os.PathLike[str]) -> str:
+    """The refusal awaiting a repair of ``harness``'s artifact seam at ``root``.
+
+    Returns a human-readable sentence when :func:`install_capture` would
+    REFUSE the install, and ``""`` when it would not.  The condition is a
+    COLLISION no finding kind expresses: a REAL legacy extension directory is
+    already disabled at :data:`PI_DISABLED_DIRNAME`, and the installer will not
+    overwrite the previous backup — so `tortoise install pi` refuses.  The
+    detector's legacy blind spot is #3713; this predicate exists only so a hint
+    never names a command that refuses.
+
+    Declared HERE, once, because BOTH surfaces that recommend a repair consult
+    it (``tortoise hooks status`` for the artifact seams, ``tortoise doctor``
+    for both classes): a copy in each caller drifts, and the drifted copy tells
+    the user to run a command that refuses — the same argument that put
+    ``hook_install.MANUAL_FIX_KINDS`` in one place (#5351).  The sentence is
+    the caller's to render when it has none of its own (``doctor`` uses it as
+    the whole hint), so a reworded refusal cannot leave a stale copy behind.
+
+    The INSTALLER keeps its own, more detailed refusal message: this predicate
+    is a MIRROR of that condition, and a mirror is the one thing that can
+    drift, so
+    ``test_pi_legacy_obstacle_matches_the_installers_own_refusal`` drives both
+    over the shape space (no legacy entry / a renameable one / its backup name
+    taken / a regular FILE at its name with the backup taken / a symlinked
+    entry, with and without the backup name taken) and pins them together.
+
+    A symlinked legacy entry is deliberately NOT a collision: the installer
+    unlinks it (the checkout it points at is untouched) and never reaches the
+    refusal, so calling it one would withhold a command that works.
+    """
+    if harness != "pi":
+        return ""
+    root_path = Path(root)
+    legacy = root_path / LEGACY_PI_DIRNAME
+    legacy_disabled = root_path / PI_DISABLED_DIRNAME
+    if not (legacy.is_dir() and not legacy.is_symlink()):
+        return ""
+    if not (legacy_disabled.exists() or legacy_disabled.is_symlink()):
+        return ""
+    return (f"a legacy capture extension is already disabled at "
+            f"{PI_DISABLED_DIRNAME} — move one aside")
 
 
 def _install_pi(home: Path, *, dry_run: bool) -> InstallResult:

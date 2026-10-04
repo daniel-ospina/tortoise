@@ -21,7 +21,7 @@ from collections import deque
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
-from prometheus_client import Counter, Histogram, generate_latest
+from prometheus_client import Counter, Gauge, Histogram, generate_latest
 
 from .env_truthy import is_truthy  # #4097: the declared truthy contract
 
@@ -252,12 +252,16 @@ PROBE_RETRY_DELAY = 0.1
 #: that reached (and failed at) the query: only the latter's error may replace
 #: the FIRST attempt's real error (#3143 review).
 #:
-#: ⚠️ This is a distinct error STRING, NOT a distinct status. A setup timeout
-#: still returns ``ok=False`` from ``probe_db``, and ``metrics()`` maps
-#: ``db["ok"] is False`` to ``status="degraded"`` + ``graph_size=0`` — #3143's
-#: symptom SHAPE, with only the ``error`` text changed. Do not read the
-#: separate spelling as "no verdict reported": to a caller the report is
-#: indistinguishable from a real unreachability except for that string.
+#: ⚠️ The spelling is a PHASE marker, not the verdict (#3683). A setup timeout
+#: still returns ``ok=False`` from ``probe_db``, but ``probe_db`` ALSO returns
+#: ``observed`` (``_probe_once``'s 4th value) and ``metrics()`` routes on THAT:
+#: a budget-exhausted setup timeout is an unobserved probe and reports the
+#: documented ``status="unknown"`` (+ ``graph_size=0``, the setup error kept),
+#: NOT ``degraded`` — "degraded" is reserved for an OBSERVED failure. So the
+#: separate spelling no longer implies a verdict the caller cannot tell apart
+#: from a real unreachability; the machine-readable discriminator is
+#: ``db["observed"]``. (A callable that RAISED keeps ``observed=True`` even
+#: though its error may be spelled with this same synthesized prefix.)
 _PROBE_SETUP_TIMEOUT_MSG = "probe setup timeout after "
 
 #: A LOOSE outer-alignment bound for :func:`probe_db`'s PLATFORM liveness
@@ -464,7 +468,21 @@ def event_retention_interval() -> int:
 REQUEST_COUNT = Counter("tortoise_requests_total", "Total HTTP requests", ["endpoint"])
 REQUEST_LATENCY = Histogram("tortoise_request_latency_seconds", "Request latency")
 ERROR_COUNT = Counter("tortoise_errors_total", "Total errors")
-TEAM_COST = Counter("tortoise_team_cost_cents", "Cost by team", ["team"])
+# #4493: the per-team cost hook. It was a ``Counter`` with NO production call
+# site — registered on /metrics and permanently 0, which reads as a measured
+# zero. It is now a **Gauge** carrying the org's ALLOCATED fixed/shared SaaS
+# cost for the current month: a recurring cost is recomputed (and can go down)
+# at every period rollover, and Prometheus' rule is "if the value can go down,
+# it is a gauge". The writer is ``record_cost``, whose only production caller
+# is ``tortoise.cost_allocation.refresh_and_publish``; the value is an
+# ALLOCATION (showback), never a measurement — see docs/ops/cost-allocation.md.
+# The label is the org id (``team`` is the pre-#3543 name; kept for the
+# metric-family continuity the issue names).
+TEAM_COST = Gauge(
+    "tortoise_team_cost_cents",
+    "Allocated fixed/shared SaaS cost per org, current month (showback allocation, NOT a measurement; #4493)",
+    ["team"],
+)
 # #3820: the analytics write path's terminal outcome, one label child per
 # member of `hosted_api._ANALYTICS_OUTCOMES`. The single writer is
 # `record_analytics_outcome` — the write path never touches the counter
@@ -476,6 +494,18 @@ ANALYTICS_OUTCOME_COUNT = Counter(
     "Analytics writes by terminal outcome (#3820)",
     ["outcome"],
 )
+# #4240 review F1: a configured JSONL rebuild journal whose append failed. The
+# append swallow is deliberate (the graph mutation stands, and raising would
+# fail a write that persisted), so this counter is what makes the failure
+# observable instead of a log line nothing watches: a journal that cannot
+# record makes the derived graph LIVE-ONLY, and the next `rebuild_all`
+# reconstructs only what the journal holds. The single writer is
+# `record_journal_write_failure` (called from `TortoiseSDK._emit_event`), so
+# the counter is never touched directly (the #501/#3677 house shape).
+JOURNAL_WRITE_FAILURE_COUNT = Counter(
+    "tortoise_journal_write_failures_total",
+    "JSONL rebuild-journal append failures on a configured journal (#4240)",
+)
 # #3498 item 1: event-loop LAG = how late each heartbeat tick actually fired
 # relative to its requested interval. The heartbeat (below) already proves the
 # loop is SCHEDULING; this histogram records HOW FAR off schedule it is, so a
@@ -486,6 +516,532 @@ LOOP_LAG = Histogram(
     "Event-loop scheduling lag per heartbeat tick (#3498)",
     buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
 )
+
+
+# ── #4491: EGRESS (response bytes) per org — the network cost dimension ───
+#
+# #4491: inbound bytes were the ONLY byte accounting in the hosted API, and
+# only as a DoS cap (the `content-length` guard on the manifest route) — a
+# safety bound, not a cost metric. NOTHING counted outbound bytes, so the
+# network cost of serving a read-heavy org (retrieval/ask result sets, graph
+# read, export) had no signal at all while reads are free by decision
+# (`product/pricing.json` -> `billing.reads_free: true`).
+#
+# SHAPE — constrained by the #5045 consolidation comment on #4491, which asks
+# for egress to become a DECLARED dimension of one metering substrate "rather
+# than a sixth separate counter": ONE writer (``record_egress``) owns the unit
+# (bytes), the attribution key (org) and the route class, so a dimension
+# registry can enumerate it later without a call-site sweep, and no caller
+# touches a metric object directly (the #501/#3677 house shape). No endpoint,
+# no quota, no cap, no price — this measures; it does not price.
+#
+# BOUNDED CARDINALITY: both labels are capped and everything past the cap folds
+# into ONE shared child — the ``_TELEMETRY_DROP_COUNTS`` doctrine in
+# ``hosted_api``. Without the cap, unknown traffic (or a fleet of orgs) grows
+# the Prometheus child set without bound, which is a scrape-cost bug, not a
+# measurement.
+#
+# ROUTE LABELS SIT ON TWO AXES: the ROUTE axis is CODE LITERAL (a FastAPI route
+# template ``/v1/points/{pid}`` or a declared mount prefix — see
+# ``hosted_api._EGRESS_DECLARED_PREFIXES``), which traffic can never add a child
+# to; the DERIVED axis is REQUEST-derived and therefore UNTRUSTED (a path that
+# matched no route). ``EGRESS_MAX_PATHS`` / ``EGRESS_MAX_DERIVED_PATHS`` bound
+# them separately, and each has one shared overflow child.
+#
+# WHY NOT ONE REGISTRY (measured): the live app already carried 121 templates, so
+# a single 128-slot registry left ~7 slots for unknown traffic — an
+# unauthenticated client could fill them with distinct paths and fold REAL routes
+# (and the size histogram) into ``__other__`` for the whole process.
+#
+# TWO MEASURED HOLES IN THAT SPLIT ALONE, both closed here:
+#   * one label STRING could be emitted from either axis, so a request-derived
+#     label could be written into a template's series — and the histogram
+#     carries no org label, which made that contamination cross-tenant. The
+#     ``origin`` label below makes the same string two distinct children.
+#   * ``/mcp`` and the docs endpoints sat on the derived axis, where 8 cheap
+#     404s on unrelated paths starved them for the process lifetime. Both are
+#     code literals of the app (a ``Mount`` prefix, a plain ``Route`` path), so
+#     they are declared and admitted on the ROUTE axis: unrelated junk cannot
+#     displace them, and no per-sub-route precision is claimed for a sub-app
+#     whose inner routes this layer does not enumerate.
+# What remains on the derived axis is ONLY untrusted traffic, where losing
+# precision is the accepted price of boundedness (the ``_TELEMETRY_DROP_COUNTS``
+# doctrine in ``hosted_api``): no legitimate surface is starved to advantage an
+# attacker.
+#
+# DECLARED LIMIT (scale, not attack): admission is first-come and permanent, so
+# past ``EGRESS_MAX_ORGS`` the LATER orgs fold into ``EGRESS_OVERFLOW`` for the
+# process lifetime — with one shared ``""`` child consuming a slot, a fleet of
+# more than ~511 orgs would see its per-org figure degrade to one bucket. An
+# admitted label is never evicted, because eviction either drops accumulated
+# cost (removing the child) or grows the child set without bound (keeping it).
+# Choosing between those is the metering substrate's decision (#5045), not this
+# counter's.
+EGRESS_MAX_ORGS = 512
+#: The route axis — code literals, ~121 templates today (measured on the live
+#: app) plus the declared mount prefixes, so 512 is headroom for new routes
+#: rather than a tight fit.
+EGRESS_MAX_PATHS = 512
+#: The request-derived axis (paths matching no route). Small on purpose: NOTHING
+#: legitimate lives here — every code-known surface is on the route axis — so
+#: this is the granularity worth paying for traffic that names its own label.
+EGRESS_MAX_DERIVED_PATHS = 8
+EGRESS_OVERFLOW = "__other__"
+#: Where excess REQUEST-DERIVED path labels fold. DELIBERATELY not a path: the
+#: fallback always emits a leading ``/``, so a value a client can request can
+#: never collide with this child — otherwise a client could pre-occupy the
+#: overflow bucket (``GET /__unrouted__``) and make routine folding
+#: indistinguishable from a real path.
+EGRESS_UNROUTED = "__unrouted__"
+# PAIR SPACE: the caps multiply — the worst case is EGRESS_MAX_ORGS x 2 origins x
+# (EGRESS_MAX_PATHS + EGRESS_MAX_DERIVED_PATHS + 2) children. The ORG axis is
+# deliberately generous because org attribution IS the measurement #4491 asks
+# for, and it is not traffic-reachable: every unauthenticated request shares the
+# ``""`` child, and a new org label costs a real org id. The path axis is the
+# bounded one, per the two-axis split above.
+
+#: Response body bytes by (org, route class, origin). The Counter answers "how
+#: many bytes did this org's traffic cost us"; the Histogram below answers "how
+#: big ARE the responses", which is the shape a fair-use boundary needs.
+#: ``origin`` is ``route`` (code literal) or ``derived`` (request-derived) — the
+#: provenance axis that keeps the two apart in the emitted series.
+EGRESS_BYTES = Counter(
+    "tortoise_egress_bytes_total",
+    "Response body bytes written to clients, by org and route class (#4491)",
+    ["org", "path", "origin"],
+)
+#: #4491 indicator 1's "or, at minimum, a distribution of response sizes per
+#: org/path" arm. Labelled by route class ONLY: org x bucket would multiply the
+#: cardinality for a question ("is this route returning 10 MB?") that the org
+#: does not change. It carries ``origin`` for the reason above — a derived label
+#: must never add observations to a template's distribution.
+EGRESS_RESPONSE_BYTES = Histogram(
+    "tortoise_egress_response_bytes",
+    "Response body size distribution by route class (#4491)",
+    ["path", "origin"],
+    buckets=(256, 1024, 4096, 16384, 65536, 262144, 1048576, 8388608),
+)
+
+#: Labels admitted so far, per dimension. Membership IS the cap registry, so a
+#: warm label costs one set lookup with NO lock (the hot path: one response per
+#: admitted org/path pair); the lock is taken only while ADMITTING a new label.
+_EGRESS_ORGS: set[str] = set()
+_EGRESS_PATHS: set[str] = set()
+_EGRESS_DERIVED_PATHS: set[str] = set()
+_EGRESS_LOCK = threading.Lock()
+
+
+#: Characters replaced in a request-derived label: C0, DEL and the C1 range
+#: (U+0085 NEL and U+009B CSI are line-break / escape introducers to
+#: Unicode-aware readers), plus U+2028/U+2029 — the SAME CLASS
+#: ``mcp_auth._sanitize_for_log`` covers. That one escapes for a LOG sink; this
+#: one replaces with ``?``, because a label is a series KEY and the value's
+#: readability matters less than it not splitting a line.
+_EGRESS_LABEL_TRANSLATE = str.maketrans({
+    **{c: "?" for c in (*range(0x20), 0x7F, *range(0x80, 0xA0))},
+    0x2028: "?",
+    0x2029: "?",
+})
+
+
+def _utf8_safe(label: str) -> str:
+    """Make a request-derived label safe to EMIT.
+
+    Control characters are replaced: the path is percent-decoded and
+    unauthenticated, and a reader that splits on line breaks — or one
+    validating control bytes — would drop or garble the series (measured: a NEL
+    in a label adds physical lines to a ``splitlines()`` reader, and the
+    ``*_bucket`` lines carry the same label).
+
+    For the SERIES this translation is the ONLY protection:
+    ``prometheus_client`` (0.26.0, measured) escapes exactly ONE control code
+    point — LF — and only in the exposition text, never in the stored key. CR,
+    TAB, NUL, CSI, U+2028 and U+2029 are all passed through RAW, so replacing
+    them here is what keeps both the stored key and the exposition clean.
+
+    A label that cannot be UTF-8 encoded is repaired. ``generate_latest()``
+    encodes label values, so ONE lone surrogate would make the whole
+    ``/metrics`` endpoint raise for the process lifetime, blinding every alert
+    rather than this one dimension. Not reachable from the HTTP path today
+    (uvicorn replaces invalid bytes; org ids are charset-validated — measured),
+    and this single writer is the only place that can enforce it.
+    """
+    label = label.translate(_EGRESS_LABEL_TRANSLATE)
+    try:
+        label.encode("utf-8")
+    except UnicodeEncodeError:
+        return label.encode("utf-8", "replace").decode("utf-8")
+    return label
+
+
+def _admit_egress_label(label: str, seen: set[str], cap: int,
+                        overflow: str = EGRESS_OVERFLOW) -> str:
+    """Admit ``label`` as a metric child, folding past ``cap`` into overflow.
+
+    Additive by construction: an already-admitted label never locks (and never
+    changes); a new label past the cap becomes ``overflow`` so the metric stays
+    bounded rather than raising or dropping the whole record.
+    """
+    if label in seen:
+        return label
+    with _EGRESS_LOCK:
+        if label in seen:
+            return label
+        if len(seen) >= cap:
+            seen.add(overflow)
+            return overflow
+        seen.add(label)
+        return label
+
+
+def record_egress(org: str | None, path: str, nbytes: int, *,
+                  derived: bool = False) -> None:
+    """Record response body bytes written for ``org`` on route class ``path``.
+
+    THE single writer for the egress dimension (#4491): the caller
+    (``hosted_api.EgressBytesMiddleware``) supplies what it measured — org,
+    route class, byte count — and never touches a metric object, so the unit
+    and the attribution key stay in one place.
+
+    ``derived`` names WHICH route-label axis ``path`` belongs to: ``False``
+    (default) for a code-literal label (a matched route template, or a declared
+    mount prefix), ``True`` for a label the caller derived from the request path
+    because no route matched. They are separate budgets so request-derived
+    labels can never consume the route budget, and the axis is emitted as the
+    ``origin`` label so the same string can never mix two provenances' series —
+    see the two-axis note above.
+
+    ``org`` may be ``None``/empty: a request that never resolved an org (an
+    unauthenticated 401, a health probe, an MCP call whose org lives in the
+    MCP ContextVar this ASGI layer cannot see) is attributed to the empty
+    label — an honest "unattributed" child rather than an invented org id.
+
+    ``nbytes`` is clamped at 0: a negative count is impossible data, and a
+    negative increment would corrupt a monotonic counter.
+
+    Labels are repaired to be UTF-8 encodable here, at the single writer,
+    because ``generate_latest()`` encodes label values: ONE unencodable value (a
+    lone surrogate) would make the whole ``/metrics`` endpoint raise for the
+    process lifetime, blinding every alert rather than this one dimension. Not
+    reachable from the HTTP path today (uvicorn replaces invalid bytes and org
+    ids are charset-validated — measured), but this is the only place that can
+    enforce it.
+    """
+    amount = max(0, int(nbytes))
+    origin = "derived" if derived else "route"
+    org_label = _utf8_safe(org or "")
+    org_label = _admit_egress_label(org_label, _EGRESS_ORGS, EGRESS_MAX_ORGS)
+    path = _utf8_safe(path or "")
+    if derived:
+        path_label = _admit_egress_label(
+            path, _EGRESS_DERIVED_PATHS, EGRESS_MAX_DERIVED_PATHS,
+            overflow=EGRESS_UNROUTED)
+    else:
+        path_label = _admit_egress_label(path, _EGRESS_PATHS, EGRESS_MAX_PATHS)
+    EGRESS_BYTES.labels(org=org_label, path=path_label, origin=origin).inc(amount)
+    EGRESS_RESPONSE_BYTES.labels(path=path_label, origin=origin).observe(amount)
+
+
+def egress_bytes_by_org() -> dict[str, int]:
+    """In-process snapshot of ``EGRESS_BYTES`` keyed by org (#4491 indicator 3).
+
+    The readable form of the metric, for a person or a test — no dashboard, no
+    UI, no new endpoint. The counter is registered with ``prometheus_client``, but
+    nothing scrapes it in production today: the hosted app serves no ``/metrics``
+    route (measured: 404) and ``serve_health`` is not a ``fly.toml`` process — the
+    same limit ``analytics_outcome_counts()`` states. This direct read is therefore
+    the only queryable form the dimension has, mirroring that function. Derived
+    from ``collect()`` rather than a second tally, so the snapshot cannot drift
+    from the metric.
+
+    The ``""`` key is the unattributed share and ``EGRESS_OVERFLOW`` the folded
+    tail of the org/path caps; both are INCLUDED, so the snapshot always
+    reconciles to the whole measurement. (``EGRESS_UNROUTED`` needs no mention
+    here: it is a PATH label, so it appears under whichever org incurred the
+    unrouted traffic, never as a key of this org-keyed dict.)
+    """
+    totals: dict[str, int] = {}
+    for family in EGRESS_BYTES.collect():
+        for sample in family.samples:
+            # Read ONLY the byte counter. The created series of the client the
+            # lock resolves is ``<name>_created``, so the second operand is not
+            # reachable there — it is kept so that a client naming it
+            # ``_created_total`` could not have its creation TIMESTAMP summed
+            # as byte counts.
+            if (not sample.name.endswith("_total")
+                    or sample.name.endswith("_created_total")):
+                continue
+            org = sample.labels.get("org")
+            if org is None:
+                # A family that lost the org label is skipped, never recorded as
+                # an org literally named ``None``.
+                continue
+            totals[org] = totals.get(org, 0) + int(sample.value)
+    return totals
+
+
+def _reset_egress() -> None:
+    """Test seam: forget every admitted label and this process's series.
+
+    Clears the cap registries as well as the children — leaving them behind
+    would make a following test see labels "already admitted" that no longer
+    exist in the metric, which is exactly the drift the cap must not have.
+    """
+    with _EGRESS_LOCK:
+        _EGRESS_ORGS.clear()
+        _EGRESS_PATHS.clear()
+        _EGRESS_DERIVED_PATHS.clear()
+    EGRESS_BYTES.clear()
+    EGRESS_RESPONSE_BYTES.clear()
+
+
+# ── #4490: HOSTED-API COMPUTE (machine time) per org — the request-time dimension ──
+#
+# #4490: Fly machine time is a flat shared cost with NO per-org driver. Nothing
+# recorded the server-side wall time or CPU time an org's traffic caused, and the
+# only request metrics (``REQUEST_COUNT``/``REQUEST_LATENCY`` above) have their
+# sole call site inside the monitoring server's own handler, so they measure the
+# health/monitoring HTTP server, not product traffic. This adds the missing
+# dimension: per-org wall seconds, CPU seconds and request count on the product
+# surface.
+#
+# SHAPE — constrained by the #5045 consolidation comment, which asks for each cost
+# dimension to be a DECLARED dimension of one metering substrate rather than "a
+# sixth separate counter": ONE writer (``record_compute``) owns the unit (seconds,
+# count), the attribution key (org) and the route class, so a dimension registry
+# can enumerate it later without a call-site sweep, and no caller touches a metric
+# object directly (the #501/#3677 house shape). No endpoint, no quota, no cap, no
+# price — this measures; it does not price.
+#
+# BOUNDED CARDINALITY: both labels are capped and everything past the cap folds
+# into ONE shared child (``__other__``). Without the cap, unknown traffic — or a
+# fleet of orgs — grows the Prometheus child set without bound, which is a
+# scrape-cost bug, not a measurement.
+#
+# THE PATH AXIS IS ENTIRELY CODE-LITERAL. The caller (``hosted_api``) passes a
+# FastAPI route TEMPLATE (``/v1/points/{pid}``) or the single constant
+# ``COMPUTE_UNROUTED``; NO substring of the request path is ever admitted as a
+# label. That is a STRICTER bound than the sibling egress dimension's two-axis
+# split (#5315): there is no request-derived axis here at all, so traffic can
+# never add a path child. The ``COMPUTE_MAX_PATHS`` cap is a safety net for route
+# growth, not an attacker-reachable budget.
+#
+# WHY ``_admit_bounded_label`` IS COMPUTE-BOUND, NOT GENERIC: it takes its registry
+# set and cap from the caller, but is hard-bound to ``_COMPUTE_LOCK``. The egress
+# twin ``_admit_egress_label`` (#5315) admits under ``_EGRESS_LOCK`` and has no
+# folded-label short-circuit, so the two are NOT drop-in equivalents.
+COMPUTE_MAX_ORGS = 512
+#: Code-literal route labels. The live app carries ~130 templates, so 512 is
+#: headroom for new routes rather than a tight fit. NOT traffic-reachable.
+COMPUTE_MAX_PATHS = 512
+COMPUTE_OVERFLOW = "__other__"
+#: The one label for a request that matched no route. Deliberately NOT a path (a
+#: path always starts with ``/``), so a client cannot request a value that
+#: collides with this child and make routine folding indistinguishable from a
+#: real route class.
+COMPUTE_UNROUTED = "__unrouted__"
+# PAIR SPACE: the two caps multiply — the emitted children are
+# ``labels(org=…, path=…)``, so the worst case is ``COMPUTE_MAX_ORGS`` x
+# (declared paths + ``COMPUTE_MAX_PATHS`` + 2 sentinels) children per counter. The
+# ORG axis is generously sized because org attribution IS the measurement #4490
+# asks for, and it is NOT traffic-reachable: every unauthenticated request shares
+# the ``""`` child, and a new org label costs a real, auth-resolved org id. The
+# PATH axis is code-literal, so its real cardinality is the app's route table
+# (measured: 135 routes / 121 distinct paths), not the 512 safety cap. Stated so
+# the bound is the PAIR, not either axis alone.
+
+#: Request count per org and route class — the denominator for wall/CPU seconds.
+COMPUTE_REQUESTS = Counter(
+    "tortoise_compute_requests",
+    "Hosted-API requests by org and route class (#4490)",
+    ["org", "path"],
+)
+#: Server-side wall seconds occupied by an org's requests, by route class. A
+#: Counter of seconds (not a Histogram) so the ORG axis and the bucket axis never
+#: multiply: the per-org figure is ``wall_seconds_total / requests_total``, and
+#: the org-free histogram below carries the distribution.
+COMPUTE_WALL_SECONDS = Counter(
+    "tortoise_compute_wall_seconds",
+    "Server-side wall seconds per request, by org and route class (#4490)",
+    ["org", "path"],
+)
+#: Server-side CPU seconds, by org and route class. Read via ``time.thread_time``
+#: at the middleware (see ``hosted_api.ComputeAttributionMiddleware``): exact when
+#: a request runs alone, an UPPER bound under async concurrency (co-scheduled
+#: requests share the loop thread's CPU for the same window), and a LOWER bound
+#: where work is offloaded to a thread pool (invisible to this layer). A cost
+#: signal, not a billing harness.
+COMPUTE_CPU_SECONDS = Counter(
+    "tortoise_compute_cpu_seconds",
+    "Server-side CPU seconds per request, by org and route class (#4490)",
+    ["org", "path"],
+)
+#: The request-duration DISTRIBUTION by route class ONLY — no org label, so the
+#: org axis and the bucket axis never multiply (mirrors the sibling egress
+#: dimension's org-free histogram). Explicit buckets past the default 10 s tail:
+#: the hosted surface carries multi-second handlers and the transport wait bound
+#: is on that order, so the interesting tail must not collapse into ``+Inf``.
+COMPUTE_REQUEST_SECONDS = Histogram(
+    "tortoise_compute_request_seconds",
+    "Server-side wall seconds distribution by route class (#4490)",
+    ["path"],
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 30.0),
+)
+
+#: Labels admitted so far, per axis. Membership IS the cap registry, so a warm
+#: label costs one set lookup with NO lock (the hot path); the lock is taken only
+#: while ADMITTING a new label.
+_COMPUTE_ORGS: set[str] = set()
+_COMPUTE_PATHS: set[str] = set()
+_COMPUTE_LOCK = threading.Lock()
+
+# NO ``_compute_safe_label`` / ``_COMPUTE_LABEL_TRANSLATE`` HERE: the compute
+# dimension reuses the shared ``_utf8_safe`` label sanitizer above (#5420). A
+# private copy was added while the sibling egress lane (#5315) was believed
+# unmerged; that lane merged (merge ``a830abe2``) and the two bodies were
+# identical apart from the table reference (measured: the two translate tables
+# compare EQUAL, 67 keys each), so the copy was pure duplication of a
+# security-relevant filter — the class that drifts on a one-sided edit.
+
+
+def _admit_bounded_label(label: str, seen: set[str], cap: int,
+                        overflow: str = COMPUTE_OVERFLOW) -> str:
+    """Admit ``label`` as a metric child, folding past ``cap`` into overflow.
+
+    The bounded-admission form for the COMPUTE dimension (#4490), hard-bound to
+    ``_COMPUTE_LOCK`` — NOT the shared helper its name suggests: the egress twin
+    (``_admit_egress_label``) admits under ``_EGRESS_LOCK`` and has no
+    folded-label short-circuit. Additive by construction: an already-admitted
+    label never locks (and never changes); a new label past the cap becomes
+    ``overflow`` so the metric stays bounded rather
+    than raising or dropping the whole record. Admission is first-come and an
+    admitted label is never evicted — eviction either drops accumulated cost or
+    grows the child set without bound, and choosing between those is the metering
+    substrate's decision (#5045), not this counter's.
+    """
+    if label in seen:
+        return label
+    # A label that was ALREADY FOLDED must never take the lock again: the folded
+    # branch inserts only ``overflow``, never the label, so without this
+    # short-circuit every request carrying a non-admitted label would acquire the
+    # module-global lock on every request for the process lifetime — the exact
+    # thing the "an already-admitted label never locks" contract promises away.
+    # The test is the LOCKED branch's OWN condition (``len(seen) >= cap``), never
+    # ``overflow in seen``: a legitimate label that happens to EQUAL the sentinel
+    # (an org literally named ``__other__``, which no validated creation path
+    # produces but no CHECK forbids) would otherwise be read as "the cap was
+    # reached" and silently fold every later org — a worse outcome than the
+    # pre-short-circuit code, which merged only that org's own series.
+    if len(seen) >= cap:
+        return overflow
+    with _COMPUTE_LOCK:
+        if label in seen:
+            return label
+        if len(seen) >= cap:
+            seen.add(overflow)
+            return overflow
+        seen.add(label)
+        return label
+
+
+def record_compute(org: str | None, path: str,
+                   wall_s: float, cpu_s: float = 0.0) -> None:
+    """Record one hosted request's server-side compute for ``org`` on ``path``.
+
+    THE single writer for the compute dimension (#4490): the caller
+    (``hosted_api.ComputeAttributionMiddleware``) supplies what it measured — the
+    org, the route class (a code literal), the wall seconds and the CPU seconds —
+    and never touches a metric object, so the unit and the attribution key stay in
+    one place.
+
+    ``org`` may be ``None``/empty: a request that never resolved an org (an
+    unauthenticated 401, a health probe, a session-JWT or MCP call whose org this
+    ASGI layer cannot see) is attributed to the empty label — an honest
+    "unattributed" child rather than an invented org id.
+
+    ``wall_s``/``cpu_s`` are clamped at 0: a negative duration is impossible data,
+    and a negative increment would corrupt a monotonic counter.
+    """
+    org_label = _admit_bounded_label(
+        _utf8_safe(org or ""), _COMPUTE_ORGS, COMPUTE_MAX_ORGS)
+    path_label = _admit_bounded_label(
+        _utf8_safe(path or COMPUTE_UNROUTED), _COMPUTE_PATHS,
+        COMPUTE_MAX_PATHS)
+    wall = max(0.0, float(wall_s))
+    cpu = max(0.0, float(cpu_s))
+    COMPUTE_REQUESTS.labels(org=org_label, path=path_label).inc()
+    COMPUTE_WALL_SECONDS.labels(org=org_label, path=path_label).inc(wall)
+    COMPUTE_CPU_SECONDS.labels(org=org_label, path=path_label).inc(cpu)
+    COMPUTE_REQUEST_SECONDS.labels(path=path_label).observe(wall)
+
+
+def _sum_compute_by_org(metric) -> dict[str, float]:
+    """Sum one org-labelled compute counter's samples, keyed by org.
+
+    Derived from ``collect()`` rather than a second tally, so a snapshot cannot
+    drift from the metric. The ``_created`` series is skipped so a creation
+    TIMESTAMP can never be summed as a duration/count.
+    """
+    totals: dict[str, float] = {}
+    for family in metric.collect():
+        for sample in family.samples:
+            if (not sample.name.endswith("_total")
+                    or sample.name.endswith("_created_total")):
+                continue
+            org = sample.labels.get("org")
+            if org is None:
+                continue
+            totals[org] = totals.get(org, 0.0) + float(sample.value)
+    return totals
+
+
+def compute_by_org() -> dict[str, dict[str, float]]:
+    """In-process snapshot of the compute dimension keyed by org (#4490 indicator 3).
+
+    The readable form of the metric, for a person or a test — no dashboard, no UI.
+    The counters are registered with ``prometheus_client``, but nothing scrapes
+    them in production today: the hosted app serves no ``/metrics`` route
+    (measured: 404), and ``serve_health`` is not a ``fly.toml`` process — the same
+    limit ``analytics_outcome_counts()`` states (#3820's audit). This direct read
+    is therefore the only queryable form the dimension has; a scrape surface is
+    deferred with that audit, not implied here. The ``""`` key is the unattributed
+    share and ``__other__`` the folded tail of the org cap; both are INCLUDED, so
+    the snapshot always reconciles to the whole measurement.
+    """
+    requests = _sum_compute_by_org(COMPUTE_REQUESTS)
+    wall = _sum_compute_by_org(COMPUTE_WALL_SECONDS)
+    cpu = _sum_compute_by_org(COMPUTE_CPU_SECONDS)
+    return {
+        org: {
+            "requests": requests.get(org, 0.0),
+            "wall_seconds": wall.get(org, 0.0),
+            "cpu_seconds": cpu.get(org, 0.0),
+        }
+        for org in sorted(set(requests) | set(wall) | set(cpu))
+    }
+
+
+def _reset_compute() -> None:
+    """Test seam: forget every admitted label and this process's series.
+
+    Clears the cap registries as well as the children — leaving the registries
+    behind would make a following test see labels "already admitted" that no
+    longer exist in the metric, which is exactly the drift the cap must not have.
+
+    Scope of the guarantee: the clears are atomic with respect to ADMISSION (they
+    hold ``_COMPUTE_LOCK``), NOT with respect to recording —
+    ``record_compute``'s ``.labels(...).inc()`` runs after admission, outside the
+    lock, so a thread interleaving between admission and ``.inc()`` can recreate a
+    child. This is a test seam, not a production path; the promise is limited to
+    what the lock covers.
+    """
+    with _COMPUTE_LOCK:
+        _COMPUTE_ORGS.clear()
+        _COMPUTE_PATHS.clear()
+        COMPUTE_REQUESTS.clear()
+        COMPUTE_WALL_SECONDS.clear()
+        COMPUTE_CPU_SECONDS.clear()
+        COMPUTE_REQUEST_SECONDS.clear()
 
 
 def register(sdk) -> None:
@@ -503,9 +1059,39 @@ def record_error() -> None:
     ERROR_COUNT.inc()
 
 
+def record_journal_write_failure() -> None:
+    """Count one failed append to a CONFIGURED rebuild journal (#4240).
+
+    Called by ``TortoiseSDK._emit_event`` when ``log.append`` raises. The append
+    is fail-soft on purpose (the graph mutation already succeeded), so this is
+    the observable degradation signal: the record is absent from the journal and
+    a later rebuild cannot restore it.
+    """
+    JOURNAL_WRITE_FAILURE_COUNT.inc()
+
+
+def journal_write_failure_count() -> int:
+    """In-process snapshot of ``JOURNAL_WRITE_FAILURE_COUNT`` (#4240).
+
+    ``/metrics`` carries the Prometheus text form; this is the readable form,
+    used by ``metrics()`` and by tests (mirrors ``analytics_outcome_counts``).
+    """
+    return _counter_val(JOURNAL_WRITE_FAILURE_COUNT)
+
+
 def record_cost(team: str, cents: int) -> None:
-    """Track LLM/tool cost for a team. cents is integer (avoids float drift)."""
-    TEAM_COST.labels(team=team).inc(cents)
+    """Set a team's ALLOCATED fixed/shared SaaS cost for the current month.
+
+    #4493: idempotent (``.set``, not ``.inc``) — the allocation is recomputed
+    every refresh, so an increment would double-count and could never express a
+    period rollover. ``cents`` is integer (avoids float drift); a negative value
+    is clamped to 0 rather than publishing a nonsensical credit.
+
+    The single production caller is
+    ``tortoise.cost_allocation.refresh_and_publish`` — this is an ALLOCATION
+    (a policy applied to a stated total), not a measured cost.
+    """
+    TEAM_COST.labels(team=team).set(max(0, int(cents)))
 
 
 def record_analytics_outcome(outcome: str) -> None:
@@ -518,6 +1104,30 @@ def record_analytics_outcome(outcome: str) -> None:
     ANALYTICS_OUTCOME_COUNT.labels(outcome=outcome).inc()
 
 
+def _collect_by_label(metric, label: str, *, sample_suffix: str = "_total") -> dict[str, int]:
+    """In-process snapshot of one labelled metric family, keyed by *label*.
+
+    ONE extraction declaration for every reader: the two families differ ONLY
+    in the sample-name suffix (a ``Counter`` exports ``…_total``; a ``Gauge``
+    exports the bare family name), and that difference is exactly why the
+    counter-shaped helpers read a Gauge as 0 — the bug class #4493 fixes.
+
+    ``sample_suffix=None`` matches the bare family name (Gauge).
+    """
+    counts: dict[str, int] = {}
+    for family in metric.collect():
+        for sample in family.samples:
+            if sample_suffix is not None:
+                if not sample.name.endswith(sample_suffix):
+                    continue
+            elif sample.name.endswith("_total") or sample.name.endswith("_created"):
+                continue
+            value = sample.labels.get(label)
+            if value is not None:
+                counts[value] = int(sample.value)
+    return counts
+
+
 def analytics_outcome_counts() -> dict[str, int]:
     """In-process snapshot of ``ANALYTICS_OUTCOME_COUNT``, keyed by outcome.
 
@@ -526,15 +1136,51 @@ def analytics_outcome_counts() -> dict[str, int]:
     no scrape (today nothing scrapes it in production — see #3820's audit:
     ``serve_health`` is not a ``fly.toml`` process).
     """
-    counts: dict[str, int] = {}
-    for family in ANALYTICS_OUTCOME_COUNT.collect():
-        for sample in family.samples:
-            if not sample.name.endswith("_total"):
-                continue
-            outcome = sample.labels.get("outcome")
-            if outcome is not None:
-                counts[outcome] = int(sample.value)
-    return counts
+    return _collect_by_label(ANALYTICS_OUTCOME_COUNT, "outcome")
+
+
+def team_cost_cents() -> dict[str, int]:
+    """In-process snapshot of ``TEAM_COST`` (allocated cents), keyed by org.
+
+    #4493: the readable form of the per-org allocation. It reads the GAUGE's
+    bare sample names (``sample_suffix=None``) — the counter-shaped helpers
+    (``_collect_by_label``'s default, ``_counter_value`` in the tests) filter
+    ``_total`` and would silently read every Gauge as 0, which is precisely
+    the dead-hook defect this metric was just rescued from.
+    """
+    return _collect_by_label(TEAM_COST, "team", sample_suffix=None)
+
+
+def clear_team_cost() -> None:
+    """Drop every ``TEAM_COST`` child (the TEST SEAM and the documented pruner).
+
+    Production does NOT clear the family before a re-publish: ``/metrics`` is
+    served by another thread, so a clear-then-set would let a scrape observe an
+    empty or partial family on every refresh. The production writer records the
+    new children first and then calls :func:`prune_team_cost` to remove only the
+    ones that are gone. This function remains for tests (and as the blunt
+    "drop everything" escape hatch). Never called on an unreadable refresh —
+    clearing there would make "unreadable" indistinguishable from "zero cost"
+    (#4493)."""
+    TEAM_COST.clear()
+
+
+def prune_team_cost(keep: set[str]) -> None:
+    """Remove every ``TEAM_COST`` child whose label is not in *keep*.
+
+    #4493: the production pruner. The allocation writer records the new/updated
+    children FIRST and prunes LAST, so a scrape on the ``/metrics`` thread can
+    never observe a gap (the clear-then-set race). An org deleted from the
+    fleet still cannot keep a stale value forever: its label is simply not in
+    *keep* on the next successful refresh.
+
+    Reads the family's current labels through the GAUGE's bare sample names
+    (:func:`team_cost_cents`), not the counter-shaped ``_total`` filter that
+    would read every child as absent.
+    """
+    for label in list(team_cost_cents()):
+        if label not in keep:
+            TEAM_COST.remove(label)
 
 
 def _is_transient_connect_error(exc: BaseException) -> bool:
@@ -580,9 +1226,15 @@ class _SingleSlotWorker:
     calls → +10 live ``ThreadPoolExecutor-N_0`` threads) plus the DB
     connection that abandoned call was holding.
 
-    One long-lived worker bounds the thread count to exactly one per process
-    no matter how many times a probe hangs. Callers keep their own hard
-    timeout through the returned ``Future`` (``future.result(timeout=…)``).
+    What bounds the thread count is the SHAPE, not the number 1 (#3683): ONE
+    process-lifetime pool per name, all ``workers`` threads created EAGERLY and
+    ONCE in ``__init__``, a BOUNDED backlog (``MAX_BACKLOG``), a never-dying
+    loop, and the daemon flag — so the count is exactly ``workers`` no matter
+    how many times a probe hangs. The ``workers=1`` default is therefore an
+    implementation choice, not the leak guard: production already runs this
+    same class at width 8 twice (``CONTROL_PLANE_WORKERS`` and the selfhost
+    readiness probe). Callers keep their own hard timeout through the returned
+    ``Future`` (``future.result(timeout=…)``).
 
     Daemon, NOT ``ThreadPoolExecutor`` (whose workers are non-daemon): a
     wedged probe must never block interpreter/uvicorn shutdown — Fly SIGTERMs
@@ -921,8 +1573,60 @@ def graph_offload_timeout_s() -> float:
 #: per-request deadline.
 CONTROL_PLANE_OFFLOAD_TIMEOUT_S = 10.0
 
-#: Bounded per-call ``(op, duration_s)`` record for the offload seam.
-_CP_OFFLOAD_RECORDS: deque[tuple[str, float]] = deque(maxlen=512)
+#: #5840: the CLOSED terminal-state vocabulary of an offload. The single writer
+#: (``record_control_plane_offload``) is the only producer, so the metric's
+#: child set is bounded by this tuple — the #501/#3677 house shape (one writer
+#: owns the label vocabulary; no caller touches a metric object directly).
+CONTROL_PLANE_OFFLOAD_OUTCOMES = (
+    "completed",           # the callable returned
+    "bound_miss_refused",  # the bound fired and the callable will never run
+    "bound_miss_running",  # the bound abandoned the AWAIT; the callable still runs
+    "domain_error",        # fn failed, or the seam itself failed (catch-all)
+                           # — not a saturation event. The two are NOT
+                           # separately labelled: `future.exception() is exc`
+                           # does attribute the common path, but it is not
+                           # RELIABLY separable — on the bare-`raise` path a
+                           # concurrently-completing fn TimeoutError is not
+                           # distinguishable from the bound's — and a
+                           # mostly-right `internal_error` child that mislabels
+                           # is worse than one documented catch-all. Residual.
+    "cancelled",           # the AWAITING task was cancelled
+)
+
+#: Bounded per-call ``(op, duration_s, outcome, pool)`` record for the offload
+#: seam. #5840: the outcome and the pool are part of the record because a
+#: SUCCESS-ONLY record made a bound miss — a genuine telemetry DROP — and a
+#: saturated pool indistinguishable from "nothing happened": the #3677 loss
+#: class reachable through the observability channel.
+_CP_OFFLOAD_RECORDS: deque[tuple[str, float, str, str]] = deque(maxlen=512)
+
+# ── #5840: offload saturation becomes MEASURABLE ──────────────────────────
+#
+# #4462 could not be decided because its precondition — "the pool's real
+# saturation rate, and the 10s bound's contribution to request latency under
+# load" — had no data source: ``control_plane_offload_records()`` was read
+# nowhere outside tests, and it recorded only SUCCESSES, so the events in
+# question (backlog refusals, missed wait bounds) left no trace at all.
+#
+# THE TWO QUESTIONS NEED DIFFERENT SHAPES. The COUNTER answers "is the pool
+# saturated" (rate by pool+outcome). The HISTOGRAM answers "how much latency
+# does the bound contribute" (duration by pool+outcome), with the bound itself
+# as a bucket edge so a bound miss is a visible pile-up at the last edge.
+#
+# DEFINED HERE rather than with the counters above because the bucket set needs
+# ``CONTROL_PLANE_OFFLOAD_TIMEOUT_S``, defined just above.
+CONTROL_PLANE_OFFLOAD_COUNT = Counter(
+    "tortoise_control_plane_offload_total",
+    "Control-plane offloads by pool and terminal outcome (#5840)",
+    ["pool", "outcome"],
+)
+CONTROL_PLANE_OFFLOAD_LATENCY = Histogram(
+    "tortoise_control_plane_offload_seconds",
+    "Control-plane offload duration by pool and outcome (#5840)",
+    ["pool", "outcome"],
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
+             CONTROL_PLANE_OFFLOAD_TIMEOUT_S, 30.0),
+)
 #: Bounded per-call ``(duration_s, thread_name)`` record for the CONTROL-PLANE
 #: CLIENT itself (#3498 item 2 — the falsifier). Recorded at the httpx choke
 #: point in ``supabase_control.SupabaseControlPlane``, so a call that ran on
@@ -992,14 +1696,47 @@ def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
     raise ValueError(f"unknown control-plane pool {pool!r}")
 
 
-def record_control_plane_offload(op: str, duration_s: float) -> None:
-    """Record ONE offloaded control-plane resolution ``(op, duration)``."""
+def record_control_plane_offload(
+    op: str, duration_s: float, *, outcome: str, pool: str
+) -> None:
+    """Record ONE offload's TERMINAL state — the single writer (#5840).
+
+    Called on EVERY terminal path, not only success. ``bound_miss_refused``
+    and ``bound_miss_running`` ARE the saturation events, and recording only
+    ``completed`` is precisely what made them unobservable.
+
+    ``outcome`` is clamped to ``CONTROL_PLANE_OFFLOAD_OUTCOMES`` so a future
+    caller cannot grow the metric's child set without bound (the doctrine at
+    the metric definitions above).
+    """
+    if outcome not in CONTROL_PLANE_OFFLOAD_OUTCOMES:
+        # NOT silent. A caller-side typo (`"complete"` for `"completed"`) would
+        # otherwise land in an unremarkable `unknown` child, and a BROKEN
+        # measurement would read as a clean one — precisely the failure this
+        # metric exists to expose. A warning (not a raise) is required because
+        # this runs inside a `finally`: raising here would replace the caller's
+        # real exception with a bookkeeping error.
+        logger.warning(
+            "control-plane offload: unknown outcome %r clamped to 'unknown' "
+            "(op=%r pool=%r) — the metric will UNDER-COUNT this terminal state",
+            outcome, op, pool,
+        )
+        outcome = "unknown"
     with _CP_RECORDS_LOCK:
-        _CP_OFFLOAD_RECORDS.append((op, duration_s))
+        _CP_OFFLOAD_RECORDS.append((op, duration_s, outcome, pool))
+    CONTROL_PLANE_OFFLOAD_COUNT.labels(pool=pool, outcome=outcome).inc()
+    CONTROL_PLANE_OFFLOAD_LATENCY.labels(pool=pool, outcome=outcome).observe(
+        duration_s
+    )
 
 
-def control_plane_offload_records() -> list[tuple[str, float]]:
-    """Snapshot of the bounded offload records (oldest first)."""
+def control_plane_offload_records() -> list[tuple[str, float, str, str]]:
+    """Snapshot of the bounded offload records (oldest first).
+
+    Each entry is ``(op, duration_s, outcome, pool)``;
+    ``CONTROL_PLANE_OFFLOAD_OUTCOMES`` names every terminal state, so a
+    caller can tell a completed call from a saturated one.
+    """
     with _CP_RECORDS_LOCK:
         return list(_CP_OFFLOAD_RECORDS)
 
@@ -1085,45 +1822,70 @@ async def run_control_plane_call(fn, *, op: str,
     bound = CONTROL_PLANE_OFFLOAD_TIMEOUT_S if timeout is None else timeout
     future = control_plane_worker(pool).submit(fn)
     started = time.monotonic()
+    # #5840: exactly ONE record per terminal state, on EVERY path. ``outcome``
+    # is assigned before each exit and read by the ``finally``, so a future
+    # early return or raise cannot silently reopen the success-only hole this
+    # closes. The initial value is the catch-all for an unexpected failure.
+    outcome = "domain_error"
     try:
-        result = await _await_future(future, timeout=bound,
-                                     cancel_on_timeout=cancel_on_timeout)
-    except TimeoutError as exc:
-        # Distinguish the three sources of TimeoutError that meet here:
-        #   1. `fn` raised it              -> a domain error, propagate
-        #   2. the pool refused the submit -> `_WorkerBacklogFull`, fail closed
-        #   3. `wait_for`'s bound expired  -> fail closed
-        future_exc = (future.exception()
-                      if future.done() and not future.cancelled() else None)
-        if future_exc is not None and not isinstance(future_exc, _WorkerBacklogFull):
-            raise
-        reason = ("pool backlog full" if isinstance(future_exc, _WorkerBacklogFull)
-                  else f"exceeded its {bound}s bound")
-        if not future.done():
-            # The callable is still QUEUED or RUNNING: the bound abandoned the
-            # AWAIT, not the work. Attribute whatever it eventually does at the
-            # op level instead of leaving it to a bare asyncio warning (#4456).
-            future.add_done_callback(_log_abandoned_outcome(op))
-        # ``refused`` is the DELIVERY discriminator (#4456): True when the
-        # callable did not and will not run (backlog-full refusal, or a queued
-        # submission cancelled by the bound); False when a bound miss left it
-        # running (or, on a non-cancellable lane, still queued).
-        raise ControlPlaneOffloadError(
-            f"control-plane call {op!r} {reason}",
-            refused=(isinstance(future_exc, _WorkerBacklogFull)
-                     or future.cancelled()),
-        ) from exc
-    record_control_plane_offload(op, time.monotonic() - started)
-    return result
+        try:
+            result = await _await_future(future, timeout=bound,
+                                         cancel_on_timeout=cancel_on_timeout)
+        except TimeoutError as exc:
+            # Distinguish the three sources of TimeoutError that meet here:
+            #   1. `fn` raised it              -> a domain error, propagate
+            #   2. the pool refused the submit -> `_WorkerBacklogFull`, fail closed
+            #   3. `wait_for`'s bound expired  -> fail closed
+            future_exc = (future.exception()
+                          if future.done() and not future.cancelled() else None)
+            if future_exc is not None and not isinstance(future_exc, _WorkerBacklogFull):
+                raise
+            reason = ("pool backlog full" if isinstance(future_exc, _WorkerBacklogFull)
+                      else f"exceeded its {bound}s bound")
+            if not future.done():
+                # The callable is still QUEUED or RUNNING: the bound abandoned the
+                # AWAIT, not the work. Attribute whatever it eventually does at the
+                # op level instead of leaving it to a bare asyncio warning (#4456).
+                future.add_done_callback(_log_abandoned_outcome(op))
+            # ``refused`` is the DELIVERY discriminator (#4456): True when the
+            # callable did not and will not run (backlog-full refusal, or a queued
+            # submission cancelled by the bound); False when a bound miss left it
+            # running (or, on a non-cancellable lane, still queued).
+            refused = (isinstance(future_exc, _WorkerBacklogFull)
+                       or future.cancelled())
+            outcome = "bound_miss_refused" if refused else "bound_miss_running"
+            raise ControlPlaneOffloadError(
+                f"control-plane call {op!r} {reason}",
+                refused=refused,
+            ) from exc
+        outcome = "completed"
+        return result
+    except asyncio.CancelledError:
+        # The AWAITING task was cancelled — neither success nor a pool failure.
+        outcome = "cancelled"
+        raise
+    finally:
+        record_control_plane_offload(
+            op, time.monotonic() - started, outcome=outcome, pool=pool
+        )
 
 
 def _probe_once(sdk, timeout=None,
-                setup_timeout=None) -> tuple[bool, str | None, bool]:
+                setup_timeout=None) -> tuple[bool, str | None, bool, bool]:
     """Execute ONE bounded probe on the shared probe worker.
 
-    Returns ``(ok, error, transient)`` — ``transient`` is True only when the
-    failure was a connection-level error that a single retry could clear,
-    never a timeout (a hung DB stays hung).
+    Returns ``(ok, error, transient, observed)`` — ``transient`` is True only
+    when the failure was a connection-level error that a single retry could
+    clear, never a timeout (a hung DB stays hung). ``observed`` (#3683) is
+    whether the probe produced a VERDICT about the DB: True whenever a callable
+    RAISED (the projection cold-start or the query failed and said why) or the
+    reachability query actually ran; False only when the probe exhausted a
+    budget (or was refused/abandoned) WITHOUT getting an answer. That is the
+    case ``metrics()`` reports as the documented ``unknown`` instead of
+    claiming an observed failure. It is a PHASE fact, never a restatement of
+    the error text: a callable that raised keeps ``observed=True`` even though
+    the query never ran — including when the raised ``TimeoutError`` carried no
+    message and the error is spelled with the synthesized setup wording.
 
     #3143: the two phases are bounded separately. ``setup_timeout`` bounds the
     projection cold-start (``sdk._get_proj()`` — connect + ``_ensure_indexes()``,
@@ -1186,13 +1948,22 @@ def _probe_once(sdk, timeout=None,
         #       Fall back to the synthesized setup message rather than
         #       returning ``error=""``.
         msg = str(e)[:200] or f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s"
+        if isinstance(e, _WorkerBacklogFull):
+            # (a) the worker REFUSED the submission (saturated #2850 backlog):
+            # ``_setup`` never ran, so the DB was never contacted — not an
+            # observation (mirrors the query-phase refusal branch below).
+            return False, msg, False, False
         if setup.done():
-            return False, msg, _is_transient_connect_error(e)
+            # (b) the CALLABLE raised. A bare ``TimeoutError()`` gets the
+            # synthesized setup spelling, but the cold-start still FAILED and
+            # said so — an observation whatever the message says.
+            return False, msg, _is_transient_connect_error(e), True
         # Not done: the cold-start genuinely overran its allowance (the worker
-        # is abandoned, never cancelled — #2850).
-        return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False
+        # is abandoned, never cancelled — #2850). Budget exhausted with NO
+        # answer ⟹ not an observation.
+        return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False, False
     except Exception as e:  # noqa: BLE001, RUF100
-        return False, str(e)[:200], _is_transient_connect_error(e)
+        return False, str(e)[:200], _is_transient_connect_error(e), True
 
     if combined:
         # Platform-liveness shape (#1384): the query may spend only what the
@@ -1207,7 +1978,7 @@ def _probe_once(sdk, timeout=None,
             # ONE spelling per phase, and ``probe_db``'s retry uses this prefix
             # to keep the first attempt's real error when its own remainder was
             # eaten by the cold-start (#3143 review P2).
-            return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False
+            return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False, False
         slot_wait_budget = None
     else:
         # Explicit-allowance shape (#3143, the MCP health tool): ``timeout``
@@ -1245,21 +2016,22 @@ def _probe_once(sdk, timeout=None,
     if (slot_wait_budget and not query.done()
             and not query_started.wait(slot_wait_budget)):
         # The worker never BEGAN the query inside the leftover allowance, so the
-        # query never ran. That is a distinct error STRING, NOT a distinct
-        # status: ``ok=False`` still flows out to ``metrics()`` as
-        # ``status="degraded"`` + ``graph_size=0`` — #3143's shape with only
-        # the text changed (see ``_PROBE_SETUP_TIMEOUT_MSG``). Same setup
-        # spelling as a cold-start overrun (one spelling per phase). The
+        # query never ran. It is reported with the SETUP spelling — one spelling
+        # per phase — and ``observed=False`` (#3683), which is what sends the
+        # report to the documented ``unknown`` ("could not tell") instead of
+        # falsely claiming an OBSERVED failure ("degraded" means a real
+        # component failing). Same setup spelling as a cold-start overrun. The
         # abandoned submission holds no extra thread (#2850).
-        return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False
+        return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False, False
     try:
         query.result(timeout=query_budget)
-        return True, None, False
+        return True, None, False, True
     except concurrent.futures.TimeoutError as e:
         if query.done() and not query_started.is_set():
             # The worker refused/aborted the submission (saturated backlog) —
-            # its own message, never a synthesized phase timeout.
-            return False, str(e)[:200], _is_transient_connect_error(e)
+            # its own message, never a synthesized phase timeout. The query
+            # was never picked up ⟹ not an observation.
+            return False, str(e)[:200], _is_transient_connect_error(e), False
         if not query_started.is_set():
             # The submission was QUEUED and never RAN (the worker was busy for
             # the whole reachability budget), so the phase at fault is the
@@ -1267,12 +2039,13 @@ def _probe_once(sdk, timeout=None,
             # spelling, the same "one spelling per phase" rule the guard above
             # follows. Only a query that actually STARTED may claim
             # ``probe timeout after …``. Reuses the EXISTING ``query_started``
-            # event; no new machinery.
-            return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False
-        # NOT retried — a slow/hung DB would just hang again.
-        return False, f"probe timeout after {timeout}s", False
+            # event; no new machinery. Never started ⟹ not an observation.
+            return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False, False
+        # NOT retried — a slow/hung DB would just hang again. The query RAN and
+        # overran, so the DB was contacted: an observation.
+        return False, f"probe timeout after {timeout}s", False, True
     except Exception as e:  # noqa: BLE001, RUF100
-        return False, str(e)[:200], _is_transient_connect_error(e)
+        return False, str(e)[:200], _is_transient_connect_error(e), True
 
 
 def probe_db(sdk, setup_timeout=None) -> dict:
@@ -1319,9 +2092,14 @@ def probe_db(sdk, setup_timeout=None) -> dict:
     # degraded within the same sub-second window; a hung black-hole DB is a
     # worker TIMEOUT and is NEVER retried.
 
-    Returns ``{"ok": bool, "latency_ms": float, "error": str|None}`` —
-    NEVER raises, so /health can report ``status: degraded`` instead of
-    crashing the process.
+    Returns ``{"ok": bool, "observed": bool, "latency_ms": float,
+    "error": str|None}`` — NEVER raises, so /health can report
+    ``status: degraded`` instead of crashing the process. ``observed``
+    (#3683) is False when the probe never got a verdict — it exhausted its
+    budget (or was refused/abandoned) without reaching the reachability query —
+    so a caller can tell "never got to ask" from "asked and it failed"
+    WITHOUT parsing the error prose. It is reported by ``_probe_once`` as a
+    phase fact, never re-derived from the error string.
 
     #3143: ``setup_timeout`` is the projection-cold-start allowance (see
     ``_probe_once``). When it is not given, the cold-start and the query SHARE
@@ -1347,28 +2125,30 @@ def probe_db(sdk, setup_timeout=None) -> dict:
     attempt_timeout = PROBE_TIMEOUT
     total_budget = (attempt_timeout if setup_timeout is None
                     else setup_timeout + attempt_timeout)
-    ok, error, transient = _probe_once(sdk, setup_timeout=setup_timeout)
+    ok, error, transient, observed = _probe_once(sdk, setup_timeout=setup_timeout)
     if not ok and transient:
         remaining = total_budget - (time.monotonic() - start) - PROBE_RETRY_DELAY
         if remaining > 0:
             time.sleep(PROBE_RETRY_DELAY)
             # Combined shape on purpose: the retry gets what the deadline has
             # LEFT, split across both phases — not a second allowance.
-            retry_ok, retry_error, _ = _probe_once(
+            retry_ok, retry_error, _, retry_observed = _probe_once(
                 sdk, timeout=remaining, setup_timeout=None)
             if retry_ok:
-                ok, error = True, None
+                ok, error, observed = True, None, True
             elif not (retry_error or "").startswith(_PROBE_SETUP_TIMEOUT_MSG):
                 # The retry reached (and failed at) the query — a genuine
-                # verdict; take it.
-                ok, error = retry_ok, retry_error
+                # verdict; take it (and its observation bit).
+                ok, error, observed = retry_ok, retry_error, retry_observed
             # else: the remainder was too small to REDO the cold-start, so the
             # retry never observed the DB. Keep the FIRST attempt's real error
-            # instead of letting the clock artifact ("probe setup timeout
-            # after 0.01s") mask it — the `remaining > 0` guard alone does not
-            # cover the 0 < remaining < cold-start window (#3143 review).
+            # AND its ``observed`` instead of letting the clock artifact
+            # ("probe setup timeout after 0.01s") mask it — the
+            # `remaining > 0` guard alone does not cover the
+            # 0 < remaining < cold-start window (#3143 review).
     return {
         "ok": ok,
+        "observed": observed,
         "latency_ms": round((time.monotonic() - start) * 1000, 1),
         "error": error,
     }
@@ -2681,8 +3461,86 @@ def _counter_val(counter) -> int:
     return 0
 
 
+#: #3253: the budget for the ``graph_size`` taxonomy round-trip that
+#: ``metrics()`` runs after a successful probe. Five label ``COUNT`` queries on
+#: the WARM projection ``probe_db`` just built are normally sub-millisecond;
+#: this is a wide margin for a large/loaded graph, and a stall now yields a
+#: per-call ``graph_size_error`` instead of pinning the health call for as long
+#: as the server stalls. Derived from (not restated beside) ``PROBE_TIMEOUT`` so
+#: the health surfaces keep ONE latency knob.
+#:
+#: ⚠️ It is a SEPARATE phase, not a widening of the reachability gate: it
+#: bounds the COUNT, so the caller's total grows by this much (see the shape
+#: totals in ``metrics()``) but the probe's own fast-degrade budget is
+#: untouched. It is captured at IMPORT time, so monkeypatching
+#: ``PROBE_TIMEOUT`` (as the probe-budget tests do) does NOT move it.
+GRAPH_SIZE_TIMEOUT = PROBE_TIMEOUT
+
+#: Name of the DEDICATED process-lifetime daemon worker the ``graph_size``
+#: count runs on. Deliberately NOT ``_probe_worker()``: a stalled label count
+#: on the SINGLE probe slot would hold it and block the NEXT health probe's
+#: ``RETURN 1``, turning a graph_size problem into a false ``degraded`` — the
+#: #3143 symptom class. A separate pool isolates the two failure domains.
+#: Its backlog is BOUNDED but fills slowly: a wedge makes each queued call pay
+#: the full ``GRAPH_SIZE_TIMEOUT`` — still bounded, so a health call is never
+#: pinned by the stall — until the backlog reaches
+#: ``_SingleSlotWorker.MAX_BACKLOG`` (32), after which submissions fail fast
+#: with ``_WorkerBacklogFull``. The recovery seam is
+#: ``_reset_graph_size_worker()``, not the backlog.
+GRAPH_SIZE_WORKER_NAME = "tortoise-graph-size-worker"
+
+#: Prefix of the per-call ``graph_size_error`` marker's structural cases; a
+#: count that RAISES supplies its own message after the colon. Defined once so
+#: callers/tests can match a symbol instead of re-typing the literal.
+_GRAPH_SIZE_UNAVAILABLE = "graph_size not measured"
+
+
+def _bounded_graph_size(target, timeout: float) -> int:
+    """``sum(target.taxonomy().values())`` bounded by ``timeout`` (#3253).
+
+    Runs the count on the DEDICATED ``GRAPH_SIZE_WORKER_NAME`` daemon worker
+    and refuses to wait past ``timeout`` (see ``GRAPH_SIZE_TIMEOUT``). RAISES
+    on failure — the taxonomy error, or a ``TimeoutError`` naming the budget
+    when the count overruns it — so ``metrics()`` can record a per-call
+    ``graph_size_error`` instead of leaving ``graph_size: 0`` to be misread as
+    an empty graph. The worker thread is abandoned, never cancelled (CPython
+    #87185), and is a daemon, so a stalled count cannot block interpreter
+    exit. A worker wedged on a permanently stalled count is dropped with
+    ``_reset_graph_size_worker()`` (mirrors ``_reset_probe_worker()``), so
+    ``graph_size`` is measurable again without a process restart.
+    """
+    future = daemon_worker(GRAPH_SIZE_WORKER_NAME).submit(target.taxonomy)
+    try:
+        counts = future.result(timeout=timeout)
+    except concurrent.futures.TimeoutError as exc:
+        # ``concurrent.futures.TimeoutError`` IS ``builtins.TimeoutError`` on
+        # py3.12, so a ``TimeoutError`` raised INSIDE ``taxonomy()`` (e.g. a
+        # redis socket read timeout) is caught here too. ``future.done()``
+        # separates the two: a callable that already finished raised its OWN
+        # error and must keep it, not be relabelled as a budget overrun.
+        if future.done():
+            raise
+        raise TimeoutError(
+            f"graph_size count exceeded its {timeout}s budget") from exc
+    return sum(counts.values())
+
+
+def _reset_graph_size_worker() -> None:
+    """Drop the graph-size worker so the next count lazily starts a fresh one.
+
+    Mirrors ``_reset_probe_worker()``: the escape hatch for tests and for ops
+    recovery when a count is presumed wedged past any realistic budget. The
+    old (possibly wedged) thread is a daemon — it is abandoned, never joined,
+    so a permanently stalled ``taxonomy()`` cannot pin the one slot for the
+    life of the process and force a restart (#3253 review P2).
+    """
+    with _DAEMON_WORKERS_LOCK:
+        _DAEMON_WORKERS.pop(GRAPH_SIZE_WORKER_NAME, None)
+
+
 def metrics(sdk=None, setup_timeout=None) -> dict:
-    """Return {status, db, falkordb, graph_size, last_ingest, errors, uptime}.
+    """Return {status, db, falkordb, graph_size, graph_size_error, last_ingest,
+    errors, uptime}.
 
     ``db`` is the deep-check result ({ok, latency_ms, error}) added by
     #1384; ``falkordb`` keeps the legacy message form for backward compat.
@@ -2704,22 +3562,39 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
     component failing); an absent registration is an unverified handle, not
     a broken DB, so reporting degraded there is the lie #2202 removes.
 
+    #3683 (health-truthful): the SAME rule covers a probe that never reached
+    the reachability query — its shared probe slot was held for the whole
+    cold-start allowance, so interleaving A (slot taken before setup began)
+    and interleaving B (setup finished, slot taken before reachability was
+    asked) never contacted the DB. ``probe_db`` reports that as
+    ``observed=False`` and it maps to ``unknown`` here (``db.ok=None``, with
+    the setup-timeout ``error`` preserved), so "never got to ask" is
+    distinguishable in the RESULT from an observed failure instead of only in
+    prose a caller must parse. Every OTHER failure that produced a verdict — a
+    raised connect error, a query that RAN and overran — carries
+    ``observed=True`` and keeps ``degraded`` reserved for real component
+    failures. A submission REFUSED by a saturated worker backlog was never
+    asked either, so it is unobserved too (``observed=False``).
+
     ``graph_size`` is counted ONLY on a successful probe (review fix, #2202):
     a dead/hung DB must degrade fast (the bounded RETURN-1 probe — ONE
     ``PROBE_TIMEOUT`` deadline in the default shape, or ``setup_timeout +
     PROBE_TIMEOUT`` when an explicit allowance is passed) and never drag an
     extra unbounded taxonomy round-trip onto the health call, and its failure
     must not inflate the very ``errors`` field this response reports. A
-    degraded report carries graph_size 0 with the probe error. The count
-    itself (``taxonomy()``) carries NO budget of its own — it is safe only
-    because it runs after a successful ``RETURN 1`` (a reachable server is
-    expected to answer label counts promptly; that is an assumption, not a
-    measurement), so the MCP tool's total latency is ``setup_timeout +
-    PROBE_TIMEOUT`` PLUS that round-trip. If the probe SUCCEEDS but the count
-    raises, the report is ``status="ok"`` with ``graph_size 0`` and an
-    incremented ``errors`` counter — the failure is recorded, never raised, so
-    ``ok`` + 0 is deliberately indistinguishable from a genuinely empty graph
-    and callers needing certainty must read ``errors``.
+    degraded report carries graph_size 0 with the probe error.
+
+    #3253: the count itself is now BOUNDED by ``GRAPH_SIZE_TIMEOUT`` on a
+    DEDICATED daemon worker (never the shared probe slot), so the MCP tool's
+    total latency is ``setup_timeout + PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT``
+    for the explicit-allowance shape and ``PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT``
+    for the platform shape — a BOUNDED tail, never "as long as the server
+    stalls". Whether ``graph_size`` was MEASURED is reported per call through
+    ``graph_size_error``: ``None`` means it was (so a 0 is a genuinely empty
+    graph), a string means it was not (a raised count OR a budget overrun),
+    which makes the two distinguishable WITHOUT diffing the cumulative
+    ``errors`` counter. A failed count still increments ``errors`` and is
+    never raised; ``graph_size`` stays 0 for backward compatibility.
 
     #3143: ``setup_timeout`` (named to match ``probe_db``'s keyword — the
     previous ``probe_setup_timeout`` SHADOWED the module function of the same
@@ -2733,28 +3608,56 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
     """
     target = sdk if sdk is not None else _sdk
     if target is None:
-        db = {"ok": None, "latency_ms": 0.0, "error": "no_sdk_registered"}
+        db = {"ok": None, "observed": False, "latency_ms": 0.0,
+              "error": "no_sdk_registered"}
     else:
         db = probe_db(target, setup_timeout=setup_timeout)
+    # #3683: ``observed`` is the status discriminator. ``probe_db`` reports
+    # ``ok=False`` for TWO different things — a DB that was ASKED and failed,
+    # and a probe that never reached the reachability query — and only the
+    # first is an observed failure. Normalising the unobserved case to
+    # ``ok=None`` keeps the documented ``unknown ⟺ db.ok is None`` shape and
+    # leaves the three-way mapping below untouched. This affects only THIS
+    # report (the MCP tool and the standalone serve_health /health, which
+    # always answers HTTP 200); the platform liveness gates read
+    # ``probe_db``'s own ``ok`` and are deliberately unchanged.
+    if db["ok"] is False and not db.get("observed", True):
+        db = {**db, "ok": None}
     if db["ok"] is True:
         status = "ok"
     elif db["ok"] is False:
         status = "degraded"
     else:
         status = "unknown"
+    # #3253: ``graph_size_error is None`` ⟺ ``graph_size`` was MEASURED, so a
+    # caller can tell a failed count from a genuinely empty graph on the SAME
+    # call — no second call to diff the cumulative ``errors`` counter.
     graph_size = 0
-    try:
-        if target is not None and db["ok"] is True:
-            graph_size = sum(target.taxonomy().values())
-    except Exception:
-        record_error()
+    graph_size_error: str | None = None
+    if target is None:
+        graph_size_error = f"{_GRAPH_SIZE_UNAVAILABLE}: no probe target"
+    elif db["ok"] is not True:
+        graph_size_error = f"{_GRAPH_SIZE_UNAVAILABLE}: db probe failed"
+    else:
+        try:
+            graph_size = _bounded_graph_size(target, GRAPH_SIZE_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001, RUF100
+            graph_size_error = (
+                f"{_GRAPH_SIZE_UNAVAILABLE}: {str(exc)[:160] or type(exc).__name__}"
+            )
+            record_error()
     return {
         "status": status,
         "db": db,
         "falkordb": "connected" if db["ok"] is True else db["error"] or "unreachable",
         "graph_size": graph_size,
+        "graph_size_error": graph_size_error,
         "last_ingest": _last_ingest,
         "errors": _counter_val(ERROR_COUNT),
+        # #4240 review F1: a configured rebuild journal that cannot record is a
+        # real degradation (the derived graph becomes live-only), so it rides
+        # the health/metrics surface rather than a log line nothing watches.
+        "journal_write_failures": _counter_val(JOURNAL_WRITE_FAILURE_COUNT),
         "uptime": round(time.monotonic() - _start, 2),
     }
 

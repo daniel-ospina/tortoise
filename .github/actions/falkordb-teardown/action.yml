@@ -1,0 +1,14 @@
+name: falkordb-teardown
+description: >-
+  Stop the containers started by `.github/actions/falkordb-provision` (#6673).
+  Add as the LAST step of the job with `if: always()`, so a failed or
+  cancelled job does not leave a FalkorDB container holding memory on the
+  runner host. Selected by the ownership label recorded at start — never by a
+  guess at the container name.
+runs:
+  using: composite
+  steps:
+    - name: Stop FalkorDB services (#6673)
+      if: always()
+      shell: bash
+      run: bash ${{ github.action_path }}/cleanup.sh

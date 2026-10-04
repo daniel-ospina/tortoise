@@ -33,6 +33,7 @@ from tortoise.backup_sweep import (
     run_graph_purge,
     org_graph_name,
 )
+from tortoise.backup_ledger import BACKUP_OBJECT_SUFFIXES
 from tortoise.hosted_backup import MemoryStorage, list_backups, source_dialect
 from tests._embedded import _wipe_or as wipe  # noqa: E402, RUF100
 from tortoise.projection import FalkorProjection
@@ -1683,6 +1684,11 @@ def test_sweep_writes_flat_index_and_prunes_custom_flats_on_default_failure(shar
         # Pre-#2313 C5-era flat dumps: one for the DEFAULT, one for the CUSTOM
         default_bid = _seed_flat_for_sweep(store, "team_fi", _team_graph("team_fi"), 0.1)
         custom_bid = _seed_flat_for_sweep(store, "team_fi", ns, 0.1)
+        # #5062 review F4: a flat artifact that carries a ledger must not be
+        # orphaned by the custom-era cleanup — the cleanup must route through
+        # the shared object set, not a hardcoded dump+manifest pair. Pre-fix
+        # this ledger survives the drain (the assertion below fails).
+        store.upload(f"backups/{custom_bid}/ledger.json", b"{}")
 
         r1 = run_backup_sweep(db=proj.db, registry=reg, storage=store,
                               config=_config())
@@ -2397,10 +2403,14 @@ def test_purge_partial_flat_delete_failure_still_rewrites_index(
     assert ok_bid in ghosts and fail_bid in ghosts
 
 
-def test_purge_residual_still_erases_artifacts(shared_proj):
-    """#2462: when the ownership guard trips (namespace retained), the
-    tombstone's OWN artifacts (nested pool + its flats) are still erased —
-    only the namespace drop is skipped."""
+def test_purge_residual_erases_own_artifacts_preserves_ambiguous_flats(shared_proj):
+    """#2462 + MUST NEVER HAPPEN: when the ownership guard trips (namespace
+    retained), the tombstone's OWN gid-keyed artifacts (nested pool) are
+    still erased — but a legacy flat matched ONLY by ``graph_name ==
+    namespace`` is NOT provably the tombstone's when that namespace does not
+    derive from its gid: the guard exists because a LIVE graph may occupy
+    it. Ownership is ambiguous → PRESERVE and report, never delete.
+    """
     if shared_proj is None:
         return
     proj = _make_env(None, shared_proj)
@@ -2420,11 +2430,69 @@ def test_purge_residual_still_erases_artifacts(shared_proj):
         _REGISTRY_GRAPH), storage=store, org_ids=["team_x"])
     residual = [p for p in res["residuals"] if p["graph_id"] == gid]
     assert len(residual) == 1
-    # Namespace retained but the tombstone's artifacts are gone.
+    # Namespace retained; the tombstone's OWN gid-keyed nested pool is gone.
     assert other_ns in proj.db.list_graphs()
     assert store.list(f"backups/team_x/{gid}/") == []
-    assert store.list(f"backups/{bid}/") == []
+    # The ambiguity-matched flat is PRESERVED and REPORTED, never erased.
+    assert store.list(f"backups/{bid}/") != []
+    assert residual[0]["artifacts"]["ambiguous_flats"] == [bid]
+    idx = json.loads(store.download("ops/legacy-flat-index/team_x.json"))
+    assert bid in idx  # its objects survive — the index entry must too
     assert _tombstone_props(proj, gid).get("purged_residual") is True
+
+
+def test_purge_never_erases_flats_of_an_unowned_namespace(shared_proj):
+    """MUST NEVER HAPPEN: a purge for graph X must never delete an archive
+    that is not provably X's.
+
+    The ownership guard refuses to GRAPH.DELETE a namespace that does not
+    derive from the tombstone's gid — precisely because a LIVE graph may
+    occupy it (drift / name-based reuse). The legacy-flat family must
+    inherit that refusal: a flat matched ONLY by ``graph_name ==
+    namespace`` (no gid match) is not provably the tombstone's, so it is
+    preserved. Here the drifted namespace belongs to a LIVE custom graph —
+    the purge must leave that live graph's legacy archive untouched.
+    """
+    if shared_proj is None:
+        return
+    proj = _make_env(None, shared_proj)
+    store = MemoryStorage()
+    reg = proj.db.select_graph(_REGISTRY_GRAPH)
+    # A LIVE custom graph with a legacy flat archive (its index entry is
+    # attributed to it by the sweep's ACTIVE-row classification).
+    live_gid = f"g_live_{os.urandom(2).hex()}"
+    live_ns = f"org_team_x_{live_gid}"
+    reg.query(
+        "CREATE (g:Graph {id:$gid, org_id:'team_x', name:'live', "
+        "kind:'custom', namespace:$ns, status:'active'})",
+        params={"gid": live_gid, "ns": live_ns})
+    proj.db.select_graph(live_ns).query(
+        "CREATE (p:Point {id:'pt-live', content:'c', pointKind:'claim'})")
+    live_bid = f"team_x/flat_live_{os.urandom(2).hex()}"
+    store.upload(f"backups/{live_bid}/dump.enc", b"live-data")
+    store.upload(f"backups/{live_bid}/manifest.json", b"{}")
+    # A tombstone whose stored namespace drifted onto the LIVE graph's — the
+    # exact condition the ownership guard exists for.
+    dead_gid = f"g_dead_{os.urandom(2).hex()}"
+    _seed_custom_tombstone(
+        proj, "team_x", dead_gid, "dead", ns=live_ns,
+        deleted_at=(datetime.now(UTC) - timedelta(days=30)).isoformat())
+    store.upload(f"backups/team_x/{dead_gid}/runA/dump.enc", b"dead-blob")
+    store.upload(
+        "ops/legacy-flat-index/team_x.json",
+        json.dumps({live_bid: {"graph_name": live_ns,
+                               "graph_id": live_gid}}).encode())
+    res = run_graph_purge(db=proj.db, registry=reg, storage=store,
+                          org_ids=["team_x"])
+    residual = [p for p in res["residuals"] if p["graph_id"] == dead_gid]
+    assert len(residual) == 1
+    # The tombstone's OWN gid-keyed nested pool IS erased...
+    assert store.list(f"backups/team_x/{dead_gid}/") == []
+    # ...but the LIVE graph's legacy archive is NOT (not provably the
+    # tombstone's) — preserved and reported instead.
+    assert store.list(f"backups/{live_bid}/") != []
+    assert residual[0]["artifacts"]["ambiguous_flats"] == [live_bid]
+    assert live_ns in proj.db.list_graphs()  # namespace also retained
 
 
 # ── #2319 second-region mirror (env-guarded; the cron runs the sweep) ────────
@@ -2460,7 +2528,7 @@ def test_sweep_mirrors_accepted_archive_when_configured(shared_proj):
 
         prim_keys = sorted(store.list("backups/team_x/"))
         mir_keys = sorted(mirror.list("backups/team_x/"))
-        assert len(prim_keys) == 2  # dump.enc + manifest.json
+        assert len(prim_keys) == len(BACKUP_OBJECT_SUFFIXES)  # dump.enc + manifest.json + ledger.json
         assert mir_keys == prim_keys  # keys preserved byte-for-byte
         # read-back integrity: mirrored ciphertext matches the primary
         for k in prim_keys:
@@ -2512,7 +2580,7 @@ def test_sweep_mirror_failure_is_loud_and_primary_survives(shared_proj):
         assert "mirror failed" in default_res["error"]
         # the primary archive is intact (durable regardless of the mirror)
         prim_keys = sorted(store.list("backups/team_x/"))
-        assert len(prim_keys) == 2
+        assert len(prim_keys) == len(BACKUP_OBJECT_SUFFIXES)
         assert [k for k in prim_keys if k.endswith("dump.enc")]
         # and the streak is recorded so /status surfaces the breach
         assert res["graph_error_streaks"].get("team_x:default") == 1

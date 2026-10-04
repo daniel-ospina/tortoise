@@ -15,6 +15,7 @@ from tortoise.commit_schema import (
     CommitPayload,
     CommitRecordState,
     Layer1Result,
+    MAX_OPERATORS,
     MAX_PAYLOAD_POINTS,
     atomicity_violations,
     canonical_payload,
@@ -847,6 +848,73 @@ class TestE5Supersessions:
         assert a != b
         assert a != _without_supersessions(raw)
 
+
+def _supersession(i: int, **overrides) -> dict:
+    s = {"superseded": f"pt_old{i}", "supersedes_by": f"pt_new{i}",
+         "evidence": "fact-value contradiction"}
+    s.update(overrides)
+    return s
+
+
+class TestSupersessionBounds:
+    """#2243 hardening: the supersession payload surface is BOUNDED — an
+    oversized record batch is a clean 422 instead of amplifying the write
+    path's one-WARN-per-record channel. The count cap mirrors the
+    entities/operators per-type cap (MAX_OPERATORS).
+
+    ⛔ ``superseded``/``supersedes_by`` are deliberately NOT capped: they
+    carry entity NAMES, which are IDENTITY stored VERBATIM (#5370/#5390
+    removed the fold's 200-char successor cap as lossy). That decision is
+    PINNED by ``test_long_successor_name_is_valid`` below."""
+
+    def test_evidence_over_200_422(self):
+        # evidence is free text — capped at 200 mirroring Point.quote (:382),
+        # so MBs of evidence inside the body cap cannot reach the WARN path.
+        raw = _raw_payload()
+        raw["supersessions"] = [_supersession(0, evidence="e" * 201)]
+        result, _ = _check(raw)
+        assert not result.ok
+        assert result.errors["supersessions[0].evidence"]
+
+    def test_evidence_at_200_ok(self):
+        raw = _raw_payload()
+        raw["supersessions"] = [_supersession(0, evidence="e" * 200)]
+        result, model = _check(raw)
+        assert result.ok, result.errors
+        assert model is not None
+
+    def test_501_supersessions_422(self):
+        raw = _raw_payload()
+        raw["supersessions"] = [
+            _supersession(i) for i in range(MAX_OPERATORS + 1)]
+        result, _ = _check(raw)
+        assert not result.ok
+        assert any("MAX_OPERATORS" in r
+                   for r in result.errors["supersessions"])
+
+    def test_exactly_max_supersessions_ok(self):
+        # the boundary is inclusive — exactly MAX_OPERATORS records pass
+        raw = _raw_payload()
+        raw["supersessions"] = [
+            _supersession(i) for i in range(MAX_OPERATORS)]
+        result, _ = _check(raw)
+        assert result.ok, result.errors
+
+    def test_long_successor_name_is_valid(self):
+        """#5370/#5390 PIN: Object names are IDENTITY, stored verbatim — the
+        fold's 200-char cap was removed as LOSSY, so a >200-char successor
+        name MUST keep validating (the reproduced repro used a 255-char
+        name). A regression that adds max_length to supersedes_by (or
+        superseded) fails here."""
+        long_name = "gh-issue-title-" + "x" * 241  # 255 chars
+        assert len(long_name) > 200
+        raw = _raw_payload()
+        raw["supersessions"] = [_supersession(
+            0, superseded="pt_old", supersedes_by=long_name)]
+        result, model = _check(raw)
+        assert result.ok, result.errors
+        assert model is not None
+        assert model.supersessions[0].supersedes_by == long_name
 
 
 # ── L2 reconciliation + budget (DE2E-7 Sessions A/B/C) ────────────────────

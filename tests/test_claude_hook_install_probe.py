@@ -84,11 +84,18 @@ def _write_fake_source_tree(src_dir: Path, log: Path, context_rc: int) -> None:
         encoding="utf-8")
 
 
-def _run_hook(path: str, extra_env: dict | None = None) -> subprocess.CompletedProcess:
+def _run_hook(path: str, extra_env: dict | None = None,
+              home: Path | None = None) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     env["PATH"] = path
     env.pop("TORTOISE_SRC_DIR", None)
     env.pop("TORTOISE_BIN", None)
+    if home is not None:
+        # #3797: the shipped hook now writes a local ``hook-run`` observation,
+        # so a test that drives the REAL hook must never let it land in the
+        # developer's own ``$HOME`` (#3721's trap).
+        env["HOME"] = str(home)
+        env["TORTOISE_IMPORT_RECEIPT_DIR"] = str(home / "receipts")
     if extra_env:
         env.update(extra_env)
     return subprocess.run(
@@ -127,7 +134,7 @@ def test_probe_fires_when_context_fails(tmp_path):
     bindir = tmp_path / "bin"
     _write_mock_tortoise(bindir, log, context_rc=1)
 
-    r = _run_hook(_path_with_tortoise(bindir))
+    r = _run_hook(_path_with_tortoise(bindir), home=tmp_path)
 
     assert r.returncode == 0, f"hook must exit 0 (stderr: {r.stderr})"
     calls = log.read_text(encoding="utf-8")
@@ -146,7 +153,7 @@ def test_probe_fires_when_context_fails_source_fallback(tmp_path):
     _write_fake_source_tree(src, log, context_rc=1)
 
     r = _run_hook(_path_without_tortoise(),
-                  extra_env={"TORTOISE_SRC_DIR": str(src)})
+                  extra_env={"TORTOISE_SRC_DIR": str(src)}, home=tmp_path)
 
     assert r.returncode == 0, f"hook must exit 0 (stderr: {r.stderr})"
     calls = log.read_text(encoding="utf-8")
@@ -163,7 +170,7 @@ def test_digest_and_probe_both_fire_on_success(tmp_path):
     bindir = tmp_path / "bin"
     _write_mock_tortoise(bindir, log, context_rc=0)
 
-    r = _run_hook(_path_with_tortoise(bindir))
+    r = _run_hook(_path_with_tortoise(bindir), home=tmp_path)
 
     assert r.returncode == 0, f"hook must exit 0 (stderr: {r.stderr})"
     calls = log.read_text(encoding="utf-8")

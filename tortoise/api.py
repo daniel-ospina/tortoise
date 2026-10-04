@@ -230,11 +230,35 @@ class EventAPI:
                           # rides the journal and makes the replay report a
                           # model change that never happened.
                           "embedding_model", "embedding_revision",
-                          "embedding_text_hash"})
+                          "embedding_text_hash",
+                          # #5256: the `extractedFrom` read-version anchor is
+                          # server-derived (resolved from the :Source below).
+                          # Accepting it would let this non-SDK seam forge the
+                          # provenance record, and the same reason the SDK and
+                          # MCP boundaries reject it applies here.
+                          "sourceVersion", "sourceVersions",
+                          "sourceVersionTransit"})
         if _forged:
             raise ValueError(
-                f"{_forged} are server-managed embedding journal fields and "
-                "cannot be set via add_point(fields=...)")
+                f"{_forged} are server-managed journal fields (embedding "
+                "identity / provenance) and cannot be set via "
+                "add_point(fields=...)")
+        # #5256: resolve the extractedFrom read-version from the :Source on the
+        # LIVE path and put it in the payload, so the Point's OWN journaled
+        # snapshot carries it and the replay never re-reads the Source (whose
+        # in-place contentHash bump is unjournalled, #5024). `getattr` — not
+        # `self.projection.g` — is load-bearing: this producer runs in
+        # projection-less extraction lanes (`projection=None`) and against the
+        # in-memory double (no `.g`), and neither has a Source to read. There
+        # the field simply stays absent; the point itself still journals.
+        if p.get("extractedFrom"):
+            _g = getattr(self.projection, "g", None)
+            if _g is not None:
+                from .projection.edges import _source_version_transit, resolve_source_versions
+                _sv = _source_version_transit(
+                    resolve_source_versions(_g, p["extractedFrom"]))
+                if _sv is not None:
+                    p["sourceVersionTransit"] = _sv
         # P1 #49: mark events with projection_version=2 so the projection gate
         # (Task 1.6) knows to strip context from v2 events.
         self._emit("PointAdded", point=p, corrects=corrects, projection_version=2)
@@ -393,6 +417,7 @@ class EventAPI:
                      governing_agreement: str = "",
                      format: str = "markdown",
                      version: str = "",
+                     content_hash: str | None = None,
                      createdAt: str | None = None,
                      updatedAt: str | None = None,
                      corrects: str | None = None,
@@ -423,6 +448,16 @@ class EventAPI:
         (intentionally NOT in ``_DOC_RETIRED`` — the persistence IS the
         intent); ``suppress_embedding`` skips the unconditional embedding call
         (new-path docs; the legacy branch computes as today — SC4).
+        #5422: ``content_hash`` is the document's **version anchor** on the
+        extraction path — the SHA-256 of the ingested text (callers pass
+        ``tortoise.ids.content_hash(text)``). It rides the JOURNALED event so
+        the projection fold writes it replayably, and it is what gives a
+        document-derived Point a version to anchor on (ONTOLOGY §4.6: the
+        hash identifies a version; identity is ``url``). The JSONL field is
+        snake_case (``content_hash``) like every sibling on this event — the
+        projection normalizes it to ``contentHash`` on the node. Absent/None
+        is the back-compat shape — the fold PRESERVES the stored hash rather
+        than clearing it, so a metadata-only re-emit cannot wipe an anchor.
         """
         self._emit("DocumentCreated",
                    corrects=corrects,
@@ -437,6 +472,7 @@ class EventAPI:
                    governing_agreement=governing_agreement,
                    format=format,
                    version=version,
+                   content_hash=content_hash,
                    createdAt=createdAt or now_iso(),
                    updatedAt=updatedAt or now_iso(),
                    topics=topics or [],

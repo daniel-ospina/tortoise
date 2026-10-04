@@ -35,6 +35,10 @@ text, or a reader recomputing it would disagree with the node).
 from __future__ import annotations
 
 import ast
+import re
+import secrets
+import string
+import uuid
 from pathlib import Path
 
 import pytest
@@ -99,6 +103,33 @@ CASES: tuple[tuple[str, str, str], ...] = (
     # floor can silently regress. Assembled at runtime (see ``_synth``).
     ("deepseek", "deepseek_api_key",
      _synth("sk-", "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6")),
+    # #6158: Tortoise's OWN minted credentials. `tortoise/oauth.py::_new_token`
+    # is `prefix + secrets.token_urlsafe(32)` — 43 URL-SAFE chars, so the
+    # `[0-9a-f]{32}` bodies above cannot match it; the signup token is
+    # `token_hex(32)` — 64 lowercase hex, twice the API-key width. Assembled at
+    # runtime (see `_synth`) so no contiguous token appears in the source.
+    ("tortoise_oauth_access", "tortoise_oauth_access_token",
+     _synth("oat_", _fill(43))),
+    ("tortoise_oauth_refresh", "tortoise_oauth_refresh_token",
+     _synth("ort_", _fill(43))),
+    ("tortoise_oauth_client_id", "tortoise_oauth_client_id",
+     _synth("ct_", _fill(43))),
+    ("tortoise_oauth_client_secret", "tortoise_oauth_client_secret",
+     _synth("cs_", _fill(43))),
+    ("tortoise_signup", "tortoise_signup_token",
+     _synth("st_", "a1b2c3d4e5f6a7b8" * 4)),
+    # #6158 review: the product LOWERCASES a user-entered signup token before its
+    # format gate (`hosted_api.py`: `signup_token.lower()` then
+    # `_SIGNUP_TOKEN_RE`), explicitly so an uppercase-hex paste resolves to the
+    # same org. So this uppercase form is a VALID recovery credential, and a
+    # lowercase-only rule stored it verbatim.
+    ("tortoise_signup_uppercase", "tortoise_signup_token",
+     _synth("ST_", "A1B2C3D4E5F6A7B8" * 4)),
+    # #6158 review: the tenant API key is the product's PRIMARY credential and
+    # the first cut of this PR had no rule for it at all — `uuid4().hex` is not
+    # a `token_hex`/`token_urlsafe` call, so the guard could not see it either.
+    ("tortoise_api_key", "tortoise_api_key",
+     _synth("tt_", "a1b2c3d4e5f6a7b8" * 2)),
     ("jev", "jev_api_key", "jv_live_" + _fill(24)),
     ("github_classic", "github_token", "ghp_" + _fill(36)),
     ("github_fine_grained", "github_token", "github_pat_" + _fill(60)),
@@ -357,6 +388,396 @@ def test_an_over_long_turn_matches_between_client_and_server(sdk, monkeypatch):
         "the whole credential survived the cut, so this test proves nothing")
 
 
+@pytest.mark.parametrize("secret,kind,direction", [
+    # SHRINKS: 72 chars -> 25 (`[REDACTED:openai_api_key]`) — the old test's
+    # only shape, which made the post-scrub re-clip a no-op and hid the defect.
+    ("sk-proj-" + _fill(64), "openai_api_key", "shrinking"),
+    # EXPANDS: 20 chars -> 28 (`[REDACTED:aws_access_key_id]`) — the P1 shape.
+    ("AKIA" + "ABCDEFGHIJKLMNOP", "aws_access_key_id", "expanding"),
+    # EXPANDS: 30 chars -> 32 (`[REDACTED:stripe_webhook_secret]`) — a second
+    # expanding shape alongside aws, so the direction is pinned twice.
+    ("whsec_" + _fill(24), "stripe_webhook_secret", "expanding-whsec"),
+])
+def test_a_credential_in_a_truncated_turn_is_redacted_and_the_cut_is_marked(
+        sdk, monkeypatch, secret, kind, direction):
+    """#4911 and #4897 COMPOSE: a turn that is both cut AND carrying a
+    credential must (a) still have the credential redacted and counted, and
+    (b) still carry the truncation marker — neither control may eat the other.
+
+    The cut and the scrub are separate passes over the same window; a marker
+    appended after the cut must not be removed by the scrubber, and the
+    scrubber's replacement must not sit where the marker's length reservation
+    assumed text — so the two markers coexist and the count is still recorded.
+
+    ⛔ BOTH redaction DIRECTIONS are pinned. A shrinking replacement (the
+    original shape only) makes a post-scrub re-clip a silent no-op, so the
+    marker could report the SCRUBBED length (5,008 for a 6,927-char turn) and
+    this test still passed. The marker's length is the turn as POSTed, either
+    way.
+    """
+    _keyless(monkeypatch)
+    from tortoise.sdk import _CAPTURE_TRUNCATION_SENTINEL, _CAPTURE_TURN_CAP
+    # The credential sits INSIDE the kept window; the turn is long enough that
+    # a marker must also be appended.
+    content = f"My key is {secret} and here is why. " + "context " * 800
+    assert len(content) > _CAPTURE_TURN_CAP
+    sid = f"sess-4897-4911-compose-{direction}"
+    res = sdk.capture_session([{"role": "user", "content": content}],
+                              session_id=sid)
+    stored, _hash = _stored(sdk, sid)[f"{sid}_t0"]
+    assert secret not in stored, "the credential survived the combined cut+scrub"
+    assert f"[REDACTED:{kind}]" in stored, (
+        "the credential must be MARKED redacted, not silently dropped")
+    assert _CAPTURE_TRUNCATION_SENTINEL in stored, (
+        "the truncation marker must survive alongside the redaction marker")
+    assert f"original length {len(content)}" in stored, (
+        "the marker's true length must be the turn as POSTed (pre-scrub)")
+    assert res["capture_redactions"] == 1
+
+
+def test_a_dangling_pem_header_past_the_cut_still_carries_the_marker(
+        sdk, monkeypatch):
+    """#4897 round-2 P2: a fail-closed PEM redaction must not eat the marker.
+
+    The ``private_key`` rule's ``\\Z`` branch consumes from a dangling header to
+    the END OF THE TEXT, so when the header sits inside the window and its
+    ``-----END`` falls past the cut, the scrubber replaced everything after the
+    header — the truncation marker included — and a cut turn was stored UNMARKED.
+    Reproduced end-to-end: an 11,263-char turn stored as 4,823 chars with no
+    sentinel. Every such cut the fuzz below produced carried a PEM. A cut
+    turn with no marker is exactly the silent truncation #4897 exists to end.
+    """
+    _keyless(monkeypatch)
+    from tortoise.sdk import _CAPTURE_TRUNCATION_SENTINEL, _CAPTURE_TURN_CAP
+    content = ("p" * 4800 + " " + _pem("RSA PRIVATE KEY") + "\n"
+               + "MIIEowIBAAKCAQEA" * 400 + "\n"
+               + _pem_end("RSA PRIVATE KEY"))
+    assert len(content) > _CAPTURE_TURN_CAP
+    sid = "sess-4897-pem-marker"
+    sdk.capture_session([{"role": "user", "content": content}], session_id=sid)
+    stored, _hash = _stored(sdk, sid)[f"{sid}_t0"]
+    assert "[REDACTED:private_key]" in stored, (
+        "the dangling key header must still be redacted")
+    assert _CAPTURE_TRUNCATION_SENTINEL in stored, (
+        "a fail-closed PEM redaction ate the truncation marker — a cut turn is "
+        "stored UNMARKED, which is the silent truncation #4897 exists to end")
+    assert f"original length {len(content)} chars]" in stored, (
+        "the re-attached marker must carry the turn's TRUE length")
+
+
+def test_the_truncation_marker_is_never_in_the_scanned_text(monkeypatch):
+    """The GENERAL rule (#4897 round 2), not just the PEM instance.
+
+    Any redaction whose body can run to end-of-text can consume the marker, so
+    ``_redact_turn_contents`` splits the marker OFF before calling
+    ``redact_secrets``. This proves the general property directly — by capturing
+    every string the scrubber is handed — so it holds for a ``\\Z`` rule added
+    in FUTURE without needing a per-rule test. (Today only ``private_key``
+    carries a ``\\Z`` branch; see
+    ``test_only_the_private_key_rule_can_consume_the_text_tail``.)
+    """
+    from tortoise import sdk as sdk_mod
+    from tortoise.sdk import (
+        _CAPTURE_TRUNCATION_SENTINEL,
+        _capture_turn_window,
+        _redact_turn_contents,
+    )
+    content = ("p" * 4800 + " " + _pem("RSA PRIVATE KEY") + "\n"
+               + "MIIEowIBAAKCAQEA" * 400)
+    seen: list[str] = []
+    real = sdk_mod.redact_secrets
+
+    def spy(text: str):
+        seen.append(text)
+        return real(text)
+
+    monkeypatch.setattr(sdk_mod, "redact_secrets", spy)
+    # #4897 round 5: the window (the sole clipper) runs FIRST on the raw text,
+    # so the marker the redactor must not scan is the one the window wrote.
+    out, _counts = _redact_turn_contents(
+        _capture_turn_window([{"role": "user", "content": content}]))
+    assert seen, "the scrubber was never called — the fixture proves nothing"
+    assert all(_CAPTURE_TRUNCATION_SENTINEL not in t for t in seen), (
+        "the truncation marker reached redact_secrets — a fail-closed rule "
+        "(any branch matching to \\Z) can then consume it")
+    assert _CAPTURE_TRUNCATION_SENTINEL in out[0]["content"]
+
+
+def test_only_the_private_key_rule_can_consume_the_text_tail():
+    """Which rules CAN eat the marker: exactly the end-of-text branches.
+
+    Enumerated from the pattern sources so a NEW ``\\Z``/``$``-to-end rule makes
+    this test name it rather than passing silently. Every listed rule is safe by
+    construction now — the marker is not part of its input (#4897 round 2) —
+    which is what makes the list a control rather than a to-do.
+    """
+    from tortoise.security import _SECRET_SHAPES
+    tail_consumers = [
+        kind for kind, pattern, _repl in _SECRET_SHAPES
+        if r"\Z" in pattern.pattern or pattern.pattern.rstrip().endswith("$")
+    ]
+    assert tail_consumers == ["private_key"], (
+        "a new rule gained an end-of-text branch; the marker is safe (it is "
+        "never scanned) but this list must name the rule so the guarantee is "
+        "documented: " + repr(tail_consumers))
+
+
+@pytest.mark.parametrize(
+    "case,kind,value", CASES, ids=[c for c, _k, _v in CASES])
+def test_every_credential_kind_still_carries_the_truncation_marker(
+        case, kind, value):
+    """The generalisation, per kind: the marker survives EVERY redaction rule.
+
+    Each sample sits INSIDE the kept window on a turn long enough to be cut, so
+    the scrubber runs over it and the marker must still be present with the true
+    pre-redaction length. This is the invariant the single PEM fixture proves
+    for one rule, stated for the whole table.
+    """
+    from tortoise.sdk import (
+        _CAPTURE_TRUNCATION_SENTINEL,
+        _capture_turn_window,
+        _redact_turn_contents,
+    )
+    content = "filler. " * 300 + value + " tail " * 900
+    assert len(content) > 5000, case
+    windowed = _capture_turn_window([{"role": "user", "content": content}])
+    out, counts = _redact_turn_contents(windowed)
+    stored = out[0]["content"]
+    assert _CAPTURE_TRUNCATION_SENTINEL in stored, (
+        f"{case}: the truncation marker did not survive the {kind} scrub")
+    assert f"original length {len(content)} chars]" in stored, case
+    assert value not in stored, f"{case}: the {kind} value survived"
+    assert counts.get(kind), f"{case}: {kind} not counted"
+
+
+def test_every_cut_turn_is_stored_with_a_marker_fuzz():
+    """Deterministic fuzz over >cap turns with PEM fragments (#4897 round 2).
+
+    The shape that found the bug: a turn over the cap that contains a PEM
+    header whose ``-----END`` is absent or falls past the cut (i.e. pasting a
+    real key). Before the fix, cuts on a turn shaped like this stored NO marker.
+    Every cut must now carry the marker, with the true pre-redaction length.
+    """
+    import random
+
+    from tortoise.sdk import (
+        _CAPTURE_TRUNCATION_SENTINEL,
+        _CAPTURE_TURN_CAP,
+        _capture_turn_texts_with_redactions,
+        _capture_turn_window,
+    )
+    alnum = _ALNUM
+
+    def fill(n: int) -> str:
+        return (alnum * (n // len(alnum) + 1))[:n]
+
+    pems = (
+        (_pem("RSA PRIVATE KEY"), _pem_end("RSA PRIVATE KEY")),
+        (_pem("OPENSSH PRIVATE KEY"), _pem_end("OPENSSH PRIVATE KEY")),
+        (_pem("EC PRIVATE KEY"), _pem_end("EC PRIVATE KEY")),
+        (_pem("PGP PRIVATE KEY BLOCK"), _pem_end("PGP PRIVATE KEY BLOCK")),
+        (_synth("-----begin rsa private key-----"),
+         _synth("-----end rsa private key-----")),
+    )
+    rng = random.Random(4897)
+    checked = 0
+    for _ in range(300):
+        total = rng.randint(_CAPTURE_TURN_CAP + 1, 20000)
+        header, end = rng.choice(pems)
+        body = fill(rng.randint(10, 400)) * rng.randint(1, 60)
+        if rng.random() < 0.5:
+            pre = fill(rng.randint(0, total // 2))
+            mid = header + "\n" + body
+            tail = ("\n" + end) if rng.random() < 0.5 else ""
+            post = fill(max(0, total - len(pre) - len(mid) - len(tail)))
+            content = pre + mid + tail + post
+        else:
+            content = fill(total)
+        checked += 1
+        # #4897 round 5: the WINDOW is the sole clipper; the stored-text sink
+        # is redaction-only, so a raw over-cap turn must be windowed first.
+        texts, _counts = _capture_turn_texts_with_redactions(
+            _capture_turn_window([{"role": "user", "content": content}]))
+        stored = texts[0][len("[user] "):]
+        assert _CAPTURE_TRUNCATION_SENTINEL in stored, (
+            "a cut turn was stored with NO marker (the #4897 defect): "
+            f"{content[:60]!r}...")
+        assert f"original length {len(content)} chars]" in stored, (
+            "the marker's total is not the turn's true pre-redaction length")
+    assert checked == 300
+
+
+def test_capped_reapplication_preserves_the_true_total():
+    """#4897 round-5 P3: re-applying the redactor preserves the true total.
+
+    The redactor no longer clips at all (``_capture_turn_window`` is the sole
+    owner of the cap), so re-applying it to a body an EXPANDING redaction has
+    already pushed past the cap must be byte-identical: the marker is split off
+    before the scan and re-attached verbatim.
+
+    This is the reviewer's reproduction — ``("xapp-1-A-1-Z " * 600)[:6000]``,
+    the most-expanding rule (slack ``xapp-``, 12 in → 22 out, space-separated):
+    pass 1 windows to 5,000 (marker reports the true total 6,000), then the
+    scrub grows the STORED turn to **8,810** chars — 1.762x on the 5,000-char
+    window. (The 1.768x max-density figure recorded on ``_redact_turn_contents``
+    is the MARKER-FREE ratio, 8,770 / 4,960 — a different quantity; do not
+    conflate the two. Both integers were off by one until review round 14: the
+    marker's LEADING SPACE stays in the body, so the marker-free body is 4,960,
+    not 4,959, and its scrubbed length is 8,770.)
+
+    This test binds the NEW invariant — the redactor is REDACTION-ONLY, so
+    re-applying it to its own output is byte-identical and can never recount a
+    span. It would go RED if a production-default ``cap`` were reintroduced into
+    ``redact_turn_contents`` (it would re-clip and rewrite the total).
+
+    ⚠️ It is NOT, however, a regression test for the historical round-4 P1. That
+    P1 lived in ``cd662b370``'s ``cap=...`` call path, and this test calls the
+    redactor with a SINGLE positional argument — under the old signature ``cap``
+    defaulted to ``None``, so the re-clip branch never fired and the test would
+    have PASSED at ``cd662b370`` (verified by running this fixture against the
+    old function body: pass 2 byte-identical). The historical P1 is covered by
+    the ABSENCE of the parameter plus
+    ``test_the_redactor_is_redaction_only_and_never_clips``. The old test this
+    replaced was separately vacuous: its pass-1 body was 4,968 chars, so it
+    never entered the re-clip branch, and it asserted ``len(body) > 5000`` on
+    the whole content rather than the marker-free quantity the code tested.
+    """
+    from tortoise.sdk import (
+        _CAPTURE_TRUNCATION_SENTINEL,
+        _capture_turn_window,
+        _redact_turn_contents,
+    )
+    raw = ("xapp-1-A-1-Z " * 600)[:6000]
+    assert len(raw) == 6000
+    once, counts1 = _redact_turn_contents(
+        _capture_turn_window([{"role": "user", "content": raw}]))
+    body = once[0]["content"]
+    assert counts1 == {"slack_token": 381}, counts1
+    assert len(body) == 8810, (
+        "the expanding redaction must push the windowed body past the cap")
+    assert f"original length {len(raw)} chars]" in body, (
+        "the marker must report the TRUE pre-redaction total")
+    assert _CAPTURE_TRUNCATION_SENTINEL in body
+    # Re-application is REDACTION-ONLY: no re-clip, no recounted span, and the
+    # stored turn is byte-for-byte unchanged.
+    twice, counts2 = _redact_turn_contents([{"role": "user", "content": body}])
+    assert twice[0]["content"] == body, "re-application changed the stored turn"
+    assert counts2 == {}, "re-application recounted a redaction"
+    assert f"original length {len(body)} chars]" not in twice[0]["content"], (
+        "the false post-redaction total was written on re-application")
+
+
+def test_the_redactor_is_redaction_only_and_never_clips():
+    """#4897 round 5: the cap lives in ONE place — ``_capture_turn_window``.
+
+    Five rounds of patches lived in ``_redact_turn_contents`` because it did two
+    jobs (clip AND redact), and the clip had to discriminate a marker this
+    module wrote from marker-shaped caller text — not decidable in-band. This
+    pins the separation directly: given a raw over-cap conversation the redactor
+    returns a REDACTED but UNCLIPPED body (no marker trust, no re-clip, no cap
+    decided here), while the window is what bounds it. A future change that
+    reintroduces clipping into the redactor reds this.
+    """
+    from tortoise.sdk import (
+        _CAPTURE_TURN_CAP,
+        _capture_turn_window,
+        _redact_turn_contents,
+    )
+    raw = "A" * (_CAPTURE_TURN_CAP + 1000)
+    out, _counts = _redact_turn_contents([{"role": "user", "content": raw}])
+    assert out[0]["content"] == raw, (
+        "the redactor clipped — the cap must be decided ONLY by the window, on "
+        "raw text, exactly once")
+    assert len(
+        _capture_turn_window([{"role": "user", "content": raw}])[0]["content"]
+    ) <= _CAPTURE_TURN_CAP
+
+
+def test_the_window_caps_by_total_length_not_by_a_marker_free_body():
+    """#4897 round-5 P2: the cap tests the TOTAL length, marker included.
+
+    ``_TRUNCATION_MARKER_FULL_RE`` accepts an ``original length \\d+`` run of ANY
+    width, so a caller can append a marker-shaped tail whose digit run is six
+    figures. If the window tested a marker-free BODY instead of the total, this
+    content (101 chars + a 100,036-char "marker") would be stored at 100,137
+    chars — an unbounded turn in the turn store and the session ``:Source``
+    sink. ``_clip_capture_turn_content`` tests the TOTAL, so the turn is a cut
+    turn whose fresh marker reports the length actually seen.
+    """
+    from tortoise.sdk import (
+        _CAPTURE_TRUNCATION_SENTINEL,
+        _CAPTURE_TURN_CAP,
+        _capture_turn_texts_with_redactions,
+        _capture_turn_window,
+    )
+    content = ("A" * 100 + " …[truncated: original length "
+               + "9" * 100_000 + " chars]")
+    assert len(content) > _CAPTURE_TURN_CAP * 10
+    windowed = _capture_turn_window([{"role": "user", "content": content}])
+    body = windowed[0]["content"]
+    assert len(body) <= _CAPTURE_TURN_CAP, len(body)
+    assert _CAPTURE_TRUNCATION_SENTINEL in body
+    assert f"original length {len(content)} chars]" in body, (
+        "the fresh marker must report the total actually seen")
+    # The stored-text sink (redaction-only over the window) preserves the bound.
+    texts, _counts = _capture_turn_texts_with_redactions(windowed)
+    assert len(texts[0][len("[user] "):]) <= _CAPTURE_TURN_CAP
+
+
+def test_rfind_not_find_so_an_earlier_lookalike_cannot_hide_the_marker():
+    """#4897 round-3 P3/M10: ``rfind`` is load-bearing, and was untested.
+
+    ``_split_truncation_marker`` must find the marker THIS module appended — the
+    LAST sentinel in the text. If it used ``content.find`` it would take an
+    EARLIER sentinel-lookalike as the split point; the tail would then no longer
+    ``fullmatch`` a marker, the split would return the whole content UNSPLIT,
+    and the real trailing marker would enter the scan, where ``private_key``'s
+    fail-closed ``\\Z`` branch eats it. The cut turn is stored UNMARKED — the
+    round-2 P2 returns. The lookalike is ordinary user prose, so this is a body
+    any client can send.
+    """
+    from tortoise.sdk import _CAPTURE_TRUNCATION_SENTINEL as S
+    # Inside the cap, so the round-3 pre-scan clip is NOT the behaviour under
+    # test — only which sentinel the split picks.
+    content = (
+        "user pasted earlier: " + S + " original length 1 chars] "
+        + "x" * 200 + " " + _pem("RSA PRIVATE KEY") + "\n"
+        + "MIIEowIBAAKCAQEA" * 40 + " "
+        + S + " original length 1234 chars]")
+    assert len(content) <= 5000, "keep the clip out of this fixture"
+    out, _counts = _redact_turn_contents(
+        [{"role": "user", "content": content}])
+    stored = out[0]["content"]
+    assert "original length 1234 chars]" in stored, (
+        "an earlier sentinel-lookalike moved the split point: the real marker "
+        "entered the scan and a fail-closed rule ate it")
+
+
+def test_a_marker_lookalike_cannot_hide_a_credential_tail():
+    """#4897 round-3 P3/M11: ``fullmatch`` is load-bearing, and was untested.
+
+    ``_split_truncation_marker`` returns the ENTIRE tail from the sentinel to
+    end-of-text as the marker. If recognition used ``search`` instead of
+    ``fullmatch``, a marker-shaped PREFIX followed by a credential would be
+    classified as a marker and re-attached VERBATIM — the tail is never scanned,
+    so the credential is STORED. ``fullmatch`` means a tail with anything after
+    the marker is not a marker at all, and the credential stays in the scanned
+    body. Security-relevant: ``search`` leaks.
+    """
+    from tortoise.sdk import _CAPTURE_TRUNCATION_SENTINEL as S
+    key = "AKIA" + "ABCDEFGHIJKLMNOP"          # aws_access_key_id, 20 chars
+    content = "filler. " * 50 + S + " original length 5 chars] " + key
+    assert len(content) <= 5000, "keep the clip out of this fixture"
+    out, counts = _redact_turn_contents(
+        [{"role": "user", "content": content}])
+    assert key not in out[0]["content"], (
+        "a credential AFTER a marker-shaped prefix was re-attached verbatim — "
+        "the tail would then never be scanned")
+    assert counts.get("aws_access_key_id") == 1, (
+        "the credential under a marker lookalike must be COUNTED, not just "
+        "absent by accident")
+
+
 def test_the_source_sink_scans_a_bounded_window(sdk, monkeypatch):
     """The Source scrub is bounded, and a non-str content cannot dodge it.
 
@@ -376,14 +797,35 @@ def test_the_source_sink_scans_a_bounded_window(sdk, monkeypatch):
     utterance, so it IS the summary — which makes the marker check load-bearing.
     """
     _keyless(monkeypatch)
+    # #4897 round 6: capture every string the scrubber is handed on the Source
+    # path so the WINDOW itself is asserted, not just the absence of one value.
+    # Row (b)'s absence assertion is vacuous on its own: dropping
+    # ``_capture_turn_window`` from ``_materialize_session_source`` still scans
+    # the whole raw turn (``len(raw)`` below) and still redacts ``beyond``, so
+    # the test stayed GREEN under that mutation (measured). The scan-length
+    # bound is what binds the control.
+    from tortoise import sdk as sdk_mod
+    from tortoise.sdk import _CAPTURE_TURN_CAP
+
+    scanned: list[int] = []
+    _real_redact = sdk_mod.redact_secrets
+
+    def _spy(text: str):
+        scanned.append(len(text))
+        return _real_redact(text)
+
+    monkeypatch.setattr(sdk_mod, "redact_secrets", _spy)
     secret = "sk_live_" + _fill(24)
     beyond = "sk-proj-" + _fill(64)
     sid = "sess-4911-source-bound"
     # A turn far larger than the stored window (its credential sits past the
     # 5,000-char cap), plus a structurally odd first turn carrying the secret.
+    # The size is bound to a NAME so the prose and the failure message below can
+    # reference it instead of a hand-copied number that drifts (round 6).
+    raw = "pad " * 200_000 + beyond
     sdk.capture_session(
         [{"role": "user", "content": {"note": f"my key is {secret}"}},
-         {"role": "user", "content": "pad " * 200_000 + beyond}],
+         {"role": "user", "content": raw}],
         session_id=sid)
 
     rows = sdk._get_proj().g.query(
@@ -404,6 +846,14 @@ def test_the_source_sink_scans_a_bounded_window(sdk, monkeypatch):
     #     credential cannot reach this sink (the documented residual is a
     #     PREFIX of a value cut mid-body in the stored TURN, not this sink).
     assert beyond not in blob, blob
+    # (c) the WINDOW is load-bearing: every string the Source path scans is
+    #     bounded by the cap. Without this assertion the mutation named above is
+    #     invisible — and the sink is cheap *here* only because the cap holds.
+    assert scanned, "the capture path never reached redact_secrets"
+    assert max(scanned) <= _CAPTURE_TURN_CAP, (
+        "the Source sink scanned an UNBOUNDED window — max scanned "
+        f"{max(scanned)} chars vs the {_CAPTURE_TURN_CAP}-char cap; the "
+        f"{len(raw)}-char raw turn should have been windowed before the scan")
 
 
 # ── AC3: count recorded per session AND surfaced ───────────────────────────
@@ -697,38 +1147,41 @@ def test_anchored_shapes_do_not_redact_prose():
         assert redact_secrets(bare) == (bare, {})
 
 
-def test_a_capped_scan_truncates_the_text_it_returns():
-    """``cap`` must bound the RESULT, not just the text that was scanned.
+def test_the_window_bounds_the_text_before_the_scan():
+    """The window bounds the RETURNED text, and the redactor only redacts.
 
-    The bug this pins: with the credential past the cap, the scanned prefix
-    matched nothing and the ORIGINAL uncapped turn was returned — so the
-    credential was forwarded un-scanned to whoever asked for a capped scan
-    (at the ``commit_session`` call site, straight into the extractor prompt
-    and off to the provider). A cap that does not cap is a leak, not a
-    performance knob.
+    #4897 round 5 moved the cap to ``_capture_turn_window`` (the sole clipper,
+    applied to RAW text) and made ``_redact_turn_contents`` redaction-only. The
+    property that still matters is the one the old test protected: a credential
+    past the window is never returned (the window cut it before the scan) and a
+    credential inside the window is redacted and counted. A cap that does not
+    cap is a leak, not a performance knob.
     """
+    from tortoise.sdk import _capture_turn_window
     secret = "sk-proj-" + _fill(64)
     long_turn = "x" * 5500 + " " + secret + " tail"
     out, counts = _redact_turn_contents(
-        [{"role": "user", "content": long_turn}], cap=5000)
-    assert len(out[0]["content"]) <= 5000, "the cap did not bound the result"
+        _capture_turn_window([{"role": "user", "content": long_turn}]))
+    assert len(out[0]["content"]) <= 5000, "the window did not bound the result"
     assert secret not in out[0]["content"]
     assert counts == {}
-    # ... for EVERY input type, not just str: a non-str turn is coerced for the
-    # scan, so the cut has to bound the coerced result too (a 100k-item list
-    # came back whole, with the credential still in it).
+    # ... for EVERY input type, not just str: a non-str turn is coerced and cut
+    # by the window too (a 100k-item list came back whole, with the credential
+    # still in it, before the coercion was added).
     out, counts = _redact_turn_contents(
-        [{"role": "user", "content": ["z"] * 100_000 + [secret]}], cap=5000)
+        _capture_turn_window(
+            [{"role": "user", "content": ["z"] * 100_000 + [secret]}]))
     assert isinstance(out[0]["content"], str)
     assert len(out[0]["content"]) <= 5000
     assert secret not in out[0]["content"]
     # A turn that needs no cut is passed through untouched (same object).
     turn = {"role": "user", "content": 5}
-    out, counts = _redact_turn_contents([turn], cap=10)
+    out, counts = _redact_turn_contents([turn])
     assert out[0] is turn and counts == {}
     # A match inside the window still redacts and still counts.
     out, counts = _redact_turn_contents(
-        [{"role": "user", "content": secret + "\n" + "x" * 6000}], cap=5000)
+        _capture_turn_window(
+            [{"role": "user", "content": secret + "\n" + "x" * 6000}]))
     assert secret not in out[0]["content"]
     assert counts == {"openai_api_key": 1}
 
@@ -852,3 +1305,649 @@ def test_redaction_is_idempotent_under_the_capture_double_pass():
     # re-match, so the writer's recomputation cannot inflate the recorded count.
     assert c2 == {}
     assert redact_secrets(once)[0].count("[REDACTED:") == 2
+
+
+# ── #6158: the rule list is tied to the MINT SITES, not to memory ───────────
+#
+# The root cause of #6158 is not the three missing prefixes — it is that
+# `_SECRET_SHAPES` has NO exhaustiveness guard: every rule so far was added
+# AFTER the fact, by hand, in response to a finding, so the next family added to
+# `oauth.py`/`hosted_api.py` re-opens the gap silently. These tests convert
+# "someone remembers" into a red test.
+
+_MINT_MODULES: tuple[str, ...] = (
+    "tortoise/oauth.py",       # oat_, ort_, ct_, cs_
+    "tortoise/hosted_api.py",  # st_, AND tt_/tk_ — the tenant API key
+    "tortoise/sdk.py",         # tt_/tk_ — the SDK mints the same key
+)
+
+#: The prefixes the product mints as CREDENTIALS — each must have a rule.
+_CREDENTIAL_PREFIXES = ("tt_", "tk_", "oat_", "ort_", "ct_", "cs_", "st_")
+
+#: The full CHARACTER CLASS each family's body is drawn from — EVERY member, not
+#: a representative sample. The probe below is built from this, so a class that
+#: loses one member must go red: with a 6-character sample, dropping a single
+#: subcategory (`q`) slipped past 48% of runs (found in review).
+#: ⛔ `_has_a_rule` is also checked against a DETERMINISTIC body built from this,
+#: because a body taken from the generator is a SAMPLE. Measured in review: over
+#: 2,000 runs, narrowing the url-safe class to alnum was missed ~26% of the time
+#: (a random 43-char `token_urlsafe` body contains no `-`/`_` about that often),
+#: and the CASES rows use `_fill(43)` over alphanumerics, so the shipped suite
+#: pinned that alphabet nowhere.
+_BODY_ALPHABETS = {
+    "tt_": "0123456789abcdef",
+    "tk_": "0123456789abcdef",
+    "st_": "0123456789abcdef",
+    # `-_` FIRST, not last: the probe takes the FIRST `width` characters of the
+    # repeated alphabet, and `width` is 43 — so with the specials appended they
+    # fell outside the window and the alnum narrowing still slipped through. The
+    # classes are `[A-Za-z0-9_-]` (64 members) and this string is all 64.
+    "oat_": "-_" + string.ascii_letters + string.digits,
+    "ort_": "-_" + string.ascii_letters + string.digits,
+    "ct_": "-_" + string.ascii_letters + string.digits,
+    "cs_": "-_" + string.ascii_letters + string.digits,
+}
+
+
+def _alphabet_probes(prefix: str, width: int) -> tuple[str, ...]:
+    """Bodies whose UNION covers every member of the family's class.
+
+    ⛔ ONE BODY IS NOT ENOUGH. The url-safe class has 64 members and the url-safe
+    width is 43, so a single 43-character body covers only the first 43 — and a
+    class that dropped one of the remaining 21 (`0123456789PQRSTUVWXYZ`) escaped
+    the guard about half the time. Rotating the start point fills the union.
+    """
+    alphabet = _BODY_ALPHABETS[prefix]
+    if width >= len(alphabet):
+        return ((alphabet * (width // len(alphabet) + 1))[:width],)
+    count = -(-len(alphabet) // width)  # ceil
+    return tuple((alphabet[i * width:] + alphabet[:i * width])[:width]
+                 for i in range(count))
+
+#: The shortest run of a body that counts as a surviving fragment. A rule that
+#: swallows only part of a value leaves the rest in cleartext, and a surviving
+#: run this long is a leak even though the WHOLE body string is no longer
+#: present.
+#: ⚠️ This is a THRESHOLD, not a proof of absence: a rule can still leave up to
+#: `_LEAK_WINDOW - 1` characters of a body behind and pass. Stated here because
+#: the assertion that uses it reads as "nothing survives", which would over-claim.
+_LEAK_WINDOW = 8
+
+#: Randomness-minted prefixed values that are NOT credentials, with the reason.
+#: The scanner cannot tell a secret from an opaque identifier — both are drawn
+#: from `uuid4().hex` — so those it finds must be either RULED or declared here.
+#: Neither path is allowed to be silent.
+_NON_SECRET_PREFIXES = {
+    "session_": "opaque session identifier (uuid4 hex, truncated to 12)",
+    "g_": "graph identifier (uuid4 hex truncated to 16, or a sha256 digest)",
+}
+
+def _new_token_body() -> str:
+    """The body ``tortoise/oauth.py::_new_token`` appends to every prefix.
+
+    ``_new_token("")`` is exactly ``secrets.token_urlsafe(32)`` — the prefix is
+    concatenated, so an empty one yields the body alone. Read rather than typed so
+    a change in that helper is a test failure, not a silent staleness.
+    """
+    from tortoise.oauth import _new_token
+
+    return _new_token("")
+
+
+def test_the_cs_rule_leaves_STRIPE_checkout_ids_alone():
+    """`cs_` is a Tortoise OAuth client secret; Stripe uses the same prefix.
+
+    `cs_test_...`/`cs_live_...` are documented Stripe checkout-session
+    identifiers, not credentials, so the rule negates the SEGMENT. Pinned
+    because that lookahead is the whole reason the rule is safe to add: without
+    this test, deleting it reddens nothing (found in review).
+    """
+    for stripe_id in ("cs_test_" + "a1B2c3D4e5F6" * 4,
+                      "cs_live_" + "a1B2c3D4e5F6" * 4):
+        out, counts = redact_secrets("id=" + stripe_id + " end")
+        assert not counts, (stripe_id[:8], counts)
+        assert stripe_id in out
+    real = "cs_" + secrets.token_urlsafe(32)
+    out, counts = redact_secrets("secret=" + real + " end")
+    assert counts.get("tortoise_oauth_client_secret"), counts
+    assert real not in out
+
+
+def _apply_slice(node: ast.AST, parent: ast.AST | None, body: str) -> str:
+    """Truncate `body` when `node` is the value of a constant `[:N]` subscript.
+
+    The slice must wrap the HELPER EXPRESSION ITSELF. A slice anywhere else in
+    the tail belongs to a different value: `f"zz_{d['k'][:5] + uuid4().hex}"`
+    mints 32 hex, and reading the unrelated `[:5]` measured 5 — certifying a rule
+    that left the real value in cleartext (found in review).
+    """
+    if (isinstance(parent, ast.Subscript) and parent.value is node
+            and isinstance(parent.slice, ast.Slice)):
+        upper = parent.slice.upper
+        if isinstance(upper, ast.Constant) and isinstance(upper.value, int):
+            return body[:upper.value]
+    return body
+
+
+def _body_from_helpers(node: ast.AST) -> str | None:
+    """The REAL body this subtree draws, or None if it names no known helper.
+
+    ⛔ THE BODY COMES FROM THE SITE'S OWN HELPER AND ARGUMENT. Cycle 1 hardcoded
+    this at 128 hex and cycle 2 at 64; in both, a change in the mint site's width
+    left the guard green while real tokens leaked. Calling the helper the SITE
+    names, with the argument the SITE passes, is what closes that.
+
+    ⛔ EVERY HELPER IN THE SUBTREE CONTRIBUTES, concatenated — and each match is
+    consumed (`uuid4().hex` is not also counted as a bare `uuid4()`). A body
+    assembled from two helpers (`token_hex(16) + token_hex(16)`) is 64; stopping
+    at the first measured 32 and certified a rule that left half the value in
+    cleartext (found in review).
+    """
+    parts: list[str] = []
+
+    def visit(n: ast.AST, parent: ast.AST | None) -> None:
+        if isinstance(n, ast.Attribute) and n.attr == "hex":
+            base = getattr(n.value, "func", None)
+            if (getattr(base, "attr", None) or getattr(base, "id", None)) == "uuid4":
+                parts.append(_apply_slice(n, parent, uuid.uuid4().hex))
+                return
+        if isinstance(n, ast.Call):
+            name = getattr(n.func, "id", None) or getattr(n.func, "attr", None)
+            if name in ("token_hex", "token_urlsafe") and len(n.args) == 1:
+                arg = n.args[0]
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, int):
+                    body = (secrets.token_hex(arg.value) if name == "token_hex"
+                            else secrets.token_urlsafe(arg.value))
+                    parts.append(_apply_slice(n, parent, body))
+                    return
+            if name == "uuid4":
+                # `str(uuid.uuid4())` is 36 chars with dashes; `.hex` is 32. The
+                # bare call is the 36 shape — returning the hex shape for both
+                # measured 32 where the site mints 36 (found in review).
+                parts.append(_apply_slice(n, parent, str(uuid.uuid4())))
+                return
+        for child in ast.iter_child_nodes(n):
+            visit(child, n)
+
+    visit(node, None)
+    return "".join(parts) or None
+
+
+#: Name fragments that mark a body as coming from a RANDOMNESS primitive. A
+#: credential body is generated, not derived, so an unrecognized call drawn from
+#: one of these is a mint this scanner cannot resolve. The fragments are what
+#: keep the fail-closed rule PRECISE: `pt_{content_hash(...)}` and
+#: `install_probe_{body.attr}` interpolate values too, but neither is a secret.
+_RANDOMNESS_FRAGMENTS = ("token", "uuid", "urandom", "rand")
+
+
+def _draws_randomness(node: ast.AST) -> bool:
+    """True when this subtree calls something that looks like a randomness source."""
+    for inner in ast.walk(node):
+        if isinstance(inner, ast.Call):
+            name = getattr(inner.func, "id", None) or getattr(inner.func, "attr", None) or ""
+            if any(frag in name for frag in _RANDOMNESS_FRAGMENTS):
+                return True
+    return False
+
+
+def test_the_signup_rule_matches_what_the_product_ACCEPTS():
+    """#6158 review: the rule must be as WIDE as the product's own acceptance.
+
+    `hosted_api.py` lowercases a user-entered signup token BEFORE its format gate
+    — deliberately, so that "a copy-pasted token with uppercase hex must resolve
+    to the same org". An uppercase form is therefore a VALID recovery credential,
+    and a lowercase-only rule stored it verbatim with `capture_redactions: 0`:
+    the #6158 failure mode, one case-flip from the covered form.
+
+    ⚠️ SCOPE: this binds the RULE, not the product's acceptance. The first
+    assertion applies the product's normalization (its format gate to the LOWERED
+    value) by hand — the handler's `signup_token.lower()` calls are inline in
+    `hosted_api.py`, not a function this test can call, so DELETING them would
+    not redden this test. It pins that the rule is wide enough for the form the
+    gate accepts; the gate's own normalization is not pinned here.
+    """
+    from tortoise.hosted_api import _SIGNUP_TOKEN_RE
+
+    minted = "st_" + secrets.token_hex(32)           # always lowercase at mint
+    pasted = "ST_" + secrets.token_hex(32).upper()   # what a user may paste
+    assert _SIGNUP_TOKEN_RE.match(pasted.lower()), (
+        "the product no longer accepts a lowercased uppercase-hex signup token; "
+        "re-derive whether `(?i)` is still the right width for this rule")
+    for form in (minted, pasted, minted.upper()):
+        out, counts = redact_secrets("token=" + form + " end")
+        assert counts.get("tortoise_signup_token"), (form[:3], counts)
+        assert form not in out and form[3:] not in out, form[:3]
+
+
+def _const_prefixes(value: ast.AST) -> tuple[str, ...]:
+    """Every string this expression can evaluate to, when it is a prefix."""
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        return (value.value,)
+    if isinstance(value, ast.IfExp):
+        return _const_prefixes(value.body) + _const_prefixes(value.orelse)
+    if isinstance(value, ast.BoolOp):
+        return tuple(s for v in value.values for s in _const_prefixes(v))
+    return ()
+
+
+def _collect_prefix_names(tree: ast.AST) -> dict[str, tuple[str, ...]]:
+    """name -> every string it is assigned OR defaults to.
+
+    ⛔ THE MOST PRIVILEGED KEY IS MINTED THROUGH A NAME. `hosted_api.py` writes
+    ``prefix = "tk_" if (final_scopes or graph_id) else "tt_"`` and then
+    ``f"{prefix}{uuid.uuid4().hex}"``; the SDK mints via
+    ``def apikey_create(..., prefix: str = "tt_", ...)``. A scanner that knew
+    only literal f-string heads saw `tt_` and never `tk_`, so the SCOPED key was
+    covered only by the accident that one regex happens to read ``(?:tt|tk)``:
+    narrowing it to `tt_` leaked `tk_` while this guard stayed green. Found in
+    review, independently, by two reviewers.
+    """
+    names: dict[str, list[str]] = {}
+
+    def add(name: str, value: ast.AST) -> None:
+        for got in _const_prefixes(value):
+            names.setdefault(name, [])
+            if got not in names[name]:
+                names[name].append(got)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    add(target.id, node.value)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            args = node.args
+            positional = [*args.posonlyargs, *args.args]
+            if args.defaults:
+                for arg, default in zip(positional[-len(args.defaults):], args.defaults,
+                                        strict=True):
+                    add(arg.arg, default)
+            for arg, default in zip(args.kwonlyargs, args.kw_defaults, strict=True):
+                if default is not None:
+                    add(arg.arg, default)
+    return {name: tuple(values) for name, values in names.items()}
+
+
+def _prefixes_of_head(
+    head: ast.AST, names: dict[str, tuple[str, ...]],
+) -> tuple[str, ...] | None:
+    """Prefixes this f-string head contributes; ``None`` if it is not one of ours.
+
+    ``None`` means "not a credential-prefix shape" (skip it); an EMPTY tuple means
+    "it IS one, but its prefix could not be resolved".
+
+    ⚠️ The caller fails closed on an empty tuple only when the token is the FIRST
+    tail (`f"{prefix}{uuid4().hex}"`). A token later in the template
+    (`f"{prefix}_{uuid4().hex}"` — prefix name, a literal `_`, then the token) is
+    SKIPPED SILENTLY, because nothing there marks the leading value as a prefix.
+    No such LATER-TAIL credential site exists today — a scan of `tortoise/*.py`
+    finds none, and the two FormattedValue-headed mints that do exist
+    (`hosted_api.py:8924` and `sdk.py:17940`) both put the token FIRST, so both
+    resolve — but the limit is real: "fails closed" does not cover it.
+    """
+    if isinstance(head, ast.Constant) and isinstance(head.value, str):
+        return (head.value,) if head.value.endswith("_") else None
+    if isinstance(head, ast.BinOp) and isinstance(head.op, ast.Add):
+        # `"zz_" + token_hex(16) + token_hex(16)` nests LEFT, so the prefix is
+        # the innermost left operand. Not recursing skipped the whole site.
+        return _prefixes_of_head(head.left, names)
+    if isinstance(head, ast.FormattedValue):
+        inner = head.value
+        if isinstance(inner, ast.Name):
+            if inner.id not in names:
+                return ()  # an unknown prefix name is unresolved, not skipped
+            return tuple(p for p in names[inner.id] if p.endswith("_")) or None
+        # An ATTRIBUTE or SUBSCRIPT prefix (`f"{self.prefix}{uuid4().hex}"`) is a
+        # mint whose prefix cannot be resolved from here, so it must be
+        # UNRESOLVED. Returning None made the caller skip it silently — the very
+        # escape this function promises cannot happen (found in review).
+        return ()
+    if isinstance(head, ast.Name):
+        if head.id not in names:
+            return ()
+        return tuple(p for p in names[head.id] if p.endswith("_")) or None
+    if isinstance(head, (ast.Attribute, ast.Subscript)):
+        return ()
+    return None
+
+
+def _resolve_prefix(
+    arg: ast.AST | None, names: dict[str, tuple[str, ...]],
+) -> tuple[str, ...] | None:
+    """The prefix(es) this argument can carry, or None when unresolvable.
+
+    ``None`` is a FAILURE at the call site, not an omission — see ``_mint_sites``.
+    """
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        return (arg.value,)
+    if isinstance(arg, ast.Name) and arg.id in names:
+        return names[arg.id]
+    return None
+
+
+def _mint_sites(source: str) -> dict[str, tuple[str, ...]]:
+    """prefix -> the REAL minted bodies, read from the parsed tree.
+
+    The shapes in use: ``_new_token("<prefix>")`` — resolving a constant passed
+    BY NAME, as ``ACCESS_TOKEN_PREFIX``/``REFRESH_TOKEN_PREFIX`` are — the signup
+    token's ``f"<prefix>{token_hex(32)}"``, the tenant API key's
+    ``f"<prefix>{uuid.uuid4().hex}"``, and the scoped variant that supplies the
+    prefix through a NAME.
+
+    Parsing rather than scanning text is load-bearing in BOTH directions: a
+    prefix merely NAMED in a comment or docstring is not a mint site, and a mint
+    this scanner RECOGNIZES but cannot resolve is a FAILURE rather than a silent
+    omission.
+
+    ⛔ LIMIT, stated so it is not mistaken for exhaustiveness. NOT claimed and
+    NOT checked: a body built through an intermediate variable (``b =
+    token_hex(32)`` then ``f"zz_{b}"``); a body drawn from a helper this scanner
+    does not model (``f"g_{_short_id()}"``, live in the tree today); and any
+    module outside ``_MINT_MODULES``. The set pin makes a NEW prefix visible only
+    when it is minted in one of the claimed shapes, inside a scanned module — a
+    family arriving any other way has to be added deliberately. Only the shapes
+    above are claimed.
+    """
+    found: dict[str, list[str]] = {}
+    unresolved: list[str] = []
+
+    tree = ast.parse(source)
+    names = _collect_prefix_names(tree)
+    # ⛔ THE GENERATOR IS NOT A SITE. `_new_token` itself is written
+    # `return prefix + secrets.token_urlsafe(32)` — its `prefix` parameter has no
+    # default, so it cannot be resolved, and treating it as an unresolved SITE
+    # would fail the whole scan on the very helper whose CALLERS are the sites.
+    # Its callers are enumerated by the `Call` branch below.
+    helper_nodes: set[int] = set()
+    for fn in ast.walk(tree):
+        if isinstance(fn, ast.FunctionDef) and fn.name == "_new_token":
+            helper_nodes.update(id(inner) for inner in ast.walk(fn))
+    # ⛔ SUB-EXPRESSIONS BELONG TO THEIR CONTAINER, so the walk must consider only
+    # top-level expressions. A `BinOp` inside an f-string is part of that
+    # f-string's body, not a site of its own (visiting it failed the whole scan
+    # closed on `f"zz_{d['k'][:5] + uuid4().hex}"`), and the inner `BinOp` of
+    # `a + b + c` is part of the outer one (visiting both double-counted the
+    # body: `"zz_" + token_hex(16) + token_hex(16)` measured [32, 32] where the
+    # site mints 64). Both found in review.
+    nested: set[int] = set()
+    for js in (n for n in ast.walk(tree) if isinstance(n, ast.JoinedStr)):
+        for part in js.values:
+            if isinstance(part, ast.FormattedValue):
+                nested.update(id(x) for x in ast.walk(part.value))
+    nested.update(id(n.left) for n in ast.walk(tree) if isinstance(n, ast.BinOp))
+    oauth_body = None
+    for node in ast.walk(tree):
+        if id(node) in helper_nodes or id(node) in nested:
+            continue
+        if isinstance(node, ast.Call):
+            name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+            if name != "_new_token":
+                continue
+            # Positional `_new_token("oat_")` OR keyword `_new_token(prefix=…)`.
+            arg = node.args[0] if node.args else next(
+                (kw.value for kw in node.keywords if kw.arg == "prefix"), None)
+            resolved = _resolve_prefix(arg, names)
+            if resolved is None:
+                unresolved.append(ast.dump(node)[:120])
+            else:
+                if oauth_body is None:
+                    oauth_body = _new_token_body()
+                for prefix in resolved:
+                    found.setdefault(prefix, []).append(oauth_body)
+        elif isinstance(node, ast.JoinedStr) and node.values:
+            tails = list(node.values[1:])
+            heads = _prefixes_of_head(node.values[0], names)
+            if heads is None:
+                continue
+            # ⛔ CONCATENATE EVERY TAIL — do not stop at the first helper. A body
+            # may be assembled from more than one: `f"zz_{token_hex(16)}"`
+            # `{token_hex(16)}` mints 64 hex, and taking only the first measured
+            # 32, certifying a rule that leaves the other half in cleartext
+            # (found in review).
+            parts: list[str] = []
+            unresolved_tail = False
+            for t in tails:
+                if isinstance(t, ast.Constant) and isinstance(t.value, str):
+                    parts.append(t.value)
+                    continue
+                raw = _body_from_helpers(t)
+                if raw is None:
+                    unresolved_tail = _draws_randomness(t)
+                    break
+                parts.append(raw)
+            # A token DIRECTLY behind an unknown prefix name
+            # (`f"{prefix}{uuid4().hex}"`) is an unresolved mint. Requiring the
+            # token to be the FIRST tail is what keeps that narrow: a token
+            # merely APPEARING in a template (`f"{t}: {token_hex(32)}"`) has a
+            # constant first tail and is not a prefix shape at all — treating it
+            # as one failed the whole scan closed on ordinary formatting strings.
+            joins_head = (
+                bool(tails)
+                and not isinstance(tails[0], ast.Constant)
+                and _body_from_helpers(tails[0]) is not None
+            )
+            if unresolved_tail or (joins_head and not heads):
+                unresolved.append(ast.dump(node)[:120])
+            elif heads and parts:
+                for prefix in heads:
+                    found.setdefault(prefix, []).append("".join(parts))
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            # `"zz_" + token_urlsafe(32)` — the non-f-string spelling — and the
+            # same with the prefix in a NAME: `P + token_urlsafe(32)`.
+            heads = _prefixes_of_head(node.left, names)
+            if heads is None:
+                continue
+            # The body is the WHOLE node, not just `right`: for the nested
+            # `"zz_" + token_hex(16) + token_hex(16)` the first helper is in the
+            # left operand, which is skipped as a site of its own.
+            raw = _body_from_helpers(node)
+            body = raw
+            if body is not None and heads:
+                for prefix in heads:
+                    found.setdefault(prefix, []).append(body)
+            elif _draws_randomness(node.right):
+                unresolved.append(ast.dump(node)[:120])
+    if unresolved:
+        raise AssertionError(
+            "this scanner cannot resolve these mint sites, so it cannot prove "
+            "they are ruled — extend the scanner rather than letting a family "
+            "escape unseen: " + "; ".join(unresolved))
+    return {prefix: tuple(dict.fromkeys(bodies)) for prefix, bodies in found.items()}
+
+
+def _edge_tt_body_width() -> int:
+    """The width of the `tt_` body the Supabase Edge function mints.
+
+    That function is TypeScript, so the AST scan cannot see it — yet it mints the
+    SAME `tt_` family, with 64 hex (32 bytes) rather than the 32 the Python sites
+    use. A floor of exactly `{32}` would leak it with every test green, so its
+    width is read from the file and folded into the pin. (Found in review: the
+    guard pinned `{32}` while a deployed mint site mints 64.)
+    """
+    src = (_REPO / "supabase/functions/tenant-provision/index.ts").read_text(
+        encoding="utf-8")
+    match = re.search(r"new Uint8Array\((\d+)\);.{0,300}?const apiKeyHex", src,
+                      re.DOTALL)
+    assert match, ("the Edge tenant-provision mint shape changed; re-derive the "
+                   "tt_ body width rather than trusting the pin")
+    assert re.search(r"apiKey = `tt_\$\{apiKeyHex\}`", src), (
+        "the Edge provisioner no longer mints a tt_ key; re-derive this pin")
+    return int(match.group(1)) * 2
+
+
+def test_every_minted_body_width_is_pinned_from_the_mint_sites():
+    """Every minted body's width, read off the SITE — the rules' floors depend on it.
+
+    A `{N,}` floor is safe only while the minted body is at least N wide, so the
+    widths are pinned here and derived by parsing the sites rather than typed in.
+    If a mint helper or its argument changes, this fails and the floors must be
+    re-derived deliberately.
+    """
+    widths: dict[str, set[int]] = {}
+    for rel in _MINT_MODULES:
+        source = (_REPO / rel).read_text(encoding="utf-8")
+        for prefix, bodies in _mint_sites(source).items():
+            if prefix in _CREDENTIAL_PREFIXES:
+                widths.setdefault(prefix, set()).update(len(body) for body in bodies)
+    # The Edge provisioner mints the SAME tt_ family with a DIFFERENT width.
+    widths.setdefault("tt_", set()).add(_edge_tt_body_width())
+    assert widths == {"tt_": {32, 64}, "tk_": {32}, "oat_": {43}, "ort_": {43},
+                      "ct_": {43}, "cs_": {43}, "st_": {64}}, widths
+
+
+def _has_a_rule(prefix: str, bodies: tuple[str, ...]) -> bool:
+    """True when SOME rule removes the WHOLE body of the value at this prefix.
+
+    ⛔ WHOLE BODY, NOT MERELY THE CONCATENATION — AND NOT MERELY THE WHOLE BODY.
+    `body not in out` is already satisfied by a rule that swallows only the FIRST
+    HALF of the value and leaves the tail in cleartext: the string that survives
+    is shorter than the body, so a substring test misses it (#5470's class, and
+    the assertion this guard exists to enforce). Any surviving RUN long enough to
+    be a meaningful fragment therefore fails the check — verified by mutating a
+    real rule to cover 16 of the tenant key's 32 hex characters, which this now
+    rejects.
+    """
+    for body in bodies:
+        value = prefix + body
+        out, _ = redact_secrets("value=" + value + " end")
+        if value in out:
+            return False
+        if len(body) >= _LEAK_WINDOW and any(
+                body[i:i + _LEAK_WINDOW] in out
+                for i in range(len(body) - _LEAK_WINDOW + 1)):
+            return False
+    return True
+
+
+def test_the_scanner_resolves_the_other_ways_a_prefix_can_be_spelled():
+    """The non-idiomatic spellings that were silently missed in review."""
+    assert set(_mint_sites('p = "zz_" + secrets.token_urlsafe(32)\n')) == {"zz_"}
+    assert set(_mint_sites('x = _new_token(prefix="qq_")\n')) == {"qq_"}
+    # `uuid4().hex` — the tenant API key's shape, named by none of the token
+    # helpers. This is the spelling that hid `tt_` from the first cut.
+    found = _mint_sites('k = f"zz_{uuid.uuid4().hex}"\n')
+    assert set(found) == {"zz_"} and len(next(iter(found.values()))[0]) == 32
+    # ⛔ THE VARIABLE-PREFIX SHAPE. `tk_` — the SCOPED, more privileged key — is
+    # minted as `prefix = "tk_" if scoped else "tt_"` then
+    # `f"{prefix}{uuid.uuid4().hex}"`. The literal `tt_` sites kept this guard
+    # green while `tk_` was enumerated nowhere, so narrowing the rule to `tt_`
+    # leaked it. Pinned in both spellings: a same-function assignment, and the
+    # SDK's parameter default (`def apikey_create(..., prefix: str = "tt_")`).
+    found = _mint_sites('prefix = "tk_" if scoped else "tt_"\n'
+                        'k = f"{prefix}{uuid.uuid4().hex}"\n')
+    assert set(found) == {"tk_", "tt_"}, found
+    found = _mint_sites('def mint(org, prefix="tt_"):\n'
+                        '    return f"{prefix}{uuid.uuid4().hex}"\n')
+    assert set(found) == {"tt_"}, found
+    # A prefix name the scanner cannot resolve is UNRESOLVED, not skipped.
+    with pytest.raises(AssertionError, match="cannot resolve"):
+        _mint_sites('k = f"{mystery_prefix}{secrets.token_hex(32)}"\n')
+
+
+def test_the_scanner_fails_closed_on_a_mint_it_cannot_resolve():
+    """A mint the scanner cannot resolve must ERROR, not be skipped quietly.
+
+    `token_bytes` is a real randomness primitive the scanner does not recognize
+    as a body source — exactly the shape a seventh family would arrive in — so it
+    must fail closed rather than be dropped.
+    """
+    fabricated = (
+        'k = f"zz_{secrets.token_bytes(32).hex()}"\n'
+    )
+    with pytest.raises(AssertionError, match="cannot resolve"):
+        _mint_sites(fabricated)
+
+
+def test_the_fail_closed_rule_does_not_fire_on_a_NON_secret_interpolation():
+    """The rule above must stay PRECISE, or it would red the real tree.
+
+    This codebase has many `_`-headed f-strings that interpolate non-secret
+    values (`f"pt_{content_hash(...)}"`, `f"install_probe_{body.attr}"`). A
+    credential body comes from a randomness primitive; a hash or an attribute
+    does not. Both are pinned here because an over-broad fail-closed rule is a
+    guard that reds everything, which is as useless as one that reds nothing.
+    """
+    assert _mint_sites('k = f"pt_{content_hash(blob)}"\n') == {}
+    assert _mint_sites('k = f"install_probe_{resp.body}"\n') == {}
+
+
+def test_the_mint_site_scanner_reports_a_prefix_that_has_no_rule():
+    """The guard must be able to FAIL — twice over.
+
+    A scanner that always returns ``set()`` and a ``_has_a_rule`` that always
+    returns True would each make the exhaustiveness test below green while
+    covering nothing — the "a test that cannot fail" defect this repo has been
+    bitten by. Both halves are pinned against a fabricated source.
+    """
+    fabricated = (
+        "def _new_token(prefix):\n"
+        "    return prefix\n"
+        'OTHER_PREFIX = "zzbogus_"\n'
+        'client = _new_token(OTHER_PREFIX)\n'
+    )
+    assert set(found_has_no := _mint_sites(fabricated)) == {"zzbogus_"}
+    assert not _has_a_rule("zzbogus_", found_has_no["zzbogus_"])
+
+
+def test_the_scanner_ignores_a_prefix_that_is_only_NAMED_in_prose():
+    """A prefix mentioned in a comment or docstring is NOT a mint site."""
+    fabricated = (
+        "# the oat_ prefix is minted elsewhere\n"
+        '\"\"\"Docstrings mentioning st_ and cs_ are not mint sites.\"\"\"\n'
+        "x = 1\n"
+    )
+    assert _mint_sites(fabricated) == {}
+
+
+def test_every_credential_the_product_mints_has_a_redaction_rule():
+    """#6158: every prefix minted IN THE SCANNED MODULES must have a rule.
+
+    This is the mechanism whose ABSENCE let ``oat_``/``ort_``/``st_`` — and, on
+    the first cut of this PR itself, ``tt_``/``tk_`` — ship with no rule at all
+    while every test stayed green: the rule list was maintained by hand and
+    nothing derived it from the producers. When a value slips through, the turn
+    is stored verbatim with ``capture_redactions: 0`` — the exact fail-open path
+    #4911 was filed for.
+    """
+    sites: dict[str, str] = {}
+    bodies: dict[str, tuple[str, ...]] = {}
+    for rel in _MINT_MODULES:
+        source = (_REPO / rel).read_text(encoding="utf-8")
+        for prefix, minted in _mint_sites(source).items():
+            sites[prefix] = rel
+            bodies[prefix] = tuple(dict.fromkeys(bodies.get(prefix, ()) + minted))
+    # Vacuity check first: if the scanner ever stops matching, an empty dict
+    # would satisfy the assertion below while proving nothing.
+    assert sites, ("the mint-site scanner found NO credential prefixes in "
+                   f"{_MINT_MODULES} — it has stopped scanning")
+    # Pin the discovered set so a REMOVED mint site is visible too: a
+    # one-directional guard would let the set shrink towards empty unnoticed,
+    # and adding a family must be a deliberate edit here. Every minted prefix is
+    # RULED or EXPLICITLY non-secret — the scanner cannot tell a credential from
+    # an opaque identifier, so a new one cannot arrive unnoticed either way.
+    assert set(sites) == set(_CREDENTIAL_PREFIXES) | set(_NON_SECRET_PREFIXES), (
+        f"minted prefixes changed to {sorted(sites)}; each is either a credential "
+        "needing a rule in _SECRET_SHAPES or a non-secret needing a line in "
+        "_NON_SECRET_PREFIXES")
+    # The Edge provisioner mints the SAME tt_ family from TypeScript, so the
+    # AST scan cannot see it — but a rule must cover ITS width too, or a deployed
+    # key leaks while this Python-only check stays green. (Found in review: the
+    # pin said {32} while `supabase/functions/tenant-provision` mints 64 hex.)
+    bodies["tt_"] = tuple(dict.fromkeys(
+        bodies["tt_"] + ("0" * _edge_tt_body_width(),)))
+    # Deterministic ALPHABET coverage. The bodies above come from the generator,
+    # so whether they happen to include `-`/`_` is a coin flip; a rule narrowed to
+    # alnum therefore passed ~74% of runs (found in review).
+    for prefix in _CREDENTIAL_PREFIXES:
+        bodies[prefix] = tuple(dict.fromkeys(
+            bodies[prefix]
+            + tuple(p for b in bodies[prefix]
+                    for p in _alphabet_probes(prefix, len(b)))))
+    unruled = sorted(f"{p} (minted in {sites[p]})" for p in _CREDENTIAL_PREFIXES
+                     if not _has_a_rule(p, bodies[p]))
+    assert not unruled, (
+        "these credential prefixes are MINTED by the product but no rule in "
+        "_SECRET_SHAPES redacts them, so a value pasted into a captured turn is "
+        "stored verbatim — add a rule with the family's OWN body width and a "
+        "CASES row:\n  " + "\n  ".join(unruled))

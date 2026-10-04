@@ -1,14 +1,21 @@
 name: CI Timing Measurement
 
-# #1477 — measurement artifact only. NEVER a gate: nothing here is in
-# python-ci-gate's needs, no step here can red a required check, and the
-# refresh path opens a PR (branch-protection safe, auto-merge repo policy)
-# only when the committed artifact content actually changed — zero bot spam.
+# #1477 — measurement artifact only. NEVER a required check: nothing here is in
+# python-ci-gate's needs, and the refresh path opens a PR (branch-protection safe,
+# auto-merge repo policy) only when the committed artifact content actually changed
+# — zero bot spam.
+#
+# #5215 Task 4b: it is also the SOLE WRITER of `config/ci-surfaces.yml:durations`
+# (via `tools/ci_timing.py --refresh-durations`) — the weights `split_fast_gate`
+# packs the push halves by. So a stale/wrong weight can red `python-ci-gate` with
+# zero test failures (#3395); the workflow itself is still not a gate, but its
+# output feeds one, and the refresh is fail-closed.
 #
 # Weekly (Monday 04:30 UTC) + on demand: samples the latest completed
 # push-to-main Python CI run, extracts real per-step durations (Jobs API)
-# + per-file durations (uploaded /tmp/pytest.log artifacts), and refreshes
-# docs/ci-timing.md + docs/ci-timing.json.
+# + per-file durations (uploaded /tmp/pytest.log artifacts), refreshes
+# docs/ci-timing.md + docs/ci-timing.json, and writes those per-file durations
+# into the selection manifest's `durations:` map.
 
 on:
   schedule:
@@ -38,6 +45,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # tools/ci_timing.py carries the inline >=3.12 guard (#5128) — this pin is
+      # what supplies the >=3.12 interpreter it needs.
+      # PyYAML only: the durations bridge validates the refreshed manifest with
+      # `ci_selection.duration_issues()` + `duration_coverage_issues()`. Pinned
+      # for the same reason `manifest-integrity` pins it.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pyyaml
+        run: pip install pyyaml==6.0.2
 
       - name: Find latest completed push-to-main Python CI run
         id: find
@@ -62,13 +79,64 @@ jobs:
         # Artifacts may legitimately be absent (older than retention, run
         # cancelled before the log existed). continue-on-error: the measure
         # job then produces step-timing-only data with a missing-log note.
+        #
+        # ⛔ `github-token` IS REQUIRED HERE AND WAS MISSING. The artifacts
+        # belong to the SAMPLED run, not to this one, and
+        # actions/download-artifact@v4 scopes its default credentials to the
+        # CURRENT run — cross-run downloads need an explicit token
+        # (README §"Download Artifacts from other workflow runs"). Without it
+        # the download fails with an auth error that `continue-on-error`
+        # swallows, so the step reported success while fetching nothing: the
+        # sampled run had eight unexpired `pytest-log-*` artifacts and the
+        # generated artifact still recorded `"files": {}` with an all-zero
+        # `counts`, i.e. no per-file durations at all. The workflow already
+        # grants `permissions: actions: read`, so the token is in scope.
+        #
+        # This is with `tools/ci_timing.py --pick-run`: the run SELECTION was
+        # fixed (#3400 / audit F8, PR #3409) and the ARTIFACT FETCH was not.
         id: download
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           pattern: pytest-log-*
           run-id: ${{ steps.find.outputs.run_id }}
+          github-token: ${{ github.token }}
           path: logs
+
+      - name: Assert the download matched the sampled run's artifacts
+        # The observability half of the token bug above. `continue-on-error` on
+        # the download is deliberate — artifacts CAN legitimately be absent —
+        # but its cost was that a FAILED download and an ABSENT artifact were
+        # indistinguishable, so a config error survived as five weeks of
+        # "successful" weekly runs each emitting an empty artifact. A step that
+        # infers absence instead of observing it is the same defect family as
+        # the report itself. This distinguishes the two and fails loudly.
+        #
+        # Only meaningful when a run was actually sampled: an empty RUN_ID
+        # already warns in the find step, and failing here would double-report.
+        if: ${{ steps.find.outputs.run_id != '' }}
+        run: |
+          set -euo pipefail
+          # ⛔ `[ -d logs ]` is load-bearing. Without it, an absent logs/ dir
+          # makes `find logs` exit non-zero, and `set -e` + `pipefail` abort the
+          # step BEFORE the echo and the comparison — turning the legitimate
+          # "no artifacts to fetch" case into a hard failure, i.e. the exact
+          # false alarm this step exists to prevent. The step's whole job is to
+          # separate "fetched nothing because the fetch failed" from "nothing to
+          # fetch"; it must not collapse them one layer up.
+          HAVE=0
+          if [ -d logs ]; then
+            HAVE=$(find logs -name '*.log' | wc -l | tr -d ' ')
+          fi
+          WANT=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/${{ steps.find.outputs.run_id }}/artifacts?per_page=100" \
+            --jq '[.artifacts[] | select(.name | startswith("pytest-log-"))] | length')
+          WANT=${WANT:-0}
+          echo "downloaded $HAVE pytest log(s); the sampled run has $WANT pytest-log-* artifact(s)"
+          if [ "$WANT" -gt 0 ] && [ "$HAVE" -eq 0 ]; then
+            echo "::error::the sampled run has $WANT pytest-log-* artifact(s) but none were downloaded — per-file durations would be empty. This is a FETCH failure (cross-run credentials), not an absent artifact. See the github-token note on the download step."
+            exit 1
+          fi
 
       - name: Generate CI timing artifact
         run: |
@@ -83,6 +151,39 @@ jobs:
           echo "=== ci-timing.md (head) ==="
           head -30 docs/ci-timing.md
 
+      - name: Refresh the durations map from the collector (Task 4b bridge)
+        # #5215 Task 4b / T-B: the bridge from the collector into
+        # `config/ci-surfaces.yml:durations` — the ONE map `split_fast_gate`
+        # packs the push halves by. Before this step the map was a one-off
+        # 2026-09-22 hand sweep (#3395); this step is now its only writer.
+        #
+        # Fail-closed: a zero-key projection, a collector key not classified in
+        # the manifest, or a refresh that would fail the manifest's own
+        # duration gate writes NOTHING and exits non-zero.
+        #
+        # `if` mirrors the assert step: an empty RUN_ID means nothing was
+        # sampled. A missing-log run has nothing to measure: the download step
+        # tolerates absent artifacts by design (retention, a run cancelled
+        # before the log existed), the collector then yields ZERO keys, and the
+        # bridge correctly reports that as UNKNOWN (exit 2). That absence is
+        # legitimate, not a bridge failure — guard on the logs themselves so a
+        # legal absence cannot red the whole `measure` job and, via `needs` +
+        # `success()`, suppress the weekly refresh.
+        if: ${{ steps.find.outputs.run_id != '' }}
+        run: |
+          set -euo pipefail
+          if [ -z "$(find logs -name '*.log' -print -quit 2>/dev/null)" ]; then
+            echo "::notice::no pytest-log artifacts for run ${{ steps.find.outputs.run_id }} — skipping the durations refresh (legitimate absence, not a failure)"
+            exit 0
+          fi
+          python3 tools/ci_timing.py --refresh-durations \
+            --repo "$GITHUB_REPOSITORY" \
+            --run-id "${{ steps.find.outputs.run_id }}" \
+            --logs-dir logs \
+            --manifest config/ci-surfaces.yml
+          echo "=== durations_captured_at ==="
+          grep -m1 '^durations_captured_at:' config/ci-surfaces.yml || true
+
       - name: Upload generated timing files
         if: always()
         uses: actions/upload-artifact@v4
@@ -91,6 +192,24 @@ jobs:
           path: |
             docs/ci-timing.md
             docs/ci-timing.json
+          if-no-files-found: ignore
+
+      - name: Upload the refreshed durations map
+        # #5215 Task 4b: the map rides its OWN artifact on purpose.
+        # `actions/upload-artifact@v4` roots an artifact at the least common
+        # ancestor of its `path` entries (v4 README, "Upload using Multiple
+        # Paths"). The `ci-timing` artifact's root is `docs/`, which is why the
+        # `refresh` job reads `generated/ci-timing.md`; adding a repo-root-level
+        # `config/ci-surfaces.yml` to THAT list would move its root to the
+        # repository root, so every `generated/<file>` read below would miss and
+        # the refresh job would fail on every run. A single-file artifact roots
+        # at `config/` instead, so the map downloads to
+        # `generated-map/ci-surfaces.yml`.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-durations-map
+          path: config/ci-surfaces.yml
           if-no-files-found: ignore
 
   refresh:
@@ -106,6 +225,25 @@ jobs:
       contents: write
       pull-requests: write
       actions: read
+    env:
+      # ⛔ REQUIRED HERE, AND IT WAS MISSING (#3092). `gh` does not inherit the
+      # Actions token implicitly: it reads GH_TOKEN (or GITHUB_TOKEN) from the
+      # ENVIRONMENT, and Actions exposes the token only as a CONTEXT
+      # (`github.token` / `secrets.GITHUB_TOKEN`) — never as an env var. With no
+      # `env:` block on this job every `gh` call below exited non-zero with
+      # "To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN
+      # environment variable". The `measure` job above has had this block all
+      # along; this job never did.
+      #
+      # WHY THE AUTOMATIC TOKEN AND NOT A PAT: the branch is pushed into THIS
+      # repo, so no cross-repo write is needed; `github.token` is minted per run
+      # and expires with the job, so there is no long-lived credential to store
+      # or rotate; and it is CAPPED by the `permissions:` block above — a PAT
+      # carries its own scopes and would silently escape that ceiling. The scopes
+      # the two calls actually need are already granted: `contents: write` to
+      # push the branch and `pull-requests: write` for `gh pr create`
+      # (`gh pr list` needs only read).
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -117,27 +255,166 @@ jobs:
           name: ci-timing
           path: generated
 
+      - name: Download the refreshed durations map
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-durations-map
+          path: generated-map
+
       - name: Open refresh PR if content changed
         run: |
-          set -e
+          set -euo pipefail
           BRANCH="chore/ci-timing-refresh-$(git rev-parse --short HEAD)"
           if git diff --no-index --quiet docs/ci-timing.md generated/ci-timing.md \
-             && git diff --no-index --quiet docs/ci-timing.json generated/ci-timing.json; then
+             && git diff --no-index --quiet docs/ci-timing.json generated/ci-timing.json \
+             && git diff --no-index --quiet config/ci-surfaces.yml generated-map/ci-surfaces.yml; then
             echo "timing artifact unchanged — no PR needed"
             exit 0
           fi
           echo "timing artifact changed — opening refresh PR"
+
+          # ⛔ Fail BEFORE any git mutation: a missing token on a changed-artifact
+          # week must not push a branch it then cannot open a PR for. Not checked
+          # on the `unchanged` path above, which legitimately needs no token.
+          if [ -z "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]; then
+            # ⛔ Do NOT write the literal Actions expression for the job token in
+            # this message: GitHub substitutes expressions in a `run:` body BEFORE
+            # bash parses it — including inside shell comments and single quotes —
+            # so spelling it out here would print the live token into the job log.
+            # Name the env KEY instead (test_no_token_expression_in_run_bodies guards
+            # the whole workflow set).
+            echo "::error::GH_TOKEN is empty in the refresh job — gh cannot authenticate, so no refresh PR can be opened. Keep the job-level \`env:\` GH_TOKEN binding on this job (see the env: block above) and \`pull-requests: write\` in its permissions (#3092)."
+            exit 1
+          fi
+
           git switch -c "$BRANCH"
           cp generated/ci-timing.md docs/ci-timing.md
           cp generated/ci-timing.json docs/ci-timing.json
-          git add docs/ci-timing.md docs/ci-timing.json
+          # #5215 Task 4b: the durations map is refreshed by the bridge, and the
+          # refresh PR is gated by `manifest-integrity` (python-ci-gate.needs),
+          # which runs `ci_selection.py --integrity` — so a refresh that would
+          # unbalance the halves fails the PR rather than landing.
+          cp generated-map/ci-surfaces.yml config/ci-surfaces.yml
+          git add docs/ci-timing.md docs/ci-timing.json config/ci-surfaces.yml
           git -c user.name="tortoise-ci[bot]" -c user.email="actions@github.com" \
-            commit -m "chore(ci): refresh CI timing artifact (#1477)"
-          git push -u origin "$BRANCH"
-          if [ "$(gh pr list --head "$BRANCH" --state open --json number --jq 'length')" = "0" ]; then
-            gh pr create --base main --head "$BRANCH" \
-              --title "chore(ci): refresh CI timing artifact (#1477)" \
-              --body "Weekly refresh of the CI timing measurement artifact (docs/ci-timing.md + docs/ci-timing.json). No code changes — measurement data only. Auto-merged per repo policy."
+            commit -m "chore(ci): refresh CI timing artifact + durations map (#1477, #5215)"
+          # Does the branch ALREADY exist on origin? The answer decides whether the
+          # cleanup below may delete it: a branch this run CREATED is an orphan by
+          # construction, but a branch that was already there may be the head of an
+          # open PR — and "no PR" is precisely the conclusion a FAILED PR query
+          # cannot support. Fails closed: `git ls-remote --exit-code` documents 2 as
+          # "no matching refs", the only status that means the branch is absent, so
+          # any other failure (network, auth) keeps the default 1 = "pre-existing,
+          # leave it alone".
+          ls_rc=0
+          git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1 || ls_rc=$?
+          BRANCH_EXISTED=1
+          case "$ls_rc" in
+            2) BRANCH_EXISTED=0 ;;
+          esac
+
+          git push -u origin "$BRANCH" || {
+            rc=$?
+            echo "::error::\`git push\` of $BRANCH failed (exit $rc) — nothing to clean up, but the refresh did not land. A rejection here is usually a re-run at the same main SHA colliding with a branch a previous run left behind (#3092)."
+            exit 1
+          }
+
+          # ⛔ CLEANUP IS INSTALLED FOR *EVERY* POST-PUSH FAILURE PATH, not just the
+          # create path. The branch is pushed above and `delete_branch_on_merge`
+          # only removes branches that HAD a PR, so ANY later failure strands it on
+          # origin forever — which is how `chore/ci-timing-refresh-28d6d8c1` and
+          # `…-635a7e1c` accumulated, one per changed-content week, with no PR and
+          # nobody watching. The trap is therefore installed immediately after the
+          # push and covers every exit below it, not just the create-failure one.
+          #
+          # `BRANCH_HAS_PR=1` means "a PR exists or was just opened, so the branch
+          # must stay" — that includes the legitimate skip below, where the remote
+          # branch is the one the existing PR points at. `BRANCH_EXISTED=1` means
+          # the branch predates this run, so a delete would reach a ref this job did
+          # not create — and it would be reaching it on the strength of a PR query
+          # that just FAILED.
+          BRANCH_HAS_PR=0
+          cleanup_orphan_branch() {
+            local rc=$?
+            trap - EXIT
+            if [ "${BRANCH_HAS_PR}" = "0" ] && [ "${BRANCH_EXISTED}" = "0" ]; then
+              if git push origin --delete "$BRANCH" >/dev/null 2>&1; then
+                echo "removed the orphan branch $BRANCH (it was pushed but no PR was opened)"
+              else
+                echo "::warning::could not remove the orphan branch $BRANCH — delete it manually"
+              fi
+            fi
+            exit "$rc"
+          }
+          trap cleanup_orphan_branch EXIT
+
+          # ⛔ A FAILED `gh` MUST FAIL THIS JOB (#3092). The pre-fix shape was
+          #
+          #     if [ "$(gh pr list --head "$BRANCH" ... )" = "0" ]; then
+          #       gh pr create ...
+          #     else
+          #       echo "refresh PR already open for $BRANCH — skipping"
+          #     fi
+          #
+          # which FAILS OPEN: `gh` exits non-zero without GH_TOKEN, a failed
+          # command substitution yields the EMPTY STRING, `[ "" = "0" ]` is
+          # false, and control fell to the `else` — reporting "already open" and
+          # exiting 0. No refresh PR was ever opened in this workflow's history
+          # while every run stayed green. The outcomes are now distinguished
+          # explicitly: query FAILED (red), a non-numeric/empty result (red), zero
+          # open PRs (create), or a real count above zero (skip). Nothing here may
+          # infer "no PR needed" from a failure.
+          if ! pr_count=$(gh pr list --head "$BRANCH" --state open --json number --jq 'length'); then
+            echo "::error::\`gh pr list --head $BRANCH\` FAILED. This is an auth/scope failure, NOT an empty PR list, and must never be read as 'no PR needed'. Check GH_TOKEN and the job's \`pull-requests: write\` scope (#3092)."
+            exit 1
+          fi
+          # A count is a NUMBER. Reject anything else before comparing it: `null`,
+          # a jq error printed on stdout, or a blank line are not counts, and
+          # `[ "null" = "0" ]` is FALSE — so each of them falls to the `else` and is
+          # reported as "already open" with exit 0. That is the same fail-open this
+          # change removes, one line lower. The repo uses this `case` shape for the
+          # same reason in `.github/scripts/registry-cron.sh` (#3006).
+          case "$pr_count" in
+            "")
+              echo "::error::\`gh pr list --head $BRANCH\` returned nothing — refusing to guess whether a refresh PR is already open (#3092)."
+              exit 1
+              ;;
+            *[!0-9]*)
+              # ⛔ The value is echoed with `%q`, never raw. A command substitution
+              # keeps embedded newlines, and the runner parses any line starting
+              # with `::` as a workflow command — so echoing the raw value would
+              # let a multi-line `gh` output forge an annotation from inside the
+              # error handler. `%q` renders it as ONE shell-escaped line, and the
+              # slice bounds what lands in the log.
+              echo "::error::\`gh pr list --head $BRANCH\` returned a NON-NUMERIC value ($(printf '%q' "${pr_count:0:200}")) — that is a broken query, not a PR count, and must never be read as 'no PR needed' (#3092)."
+              exit 1
+              ;;
+          esac
+          if [ "$pr_count" = "0" ]; then
+            if gh pr create --base main --head "$BRANCH" \
+              --title "chore(ci): refresh CI timing artifact + durations map (#1477, #5215)" \
+              --body "Weekly refresh of the CI timing measurement artifact (docs/ci-timing.md + docs/ci-timing.json) and, since #5215 Task 4b, the per-file \`durations\` map in config/ci-surfaces.yml — the weights the push split packs by. Measurement data only; no code changes. Gated by manifest-integrity. Auto-merged per repo policy."; then
+              BRANCH_HAS_PR=1
+              echo "refresh PR opened for $BRANCH"
+            else
+              rc=$?
+              # ⛔ NAME BOTH CAUSES. There are TWO independent documented reasons a
+              # `gh pr create` with the automatic token fails here, and reporting
+              # only the first misdiagnoses the live failure:
+              #   1. this job lacks `pull-requests: write` (403, "Resource not
+              #      accessible by integration");
+              #   2. the REPOSITORY setting "Allow GitHub Actions to create and
+              #      approve pull requests" is disabled — `gh api
+              #      repos/$GITHUB_REPOSITORY/actions/permissions/workflow` reports
+              #      can_approve_pull_request_reviews=false, and then the create is
+              #      refused with "GitHub Actions is not permitted to create or
+              #      approve pull requests" even though the scope IS granted.
+              # (2) was measured live on this repo while fixing #3092 — see the
+              # issue. Do not shorten this to one cause.
+              echo "::error::\`gh pr create\` exited $rc — the refresh job could not open the timing PR. Two documented causes: (1) this job lacks \`pull-requests: write\`; (2) the repository setting 'Allow GitHub Actions to create and approve pull requests' is disabled — check \`gh api repos/${GITHUB_REPOSITORY:-OWNER/REPO}/actions/permissions/workflow\`, field can_approve_pull_request_reviews. Cause (2) refuses the create even when the scope IS granted (#3092)."
+              exit 1
+            fi
           else
+            BRANCH_HAS_PR=1
             echo "refresh PR already open for $BRANCH — skipping"
           fi

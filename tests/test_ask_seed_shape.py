@@ -34,7 +34,11 @@ from tools.gen_ask_transcripts import (
     _render_user_message,
     _seed,
 )
-from tortoise.sdk import TortoiseSDK
+from tortoise.sdk import (
+    _CAPTURE_TRUNCATION_SENTINEL,
+    TortoiseSDK,
+    _clip_capture_turn_content,
+)
 
 TRANSCRIPTS_DIR = Path(__file__).parent / "fixtures" / "ask_llm_transcripts"
 #: The transcript whose golden quotes the seeded session id directly
@@ -100,7 +104,13 @@ def test_seed_capture_turn_store_is_capture_exact(sdk):
     loop emits: the ``{sid}_t{i}`` episodic Point per WINDOWED turn, the
     ``[role] <content>`` framing, the role normalization, and the CONTAINS
     edge. A blank turn IS stored (capture writes ``"[user] "``); a wholly
-    blank session writes NOTHING (capture's gate is pre-mutation)."""
+    blank session writes NOTHING (capture's gate is pre-mutation).
+
+    ⛔ THE WINDOW CARRIES A TRUNCATION MARKER (#4897), so the over-cap turn is
+    no longer a bare 5,000-character slice. Built from the module's own clipper
+    rather than pasted so the two cannot drift, with the marker asserted
+    separately so losing it still reds here.
+    """
     ids = seed_capture_turn_store(sdk, "sess-x", [
         {"role": "user", "content": "hello"},
         {"role": None, "content": "no role"},
@@ -117,8 +127,12 @@ def test_seed_capture_turn_store_is_capture_exact(sdk):
         "[unknown] no role",
         "[assistant] 123",
         "[user] ",
-        "[user] " + "z" * 5000,
+        "[user] " + _clip_capture_turn_content("z" * 6000),
     ]
+    assert _CAPTURE_TRUNCATION_SENTINEL in points[4][1], (
+        "the windowed turn must carry #4897's truncation marker")
+    assert len(points[4][1]) == len("[user] ") + 5000, (
+        "and the marked window must stay within the cap")
     for pid, _c, kind, episodic, is_op, speaker, sess_prop, ev_prop, chash \
             in points:
         assert kind == "event", (pid, kind)

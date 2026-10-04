@@ -116,6 +116,83 @@ HOOK_SRC_DIR_RELPATH = Path(".tortoise") / "hook-src-dir"
 KIND_INSTALL_INERT = "install-inert"
 KIND_CAPTURE_FAILURE = "capture-failure"
 
+#: The ``kind`` marker on the local ``hook-runs/<harness>.json`` observation.
+#:
+#: This is a THIRD local writer, and it deliberately lives in its own file
+#: rather than as a third ``kind`` on the two-writer
+#: ``capture-errors/<harness>.json`` path above: that path's readers key on an
+#: exact marker (``session verify`` accepts it as install-inert evidence ONLY
+#: when ``kind == KIND_INSTALL_INERT``), so adding a writer there invites
+#: exactly the read/write divergence #4314 fixed.
+#:
+#: #3797: what it records is that the INSTALLED HOOK RAN.  Before it existed,
+#: a host that copied the hook but never ran ``tortoise init`` produced no
+#: observation at all — the probe is refused at the credential gate before any
+#: request is dispatched, the server route is auth-gated, and the hook
+#: discarded the exit code — so "installed and ran" was indistinguishable from
+#: "not installed".  The record is written by the HOOK (the only faithful
+#: witness: ``tortoise session probe`` is also invoked by hand and by other
+#: harnesses), it carries no credential and no content (harness, timestamp,
+#: and the probe's outcome), and it is best-effort — a failed write can never
+#: change the hook's exit-0 contract.  The read condition is the write
+#: condition: a reader accepts the record only when ``kind`` equals this
+#: marker AND the recorded ``harness`` matches the one asked about, so a
+#: foreign or corrupt file can never read as a run.
+KIND_HOOK_RUN = "hook-run"
+
+#: The script generation at which the hook-run observation was INTRODUCED
+#: (#3797).  An INSTALLED ``session-start.sh`` below it cannot record a run, so
+#: its silence is not evidence that the hook never ran: the reader must say it
+#: could not tell, never render the absence as an observation.  While the write
+#: contract stays unchanged this coincides with the shipped ``session-start.sh``
+#: generation; a later UNRELATED behaviour bump moves the shipped marker past
+#: it, and that is correct — an install at or above this generation can still
+#: write the record, so this floor must NOT be raised to follow such a bump.
+HOOK_RUN_GENERATION = 7
+
+
+def local_state_dir(leaf: str) -> Path:
+    """The HOME-scoped local-state directory ``leaf`` — ONE derivation.
+
+    #3797: the record a hook writes (``hook-runs/``) and the capture breadcrumb
+    (``capture-errors/``) sit under the SAME base, and it is derived in several
+    places.  This function is the spelling used by
+    ``__main__._capture_error_file``, ``__main__._hook_run_file`` (and so
+    ``_read_hook_run``) and ``capture_spool._clear_breadcrumb_for``, and
+    ``_tortoise_state_dir`` in ``tortoise/claude-hooks/session-start.sh`` is
+    the shell one, kept in step by tests rather than by hope.
+
+    The copies that are NOT routed through here must move in lockstep with any
+    change to the rule, and are tracked in #5503:
+
+    * ``session_verify._local_capture_error_file`` — a deliberately
+      env-parameterised TWIN (it resolves HOME from the environment the hook
+      was FIRED with, #4314), so it re-derives this base by hand;
+    * the ``sessions import`` RECEIPT path in ``__main__._cmd_sessions_import``
+      and its reader ``session_verify._local_import_receipt`` — a copy whose
+      EMPTY-override behaviour differs (the writer takes ``""`` as a value,
+      the reader as unset);
+    * the five sibling shell hooks, which do not drop a trailing ``/.``.
+
+    ``TORTOISE_IMPORT_RECEIPT_DIR`` names the RECEIPT dir, so the base is its
+    ``.parent``.  An override that is UNSET **or EMPTY** falls back to
+    ``$HOME``: the shell spells that ``${VAR:-default}``, and a plain
+    ``os.environ.get(name, default)`` would read ``""`` as the CURRENT
+    DIRECTORY instead — a writer and its clearer would then look in two
+    different trees for the SAME run, so a breadcrumb written under ``$HOME``
+    is never removed and a run reads as never-ran (the #4373 class).
+    ``Path`` drops a trailing ``/`` and a trailing ``/.`` before ``.parent``,
+    matching the shell helper's explicit normalisation.
+
+    ``Path.home()`` is touched only when there is no override at all, so it can
+    still RAISE when ``$HOME`` is ``~``/``~/x`` — callers must treat the
+    derivation as fallible.
+    """
+    override = os.environ.get("TORTOISE_IMPORT_RECEIPT_DIR")
+    receipt_dir = (Path(override) if override
+                   else Path.home() / ".tortoise" / "import-receipts")
+    return receipt_dir.parent / leaf
+
 
 #: Substrings that identify a hook body as Tortoise's. Deliberately specific
 #: (a bare word ``tortoise`` would match a foreign hook that merely mentions
@@ -469,6 +546,16 @@ class HarnessLayout:
     root_env: str | None = None
     root_home_default: str | None = None
     flat_entry: bool = False
+    #: Whether this harness's SHIPPED hooks write a local ``hook-run``
+    #: observation (``~/.tortoise/hook-runs/<harness>.json``) when they run.
+    #: Only the Claude ``session-start.sh`` seam does (#3797): the reader
+    #: (``tortoise hooks status``) must not render an absence-of-observation
+    #: for a harness whose hooks structurally never write one — that would be
+    #: the same "assert what was not observed" defect this record exists to
+    #: remove, wearing a new surface.  A harness adopts the record by adding
+    #: the write to its own hook and flipping this flag, not by the reader
+    #: guessing.
+    writes_hook_run: bool = False
 
     def hooks_root(self, root: Path) -> Path:
         return root / self.hooks_dir
@@ -500,6 +587,10 @@ def _claude_layout() -> HarnessLayout:
         harness="claude",
         hooks_dir=_CLAUDE_HOOKS_DIR,
         settings_file=".claude/settings.json",
+        # #3797: the Claude session-start hook writes the local hook-run
+        # observation, so `hooks status` MAY render it for claude — and only
+        # for claude (see HarnessLayout.writes_hook_run).
+        writes_hook_run=True,
         scripts=(
             HookScriptSpec(
                 "session-start.sh", "SessionStart", 60,
@@ -694,6 +785,33 @@ def artifact_root(harness: str, home: Path) -> Path | None:
     return Path(home) / contract.root_relpath
 
 
+def artifact_home(harness: str, root: str | os.PathLike[str]) -> Path | None:
+    """The ``$HOME`` an artifact install root is scoped under, or ``None``.
+
+    The INVERSE of :func:`artifact_root`: ``root`` is that ``$HOME`` with the
+    contract's ``root_relpath`` appended, so the home is the ancestor
+    ``artifact_root`` appended to.  ``None`` when ``root`` does not END with
+    that relpath, or the harness declares no artifact contract.
+
+    The distinction is LOAD-BEARING, never a best-effort guess: the installer
+    is HOME-scoped (it writes ``<home>/<root_relpath>``), so a caller that
+    derived a home from an unrelated directory would install into a DIFFERENT
+    tree while leaving the directory it named untouched (#5351).
+
+    A caller that only grades whatever is AT ``root`` does not need this —
+    :func:`detect_artifact_install` falls back to ``root`` itself — so ``None``
+    is not an error here; it is "this root is not the contract's root".
+    """
+    contract = ARTIFACT_CONTRACTS.get(harness)
+    if contract is None:
+        return None
+    parts = contract.root_relpath.parts
+    root_path = Path(root)
+    if not parts or tuple(root_path.parts[-len(parts):]) != parts:
+        return None
+    return root_path.parents[len(parts) - 1]
+
+
 #: Shipped non-shell seams, by harness.  The version contract is the
 #: harness-agnostic half of this module: a shell-hook seam answers through
 #: ``HARNESS_LAYOUTS``, a non-shell seam through this registry, and the
@@ -774,11 +892,11 @@ def contract_version_for(harness: str) -> int | None:
     is a shell hook (answered by ``contract_version`` over a ``HarnessLayout``)
     or a non-shell artifact (answered from :data:`ARTIFACT_CONTRACTS`), so
     ``pi`` is pinned by the SAME test table as its three shell siblings instead
-    of falling outside the machinery (#4680).  Its production consumer is
-    ``tortoise doctor`` step 7, which grades both seam classes;
-    ``tortoise hooks status`` also reads its version through it, but only for
-    layout harnesses — the CLI still rejects ``pi`` before reaching this call,
-    so Pi is unreachable there (#5351).
+    of falling outside the machinery (#4680).  BOTH seam classes reach this
+    version through BOTH surfaces: ``tortoise doctor`` step 7 grades them, and
+    ``tortoise hooks status`` reads it for a layout OR (since #5351) an
+    artifact harness — the CLI resolves the latter through
+    ``ARTIFACT_CONTRACTS`` and prints ``contract vN`` for a Pi seam.
 
     ``None`` means "no contract is registered for this harness" or "the
     shipped seam declares no readable generation".  The former is the normal
@@ -851,6 +969,25 @@ def is_manual_fix(kind: str) -> bool:
     will work" (the doctor/status hint wording is scoped accordingly).
     """
     return kind in MANUAL_FIX_KINDS or kind.startswith("symlinked")
+
+
+#: The installer-command CLAUSES the artifact details embed — the ones a caller
+#: must not render while the installer would refuse them (#5351).  Declared
+#: beside the details that write them, and matched as CLAUSES rather than as the
+#: bare `` `tortoise install <h>` `` token, because a caller matches rendered
+#: prose: the token also occurs inside an install PATH (backticks are legal
+#: filename characters), and a caller testing for the token alone withholds a
+#: `chmod` instruction whose path merely looks like a command — measured, and
+#: pinned by
+#: ``tests/test_doctor.py::test_doctor_keeps_a_command_free_detail_when_the_path_looks_like_a_command``
+#: A caller must ALSO exempt the manual kinds: the ``symlinked-install`` note
+#: (also non-blocking) embeds the ``re-run`` clause as the second step of an
+#: instruction whose first step is the user's, so its clause must not be read as
+#: a bare prescription.
+ARTIFACT_INSTALLER_CLAUSES = (
+    "reinstall with `tortoise install {harness}`",
+    "re-run `tortoise install {harness}`",
+)
 
 
 # ── settings helpers ────────────────────────────────────────────────────
@@ -2233,10 +2370,11 @@ def detect_artifact_install(root: str | os.PathLike[str],
     # This is the artifact peer of `detect_install`'s `symlinked-install`.
     # A caller handing us a root unrelated to the contract (a test's tmp_path)
     # falls back to that root, where the check still covers the artifact.
-    home = root_path
-    _parts = contract.root_relpath.parts
-    if tuple(root_path.parts[-len(_parts):]) == _parts:
-        home = root_path.parents[len(_parts) - 1]
+    # The derivation is the shared one (:func:`artifact_home`), never a second
+    # copy — the CLI maps `--dir` back to a home with the same call (#5351).
+    home = artifact_home(harness, root_path)
+    if home is None:
+        home = root_path
     root_link = _symlink_in_path(home, root_path)
     if root_link is not None:
         findings.append(Finding(

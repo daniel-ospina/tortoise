@@ -19,6 +19,7 @@ from tortoise.metering import (
     _reset_thresholds_for_tests,
     _thresholds_fired,  # noqa: F401
     get_current_usage,
+    record_ask_usage,
     record_write_ops,
 )
 from tortoise.quota import QuotaCheckError
@@ -161,8 +162,11 @@ class TestRecordWriteOps:
         and window resolution RAISES by design — so the old shape could not
         tell "I could not resolve the window" apart from "the row write
         failed". The window resolves; the MERGE raises; the write is non-fatal
-        (the increment is dropped — it is NOT retried at any call site; that
-        residual is #3824's representation scope).
+        (the increment is dropped — it is NOT retried at any call site; since
+        #4779 that drop is REPRESENTED durably as
+        ``drop_class="increment_write_unconfirmed"``. #3824 does NOT represent
+        it: that counter rides the capture-cost MEASUREMENT row, a different
+        surface).
         """
         sdk, tid = reg_sdk
         _break_increment_only(monkeypatch, sdk)
@@ -411,6 +415,24 @@ class TestGetCurrentUsage:
         assert usage["period"] == _current_period(team["id"]).label
         assert usage["overage_eligible"] is False  # free tier
         sdk.close()
+
+    def test_an_ask_only_org_reads_as_zero_without_a_false_query_failure(
+            self, reg_sdk, caplog):
+        """A row whose ``write_ops`` is unset is a ZERO, not a failed query.
+
+        The ask/embed writers MERGE their own ``MeteringRecord`` and never set
+        ``write_ops``, so a row with the property absent is the ordinary
+        multi-lane shape. ``int(None)`` raised inside this best-effort read and
+        logged "metering usage query failed" on the ``/v1/team`` hot path — a
+        false alarm naming the wrong cause. The returned view was already
+        correct; the diagnostic was not.
+        """
+        sdk, tid = reg_sdk  # noqa: RUF059
+        record_ask_usage(tid, calls=1, tokens_in=1, tokens_out=1, cost_usd=0.0)
+        with caplog.at_level("WARNING"):
+            usage = get_current_usage(tid)
+        assert usage["write_ops_used"] == 0
+        assert "metering usage query failed" not in caplog.text
 
     def test_usage_reflects_accumulated_ops(self, reg_sdk):
         sdk, tid = reg_sdk  # noqa: RUF059

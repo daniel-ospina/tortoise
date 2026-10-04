@@ -9,8 +9,12 @@ real Source); no phantom Sources; Source nodes (including the D10 document
 Source) and Event nodes survive replay;
 a re-index run restores the dropped session/meeting edges (repair carve-out →
 ``updated``). The wipe-after-parse + line-tolerance ordering pins: parse ALL
-.jsonl into memory (torn TRAILING line skipped+warned, never raised) BEFORE
-the wipe — a torn tail rebuilds to the crash-free structural state. Restore
+.jsonl into memory (torn TRAILING line skipped+warned, never raised — and,
+since #3316, that READ tolerance is qualified: a tear whose loss would REVIVE
+state is still skipped by ``read_all``, but the REPLAY refuses it before the
+wipe, so a torn removal record can no longer rebuild) BEFORE the wipe — a torn
+tail whose loss is the data-LOSS direction rebuilds to the crash-free
+structural state. Restore
 drill: backup (corpus + events dir + db) → wipe → rebuild_all (line-tolerant)
 → re-index → the full Source count (provenance Sources + D10 document
 Sources), zero duplicate urls. Forward-only
@@ -149,7 +153,7 @@ def test_s13_rebuild_drops_session_meeting_edges_doc_survives(tmp_path):
         log = EventLog(events)
         assert len(log.read_all()) >= 3
         proj = sdk._get_proj()
-        counts = proj.rebuild_all(str(events_dir))  # noqa: F841
+        counts = proj.rebuild_all(str(events_dir), confirm_destructive=True)  # noqa: F841
         # node survival: 4 Sources (3 provenance corpus Sources + the D10
         # document Source), 2 Events (session+meeting), 1 document Source
         assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 4
@@ -202,7 +206,7 @@ def test_s13_post_rebuild_version_equality_and_sweep(tmp_path):
                for u in [x[0] for x in
                          g.query("MATCH (s:Source) RETURN s.url").result_set]}
         proj = sdk._get_proj()
-        proj.rebuild_all(str(events_dir))
+        proj.rebuild_all(str(events_dir), confirm_destructive=True)
         # re-index repair oracle restores edges; versions land at the
         # converged values (the hash-diff-gated bump replays journaled states)
         sdk.index_directory(str(corpus), extract_metadata=False)
@@ -224,8 +228,15 @@ def test_s15_torn_tail_journal_rebuilds_to_crash_free_state(tmp_path):
     """T12/S15 cycle-21: a journal with a TORN TRAILING line (SIGKILL
     mid-append) → EventLog.read_all() succeeds (line-tolerance, skipped +
     counted, never raised) AND rebuild_all recovers to the crash-free
-    structural state (the wipe-after-parse pin: ALL jsonl parsed BEFORE the
-    wipe, so a torn line is a survivable skip, not total loss)."""
+    structural state (a torn line is a survivable skip, not total loss).
+
+    Scope note (#3316): this pins the TOLERANCE, not the wipe-after-parse
+    ORDERING. A tolerated tear never makes the parse raise, so this pin CANNOT
+    observe when the wipe happens. The ordering is pinned where it IS
+    observable: an engine that refuses a torn tail must leave a
+    wipe-observable sentinel (a ``:Canary`` node) intact — see
+    tests/test_ops_safety.py's ``test_rebuild_all_refuses_a_torn_removal_tail_before_the_wipe``
+    and ``test_rebuild_all_refuses_a_torn_tail_in_any_journal_file``."""
     events_dir = tmp_path / "events"; events_dir.mkdir()  # noqa: E702
     log_path = str(events_dir / "events.jsonl")
     corpus = _all_three_corpus(tmp_path)
@@ -234,16 +245,20 @@ def test_s15_torn_tail_journal_rebuilds_to_crash_free_state(tmp_path):
         sdk.index_directory(str(corpus), extract_metadata=False)
         g = sdk._get_proj().g
         n_sources = g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0]
-        # simulate the SIGKILL mid-append: a torn trailing line
+        # simulate the SIGKILL mid-append: a torn trailing line. #3316: the
+        # torn type is deliberately one whose loss is the data-LOSS direction
+        # (``TORN_TAIL_HARMLESS_EVENT_TYPES``) — a torn removal/terminal record
+        # is REFUSED before the wipe by the separate #3316 pin, so it can no
+        # longer stand in for "a torn line is survivable".
         with open(log_path, "a", encoding="utf-8") as f:
-            f.write('{"type": "EventRecorded", "id": "session_r1", "eventId": "sess')  # torn
+            f.write('{"type": "PointAdded", "point": {"id": "session_r1", "content": "torn')  # torn
         log = EventLog(log_path)
         events = log.read_all()          # must NOT raise
         assert log.torn_trailing_count == 1
         assert len(events) >= 3
-        # rebuild survives the torn tail (parse-all-then-wipe)
+        # rebuild survives the torn tail (a tolerant tear must not abort)
         proj = sdk._get_proj()
-        proj.rebuild_all(str(events_dir))
+        proj.rebuild_all(str(events_dir), confirm_destructive=True)
         assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == n_sources
         assert _required_sweep(g) == 0
     finally:
@@ -304,7 +319,7 @@ def test_s15_restore_drill_end_to_end(tmp_path):
     sdk2 = TortoiseSDK(_db(tmp_path, "restored.db"), namespace="e2e-900")
     try:
         proj = sdk2._get_proj()
-        counts = proj.rebuild_all(str(backup / "events"))  # noqa: F841
+        counts = proj.rebuild_all(str(backup / "events"), confirm_destructive=True)  # noqa: F841
         g = sdk2._get_proj().g
         # nodes survive; session/meeting edges dropped per S13. D10: the
         # 3-file corpus yields 3 provenance Sources + 1 document Source.
@@ -352,7 +367,7 @@ def test_t12_backfill_rebuild_wipe_semantics(tmp_path):
         assert g.query("MATCH (e:Event {eventId:'docA.md'}) RETURN count(e)"
                        ).result_set[0][0] == 1
         proj = sdk._get_proj()
-        proj.rebuild_all(str(events_dir))
+        proj.rebuild_all(str(events_dir), confirm_destructive=True)
         # the UNJOURNALED legacy DocumentCreated Event node is DROPPED
         assert g.query("MATCH (e:Event {eventId:'docA.md'}) RETURN count(e)"
                        ).result_set[0][0] == 0
@@ -384,7 +399,8 @@ def test_t12_old_logic_skips_unknown_record_types(tmp_path):
             f.write(json.dumps({"type": "FutureRecordKind2027",
                                 "id": "future-1", "payload": {"x": 1}}) + "\n")
         proj = sdk._get_proj()
-        counts = proj.rebuild_all(str(events_dir))   # must NOT raise  # noqa: F841
+        counts = proj.rebuild_all(  # noqa: F841
+            str(events_dir), confirm_destructive=True)   # must NOT raise
         g = sdk._get_proj().g
         # known kinds replayed; the unknown kind skipped silently. D10: the
         # 3-file corpus yields 3 provenance Sources + 1 document Source.
@@ -418,7 +434,7 @@ def test_t12_instantiates_edges_rebuild_drop_and_restore(tmp_path):
             "RETURN count(o)").result_set[0][0]
         assert n_live >= 2, f"expected issue/PR edges live, got {n_live}"
         proj = sdk._get_proj()
-        proj.rebuild_all(str(events_dir))
+        proj.rebuild_all(str(events_dir), confirm_destructive=True)
         # the aboutObject edges are DROPPED (indexer-side, unjournaled)
         assert g.query(
             "MATCH ()-[:aboutObject]->() RETURN count(*)").result_set[0][0] == 0

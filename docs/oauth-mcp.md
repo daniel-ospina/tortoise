@@ -360,8 +360,9 @@ Before #4097 an empty value silently disabled `TORTOISE_OAUTH_CIMD` (and, worse,
 
 - The rate-limit, fetch-cache and #3669 occupancy stores are in-process, so the
   real bound is `limit × running machines` and resets on restart — the same
-  accepted limitation as `_OAUTH_DCR_BUCKETS` (#2866; the shared primitive is
-  #3124). The in-flight cap is per process (N machines ⇒ N×4), and the window
+  accepted limitation as `_OAUTH_DCR_BUCKETS` (#2866; the shared primitive's
+  store is bounded by #3124, and that cap is per-process too). The in-flight
+  cap is per process (N machines ⇒ N×4), and the window
   budget is per process (N machines ⇒ N×120 s/window).
 - The fetch is **synchronous** by construction, matching this path's existing
   control-plane style (`cp.query` is a blocking PostgREST call made from the
@@ -393,7 +394,7 @@ Before #4097 an empty value silently disabled `TORTOISE_OAUTH_CIMD` (and, worse,
   AS responsive; it does not make CIMD fetch capacity attack-proof, and the
   600/hr aggregate limiter is the other ceiling on the same path. This is the
   residual the single-worker deployment carries until the limiter/budget moves
-  to shared state (#3124).
+  to shared state (#1677).
 - The `authorize` error path uses the client **stamped on the raised
   `OAuthError`** by `validate_authorize_params`, so an in-document
   `redirect_uri` is still honoured on error responses without a second
@@ -457,16 +458,20 @@ never the default. A malformed entry is skipped without aborting the list.
 
 Scope vectors. `SCOPES_SUPPORTED` (`["mcp"]`) stays the client-facing default
 and the RFC 9728 PRM document; `SCOPES_ACCEPTED` (`["mcp",
-"offline_access"]`) is what the DCR gate and the RFC 8414 AS metadata accept, so
-Claude's `offline_access` request no longer 400s.
+"offline_access"]`) is what the DCR gate, the RFC 8414 AS metadata, and the
+authorize/consent/mint gate (`validate_scope`) accept, so Claude's
+`offline_access` request no longer 400s. A scope outside that set is rejected
+with `invalid_scope` on `GET /oauth/authorize`, `POST /oauth/consent`, and at
+the token mint — it cannot reach an authorization code or a token claim.
 
 Accepted limitations (see the code comment for the full list):
 
 - The stores are **in-process**, so real capacity is `limit × machines` and
   resets on restart. Out-of-process limiting is #1677.
 - `oauth_clients` row pruning is **not** part of this policy — #2853 owns it
-  (owner @daniel-ospina, review date 2026-10-15); #3124 tracks the still
-  unbounded shared per-IP bucket primitive.
+  (owner @daniel-ospina, review date 2026-10-15); the shared per-IP bucket
+  primitive's key space is bounded by #3124 (reclaim-inactive + reject-new /
+  shared overflow).
 - The limiter runs **before body parsing**, so an invalid-JSON or oversized
   POST still consumes budget (charges ≤ 600/hr anonymous + 1200/hr trusted);
   row writes are not bounded by it.
@@ -483,10 +488,10 @@ Accepted limitations (see the code comment for the full list):
   to protect. #3134 owns the dated measurement (owner @daniel-ospina,
   2026-11-15).
 - `/register` also passes the generic `RateLimitMiddleware` (100/min, whose
-  bucket store has no hard key cap — #3124).
+  bucket store is now hard-capped by #3124).
 - The exemption rests on the Fly edge overwriting any client-supplied
   `Fly-Client-IP`; #3126 is the dated re-verification (owner
   @daniel-ospina, 2026-11-15) and carries the operator recipe.
-- Trusted traffic is not charged to the anonymous aggregate; unrelated
-  protocol gaps found en route are filed as #3125 (`_check_claim_rate_limit`
-  proxy-IP keying) and #3128 (unvalidated authorize/consent scope).
+- Trusted traffic is not charged to the anonymous aggregate; an unrelated
+  protocol gap found en route is filed as #3125 (`_check_claim_rate_limit`
+  proxy-IP keying).

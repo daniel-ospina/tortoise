@@ -540,7 +540,8 @@ def test_extractor_warnings_folded_into_stats(monkeypatch):
     byte-indistinguishable in the stats/report from a clean one. Every
     session's ``out["warnings"]`` must be counted, deduplicated, and
     sampled into the per-question stats (parity with the product lane's
-    ``meta["warnings"]`` contract, sdk.py:4503 → :4933)."""
+    ``meta["warnings"]`` contract — see ``sdk.py::TortoiseSDK.capture_session``, which
+    reads the extractor's ``meta`` and re-emits it as ``extraction_warnings``)."""
     per_session = {"payload": {}, "minted_kinds": [], "supersessions": [],
                    "errors": [], "error_census": {},
                    "warnings": ["R8: no prior matches — skipped (fail-open)",

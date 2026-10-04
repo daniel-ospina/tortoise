@@ -356,6 +356,92 @@ class TestS2:
         assert "CLAUSE-LEVEL STRIP" not in s1
         assert "OPERATIONAL-VALUE" in s1
 
+    def test_short_session_fact_rule_reaches_every_stage(self):
+        """#1507: the SHORT-SESSION fact-retention clause — the granularity
+        bar is a predicate over CONTENT, never over session LENGTH.
+
+        The v2 pipeline's ONE clear regression in the #1350 measurement was
+        Information Extraction (76.5% vs the 84.7% deterministic baseline,
+        -8.2pp): the bar was calibrated on LONG design sessions, where the
+        narrative-first rule pays off, and read a short fact-dense session as
+        "too small to be worth a point" — so the facts the session existed to
+        record were never emitted (0-2 points against a 3-5 target).
+
+        The clause must reach BOTH registers, for the same reason the value
+        carve-out does (#2453): S1 (the story summarizer) decides what the
+        narrative carries and S2/S4 (the mapper) decides what becomes a
+        point. If only one carries it, the story keeps a fact the mapper then
+        discards and the regression survives.
+        """
+        rule = v2.SHORT_SESSION_FACT_RULE
+        assert "SHORT-SESSION FACT RETENTION" in rule
+        # The predicate framing IS the fix — lock it, not merely presence.
+        assert "NEVER over session length" in rule
+        # QUALIFICATION is load-bearing (review P1): an unqualified "every
+        # stated quantity is durable" re-admits what VALUE_FIDELITY_RULE and
+        # S2_TMPL's VALUE FILTER exclude (test counts, routine readouts), and
+        # S1 carries NO anti-routine gate to catch it. The enumeration must
+        # stay tied to the SAME test the carve-out uses.
+        assert "subject of a decision" in rule
+        assert "never WHETHER it qualifies" in rule
+        # Anti-hoarding edge must survive: padding to a count is the failure
+        # mode a density instruction invites.
+        assert "mint kinds" in rule
+        assert "no-op" in rule
+        # No numeric density target. Pins the removed RANGE in every spelling
+        # (a range gets anchored on as a goal), not merely one punctuation of
+        # it. The only number left in the clause is the descriptive
+        # "one or two facts".
+        for variant in ("3 to 5", "3-5", "3–5", "0 to 2", "0-2", "0–2"):
+            assert variant not in rule
+        assert "quota" not in rule
+
+        # S1 (narrative register) gets it via the granularity slot.
+        s1 = (v2.S1_TMPL
+              .replace("{memory_granularity}", v2._granularity_text())
+              .replace("{date_anchor}", v2._date_anchor(None)))
+        assert "SHORT-SESSION FACT RETENTION" in s1
+        assert "OPERATIONAL-VALUE" in s1   # still shares the slot (#2453)
+
+        # The S2/S4 {anti_routine} slot is its OWN seam and must be pinned
+        # directly (review P1): the pre-review draft also carried the clause via
+        # {master_list}, so a prompt-level assertion alone let this wiring be
+        # deleted while the suite stayed green. The master-render appends were
+        # removed in cycle 1; the slot is now the clause's only S2/S4 seam.
+        assert "SHORT-SESSION FACT RETENTION" in v2._s2s4_rules()
+
+        for prompt in (v2.render_s2_prompt(),
+                       v2.render_s2_prompt(core_only=True),
+                       v2.render_s4_prompt("S", {"results": []}, {})):
+            assert "SHORT-SESSION FACT RETENTION" in prompt
+            assert "VALUE FIDELITY" in prompt   # #2453 rides the same slot
+            # Emitted EXACTLY ONCE (review P2): the master render must NOT
+            # carry it too. The figure is deliberately NOT quoted here — a byte
+            # count in a comment re-stales the moment the clause is edited (it
+            # did, twice); `count == 1` is the claim that cannot go stale.
+            # S4 is in this loop because the duplication defect was per S2/S4,
+            # so a lock covering only S2 would cover half the surface.
+            assert prompt.count("SHORT-SESSION FACT RETENTION") == 1
+
+        # EVERY master render mode must NOT carry it — the single-seam rule
+        # above is only real if this stays true. All three modes are named:
+        # omitting _render_master_compact would leave the absence unguarded
+        # precisely in the mode the others were already verified against.
+        for render in (v2._render_master_core_only(v2.build_master_list()),
+                       v2._render_master_verbose(v2.build_master_list()),
+                       v2._render_master_compact(v2.build_master_list(),
+                                                 "a short story")):
+            assert "SHORT-SESSION FACT RETENTION" not in render
+
+        # The S1 asymmetry lock MUST survive: naming the anti-routine gate in
+        # S1 would import that register into the narrative stage.
+        assert "ANTI-ROUTINE EXCLUSION" not in s1
+        assert "NOOP" not in s1
+        # CLAUSE-LEVEL STRIP is part of the anti-routine block, so it must be
+        # absent from S1 too. Asserted HERE as well as in the sibling test, so
+        # the whole asymmetry lock lives with the clause that could break it.
+        assert "CLAUSE-LEVEL STRIP" not in s1
+
     def test_s4_prompt_anti_routine_exclusion(self):
         """#2424: S4 (the GAP REVIEWER) applies the SAME anti-routine gate
         — it must not ADD true-but-routine content as gaps (its TASK's
@@ -865,6 +951,142 @@ class TestS3:
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
         assert v2.resolve_backend_mode() == "real"
 
+    def test_hosted_posture_searches_the_graph(self, monkeypatch):
+        """#3679: a client WITHOUT a projection falls back to the env label.
+
+        This pins the documented **mock** path (the client exposes no
+        ``_get_proj``), where searchability is decided by the env label: with
+        ``TORTOISE_API_URL`` set and no DB URI, S3 must NOT be skipped. The
+        pre-fix gate (``if mode != "real":``) returned the degraded
+        "S3 skipped ... 'hosted'" shape and NEVER called the client.
+
+        ⚠️ SCOPE — this does NOT mean the hosted posture searches in
+        production. A real ``TortoiseSDK`` with no DB URI holds the EMBEDDED
+        store and must still skip, pinned by
+        ``test_hosted_label_does_not_override_an_embedded_store`` and
+        ``test_unresolvable_projection_fails_closed``. The genuine production
+        change is the REVERSE divergence: a DB URI in the env plus an embedded
+        client, which the old gate searched and this one correctly skips
+        (#3679 review P3).
+
+        Asserting ``degraded is False`` alone is NOT enough: a change that
+        returns an empty non-degraded shape would satisfy it, so this asserts
+        the query path was actually invoked."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_API_URL", "https://api.example.test")
+
+        class RecordingSDK:
+            def __init__(self):
+                self.calls = []
+
+            def tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False):
+                self.calls.append((query, entity_type))
+                if entity_type == "object":
+                    return [{"id": "obj-1", "content": "single-flash pipeline",
+                             "point_kind": "core:plan"}]
+                return []
+
+        sdk = RecordingSDK()
+        res = v2.search_graph(sdk, S2_FIXTURE, "The story. First para.")
+        assert res["mode"] == "hosted"
+        assert res["degraded"] is False
+        assert res["reason"] is None
+        # the query path ACTUALLY ran — not just a non-degraded empty result
+        assert sdk.calls, "the hosted posture must reach tortoise_fts_query"
+        assert "object" in {t for _, t in sdk.calls}
+
+    def test_hosted_label_does_not_override_an_embedded_store(self, monkeypatch):
+        """#3679 owner ruling: the env label must not re-admit FalkorDBLite.
+
+        ``TORTOISE_API_URL`` set while the client's projection is the embedded
+        test/eval store: S3 must STILL skip and must never query it. A naive
+        ``mode in ("real", "hosted")`` flip would search the embedded store —
+        exactly what the gate exists to exclude."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_API_URL", "https://api.example.test")
+
+        class EmbeddedProjection:
+            _is_embedded = True
+
+        class EmbeddedSDK:
+            def __init__(self):
+                self.calls = 0
+
+            def _get_proj(self):
+                return EmbeddedProjection()
+
+            def tortoise_fts_query(self, *args, **kwargs):
+                self.calls += 1
+                return []
+
+        sdk = EmbeddedSDK()
+        res = v2.search_graph(sdk, S2_FIXTURE, "STORY")
+        assert res["degraded"] is True
+        assert "FalkorDBLite" in (res["reason"] or "")
+        assert sdk.calls == 0, "the embedded store must never be queried"
+
+    def test_unresolvable_projection_fails_closed(self, monkeypatch):
+        """#3679 review P1: a projection that cannot be RESOLVED is embedded.
+
+        ``_get_proj`` is not guaranteed to raise deterministically — the SDK
+        caches ``_proj`` on success only, so a transient open failure retries
+        and succeeds. If a raise fell back to the env label, the gate would
+        re-open and the query path's second ``_get_proj()`` call would read
+        the embedded store this gate exists to exclude. The label here says
+        "hosted" precisely so a fallback would show up as a search."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_API_URL", "https://api.example.test")
+
+        class FlakySDK:
+            def __init__(self):
+                self.calls = 0
+
+            def _get_proj(self):
+                raise RuntimeError("transient open failure")
+
+            def tortoise_fts_query(self, *args, **kwargs):
+                self.calls += 1
+                return []
+
+        sdk = FlakySDK()
+        res = v2.search_graph(sdk, S2_FIXTURE, "STORY")
+        assert res["degraded"] is True
+        assert sdk.calls == 0, (
+            "an unresolvable projection must fail CLOSED — the env label "
+            "('hosted') must not re-open the gate")
+
+    def test_projection_without_the_flag_fails_closed(self, monkeypatch):
+        """#3679 review P3: the ``_is_embedded`` read defaults to embedded.
+
+        ``True`` is the fail-closed default (a projection lacking the flag is
+        not proven searchable), which is also what the product package's
+        readers of a foreign projection use — ``sdk.py:11205``,
+        ``sdk.py:15011``, ``pack_state.py:175``. It is not a universal:
+        ``projection/__init__.py:5795`` reads its own flag with a ``False``
+        default. A ``False`` default here would make a projection lacking the
+        flag read as a searchable real graph."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_API_URL", "https://api.example.test")
+
+        class FlaglessProjection:
+            pass  # deliberately carries no _is_embedded
+
+        class FlaglessSDK:
+            def __init__(self):
+                self.calls = 0
+
+            def _get_proj(self):
+                return FlaglessProjection()
+
+            def tortoise_fts_query(self, *args, **kwargs):
+                self.calls += 1
+                return []
+
+        sdk = FlaglessSDK()
+        res = v2.search_graph(sdk, S2_FIXTURE, "STORY")
+        assert res["degraded"] is True
+        assert sdk.calls == 0
+
     def test_degrades_when_embedded(self, monkeypatch):
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.delenv("TORTOISE_API_URL", raising=False)
@@ -885,7 +1107,7 @@ class TestS3:
             def __init__(self):
                 self.calls = []
 
-            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+            def tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False):
                 self.calls.append((query, entity_type))
                 # the REAL callee row shape: ``SearchResult.to_dict()`` keys
                 # the kind as ``point_kind`` (#4511) — never ``kind``.
@@ -923,7 +1145,7 @@ class TestS3:
         """
 
         class MockSDK:
-            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+            def tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False):
                 return {
                     "point": [{"id": "pt-1", "content": "flash is the path",
                                "point_kind": "statement"}],
@@ -959,7 +1181,7 @@ class TestS3:
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
 
         class MockSDK:
-            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+            def tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False):
                 if entity_type == "object":
                     return [{"id": "obj-1", "content": "single-flash pipeline",
                              "point_kind": "core:plan"}]
@@ -971,19 +1193,36 @@ class TestS3:
         assert "- obj-1 | single-flash pipeline | core:plan" in rendered
 
     def test_turn_echo_is_never_an_s3_prior(self, monkeypatch):
-        """#2552: a capture's own turn echoes are transcript, not memory.
+        """#2552/#4509: a capture's own turn echoes are transcript, not memory.
 
         On a fresh capture the session's turn Points (``{sid}_t{i}``) are the
         only content in the graph, so S3 used to return them as the
         link-before-create prior set: the extracted claim NOOP-folded onto its
-        own transcript echo and never became a memory Point."""
+        own transcript echo and never became a memory Point.
+
+        FALSIFIER — value: the transfer argument passed to the callee. The
+        prior set loses ``pt_real`` (and the caller-minted ``s1_t9`` survives
+        only by accident) unless ``_fts_rows`` passes
+        ``exclude_turn_echo_session="s1"`` on the point leg; the mock applies
+        the REAL callee exclusion contract, so a dropped kwarg re-admits
+        ``s1_t3``/``s1_t4``/``s1_t5`` and the assertion goes red. Reachable:
+        the fixture carries three echo rows whose ids/markers the real
+        predicate matches, plus two rows it must NOT match."""
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
 
+        from tortoise.retrieval import is_turn_echo_row
+
         class MockSDK:
-            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+            """Models the REAL ``tortoise_fts_query`` opt-in contract: the
+            candidate window is filtered by ``exclude_turn_echo_session``
+            before it is returned."""
+
+            def tortoise_fts_query(self, query, *, entity_type, limit=3,
+                                   include_terminal=False,
+                                   exclude_turn_echo_session=None):
                 if entity_type != "point":
                     return []
-                return [
+                rows = [
                     {"id": "s1_t3", "content": "[user] the lease makes that "
                      "impossible no matter how we roll out",
                      "point_kind": "event"},
@@ -1000,6 +1239,10 @@ class TestS3:
                     {"id": "pt_real", "content": "a real claim",
                      "point_kind": "statement"},
                 ]
+                if exclude_turn_echo_session:
+                    rows = [r for r in rows if not is_turn_echo_row(
+                        exclude_turn_echo_session, r)]
+                return rows[:limit]
 
         res = v2.search_graph(MockSDK(), S2_FIXTURE, "STORY", session_id="s1")
         assert [p["id"] for p in res["points"]] == ["s1_t9", "pt_real"]
@@ -1007,67 +1250,69 @@ class TestS3:
     def test_turn_echo_filter_is_anchored_not_shape_based(self):
         """The id leg is exactly ``^{session_id}_t\\d+$``, never a shape guess.
 
+        #4509 moved the predicate to its canonical home
+        (``retrieval.is_turn_echo_id``); the semantics are unchanged and the
+        retrieval-layer exclusion the point leg now relies on is pinned here.
         ``create_point`` accepts explicit caller ids and ``retrieval.py``
         records the D3 decision that "the shape of an id is not evidence that a
         capture happened", so an unanchored ``_t\\d+$`` would silently drop a
-        real, caller-minted memory Point from every prior set."""
+        real, caller-minted memory Point from every prior set.
+
+        FALSIFIER — value: the boolean identity. An anchored-``fullmatch``
+        regression (``.match``/search, or ``isdigit``) flips at least one of
+        the negative cases below; every one of those ids exists in the fixture."""
+        from tortoise.retrieval import is_turn_echo_id
         # this capture's own echoes
-        assert v2._is_turn_echo_id("s1", "s1_t0")
-        assert v2._is_turn_echo_id("wp06_quarry_rollout",
-                                   "wp06_quarry_rollout_t8")
+        assert is_turn_echo_id("s1", "s1_t0")
+        assert is_turn_echo_id("wp06_quarry_rollout",
+                                "wp06_quarry_rollout_t8")
         # another session's turn is not ours to drop
-        assert not v2._is_turn_echo_id("s1", "s2_t8")
+        assert not is_turn_echo_id("s1", "s2_t8")
         # a session id that PREFIXES another's must not over-match
-        assert not v2._is_turn_echo_id("s1", "s10_t3")
+        assert not is_turn_echo_id("s1", "s10_t3")
         # caller-minted ids that merely LOOK like the shape — the class
         # tests/test_d3_session_identity.py documents as reachable
-        assert not v2._is_turn_echo_id("s1", "acme_t5")
-        assert not v2._is_turn_echo_id("s1", "note_t12")
-        assert not v2._is_turn_echo_id("s1", "pt_foo_t3")
+        assert not is_turn_echo_id("s1", "acme_t5")
+        assert not is_turn_echo_id("s1", "note_t12")
+        assert not is_turn_echo_id("s1", "pt_foo_t3")
         # exactly ``\d`` — NOT ``str.isdigit()``, which also accepts category-No
         # numerics (superscript 2, circled 1) for which ``\d`` is False
-        assert not v2._is_turn_echo_id("s1", "s1_t\u00b2")
-        assert not v2._is_turn_echo_id("s1", "s1_t\u2460")
-        assert not v2._is_turn_echo_id("s1", "s1_t")        # no digits
-        assert not v2._is_turn_echo_id("s1", "s1_t3\n")    # no trailing NL
+        assert not is_turn_echo_id("s1", "s1_t\u00b2")
+        assert not is_turn_echo_id("s1", "s1_t\u2460")
+        assert not is_turn_echo_id("s1", "s1_t")        # no digits
+        assert not is_turn_echo_id("s1", "s1_t3\n")    # no trailing NL
         # content-addressed memory ids
-        assert not v2._is_turn_echo_id(
+        assert not is_turn_echo_id(
             "s1",
             "pt_e3f831d86cf073e2af58d9b542c5ca7be19ec7c114d307f675fce08b1672a8")
         # regex metacharacters in the session id are escaped, not interpreted
-        assert v2._is_turn_echo_id("s.1", "s.1_t2")
-        assert not v2._is_turn_echo_id("s.1", "sx1_t2")
+        assert is_turn_echo_id("s.1", "s.1_t2")
+        assert not is_turn_echo_id("s.1", "sx1_t2")
         # no session named -> never drop (an unanchored match would be a guess)
-        assert not v2._is_turn_echo_id(None, "s1_t8")
-        assert not v2._is_turn_echo_id("", "s1_t8")
-        assert not v2._is_turn_echo_id("s1", None)
+        assert not is_turn_echo_id(None, "s1_t8")
+        assert not is_turn_echo_id("", "s1_t8")
+        assert not is_turn_echo_id("s1", None)
 
     def test_turn_echo_filter_requires_a_turn_marker(self):
         """Both legs must hold: a caller-minted Point carrying the session's
-        turn-namespace id but no turn marker is NOT a turn echo."""
-        assert v2._is_turn_echo_row("s1", {"id": "s1_t3",
-                                           "content": "[user] hello there"})
+        turn-namespace id but no turn marker is NOT a turn echo (#4509 moved
+        the predicate to ``retrieval.is_turn_echo_row``)."""
+        from tortoise.retrieval import is_turn_echo_row
+        assert is_turn_echo_row("s1", {"id": "s1_t3",
+                                        "content": "[user] hello there"})
         # the production turn marker — covers a role outside the allowlist
-        assert v2._is_turn_echo_row(
+        assert is_turn_echo_row(
             "s1", {"id": "s1_t5", "content": "[developer] custom role",
                    "point_kind": "event"})
         # same id, claim content and kind -> preserved
-        assert not v2._is_turn_echo_row(
+        assert not is_turn_echo_row(
             "s1", {"id": "s1_t3", "content": "the lease forbids it",
                    "point_kind": "statement"})
         # transcript content but another session's id -> preserved
-        assert not v2._is_turn_echo_row(
+        assert not is_turn_echo_row(
             "s1", {"id": "s2_t3", "content": "[user] hello"})
-        assert not v2._is_turn_echo_row(
+        assert not is_turn_echo_row(
             None, {"id": "s1_t3", "content": "[user] hello"})
-
-    def test_turn_echo_content_pattern_matches_retrieval(self):
-        """The content leg IS ``retrieval._ROLE_PREFIX_RE`` — pinned
-        STRUCTURALLY (pattern + flags), so a role added to the production
-        pattern cannot leave this mirror stale."""
-        from tortoise.retrieval import _ROLE_PREFIX_RE
-        assert v2._TURN_ECHO_CONTENT_RE.pattern == _ROLE_PREFIX_RE.pattern
-        assert v2._TURN_ECHO_CONTENT_RE.flags == _ROLE_PREFIX_RE.flags
 
     def test_turn_echo_id_agrees_with_the_graded_layer_pattern(self):
         """The id leg is the graded layer's ``_turn_id_pattern`` identity on every
@@ -1076,132 +1321,127 @@ class TestS3:
         accepts a single trailing newline). Both sides of that divergence are
         asserted so the difference is pinned and visible rather than latent."""
         from tests.eval.write_path.runner import _turn_id_pattern
+        from tortoise.retrieval import is_turn_echo_id
         pat = _turn_id_pattern("s1")
         for pid in ("s1_t0", "s1_t12", "s2_t1", "s10_t1", "s1_t", "s1_tx",
                     "pt_ab_t3", "acme_t5"):
-            assert v2._is_turn_echo_id("s1", pid) == bool(pat.match(pid)), pid
+            assert is_turn_echo_id("s1", pid) == bool(pat.match(pid)), pid
         # the deliberate divergence: the runner's ``$`` accepts a trailing
         # newline, this predicate does not (stricter = a missed drop, never
         # memory loss)
         assert bool(pat.match("s1_t3\n")) is True
-        assert v2._is_turn_echo_id("s1", "s1_t3\n") is False
+        assert is_turn_echo_id("s1", "s1_t3\n") is False
 
     def test_turn_echo_filter_is_point_only(self, monkeypatch):
-        """An echo-shaped id on the event/entity legs is untouched — the drop
-        is confined to ``entity_type == "point"``."""
+        """An echo-shaped id on the event/entity legs is untouched — the
+        exclusion is confined to ``entity_type == "point"`` (the legs the
+        callee may be asked to filter).
+
+        FALSIFIER — value: the ``exclude_turn_echo_session`` argument per leg.
+        The mock models the callee contract and records the argument, so
+        passing the session on the event/object legs (or dropping it on the
+        point leg) flips the assertion. Reachable: the fixture carries
+        echo-shaped rows on all three legs."""
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
 
+        from tortoise.retrieval import is_turn_echo_row
+
         class MockSDK:
-            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+            def __init__(self):
+                self.seen = {}
+
+            def tortoise_fts_query(self, query, *, entity_type, limit=3,
+                                   include_terminal=False,
+                                   exclude_turn_echo_session=None):
+                self.seen[entity_type] = exclude_turn_echo_session
                 if entity_type == "point":
-                    return [{"id": "pt_real", "content": "a real claim",
-                             "point_kind": "statement"}]
+                    rows = [
+                        {"id": "s1_t3", "content": "[user] owner paused",
+                         "point_kind": "event"},
+                        {"id": "pt_real", "content": "a real claim",
+                         "point_kind": "statement"},
+                    ]
+                    if exclude_turn_echo_session:
+                        rows = [r for r in rows if not is_turn_echo_row(
+                            exclude_turn_echo_session, r)]
+                    return rows[:limit]
                 if entity_type == "event":
                     return [{"id": "s1_t3", "content": "[user] owner paused",
                              "point_kind": "core:decision"}]
                 if entity_type in ("object", "subject"):
                     # echo-shaped id AND transcript content — still preserved on
-                    # the entity leg, which carries no such drop
+                    # the entity leg, which carries no such exclusion
                     return [{"id": "s1_t4", "content": "[user] a named entity",
                              "point_kind": "core:plan"}]
                 return []
 
-        res = v2.search_graph(MockSDK(), S2_FIXTURE, "The story. First para.",
+        sdk = MockSDK()
+        res = v2.search_graph(sdk, S2_FIXTURE, "The story. First para.",
                               session_id="s1")
         assert [e["id"] for e in res["events"]] == ["s1_t3"]
         assert [e["id"] for e in res["entities"]] == ["s1_t4"]
         assert [p["id"] for p in res["points"]] == ["pt_real"]
+        # the session is named on the point leg ONLY
+        assert sdk.seen.get("point") == "s1"
+        assert all(v is None for k, v in sdk.seen.items() if k != "point"), \
+            sdk.seen
 
-    def test_turn_echo_drop_refills_the_prior_window(self, monkeypatch):
-        """The drop runs AFTER the SDK's own ``[:limit]`` truncation (#898's
-        filter-before-truncation contract, applied here by hand), so the point
-        leg over-fetches and refills. The mock HONOURS ``limit`` exactly as
-        ``tortoise_fts_query`` does, so the behavioural assertion can only pass
-        if the refill is real."""
+    def test_point_leg_asks_for_exactly_limit_no_over_fetch(self, monkeypatch):
+        """#4509: the fix REMOVED the caller-side over-fetch — every leg asks
+        for exactly ``limit`` now that the callee filters before its own cut.
+        This is the fingerprint guard for the deleted ``_PRIOR_OVERFETCH``.
+
+        FALSIFIER — value: the ``limit`` the point leg passes. A revert that
+        reintroduced a wider window (``limit + _PRIOR_OVERFETCH``) makes the
+        ``== 3`` assertion fail; reachable because the mock records the exact
+        window on every leg."""
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
 
         class MockSDK:
             def __init__(self):
                 self.asked = []
 
-            def tortoise_fts_query(self, query, *, entity_type, limit=3):
-                self.asked.append((entity_type, limit))
-                if entity_type != "point":
-                    return []
-                rows = ([{"id": f"s1_t{i}", "content": f"[user] turn {i}",
-                          "point_kind": "event"} for i in range(5)]
-                        + [{"id": "pt_real", "content": "a real claim",
-                            "point_kind": "statement"}])
-                return rows[:limit]  # the real callee truncates to `limit`
+            def tortoise_fts_query(self, query, *, entity_type, limit=3,
+                                   include_terminal=False,
+                                   exclude_turn_echo_session=None):
+                self.asked.append((entity_type, limit, exclude_turn_echo_session))
+                return []
 
         sdk = MockSDK()
-        res = v2.search_graph(sdk, S2_FIXTURE, "STORY", session_id="s1")
-        assert [p["id"] for p in res["points"]] == ["pt_real"]
-        # the point leg asked for exactly `limit + _PRIOR_OVERFETCH`; every other
-        # leg kept the exact window it always had
+        v2.search_graph(sdk, S2_FIXTURE, "STORY", session_id="s1")
         assert sdk.asked, "no queries ran"
-        assert {win for t, win in sdk.asked if t == "point"} == \
-            {3 + v2._PRIOR_OVERFETCH}, sdk.asked
-        assert {win for t, win in sdk.asked if t != "point"} == {3}, sdk.asked
+        assert {win for _t, win, _s in sdk.asked} == {3}, sdk.asked
+        assert sdk.asked and all(
+            (s == "s1") if t == "point" else (s is None)
+            for t, _win, s in sdk.asked), sdk.asked
 
-    def test_turn_echo_drop_refills_a_single_slot(self, monkeypatch):
-        """``limit=1`` — the minimal refill: one echo dropped, the real prior
-        still returned."""
-        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+    def test_no_session_sends_the_pre_4509_call_shape(self):
+        """A caller that cannot name its capture session must keep the exact
+        pre-#4509 call shape — no exclusion argument at all, so an SDK whose
+        signature predates #4509 still works.
 
-        class MockSDK:
-            def tortoise_fts_query(self, query, *, entity_type, limit=3):
-                if entity_type != "point":
-                    return []
-                rows = [{"id": "s1_t0", "content": "[user] hi",
-                         "point_kind": "event"},
-                        {"id": "pt_real", "content": "a real claim",
-                         "point_kind": "statement"}]
-                return rows[:limit]
+        FALSIFIER — value: presence of the keyword. The strict mock below
+        raises ``TypeError`` on ANY unexpected keyword, so an unconditional
+        ``exclude_turn_echo_session=None`` (sent even with no session) turns
+        this test red. Reachable: both calls below omit ``session_id``."""
+        class StrictMockSDK:
+            def tortoise_fts_query(self, query, *, entity_type, limit=3,
+                                   include_terminal=False):
+                return []
 
-        res = v2.search_graph(MockSDK(), S2_FIXTURE, "STORY", limit=1,
-                              session_id="s1")
-        assert [p["id"] for p in res["points"]] == ["pt_real"]
-
-    def test_turn_echo_window_bound_is_documented(self, monkeypatch):
-        """The refill pool is FINITE, its SIZE is pinned, and BOTH sides of its
-        boundary are asserted — not implied.
-
-        A capture can hold ``MAX_SESSION_TURNS`` (500) turns; when more echoes
-        than the window outrank a real prior, the prior is still starved. The
-        durable fix is a pre-truncation exclusion in the retrieval layer
-        (#4509); until then the pool is a deliberate constant, so growth is a
-        conscious change and its declared bound stays true."""
-        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
-        # the pool size IS part of the documented contract — pinned, so a silent
-        # growth cannot turn the declared bound into a lie
-        assert v2._PRIOR_OVERFETCH == 12
-
-        def _prior_survives(echoes):
-            class MockSDK:
-                def tortoise_fts_query(self, query, *, entity_type, limit=3):
-                    if entity_type != "point":
-                        return []
-                    rows = ([{"id": f"s1_t{i}", "content": f"[user] turn {i}",
-                              "point_kind": "event"} for i in range(echoes)]
-                            + [{"id": "pt_real", "content": "a real claim",
-                                "point_kind": "statement"}])
-                    return rows[:limit]
-            return bool(v2.search_graph(MockSDK(), S2_FIXTURE, "STORY",
-                                        session_id="s1")["points"])
-
-        # one echo short of the window -> the refill still surfaces the prior
-        assert _prior_survives(3 + v2._PRIOR_OVERFETCH - 1)
-        # AT the window bound the prior is starved — the documented limitation
-        assert not _prior_survives(3 + v2._PRIOR_OVERFETCH)
+        sdk = StrictMockSDK()
+        assert v2._fts_rows(sdk, "point", "q", limit=3) == []
+        assert v2._fts_rows(sdk, "object", "q", limit=3) == []
 
     def test_turn_echo_drop_never_exceeds_the_limit(self, monkeypatch):
-        """The refill re-truncates: the prior set is never wider than ``limit``,
-        even though the point leg fetched ``limit + _PRIOR_OVERFETCH`` rows."""
+        """The prior set is never wider than ``limit`` — the callee truncates
+        to the requested window and the extractor does not add rows."""
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
 
         class MockSDK:
-            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+            def tortoise_fts_query(self, query, *, entity_type, limit=3,
+                                   include_terminal=False,
+                                   exclude_turn_echo_session=None):
                 if entity_type != "point":
                     return []
                 rows = [{"id": f"pt_{i}", "content": f"claim {i}",
@@ -1211,55 +1451,36 @@ class TestS3:
         res = v2.search_graph(MockSDK(), S2_FIXTURE, "STORY", session_id="s1")
         assert len(res["points"]) == 3
 
-    def test_over_fetch_is_clamped_to_the_sdk_limit_bound(self, monkeypatch):
-        """The over-fetch must not push the callee past its documented bound,
-        the mirror constant must match the callee's REAL bound, and an
-        out-of-range ``limit`` must still reach the callee (which raises) rather
-        than being silently capped."""
-        import inspect
+    def test_single_slot_window_still_surfaces_the_prior(self, monkeypatch):
+        """``limit=1``: with the exclusion applied BEFORE the cut, the single
+        slot goes to the real prior, not to the echo ranked above it.
 
-        from tortoise.sdk import TortoiseSDK
+        FALSIFIER — value: whether the lone slot is ``s1_t0`` or ``pt_real``.
+        Because the mock records the argument and filters before ``[:limit]``,
+        dropping the kwarg leaves the echo in the slot and the assertion fails.
+        Reachable: the fixture's echo ranks first."""
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
-        # drift guard: the bound is a hardcoded literal in the callee — pin the
-        # mirror against THAT source, not against itself
-        src = inspect.getsource(TortoiseSDK.tortoise_fts_query)
-        assert f"limit > {v2._FTS_LIMIT_MAX}" in src, (
-            f"_FTS_LIMIT_MAX={v2._FTS_LIMIT_MAX} does not match the callee's "
-            "documented bound — the clamp would let the over-fetch raise")
+
+        from tortoise.retrieval import is_turn_echo_row
 
         class MockSDK:
-            def __init__(self):
-                self.asked = []
+            def tortoise_fts_query(self, query, *, entity_type, limit=3,
+                                   include_terminal=False,
+                                   exclude_turn_echo_session=None):
+                if entity_type != "point":
+                    return []
+                rows = [{"id": "s1_t0", "content": "[user] hi",
+                         "point_kind": "event"},
+                        {"id": "pt_real", "content": "a real claim",
+                         "point_kind": "statement"}]
+                if exclude_turn_echo_session:
+                    rows = [r for r in rows if not is_turn_echo_row(
+                        exclude_turn_echo_session, r)]
+                return rows[:limit]
 
-            def tortoise_fts_query(self, query, *, entity_type, limit=3):
-                self.asked.append((entity_type, limit))
-                return []
-
-        sdk = MockSDK()
-        v2._fts_rows(sdk, "point", "q", limit=v2._FTS_LIMIT_MAX - 1,
-                     session_id="s1")
-        assert sdk.asked == [("point", v2._FTS_LIMIT_MAX)], sdk.asked
-
-        sdk2 = MockSDK()
-        v2._fts_rows(sdk2, "point", "q", limit=v2._FTS_LIMIT_MAX + 1,
-                     session_id="s1")
-        assert sdk2.asked == [("point", v2._FTS_LIMIT_MAX + 1)], sdk2.asked
-
-    def test_over_fetch_only_when_a_session_can_be_filtered(self):
-        """No session -> nothing to drop -> no wider window (no wasted work)."""
-        class MockSDK:
-            def __init__(self):
-                self.asked = []
-
-            def tortoise_fts_query(self, query, *, entity_type, limit=3):
-                self.asked.append((entity_type, limit))
-                return []
-
-        sdk = MockSDK()
-        v2._fts_rows(sdk, "point", "q", limit=3)  # no session_id
-        v2._fts_rows(sdk, "point", "q", limit=3, session_id="s1")
-        assert sdk.asked == [("point", 3),
-                             ("point", 3 + v2._PRIOR_OVERFETCH)], sdk.asked
+        res = v2.search_graph(MockSDK(), S2_FIXTURE, "STORY", limit=1,
+                              session_id="s1")
+        assert [p["id"] for p in res["points"]] == ["pt_real"]
 
     def test_extract_session_forwards_the_session_id_to_the_prior_search(
             self, monkeypatch):
@@ -1308,15 +1529,16 @@ class TestS3:
             sdk._extract_session_v2([{"role": "user", "content": "hi"}],
                                     "sess-7", "2026-01-01T00:00:00Z")
         # the extraction anchor and the turn-id prefix are ONE identity
+        from tortoise.retrieval import is_turn_echo_id
         assert seen.get("session_id") == "sess-7"
-        assert v2._is_turn_echo_id(seen["session_id"],
-                                   f"{seen['session_id']}_t0")
+        assert is_turn_echo_id(seen["session_id"],
+                               f"{seen['session_id']}_t0")
 
     def test_degrades_on_backend_error(self, monkeypatch):
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
 
         class BoomSDK:
-            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+            def tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False):
                 raise ConnectionError("graph unreachable")
 
         res = v2.search_graph(BoomSDK(), S2_FIXTURE, "STORY")
@@ -1927,6 +2149,219 @@ class TestS5:
         assert len(minted) == 1
         assert len(minted[0]["content"]) == 1000
 
+    def test_over_long_entity_name_is_never_minted_as_a_claim_point(self):
+        """#5069: the entity guard keyed ``emitted_entity_names`` on the FULL
+        name while ``_mint_endpoint`` keyed the ref on its 1000-char prefix,
+        so a >1000-char entity name was NOT recognised as an entity and the
+        mint fabricated a claim Point out of the truncated participant name —
+        exactly what the OPERATOR REFERENCING hard rule forbids. The bound
+        observable is the PAYLOAD: no fabricated Point, no operator, and the
+        guard's own refusal warning.
+        """
+        long_name = "A" * 1100
+        embed = {"entities": [{"name": long_name, "kind": "core:tool"}],
+                 "events": [], "points": [],
+                 "operators": [{"src": long_name, "dst": "K",
+                                "op_type": "IMPL"}]}
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        assert r["payload"]["operators"] == []
+        assert r["payload"]["points"] == [], (
+            "no Point may be fabricated from the truncated participant name")
+        assert r["stats"]["operator_endpoints_minted"] == 0
+        assert any("NOT minted" in w and "ENTITY" in w for w in r["warnings"])
+
+    def test_entity_name_in_collapsed_spelling_is_never_minted(self):
+        """#5069 code-review (P1): an entity name longer than ``_MAX_CONTENT``
+        whose first 1000 chars contain a whitespace run normalises SHORTER
+        than the raw name, so the ref the model writes may be the COLLAPSED
+        spelling. The full-name key caught that (main does); the
+        truncated-prefix key alone does not, because the collapsed ref's key
+        is the collapsed name, not the truncated prefix — and the mint then
+        fabricates a Point out of the participant name. The guard must key
+        BOTH forms.
+
+        This is a PARTIAL-FIX guard, not a base-vs-head discriminator: `main`'s
+        full-name key already refuses this spelling (as the sentence above
+        says). It pins that the canonicalisation does not LOSE the collapsed
+        arm while gaining the truncated one.
+        """
+        name = "a" * 900 + " " * 200 + "b" * 50
+        ref = v2._norm(name)
+        assert ref != name and len(ref) <= v2._MAX_CONTENT < len(name)
+        embed = {"entities": [{"name": name, "kind": "core:tool"}],
+                 "events": [], "points": [],
+                 "operators": [{"src": ref, "dst": "K",
+                                "op_type": "IMPL"}]}
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        assert r["payload"]["operators"] == []
+        assert r["payload"]["points"] == [], (
+            "a participant name was minted from its collapsed spelling")
+        assert any("NOT minted" in w and "ENTITY" in w for w in r["warnings"])
+
+    def test_respelled_long_entity_name_is_never_minted_via_the_other_key_arm(self):
+        """#5069 code-review (P2): the guard is a set INTERSECTION, not a
+        membership test on the mint's own resolution key — and the difference
+        is load-bearing exactly when the ref is a whitespace RE-SPELLING of a
+        >1000-char name whose raw cap-truncation cuts inside a whitespace run.
+        There the ref's collapsed arm matches the entity's key set while its
+        resolution key does not, so the pre-#5069 membership form fabricates a
+        degenerate ``"a"*500`` Point and only the intersection refuses. Every
+        other fixture uses the literal raw or literal collapsed name, where
+        both arms coincide — this is the case that pins the intersection.
+        """
+        name = "a" * 500 + " " * 100 + "a" * 500 + " " * 100 + "b"
+        ref = "a" * 500 + " " * 5000 + "a" * 500 + " " * 100 + "b"
+        # the two spellings name the same entity ...
+        assert v2._norm(name) == v2._norm(ref)
+        # ... the resolution key does NOT match ...
+        assert v2._norm(ref[:v2._MAX_CONTENT]) not in v2._endpoint_keys(name)
+        # ... but the key sets still intersect, which is what refuses it.
+        assert v2._endpoint_keys(ref) & v2._endpoint_keys(name)
+        embed = {"entities": [{"name": name, "kind": "core:tool"}],
+                 "events": [], "points": [],
+                 "operators": [{"src": ref, "dst": "K",
+                                 "op_type": "IMPL"}]}
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        assert r["payload"]["operators"] == []
+        assert r["payload"]["points"] == [], (
+            "a participant name was minted from a re-spelling of itself")
+        assert any("NOT minted" in w and "ENTITY" in w for w in r["warnings"])
+
+    def test_endpoint_content_cap_matches_vet_gate(self):
+        """#5069: the mint's key, the emit-path content keys and
+        ``vet_gate._MAX_CONTENT`` all truncate at the same boundary. The two
+        modules deliberately duplicate the value (vet_gate must not import
+        extractor_v2), so the mirror is pinned here or it rots silently.
+        """
+        from tortoise import vet_gate
+        assert v2._MAX_CONTENT == vet_gate._MAX_CONTENT
+
+    def test_entity_name_at_and_over_the_truncation_boundary_is_never_minted(self):
+        """#5069 boundary: the guard's key and the mint's key are the same
+        transform, so the boundary is exact — a name of exactly the key
+        length (1000) and one character past it both refuse. Both are asserted
+        because 1000 was already refused by the pre-#5069 code (no truncation
+        to hide behind) while 1001 is the case the mismatch opened.
+        """
+        for length in (1000, 1001):
+            name = "B" * length
+            embed = {"entities": [{"name": name, "kind": "core:tool"}],
+                     "events": [], "points": [],
+                     "operators": [{"src": name, "dst": "K",
+                                    "op_type": "IMPL"}]}
+            r = v2.execute_embed(embed, {}, session_id="s1")
+            assert r["payload"]["operators"] == [], length
+            assert r["payload"]["points"] == [], length
+
+    def test_over_long_duplicate_name_entity_is_never_minted(self):
+        """#5069 same-name duplicate: two entities that BOTH survive the
+        extractor's pre-existing ``(name, kind)`` dedup — the same >1000-char
+        name under DIFFERENT kinds — must still shield that name. The guard
+        keys the NAME, so a second emitted spelling cannot re-open the mint.
+
+        The kinds must differ: with an identical kind the extractor's own
+        ``(name, kind)`` dedup drops the second entity before the guard is
+        built, and the fixture then exercises only the single-entity path —
+        the inert-fixture defect the #5069 review caught. The assertions below
+        pin that BOTH entities were emitted.
+        """
+        long_name = "C" * 1100
+        embed = {"entities": [{"name": long_name, "kind": "core:tool"},
+                              {"name": long_name, "kind": "core:concept"}],
+                 "events": [], "points": [],
+                 "operators": [{"src": long_name, "dst": "K",
+                                "op_type": "IMPL"}]}
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        assert len(r["payload"]["entities"]) == 2, (
+            "the fixture must emit BOTH entities or it cannot exercise the "
+            "duplicate-key guard")
+        assert r["payload"]["operators"] == []
+        assert r["payload"]["points"] == []
+
+    def test_raw_prefix_of_a_whitespace_straddling_name_is_never_minted(self):
+        """#5069 review (P1): the RAW ``_MAX_CONTENT`` prefix of a
+        whitespace-straddling name (``name[:1000]``) is the ONE input the raw
+        arm of ``emitted_entity_names`` is load-bearing for — the mint keys a
+        ref as ``_norm(ref[:1000])``, so this ref's key IS the name's raw arm.
+        Every other long-name fixture uses the full raw name or the collapsed
+        spelling, where the two arms coincide; a regression that built the
+        entity sets from the closure arm alone would leave those green. Driven
+        on BOTH the emitted and the #4716 graph-index legs.
+        """
+        name = "a" * 900 + " " * 200 + "b" * 50   # raw 1150, collapsed 951
+        ref = name[:v2._MAX_CONTENT]
+        # the fixture straddles: the RAW arm carries the ref, the closure arm
+        # does not — so this test discriminates the raw arm specifically.
+        assert v2._norm(ref) == v2._norm(name[:v2._MAX_CONTENT])
+        assert v2._norm(ref) != v2._norm(v2._norm(name)[:v2._MAX_CONTENT])
+        emitted = {"entities": [{"name": name, "kind": "core:tool"}],
+                   "events": [], "points": [],
+                   "operators": [{"src": ref, "dst": "K",
+                                  "op_type": "IMPL"}]}
+        r = v2.execute_embed(emitted, {}, session_id="s1")
+        assert r["payload"]["operators"] == []
+        assert r["payload"]["points"] == [], (
+            "a participant name was minted from the raw cap prefix")
+        indexed = {"entities": [], "events": [], "points": [],
+                   "operators": [{"src": ref, "dst": "K",
+                                  "op_type": "IMPL"}]}
+        search = {"entities": [{"id": "obj_r", "name": name,
+                                "kind": "core:plan"}],
+                  "events": [], "points": []}
+        r2 = v2.execute_embed(indexed, search, session_id="s1")
+        assert r2["payload"]["operators"] == []
+        assert r2["payload"]["points"] == [], (
+            "the graph-index leg re-opened with the raw cap prefix")
+
+    def test_over_long_graph_index_entity_name_is_never_minted(self):
+        """#5069: the #4716 graph-index leg of the guard carried the SAME
+        mismatch — an Object already in the graph but not re-emitted this
+        session, whose name exceeds 1000 chars, was minted as a claim Point.
+        A fix that canonicalised only ``emitted_entity_names`` would leave
+        this leg fabricating.
+        """
+        long_name = "D" * 1100
+        embed = {"entities": [], "events": [], "points": [],
+                 "operators": [{"src": long_name, "dst": "K",
+                                "op_type": "IMPL"}]}
+        search = {"entities": [{"id": "obj_long", "name": long_name,
+                                "kind": "core:plan"}],
+                  "events": [], "points": []}
+        r = v2.execute_embed(embed, search, session_id="s1")
+        assert r["payload"]["operators"] == []
+        assert r["payload"]["points"] == []
+        assert any("NOT minted" in w and "ENTITY" in w for w in r["warnings"])
+
+    def test_entity_name_whose_collapsed_form_exceeds_the_cap_is_never_minted(self):
+        """#5069 code-review (P2): the guard's key set must be CLOSED under the
+        mint's identity ``_norm(x[:_MAX_CONTENT])``. When the name's
+        whitespace-collapsed form is itself longer than the cap, the ref a
+        model writes can be that collapsed form truncated at the cap — a key in
+        NEITHER the raw-prefix form nor the full name, so the pre-closure key
+        set missed it and the mint fabricated a Point on BOTH the emitted and
+        the #4716 graph-index leg.
+        """
+        name = "a" * 500 + " " * 900 + "b" * 600     # raw 2000, collapsed 1101
+        ref = v2._norm(name)[:v2._MAX_CONTENT]
+        assert len(v2._norm(name)) > v2._MAX_CONTENT
+        emitted = {"entities": [{"name": name, "kind": "core:tool"}],
+                   "events": [], "points": [],
+                   "operators": [{"src": ref, "dst": "K",
+                                  "op_type": "IMPL"}]}
+        r = v2.execute_embed(emitted, {}, session_id="s1")
+        assert r["payload"]["operators"] == []
+        assert r["payload"]["points"] == [], (
+            "a participant name was minted from its truncated collapsed form")
+        indexed = {"entities": [], "events": [], "points": [],
+                   "operators": [{"src": ref, "dst": "K",
+                                  "op_type": "IMPL"}]}
+        search = {"entities": [{"id": "obj_c", "name": name,
+                                "kind": "core:plan"}],
+                  "events": [], "points": []}
+        r2 = v2.execute_embed(indexed, search, session_id="s1")
+        assert r2["payload"]["points"] == [], (
+            "the graph-index leg re-opened with the same ref")
+
     def test_minted_endpoint_is_pruned_when_its_operator_drops(self):
         """#2552 code-review (P2): the mint runs BEFORE the operator is known
         to survive. A MITIGATES that declares no target edge is still dropped
@@ -2248,7 +2683,7 @@ class TestParticipantSlots:
         assert "agent" in warns
 
     def test_slot_minted_kind_repaired(self):
-        # P2-1 review fix: slot kinds gate against the same master_kind_forms
+        # P2-1 review fix: slot kinds gate against the same _object_kind_forms
         # vocabulary S5 applies to entities — a near-miss kind is repaired
         # (never silently divergent), and the repaired (name, kind) then
         # resolves against the emitted entity
@@ -3475,6 +3910,46 @@ class TestClassifyStage:
             "the slot kind survives _clean_slots + _resolve_slot_refs"
         assert not any("minted slot kind" in w for w in res["warnings"]), \
             res["warnings"]
+
+    def test_event_slot_survives_for_pack_declared_event_kind(self):
+        """#5806: _clean_slots' EVENT lane gates against the SAME widened
+        event vocabulary as execute_embed's event gate — a slot referencing
+        a pack-DECLARED event kind keeps its kind and resolves. Previously
+        the lane read only master["events"] (core EVENTS), so such a slot
+        was repaired to core:occurrence for exactly the kinds the S5 event
+        gate admits — the same asymmetry FIX M closed on the entity side."""
+        embed = {"entities": [], "events": [], "operators": [],
+                 "chain_notes": [], "link_before_create": [],
+                 "points": [{"content": "the pr was opened",
+                             "pointKind": "statement",
+                             "about_entities": [],
+                             "slots": {"event": [
+                                 {"name": "the pr was opened",
+                                  "kind": "dev:prOpened",
+                                  "confidence": 0.9}]}}]}
+        res = v2.execute_embed(embed, {}, session_id="s1")
+        pt = res["payload"]["points"][0]
+        assert pt["slots"]["event"][0]["kind"] == "dev:prOpened", \
+            "the event slot kind survives _clean_slots + _resolve_slot_refs"
+        assert not any("minted slot kind" in w for w in res["warnings"]), \
+            res["warnings"]
+
+    def test_event_lane_still_repairs_a_foreign_kind(self):
+        """#5806 control: widening the event lane to _event_kind_forms must
+        NOT turn the gate into a no-op — a kind no vocabulary admits is
+        still repaired to the event fallback with a warning, so the
+        minted-kind census keeps working."""
+        warnings: list[str] = []
+        master = v2._build_master_from_brief(
+            {"events": {}, "objectKinds": {}, "documentKinds": {}})
+        slots = v2._clean_slots(
+            {"event": [{"name": "something",
+                         "kind": "nota:packsDoNotDeclareThis",
+                         "confidence": 0.5}]},
+            warnings, "t", master=master)
+        assert slots["event"][0]["kind"] == v2._EVENT_FALLBACK["kind"], \
+            "a kind no vocabulary admits is still repaired"
+        assert any("minted slot kind" in w for w in warnings), warnings
 
     def test_fold_never_drops_different_non_sentinel_kind(self):
         """A same-name duplicate carrying a DIFFERENT non-sentinel kind is

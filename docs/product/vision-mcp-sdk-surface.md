@@ -249,4 +249,5 @@ steps rather than gates. Applying them cost less than asking.
   post-beta; it is cheap (every harness in the field makes the customer supply their model key).
 - **The journal capability** (`checkpoint`, `diary_write`, `diary_read`). Live on the MCP today,
   from the initial commit, with a `wing`/`room` vocabulary that appears nowhere in
-  `docs/ONTOLOGY.md`. Filed separately; unlisted until then.
+  `docs/ONTOLOGY.md`. Post-beta and unlisted — tracked by **#4667** (keep / rename / retire
+  undecided; a surface decision).

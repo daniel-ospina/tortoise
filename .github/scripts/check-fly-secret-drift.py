@@ -795,7 +795,9 @@ def main() -> int:
                 violations.append(
                     f"STALE DECLARATION — {name!r} is declared fly-toml-env but is also a "
                     "Fly secret, which shadows [env] (declare the real source "
-                    "instead)"
+                    "instead; for a sanctioned fly-toml-env transition the shadow is "
+                    "unset LAST, after [env] is on the machine — "
+                    "docs/infra-runbook.md §8.4)"
                 )
             elif name in assigned or name in unconditional or name in live:
                 # The reverse of the check above: [env] is only the source while

@@ -244,6 +244,20 @@ _REDACT_PATTERNS = [
 ]
 
 
+def _redact_message(e: BaseException) -> str:
+    """Pattern-redacted ``str(e)``, WITHOUT the 200-char cap.
+
+    Split out of :func:`redact_error` so a caller that must scrub its own
+    literals (``session_indexer._redact_exc``) can do so BEFORE truncation.
+    Scrubbing an already-cut string can only match a WHOLE secret, so a
+    credential straddling the cut survives as a fragment (#3067).
+    """
+    msg = str(e) or e.__class__.__name__
+    for pattern, repl in _REDACT_PATTERNS:
+        msg = pattern.sub(repl, msg)
+    return msg
+
+
 def redact_error(e: BaseException) -> str:
     """Return a safe, generic error string for a caught exception.
 
@@ -252,10 +266,7 @@ def redact_error(e: BaseException) -> str:
     tracebacks. Used by analyze()'s error path so tenants never see DB/query
     internals.
     """
-    msg = str(e) or e.__class__.__name__
-    for pattern, repl in _REDACT_PATTERNS:
-        msg = pattern.sub(repl, msg)
-    return f"{e.__class__.__name__}: {msg[:200]}"
+    return f"{e.__class__.__name__}: {_redact_message(e)[:200]}"
 
 
 # ── Credential redaction (capture write path, #4911) ───────────────────────
@@ -296,11 +307,16 @@ def redact_error(e: BaseException) -> str:
 #         is 40 chars of base64 with no vendor prefix, so matching it bare
 #         would redact prose — it is anchored on the literal
 #         ``aws_secret_access_key`` name (quoted or bare) instead. The same
-#         pattern covers the two ``bearer_token`` rules, anchored on the
-#         ``Authorization: Bearer`` header name / a bare ``bearer`` keyword.
-#         Each keeps its anchor text in the output, so the record stays
-#         diagnostic. These are the ONLY rules whose anchor is contextual;
-#         the AWS pair's ID half is covered by a vendor shape.
+#         contextual-anchor family covers the two ``bearer_token`` rules,
+#         anchored on the ``Authorization: Bearer`` header name / a bare
+#         ``bearer`` keyword; each keeps its anchor text in the output, so the
+#         record stays diagnostic. These are the ONLY rules whose anchor is
+#         contextual; the AWS pair's ID half is covered by a vendor shape.
+#         ⛔ The BARE ``bearer`` form is NOT value-shape-less — its body carries
+#         a credential-shape gate, because "any 24+ char space-free span" is not
+#         credential-shaped (#5471): it redacted hyphen/underscore-joined
+#         lowercase identifiers (``authentication-middleware-component-v2``),
+#         destroying captured text and inflating ``capture_redactions``.
 #
 #     Everything else is anchored on a vendor-shaped prefix, and a
 #     structural/entropy guess (a gitleaks-style generic-api-key rule) is
@@ -315,6 +331,16 @@ def redact_error(e: BaseException) -> str:
 #     are body characters — a real token glued after one must still match.
 #     Narrowing a lookbehind to buy scan speed is a RECALL bug, not a fix; see
 #     **Linear** below for the measured instance.
+#     ⛔ WIDER BODY CLASS FIRST, NARROWER SECOND (#5470). ``(?![A-Za-z0-9])``
+#     permits a narrow body class to stop at a character the WIDER sibling for
+#     the same prefix would consume: ``deepseek_api_key`` matches ``[a-z0-9]``
+#     while the generic ``sk-`` rule matches ``[A-Za-z0-9_-]``, so the narrow
+#     rule could stop at a ``-``/``_``, replace a 32-char PREFIX of a longer
+#     token, and (the ``sk-`` anchor now gone) leave the tail in the graph with
+#     a redaction counted. The fix is ORDER: the generic rule runs first and
+#     consumes every ≥40-char token whole, so the narrow rule only sees what the
+#     wider one cannot match. Do NOT instead narrow the terminator to
+#     ``(?![A-Za-z0-9_-])`` — that drops a real 32-char key glued to a suffix.
 #   * **Visible marker, never a silent cut.** A matched span is replaced by
 #     ``[REDACTED:<kind>]``, so a reader of a stored turn can tell a secret was
 #     there and that the text is incomplete. Silent loss of fidelity on this
@@ -324,7 +350,11 @@ def redact_error(e: BaseException) -> str:
 #     and document-redaction practice (a bracketed marker in place of a
 #     deletion).
 #   * **Ordered.** ``sk-ant-…`` is tried before the generic ``sk-…``, or every
-#     Anthropic key would be labelled an OpenAI one.
+#     Anthropic key would be labelled an OpenAI one. Among rules sharing a
+#     literal prefix, the rule with the WIDER body class runs first (#5470): a
+#     narrower one can stop at a character the wider one consumes, and then
+#     neither the prefix-anchored wider rule (its anchor is already replaced)
+#     nor the narrower rule (it has already matched) can consume the tail.
 #   * **Linear.** No rule may do work proportional to the TEXT once per
 #     candidate start; every rule must bound its per-candidate work by a
 #     CONSTANT, so the total is O(text) however many candidates the text holds.
@@ -374,10 +404,155 @@ _REDACTION_VALUE = "[REDACTED:{kind}]"
 
 #: ``(kind, pattern, replacement)`` — ordered, and the ORDER IS LOAD-BEARING.
 _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
+    # ── Tortoise's OWN minted credentials ───────────────────────────────────
+    # FIRST, for the same reason `sk-ant-` precedes the generic `sk-`: these are
+    # the narrowest anchors in the table, so they must win the label when a
+    # value is also reachable by a broader rule (a `Bearer oat_…` is matched by
+    # the bare-bearer rule too, and the credit belongs here).
+    #
+    # ⛔ THE BODIES DIFFER PER FAMILY AND THE FLOOR CARRIES A `,` — that comma
+    # is the whole fix (#6158). `tortoise/oauth.py::_new_token` is
+    # `prefix + secrets.token_urlsafe(32)`, i.e. URL-SAFE BASE64-ish text
+    # (mixed case, `-`, `_`, exactly 43 chars after `.rstrip("=")`), so the
+    # `[0-9a-f]{32}` body used for the API-key shapes CANNOT match it. `st_` is
+    # minted by `token_hex(32)` — SIXTY-FOUR lowercase hex, twice the API-key
+    # width — so the `,` is required. ⚠️ A fixed `{32}` does NOT truncate: with a
+    # boundary lookahead it matches NOTHING on a longer body (the greedy 32 is
+    # followed by another hex character, the lookahead fails, there is no shorter
+    # alternative), so the WHOLE credential survives. Remove the lookahead
+    # instead and only the tail survives. Both leak; the first is the wider one.
+    # Measured in review against a real 64-hex `st_`.
+    #
+    # ⛔ `ct_` IS A CLIENT ID, NOT A SECRET — INCLUDED DELIBERATELY. Redacting a
+    # non-secret is the safe direction; omitting a rule is not. ⚠️ The guard DOES
+    # carry a non-secret list (`_NON_SECRET_PREFIXES`), so "it would force an
+    # exemption list" was wrong — the asymmetry is the whole reason.
+    #
+    # ⛔ THE TRAILING LOOKAHEAD CLASS IS THE BODY CLASS MINUS ITS OWN
+    # CHARACTERS, WHICH IS WHAT KEEPS THIS LINEAR. For the `oat_`/`ort_`/`ct_`/
+    # `cs_` family the body is `[A-Za-z0-9_-]` and the lookahead is
+    # `[A-Za-z0-9]` — a subset — so after a greedy body match the next character
+    # can never be alnum and the lookahead succeeds on the FIRST try (no
+    # backtracking). The `st_` body is `[0-9a-f]` only, so its lookahead
+    # excludes hex rather than alnum: with an alnum lookahead a body followed
+    # by a non-hex letter (`st_…g`) would backtrack one character at a time and
+    # scan quadratically — the failure mode #4911 was fixed for.
+    # ⚠️ RECORDED RESIDUALS for these families, so they are not mistaken for
+    # coverage: (1) a value SPLIT by a newline matches nothing — the `jwt` rule
+    # carries `\s*` because long tokens wrap, and these get no equivalent, having
+    # no internal delimiter; (2) a body followed by `_suffix` or `-prod-2` has
+    # those swallowed too (the safe direction); (3) `_has_a_rule` in the guard
+    # tests `value=<token> end`, so it does not exercise the boundary lookahead at
+    # all — narrowing a lookahead is undetectable there.
+    # ⛔ THE TENANT API KEY — the product's PRIMARY credential, and the one the
+    # first cut of the guard could NOT see: it is `f"tt_{uuid.uuid4().hex}"`, so
+    # it names none of the token helpers, and `tortoise/sdk.py` (which mints the
+    # same key) was not in the scanned module list. The guard certified coverage
+    # it did not have (found in review). Body is `uuid4().hex` — 32 lowercase
+    # hex — and the `{32,}` floor with a HEX-only lookahead keeps the scan linear
+    # while making a surviving suffix impossible.
+    # ⛔ PR #6096 CARRIES A MATERIALLY WEAKER RULE FOR THE SAME KIND, so the
+    # de-dup DIRECTION matters. #6096 uses `{32}` with an ALNUM lookahead
+    # (`[0-9a-f]{32}(?![A-Za-z0-9])`), which FAILS THE WHOLE MATCH on any body
+    # LONGER than 32 characters — measured from 33 hex upward, not only 65+: the
+    # greedy 32 is followed by an alnum, the lookahead fails,
+    # and there is no shorter alternative — so it cannot redact the 64-hex `tt_`
+    # key the Supabase Edge provisioner mints (`supabase/functions/
+    # tenant-provision/index.ts`, the width `_edge_tt_body_width()` reads).
+    # Whichever lands second must keep THIS rule (`{32,}` + the HEX-only
+    # lookahead) and drop the other copy; taking #6096's direction instead leaves
+    # the deployed Edge key in cleartext with `capture_redactions: 0`.
+    ("tortoise_api_key",
+     re.compile(r"(?<![A-Za-z0-9])(?:tt|tk)_[0-9a-f]{32,}(?![0-9a-f])"),
+     _REDACTION_VALUE.format(kind="tortoise_api_key")),
+    ("tortoise_oauth_access_token",
+     re.compile(r"(?<![A-Za-z0-9])oat_[A-Za-z0-9_-]{43,}(?![A-Za-z0-9])"),
+     _REDACTION_VALUE.format(kind="tortoise_oauth_access_token")),
+    ("tortoise_oauth_refresh_token",
+     re.compile(r"(?<![A-Za-z0-9])ort_[A-Za-z0-9_-]{43,}(?![A-Za-z0-9])"),
+     _REDACTION_VALUE.format(kind="tortoise_oauth_refresh_token")),
+    ("tortoise_oauth_client_id",
+     re.compile(r"(?<![A-Za-z0-9])ct_[A-Za-z0-9_-]{43,}(?![A-Za-z0-9])"),
+     _REDACTION_VALUE.format(kind="tortoise_oauth_client_id")),
+    # ⛔ `cs_` MUST NOT SWALLOW STRIPE'S CHECKOUT-SESSION IDS. Stripe mints
+    # `cs_test_…`/`cs_live_…`, and this rule's body class matches them happily,
+    # so without the exclusion a third-party Stripe id in a checkout URL was
+    # recorded as `tortoise_oauth_client_secret` — a WRONG attribution, which is
+    # worse than no match (found in review: one real hit in a 615-transcript
+    # scan). The negation is on the SEGMENT, not the body: Tortoise's body is 43
+    # RANDOM url-safe characters, so it cannot begin `test_`/`live_` except by
+    # coincidence.
+    ("tortoise_oauth_client_secret",
+     re.compile(r"(?<![A-Za-z0-9])cs_(?!(?:test|live)_)[A-Za-z0-9_-]{43,}"
+                r"(?![A-Za-z0-9])"),
+     _REDACTION_VALUE.format(kind="tortoise_oauth_client_secret")),
+    # ⛔ CASE-INSENSITIVE, because the PRODUCT ACCEPTS IT CASE-INSENSITIVELY.
+    # `hosted_api.py` lowercases a user-entered signup token BEFORE the format
+    # gate (`signup_token.lower()` then `_SIGNUP_TOKEN_RE`) — explicitly so that
+    # "a copy-pasted token with uppercase hex must resolve to the same org". So
+    # `ST_<UPPER HEX>` is a fully valid recovery credential, and a lowercase-only
+    # rule stored it verbatim: the #6158 failure mode, one case-flip from the
+    # covered form (found in review). No other family gets `(?i)`: `tt_`/`tk_`
+    # are hashed raw with no lowering, so an uppercased one is not a credential
+    # and widening those would only over-redact.
+    ("tortoise_signup_token",
+     re.compile(r"(?i)(?<![A-Za-z0-9])st_[0-9a-f]{64,}(?![0-9a-f])"),
+     _REDACTION_VALUE.format(kind="tortoise_signup_token")),
     # Anthropic — BEFORE the generic `sk-` (see the ordering rule above).
     ("anthropic_api_key",
      re.compile(r"(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9_-]{20,}(?![A-Za-z0-9])"),
      _REDACTION_VALUE.format(kind="anthropic_api_key")),
+    # OpenAI / OpenRouter. The lookbehind is LOAD-BEARING: `disk-…`, `risk-…`
+    # and `task-…` all contain the substring `sk-` (the measured #4911 false
+    # positive) and are excluded because their `sk-` is INSIDE a word. The body
+    # floor of 40 is load-bearing too: at 20, an ordinary engineering sentence
+    # matched (`sk-learn-pipeline-version-2`), while every real OpenAI/
+    # OpenRouter body after `sk-`/`sk-proj-` is 48+. It is NOT a floor for the
+    # whole `sk-` family — DeepSeek's 32-char form is the separate rule below.
+    #
+    # ⛔ ORDERED BEFORE `deepseek_api_key` so the WIDE body class gets the first
+    # refusal (#5470). The deepseek body excludes `-`/`_`; tried first, it could
+    # match a 32-char PREFIX of a longer `sk-` token and replace only that,
+    # leaving the tail in cleartext while the count reported a redaction — the
+    # false-assurance class the module header warns about. The generic rule's
+    # 40-char floor cannot match a real 32-char DeepSeek key, so the reorder
+    # costs no DeepSeek coverage.
+    ("openai_api_key",
+     re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{40,}(?![A-Za-z0-9])"),
+     _REDACTION_VALUE.format(kind="openai_api_key")),
+    # ⛔ THE TAIL FILLER for the sub-40 gap the generic floor leaves (found in
+    # review of #5470). The generic rule needs 40 body chars; a `sk-` token
+    # whose ``run + separator + tail`` is UNDER 40 is therefore invisible to it.
+    # The plain deepseek rule below still matches the 32+ run, its
+    # ``(?![A-Za-z0-9])`` terminator ACCEPTS the separator, and it replaces the
+    # run ALONE — the tail is then unrecoverable because the ``sk-`` anchor is
+    # gone and the receipt still reports one redaction
+    # (``sk-<32>-A`` -> ``[REDACTED:deepseek_api_key]-A``).
+    # This rule consumes the separator-run AND everything after it, so the whole
+    # token goes. It sits AFTER the generic rule (so the ``>= 40``-char case keeps
+    # the wide label and the wide span) and BEFORE the plain deepseek rule (so
+    # the separable tail is consumed before the plain rule can claim the run).
+    #
+    # ⛔ Do NOT narrow its tail class to a ``(?![A-Za-z0-9_-])`` terminator: that
+    # would stop matching a real key glued to a ``_suffix`` — the recall
+    # regression already rejected for the plain deepseek rule (#5470). The
+    # greedy tail class IS the terminator here: it consumes to the end of the
+    # BODY ALPHABET.
+    #
+    # ⛔ "to the end of the body alphabet" is the whole claim — NOT "no part of the
+    # token survives" (review round 12). The class is ``[A-Za-z0-9_-]*``, so it stops
+    # at ANY character outside it, and a key followed by such a character keeps its
+    # tail in cleartext while the count reports a redaction — #5470's class:
+    # ``redact_secrets("sk-" + "a"*32 + "." + "ABCDEFGH")`` →
+    # ``('[REDACTED:deepseek_api_key].ABCDEFGH', {'deepseek_api_key': 1})``. The same
+    # holds for the generic ``openai``/``anthropic`` rules, and for ``+ / = ! ~ : , ;``
+    # ``( [ ' | @ #`` and space. No known vendor body carries those after the key, and
+    # the sweep test only suffixes with ``-``/``_``, so this is recorded rather than
+    # silently relied on: widening the filler to the terminator's implicit alphabet is
+    # a recall/precision decision, not a comment fix.
+    ("deepseek_api_key",
+     re.compile(r"(?<![A-Za-z0-9])sk-[a-z0-9]{32,}[-_][A-Za-z0-9_-]*"),
+     _REDACTION_VALUE.format(kind="deepseek_api_key")),
     # DeepSeek — the body is EXACTLY 32 LOWERCASE alnum characters, which sits
     # BELOW the generic `sk-` rule's 40 floor, so without this rule a pasted
     # DeepSeek key was stored verbatim with `capture_redactions: 0` (found in
@@ -386,21 +561,27 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # routinely. A DEDICATED lowercase-only rule is what makes the short floor
     # safe where lowering the generic one is not: the measured prose false
     # positive `sk-learn-pipeline-version-2` carries hyphens inside its body,
-    # so `[a-z0-9]{32,}` cannot match it. Ordered BEFORE the generic rule so the
-    # narrower shape wins the label (same reason `sk-ant-` precedes both).
+    # so `[a-z0-9]{32,}` cannot match it.
+    #
+    # ⛔ IT MUST NOT RUN BEFORE THE GENERIC RULE (#5470). Its body class stops
+    # at `-`/`_` and its `(?![A-Za-z0-9])` terminator ACCEPTS them, so on its
+    # own it matches a 32-char PREFIX of a longer `sk-` token and — because the
+    # `sk-` anchor is then gone — the generic rule can no longer see the rest,
+    # leaving the tail in the graph while `capture_redactions` reports a
+    # redaction (the false-assurance class the module header warns about).
+    # Running the generic rule FIRST fixes the span: it consumes every
+    # ≥40-char `sk-` token WHOLE, and this rule then only ever sees bodies the
+    # generic floor cannot reach (a real DeepSeek key is exactly 32). ORDERING,
+    # not a narrowed terminator, is the fix: tightening the terminator to
+    # `(?![A-Za-z0-9_-])` was the other candidate and it REGRESSES recall — a
+    # real 32-char key glued to `_suffix` then matches nothing at all (pinned by
+    # `test_a_credential_touching_a_word_character_is_still_redacted`).
+    # The SEPARABLE-TAIL variant sits BETWEEN the generic rule and this one, so a
+    # run followed by `-`/`_` whose combined body is under 40 is consumed whole
+    # before this rule can claim the run alone (the tail-filler comment above).
     ("deepseek_api_key",
      re.compile(r"(?<![A-Za-z0-9])sk-[a-z0-9]{32,}(?![A-Za-z0-9])"),
      _REDACTION_VALUE.format(kind="deepseek_api_key")),
-    # OpenAI / OpenRouter. The lookbehind is LOAD-BEARING: `disk-…`, `risk-…`
-    # and `task-…` all contain the substring `sk-` (the measured #4911 false
-    # positive) and are excluded because their `sk-` is INSIDE a word. The body
-    # floor of 40 is load-bearing too: at 20, an ordinary engineering sentence
-    # matched (`sk-learn-pipeline-version-2`), while every real OpenAI/
-    # OpenRouter body after `sk-`/`sk-proj-` is 48+. It is NOT a floor for the
-    # whole `sk-` family — DeepSeek's 32-char form is the separate rule above.
-    ("openai_api_key",
-     re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{40,}(?![A-Za-z0-9])"),
-     _REDACTION_VALUE.format(kind="openai_api_key")),
     # Supabase secret key (the ``sb_secret_`` form; ``sb_publishable_`` is public
     # by design and is deliberately left alone). This repo IS a Supabase-backed
     # product, so this shape reaches transcripts routinely.
@@ -606,11 +787,81 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     ("bearer_token",
      re.compile(r"(?i)(authorization\s*:\s*bearer\s+)([A-Za-z0-9._\-+/=]{12,})"),
      r"\g<1>" + _REDACTION_VALUE.format(kind="bearer_token")),
-    # A bare `Bearer <token>` (no `Authorization:` prefix). The 24-char floor
-    # keeps this off ordinary prose ("the bearer of a long-standing …" has
-    # spaces, and a 24+ char space-free token is already credential-shaped).
+    # A bare `Bearer <token>` (no `Authorization:` prefix). The body must be
+    # CREDENTIAL-shaped, not merely space-free: the pre-#5471 body (any 24+
+    # char ``[A-Za-z0-9._\-+/=]`` span) redacted hyphen/underscore-joined
+    # lowercase identifiers (``authentication-middleware-component-v2``,
+    # ``token_from_some_config_name``) — normal 24+ char space-free spans in a
+    # transcript — destroying captured text and inflating ``capture_redactions``
+    # until the count stopped being a signal.
+    #
+    # The discriminator is the ALPHABET, not an entropy score (which this table
+    # deliberately does not ship): a credential body contains an uppercase
+    # letter, a ``+``/``/``/``=`` (base64), a hex-only run (hex/UUID keys), or a
+    # 24+ char unbroken run with no ``-``/``_`` (base62/base36 keys). A prose slug
+    # is instead all-lowercase WORDS joined by ``-``/``_``, so every unbroken run
+    # in it is a dictionary word — short. All three signals are what a random
+    # token alphabet supplies and a word-joined identifier does not.
+    #
+    # ⛔ WHAT THE DISCRIMINATOR DOES **NOT** SPARE, stated because the earlier
+    # comment claimed prose-safety on a premise no test bound: an identifier that
+    # contains ANY uppercase letter is treated as a candidate and redacted, so
+    # camelCase/PascalCase names are destroyed and counted —
+    # ``bearer OAuth2TokenRefreshMiddleware`` and
+    # ``bearer Content-Security-Policy-header`` both become
+    # ``bearer [REDACTED:bearer_token]`` (reproduced in review; pinned in
+    # ``test_bare_bearer_over_redacts_mixed_case_identifiers``). That is
+    # deliberate over-redaction, not a defect to trade away here: a false
+    # positive costs a span of text and one count, a false negative leaks a
+    # credential, and the two are not symmetric. The all-lowercase prose this
+    # fix is FOR is spared; a mixed-case identifier still is not.
+    #
+    # ⛔ And the second signal reaches further than "uppercase": a >= 24-char run of
+    # ONLY hex letters and digits (``.``/``-``/``_`` allowed inside) also marks a
+    # candidate, so a lowercase, separator-joined identifier built from hex characters
+    # is redacted too — ``bearer deadbeefcafe-deadbeef-cafe-babe`` and
+    # ``bearer facade-decade-beaded-cafebabe`` both match. "All-lowercase prose is
+    # spared" is therefore not the whole story, and
+    # ``test_bare_bearer_does_not_redact_ordinary_identifiers`` cannot bind it (its
+    # words use ``g``-``z`` letters, so they are not hex). Read the sparing as
+    # "lowercase WORDS", not "lowercase".
+    #
+    # ⛔ THE BODY CLASS IS GREEDY, and that — not the lookahead — is what keeps
+    # a long token from being redacted only as a 24-char prefix. An earlier
+    # revision carried a whole-token lookahead here and called it LOAD-BEARING
+    # for #5470's failure mode; it was INERT (the greedy ``{24,}`` capture starts
+    # at the same position and consumes the maximal class run either way,
+    # so removing it changed no span over 9,600 fuzz inputs — re-measured here
+    # over 4,000 more, 0 differences). It has been deleted rather than left to
+    # be read as verified. The #5470 terminator matters on rules whose body is
+    # NOT greedy (the ``sk-`` family); claiming it here was the defect.
+    #
+    # ⛔ The unbroken-run signal matches a run ANYWHERE in the candidate, not
+    # only at its start: its lead-in class INCLUDES ``-``/``_`` so a ≥24-char run
+    # sitting after a separator is still seen (``key-<32 hex>``,
+    # ``shpat_<32>``, ``x_<32 hex>``). The earlier form (``[A-Za-z0-9.+/=]{24,}``)
+    # was anchored at the candidate's first character, so a ``-``/``_`` before the
+    # run ended the scan — every one of those shapes was caught by the pre-#5471
+    # rule (any 24+ char space-free span) and then STORED VERBATIM here with
+    # ``capture_redactions: 0``. The lead-in class must contain ``-``/``_``
+    # (a lead-in of ``[A-Za-z0-9.+/=]*`` alone still stops at the separator and
+    # misses the same four shapes). The whole-token capture below is unchanged.
+    #
+    # Known recall residual (documented, not silent): a ≥24-char token that is
+    # ALL lowercase, contains a ``g``-``z`` letter (so it is not hex) AND is
+    # split by ``-``/``_`` into runs ALL shorter than 24 (a lowercase base62/base36
+    # key with separators) is indistinguishable BY SHAPE from a prose slug, so
+    # it is not redacted here. The unbroken form of the same key IS caught
+    # ANYWHERE in the candidate (the third signal), and the
+    # ``Authorization: Bearer …`` rule still catches it in header form; claiming
+    # the split form would require the entropy guess the module header rejects,
+    # at the cost of re-redacting the prose this fix is for.
     ("bearer_token",
-     re.compile(r"(?i)(\bbearer\s+)([A-Za-z0-9._\-+/=]{24,})"),
+     re.compile(r"(\b(?i:bearer)\s+)"
+                r"(?=[A-Za-z0-9._\-+/=]*[A-Z+/=]"
+                r"|[0-9a-f._\-]{24,}"
+                r"|[A-Za-z0-9._\-+/=]*[A-Za-z0-9+/=]{24,})"
+                r"([A-Za-z0-9._\-+/=]{24,})"),
      r"\g<1>" + _REDACTION_VALUE.format(kind="bearer_token")),
 )
 
@@ -640,7 +891,14 @@ def redact_secrets(text: str) -> tuple[str, dict[str, int]]:
     batch and once at the write — the same bytes must come out both times
     (#4194).
     """
-    if not isinstance(text, str) or not text:
+    if not isinstance(text, str):
+        # #5472: the contract is ``tuple[str, dict]``, so the first element is
+        # ALWAYS a ``str`` — a non-str argument used to be returned unchanged
+        # against the annotation, with no error. Coerce and fall through to the
+        # scan below: never ``str()``-and-return unscanned (a container's repr
+        # can itself carry a credential).
+        text = "" if text is None else str(text)
+    if not text:
         return text, {}
     counts: dict[str, int] = {}
     out = text

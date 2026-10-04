@@ -1,10 +1,13 @@
 """The SDK rename table must not drift from the code and docs it describes (#4282).
 
-`tools/sdk_rename_table.py` reads every `sdk.py:N` straight from the AST, parses the
-40 target names out of `docs/product/beta-sdk-surface.md`, and parses the R/W/N group
-partition out of `docs/product/canonical-sdk-methods.md`. What it can still do is go
-*stale* — someone edits `sdk.py` or either doc and never regenerates — which is exactly
-the drift the generator's own docstring promises cannot happen. This is the enforcement.
+`tools/sdk_rename_table.py` reads the public method set and the `def` count straight
+from the AST, parses the 40 target names out of `docs/product/beta-sdk-surface.md`, and
+parses the R/W/N group partition out of `docs/product/canonical-sdk-methods.md`. It
+commits **no `sdk.py:N` line offsets**: a derived offset is a fact about a *moving*
+source, and committing one reddened this gate on correct PRs (5 of them, #4813) — every
+sdk.py insertion, or merely being behind a main that had one, invalidated all 153.
+What it can still do is go *stale* — someone edits `sdk.py` or either doc and never
+regenerates. This is the enforcement.
 
 What this file deliberately does NOT do is import the generator's data and compare it to
 itself. The sibling Phase 0.1 PR was red-green for rounds because a test did
@@ -28,17 +31,65 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 GENERATOR = ROOT / "tools" / "sdk_rename_table.py"
+# The generator's default output path. It is NO LONGER COMMITTED (#5373) — every
+# reader below goes through the session fixture, which rebinds this to a freshly
+# rendered temp copy. Keeping the name `DOC` means the ~40 existing readers are
+# unchanged; the artifact they read is now guaranteed current instead of
+# guaranteed-possibly-stale.
 DOC = ROOT / "docs" / "product" / "sdk-rename-table.md"
 BETA = ROOT / "docs" / "product" / "beta-sdk-surface.md"
 CANON = ROOT / "docs" / "product" / "canonical-sdk-methods.md"
 
-# One Part A row: `| 1 | \`name\` | \`sdk.py:123\` | R1 | \`target\` | stated | citation |`.
+_DOC_PATH: Path | None = None
+
+
+def _render_doc() -> Path:
+    """Render the rename table into a temp dir, once per session.
+
+    The file is generated ON DEMAND because committing it was the defect (#5373): it
+    is a function of `sdk.py` line numbers, so any two concurrent `sdk.py` PRs
+    conflicted on it — 8 of the 44 unclean PRs measured 2026-09-26, and normalising
+    `sdk.py:\\d+` made the two sides byte-identical. Rendering here is STRONGER than
+    reading a committed copy: the asserted content cannot be a stale artifact, and
+    the ~40 independent AST/doc oracles below still check every row.
+    """
+    global _DOC_PATH
+    if _DOC_PATH is None:
+        import tempfile
+
+        from tests._embedded import register_session_tmpdir
+
+        tmpdir = tempfile.mkdtemp(prefix="sdk-rename-table-")
+        # #4096: the tree is session-scoped (this is a once-per-session cache), so it
+        # is reclaimed by the session reclaimer, not by a local finalizer that would
+        # run before the session's own teardown. Same primitive as `conftest.py`'s
+        # `_shared_embedded_path`.
+        register_session_tmpdir(tmpdir)
+        out = Path(tmpdir) / "sdk-rename-table.md"
+        proc = subprocess.run(
+            [sys.executable, str(GENERATOR), "--out", str(out)],
+            cwd=ROOT, capture_output=True, text=True,
+        )
+        assert proc.returncode == 0, f"the generator failed:\n{proc.stderr}"
+        _DOC_PATH = out
+    return _DOC_PATH
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _generated_doc() -> None:
+    """Point `DOC` at the rendered copy before any test in this module reads it."""
+    global DOC
+    DOC = _render_doc()
+
+# One Part A row: `| 1 | \`name\` | R1 | \`target\` | stated | citation |`.
 # The citation cell is captured greedily to the final pipe so escaped (`\|`) pipes
 # inside a quoted markdown row do not split it. The Target cell is either a backticked
 # method name or an em-dash; the three axis cells (Lifecycle/Visibility/Delete) are a
 # single lowercase word or an em-dash, and Basis is one of the four evidence values.
+# There is deliberately no `sdk.py:N` Source cell — an offset into a moving source is
+# not a fact this artifact may commit (#4813).
 ROW_RE = re.compile(
-    r"^\| \d+ \| `([a-z_][a-z0-9_]*)` \| `sdk\.py:(\d+)` \| ([A-Z]\d+|ARCHIVE) \| "
+    r"^\| \d+ \| `([a-z_][a-z0-9_]*)` \| ([A-Z]\d+|ARCHIVE) \| "
     r"(`([a-z_][a-z0-9_]*)`|—) \| ([a-z]+|—) \| ([a-z]+|—) \| "
     r"(stated|derived|unbacked|contested) \| ([a-z]+|—) \| (.*) \|$"
 )
@@ -81,11 +132,11 @@ def part_a_rows() -> list[dict]:
         m = ROW_RE.match(line)
         if m:
             rows.append({
-                "name": m.group(1), "line": int(m.group(2)), "group": m.group(3),
-                "target": m.group(5) or "",
-                "lifecycle": m.group(6), "visibility": m.group(7),
-                "basis": m.group(8), "delete": m.group(9),
-                "cite": m.group(10),
+                "name": m.group(1), "group": m.group(2),
+                "target": m.group(4) or "",
+                "lifecycle": m.group(5), "visibility": m.group(6),
+                "basis": m.group(7), "delete": m.group(8),
+                "cite": m.group(9),
             })
     return rows
 
@@ -233,7 +284,7 @@ CITATION_REGION_LITERAL: dict[str, str] = {
     'w4_index_sessions': '| `index_sessions` / `ingest_corpus` → `index_directory` | `file_type` | both self-declared DEPRECATED in their own docstrings |',
     'w4_mine': '| `mine_corpus` | 1 | → `mine_knowledge_from_directory`. It is the **batch form of `mine_knowledge_from_session`**, not a kind of indexing. |',
     'w4_rename': '| `index_sources` (bare) | 1 | Renamed → `index_sources_from_directory`, so the index/mine distinction is unmissable. |',
-    'w5': '- **The journal capability** — `checkpoint`, `diary_write`, `diary_read`. They arrived in the\n  **initial codebase commit** (`a02ab48c7`) with no design record, and their `wing` / `room`\n  parameters appear **nowhere in `docs/ONTOLOGY.md`**. They are **live in the MCP server**\n  today. **Filed post-beta** (issue to be created) and **unlisted** until then.',
+    'w5': '- **The journal capability** — `checkpoint`, `diary_write`, `diary_read`. They arrived in the\n  **initial codebase commit** (`a02ab48c7`) with no design record, and their `wing` / `room`\n  parameters appear **nowhere in `docs/ONTOLOGY.md`**. They are **live in the MCP server**\n  today. **Post-beta** and **unlisted** — tracked by **#4667** (keep / rename / retire\n  undecided; a surface decision).',
     'w6': "| `capture_session` / `commit_session` | → row 16 `mine_knowledge_from_session`, one method. The backend is the target graph's configuration. |",
     'w8': '| `assess_source`, `set_source_tier`, `get_source_reliability` | 3 | → `manage_source_trust` for the setter; reads via `list_sources`. |',
     'w8_backfill': '| `backfill_v25`, `backfill_sources`, `backfill_about_entities`, `reconcile_sessions` | 4 | One-shot migrations. Run once, then dead code carrying a public promise. |',
@@ -268,7 +319,7 @@ ROW_CITE_LITERAL: dict[str, tuple[str, str]] = {
     'calibration_passed': ('check_confidence', '`beta-sdk-surface.md` — “\\| `recall_gaps`, `recall_subgraph`, `recall_state`, `recall_legs`, `calibrate_summary`, `calibration_passed` \\| ~6 \\| → `check_confidence` for the confidence view; **`recall_subgraph` is dropped, not folded** — `explore_connections` answers that question. The gaps question is flagged in "Named but not solved". \\|”'),
     'capture_session': ('mine_knowledge_from_session', "`beta-sdk-surface.md` — “\\| `capture_session` / `commit_session` \\| → row 16 `mine_knowledge_from_session`, one method. The backend is the target graph's configuration. \\|”"),
     'check_structure': ('graph_overview', '`beta-sdk-surface.md` — “\\| narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` \\| **Deleted, not folded.** The approved list contains the container and not the aliases; shipping both is the merge failing at its own goal. \\|”'),
-    'checkpoint': ('', '`beta-sdk-surface.md` — “- **The journal capability** — `checkpoint`, `diary_write`, `diary_read`. They arrived in the **initial codebase commit** (`a02ab48c7`) with no design record, and their `wing` / `room` parameters appear **nowhere in `docs/ONTOLOGY.md`**. They are **live in the MCP server** today. **Filed post-beta** (issue to be created) and **unlisted** until then.”'),
+    'checkpoint': ('', '`beta-sdk-surface.md` — “- **The journal capability** — `checkpoint`, `diary_write`, `diary_read`. They arrived in the **initial codebase commit** (`a02ab48c7`) with no design record, and their `wing` / `room` parameters appear **nowhere in `docs/ONTOLOGY.md`**. They are **live in the MCP server** today. **Post-beta** and **unlisted** — tracked by **#4667** (keep / rename / retire undecided; a surface decision).”'),
     'cleanup_expired_invitations': ('', '`beta-sdk-surface.md` — “\\| `trash_graphs`, `migrate_orgs_to_registry`, `cleanup_expired_invitations`, `sweep_invite_ghost_memberships` \\| 4 \\| **Our maintenance.** Never product surface. \\|”'),
     'close': ('close', "`beta-sdk-surface.md` — “> **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the > current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the 26 exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **4** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`) have a prefixed equivalent. So it is **26 of 26 by name**, or **22 of 26** if you normalise the prefix. > The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it. Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every *current* tool to its destination but does not name the target's replacing name.”"),
     'commit_session': ('mine_knowledge_from_session', "`beta-sdk-surface.md` — “\\| `capture_session` / `commit_session` \\| → row 16 `mine_knowledge_from_session`, one method. The backend is the target graph's configuration. \\|”"),
@@ -291,8 +342,8 @@ ROW_CITE_LITERAL: dict[str, tuple[str, str]] = {
     'delete_entity': ('delete_knowledge', '`canonical-sdk-methods.md` — “\\| W12 \\| `delete_knowledge` \\| #18 \\| `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` \\| keep, collapse \\|”'),
     'delete_point': ('delete_knowledge', '`beta-sdk-surface.md` — “\\| `delete_point`, `delete_point_wrapped` \\| 2 \\| → `delete_knowledge`. \\|”'),
     'delete_point_wrapped': ('delete_knowledge', '`beta-sdk-surface.md` — “\\| `delete_point`, `delete_point_wrapped` \\| 2 \\| → `delete_knowledge`. \\|”'),
-    'diary_read': ('', '`beta-sdk-surface.md` — “- **The journal capability** — `checkpoint`, `diary_write`, `diary_read`. They arrived in the **initial codebase commit** (`a02ab48c7`) with no design record, and their `wing` / `room` parameters appear **nowhere in `docs/ONTOLOGY.md`**. They are **live in the MCP server** today. **Filed post-beta** (issue to be created) and **unlisted** until then.”'),
-    'diary_write': ('', '`beta-sdk-surface.md` — “- **The journal capability** — `checkpoint`, `diary_write`, `diary_read`. They arrived in the **initial codebase commit** (`a02ab48c7`) with no design record, and their `wing` / `room` parameters appear **nowhere in `docs/ONTOLOGY.md`**. They are **live in the MCP server** today. **Filed post-beta** (issue to be created) and **unlisted** until then.”'),
+    'diary_read': ('', '`beta-sdk-surface.md` — “- **The journal capability** — `checkpoint`, `diary_write`, `diary_read`. They arrived in the **initial codebase commit** (`a02ab48c7`) with no design record, and their `wing` / `room` parameters appear **nowhere in `docs/ONTOLOGY.md`**. They are **live in the MCP server** today. **Post-beta** and **unlisted** — tracked by **#4667** (keep / rename / retire undecided; a surface decision).”'),
+    'diary_write': ('', '`beta-sdk-surface.md` — “- **The journal capability** — `checkpoint`, `diary_write`, `diary_read`. They arrived in the **initial codebase commit** (`a02ab48c7`) with no design record, and their `wing` / `room` parameters appear **nowhere in `docs/ONTOLOGY.md`**. They are **live in the MCP server** today. **Post-beta** and **unlisted** — tracked by **#4667** (keep / rename / retire undecided; a surface decision).”'),
     'dream': ('refresh_confidence', '`canonical-sdk-methods.md` — “\\| W13 \\| `stabilize_beliefs` \\| #19 \\| `dream`, `compute_confidence`, `compute_reputation`, `record_calibration` \\| keep — **`compute_confidence` mislabelled read** \\|”'),
     'dream_health_check': ('graph_overview', '`beta-sdk-surface.md` — “\\| `audit`, `validate_domain`, `summarize_structure`, `dream_health_check`, `dream_health_state` \\| ~5 \\| → `graph_overview` where they are orientation. The diagnostics are the held question above. \\|”'),
     'dream_health_state': ('graph_overview', '`beta-sdk-surface.md` — “\\| `audit`, `validate_domain`, `summarize_structure`, `dream_health_check`, `dream_health_state` \\| ~5 \\| → `graph_overview` where they are orientation. The diagnostics are the held question above. \\|”'),
@@ -495,9 +546,14 @@ def generator_module():
 # THE GATE — `--check` must be clean, and must RED on drift
 # ─────────────────────────────────────────────────────────────────────
 def test_check_mode_is_clean() -> None:
-    """The committed doc must equal a fresh render. This is the CI form."""
+    """`--check` must be clean against the render it just produced, and stable.
+
+    It no longer compares a COMMITTED copy (there is none, #5373) — it asserts the
+    render is DETERMINISTIC, which is what makes `--check` meaningful for a local
+    copy at all. The drifted-copy test below still proves `--check` reds.
+    """
     proc = subprocess.run(
-        [sys.executable, str(GENERATOR), "--check"],
+        [sys.executable, str(GENERATOR), "--check", "--out", str(_render_doc())],
         cwd=ROOT, capture_output=True, text=True,
     )
     assert proc.returncode == 0, (
@@ -1134,21 +1190,30 @@ def test_the_whole_mapping_is_pinned() -> None:
     )
 
 
-def test_part_a_line_numbers_point_at_the_right_method() -> None:
-    """Every `sdk.py:N` citation must equal the method's real `def` line.
+def test_no_committed_line_number_citation_exists() -> None:
+    """The doc must commit NO `sdk.py:N` offset — the derived fact stays gone (#4813).
 
-    This closes the artifact's central promise — that the citations cannot drift — and
-    it is compared against a **fresh AST walk**, not a second reading of the generator.
-    A constant offset added to every emitted line number makes all 150 citations wrong
-    while every other test stays green.
+    The removed `Source` columns were a committed snapshot of a line offset into a
+    MOVING `tortoise/sdk.py`, and the old `test_part_a_line_numbers_point_at_the_right_
+    method` re-derived the same offsets from a fresh AST walk of that same moving file.
+    So the [doc, generator, test] triple agreed with itself and reddened on any PR that
+    inserted a line upstream of a `def` — or was merely behind a main that did. #5125
+    and #5189 each regenerated the table and main was stale again within days; the fix
+    is to stop committing the fact, not to regenerate it a third time.
+
+    This is the mutation gate for that removal: re-introducing the column, a stray
+    `sdk.py:<line>` in prose, or a copied citation anywhere in the artifact all red here.
+    A bare `sdk.py` mention with no offset (prose, the Reproduce block) is not a
+    citation and stays allowed — the pattern requires the `:<digits>`.
     """
-    truth = public_methods_independently()
-    bad = [
-        f"{r['name']}: cited :{r['line']}, defined at :{truth.get(r['name'])}"
-        for r in part_a_rows()
-        if truth.get(r["name"]) != r["line"]
-    ]
-    assert not bad, "Part A cites the wrong `sdk.py` line for:\n  " + "\n  ".join(bad)
+    text = DOC.read_text(encoding="utf-8")
+    hits = re.findall(r"sdk\.py:\d+", text)
+    assert not hits, (
+        "the SDK rename table commits derived `sdk.py:N` line offsets again. They are "
+        "facts about a moving source: every sdk.py insertion invalidates them and reds "
+        "the gate on correct, unrelated PRs. Derive the offset where it is needed; do "
+        f"not commit it (#4813). Found {len(hits)}: {hits[:5]}"
+    )
 
 
 def test_every_target_is_on_the_approved_surface() -> None:
@@ -1406,8 +1471,8 @@ def test_the_unread_cells_and_the_row_ordinals_are_pinned() -> None:
     Each of these was mutable with the whole suite green: the ordinals could become
     `100, 101, …`, C1's status cell could state the opposite of its own heading, and
     C4's referent could name a method that does not exist. A cell that states a fact is
-    a claim; unread, it is a claim that can be false. (C2's own Source and Reason columns
-    are pinned separately, in `test_part_c2_reasons_and_sources_are_read`.)
+    a claim; unread, it is a claim that can be false. (C2's own Reason column
+    is pinned separately, in `test_part_c2_reasons_are_read`.)
     """
     text = DOC.read_text(encoding="utf-8")
     part_a = text.split("## Part A")[1].split("## Part B")[0]
@@ -1459,7 +1524,7 @@ def test_the_unread_cells_and_the_row_ordinals_are_pinned() -> None:
 
 
 def test_part_a_rows_are_well_formed_markdown() -> None:
-    r"""Every Part A row must carry exactly 10 cells when split on UNESCAPED pipes.
+    r"""Every Part A row must carry exactly 9 cells when split on UNESCAPED pipes.
 
     The citation column quotes markdown table rows, so their `|` must be escaped as
     `\|` — otherwise the row silently grows extra columns and the quoted evidence
@@ -1471,7 +1536,7 @@ def test_part_a_rows_are_well_formed_markdown() -> None:
         if not re.match(r"^\| \d+ \| ", line):
             continue
         cells = re.split(r"(?<!\\)\|", line.strip().strip("|"))
-        if len(cells) != 10:
+        if len(cells) != 9:
             bad.append((line[:80], len(cells)))
     assert not bad, (
         "Part A rows have the wrong number of markdown cells (escaped pipes are "
@@ -1575,25 +1640,20 @@ def test_part_c2_is_exactly_the_unbacked_rows() -> None:
     assert listed == unbacked_in_table
 
 
-def test_part_c2_reasons_and_sources_are_read() -> None:
-    """C2's Source and Reason columns were rendered but read by no test.
+def test_part_c2_reasons_are_read() -> None:
+    """C2's Reason column was rendered but read by no test.
 
-    The finding *is* the reason, and the Source is the claim that the method exists at
-    that line: a reason that drifts from its finding, or a Source pointing at the wrong
-    line, is a false claim nothing else in the suite can see. The line numbers are
-    checked against a fresh AST walk; the reasons are pinned literally.
+    The finding *is* the reason: a reason that drifts from its finding is a false claim
+    nothing else in the suite can see. The reasons are pinned literally here; the names
+    are checked against a fresh AST walk. C2 no longer carries a `Source` line-offset
+    column — the offset was the row's own key under another name, and committing it
+    coupled the doc to `sdk.py` line movement (#4813; see
+    `test_no_committed_line_number_citation_exists`).
     """
     section = _section("C2 — rows with NO doc backing")
-    rows = re.findall(r"^\| `([a-z_][a-z0-9_]*)` \| `sdk\.py:(\d+)` \| (.*) \|$",
-                      section, re.M)
-    parsed = {n: (int(ln), reason) for n, ln, reason in rows}
-    # Only the REASONS are pinned as literals. The line numbers were previously
-    # duplicated here as literals too, which asserted a value the fresh-AST-walk check
-    # below already derives — so they added no coverage, and their only possible effect
-    # was to fail as a stale-value alarm once the doc had been regenerated without them
-    # being updated. The docstring's contract (lines from the AST, reasons literal) is
-    # what the code now does.
-    assert {n: reason for n, (_ln, reason) in parsed.items()} == {
+    rows = re.findall(r"^\| `([a-z_][a-z0-9_]*)` \| (.*) \|$", section, re.M)
+    parsed = {n: reason for n, reason in rows}
+    assert parsed == {
         "org_create": (
             "No target method creates an organisation account. The tenancy block reads "
             "one (`get_organisation_account`) and files account *closure* as a console "
@@ -1611,8 +1671,8 @@ def test_part_c2_reasons_and_sources_are_read() -> None:
         ),
     }, f"C2's reasons changed:\n  {parsed}"
     truth = public_methods_independently()
-    wrong = {n: (ln, truth[n]) for n, (ln, _) in parsed.items() if ln != truth[n]}
-    assert not wrong, f"C2 cites the wrong `sdk.py` line: {wrong}"
+    unknown = sorted(set(parsed) - set(truth))
+    assert not unknown, f"C2 names a method that is not on the public surface: {unknown}"
 
 
 def test_part_c4_lists_the_doc_code_name_mismatches() -> None:
@@ -1800,7 +1860,7 @@ def test_a_truncated_anchor_cannot_shorten_the_region() -> None:
     # P1-1a: a bullet anchor truncated at a source line wrap.
     bullet_anchor = "- **The journal capability**"
     full_bullet = _derive_region(beta, Region(bullet_anchor))
-    assert "Filed post-beta" in full_bullet and "unlisted" in full_bullet
+    assert "Post-beta" in full_bullet and "unlisted" in full_bullet
     line_wrapped = (
         "- **The journal capability** — `checkpoint`, `diary_write`, `diary_read`. "
         "They arrived in the\n  **initial codebase commit** (`a02ab48c7`) with no "
@@ -2158,8 +2218,13 @@ def test_section_prose_paragraphs_are_read() -> None:
     """
     doc = _doc()
     paragraphs = [
-        "Every `sdk.py:N` citation is **read from the AST at build time**, so it cannot "
-        "drift from the code it cites. The 40 target names are **parsed out of "
+        "**This table commits no `sdk.py:N` citation.** A line offset is a fact derived "
+        "from a **moving source**, so committing one made every PR that inserted a line "
+        "into `tortoise/sdk.py` — or was merely behind a main that did — red on correct "
+        "content (5 PRs). An offset is derived only where a diagnostic needs one, never "
+        "written down. The method set and the `def` count are **read from the AST at "
+        "build time**, so they cannot drift from the code they describe. The 40 target "
+        "names are **parsed out of "
         "`docs/product/beta-sdk-surface.md`** (owner-approved 2026-09-21), and the "
         "R/W/N group partition out of `docs/product/canonical-sdk-methods.md`; every "
         "count below is arithmetic over those, never a typed number. Each row's citation "
@@ -2286,13 +2351,72 @@ def test_table_header_rows_are_read() -> None:
     """
     doc = _doc()
     headers = [
-        "| # | Method | Source | Group | Target | Lifecycle | Visibility | Basis | "
+        "| # | Method | Group | Target | Lifecycle | Visibility | Basis | "
         "Delete | Citation |",
         "| Destination | Current methods | Count |",
         "| Target method | Status |",
-        "| Method | Source | Why it has no destination |",
+        "| Method | Why it has no destination |",
         "| Method | Part A carries | The other doc implies | Other doc's grouping |",
         "| Doc's name | Real method (if any) | Where the doc uses it |",
     ]
     missing = [h for h in headers if h not in doc]
     assert not missing, f"a table header row changed or was dropped: {missing}"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# COMMENT CITATION ANCHORS (#4748)
+# ─────────────────────────────────────────────────────────────────────
+# Six test/helper COMMENTS cited `sdk.py:<N>` at a line that did not point at the
+# code the comment claimed. Nothing failed, because a comment's target can drift
+# with any docstring insertion — and by the time #4748 was worked, all six had
+# rotted AGAIN (e.g. `sdk.py:744` was a blank line at the issue's commit and
+# unrelated prose at the work commit). The fix is a SYMBOL (`file.py::symbol`),
+# which a line shift cannot invalidate. A rename can still dangle an anchor, so
+# this is its liveness guard: each must resolve to a real def in the file it
+# names. It pins NO line numbers — that is the thing proven to rot.
+# Every anchor is fully QUALIFIED (`Class.method`): a bare method name would let a
+# rename pass this gate whenever any other def of the same name survived anywhere
+# in the file — including a helper nested inside another function (#4748 review).
+# Requiring the real qualified path makes the check exact by construction.
+_CITATION_ANCHORS: tuple[tuple[str, str], ...] = (
+    ("tortoise/sdk.py", "TortoiseSDK.create_point"),             # test_ingest_mode.py
+    ("tortoise/sdk.py", "TortoiseSDK.create_source"),            # test_ingest_mode.py
+    ("tortoise/sdk.py", "TortoiseSDK.ingest"),                   # test_ingest_mode.py
+    ("tortoise/sdk.py", "TortoiseSDK._extract_session_v2"),      # test_no_tests_imports…
+    ("tortoise/sdk.py", "TortoiseSDK.tortoise_fts_query"),       # eval/retrieval/run.py
+    ("tortoise/sdk.py", "TortoiseSDK.file_human_approval"),      # test_ranking.py
+    ("tortoise/sdk.py", "TortoiseSDK.capture_session"),          # test_ingest_v2_parallel.py
+    ("tortoise/projection/entities.py", "_EntityHandlers._event_plain_merge"),
+    ("tortoise/ranking.py", "GraphRanker._fetch_event_signals"),
+)
+
+
+def _defined_symbols(path: Path) -> set[str]:
+    """Function/method symbols defined in `path`, by a fresh AST walk.
+
+    Module-level functions and the direct methods of a top-level class are
+    collected. A function nested INSIDE another function is deliberately not
+    added under its bare name: the anchor exists so a reader can land on the
+    real symbol, and a nested helper that happens to share a name would let a
+    RENAMED method keep this gate green while the comment's referent is gone
+    (#4748 review). Class-qualified anchors are likewise collision-proof.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    out: set[str] = set()
+    for node in tree.body:  # module level only — nested defs do not qualify
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            out.add(node.name)
+        elif isinstance(node, ast.ClassDef):
+            for sub in node.body:
+                if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    out.add(f"{node.name}.{sub.name}")
+    return out
+
+
+def test_citation_anchors_resolve_to_real_symbols() -> None:
+    """Every symbol a test/helper comment cites must still exist (#4748)."""
+    for rel, symbol in _CITATION_ANCHORS:
+        assert symbol in _defined_symbols(ROOT / rel), (
+            f"{rel}::{symbol} no longer exists — a test-suite comment anchor "
+            f"dangles. Update the comment(s) citing it (issue #4748)."
+        )

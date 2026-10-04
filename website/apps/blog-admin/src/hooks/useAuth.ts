@@ -36,9 +36,12 @@ const INITIAL: AuthState = { loading: true, session: null, isAdmin: false, unava
  * #3080: carry the current console path to /auth so sign-in returns HERE.
  *
  * PATHNAME only — parity with the server gate's returnToPath(), which also drops
- * the query. /auth rejects a `next` containing ':' or '\\' anywhere, so sending
- * pathname+search would silently drop the return-to for any admin URL carrying
- * such a query (e.g. ?t=12:00) and re-login would land on the app root.
+ * the query. (This comment previously claimed /auth rejects a `next` containing
+ * ':' — false then and now: the consumer's guard is `\` plus a leading-'/'
+ * same-origin check, and its early block explicitly ACCEPTS ':' because the gate
+ * emits colon paths. Pathname-only is retained for the gate parity, NOT for that
+ * reason; the cost is that a query on a deep link (?t=12:00) is dropped and
+ * re-login lands on the query-less path.)
  */
 function authUrlWithReturn(): string {
   return `${AUTH_URL}?next=${encodeURIComponent(window.location.pathname)}`;

@@ -802,6 +802,15 @@ class BackupWatcher:
         # contains it next poll. Retiring it would have documented a retry that
         # never happened and orphaned the incident forever — the graph is gone, so
         # no other surface ever revisits it.
+
+        #5191: the leg goes through the SAME shared `_alert_leg` the alert drive
+        # uses, so containment is single-sourced rather than duplicated here. The
+        # contract is identical (a raising close never escapes the poll; a failed
+        # leg is re-evaluated next poll), and it fixes a divergence this path had:
+        # `CloseCooldown` — "still open, backing off", a NORMAL state — was logged
+        # with a full exception traceback as though it were a crash. `_alert_leg`
+        # logs it at INFO. Deferral (not in-cycle retry) is deliberate: ADR-011's
+        # "the driver's next healthy run closes it".
         """
         pending: set[str] = set()
         try:
@@ -810,13 +819,10 @@ class BackupWatcher:
             for key in sorted(prev_graph_keys - cur_graph_keys):
                 for kind in ("STALE", "NEVER_BACKED_UP", "METADATA_LOST",
                              "BACKUP_SET_MISSING"):
-                    try:
-                        self._alerts.resolve_incident(kind, key)
-                    except Exception:
-                        logger.exception(
-                            "vanished-graph resolve failed for %s/%s — kept "
-                            "pending for the next poll", kind, key,
-                        )
+                    # False covers BOTH "close failed" and "cooling down" — the
+                    # key is kept pending either way, which is exactly the retry
+                    # semantics this path had before.
+                    if not self._alert_leg("resolve_incident", kind, key):
                         pending.add(key)
             # A pending key is no longer in `cur`, so keeping it in the set makes
             # the next poll's diff re-include it.

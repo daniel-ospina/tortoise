@@ -205,22 +205,69 @@ def _as_items(value: object) -> Sequence[Any]:
 
 
 #: The embedder truncates point/event content AND minted endpoint refs to this
-#: many characters before keying them (the ``str(...).strip()[:1000]`` sites in
-#: ``execute_embed`` — event content, point content, minted refs) — cited
-#: symbolically, not by line number, because line numbers move as the module is
-#: edited.
+#: many characters before keying them (``extractor_v2._MAX_CONTENT``, the
+#: ``str(...).strip()[:1000]`` sites in ``execute_embed``) — cited symbolically,
+#: not by line number, because line numbers move as the module is edited.
 _MAX_CONTENT = 1000
 
 
 def _norm_variants(text: object) -> set[str]:
-    """Normalized forms the embedder can key an endpoint on.
+    """Normalized keys for an ENTITY-name identity — the mint's guard SUPERSET.
 
-    Both the FULL text and its :data:`_MAX_CONTENT`-char prefix: ``execute_embed``
-    keys a point/event id on the truncated content, while an operator's ref is
-    also probed untruncated (a minted endpoint registers the untruncated key
-    only when the truncated form did not already resolve). A removed item must
-    therefore be recognised under EITHER form, or an operator on its content
-    escapes the prune and the text is re-materialised as a Point.
+    The mint transform ``M(x) = _norm(x.strip()[:_MAX_CONTENT])`` applied to the
+    raw string and to its whitespace-collapsed form — ``_endpoint_keys(x) = {M(x),
+    M(_norm(x))}``, the entity guard's own set ("the two SPELLINGS, not every
+    truncation") — PLUS the untruncated ``_norm(x)`` alias the mint registers for
+    a minted endpoint (``_full``; ``_resolve`` probes that spelling). So for
+    non-empty ``x``, ``_norm_variants(x) == _endpoint_keys(x) | {_norm(x)}`` — a
+    SUPERSET that is STRICT exactly when ``_norm(x)`` is not already one of the
+    guard's two arms; both helpers return the empty set for empty/whitespace-only
+    input.
+
+    Use this for the **entity-name key sets** (``removed_entity_names``,
+    ``present_entity_names``, ``prior_entity_keys``) AND for the **ENTITY half**
+    of the operator-endpoint surface (:func:`_operator_endpoint_key_sets`),
+    which ``apply_vet`` matches against the removed-ENTITY keys alone
+    (``entity_gone``) — so it must cover the entity-GUARD ref keys, not only the
+    resolution keys. Use :func:`_resolution_variants` (``{_norm(x), M(x)}``) for
+    point/event CONTENT and for the CONTENT half of the endpoint surface:
+    relative to it, the extra arm here is the entity guard's collapsed-closure
+    ``M(_norm(x))``, which a regular point never registers. Carrying it on a
+    content SURVIVOR surface lets a surviving long point shield an operator
+    endpoint the mint cannot resolve, and carrying it against a MERGED ``gone``
+    lets it collide with a removed CONTENT key — each re-opening a ``#2552``
+    fabrication or dropping a legitimate edge (#5069 review, P1).
+
+    For non-empty ``raw`` the two sets are equal exactly while the untruncated
+    alias ``_norm(raw)`` is ALREADY one of the guard's two arms; otherwise the
+    difference is exactly ``{_norm(raw)}``. For empty/whitespace-only input both
+    helpers return the empty set, so the difference is empty too. Do NOT decide
+    equality by length: ``.lower()`` can LENGTHEN (``"İ"`` lowercases to two
+    code points), so a raw string at or under the cap can still normalise past
+    it — compare the SETS, not the lengths.
+    ``test_endpoint_key_set_matches_extractor`` pins the containment and the
+    exact difference.
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return set()
+    return {_norm(raw),
+            _norm(raw[:_MAX_CONTENT]),
+            _norm(_norm(raw)[:_MAX_CONTENT])}
+
+
+def _resolution_variants(text: object) -> set[str]:
+    """The keys ``execute_embed`` RESOLVES point/event/operator CONTENT on.
+
+    ``_norm(x.strip()[:_MAX_CONTENT])`` — the mint's resolution key — plus the
+    UNTRUNCATED ``_norm(x)`` alias a minted endpoint registers (``_full`` in
+    ``_mint_endpoint``; ``_resolve`` probes that spelling). Deliberately NOT
+    :func:`_norm_variants`: that set additionally carries the ENTITY guard's
+    collapsed-closure arm, which a regular point/event never registers. On a
+    SURVIVOR surface that extra arm lets a surviving >cap point shield an
+    operator endpoint the mint cannot resolve, and the mint then fabricates a
+    claim Point from the DISCARDED text — the ``#2552`` failure the prune
+    exists to prevent (#5069 review, P1).
     """
     raw = str(text or "").strip()
     if not raw:
@@ -553,9 +600,12 @@ def _item_text_variants(section: str, item: Mapping[str, Any]) -> set[str]:
     materializes whatever text the operator wrote — so a point carrying both keys
     can be re-materialised from either. Only a survivor's CONTENT shields an
     endpoint; its name does not resolve in ``execute_embed``, so it must not.
+    Keyed with :func:`_resolution_variants` (the mint's RESOLUTION keys), never
+    :func:`_norm_variants` — see that helper for why the entity-closure arm must
+    not leak onto a content surface.
     """
-    return (_norm_variants(_item_text(section, item))
-            | _norm_variants(_item_content(section, item)))
+    return (_resolution_variants(_item_text(section, item))
+            | _resolution_variants(_item_content(section, item)))
 
 
 def _content_texts(embed_list: object) -> set[str]:
@@ -563,7 +613,7 @@ def _content_texts(embed_list: object) -> set[str]:
     surface (``_resolve`` keys ``point_ids``/``event_ids`` by content)."""
     out: set[str] = set()
     for section, _index, item in _iter_items(embed_list):
-        out |= _norm_variants(_item_content(section, item))
+        out |= _resolution_variants(_item_content(section, item))
     return out
 
 
@@ -608,14 +658,26 @@ def _entity_map(embed_list: object) -> dict[str, Mapping[str, Any]]:
     return out
 
 
-def _operator_endpoint_text(op: Mapping[str, Any]) -> set[str]:
-    """Normalized texts an operator endpoint names.
+def _operator_endpoint_key_sets(
+        op: Mapping[str, Any]) -> tuple[set[str], set[str]]:
+    """``(content_keys, entity_keys)`` an operator endpoint names.
 
-    Mirrors ``execute_embed``'s resolution surface: ``src``/``dst`` whichever
-    ``op_type`` an operator carries (the embedder reads them unconditionally),
-    and the target — read as
+    The prune matches each half against its OWN provenance of ``gone`` —
+    ``content_keys`` (:func:`_resolution_variants`, the mint's RESOLUTION keys)
+    against the removed point/event CONTENT keys, and ``entity_keys``
+    (:func:`_norm_variants`, which ALSO covers the mint's ENTITY-GUARD ref keys)
+    against the removed ENTITY keys. Matching one MERGED set against the union
+    is wrong in both directions: drop the entity half and a ref naming a
+    DISCARDED >cap entity through its collapsed-closure arm escapes the prune,
+    so the mint fabricates a claim Point from the participant name (#5069
+    re-review, P1a); keep it merged and the same closure arm can coincide with a
+    removed CONTENT key, dropping an operator the mint would have kept, with a
+    false "whose endpoint was discarded" warning (#5069 re-review, P1b).
+
+    ``src``/``dst`` are read whichever ``op_type`` an operator carries (the
+    embedder reads them unconditionally). The target — read as
     ``op.get("target") or op.get("target_edge")``, the **first present, not a
-    union** — **only for a MITIGATES**, which is the only ``op_type`` the
+    union** — is read **only for a MITIGATES**, the only ``op_type`` the
     embedder reads a target for (``if _op_type == "MITIGATES"``). Reading it for
     every operator would drop a valid edge on a field the embedder never looks
     at — an IMPL carrying a stray ``target`` naming a discarded point would be
@@ -624,19 +686,37 @@ def _operator_endpoint_text(op: Mapping[str, Any]) -> set[str]:
     skipped and left to be re-minted, and a target is honoured only when it is a
     ``dict``, exactly as the embedder requires.
     """
-    out: set[str] = set()
+    content: set[str] = set()
+    entity: set[str] = set()
+
+    def _add(v: object) -> None:
+        content.update(_resolution_variants(v))
+        entity.update(_norm_variants(v))
+
     for key in ("src", "dst"):
         v = op.get(key)
         if v and str(v).strip():
-            out |= _norm_variants(v)
+            _add(v)
     if str(op.get("op_type", "")).upper() == "MITIGATES":
         target = op.get("target") or op.get("target_edge")
         if isinstance(target, dict):
             for key in ("src", "dst"):
                 v = target.get(key)
                 if v and str(v).strip():
-                    out |= _norm_variants(v)
-    return out
+                    _add(v)
+    return content, entity
+
+
+def _operator_endpoint_text(op: Mapping[str, Any]) -> set[str]:
+    """Every text an operator endpoint names, both provenances UNIONed.
+
+    Convenience for callers that only need the union (and the drift test that
+    pins the MITIGATES-target read). :func:`apply_vet` uses
+    :func:`_operator_endpoint_key_sets` to match each provenance against its own
+    ``gone`` half.
+    """
+    content, entity = _operator_endpoint_key_sets(op)
+    return content | entity
 
 
 def removal_pool(before: object, after: object) -> dict:
@@ -655,7 +735,10 @@ def removal_pool(before: object, after: object) -> dict:
     **A removal is an absent ITEM, not a text missing from a surface.** Every
     collected text is the identity *and* content of an item with no value-equal
     counterpart in ``after``, because the #2552 mint materialises whichever form
-    an operator wrote. Deriving the set from a surface difference would invent
+    an operator wrote. Each text is keyed with :func:`_resolution_variants` (the
+    mint's RESOLUTION keys); the ENTITY-closure arm belongs to
+    :func:`_norm_variants` and must not leak onto this CONTENT surface. Deriving
+    the set from a surface difference would invent
     removals for every surviving item that carries a ``name`` — a name is in the
     identity surface and not in the content surface — and prune operators naming
     a survivor.
@@ -668,8 +751,10 @@ def removal_pool(before: object, after: object) -> dict:
     does not resolve an endpoint on it. A present ENTITY's name does, for a
     different reason — the embedder drops an entity-named endpoint rather than
     minting a Point for it, so pruning would only mis-attribute the drop. That
-    shield covers only the names the mint's guard can match — see
-    :func:`apply_vet` for the exact criterion.
+    shield is keyed with :func:`_norm_variants`, a SUPERSET of the mint's guard
+    set (it also carries the mint's untruncated resolution alias), so it is
+    never NARROWER than the guard — see :func:`apply_vet` for the exact
+    criterion.
     """
     before_entities = _entity_map(before)
     after_entities = _entity_map(after)
@@ -847,7 +932,15 @@ def apply_vet(embed_list: Mapping[str, Any],
                     kept.append(item)
                     continue
                 if name:
-                    removed_entity_names.add(name)
+                    # #5069: THIS PASS's gone-set entry carries every form the
+                    # mint keys a SPELLING of the name under, not just the full
+                    # normalised name. A truncated spelling of a discarded
+                    # >1000-char name otherwise escapes ``gone`` — and the mint
+                    # cannot see a discarded entity (it is in neither the
+                    # emitted set nor the S3 index), so it would fabricate a
+                    # Point from it. (The pool stores the full name; the
+                    # cross-pass leg expands it from the raw item below.)
+                    removed_entity_names |= _norm_variants(item.get("name"))
             else:
                 removed_context |= _item_text_variants(section, item)
             warnings.append(
@@ -897,33 +990,58 @@ def apply_vet(embed_list: Mapping[str, Any],
     # same-pass discard of a duplicate-name entity — pruned an operator whose
     # endpoint was present, with a warning claiming it "was discarded".
     #
-    # The shield has to key EXACTLY as the mint does, or it un-prunes an
-    # endpoint the mint will fabricate. ``_mint_endpoint`` TRUNCATES the
-    # reference and then normalises — ``_norm(str(ref).strip()[:1000])`` — and
-    # compares that against ``emitted_entity_names``, which holds the FULL name
-    # normalised. So a name is shielded only when truncating it does not change
-    # what normalisation yields: a name longer than ``_MAX_CONTENT``, and one
-    # whose 1000th character falls inside a whitespace run that ``_norm`` would
-    # collapse (verified: a 1,150-char name normalising to 951 characters
-    # shields under the normalise-then-truncate test, while the mint keys it at
-    # 900 and fabricates a Point). Computed from the RAW name for that reason.
+    # The shield must key AT LEAST as broadly as the mint's refusal set: a
+    # narrower shield prunes an entity-named endpoint and mis-reports it as
+    # "whose endpoint was discarded". Keying broader is safe here, because every
+    # extra alias the shield carries is matched by the mint's guard for that same
+    # ref (the mint re-keys the ref through the truncated arms below), so nothing
+    # it shields can be fabricated. #5069 canonicalised the guard key on BOTH
+    # sides:
+    # ``extractor_v2._endpoint_keys`` is the mint transform
+    # ``_norm(x.strip()[:_MAX_CONTENT])`` applied to the raw and to the
+    # whitespace-collapsed spelling of x, the mint's entity sets are built with
+    # it, and the mint's guard is a set intersection against it — so
+    # ``_norm_variants`` here (the same two forms PLUS the untruncated
+    # resolution alias, i.e. a superset) covers the mint's own key set, and a
+    # present entity shields its name in either spelling at ANY length.
+    # The former ``_norm(raw[:1000]) == name`` test shielded only when
+    # truncation left the normalised name unchanged, so it pruned operators
+    # naming a present entity — the false "whose endpoint was discarded"
+    # warning this shield exists to prevent.
     present_entity_names: set[str] = set()
-    for name, item in _entity_map(out).items():
-        raw = str(item.get("name") or "")
-        if _norm(raw.strip()[:_MAX_CONTENT]) == name:
-            present_entity_names.add(name)
-    gone = (removed_context | prior_texts | removed_entity_names
-            | set(prior_entities)) - surviving_texts - set(canonical) \
-        - present_entity_names
-    if gone:
+    for _ent in _section_items(out, "entities"):
+        if isinstance(_ent, Mapping):
+            present_entity_names |= _norm_variants(_ent.get("name"))
+    # #5069: the pool stores a removed entity under its FULL normalised name
+    # (``_entity_map`` keys it that way for Rule 4's restore lookup), but the
+    # ENTITY half of the prune is matched against the endpoint's
+    # ``_norm_variants`` keys. Expand from the stored ITEM's raw name — expanding
+    # the already-collapsed KEY would lose the raw arm and leave a cap-truncated
+    # raw-prefix ref unpruned on this leg alone. That is what lets a
+    # >1000-char entity discarded in an earlier pass still be pruned when a
+    # later pass re-names it — the cross-pass leg of the guard.
+    prior_entity_keys = {k for _item in prior_entities.values()
+                         for k in _norm_variants(_item.get("name"))}
+    # Match each endpoint provenance against its OWN ``gone`` half (#5069
+    # re-review, P1b): a removed point/event contributes the mint's RESOLUTION
+    # keys, a removed entity contributes its mint-GUARD keys. One MERGED set
+    # over-prunes when an endpoint's entity-closure arm coincides with a removed
+    # CONTENT key (an operator the mint would have kept, dropped with a false
+    # "whose endpoint was discarded" warning). The shields subtract from BOTH
+    # halves, exactly as the single `gone` did.
+    _shield = surviving_texts | set(canonical) | present_entity_names
+    content_gone = (removed_context | prior_texts) - _shield
+    entity_gone = (removed_entity_names | prior_entity_keys) - _shield
+    if content_gone or entity_gone:
         ops = _as_items(out.get("operators"))
         kept_ops: list[Any] = []
         pruned = 0
         for op in ops:
-            if isinstance(op, Mapping) and (
-                    _operator_endpoint_text(op) & gone):
-                pruned += 1
-                continue
+            if isinstance(op, Mapping):
+                content_keys, entity_keys = _operator_endpoint_key_sets(op)
+                if (content_keys & content_gone) or (entity_keys & entity_gone):
+                    pruned += 1
+                    continue
             kept_ops.append(op)
         if pruned:
             out["operators"] = kept_ops

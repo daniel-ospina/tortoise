@@ -22,6 +22,16 @@ serializes every recall key to null.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/longmem_eval/report.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]})"
+    )
+
 import json
 import math
 import os  # noqa: F401
@@ -1922,8 +1932,12 @@ def build_report(
     # | Census signal            | Mechanical fix (run-protocol steps 4/6)   |
     # |--------------------------|------------------------------------------|
     # | fatal_402_billing > 0    | M2 pre-flight probe missed it → check     |
-    # |                          | budget (A6), re-run pre-flight — not a   |
-    # |                          | code bug                                 |
+    # | (a key-limit 403 lands   | budget (A6), re-run pre-flight — not a    |
+    # | here too, #4959)         | code bug. The signature set is BROAD      |
+    # |                          | (#4952): a 403 "rate/organization/token   |
+    # |                          | limit exceeded" also lands here — a false |
+    # |                          | DEGRADE (fail-closed, never a false       |
+    # |                          | certificate); triage budget first.        |
     # | transient_429 spike      | reduce --workers / raise backoff cap /   |
     # |                          | provider load                            |
     # | transient_timeout spike  | raise TORTOISE_EXTRACTOR_MAX_TOKENS or   |
@@ -1932,8 +1946,14 @@ def build_report(
     # |                          | → fix prompt, not retries                |
     # | truncated > 0            | cap too low for the stage → raise the    |
     # |                          | stage cap (TORTOISE_EXTRACTOR_MAX_TOKENS) |
-    # | fatal_401_auth /         | key rotation / provider config — pre-    |
-    # | fatal_403_forbidden      | flight (M2) should have caught           |
+    # | fatal_401_auth /         | operator key replacement / provider      |
+    # | fatal_403_forbidden      | config — pre-flight (M2) should have     |
+    # |                          | caught (among the FATAL classes only the |
+    # |                          | billing one is rotation-eligible; these  |
+    # |                          | re-raise, #1951. A 403 whose BODY matches |
+    # |                          | a key-limit signature is the BILLING      |
+    # |                          | condition and lands in fatal_402_billing  |
+    # |                          | instead, #4959)                           |
     # ───────────────────────────────────────────────────────────────────────
 
     # ── M7 (D2): leg-mix — match_source aggregation, never re-derived ──

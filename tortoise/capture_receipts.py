@@ -15,10 +15,12 @@ state keys (never client state):
   which harness captured. The bare ``session_capture_receipt`` is the
   harness-unproven key (legacy no-harness hooks, session-JWT captures).
 * ``session_capture_last_error_<harness>`` carries the last non-2xx attempt's
-  detail (the per-harness failure sub-line). Same conclusion, different
-  resolution: the REST capture resolves the harness ``stored or claimed``,
-  while the MCP capture (``tortoise/mcp_server.py``) records the request's own
-  ``harness`` without checking it against the Session's stored harness.
+  detail (the per-harness failure sub-line). Same conclusion, same resolution:
+  every capture surface — the REST endpoint and the MCP
+  ``tortoise_session_capture`` tool (``tortoise/mcp_server.py``) — resolves the
+  harness with ``hosted_api._observed_capture_harness`` (stored or claimed)
+  before writing the key (#3681 / #4898). That helper is the single resolver;
+  its own docstring carries the credential and stored-harness rules.
 
 The hosted API (``tortoise/hosted_api.py``) imports both keys from THIS module,
 and the CLI's ``tortoise session verify`` (#3809) imports ``capture_receipt_key``

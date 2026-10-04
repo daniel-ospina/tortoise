@@ -160,6 +160,32 @@ def test_norm_matches_extractor_norm():
         assert vg._norm(value) == v2._norm(value), value
 
 
+def test_endpoint_key_set_matches_extractor():
+    """#5069: ``_norm_variants`` must COVER ``extractor_v2._endpoint_keys`` — the
+    mint's entity-guard set (``vet_gate`` must not import ``extractor_v2``), and
+    the operator prune is correct only while it does. ``_norm`` and
+    ``_MAX_CONTENT`` have their own pins; this covers the key SET itself,
+    including the closure arm (a text whose collapsed form exceeds the cap) and
+    the untruncated alias the mint registers (``_full`` in ``_mint_endpoint``),
+    which the guard set does NOT carry. A drift here re-opens the #5005 defect
+    silently.
+    """
+    from tortoise import extractor_v2 as v2
+    for value in ("A" * 1100, "a" * 900 + " " * 200 + "b" * 50,
+                  "a" * 500 + " " * 900 + "b" * 600, "B" * 1000, "B" * 1001,
+                  "  padded  ", "Straße", "tab\tand\nnewline", "", None, 42,
+                  "a" * 5000):
+        got = set(vg._norm_variants(value))
+        guard = set(v2._endpoint_keys(value))
+        assert guard <= got, (
+            value if not isinstance(value, str) else value[:40])
+        raw = str(value or "").strip()
+        assert got - guard == ({vg._norm(raw)}
+                              if raw and vg._norm(raw) not in guard
+                              else set()), (
+            value if not isinstance(value, str) else value[:40])
+
+
 # ── fail-open ──────────────────────────────────────────────────────────────
 
 def test_no_arbiter_keeps_everything_and_reports_coverage():
@@ -738,9 +764,12 @@ def test_present_entity_name_does_not_get_its_operator_pruned():
     assert len(out2["operators"]) == 1
     assert not any("pruned" in w for w in warnings2), warnings2
 
-    # A name LONGER than the mint's 1000-char key does NOT shield: the mint
-    # compares the truncated ref against the full name, so it would fabricate a
-    # claim Point out of a participant name. The operator must be pruned.
+    # A name LONGER than the mint's 1000-char key STILL shields: #5069
+    # canonicalised the mint's entity key on BOTH sides, so the mint keys the
+    # truncated ref and the truncated name with the same transform, refuses to
+    # fabricate a Point, and drops the operator itself. Pruning here would not
+    # change the payload — it would only re-introduce the false "whose endpoint
+    # was discarded" claim this shield exists to prevent.
     long_name = "A" * 1100
     big = {"entities": [{"name": long_name, "kind": "core:tool"},
                         {"name": long_name, "kind": "core:concept"}],
@@ -750,15 +779,15 @@ def test_present_entity_name_does_not_get_its_operator_pruned():
     first_big = next(vg._item_id(*t) for t in vg._iter_items(big)
                      if t[0] == "entities" and t[1] == 0)
     out3, warnings3 = vg.apply_vet(big, {first_big: {"outcome": vg.DISCARD}})
-    assert out3["operators"] == [], (
-        "a >1000-char name is not what `emitted_entity_names` holds — the mint "
-        "would fabricate a Point for the truncated ref")
-    assert any("pruned" in w for w in warnings3), warnings3
+    assert out3["operators"] == [big["operators"][0]], (
+        "a present >1000-char entity name shields — the mint refuses to mint "
+        "the truncated ref, so VET must leave the drop to the mint")
+    assert not any("pruned" in w for w in warnings3), warnings3
 
     # The truncation has to be the MINT's (truncate, then normalise). A name
     # whose 1000th character falls inside a whitespace run normalises to
-    # something shorter, so it shields under a normalise-then-truncate test
-    # while the mint keys it at the shorter length and fabricates.
+    # something shorter, so it must shield through BOTH key forms — the full
+    # normalised name and its ``_MAX_CONTENT`` prefix.
     spaced = "a" * 900 + " " * 200 + "b" * 50
     assert len(spaced) > vg._MAX_CONTENT
     assert len(vg._norm(spaced)) <= vg._MAX_CONTENT < len(spaced), (
@@ -773,9 +802,359 @@ def test_present_entity_name_does_not_get_its_operator_pruned():
                     if t[0] == "entities" and t[1] == 0)
     out4, warnings4 = vg.apply_vet(spaced_el,
                                    {first_sp: {"outcome": vg.DISCARD}})
-    assert out4["operators"] == [], (
-        "the mint truncates before normalising — this name is not shielded")
-    assert any("pruned" in w for w in warnings4), warnings4
+    assert out4["operators"] == [spaced_el["operators"][0]], (
+        "the mint truncates before normalising — the shield must key the same "
+        "way, not prune a present entity's endpoint")
+    assert not any("pruned" in w for w in warnings4), warnings4
+
+    # ...and the COLLAPSED spelling of that same name — the ref a model writes
+    # when it normalises the name itself — must shield too. This is the exact
+    # case #5069's code review caught: keying the entity set on the truncated
+    # prefix ALONE left this spelling open, and the mint fabricated a Point.
+    collapsed_el = {
+        "entities": [{"name": spaced, "kind": "core:tool"},
+                     {"name": spaced, "kind": "core:concept"}],
+        "events": [],
+        "points": [{"content": "K", "pointKind": "statement"}],
+        "operators": [{"src": vg._norm(spaced), "dst": "K",
+                       "op_type": "IMPL"}]}
+    assert vg._norm(spaced) != spaced, "fixture must be a re-spelling"
+    first_col = next(vg._item_id(*t) for t in vg._iter_items(collapsed_el)
+                     if t[0] == "entities" and t[1] == 0)
+    out5, warnings5 = vg.apply_vet(collapsed_el,
+                                   {first_col: {"outcome": vg.DISCARD}})
+    assert out5["operators"] == [collapsed_el["operators"][0]], (
+        "the collapsed spelling names the same present entity — do not prune")
+    assert not any("pruned" in w for w in warnings5), warnings5
+
+
+def test_truncated_spelling_of_a_discarded_entity_is_pruned():
+    """#5069 code-review (P1): with a >1000-char entity DISCARDED, an operator
+    endpoint written as a TRUNCATED spelling of its name is not the full
+    normalised name the pool used to carry, so it escaped ``gone`` — and the
+    mint cannot see a discarded entity (it is in neither the emitted set nor
+    the S3 index), so it fabricated a claim Point out of the participant name.
+    The pool entry must carry every form the mint keys a SPELLING under — the
+    ``collapsed_heavy`` fixture is load-bearing: its two key forms DIFFER, so a
+    truncate-the-raw-only pool passes the whitespace-free name and fails here.
+    """
+    from tortoise import extractor_v2 as v2
+    long = "A" * 1100
+    collapsed_heavy = "a" * 500 + " " * 900 + "b" * 600
+    assert len(v2._norm(collapsed_heavy)) > v2._MAX_CONTENT
+    cases = [(long, long[:v2._MAX_CONTENT]),
+             (long, long),
+             (collapsed_heavy, v2._norm(collapsed_heavy)[:v2._MAX_CONTENT]),
+             (collapsed_heavy, v2._norm(collapsed_heavy))]
+    for name, src in cases:
+        el = {"entities": [{"name": name, "kind": "core:tool"}],
+              "events": [],
+              "points": [{"content": "P1src", "pointKind": "statement"}],
+              "operators": [{"src": src, "dst": "P1src",
+                             "op_type": "IMPL"}]}
+        first = vg._item_id("entities", 0, el["entities"][0])
+        out, warnings = vg.apply_vet(el, {first: {"outcome": vg.DISCARD}})
+        assert out["operators"] == [], (name[:8], len(src))
+        assert any("pruned" in w for w in warnings), warnings
+        payload, _res = _payload_of(out)
+        assert [p["content"] for p in payload["points"]] == ["P1src"], (
+            "the discarded participant name was re-materialised as a Point")
+        assert payload["operators"] == []
+
+
+def test_cross_pass_discarded_entity_name_is_still_pruned():
+    """#5069 code-review (P1): ``removal_pool`` stores a removed entity under its
+    FULL normalised name, while the prune matches ``_norm_variants`` keys. A
+    >1000-char entity removed in pass 1 and re-named by an S4-added operator on
+    the union pass therefore escaped ``gone`` — and the mint cannot see a
+    discarded entity, so it fabricated a Point from the participant name. The
+    ``collapsed_heavy`` raw-prefix case is load-bearing: expanding the pool's
+    already-normalised KEY (instead of the stored item's raw name) loses the
+    raw arm and leaves exactly that ref unpruned on this leg alone.
+    """
+    from tortoise import extractor_v2 as v2
+    long = "A" * 1100
+    collapsed_heavy = "a" * 500 + " " * 900 + "b" * 600
+    for name, src in ((long, long),
+                      (long, long[:v2._MAX_CONTENT]),
+                      (collapsed_heavy,
+                       v2._norm(collapsed_heavy)[:v2._MAX_CONTENT]),
+                      (collapsed_heavy, collapsed_heavy[:v2._MAX_CONTENT])):
+        el = {"entities": [{"name": name, "kind": "core:tool"}],
+              "events": [],
+              "points": [{"content": "P1src", "pointKind": "statement"}],
+              "operators": []}
+        first = vg._item_id("entities", 0, el["entities"][0])
+        pass1, _w1 = vg.apply_vet(el, {first: {"outcome": vg.DISCARD}})
+        pool = vg.removal_pool(el, pass1)
+        assert pool["removed_entities"], "fixture must remove the entity"
+        union = {**pass1,
+                 "operators": [{"src": src, "dst": "P1src",
+                                "op_type": "IMPL"}]}
+        out, warnings = vg.apply_vet(union, {}, prior=pool)
+        assert out["operators"] == [], (name[:6], len(src))
+        assert any("pruned" in w for w in warnings), warnings
+        payload, _res = _payload_of(out)
+        assert [p["content"] for p in payload["points"]] == ["P1src"], (
+            "the cross-pass participant name was re-materialised as a Point")
+        assert payload["operators"] == []
+
+
+def test_respelled_discarded_entity_matched_only_by_the_closure_arm_is_pruned():
+    """#5069 re-review (P1): the operator-endpoint surface must cover the mint's
+    ENTITY-GUARD ref keys, not only its resolution keys. ``gone`` unions CONTENT
+    keys (2-arm) with ENTITY-name keys (3-arm); keying the endpoint side on the
+    2-arm content set drops the entity guard's collapsed-closure
+    ``M(_norm(x))``, so a ref naming a DISCARDED entity through that arm ALONE
+    escapes the prune — and a discarded entity is in neither
+    ``emitted_entity_names`` nor the S3 index, so the prune is the only control
+    and the mint mints a claim Point from the participant name. Driven on BOTH
+    the same-pass and the cross-pass leg.
+    """
+    from tortoise import extractor_v2 as v2
+    name = "a" * 500 + " " * 900 + "b" * 600         # raw 2000, collapsed 1101
+    ref = "a" * 500 + " " * 50 + "b" * 500 + "tail"  # raw 1054
+    closure = v2._norm(name)[:v2._MAX_CONTENT]
+    # the ref is a spelling of the name only through its OWN closure arm ...
+    assert v2._norm(v2._norm(ref)[:v2._MAX_CONTENT]) == closure
+    # ... which the entity name's closure arm carries, but neither of the ref's
+    # RESOLUTION arms does — so a 2-arm endpoint set misses it entirely.
+    assert closure in vg._norm_variants(name)
+    assert v2._norm(ref) not in vg._norm_variants(name)
+    assert v2._norm(ref[:v2._MAX_CONTENT]) not in vg._norm_variants(name)
+    assert vg._operator_endpoint_text(
+        {"src": ref, "dst": "K", "op_type": "IMPL"}) & vg._norm_variants(name), (
+        "the endpoint set must cover the mint's entity-guard keys")
+    for cross_pass in (False, True):
+        el = {"entities": [{"name": name, "kind": "core:tool"}],
+              "events": [],
+              "points": [{"content": "K", "pointKind": "statement"}],
+              "operators": ([] if cross_pass else
+                            [{"src": ref, "dst": "K", "op_type": "IMPL"}])}
+        first = vg._item_id("entities", 0, el["entities"][0])
+        pass1, _w1 = vg.apply_vet(el, {first: {"outcome": vg.DISCARD}})
+        if cross_pass:
+            pool = vg.removal_pool(el, pass1)
+            union = {**pass1,
+                     "operators": [{"src": ref, "dst": "K",
+                                    "op_type": "IMPL"}]}
+            out, warnings = vg.apply_vet(union, {}, prior=pool)
+        else:
+            out, warnings = vg.apply_vet(el, {first: {"outcome": vg.DISCARD}})
+        assert out["operators"] == [], (cross_pass, warnings)
+        assert any("pruned" in w for w in warnings), (cross_pass, warnings)
+        payload, _res = _payload_of(out)
+        assert [p["content"] for p in payload["points"]] == ["K"], (
+            cross_pass,
+            "the discarded participant name was re-materialised as a Point")
+        assert payload["operators"] == []
+
+
+def test_discarded_point_closure_arm_does_not_enter_gone():
+    """#5069 re-review (P2): the REMOVED-content surface is keyed on the mint's
+    RESOLUTION keys only. A discarded point's entity-closure arm is not a key the
+    mint resolves it on, so it must not enter ``gone`` (a reversion here re-adds
+    the arm, over-pruning legitimate edges with a false "whose endpoint was
+    discarded" warning). Pins the split at the `_item_text_variants` call site,
+    which `_content_texts`'s survivor test does not constrain.
+    """
+    from tortoise import extractor_v2 as v2
+    content = "a" * 500 + " " * 900 + "b" * 600
+    variants = vg._item_text_variants(
+        "points", {"content": content, "pointKind": "statement"})
+    assert v2._norm(content) in variants          # the untruncated alias
+    assert v2._norm(content[:v2._MAX_CONTENT]) in variants   # the mint key
+    assert v2._norm(v2._norm(content)[:v2._MAX_CONTENT]) not in variants, (
+        "the entity-closure arm must not reach the content surface")
+
+
+def test_content_only_closure_collision_does_not_over_prune():
+    """#5069 re-review (P1b): an endpoint's entity-closure arm must be matched
+    only against REMOVED-ENTITY keys, never against removed CONTENT keys. The
+    merged-set form pruned this operator because the ref's closure arm happened
+    to coincide with a DISCARDED POINT's content — but the mint's resolution key
+    for the ref is distinct, so it would have minted the ref as its own new
+    endpoint; the operator was dropped with a false "whose endpoint was
+    discarded" warning (edge loss). The provenance split keeps it.
+    """
+    from tortoise import extractor_v2 as v2
+    content = "a" * 500 + " " + "b" * 499            # 1000 chars, discarded
+    ref = "a" * 500 + " " * 50 + "b" * 500 + "tail"  # raw 1054
+    assert v2._norm(v2._norm(ref)[:v2._MAX_CONTENT]) == v2._norm(content)
+    assert v2._norm(ref[:v2._MAX_CONTENT]) != v2._norm(content)
+    el = {"entities": [],
+          "events": [],
+          "points": [{"content": content, "pointKind": "statement"},
+                     {"content": "K", "pointKind": "statement"}],
+          "operators": [{"src": ref, "dst": "K", "op_type": "IMPL"}]}
+    first = vg._item_id("points", 0, el["points"][0])
+    out, warnings = vg.apply_vet(el, {first: {"outcome": vg.DISCARD}})
+    assert out["operators"] == el["operators"], (
+        "the ref resolves as its own endpoint, not as the discarded content")
+    assert not any("pruned" in w for w in warnings), warnings
+    # Close the loop the docstring claims: the survivor really is the minted
+    # ref, and the discarded content was NOT re-materialised.
+    assert [p["content"] for p in out["points"]] == ["K"]   # discard fired
+    payload, _res = _payload_of(out)
+    assert len(payload["operators"]) == 1
+    new_pts = [p["content"] for p in payload["points"]
+               if p["content"] != "K"]
+    assert [v2._norm(p[:v2._MAX_CONTENT]) for p in new_pts] == \
+        [v2._norm(ref[:v2._MAX_CONTENT])], (
+            "the surviving endpoint must be the ref's OWN key")
+    assert not any(v2._norm(p) == v2._norm(content) for p in new_pts), (
+        "the discarded content must not be re-materialised")
+
+
+def test_cross_pass_removed_entity_shielded_by_a_surviving_content():
+    """#5069 re-review (P2): the ENTITY half of the prune subtracts the SURVIVOR
+    surface too. A cross-pass removed entity whose name coincides with a
+    SURVIVING point's content must not prune an operator the mint resolves to
+    that survivor — the only reachable collision where the entity half's
+    ``surviving_texts`` shield is load-bearing.
+    """
+    el = {"entities": [{"name": "foo", "kind": "core:tool"}], "events": [],
+          "points": [{"content": "K", "pointKind": "statement"}],
+          "operators": []}
+    first = vg._item_id("entities", 0, el["entities"][0])
+    pass1, _w1 = vg.apply_vet(el, {first: {"outcome": vg.DISCARD}})
+    pool = vg.removal_pool(el, pass1)
+    assert pool["removed_entities"], "fixture must remove the entity"
+    union = {**pass1,
+             "points": [*pass1["points"],
+                        {"content": "foo", "pointKind": "statement"}],
+             "operators": [{"src": "foo", "dst": "K", "op_type": "IMPL"}]}
+    out, warnings = vg.apply_vet(union, {}, prior=pool)
+    assert len(out["operators"]) == 1, (
+        "a surviving point resolves 'foo' — the entity removal must not prune "
+        "its operator")
+    assert not any("pruned" in w for w in warnings), warnings
+
+
+def test_present_entity_name_shields_the_content_half_of_the_prune():
+    """#5069 re-review (P2): the CONTENT half of the prune subtracts the
+    PRESENT-ENTITY shield too. With entity ``X`` present and a point whose
+    content is ``X`` DISCARDed, an operator naming ``X`` must not be pruned with
+    a false "whose endpoint was discarded" warning — the entity-named endpoint
+    is dropped by the mint's own guard. Sibling of
+    ``test_present_entity_name_does_not_get_its_operator_pruned`` for the content
+    half.
+    """
+    el = {"entities": [{"name": "X", "kind": "core:tool"}],
+          "events": [],
+          "points": [{"content": "X", "pointKind": "statement"}],
+          "operators": [{"src": "X", "dst": "K", "op_type": "IMPL"}]}
+    first = vg._item_id("points", 0, el["points"][0])
+    out, warnings = vg.apply_vet(el, {first: {"outcome": vg.DISCARD}})
+    assert len(out["operators"]) == 1, (
+        "the entity is present — the mint drops the entity-named endpoint")
+    assert not any("pruned" in w for w in warnings), warnings
+
+
+def test_respelled_discarded_entity_in_a_mitigates_target_is_pruned():
+    """#5069 re-review (P2): the entity closure arm must be covered on the
+    MITIGATES ``target`` endpoint too, not only ``src``/``dst`` — reverting that
+    one read re-opens the same fabrication through the target leg.
+    """
+    from tortoise import extractor_v2 as v2
+    name = "a" * 500 + " " * 900 + "b" * 600
+    ref = "a" * 500 + " " * 50 + "b" * 500 + "tail"
+    assert v2._norm(v2._norm(ref)[:v2._MAX_CONTENT]) == \
+        v2._norm(name)[:v2._MAX_CONTENT]
+    el = {"entities": [{"name": name, "kind": "core:tool"}],
+          "events": [],
+          "points": [{"content": "K", "pointKind": "statement"},
+                     {"content": "K2", "pointKind": "statement"}],
+          "operators": [{"src": "K", "dst": "K2", "op_type": "MITIGATES",
+                         "target": {"src": ref, "dst": "K2"}}]}
+    first = vg._item_id("entities", 0, el["entities"][0])
+    out, warnings = vg.apply_vet(el, {first: {"outcome": vg.DISCARD}})
+    assert out["operators"] == [], warnings
+    assert any("pruned" in w for w in warnings), warnings
+    payload, _res = _payload_of(out)
+    assert [p["content"] for p in payload["points"]] == ["K", "K2"], (
+        "the discarded participant name was re-materialised via the target")
+
+
+def test_discarded_over_long_point_content_is_pruned_on_both_legs():
+    """#5069 code-review (P1): ``_resolution_variants`` must carry the
+    UNTRUNCATED ``_norm(raw)`` arm as well as the truncated key — the mint
+    registers that spelling as a resolution alias (``_full`` in
+    ``_mint_endpoint``), so a discarded >cap point whose full key is the only
+    spelling the operator names must still be pruned. Dropping the arm lets the
+    operator survive and the mint re-materialise the discarded content as a
+    claim Point. Driven on BOTH legs with an event that shares the point's
+    truncated key (the collision that made the missing arm reachable).
+
+    Note: the fixture's closure arm collapses onto the truncated key (the
+    content is whitespace-free), so this test pins arm 1, NOT the entity
+    closure arm — that arm must not exist on this surface at all (see
+    ``test_surviving_long_point_does_not_shield_a_discarded_prefix_point``).
+    """
+    long_point = "a" * 1000 + "Y"
+    colliding_event = "a" * 1000 + "X"
+    for cross_pass in (False, True):
+        el = {"entities": [],
+              "events": [{"content": colliding_event,
+                          "eventKind": "core:occurrence"}],
+              "points": [{"content": long_point, "pointKind": "statement"},
+                         {"content": "D", "pointKind": "statement"}],
+              "operators": [{"src": long_point, "dst": "D",
+                              "op_type": "IMPL"}]}
+        first = vg._item_id("points", 0, el["points"][0])
+        if cross_pass:
+            pass1, _ = vg.apply_vet(el, {first: {"outcome": vg.DISCARD}})
+            pool = vg.removal_pool(el, pass1)
+            union = {**pass1,
+                     "operators": [{"src": long_point, "dst": "D",
+                                     "op_type": "IMPL"}]}
+            out, warnings = vg.apply_vet(union, {}, prior=pool)
+        else:
+            out, warnings = vg.apply_vet(
+                el, {first: {"outcome": vg.DISCARD}})
+        assert out["operators"] == [], (cross_pass, warnings)
+        assert any("pruned" in w for w in warnings), (cross_pass, warnings)
+        payload, _res = _payload_of(out)
+        assert [p["content"] for p in payload["points"]] == ["D"], (
+            cross_pass, "the discarded point's content was re-materialised")
+        assert payload["operators"] == []
+
+
+def test_surviving_long_point_does_not_shield_a_discarded_prefix_point():
+    """#5069 review (P1): the ENTITY closure arm of ``_norm_variants`` must NOT
+    leak onto the point/event SURVIVOR surface. A regular point's resolution
+    key is ``_norm(content[:_MAX_CONTENT])`` only — it never registers the
+    closure arm (``_full`` belongs to a MINTED endpoint). While
+    ``surviving_texts`` was built from ``_norm_variants``, a surviving >cap
+    point whose collapsed form truncates to exactly a DISCARDED point's content
+    shielded that content: the operator escaped ``gone`` and the mint
+    re-materialised the discarded text as a claim Point — the ``#2552``
+    resurrection the prune exists to prevent. Verified RED before the
+    entity/content key split (the operator survived and a 1000-char Point was
+    fabricated); GREEN once ``_content_texts``/``_item_text_variants`` key with
+    ``_resolution_variants``.
+    """
+    from tortoise import extractor_v2 as v2
+    survivor = "a" * 500 + " " * 900 + "b" * 600   # raw 2000, collapsed 1101
+    closure = v2._norm(survivor)[:v2._MAX_CONTENT]
+    assert len(v2._norm(survivor)) > v2._MAX_CONTENT
+    assert closure not in vg._content_texts(
+        {"entities": [], "events": [],
+         "points": [{"content": survivor, "pointKind": "statement"}]}), (
+        "a surviving point must not shield the closure arm of its own content")
+    el = {"entities": [],
+          "events": [],
+          "points": [{"content": survivor, "pointKind": "statement"},
+                     {"content": closure, "pointKind": "statement"}],
+          "operators": [{"src": closure, "dst": "K", "op_type": "IMPL"}]}
+    first = vg._item_id("points", 1, el["points"][1])
+    out, warnings = vg.apply_vet(el, {first: {"outcome": vg.DISCARD}})
+    assert out["operators"] == [], warnings
+    assert any("pruned" in w for w in warnings), warnings
+    payload, _res = _payload_of(out)
+    assert not any(p["content"] == closure for p in payload["points"]), (
+        "the discarded closure-arm content was re-materialised as a Point")
+    assert len(payload["points"]) == 1
 
 
 def test_a_genuinely_removed_item_still_fills_the_pool():

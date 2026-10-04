@@ -159,9 +159,9 @@ def test_parity_gate_fails_closed_on_a_missing_or_unreadable_copy(tmp_path):
 
 def test_4365_served_document_sends_chatgpt_to_a_path_that_exists():
     """#4365/#2698: the served document's §2 note must not send a ChatGPT user to
-    the dashboard's "ChatGPT tab" — #2698 removed it from the chooser
-    (HARNESS_FAMILIES has no chatgpt entry). Reverting the note to the retired
-    tab tripped no test at all (mutation-verified, #4365 review round 4).
+    the dashboard's "ChatGPT tab" — #2698 deleted that tab, and #2912's
+    four-family HARNESS_FAMILIES has no chatgpt entry. Reverting the note to the
+    retired tab tripped no test at all (mutation-verified, #4365 review round 4).
 
     Canonical only: the mirror is pinned byte-identical by
     `test_m8_deploy_mirror_matches_canonical`, so this covers both copies."""
@@ -172,6 +172,79 @@ def test_4365_served_document_sends_chatgpt_to_a_path_that_exists():
         "the served document must not name the retired dashboard ChatGPT tab")
     assert "no ChatGPT surface in the dashboard chooser" in skill, (
         "the served document must state that there is no ChatGPT chooser surface")
+
+
+def test_5153_served_document_pins_the_canonical_mcp_key_variable():
+    """#5153: the served document's Pi step must state that `TORTOISE_API_KEY`
+    is the only name any code path reads, and that a differently-named MCP
+    credential — a #3615 policy difference, not a defect — must therefore be
+    aliased. Without that, a profile following the doc exports only its own
+    name, the committed `.mcp.json` expands `${TORTOISE_API_KEY}` to an empty
+    Bearer, and the server answers 401 while the CLI/SDK/static-auth paths go
+    unauthenticated: the config-name mismatch this issue reports.
+
+    The variable name is pinned against the CODE, not against itself — every
+    `Bearer ${VAR}` snippet the document carries must name a variable that
+    `tortoise/mcp_client.py` (the MCP HTTP client) actually reads, so a snippet
+    repointed at an unread name — exactly the issue's proposed "fix option 1"
+    — fails here.
+
+    Canonical only: the mirror is pinned byte-identical by
+    `test_m8_deploy_mirror_matches_canonical`, so this covers both copies.
+
+    #5153 P1 review: the paragraph must NOT re-assert the credential-
+    independent capture reassurance. That reassurance is FALSE on the Pi host
+    this very step instructs: `agent-infra/extensions/reflect-hook.ts`
+    resolves the credential itself and starts hosted capture on its mere
+    PRESENCE (`env.TORTOISE_API_KEY || file.apiKey`), reading no
+    `TORTOISE_CAPTURE`. The claim is true only of the in-repo consent-gated
+    paths (`tortoise/capture_consent.py`), so the document must name the
+    per-surface split and the open dependency (`agent-infra#1117`) instead of
+    generalising."""
+    skill = LIVE_SKILL.read_text(encoding="utf-8")
+    assert "is the canonical name, and the **only** one any code path" in skill, (
+        "the Pi step must state that TORTOISE_API_KEY is the only name read")
+    assert 'export TORTOISE_API_KEY="$TORTOISE_MCP_API_KEY"' in skill, (
+        "the Pi step must show the alias a separately-named MCP credential needs")
+
+    referenced = set(
+        re.findall(r'"Authorization":\s*"Bearer \$\{([A-Z0-9_]+)\}', skill))
+    assert referenced, (
+        "the served document must carry an env-indirect Bearer snippet")
+    client = (REPO_ROOT / "tortoise" / "mcp_client.py").read_text(encoding="utf-8")
+    unread = sorted(v for v in referenced
+                    if f'os.environ.get("{v}"' not in client)
+    assert not unread, (
+        "the served Bearer snippet references a variable the MCP HTTP client "
+        f"never reads ({', '.join('$' + v for v in unread)}) — the 401 in #5153")
+
+    # ── #5153 P1: no credential-independent capture reassurance ────────────
+    # The false claim, in the two forms the doc carried it. "The alias is safe
+    # since #3615" is the added sentence; "never on the credential" is the
+    # generalisation that made it read as authoritative. Both are false on a
+    # Pi host and must not come back.
+    for stale in ("The alias is safe since #3615", "never on the credential",
+                  "no longer required for that purpose"):
+        assert stale not in skill, (
+            "the false credential-independent capture reassurance returned "
+            f"({stale!r}): the Pi reflect-hook captures on credential presence, "
+            "not on TORTOISE_CAPTURE — agent-infra#1117")
+    # The replacement must be per-surface and name the truth on each side:
+    # the in-repo consent gate, the ungated Pi reflect-hook, and the open
+    # dependency that makes the Pi side a known gap rather than a settled fact.
+    for required in ("tortoise/capture_consent.py", "reflect-hook",
+                     "agent-infra#1117"):
+        assert required in skill, (
+            "the capture-gating claim must be per-surface and name "
+            f"{required!r} (#5153 P1)")
+
+    # The same reassurance was mirrored in .env.example; pin it there too.
+    env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+    for stale in ("The alias is safe since #3615", "never on the credential"):
+        assert stale not in env_example, (
+            f".env.example repeats the false reassurance ({stale!r})")
+    assert "agent-infra#1117" in env_example, (
+        ".env.example must name the open Pi reflect-hook dependency (#1117)")
 
 
 def _installer_skills() -> list[str]:
@@ -274,11 +347,15 @@ def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
     """
     harnesses = (DASHBOARD_SRC / "harnesses.js").read_text(encoding="utf-8")
 
-    m = re.search(
+    # Exactly ONE definition: a second export would make a first-match search
+    # read whichever came first, so this file and test_harness_mcp_config.py
+    # would disagree about the URL while both looked green (#4836).
+    m = re.findall(
         r"^export const ONBOARDING_INSTRUCTIONS_URL =\s*\n?\s*'([^']+)'",
         harnesses, re.M)
-    assert m, "ONBOARDING_INSTRUCTIONS_URL must be an exported constant"
-    url = m.group(1)
+    assert len(m) == 1, (
+        f"ONBOARDING_INSTRUCTIONS_URL must be defined exactly once, found {m}")
+    url = m[0]
     assert url == (
         "https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md"
     ), "the instruction URL must be the served instruction document"

@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from tests import _live_utils
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tools.longmem_eval import run_protocol as rp  # noqa: E402, I001, RUF100
@@ -390,7 +392,7 @@ def test_cmd_run_requires_real_backend_env(tmp_path, monkeypatch):
             step="5", owner_approve=None, dry_run=True, extra=[],
             expected_direction=None))
     # with the env set, dry-run prints the command (no execution)
-    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
+    monkeypatch.setenv("TORTOISE_DB_URI", _live_utils.docker_base_uri())
     rp.cmd_run(state, argparse_namespace(
         step="3", owner_approve=None, dry_run=True, extra=[],
         expected_direction=None))
@@ -403,7 +405,7 @@ def test_cmd_run_records_resume_quality_scan(tmp_path, monkeypatch, capsys):
     recorded in the run state (population-purity note); a clean checkpoint
     records a clean scan. The scan mirrors the runner's own gate signal
     (run.resume_gate_reject_reason — single source of truth)."""
-    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
+    monkeypatch.setenv("TORTOISE_DB_URI", _live_utils.docker_base_uri())
     state = _fresh_state(tmp_path)
     for n in range(1, 8):
         state.pass_gate(n, f"step {n} done")
@@ -767,7 +769,7 @@ def test_cmd_run_scan_uses_last_checkpoint_flag(tmp_path, monkeypatch):
     protocol's own --checkpoint after them, and the runner's argparse is
     last-wins — so the scan and the recorded state describe the file the
     runner actually uses."""
-    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
+    monkeypatch.setenv("TORTOISE_DB_URI", _live_utils.docker_base_uri())
     state = _fresh_state(tmp_path)
     for n in range(1, 8):
         state.pass_gate(n, f"step {n} done")
@@ -814,7 +816,7 @@ def test_cmd_run_scan_uses_last_checkpoint_flag(tmp_path, monkeypatch):
 def test_cmd_run_step7_requires_expected_direction(tmp_path, monkeypatch, capsys):
     """Step 7 via `run` needs the pre-stated expected-delta direction AND
     the recorded step-3/5 reports before building the confirmation set."""
-    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
+    monkeypatch.setenv("TORTOISE_DB_URI", _live_utils.docker_base_uri())
     state = _fresh_state(tmp_path)
     for n in range(1, 7):
         state.pass_gate(n, f"step {n} done")
