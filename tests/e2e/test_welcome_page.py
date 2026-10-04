@@ -78,11 +78,14 @@ def _unobserved_outcome(*, transport_failures: list[str], post_issued: bool) -> 
     - the form never submitted a request at all — the other PRODUCT condition,
       and the one the pre-#4940 message asserted for all three.
 
-    `net::ERR_ABORTED` is deliberately NOT a product failure: the signup POST is a
-    plain `fetch` carrying no `AbortController`/`signal` (verified: `signup.html`),
-    so nothing in the SIGNUP PATH can abort it — an abort is a navigation or
-    context teardown superseding the in-flight fetch, i.e. a never-answered
-    request, which #4940's taxonomy buckets as UNAVAILABLE.
+    `net::ERR_ABORTED` is deliberately NOT a product failure. What is VERIFIED: no
+    code passes a `signal` to the signup `fetch` and nothing calls `.abort()` on it
+    (`signup.html`), so the signup path itself cannot cancel it. A page NAVIGATION
+    still can — the page's own session probe redirects before responding — which is
+    exactly why an abort is bucketed as never-answered/UNAVAILABLE rather than as a
+    product failure. (An earlier revision of this note claimed "nothing in the
+    signup path can abort it", which the repo falsifies at `signup.html`'s
+    pre-response `window.location.replace(...)`.)
 
     The verdict is RETURNED rather than acted on so the split itself is pinnable:
     a message-only pin cannot see the buckets collapse, and collapsing them is how
@@ -97,7 +100,7 @@ def _unobserved_outcome(*, transport_failures: list[str], post_issued: bool) -> 
     if transport_failures:
         return (
             "unavailable",
-            "no POST to the BFF /auth/signup got no response (observed: "
+            "the POST to the BFF /auth/signup got no response (observed: "
             + "; ".join(transport_failures)
             + "); the smoke does not attribute a cause",
         )
@@ -119,9 +122,9 @@ def _post_issued_flag() -> dict:
     """The `post_issued` register for the smoke, initially False.
 
     `post_issued` is the ONLY discriminator between "the form never submitted"
-    (PRODUCT) and "issued but never answered" (UNAVAILABLE), so its initial value
-    is pinned here rather than trusted: hardcoding it True turns a product
-    regression into a SKIP and the suite exits GREEN (#4940 review round 6).
+    (PRODUCT) and "issued but never answered" (UNAVAILABLE), so its initial value is
+    produced here rather than written as a literal in the smoke's body: hardcoding
+    it True turns a product regression into a SKIP.
     """
     return {"value": False}
 
@@ -515,11 +518,11 @@ def test_unobserved_outcome_is_disposed_correctly() -> None:
 
 
 def test_post_issued_flag_starts_false() -> None:
-    """#4940: the register must start False, pinned as behaviour.
+    """#4940: the register starts False and is MUTABLE.
 
-    Hardcoding it True leaves every other pin green while turning a
-    "form never submitted" PRODUCT regression into a SKIP — a GREEN exit with the
-    product fault unreported (#4940 review round 6).
+    The False value is caught by the listener pin too; what is unique here is that
+    it is a dict the `request` listener can set in place — an immutable object per
+    call would silently break the signal while every value assertion still passed.
     """
     flag = _post_issued_flag()
     assert flag == {"value": False}
