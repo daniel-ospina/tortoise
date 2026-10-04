@@ -27,6 +27,9 @@ statements would miss.
 from __future__ import annotations
 
 import ast
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -163,4 +166,108 @@ def test_heavy_imports_live_in_the_one_leaf_module():
         f"heavy imports must live only in {_LEAF_MODULE} (the one sanctioned home "
         "for the shared lock — a leaf module, so the lock cannot become part of an "
         "import cycle). Call a helper from there instead:\n" + _report(off_home)
+    )
+
+
+def _probe_collection_warmup_env(tmp_path, preset):
+    """Return ``(observed, proc)`` for a child ``pytest --collect-only`` run.
+
+    ``preset`` is the value ``TORTOISE_EMBEDDER_WARMUP`` carries in the child's
+    environment BEFORE it starts; ``None`` means the variable is absent. The
+    hook records what COLLECTION saw into a file (not stderr — pytest captures
+    that), so the parent asserts on the value the test modules were imported
+    under, rather than on the value once a fixture has run.
+    """
+    hook = tmp_path / "_warmup_env_probe.py"
+    observed_file = tmp_path / (
+        "warmup_env_preset.txt" if preset is not None else "warmup_env.txt"
+    )
+    hook.write_text(
+        "import os\n"
+        "def pytest_collection_finish(session):\n"
+        "    with open(os.environ['PROBE_OUT'], 'w') as fh:\n"
+        "        fh.write(repr(os.environ.get('TORTOISE_EMBEDDER_WARMUP')))\n",
+        encoding="utf-8",
+    )
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("TORTOISE_EMBEDDER_WARMUP", "PROBE_OUT")
+    }
+    if preset is not None:
+        env["TORTOISE_EMBEDDER_WARMUP"] = preset
+    env["PROBE_OUT"] = str(observed_file)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(tmp_path), env.get("PYTHONPATH", "")]
+    ).strip(os.pathsep)
+    proc = subprocess.run(
+        [
+            sys.executable, "-m", "pytest", "--collect-only", "-q",
+            "-p", "no:cacheprovider", "-p", "_warmup_env_probe",
+            "tests/test_heavy_import_guard.py",
+        ],
+        cwd=_REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    observed = (
+        observed_file.read_text(encoding="utf-8")
+        if observed_file.exists()
+        else "<collection hook did not run>"
+    )
+    return observed, proc
+
+
+def test_collection_disables_the_embedder_warmup_before_any_module_import(tmp_path):
+    """#7015: the opt-out must be in force during COLLECTION, not only per-test.
+
+    The scan above reasons about ``tortoise/`` only, so it cannot see the
+    mirror-class failure that actually reddened ``main``: a *harness* module-level
+    live-DB probe calls ``TortoiseSDK._get_proj()`` at import, which starts the
+    #2952 background embedder load (``import sentence_transformers`` -> ``torch``)
+    while collection is still importing other modules. If a cold
+    ``sklearn``/``scipy`` import is collected at that moment, scipy's array-API
+    dispatch raises the partially-initialized-``torch`` AttributeError and the
+    shard's manifest step fails closed on the single collection error.
+
+    ``tests/conftest.py``'s autouse opt-out is a *test* fixture, so it only helps
+    if the value is ALSO set at conftest import. This proves both halves of that
+    claim with a child pytest that reports what collection observed.
+    """
+    observed, proc = _probe_collection_warmup_env(tmp_path, None)
+    # Non-vacuity: `pytest_collection_finish` also fires when the path argument
+    # matched nothing, so without this a rename/move of this file (or an injected
+    # `--ignore`) would leave the assertions below trivially green while the
+    # guard watched nothing at all.
+    assert proc.returncode == 0, (
+        "the probe child must actually collect tests/test_heavy_import_guard.py; "
+        "a child that collects nothing still fires pytest_collection_finish and "
+        f"would make this guard vacuous.\nrc={proc.returncode}\n"
+        f"stdout tail:\n{proc.stdout[-2000:]}\nstderr tail:\n{proc.stderr[-2000:]}"
+    )
+    assert "test_collection_disables_the_embedder_warmup" in proc.stdout, (
+        "the probe child collected the guard module but not this test — the "
+        f"guard would be watching a different file.\nstdout tail:\n{proc.stdout[-2000:]}"
+    )
+    assert observed == "'0'", (
+        "tests/conftest.py must disable the embedder warm-up at IMPORT time so a "
+        "module-level collection probe cannot start the background torch import "
+        "(#7015). Probed with TORTOISE_EMBEDDER_WARMUP removed from the child "
+        f"environment; collection observed {observed}.\nstderr tail:\n{proc.stderr[-2000:]}"
+    )
+
+    # ...and it must be ASSIGNED at import, not `setdefault`. A pre-set value (a
+    # dev shell, a wrapper) must not be able to re-open the very race the line
+    # closes — exactly as the per-test fixture does not honour one. Without this
+    # second case a `setdefault` regression stays green in CI, because CI never
+    # pre-sets the variable.
+    observed_preset, proc_preset = _probe_collection_warmup_env(tmp_path, "1")
+    assert observed_preset == "'0'", (
+        "the collection-time opt-out must be an ASSIGNMENT, not `setdefault`: with "
+        "TORTOISE_EMBEDDER_WARMUP=1 already in the child environment, collection "
+        f"observed {observed_preset} instead of '0', so a pre-set value can still "
+        f"re-open the collection-time torch race (#7015).\nrc={proc_preset.returncode}\n"
+        f"stderr tail:\n{proc_preset.stderr[-2000:]}"
     )

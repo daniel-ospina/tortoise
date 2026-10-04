@@ -41,6 +41,25 @@ os.environ.setdefault("TORTOISE_HEALTHZ_PORT", "0")
 # install gate needs the env early.)
 os.environ.setdefault("TORTOISE_TEST_MODE", "1")
 
+# #7015: the embedder autouse opt-out below is a *test* fixture, so it is too
+# late for COLLECTION — and collection is where the race bites. Three shard
+# files (test_3815_mitigation_moves_weight, test_ep_directional,
+# test_issue94_annotate_ep_batch) build an SDK and call `_get_proj()` at MODULE
+# level as a live-DB availability probe, so importing the module starts the
+# #2952 background embedder warm-up (`EmbeddingModel.start_warm_up`) before any
+# fixture runs. That thread's cold `import sentence_transformers` -> `torch`
+# then overlaps a cold `sklearn`/`scipy` import in another collected module, and
+# scipy's array-API dispatch raises `AttributeError: partially initialized
+# module 'torch' has no attribute 'Tensor'` (mechanism in
+# ``tortoise/heavy_imports.py``). On 1bb0b1a6c that ONE collection error failed
+# shard (d)'s manifest step closed and reddened the required `python-ci-gate`.
+# The opt-out must be in force BEFORE any test module is imported, so it is set
+# here at conftest import. ASSIGNED, not `setdefault`: a pre-set value (a dev
+# shell, a wrapper) must not be able to re-open the window, exactly as the
+# per-test fixture does not honour one. Tests that need the warm-up ON
+# delenv/patch it (`test_2952_degraded_read`).
+os.environ["TORTOISE_EMBEDDER_WARMUP"] = "0"
+
 # #1642 FIX 6: the session-end sweep loops discover->reap until the backlog
 # is cleared or this wall-clock budget is exhausted, at a raised batch size
 # — one completing suite can clear a multi-hundred orphan backlog (the old
