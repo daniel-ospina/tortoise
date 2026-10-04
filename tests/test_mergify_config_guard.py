@@ -600,6 +600,51 @@ def test_clause_vii_verdict_does_not_depend_on_nested_worktrees(
     assert clause(root, "vii") == 1
 
 
+def test_clause_vii_missing_index_is_not_a_pass(tmp_path: Path) -> None:
+    """The ON-DISK route to a silently-empty read, which nothing pinned.
+
+    `git ls-files --cached` exits **0 with EMPTY stdout** when the index is
+    missing, so the "resolved to NOTHING" guard is the only thing between that
+    and a clause reporting "no union" while a tracked union is active. Removing
+    that guard left ALL 142 tests green, i.e. this fail-open was one line from
+    shipping unnoticed. The test pins the CODE, not the mechanism: the clause
+    must not PASS.
+    """
+    root = make_tree(tmp_path, merge_config(), attrs=UNION_ATTRS)
+    _write(root / "config" / "ci-surfaces.yml", "x: 1\n")
+    _own_git_repo(root)
+    (root / ".git" / "index").unlink()  # `ls-files` now exits 0, EMPTY
+    with pytest.raises(mcg.GuardUnreadable):
+        clause(root, "vii")
+
+
+def test_clause_vii_gitdir_info_attributes_is_not_missed(tmp_path: Path) -> None:
+    """`$GIT_DIR/info/attributes` is part of the sanctioned form and was
+    entirely untested — deleting the whole read left the suite green. A union
+    declared there is a fail-open when missed.
+    """
+    root = make_tree(tmp_path, merge_config())
+    _write(root / ".git" / "info" / "attributes", "config/*.yml merge=union\n")
+    _write(root / "config" / "ci-surfaces.yml", "x: 1\n")
+    assert clause(root, "vii") == 1
+
+
+def test_clause_vii_tracked_but_deleted_attributes_is_a_pass(tmp_path: Path) -> None:
+    """The `is_file()` filter on the tracked set is deliberate, not incidental.
+
+    A tracked-but-deleted `.gitattributes` is not on disk; reading it would
+    raise `GuardUnreadable`, i.e. a false RED on a working tree that merely
+    carries an uncommitted deletion — the "a lane reads a red that is not real"
+    failure class this change exists to fix. Dropping the filter was invisible
+    to the whole suite.
+    """
+    root = make_tree(tmp_path, merge_config(), attrs=UNION_ATTRS)
+    _write(root / "config" / "ci-surfaces.yml", "x: 1\n")
+    _own_git_repo(root)
+    os.remove(root / ".gitattributes")  # still tracked, no longer on disk
+    assert clause(root, "vii") == 0
+
+
 def test_clause_vii_single_fail_propagating_invocation_is_green(tmp_path: Path) -> None:
     root, _ = union_tree(tmp_path, "python3 tools/registry_integrity.py")
     assert clause(root, "vii") == 0
