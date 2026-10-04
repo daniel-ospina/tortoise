@@ -1640,6 +1640,9 @@ def expand_structural_hops(
         start = time.monotonic()
         cypher = (
             "MATCH (seed:Point) WHERE seed.id IN $seeds "
+            # #6976: load-bearing `WITH seed` — without it FalkorDB 6.0.0 drops
+            # the id predicate at the re-binding MATCH below (foreign rows).
+            "WITH seed "
             f"MATCH path = (seed)-[:IMPL|NAND*1..{max_hops}]-(n:Point) "
             "WHERE n.id <> seed.id AND n.is_operator <> true"
             + ("" if excluded_statuses == ()
@@ -2269,6 +2272,7 @@ def get_relationships(graph, point_ids: list[str]) -> dict[str, list[dict]]:
     try:
         cypher = (
             "MATCH (n:Point) WHERE n.id IN $ids "
+            "WITH n "
             "MATCH (n)-[r:IMPL|NAND|hasPart]-(op:Point {is_operator:true}) "
             "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point) "
             "WHERE other.id <> n.id "
@@ -2375,6 +2379,7 @@ def get_relationships_bounded(
         # are not live epistemic structure).
         rows = graph.query(
             "MATCH (n:Point) WHERE n.id IN $ids "
+            "WITH n "
             "MATCH (n)-[r:IMPL|NAND|hasPart]-(op:Point {is_operator:true}) "
             f"WHERE {_exclude_status_clause('op')} "
             "RETURN n.id, type(r) AS et, r.idx AS n_idx, op.id AS op_id, "
@@ -2421,6 +2426,7 @@ def get_relationships_bounded(
         if op_ids:
             rows = graph.query(
                 "MATCH (op:Point {is_operator:true}) WHERE op.id IN $op_ids "
+                "WITH op "
                 "MATCH (op)-[:mitigated_by]->(m:Point) "
                 "RETURN op.id, m.id, m.status, m.createdAt, m.content",
                 params={"op_ids": list(op_ids)},
@@ -2442,6 +2448,7 @@ def get_relationships_bounded(
         if op_ids:
             rows = graph.query(
                 "MATCH (op:Point {is_operator:true}) WHERE op.id IN $op_ids "
+                "WITH op "
                 "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point) "
                 "WHERE (other.is_operator = false OR other.is_operator IS NULL) "
                 "  AND NOT (op)-[:mitigated_by]->(other) "
@@ -2534,6 +2541,7 @@ def get_relationships_bounded(
         if op_ids:
             rows = graph.query(
                 "MATCH (op:Point {is_operator:true}) WHERE op.id IN $op_ids "
+                "WITH op "
                 "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point) "
                 "WHERE (other.is_operator = false OR other.is_operator IS NULL) "
                 "RETURN op.id, type(r2) AS et, count(other)",
@@ -2893,7 +2901,13 @@ def filter_by_relationship(
         label = "Point"
         is_operator_clause = " AND n.is_operator = true" if entity_type == "operator" else ""
         cypher = (
+            # #6976: the id predicate is DROPPED by FalkorDB 6.0.0 when a later
+            # plain MATCH re-binds `n` as a pattern endpoint — the query then
+            # returns OTHER points' rows, a silent filter BYPASS rather than an
+            # empty read (measured: 5 rows, 4 with foreign ids). The `WITH n`
+            # below is LOAD-BEARING: it keeps the predicate bound. Do not remove.
             f"MATCH (n:{label}) WHERE n.{id_field} IN $ids{is_operator_clause} "
+            f"WITH n "
             f"MATCH (n)<-[r1:hasPart|IMPL|NAND]-(op:Point {{is_operator:true, label:$pred}})"
             f"-[r2:hasPart|IMPL|NAND]->(t:{label} {{{id_field}: $tid}}) "
             f"RETURN DISTINCT n.{id_field}"
@@ -2938,7 +2952,11 @@ def filter_by_traversal_predicate(
         label = "Point"
         is_operator_clause = " AND n.is_operator = true" if entity_type == "operator" else ""
         cypher = (
+            # #6976: load-bearing `WITH n` — without it FalkorDB 6.0.0 drops the id
+            # predicate at the re-binding MATCH below and the function returns
+            # FOREIGN rows (measured: 170 rows, 169 foreign).
             f"MATCH (n:{label}) WHERE n.{id_field} IN $ids{is_operator_clause} "
+            f"WITH n "
             f"MATCH (n)<-[r:hasPart|IMPL|NAND]-(op:Point {{is_operator:true, label:$pred}}) "
             f"RETURN DISTINCT n.{id_field}"
         )
