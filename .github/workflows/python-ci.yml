@@ -2035,10 +2035,12 @@ jobs:
           echo "tempdir cleaned"
       - name: Cache HF embedding model (BAAI/bge-small-en-v1.5)
         # #4387: the carve-out job runs test_longmem_runner.py, which exercises
-        # the dense leg — so it provisions the embedder OFFLINE, exactly like
-        # the `test`, `test-slow` and `test-concurrency-falkor` jobs. Without
-        # the cache AND the offline pair on the pytest step, an uncached load
-        # does not fail fast: with the suite-wide egress guard installed it
+        # the dense leg — so it provisions the embedder OFFLINE like the `test`,
+        # `test-slow` and `test-concurrency-falkor` jobs. Its BUDGET is the two
+        # long-running siblings' (`--attempts 5 --backoff 10` under a 10-minute
+        # cap), not `test`'s tighter `--attempts 3 --backoff 5` under 6 minutes.
+        # Without the cache AND the offline pair on the pytest step, an uncached
+        # load does not fail fast: with the suite-wide egress guard installed it
         # RETRIES against huggingface.co rather than resolving DNS, and
         # test_longmem_runner.py re-attempts the load per test — so the shard is
         # killed by the 15m watchdog with 0 failures (rc=124) instead of
@@ -2057,6 +2059,7 @@ jobs:
         # jobs for the same reason as the cache above — the carve-out lane runs
         # the dense leg, so the model must be PRESENT before the offline pytest
         # step, otherwise those assertions skip and the skip-guard reds.
+        # The command and cap are the two long-running siblings' (see above).
         # 10 minutes, matching the two `--attempts 5 --backoff 10` siblings
         # (test-slow, test-concurrency-falkor): five attempts sleep 100s of
         # backoff before the final probe, which does not fit the `test` job's
@@ -2088,8 +2091,9 @@ jobs:
           # provisions — and that gap is why its shards died on the 15m
           # watchdog with 0 failures (rc=124): see this job's cache step above
           # for the mechanism. The request/backoff/test counts observed on the
-          # pre-`pytest_configure` revision are deliberately NOT restated here,
-          # or anywhere else — three copies of a measured figure is what drifts.
+          # pre-`pytest_configure` revision are deliberately NOT restated here or
+          # in the test that guards this step — multiple copies of a measured
+          # figure in the tree is what drifts.
           HF_HUB_OFFLINE: "1"
           TRANSFORMERS_OFFLINE: "1"
         run: |
