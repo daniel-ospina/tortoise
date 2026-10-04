@@ -38,6 +38,17 @@ unattributable); 2 = environment error (measurement impossible); 3 = NOT-CLOSING
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/embedded_evidence.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/embedded_evidence.py`"
+    )
+
 import argparse
 import contextlib
 import hashlib
@@ -46,7 +57,6 @@ import math
 import os
 import re
 import subprocess
-import sys
 import tempfile
 import time
 import uuid
@@ -173,6 +183,25 @@ def load1() -> float:
         return float(os.getloadavg()[0])
     except (OSError, AttributeError):
         return LOAD_UNMEASURED
+
+
+def _validated_ceiling(value: float) -> float:
+    """D14: the ceiling must be a finite number `> 0`; anything else is a usage error.
+
+    argparse already rejects a non-numeric string, but `0`, a negative, `nan` and
+    `inf` all arrive as floats, and they fail in two DIFFERENT directions. `nan` and
+    `inf` fail OPEN: `before > nan` and `before > inf` are False for EVERY sample, so
+    a ceiling that is not a usable threshold refuses nothing — the gate reads as
+    present while supplying no protection. `0` and a negative fail SHUT: they refuse
+    every real run, turning the whole measurement into a refusal dressed as an
+    environment error. The record would also carry `"ceiling": NaN`, which
+    `json.dump` writes as a bare `NaN` token no strict JSON reader accepts.
+    """
+    if not math.isfinite(value) or value <= 0.0:
+        raise UsageError(
+            f"--load-ceiling must be a finite number > 0, not {value!r}"
+        )
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -1023,12 +1052,42 @@ def _run_once(
     run_id: int,
     marker: str,
     timeout: int,
+    ceiling: float,
+    label: str,
 ) -> dict:
     junit = run_root / f"junit-{run_id}.xml"
     cmd = _pytest_cmd(files, junit, marker, timeout)
     env = _child_env(run_root)
     (run_root / "pi3827_capture.py").write_text(_CAPTURE_PLUGIN)
     before = load1()
+    # ── THE CEILING IS PER RUN, NOT PER MEASUREMENT ────────────────────────────
+    # This gate is the SAME `before` sample the run records, so the value gated and
+    # the value reported cannot disagree. It lives here rather than in the caller so
+    # that no call site can forget it and so the pairing baseline is covered too.
+    #
+    # It used to be sampled and checked ONCE, before run 1, by the caller — so runs
+    # 2..N could begin above the ceiling and still be counted in the verdict, and one
+    # did: the #3882 closing record declares `load.ceiling` 60.0 while run 1 ends at
+    # 68.0, run 2 BEGINS at 68.0, and run 2 is the only red. Its per-run
+    # `load.before` was recorded and never asserted.
+    # A sample that could not be read is NOT "below the ceiling". `load1()` returns
+    # the `LOAD_UNMEASURED` sentinel (-1.0) when the host is unreadable, and
+    # `-1.0 > ceiling` is False, so comparing the sentinel would ADMIT the run — the
+    # gate fails open in exactly the case it cannot decide. The verdict does not
+    # rescue that: `load.band` is derived from the run's own `after` sample, so a
+    # `before` that failed to read while `after` succeeded still lands the run in a
+    # real band and the record can close on a run whose admissibility was never
+    # established. D14 calls this ceiling fail-closed, so an unusable sample is a
+    # refusal.
+    if not math.isfinite(before) or before < 0.0:
+        raise RuntimeError(
+            f"load is unmeasurable ({before}) before run {run_id} ({label}): the "
+            f"ceiling {ceiling} cannot be enforced on a sample that could not be read"
+        )
+    if before > ceiling:
+        raise RuntimeError(
+            f"load {before} exceeds ceiling {ceiling} before run {run_id} ({label})"
+        )
     started = time.time()
     timed_out = False
     child_out = ""
@@ -1186,6 +1245,86 @@ def closes_issue(rec: dict) -> tuple[bool, list[str]]:
                rec["red"]["cause"] in rec["selection"]["expected_causes"])
     ok &= conj("red-file-list-differs", rec["red"]["same_file_list"])
     ok &= conj("load-bands-do-not-overlap", rec["load"]["overlap"])
+    # The ceiling is enforced as a PRODUCER gate in `_run_once`, but this function
+    # is also the RE-EVALUATION surface for a persisted record, and `load.ceiling`
+    # was persisted for exactly this comparison. Without the conjunct below the
+    # field is WRITE-ONLY: the contravention is RECORDED but never NAMED in the
+    # reason list this function returns. Measured on the live #3882 record — run 2
+    # begins at 67.998 against `ceiling` 60.0 and the reason list omitted it. That
+    # record does NOT close either way (`closes_issue` returns
+    # ["non-green-bucket","no-rate-change"] at origin/main and
+    # ["non-green-bucket","load-above-ceiling","no-rate-change"] with the
+    # conjunct), so this conjunct is NOT what refuses it — the change is that the
+    # contravention is now NAMED rather than silently dropped, and no persisted
+    # record's verdict flips. The
+    # issue's own defect was "the contravention is recorded and never asserted";
+    # asserting it only in the producer leaves the consumer doing exactly that.
+    #
+    # The attested baseline is a RUN too (same reason as `pin-not-airtight`), so
+    # it is in the population. An unusable sample is a refusal, not a licence:
+    # the PRODUCER refuses a `before` that is non-finite or negative (the
+    # `LOAD_UNMEASURED` sentinel is `-1.0`, and `-1.0 > ceiling` is `False`, so
+    # the bare comparison fails OPEN). A consumer that compared naively would
+    # re-create that exact fail-open one layer down, on the surface whose whole
+    # job is to re-read a record — so the same admissibility rule is applied
+    # here, at BOTH bounds.
+    #
+    # Every read OF THESE FIELDS goes through `_load_number`, because a record
+    # re-read from disk is untrusted JSON: a missing key, a null, a string or a
+    # 401-digit int literal all reach here, and a traceback is not a fail-closed
+    # refusal — the function must return a reason.
+    #
+    # SCOPE, stated so this comment does not overclaim: this makes the LOAD reads
+    # total, not the whole function. The other conjuncts above still subscript
+    # `rec` directly (e.g. `rec["load"]["overlap"]`, `rec["red"]`, `rec["runs"]`),
+    # so a structurally malformed record still raises there. That is PRE-EXISTING
+    # and deliberately unchanged here: making the entire function total is a
+    # bigger change than this PR's subject and is tracked separately.
+    def _load_number(value: object) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        try:
+            number = float(value)
+        except (OverflowError, ValueError):  # an int literal too large to convert
+            return None
+        return number if math.isfinite(number) else None
+
+    def _run_number(run: object) -> float | None:
+        load = run.get("load") if isinstance(run, dict) else None
+        return _load_number(load.get("before")) if isinstance(load, dict) else None
+
+    _load = rec.get("load") if isinstance(rec.get("load"), dict) else {}
+    _ceiling = _load_number(_load.get("ceiling"))
+    _ceiling_usable = _ceiling is not None and _ceiling > 0
+    _red = rec.get("red") if isinstance(rec.get("red"), dict) else {}
+    _baseline = _red.get("baseline_run")
+    _load_runs = [*rec["runs"], *([_baseline] if _baseline else [])]
+    _befores = [_run_number(r) for r in _load_runs]
+    ok &= conj("load-ceiling-unusable", _ceiling_usable)
+    # A run whose load could not be read is inadmissible, exactly as at the
+    # producer: `LOAD_UNMEASURED` (`-1.0`) is the sentinel for "the host was
+    # unreadable", and a negative load is not a measurement.
+    ok &= conj("load-sample-unusable",
+               all(b is not None and b >= 0.0 for b in _befores))
+    # "No run began above the declared ceiling." Evaluated ONLY over USABLE samples,
+    # so a single sample can never be reported as BOTH unusable and above the
+    # ceiling. That is PER-SAMPLE disjointness, NOT disjointness of the reason SETS:
+    # one `-1.0` run and one 68.0 run legitimately carry both labels, because each
+    # is a true statement about a different run. A `-1.0` sentinel is
+    # not above the ceiling (`-1.0 <= 60.0`), and re-asserting usability here —
+    # which the first version did — recorded a contravention that did not happen
+    # into `verdict.violations`, the one list a human reads, while hiding that it
+    # was the SAMPLE check doing the work. An unusable sample is not silently
+    # admissible: `load-sample-unusable` refuses the record above. Nor is this
+    # reason emitted against an unusable THRESHOLD: it is gated on
+    # `_ceiling_usable`, so a ceiling of 0 reports `load-ceiling-unusable` alone
+    # rather than attributing a contravention to a value `_validated_ceiling`
+    # itself declares not to be a threshold.
+    _above_ceiling = [
+        b for b in _befores
+        if b is not None and b >= 0.0 and _ceiling_usable and b > _ceiling
+    ]
+    ok &= conj("load-above-ceiling", not _above_ceiling)
     # `attempted` is deliberately NOT an AND-term here: `main()` rejects `--n < 2`,
     # so the producer could only ever set it True and it supplied no protection. The
     # falsifiable claim is `rate_change` (a red was demonstrated and did not appear
@@ -1486,6 +1625,13 @@ def _build_record(args: argparse.Namespace) -> dict:
     # fall through to exit 3 and still write a record).
     if args.record_role == "closing" and not args.pairing_ref:
         raise UsageError("--record-role closing requires --pairing-ref")
+    # D14: the ceiling must be a usable threshold, and it is validated HERE — with the
+    # other pre-measurement usage checks, before ANY resource is acquired. Raised
+    # later it would run after `_worktree_at` created the `--ref` worktree but before
+    # the `try/finally` that removes it, so a typo'd ceiling would leak a worktree
+    # into `git worktree list` — the surface `tools/collision_preflight.py` scans
+    # untruncated — and exit 2 while appearing to cost nothing.
+    ceiling = _validated_ceiling(args.load_ceiling)
     from tools.ci_selection import load_manifest
 
     run_root = Path(tempfile.mkdtemp(prefix="pi-embedded-evidence-"))
@@ -1501,32 +1647,38 @@ def _build_record(args: argparse.Namespace) -> dict:
     measured_root = REPO_ROOT
     worktree_added = False
     # #4203 owner ruling (option (a), #4572): the record must not live inside the
-    # measured tree. Refuse it BEFORE any measurement — and before the `--ref`
-    # worktree exists — so a usage error costs no measurement and leaves no
-    # worktree behind. `REPO_ROOT` is checked first because `post_review_dirty` is
-    # measured on the invoking checkout even when `--ref` measures elsewhere.
+    # measured tree. The `REPO_ROOT` half is refused FIRST, before anything is
+    # created — `post_review_dirty` is measured on the invoking checkout even when
+    # `--ref` measures elsewhere — so that refusal costs nothing at all. The
+    # measured-root half cannot run until the `--ref` worktree EXISTS, so it lives
+    # inside the `try` below, whose `finally` removes what it had to refuse.
     if args.record_out is not None:
         _refuse_in_tree_record_out(args.record_out, REPO_ROOT)
     if args.ref:
         requested_ref = _git("rev-parse", f"{args.ref}^{{commit}}")
         measured_root, worktree_added = _worktree_at(requested_ref, run_root, "worktree")
-        if args.record_out is not None:
-            _refuse_in_tree_record_out(args.record_out, measured_root)
-    commit = _git("rev-parse", "HEAD", cwd=measured_root)
-    tree = _git("rev-parse", "HEAD^{tree}", cwd=measured_root)
-
-    ceiling = args.load_ceiling
-    cur_load = load1()
-    if args.environment_error:
-        raise RuntimeError(args.environment_error)
 
     runs: list[dict] = []
     tree_states: list[tuple[str, bool]] = []
     porcelain = ""
     dirty = False
+    # Everything that can raise AFTER the `--ref` worktree exists lives INSIDE this
+    # `try`, so the `finally` below removes it. Three statements used to sit between
+    # `_worktree_at` and the `try` — the measured-root `--record-out` refusal, the two
+    # `_git rev-parse` reads, and the `--environment-error` injection — and a raise
+    # from any of them skipped the `finally`, leaking the detached worktree into
+    # `git worktree list`, the surface `tools/collision_preflight.py` scans
+    # untruncated. The #4203 invariant above is what this makes hold.
     try:
-        if cur_load > ceiling:
-            raise RuntimeError(f"load {cur_load} exceeds ceiling {ceiling}")
+        if args.ref and args.record_out is not None:
+            _refuse_in_tree_record_out(args.record_out, measured_root)
+        commit = _git("rev-parse", "HEAD", cwd=measured_root)
+        tree = _git("rev-parse", "HEAD^{tree}", cwd=measured_root)
+        if args.environment_error:
+            raise RuntimeError(args.environment_error)
+        # The load ceiling is enforced PER RUN inside `_run_once` (see the gate there),
+        # so every run — and the pairing baseline — is admitted on the same rule. It
+        # used to be sampled and checked once here, before run 1.
         # D11: the baseline digest is captured BEFORE the first run, so a tree that
         # moves DURING run 1 is caught. Capturing it after run 1 (the old code) made
         # run 1 compare with itself — `tree_moved` was False for run 1 by
@@ -1535,7 +1687,7 @@ def _build_record(args: argparse.Namespace) -> dict:
         base_digest, _base_dirty = _porcelain_digest(measured_root)
         for i in range(1, args.n + 1):
             runs.append(_run_once(files, measured_root, run_root, i, args.marker,
-                                  args.run_timeout))
+                                  args.run_timeout, ceiling, "measured"))
             # The per-run tree state. The cleanliness digest MUST be taken while the
             # measured tree still EXISTS (see below) — and it is taken once per run so
             # `tree_moved` is MEASURED: a run whose tree digest differs from the
@@ -1597,7 +1749,7 @@ def _build_record(args: argparse.Namespace) -> dict:
         try:
             pair_base_digest, _pbd = _porcelain_digest(pair_measured)
             baseline_run = _run_once(files, pair_measured, pair_root, 1, args.marker,
-                                     args.run_timeout)
+                                     args.run_timeout, ceiling, "pairing baseline")
             pair_post_digest, _ppd = _porcelain_digest(pair_measured)
             # The baseline is a RUN too: persist its own tree state so `pin-not-airtight`
             # and a re-evaluating verifier can see whether the pairing worktree moved.

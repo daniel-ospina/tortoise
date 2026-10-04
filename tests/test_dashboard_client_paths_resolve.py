@@ -148,7 +148,10 @@ TRAILING_HOLE_SITES = {
     ("api", "/v1/onboarding/github/repos", "GET"): 1,
     ("api", "/v1/onboarding/github/status", "GET"): 1,
     ("api", "/v1/onboarding/state", "GET"): 1,
-    ("api", "/v1/onboarding/state", "PATCH"): 5,
+    # #4258: the MemorySources capture-extract toggle PATCHes the EXISTING
+    # endpoint (main.jsx `toggleCaptureExtract`), adding the 6th ambiguous
+    # trailing-hole call site at this path — a deliberate +1, not a new route.
+    ("api", "/v1/onboarding/state", "PATCH"): 6,
     ("api", "/v1/onboarding/state/checkpoint", "POST"): 1,
     ("api", "/v1/sessions", "DELETE"): 1,
     ("api", "/v1/sessions", "GET"): 2,

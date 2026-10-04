@@ -352,7 +352,9 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
       * A3 fusion — ``TORTOISE_ASK_FUSION_WEIGHTS`` (JSON; default None
         = the shared global 1.5) + ``TORTOISE_ASK_FUSION_K`` (default 60).
       * A4 search_keys PRF — ``TORTOISE_ASK_SEARCH_KEYS_PRF`` (default
-        ON): additive expansion terms from the retrieved pool's
+        OFF until measured, #4593 — the library parameter default was
+        already ``False``; only this lane flipped it ON unmeasured):
+        additive expansion terms from the retrieved pool's
         top-5 hits' ``search_keys`` (original tokens always keep their
         OR-cap slots).
       * A5 evidence boost — ``TORTOISE_ASK_EVIDENCE_BOOST`` (default
@@ -515,7 +517,7 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
         keep_numeric = ask_env_bool(
             "TORTOISE_ASK_NUMERIC_TOKENS", True)  # A1, default ON
         search_keys_prf = ask_env_bool(
-            "TORTOISE_ASK_SEARCH_KEYS_PRF", True)      # A4, default ON
+            "TORTOISE_ASK_SEARCH_KEYS_PRF", False)     # A4, default OFF until measured (#4593)
         evidence_boost = ask_env_bool(
             "TORTOISE_ASK_EVIDENCE_BOOST", True)       # A5, default ON
         # A8 (Slice A #2683): the evidence-package assembly arm —

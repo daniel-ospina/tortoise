@@ -31,6 +31,16 @@ the structural signal).
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/longmem_eval/ingest_v2.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]})"
+    )
+
 import logging
 from collections.abc import Callable
 from functools import partial
@@ -47,6 +57,10 @@ from .errors import (  # noqa: E402
     INGEST_WRITE_RETRIES,
     call_with_predicate,
     retryable_transient,
+)
+from .stall_guard import (  # noqa: E402
+    Heartbeat,
+    resolve_stall_timeout_s,
 )
 from .ingest import (SESSION_TRANSCRIPT_KIND, EXTRACTION_POINT_KIND,  # noqa: E402
                      UNDATED_SENTINEL,
@@ -685,7 +699,17 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
                        # resume-internal whole-question retry (R2) budget
                        # is granted (P1-1).
                        ingest_write_retries: int = INGEST_WRITE_RETRIES,
-                       write_marker_armed: bool = True) -> dict:
+                       write_marker_armed: bool = True,
+                       # #2969: liveness/stall guard. ``heartbeat`` is an
+                       # injection SEAM — tests supply a clock-driven one, and
+                       # a caller may supply a shared one; None → a fresh
+                       # per-question heartbeat is created. No production
+                       # caller passes it today (`run_evaluation` has no such
+                       # parameter), so the seam is exercised by tests only.
+                       # ``stall_timeout_s`` overrides the env/default
+                       # no-progress budget (None → resolve from env).
+                       heartbeat: Heartbeat | None = None,
+                       stall_timeout_s: float | None = None) -> dict:
     """v2 ingest: each haystack session through extract_session_v2 → the
     payload written to the eval graph (Session + turn-granular raw chunks
     retained — the verbatim recall mitigation). Returns stats for
@@ -783,6 +807,22 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
     # unbounded list).
     _warn_seen: set[str] = set()
 
+    # ── #2969: liveness/stall guard ──────────────────────────────────────
+    # The heartbeat is the "is this run stalled or just slow?" signal the
+    # silent 4h/question grind lacked: a line at each stage BOUNDARY once the
+    # emit interval has elapsed, plus a no-progress budget enforced at every
+    # boundary. Blowing the
+    # budget raises IngestStallTimeout — a TimeoutError with ETIMEDOUT, so
+    # the EXISTING machinery grades the failure entry
+    # ``ingest:retries_exhausted`` (retryable) and ``--retry-failed``
+    # re-attempts it. No new error channel.
+    # ``hb.stage(name)`` = "bound the stage that just finished, then mark
+    # this one as started" — so a slow stage is measured, not forgiven (see
+    # Heartbeat.stage). The first call only starts the clock.
+    hb = heartbeat if heartbeat is not None else Heartbeat(
+        label=qid, stall_timeout_s=resolve_stall_timeout_s(stall_timeout_s))
+    hb.stage("ingest:start")
+
     # ── Phase A (sequential, fast): session node + turn/chunk raw leg.
     # #1744 — this live copy had lost the parallel extraction the older copy
     # carried. The phases are A (raw leg) → B (LLM extraction) → C (payload
@@ -798,6 +838,13 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
     #     cross-session consolidation is not visible to the workers — the
     #     documented trade-off of the parallel fast path.
     def _phase_a_ctx(si: int, session: list[dict]) -> dict:
+        # #2969: bounds the previous stage — notices a SINGLE gap that drifted
+        # past the STALL BUDGET before starting new work. (Not the socket bound:
+        # that is a separate, usually smaller, per-operation bound.)
+        # NOTE: this bounds ONE inter-boundary gap. Total question time is
+        # reported but never enforced, so a question whose every stage stays
+        # under the budget is not detected by this check.
+        hb.stage(f"s{si}:phase-a")
         sid = ids[si] if si < len(ids) else f"{qid}-s{si}"
         session_date = dates[si] if si < len(dates) else ""
         s_node = f"lme:{qid}:s{si}"
@@ -841,6 +888,7 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
         stats["sessions"] += _phase_a["sessions"]
         stats["chunks"] += _phase_a["chunks"]
         stats["ingest_retries"] += _retries_a["n"]
+        hb.stage(f"s{si}:extract")
 
         return {
             "si": si, "sid": sid, "session_date": session_date,
@@ -910,9 +958,11 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
             # #1746 (D7): the session-level exception path contributes one
             # call / zero truncations to the llm roll-up.
             stats["llm"]["calls"] += 1
+            hb.stage(f"s{si}:next")
             return
         out = res["out"]
         payload = out.get("payload") or {}
+        hb.stage(f"s{si}:phase-c")
         stats["turns"] += len(session)
         stats["minted_kinds"] += len(out.get("minted_kinds", []) or [])
         stats["supersessions"] += len(out.get("supersessions", []) or [])
@@ -1042,4 +1092,5 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
             _ctx = _phase_a_ctx(si, session)
             _write_ctx(_ctx, _extract_ctx(_ctx))
 
+    hb.stage("ingest:done")
     return stats

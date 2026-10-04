@@ -275,7 +275,8 @@ extractor over the conversation. **A capture is stored unconditionally**:
 with no LLM provider key configured the Session + its turn Points are STORED
 and stay searchable, and only the LLM extraction into memory points is
 skipped — the receipt carries `extraction_mode: "no-provider"` plus a warning
-(#3892 owner ruling, 2026-09-18). The regex extraction loop was removed as a
+(#3892 owner ruling, 2026-09-18), or `extraction_mode: "extraction-disabled"`
+when the team turned extraction OFF in the dashboard (#4258, default ON). The regex extraction loop was removed as a
 product path (#822) and there is no fallback, so with no key no memory points
 are produced. This section is the ops contract for making sure extraction is
 enabled.
@@ -370,7 +371,7 @@ fly ssh console -a tortoise-y4mjjq -C "python -m tortoise doctor"
 curl -s https://api.premiselabs.co/health/ready    # {"status":"ok","db":"connected"}
 # POST /v1/sessions with a team token → expect 200 + "extraction_mode":"llm".
 # A 200 with "extraction_mode":"no-provider" = no key: turns stored,
-# extraction skipped.
+# extraction skipped. "extraction-disabled" = the team turned extraction OFF.
 
 # 4. Local hermetic E2E (offline — MockModel seam, exercises the full path):
 RUN_HOSTED_E2E=1 python -m pytest tests/e2e/hosted/ -q -rs
@@ -1985,13 +1986,13 @@ stronger one is evidence that the release is actually unready.
 | RESEND_API_KEY | ✅ (billing + transactional email, #310/#307) | — | ✅ |
 | RESEND_FROM_EMAIL | ✅ (single managed sender identity — #1136; default `noreply@premiselabs.co`) | — | ✅ |
 | BILLING_FROM_EMAIL | optional (distinct billing sender override — #1136) | — | — |
-| BILLING_NOTIFY_TO | ✅ (ops inbox for billing/abuse emails) | — | ✅ |
+| BILLING_NOTIFY_TO | ✅ (ops inbox for billing email) | — | ✅ |
 
 ### Runtime Config (non-secret)
 
 | Var | Default | Effect |
 |-----|---------|--------|
-| `RESEND_SEND_BUDGET_DAILY` | `100` | In-process hard cap on provider-accepted sends per UTC day (#1138 — Resend free tier 100/day). When reached, further invite sends are skipped with a loud warning instead of silently 429ing. Estimate only — resets on process restart. |
+| `RESEND_SEND_BUDGET_DAILY` | `100` | In-process hard cap on sends per UTC day (#1138, scope widened #3631 — Resend free tier 100/day). When reached, further **invite, OTP, onboarding and billing** sends are skipped with a loud warning instead of silently 429ing (abuse alerts are Telegram-only, #3639, and consume no slot). Estimate only — resets on process restart. |
 | `RESEND_SEND_BUDGET_MONTHLY` | `3000` | Same as above for the UTC month (free tier 3,000/month). |
 
 ## Reproducibility Test
@@ -2002,7 +2003,7 @@ Can a fresh Fly.io account + Cloudflare account follow §1 from zero and arrive 
 - [ ] `app.premiselabs.co` → resolves, serves dashboard placeholder
 - [ ] GitHub push to main → auto-deploys tortoise-api
 - [ ] ≥1 LLM provider key in GitHub secrets → deployed to Fly (`fly secrets list -a tortoise-y4mjjq`) → `tortoise doctor` reports `Session extraction ✅` on the app
-- [ ] Live `POST /v1/sessions` smoke returns 200 + `extraction_mode: "llm"` (a keyless `"no-provider"` means turns were stored but extraction was skipped)
+- [ ] Live `POST /v1/sessions` smoke returns 200 + `extraction_mode: "llm"` (a keyless `"no-provider"`, or `"extraction-disabled"` for a team with extraction off, means turns were stored but extraction was skipped)
 - [ ] `fly.toml` declares `auto_stop_machines` / `auto_start_machines` / `min_machines_running` explicitly (no implicit platform defaults) and `fly config show` matches (§6.2)
 - [ ] Every machine has its own volume (`fly volumes list` count == `fly machines list` count) — a machine sharing `tortoise_api_data` is impossible and must never be attempted (§6.3)
 - [ ] Routing check is `[[services.tcp_checks]]` (kernel-served: **not starved by event-loop/thread-pool scheduling** — it can still fail if the accept backlog saturates) and no `[[services.http_checks]]` entry remains (§6.4)

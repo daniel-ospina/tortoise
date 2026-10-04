@@ -2,7 +2,10 @@
 // canonical names `off → install-pending → waiting → active`, probe-driven
 // (Task 16 creates the component; Task 17's panel reuses it). Pure (no React),
 // node --test unit-tested (mirrors sessionKey.js). #1927: the re-ask gate
-// predicate was removed with the consent gate (default-ON, ToS-covered).
+// predicate was removed with the SERVER policy gate — session_recording is
+// default-ON (ToS-covered) and this derivation reads only that projection. It
+// says nothing about #3615's per-machine transmission opt-in (TORTOISE_CAPTURE,
+// default OFF) — see captureInstallNote in harnesses.js.
 
 // #3428/#2937 (lane B3): the capture CLAIM's capability source is the harness
 // table below. harnesses.js is pure constants (no browser globals, no imports),
@@ -124,9 +127,10 @@ export function captureClaimForHarness(state, harness) {
 }
 
 // #1927: the misled-user re-ask gate predicate (shouldShowReAsk) was removed
-// with the consent gate — session_recording is default-ON (ToS-covered) and
-// the dashboard toggle is a quiet off-switch, so there is no exactly-once
-// re-ask to compute.
+// with the SERVER policy gate — session_recording is default-ON (ToS-covered)
+// and the dashboard toggle is a quiet off-switch, so there is no exactly-once
+// re-ask to compute. Distinct from #3615's per-machine opt-in: this state can
+// read as capture-capable while a given host has not opted in yet.
 export function lastErrorForHarness(state, harness) {
   if (!state) return null
   return state[`session_capture_last_error_${harness}`] || null

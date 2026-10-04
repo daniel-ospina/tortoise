@@ -43,6 +43,23 @@ the new content under its own "documented, reviewed content change" clause;
 spine carries ``lme_session_index``, whose index tag still wins in
 ``_render_block``.
 
+#4593 A4-DEFAULT EXEMPTION from the R17 policy above (deliberate, narrow, and
+recorded here because R17 is the statement a lane reads FIRST). R17 names
+"the #2070 knob series (A1-A7)" as an invalidating surface. #4593 turned the
+ask lane's A4 ``search_keys`` PRF DEFAULT off (graph decision
+``2026-09-30-a4-query-expansion-default``: opt:1, EP 0.691), which does shrink
+the legacy evidence — but it is a DEFAULT change, and the two guards R17
+relies on collide for it: ``_assert_golden`` layer 1b requires the live
+multiset to recover ``_PRE_3804_CHUNKS`` and instructs the reader "Do NOT
+re-capture ``_PRE_3804_CHUNKS``", so re-capturing a row-DROPPING change would
+mean restructuring the #3804 guard to pin a default. Instead: the R17 goldens
+BELOW are PINNED to their capture-time A4=1 posture (``_ask_env_clean``), and
+the SHIPPED A4=0 evidence is pinned separately and literally
+(``_A4_OFF_ROWS`` / ``_A4_OFF_ORDERED`` +
+``test_product_default_a4_off_evidence_is_pinned``). A
+change to A4's IMPLEMENTATION — as opposed to its default — still invalidates
+these goldens under R17, unchanged.
+
 Docker lane only (live FalkorDB — dedicated per-test graph with fulltext,
 deleted at teardown)."""
 import contextlib
@@ -58,13 +75,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pytest
 
 import tests._assembly_graph as ag
+from tests import _live_utils
 from tortoise.ask_lane import run_ask_assembled, run_ask_lane
 from tortoise.sdk import TortoiseSDK
 
 # ── Live-FalkorDB + FTS availability (same gate as test_assembly_fixtures) ──
 _URI = os.environ.get(
     "TORTOISE_DB_URI",
-    "docker://:falkordb@localhost:6379/tortoise_test_matrix").rstrip("/")
+    _live_utils.docker_uri("tortoise_test_matrix")).rstrip("/")
 FALKORDB_AVAILABLE = False
 _OLD_URI = os.environ.get("TORTOISE_DB_URI")
 _PROBE_GRAPH = f"{_URI}_probe"
@@ -132,9 +150,20 @@ def sdk(monkeypatch):
 @pytest.fixture(autouse=True)
 def _ask_env_clean(monkeypatch):
     """Hermetic env: the assembly + W4 flags start CLEAN (unset) for every
-    test; tests opt in explicitly."""
+    test; tests opt in explicitly.
+
+    The A4 ``search_keys`` PRF retrieval lever is PINNED to its capture-time
+    value (ON), not left floating on the lane's default: the R17 goldens below
+    were captured under ON, and #4593 turned that default OFF. The module
+    docstring's "#4593 A4-DEFAULT EXEMPTION" note records why this default
+    change is an exemption from R17 rather than a re-capture, and where the
+    SHIPPED A4=0 evidence is pinned instead. Scope: the pin is file-wide
+    (harmless today — no test here depends on A4's default); a future test that
+    wants the product default must ``delenv`` it, as
+    ``test_product_default_a4_off_evidence_is_pinned`` does."""
     monkeypatch.delenv("TORTOISE_ASK_CONNECTED_ASSEMBLY", raising=False)
     monkeypatch.delenv("TORTOISE_W4_ENRICHMENT", raising=False)
+    monkeypatch.setenv("TORTOISE_ASK_SEARCH_KEYS_PRF", "1")
     yield
 
 
@@ -294,6 +323,96 @@ _FROZEN_CHUNKS = {
 _PRE_3804_CHUNKS = {
     q: tuple(sorted(rows | {_HEADER_CHUNK}))
     for q, rows in _PRE_3804_ROWS.items()
+}
+
+# ── A4-PRF-OFF evidence record (#4593) ──────────────────────────────────
+# The COMMITTED goldens above were captured with the ask lane's A4
+# ``search_keys`` PRF lever ON. #4593 turned that DEFAULT off (graph
+# decision ``2026-09-30-a4-query-expansion-default``: opt:1, EP 0.691), so
+# the SHIPPED flag-OFF lane now returns a SMALLER multiset for some of these
+# questions — A4's additive expansion is what pulled the extra rows in. The
+# drop is intended, so it is recorded here as its own literal (transcribed
+# from the lane, never derived by subtracting one record from another) and
+# pinned by ``test_product_default_a4_off_evidence_is_pinned``. The R17
+# goldens above keep pinning the capture-time A4=1 posture; see the
+# #4593 note in the module docstring for why the default change is an
+# exemption to R17 rather than a re-capture.
+_A4_OFF_ROWS = {
+    "what is the current status of the couch?": frozenset({
+        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+    }),
+    "compare the couch and the dog bed, which should i keep?": frozenset({
+        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+        "[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion",
+        "[session sess-2026-08-10] took the dog to the vet for the chewed cushion",
+        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+    }),
+    "what was the couch status two weeks ago?": frozenset({
+        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+    }),
+    "which came first - the couch or the dog bed?": frozenset({
+        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+        "[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion",
+        "[session sess-2026-08-10] took the dog to the vet for the chewed cushion",
+        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+        "[session sess-2026-09-01] the new sofa was delivered on the first of september",
+    }),
+    CANARY_QUESTION: frozenset({
+        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+        "[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion",
+        "[session sess-2026-08-10] took the dog to the vet for the chewed cushion",
+        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+        "[session sess-2026-09-01] the new sofa was delivered on the first of september",
+        "[session sess-bookshelf] [valid since 2026-09-05] on the fifth of september we moved the bookshelf into the study and bought a reading lamp - the same week the old couch was discussed and the dog bed got chewed, but the bookshelf was the newest thing we bought that month",
+    }),
+}
+_A4_OFF_CHUNKS = {
+    q: tuple(sorted(rows | {_HEADER_CHUNK}))
+    for q, rows in _A4_OFF_ROWS.items()
+}
+#: The shipped A4=0 posture's chunk ORDER (the rendered sequence, header
+#: included) — the byte-identity half, mirroring what the R17 goldens pin for
+#: the A4=1 posture. Transcribed from the lane in render order, not sorted. An
+#: order drift here is the engine's opaque fulltext sequence moving (see
+#: ``_assert_golden`` layer 2), i.e. re-capture territory rather than a content
+#: regression — the multiset check in the tests keeps the two distinguishable.
+_A4_OFF_ORDERED = {
+    "what is the current status of the couch?": (
+        _HEADER_CHUNK,
+        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+    ),
+    "compare the couch and the dog bed, which should i keep?": (
+        _HEADER_CHUNK,
+        "[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion",
+        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+        "[session sess-2026-08-10] took the dog to the vet for the chewed cushion",
+    ),
+    "what was the couch status two weeks ago?": (
+        _HEADER_CHUNK,
+        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+    ),
+    "which came first - the couch or the dog bed?": (
+        _HEADER_CHUNK,
+        "[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion",
+        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+        "[session sess-2026-09-01] the new sofa was delivered on the first of september",
+        "[session sess-2026-08-10] took the dog to the vet for the chewed cushion",
+    ),
+    CANARY_QUESTION: (
+        _HEADER_CHUNK,
+        "[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion",
+        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+        "[session sess-2026-09-01] the new sofa was delivered on the first of september",
+        "[session sess-2026-08-10] took the dog to the vet for the chewed cushion",
+        "[session sess-bookshelf] [valid since 2026-09-05] on the fifth of september we moved the bookshelf into the study and bought a reading lamp - the same week the old couch was discussed and the dog bed got chewed, but the bookshelf was the newest thing we bought that month",
+    ),
 }
 
 #: A rendered row's leading session annotation, ``[session <id>]`` — the ONLY
@@ -475,6 +594,57 @@ def test_flag_on_unrouted_byte_identity(sdk, monkeypatch):
     ]:
         res = _ask(sdk, monkeypatch, q, flag_on=True)
         _assert_golden(res["evidence"], q, gold)
+
+
+def test_product_default_a4_off_evidence_is_pinned(sdk, monkeypatch):
+    """#4593: the SHIPPED flag-OFF lane (A4 PRF default OFF) returns a SMALLER
+    multiset than the capture-time R17 goldens above. Those goldens pin the
+    A4=1 capture posture (``_ask_env_clean``) and must keep doing so, so the
+    shipped A4=0 multiset is pinned HERE — otherwise an evidence-level
+    regression on the product default would pass this module silently.
+
+    The expectation is a literal record (``_A4_OFF_ROWS``), not a subtraction
+    of the two postures: derived expectations cannot fail when the thing they
+    are derived from moves."""
+    monkeypatch.delenv("TORTOISE_ASK_SEARCH_KEYS_PRF", raising=False)
+    ag.build_base_graph(sdk)
+    for q in [
+        "what is the current status of the couch?",
+        "compare the couch and the dog bed, which should i keep?",
+        "what was the couch status two weeks ago?",
+        "which came first - the couch or the dog bed?",
+    ]:
+        res = _ask(sdk, monkeypatch, q, flag_on=False)
+        live = _evidence_chunks(res["evidence"])
+        frozen = _A4_OFF_CHUNKS[q]
+        assert live == frozen, (
+            f"A4-OFF evidence moved on {q!r} — the shipped default's evidence "
+            "changed. "
+            f"Missing: {sorted((Counter(frozen) - Counter(live)).elements())}; "
+            f"unexpected: {sorted((Counter(live) - Counter(frozen)).elements())}")
+        assert tuple(ag.evidence_chunks(res["evidence"])) == _A4_OFF_ORDERED[q], (
+            f"A4-OFF chunk ORDER drifted on {q!r}: the multiset above is "
+            "intact, so this is the engine's opaque fulltext sequence moving — "
+            "verify the set, then RE-CAPTURE + RE-REVIEW ``_A4_OFF_ORDERED``.")
+
+
+def test_product_default_a4_off_keeps_the_out_of_subgraph_canary(
+        sdk, monkeypatch):
+    """#4593 side-effect check, and the reason this file could not be left as
+    it was: A4's additive expansion is what pulled several rows in, so turning
+    its default OFF shrinks the evidence. This pins that the one row the
+    R16(b) canary depends on — the out-of-subgraph gold carrying "reading
+    lamp" — STILL reaches the legacy lane under the shipped default."""
+    monkeypatch.delenv("TORTOISE_ASK_SEARCH_KEYS_PRF", raising=False)
+    ag.build_base_graph(sdk)
+    o = ag.build_out_of_subgraph_gold(sdk)
+    legacy = _ask(sdk, monkeypatch, o["question"], flag_on=False)
+    assert o["question"] == CANARY_QUESTION, o["question"]
+    assert _evidence_chunks(legacy["evidence"]) == _A4_OFF_CHUNKS[o["question"]]
+    assert tuple(ag.evidence_chunks(legacy["evidence"])) == _A4_OFF_ORDERED[o["question"]]
+    assert "reading lamp" in legacy["evidence"], (
+        "A>=1 (R16(b)) must survive the A4 default turning OFF — the "
+        "out-of-subgraph gold no longer reaches the legacy lane")
 
 
 def test_fired_routing_exact_goldens(sdk, monkeypatch):
@@ -1000,8 +1170,12 @@ def test_long_successor_sdk_object_read_returns_it_verbatim(sdk):
         session_id="s5370_read", warn=warns.append)
     assert applied == 1, f"the fold must apply: {warns}"
 
+    # #3301: the folded Object is SUPERSEDED, and the search lane's default
+    # Object view now excludes the canonical terminal vocabulary — so read it
+    # through the terminal-inclusive view (the documented audit/history
+    # opt-in). This test pins #5370's TRUNCATION contract, not visibility.
     hits = sdk.tortoise_fts_query("read-src", entity_type="object",
-                                  limit=25)
+                                  limit=25, include_terminal=True)
     hit = next((h for h in hits if h.get("content") == "read-src"), None)
     assert hit is not None, (
         "the SDK object read returned no hit for the folded Object: "
