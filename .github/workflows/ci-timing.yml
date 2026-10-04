@@ -225,6 +225,25 @@ jobs:
       contents: write
       pull-requests: write
       actions: read
+    env:
+      # ⛔ REQUIRED HERE, AND IT WAS MISSING (#3092). `gh` does not inherit the
+      # Actions token implicitly: it reads GH_TOKEN (or GITHUB_TOKEN) from the
+      # ENVIRONMENT, and Actions exposes the token only as a CONTEXT
+      # (`github.token` / `secrets.GITHUB_TOKEN`) — never as an env var. With no
+      # `env:` block on this job every `gh` call below exited non-zero with
+      # "To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN
+      # environment variable". The `measure` job above has had this block all
+      # along; this job never did.
+      #
+      # WHY THE AUTOMATIC TOKEN AND NOT A PAT: the branch is pushed into THIS
+      # repo, so no cross-repo write is needed; `github.token` is minted per run
+      # and expires with the job, so there is no long-lived credential to store
+      # or rotate; and it is CAPPED by the `permissions:` block above — a PAT
+      # carries its own scopes and would silently escape that ceiling. The scopes
+      # the two calls actually need are already granted: `contents: write` to
+      # push the branch and `pull-requests: write` for `gh pr create`
+      # (`gh pr list` needs only read).
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -244,7 +263,7 @@ jobs:
 
       - name: Open refresh PR if content changed
         run: |
-          set -e
+          set -euo pipefail
           BRANCH="chore/ci-timing-refresh-$(git rev-parse --short HEAD)"
           if git diff --no-index --quiet docs/ci-timing.md generated/ci-timing.md \
              && git diff --no-index --quiet docs/ci-timing.json generated/ci-timing.json \
@@ -253,6 +272,21 @@ jobs:
             exit 0
           fi
           echo "timing artifact changed — opening refresh PR"
+
+          # ⛔ Fail BEFORE any git mutation: a missing token on a changed-artifact
+          # week must not push a branch it then cannot open a PR for. Not checked
+          # on the `unchanged` path above, which legitimately needs no token.
+          if [ -z "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]; then
+            # ⛔ Do NOT write the literal Actions expression for the job token in
+            # this message: GitHub substitutes expressions in a `run:` body BEFORE
+            # bash parses it — including inside shell comments and single quotes —
+            # so spelling it out here would print the live token into the job log.
+            # Name the env KEY instead (test_no_token_expression_in_run_bodies guards
+            # the whole workflow set).
+            echo "::error::GH_TOKEN is empty in the refresh job — gh cannot authenticate, so no refresh PR can be opened. Keep the job-level \`env:\` GH_TOKEN binding on this job (see the env: block above) and \`pull-requests: write\` in its permissions (#3092)."
+            exit 1
+          fi
+
           git switch -c "$BRANCH"
           cp generated/ci-timing.md docs/ci-timing.md
           cp generated/ci-timing.json docs/ci-timing.json
@@ -264,11 +298,123 @@ jobs:
           git add docs/ci-timing.md docs/ci-timing.json config/ci-surfaces.yml
           git -c user.name="tortoise-ci[bot]" -c user.email="actions@github.com" \
             commit -m "chore(ci): refresh CI timing artifact + durations map (#1477, #5215)"
-          git push -u origin "$BRANCH"
-          if [ "$(gh pr list --head "$BRANCH" --state open --json number --jq 'length')" = "0" ]; then
-            gh pr create --base main --head "$BRANCH" \
+          # Does the branch ALREADY exist on origin? The answer decides whether the
+          # cleanup below may delete it: a branch this run CREATED is an orphan by
+          # construction, but a branch that was already there may be the head of an
+          # open PR — and "no PR" is precisely the conclusion a FAILED PR query
+          # cannot support. Fails closed: `git ls-remote --exit-code` documents 2 as
+          # "no matching refs", the only status that means the branch is absent, so
+          # any other failure (network, auth) keeps the default 1 = "pre-existing,
+          # leave it alone".
+          ls_rc=0
+          git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1 || ls_rc=$?
+          BRANCH_EXISTED=1
+          case "$ls_rc" in
+            2) BRANCH_EXISTED=0 ;;
+          esac
+
+          git push -u origin "$BRANCH" || {
+            rc=$?
+            echo "::error::\`git push\` of $BRANCH failed (exit $rc) — nothing to clean up, but the refresh did not land. A rejection here is usually a re-run at the same main SHA colliding with a branch a previous run left behind (#3092)."
+            exit 1
+          }
+
+          # ⛔ CLEANUP IS INSTALLED FOR *EVERY* POST-PUSH FAILURE PATH, not just the
+          # create path. The branch is pushed above and `delete_branch_on_merge`
+          # only removes branches that HAD a PR, so ANY later failure strands it on
+          # origin forever — which is how `chore/ci-timing-refresh-28d6d8c1` and
+          # `…-635a7e1c` accumulated, one per changed-content week, with no PR and
+          # nobody watching. The trap is therefore installed immediately after the
+          # push and covers every exit below it, not just the create-failure one.
+          #
+          # `BRANCH_HAS_PR=1` means "a PR exists or was just opened, so the branch
+          # must stay" — that includes the legitimate skip below, where the remote
+          # branch is the one the existing PR points at. `BRANCH_EXISTED=1` means
+          # the branch predates this run, so a delete would reach a ref this job did
+          # not create — and it would be reaching it on the strength of a PR query
+          # that just FAILED.
+          BRANCH_HAS_PR=0
+          cleanup_orphan_branch() {
+            local rc=$?
+            trap - EXIT
+            if [ "${BRANCH_HAS_PR}" = "0" ] && [ "${BRANCH_EXISTED}" = "0" ]; then
+              if git push origin --delete "$BRANCH" >/dev/null 2>&1; then
+                echo "removed the orphan branch $BRANCH (it was pushed but no PR was opened)"
+              else
+                echo "::warning::could not remove the orphan branch $BRANCH — delete it manually"
+              fi
+            fi
+            exit "$rc"
+          }
+          trap cleanup_orphan_branch EXIT
+
+          # ⛔ A FAILED `gh` MUST FAIL THIS JOB (#3092). The pre-fix shape was
+          #
+          #     if [ "$(gh pr list --head "$BRANCH" ... )" = "0" ]; then
+          #       gh pr create ...
+          #     else
+          #       echo "refresh PR already open for $BRANCH — skipping"
+          #     fi
+          #
+          # which FAILS OPEN: `gh` exits non-zero without GH_TOKEN, a failed
+          # command substitution yields the EMPTY STRING, `[ "" = "0" ]` is
+          # false, and control fell to the `else` — reporting "already open" and
+          # exiting 0. No refresh PR was ever opened in this workflow's history
+          # while every run stayed green. The outcomes are now distinguished
+          # explicitly: query FAILED (red), a non-numeric/empty result (red), zero
+          # open PRs (create), or a real count above zero (skip). Nothing here may
+          # infer "no PR needed" from a failure.
+          if ! pr_count=$(gh pr list --head "$BRANCH" --state open --json number --jq 'length'); then
+            echo "::error::\`gh pr list --head $BRANCH\` FAILED. This is an auth/scope failure, NOT an empty PR list, and must never be read as 'no PR needed'. Check GH_TOKEN and the job's \`pull-requests: write\` scope (#3092)."
+            exit 1
+          fi
+          # A count is a NUMBER. Reject anything else before comparing it: `null`,
+          # a jq error printed on stdout, or a blank line are not counts, and
+          # `[ "null" = "0" ]` is FALSE — so each of them falls to the `else` and is
+          # reported as "already open" with exit 0. That is the same fail-open this
+          # change removes, one line lower. The repo uses this `case` shape for the
+          # same reason in `.github/scripts/registry-cron.sh` (#3006).
+          case "$pr_count" in
+            "")
+              echo "::error::\`gh pr list --head $BRANCH\` returned nothing — refusing to guess whether a refresh PR is already open (#3092)."
+              exit 1
+              ;;
+            *[!0-9]*)
+              # ⛔ The value is echoed with `%q`, never raw. A command substitution
+              # keeps embedded newlines, and the runner parses any line starting
+              # with `::` as a workflow command — so echoing the raw value would
+              # let a multi-line `gh` output forge an annotation from inside the
+              # error handler. `%q` renders it as ONE shell-escaped line, and the
+              # slice bounds what lands in the log.
+              echo "::error::\`gh pr list --head $BRANCH\` returned a NON-NUMERIC value ($(printf '%q' "${pr_count:0:200}")) — that is a broken query, not a PR count, and must never be read as 'no PR needed' (#3092)."
+              exit 1
+              ;;
+          esac
+          if [ "$pr_count" = "0" ]; then
+            if gh pr create --base main --head "$BRANCH" \
               --title "chore(ci): refresh CI timing artifact + durations map (#1477, #5215)" \
-              --body "Weekly refresh of the CI timing measurement artifact (docs/ci-timing.md + docs/ci-timing.json) and, since #5215 Task 4b, the per-file \`durations\` map in config/ci-surfaces.yml — the weights the push split packs by. Measurement data only; no code changes. Gated by manifest-integrity. Auto-merged per repo policy."
+              --body "Weekly refresh of the CI timing measurement artifact (docs/ci-timing.md + docs/ci-timing.json) and, since #5215 Task 4b, the per-file \`durations\` map in config/ci-surfaces.yml — the weights the push split packs by. Measurement data only; no code changes. Gated by manifest-integrity. Auto-merged per repo policy."; then
+              BRANCH_HAS_PR=1
+              echo "refresh PR opened for $BRANCH"
+            else
+              rc=$?
+              # ⛔ NAME BOTH CAUSES. There are TWO independent documented reasons a
+              # `gh pr create` with the automatic token fails here, and reporting
+              # only the first misdiagnoses the live failure:
+              #   1. this job lacks `pull-requests: write` (403, "Resource not
+              #      accessible by integration");
+              #   2. the REPOSITORY setting "Allow GitHub Actions to create and
+              #      approve pull requests" is disabled — `gh api
+              #      repos/$GITHUB_REPOSITORY/actions/permissions/workflow` reports
+              #      can_approve_pull_request_reviews=false, and then the create is
+              #      refused with "GitHub Actions is not permitted to create or
+              #      approve pull requests" even though the scope IS granted.
+              # (2) was measured live on this repo while fixing #3092 — see the
+              # issue. Do not shorten this to one cause.
+              echo "::error::\`gh pr create\` exited $rc — the refresh job could not open the timing PR. Two documented causes: (1) this job lacks \`pull-requests: write\`; (2) the repository setting 'Allow GitHub Actions to create and approve pull requests' is disabled — check \`gh api repos/${GITHUB_REPOSITORY:-OWNER/REPO}/actions/permissions/workflow\`, field can_approve_pull_request_reviews. Cause (2) refuses the create even when the scope IS granted (#3092)."
+              exit 1
+            fi
           else
+            BRANCH_HAS_PR=1
             echo "refresh PR already open for $BRANCH — skipping"
           fi
