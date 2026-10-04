@@ -13610,7 +13610,14 @@ def _prevalidate_supersede_window(sdk, pr, *, now: str) -> None:
     # writer's clock, not a fact — so a resolution that would land on it is NOT
     # pre-validated; the boundary decides instead of this check guessing an
     # instant the writer has not chosen yet.
-    if not (stored_vf and _created_sort_key(stored_vf)[0] == 0) and not (
+    # The `stored_vf` test is PRESENCE (`is not None`), matching the
+    # resolver's own predicate (#3985): a numeric `0` IS orderable and the
+    # resolver DOES land on it, so a truthiness test here would defer a
+    # resolution that is not the writer's `now` — minting the successor and
+    # then failing the boundary check, which is the orphan #5363 exists to
+    # prevent.
+    if not (stored_vf is not None
+            and _created_sort_key(stored_vf)[0] == 0) and not (
             successor_created_at
             and _created_sort_key(successor_created_at)[0] == 0):
         return

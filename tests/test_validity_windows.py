@@ -931,12 +931,61 @@ def test_window_end_falsey_but_present_orderable_start_is_used():
     created = "2026-09-28T00:00:00+00:00"
     assert _window_end(None, stored_vf=0, successor_created_at=created) == 0
     assert _window_end(None, stored_vf=0.0, successor_created_at=created) == 0.0
+    # `False` is an int subclass -> keys `(0, 0.0)`, i.e. orderable, and is
+    # PRESENT, so it is a real window start too (the read path agrees).
+    assert _window_end(None, stored_vf=False,
+                       successor_created_at=created) is False
     # Contiguity: an epoch-0 predecessor is the SAME instant, so the guard's
     # strictly-before test does not fire and write == read exactly.
     assert _window_end(0, stored_vf=0, successor_created_at=created) == 0
     # Control — the fallback still applies when there is no stored start.
     assert _window_end(None, stored_vf=None,
                        successor_created_at=created) == created
+
+
+def test_prevalidate_mirrors_the_resolver_for_a_falsey_but_orderable_start():
+    """#3985 — the hosted pre-write check must share the resolver's PRESENCE
+    predicate for ``stored_vf``, not truthiness.
+
+    ``hosted_api._prevalidate_supersede_window`` was written when a falsey
+    ``stored_vf`` fell through to the writer's ``now``.  #3985 makes the
+    resolver land on the KNOWN instant ``0`` instead, so a truthiness test in
+    the mirror defers a resolution that is NOT ``now``: the successor is
+    minted, and the refusal arrives only at the last-resort boundary — losing
+    the #5363 no-orphan guarantee the pre-check exists to give.
+
+    Fails before the fix: the pre-check returns early, so nothing raises.
+    """
+    from types import SimpleNamespace
+
+    from tortoise.hosted_api import _prevalidate_supersede_window
+    from tortoise.sdk import InvertedSupersedeWindow
+
+    class _G:
+        def query(self, cypher, params=None):
+            if "n.validFrom, n.createdAt" in cypher:
+                # the successor: stored start is 0 (epoch-0), no createdAt
+                return SimpleNamespace(result_set=[[0, None]])
+            # the predecessor's own stored start
+            return SimpleNamespace(result_set=[["2026-06-01"]])
+
+    proj = SimpleNamespace(g=_G())
+
+    class _SDK:
+        def _get_proj(self):
+            return proj
+
+        def _find_point_by_content(self, content, *, pointKind=None):
+            return "succ-id"  # a dedup target exists -> existing_id truthy
+
+    pr = SimpleNamespace(
+        existing_id="old-id",
+        supersede_id="succ-id",
+        point=SimpleNamespace(content="c", pointKind="statement", when=None),
+    )
+    with pytest.raises(InvertedSupersedeWindow):
+        _prevalidate_supersede_window(
+            _SDK(), pr, now="2026-09-28T00:00:00+00:00")
 
 
 def test_supersede_refuses_epoch0_successor_over_a_dated_predecessor(sdk):

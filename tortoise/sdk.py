@@ -3736,36 +3736,34 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
     anywhere — a silent, permanent loss of the old fact.
 
     Resolution order is the same five SOURCES in the same order — a clause was
-    inserted, so the step list is not unchanged (#3985)::
+    narrowed, so the step list is not unchanged (#3985)::
 
         str(valid_from) [a STRING must name an instant; a numeric is exempt]
-                        -> stored_vf (truthy)
-                        -> stored_vf (falsey but ORDERABLE - #3985)
-                        -> successor_created_at (ORDERABLE - #5360) -> now
+                        -> stored_vf (PRESENT and ORDERABLE — #5360 + #3985)
+                        -> successor_created_at (TRUTHY and ORDERABLE - #5360)
+                        -> now
 
-    ``stored_vf`` is taken when ORDERABLE even if falsey (#3985: a numeric
-    ``0`` is the epoch-0 instant the read path already keys it as), and
-    ``successor_created_at`` is taken only when ORDERABLE (#5360): a
-    present-but-unparseable start carries no instant, and persisting it as
-    the end leaves the window unbounded - see the branch comment below.
+    ``stored_vf`` is taken when it is PRESENT and ORDERABLE. PRESENT, not
+    truthy: ``_covers`` gates on ``is not None``, so a numeric ``0`` is a real
+    window start there — the epoch-0 instant (#3985). ORDERABLE, because a
+    present-but-unparseable start carries no instant and persisting it would
+    leave the window unbounded (#5360). ``successor_created_at`` is taken only
+    when it is truthy and ORDERABLE (#5360); otherwise the resolver falls to
+    ``now``.
 
-    The fourth step is #3985.  ``stored_vf`` is the successor's OWN stored
-    start, and the read path reads it with an ``is not None`` presence
-    predicate (``_covers``), so a numeric ``0`` is a REAL window start there —
-    the epoch-0 instant.  This resolver's truthiness test skipped it and fell
-    back to ``successor_created_at``, which lands INSIDE the read path's
+    #3985 changed exactly ONE case: a stored start that is FALSEY but
+    orderable (``0``). The old truthiness test skipped it and fell back to
+    ``successor_created_at``, which lands INSIDE the read path's
     ``[epoch 0, ∞)`` window: the predecessor and the successor then both cover
-    ⇒ a 2-candidate ``ambiguous`` answer instead of the successor.  Splitting
-    the falsey case out fixes the write/read divergence for ``0``.
+    ⇒ a 2-candidate ``ambiguous`` answer instead of the successor.
 
-    It is a SEPARATE clause rather than ``stored_vf is not None`` so that
-    exactly one case changes.  ``is not None`` would also absorb the
-    falsey-but-UNPARSEABLE ``""``, stamping the predecessor's end ``""`` —
+    Presence is NOT enough on its own: ``is not None`` alone would also absorb
+    the falsey-but-UNPARSEABLE ``""``, stamping the predecessor's end ``""`` —
     which ``_covers`` reads as an OPEN end, so the predecessor would cover
-    every later instant and the successor would never become the answer;
-    and an orderability-only predicate would drop the truthy-but-unparseable
-    ``"TBD"``, which the Scope note below records as a deliberate residual.
-    Both keep their current behaviour.
+    every later instant and the successor would never become the answer. The
+    orderability conjunct is what keeps that out; the residual is tracked as
+    #6140. A truthy-but-unparseable stored start (``"TBD"``) also falls
+    through, to ``successor_created_at``.
 
     Returns the value AS PERSISTED.  The ``stored_vf`` branches stay RAW (no
     ``str()``): a numeric stored value must keep keying as ``(0, float)``
@@ -3847,7 +3845,7 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
         and _created_sort_key(valid_from)[0] != 0
     ):
         succ_vf = str(valid_from)
-    elif stored_vf and _created_sort_key(stored_vf)[0] == 0:
+    elif stored_vf is not None and _created_sort_key(stored_vf)[0] == 0:
         # #5360 — ORDERABLE, not merely truthy. A stored start that is present
         # but unorderable ("not-a-date", "TBD") names no instant, and this
         # branch used to persist it RAW as the predecessor's window END. The
@@ -3879,18 +3877,15 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
         # ``test_window_end_numeric_kwarg_resolved_before_measure`` (B3) pins
         # that the guard measures that RESOLVED value — so the numeric case is
         # NOT an inversion.
-        succ_vf = stored_vf
-    elif stored_vf is not None and _created_sort_key(stored_vf)[0] == 0:
-        # #3985: a FALSEY-but-PRESENT start the read path CAN order (numeric
-        # ``0`` / ``0.0`` / ``False`` -> the epoch-0 instant).  ``_covers``
-        # gates on ``vf is not None``, so the read path already treats ``0``
-        # as a real window start; the truthiness test above skipped it and
-        # fell back to ``successor_created_at``, which lands INSIDE the read
-        # path's ``[epoch 0, inf)`` window -> both candidates cover -> a
-        # 2-candidate ``ambiguous`` answer.  The orderability conjunct (the
-        # measure the guard itself uses) admits ONLY the case both paths can
-        # order: ``""`` keys as ``(1, text)`` and stays on the fallback, and
-        # the truthy-but-unparseable ``"TBD"`` still takes the clause above.
+        #
+        # PRESENT, not truthy, is the other half of the predicate (#3985): the
+        # read path gates on ``vf is not None``, so a numeric ``0`` is a REAL
+        # window start there. A truthiness test skipped it and fell back to
+        # ``successor_created_at``, which lands INSIDE the read path's
+        # ``[epoch 0, inf)`` window -> both candidates cover -> a 2-candidate
+        # ``ambiguous`` answer. ``is not None`` ALONE would be wrong the other
+        # way: it would absorb the falsey-but-UNORDERABLE ``""``, whose open end
+        # would hide the successor forever (residual: #6140).
         succ_vf = stored_vf
     elif successor_created_at and _created_sort_key(successor_created_at)[0] == 0:
         # #5360, the THIRD route (found in the third review cycle): ``createdAt``
@@ -8158,9 +8153,10 @@ class TortoiseSDK:
         # unchecked window end against a start the read path treats as real
         # (a `validFrom=0` successor's `[epoch0, inf)` window overlaps any
         # predecessor end the kwarg writes at or after epoch 0, and gaps
-        # before it). The no-kwarg falsey case keeps
-        # the pre-existing truthiness fallback - its read/write divergence is
-        # real and tracked in #3985, not silently redefined here.
+        # before it). The no-kwarg FALSEY-AND-UNORDERABLE case (`""`) keeps the
+        # pre-existing fallback - its read/write divergence is real and tracked
+        # in #6140; #3985 fixed the falsey-but-ORDERABLE case (`0`), which the
+        # branch above now takes.
         vf_rows = proj.g.query(
             "MATCH (n:Point {id:$id}) RETURN n.validFrom, n.createdAt",
             params={"id": new_id},
