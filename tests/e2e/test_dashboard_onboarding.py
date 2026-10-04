@@ -205,10 +205,11 @@ def _wire(page: Page, *, seed_objects: list = None,  # noqa: RUF013
                 # returns a module name that exists ONLY here, so the fork test
                 # can tell a registry-backed render from the static offline
                 # fallback (wizardFlow.js BUILD_CATALOG_PLACEHOLDER).
-                # #2763: the payload currently CANNOT reach the card (fetch is
-                # gated on wizardStep 2, the catalog renders on wizardStep 1),
-                # so the test pins the shipped placeholder render + the fetch
-                # count and will flip when #2763 is fixed.
+                # #2763 (fixed): the fetch is gated on the FORK CARD — the step
+                # that renders the catalog — so this payload reaches it and
+                # REPLACES the static placeholder (never merges). The test
+                # asserts the registry-only name below and the fallback's
+                # absence.
                 cap["capabilities"] += 1
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"modules": [
@@ -1104,11 +1105,11 @@ def test_first_timer_wizard_build_fork_records_no_catalog_presented(page: Page) 
     removal: the ONLY client checkpoint on the journey is the set-once fork.
     #2323: the org-holding journey never mints a second org.
 
-    The catalog pin is deliberately two-sided (#2763): the fork card renders the
-    STATIC placeholder because the registry fetch is gated on the connect step
-    while the catalog renders one step earlier — the fetch is counted so the
-    mock is genuinely exercised, and the assertion flips to the registry-only
-    name when #2763 lands."""
+    #2763 (fixed): the registry fetch was gated on the CONNECT step while the
+    # catalog renders one step earlier, so the payload could never reach the
+    # card. The gate now names the FORK CARD, and the assertion below is the
+    # registry-only name the mock serves — a registry-backed render, not the
+    # static offline fallback."""
     _seed_cookie(page, "u-bld")
     cap = _wire(page, role="owner")
     # #2744: the DOCUMENT always loads from the local built-dist preview.
@@ -1124,23 +1125,26 @@ def test_first_timer_wizard_build_fork_records_no_catalog_presented(page: Page) 
     expect(page.locator("body")).to_contain_text("You're set up in", timeout=5_000)
     page.get_by_role("button", name="Continue →").click()
     expect(page.locator("body")).to_contain_text("Choose how you'll use Tortoise", timeout=10_000)
-    # STEP 1: fork card — pick the BUILD fork. #2763: the catalog renders from
-    # the static placeholder here (the registry fetch fires one step later than
-    # the only call site that renders it), so assert the SHIPPED names and then
-    # prove the registry request is genuinely issued on the connect step.
+    # STEP 1: fork card — pick the BUILD fork. #2763: the registry fetch is
+    # gated on the step that RENDERS the catalog (this card), so the payload
+    # reaches it. The mock's module name exists ONLY in the mocked registry and
+    # the payload REPLACES the placeholder rather than merging with it, so
+    # asserting that name plus the fallback names' absence proves a
+    # registry-backed render and not the offline fallback.
     page.get_by_role("button", name=re.compile("Build an application on top")).click()
     expect(page.locator("body")).to_contain_text("Build catalog", timeout=10_000)
-    expect(page.locator("body")).to_contain_text("Session recorder", timeout=5_000)
-    assert cap["capabilities"] == 0, \
-        "the registry catalog must not be fetched from the fork card (it renders one step earlier — #2763)"
+    # The fetch is issued by a passive effect when the card mounts — poll
+    # instead of snapshotting immediately after the text appears.
+    _wait_until(lambda: cap["capabilities"] == 1, timeout_ms=5_000,
+                message="the registry catalog fetch (exactly once, from the fork card)")
+    expect(page.locator("body")).to_contain_text("Registry-only module", timeout=10_000)
+    expect(page.locator("body")).not_to_contain_text("Session recorder")
     page.get_by_role("button", name="Continue →").click()
     expect(page.locator("body")).to_contain_text("Connect your agent", timeout=10_000)
-    # The fetch is issued by a passive effect when the connect step mounts —
-    # poll instead of snapshotting immediately after the text appears.
-    _wait_until(lambda: cap["capabilities"] == 1, timeout_ms=5_000,
-                message="the registry catalog fetch (exactly once)")
+    # #2763: the fetch is once per session and the gate no longer names the
+    # connect step at all — advancing past the card must not add a request.
     assert cap["capabilities"] == 1, \
-        f"#2004 (W8): the registry catalog must be fetched exactly once: {cap['capabilities']}"
+        f"#2004 (W8): the registry catalog must be fetched exactly once, from the fork card: {cap['capabilities']}"
     # #3913: the fork is the ONLY checkpoint the dashboard writes. The old
     # assertion here was the opposite — it required the catalog-presented mark;
     # that write is deleted, so the meaningful pin is now its ABSENCE, and the
