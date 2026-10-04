@@ -43,14 +43,12 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 
 def _is_bff_signup_request(method: str, url: str) -> bool:
-    """True for the BFF call this monitor watches (`POST /auth/signup`)."""
+    """True for the BFF call this monitor watches (`POST /auth/signup`).
+
+    ONE predicate governs all three listeners (issue/response/requestfailed), so
+    the filter the pins exercise is the filter that actually gates the verdict.
+    """
     return method == "POST" and url.endswith("/auth/signup")
-
-
-# #4940: Chromium reports a request the PAGE (or its own JS) killed as
-# `net::ERR_ABORTED`. That is a client-side condition and must not be bucketed
-# with host reachability — see `_unobserved_outcome`.
-ABORTED_TRANSPORT = "net::ERR_ABORTED"
 
 
 def _signup_transport_failure(method: str, url: str, failure: str | None) -> str | None:
@@ -74,14 +72,19 @@ def _unobserved_outcome(*, transport_failures: list[str], post_issued: bool) -> 
     `signup["status"]` stays `None` for four different situations, and they do
     NOT share a verdict:
 
-    - the request was ABORTED client-side (`net::ERR_ABORTED`) — the page or its
-      own JS killed the POST. That is a PRODUCT condition, so it FAILS;
     - the request DIED at the transport layer (DNS, TLS, connection refused) —
       UNAVAILABLE;
     - the request was ISSUED but never answered (connection blackhole, slow
-      connect timeout) — UNAVAILABLE;
+      connect timeout, client-side abort) — UNAVAILABLE;
     - the form never submitted a request at all — the other PRODUCT condition,
       and the one the pre-#4940 message asserted for all four.
+
+    `net::ERR_ABORTED` is deliberately NOT a product failure. The signup POST is a
+    plain `fetch` with no `AbortController`/`signal` (verified: `signup.html`),
+    so the page cannot abort its own request — an abort is browser/lifecycle
+    cancellation (a navigation superseding the in-flight fetch, context teardown),
+    which is a never-answered request, exactly what #4940's taxonomy buckets as
+    UNAVAILABLE.
 
     The verdict is RETURNED rather than acted on so the split itself is pinnable:
     a message-only pin cannot see the buckets collapse, and collapsing them is how
@@ -92,18 +95,13 @@ def _unobserved_outcome(*, transport_failures: list[str], post_issued: bool) -> 
     while the page had loaded and every locator had filled and clicked — a form
     that never submitted because it was never served fails on a locator timeout,
     not here — and the test had simply waited out its whole 30s budget. The
-    availability watchdog measured that host DOWN in an ADJACENT window (incident
-    #4682, 18:00–18:28Z, about two hours earlier), so the watchdog is NOT the
-    instrument that answers this failure — which is why the timeout case is
-    reported as its own condition rather than silently attributed to the host.
+    availability watchdog measured the BFF's UPSTREAM host (`api.premiselabs.co`,
+    incident #4682, 18:00–18:28Z, about two hours earlier — a DIFFERENT host from
+    the `app.premiselabs.co` BFF this smoke calls) DOWN in an adjacent window, so
+    the watchdog is NOT the instrument that would have caught this failure, which
+    is why the timeout case is reported as its own condition rather than silently
+    attributed to the host.
     """
-    if any(ABORTED_TRANSPORT in entry for entry in transport_failures):
-        return (
-            "product",
-            "the POST to the BFF /auth/signup was ABORTED before any response — a "
-            "client-side condition, not an availability one: "
-            + "; ".join(transport_failures),
-        )
     if transport_failures:
         return (
             "unavailable",
@@ -122,6 +120,17 @@ def _unobserved_outcome(*, transport_failures: list[str], post_issued: bool) -> 
         "no POST to the BFF /auth/signup was observed — the form did not "
         "submit, or it is still posting straight to Supabase",
     )
+
+
+def _unobserved_disposition(verdict: str) -> str:
+    """Map a verdict to what the smoke does with it: `"skip"` or `"fail"`.
+
+    Split out of the call site so the disposition is a real assertion instead of
+    source text that a mutation can sidestep: swapping the two branches at the
+    call site keeps every asserted string in place while making every unobserved
+    case skip — i.e. a product regression exiting GREEN (#4940 review round 3).
+    """
+    return "skip" if verdict == "unavailable" else "fail"
 
 # Canonical host for the auth surface is tortoise.premiselabs.co (host
 # consolidation 2026-08-17: premiselabs.co 301s /welcome → the tortoise host).
@@ -335,6 +344,17 @@ def test_signup_transport_failure_is_filtered_and_formatted() -> None:
     )
 
 
+def test_unobserved_disposition_maps_verdicts() -> None:
+    """#4940: the skip/fail DECISION is pinned as behaviour, not as source text.
+
+    Substring asserts over the call site passed while its two branches were
+    swapped — that mutation makes every unobserved case skip, so a product
+    regression exits GREEN (#4940 review round 3).
+    """
+    assert _unobserved_disposition("unavailable") == "skip"
+    assert _unobserved_disposition("product") == "fail"
+
+
 def test_live_signup_registers_both_capture_listeners() -> None:
     """#4940: a deleted or DEAD listener must redden something.
 
@@ -347,18 +367,23 @@ def test_live_signup_registers_both_capture_listeners() -> None:
     src = inspect.getsource(test_live_signup_no_429_confirmation_required)
     assert 'page.on("requestfailed", _on_requestfailed)' in src
     assert 'page.on("request", _on_request)' in src
+    # The response listener carries the CONTRACT verdict, and it is checked here
+    # because this change made its absence non-obvious: without it no response is
+    # captured, no `requestfailed` fires, and the `request` listener alone makes
+    # the case UNAVAILABLE (skip) — a broken capture would exit GREEN.
+    assert 'page.on("response", _on_response)' in src
     # Registered-but-dead is the failure mode a registration-only pin misses: the
     # bodies must delegate to the pure, pinned helpers.
     assert "_signup_transport_failure(req.method, req.url, req.failure)" in src
     assert "_is_bff_signup_request(req.method, req.url)" in src
-    # The call site must still SELECT on the verdict and have a reachable FAIL
-    # branch: collapsing it to `pytest.skip` for every unobserved case would let
-    # a product regression exit green, and no browser-free test can reach this
-    # line any other way (round-2 mutation B).
-    assert "verdict, message = _unobserved_outcome(" in src
-    assert 'if verdict == "unavailable":' in src
-    assert "pytest.skip(message)" in src
-    assert "pytest.fail(message)" in src
+    # The DISPOSITION is pinned as a pure function below, not as source text: a
+    # substring pin over the call site passed while the two branches were swapped.
+    assert "_unobserved_disposition(verdict)" in src
+    # Order matters: FAIL must be the fall-through, not the skip. With the two
+    # branches swapped, every unobserved case skips and a product regression exits
+    # GREEN (measured mutation E) — this is the one property of the call site a
+    # browser-free pin can still assert.
+    assert src.index("pytest.skip(message)") < src.index("pytest.fail(message)")
 
 
 def test_unobserved_outcome_splits_verdicts() -> None:
@@ -371,13 +396,14 @@ def test_unobserved_outcome_splits_verdicts() -> None:
     """
     signup_url = "https://app.premiselabs.co/auth/signup"
 
-    # A client-side abort is a PRODUCT condition, not availability.
+    # A client-side abort (net::ERR_ABORTED) is a never-answered request, not a
+    # product failure: the signup fetch has no AbortController, so the page cannot
+    # abort its own POST — it is browser/lifecycle cancellation.
     verdict, message = _unobserved_outcome(
-        transport_failures=[f"POST {signup_url} — {ABORTED_TRANSPORT}"],
+        transport_failures=["POST https://app.premiselabs.co/auth/signup — net::ERR_ABORTED"],
         post_issued=True,
     )
-    assert verdict == "product"
-    assert ABORTED_TRANSPORT in message
+    assert verdict == "unavailable"
 
     # Host/dependency transport death is UNAVAILABLE.
     verdict, message = _unobserved_outcome(
@@ -462,7 +488,7 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
         # None — the monitor failed on "no /v1/signup/email response observed"
         # even when signup was perfectly healthy. The observable boundary is now
         # the BFF call itself.
-        if resp.request.method == "POST" and resp.url.endswith("/auth/signup"):
+        if _is_bff_signup_request(resp.request.method, resp.url):
             signup["status"] = resp.status
             signup["body"] = resp.text()[:400]
         elif "v1/signup/email" in resp.url or "grant_type=password" in resp.url:
@@ -540,7 +566,7 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
                 transport_failures=transport_failures,
                 post_issued=post_issued["value"],
             )
-            if verdict == "unavailable":
+            if _unobserved_disposition(verdict) == "skip":
                 pytest.skip(message)
             pytest.fail(message)
         assert signup["status"] == 200, (
