@@ -152,6 +152,13 @@ class Snapshot:
     machine_id: str
     model: str | None = None
     harness: str = "claude"
+    # #3516 §B: which producer captured this session — 'hook' (the in-process
+    # hook/CLI leg) or 'store_sync' (the store-sync backstop). It is the ONLY
+    # discriminator that makes the hook-liveness check falsifiable: without it
+    # the two lanes POST identical rows and a dead hook greens. None (absent)
+    # is honest — a backfill/import producer has no lane, and the server stores
+    # absence, never a fabricated lane.
+    capture_lane: str | None = None
 
 
 @dataclass
@@ -758,6 +765,7 @@ def write_spool_entry(
         "version": 1,
         "session_id": snapshot.session_id,
         "harness": snapshot.harness,
+        "capture_lane": snapshot.capture_lane,
         "source": snapshot.source,
         "machine_id": snapshot.machine_id,
         "created_at": (prior or {}).get("created_at", now),
@@ -1150,6 +1158,11 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         "conversation": turns,
         "machine_id": meta.get("machine_id"),
     }
+    # #3516 §B: forward the producer lane ONLY when the spool entry carries one
+    # (set-only-when-present). A pre-#3516 entry, or a backfill/import entry,
+    # has no lane and must POST without the key rather than inventing one.
+    if meta.get("capture_lane"):
+        payload["capture_lane"] = meta["capture_lane"]
     if meta.get("model"):
         payload["model"] = meta["model"]
     outcome = post(payload)

@@ -11329,6 +11329,14 @@ _SESSION_HARNESS_VALUES = frozenset({
     "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
 })
 
+# #3516 §B / #3515 piece 8: which producer captured a session — 'hook' (the
+# in-process hook/CLI leg) or 'store_sync' (the store-sync backstop). This is
+# the ONLY discriminator that makes the hook-liveness check falsifiable: the two
+# lanes POST the same payload except this field, so without it a run with the
+# hook stubbed no-op greens. Distinct from the EXTRACTION lane (`_capture_lane()`
+# returns m2/v2) — same word, different meaning; do not merge the two.
+_SESSION_CAPTURE_LANE_VALUES = frozenset({"hook", "store_sync"})
+
 
 class SessionRequest(BaseModel):
     conversation: list[dict] = Field(..., max_length=1000)
@@ -11354,6 +11362,11 @@ class SessionRequest(BaseModel):
     # session_id is the idempotency key (re-POST same id ⇒ 0 new nodes);
     # source carries the transcript stem (forwarded by _cmd_session_capture).
     harness: str | None = None
+    # #3516 §B: OPTIONAL and set-only-when-present, so a pre-installed hook, an
+    # SDK caller or a backfill producer that POSTs without it never 422s and
+    # never erases a lane the server already stored. `None` is stored as ABSENT,
+    # never as a fabricated lane. Invalid values fail the boundary 422.
+    capture_lane: str | None = None
     source: str | None = None
     # #2599: machine_id and model are CLIENT-CLAIMED informational fields
     # (forgeable, never security-trusted) — complementing the server-resolved
@@ -11372,6 +11385,18 @@ class SessionRequest(BaseModel):
             raise ValueError(
                 f"invalid harness {v!r} — must be one of "
                 f"{sorted(_SESSION_HARNESS_VALUES)}")
+        return v
+
+    # #3516 §B: invalid capture_lane ⇒ 422 at the model boundary (same contract
+    # as harness) — a typo'd lane must be visible, and must never be silently
+    # stored as a lane the hook-liveness check would then misread.
+    @field_validator("capture_lane")
+    @classmethod
+    def _validate_capture_lane(cls, v):
+        if v is not None and v not in _SESSION_CAPTURE_LANE_VALUES:
+            raise ValueError(
+                f"invalid capture_lane {v!r} — must be one of "
+                f"{sorted(_SESSION_CAPTURE_LANE_VALUES)}")
         return v
 
     # #2599: reject non-printable characters in machine_id/model (a newline
@@ -12161,6 +12186,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     _capture_write = await _run_off_loop(
         _CAPTURE_EXECUTOR, _write_session_and_turns, proj, sdk, session_id,
         windowed, now=now, harness=capture_harness,
+        capture_lane=body.capture_lane,
         actor_user_id=_actor_uid, machine_id=body.machine_id,
         model=body.model, session_existed=session_existed,
         embed_fn=lambda texts: _capture_turn_embeddings(

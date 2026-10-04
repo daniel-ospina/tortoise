@@ -2108,6 +2108,7 @@ def _write_session_and_turns(
     *,
     now: str,
     harness: str | None = None,
+    capture_lane: str | None = None,
     actor_user_id: str | None = None,
     machine_id: str | None = None,
     model: str | None = None,
@@ -2126,8 +2127,8 @@ def _write_session_and_turns(
     BYTE-IDENTICAL COPIES of and could therefore drift on:
 
       * the ``:Session`` MERGE field list (``created_at``/``turn_count``/
-        ``is_episodic`` + the conditional ``harness``/``actor_user_id``/
-        ``machine_id``/``model`` clauses);
+        ``is_episodic`` + the conditional ``harness``/``capture_lane``/
+        ``actor_user_id``/``machine_id``/``model`` clauses);
       * the per-turn MERGE field list, the turn-point Cypher text, the
         ``CONTAINS`` wiring and the stale-turn sweep — all delegated to
         ``_write_capture_turns``, which holds the ONE ``UNWIND $turns``
@@ -2190,6 +2191,15 @@ def _write_session_and_turns(
         merge_sets.append("s.harness=$harness")
         merge_params["harness"] = harness
         session_record["harness"] = harness
+    # #3516 §B: the producer lane ('hook' | 'store_sync'). Set-only-when-present
+    # — the SAME rule as harness: a lane-less re-capture (backfill/import, or a
+    # pre-#3516 producer) must never erase a lane the server already stored,
+    # because a stored lane is the only evidence the hook-liveness check can
+    # read. ``None`` is stored as ABSENT, never as a fabricated lane.
+    if capture_lane:
+        merge_sets.append("s.capture_lane=$capture_lane")
+        merge_params["capture_lane"] = capture_lane
+        session_record["capture_lane"] = capture_lane
     if actor_user_id:
         merge_sets.append("s.actor_user_id=coalesce(s.actor_user_id, $uid)")
         merge_params["uid"] = actor_user_id
