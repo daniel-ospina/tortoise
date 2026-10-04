@@ -73,7 +73,9 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     )
 
 import argparse
+import faulthandler
 import os
+import signal
 import time
 
 # Keep in lockstep with tortoise/embeddings.py (EMBEDDING_MODEL /
@@ -86,6 +88,40 @@ REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"  # pinned (VULN-001)
 CACHED_MARKER = "embedding model: cached, no download needed"
 DOWNLOADED_MARKER = "embedding model: downloaded"
 PROBE_FAILED_MARKER = "embedding model: not cached — downloading (with retries)"
+
+
+DONE_MARKER = "embedder provision: complete"
+
+
+def _install_termination_stack_dump() -> None:
+    """#7359: dump every thread's stack if the step is cancelled.
+
+    The step normally takes ~9s. On the observed failure it printed its success
+    marker and THEN sat until the step's 6-minute timeout — so the bounding
+    question is "what is the process doing during that time", and the existing
+    log cannot answer it (the last line is a success). GitHub cancels a timed-out
+    step with SIGTERM before SIGKILL, so a handler here turns the NEXT occurrence
+    into its own diagnosis: it prints all thread stacks and exits non-zero.
+
+    Without this, the only fact a timeout yields is that the step was slow.
+    """
+    def _dump(signum, _frame):
+        try:
+            sys.stderr.write(
+                f"\n::warning::embedder_provision got signal {signum} — dumping all "
+                "thread stacks (#7359; the step was cancelled)\n"
+            )
+            sys.stderr.flush()
+            faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+            sys.stderr.flush()
+        except Exception:  # a diagnostic must never mask the cancellation
+            pass
+        os._exit(124)  # 124 = the conventional timeout exit status
+
+    try:
+        signal.signal(signal.SIGTERM, _dump)
+    except (ValueError, OSError):
+        pass  # non-main thread or unsupported platform — the step still runs
 
 
 def _annotation(level: str, message: str) -> None:
@@ -167,6 +203,7 @@ def provision(*, attempts: int, backoff: float) -> tuple[bool, str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _install_termination_stack_dump()
     parser = argparse.ArgumentParser(description="Provision the pinned embedding model, loudly.")
     parser.add_argument("--attempts", type=int, default=3, help="download attempts (>=1)")
     parser.add_argument("--backoff", type=float, default=5.0, help="base backoff seconds")
@@ -197,5 +234,47 @@ def main(argv: list[str] | None = None) -> int:
     return 1
 
 
+# #7359: leave via os._exit, NOT sys.exit.
+#
+# MEASURED: run 37239542471 (PR #5339) spent 6.27m in this step, against 0.13m for
+# the same step on main (37240061542, 37229990684). The step's log ends with the
+# #2573 success marker and nothing after it:
+#
+#     Loading weights: 100%|##########| 199/199 [...]
+#     embedding model: cached, no download needed
+#     ##[error] ... has timed out after 6 minutes.
+#
+# Python runs interpreter shutdown AFTER the last user statement, so the marker
+# being the final line places the six minutes in teardown, not in this script:
+# `sentence_transformers` imports torch, whose teardown joins its thread pools
+# and runs C++ destructors. That is normally milli­seconds of work, but it is
+# not bounded and it is not this step's business — the step's contract is "is
+# the pinned embedder obtainable", and that answer is already established and
+# printed by the time we get here.
+#
+# `os._exit` skips atexit handlers and interpreter teardown and returns the code
+# we already computed. It is safe on both paths: stdout/stderr are flushed
+# explicitly below (every marker already flushes), the cached path performs no
+# writes needing finalisation, and the download path writes to the HF cache
+# during construction rather than at teardown.
+#
+# This is deliberately NOT `timeout-minutes` being raised: the step takes ~9s
+# when it works, so a longer bound would convert a 6-minute stall into a longer
+# one and hide it (#964's bound was written for a stalled download, which the
+# log's `cached, no download needed` rules out).
 if __name__ == "__main__":
-    sys.exit(main())
+    _rc = main()
+    # --print-model / --print-revision are MACHINE-READ pins consumed by the
+    # workflow-side lockstep check, so their stdout stays byte-exact; the marker
+    # belongs only to the provisioning path (which is the one that can hang).
+    if not {"--print-model", "--print-revision"} & set(sys.argv[1:]):
+        # The marker is the diagnostic: if a future log shows it and the step
+        # STILL hangs, the stall is outside this interpreter, and the SIGTERM
+        # stack dump installed above is what will say where.
+        print(DONE_MARKER, flush=True)
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(_rc)

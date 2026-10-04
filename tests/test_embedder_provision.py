@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import os
 import re
+import select
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -475,3 +477,76 @@ def test_gate_tool_has_a_ci_carveout():
         "a gate-only change must fail closed to the full matrix; got "
         f"surfaces={result.get('surfaces')!r} full={result.get('full')!r}"
     )
+
+
+# ── #7359: the stall is diagnosed by the run that hits it ─────────────────
+
+_HANGS_FOREVER = (
+    "import time\n"
+    "class SentenceTransformer:\n"
+    "    def __init__(self, *a, **k):\n"
+    "        print('FAKE_HANG_ENTERED', flush=True)\n"
+    "        time.sleep(600)\n"
+)
+
+
+def test_a_cancelled_step_dumps_every_thread_stack(tmp_path):
+    """#7359: the observable failure must be self-diagnosing.
+
+    Measured: run 37239542471 spent 6.27m in this step against 0.13m on main,
+    and its log ENDS with the success marker — so the one fact needed is *what
+    the process was doing*, and a plain log cannot yield it. GitHub cancels a
+    timed-out step with SIGTERM before SIGKILL, so the script must convert that
+    into an all-thread stack dump.
+
+    Load-bearing: delete the SIGTERM handler and this fails on `dumping all`
+    (the process dies on the default disposition, the step log is unchanged,
+    and the next occurrence is as uninformative as this one was).
+    """
+    fake = tmp_path / "fake"
+    fake.mkdir(parents=True, exist_ok=True)
+    (fake / "sentence_transformers.py").write_text(_HANGS_FOREVER, encoding="utf-8")
+    env = _base_env(tmp_path)
+    env["PYTHONPATH"] = str(fake) + os.pathsep + env.get("PYTHONPATH", "")
+
+    proc = subprocess.Popen(
+        [sys.executable, str(_SCRIPT), "--attempts", "1", "--backoff", "0"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    try:
+        # Wait for positive evidence the process is INSIDE the hang, rather
+        # than sleeping a fixed guess — a fixed sleep is both slower and racy.
+        ready, _, _ = select.select([proc.stdout], [], [], 60)
+        assert ready, "script never reached the (fake) hanging constructor"
+        assert "FAKE_HANG_ENTERED" in proc.stdout.readline()
+
+        proc.send_signal(signal.SIGTERM)
+        _out, err = proc.communicate(timeout=60)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+
+    assert "dumping all" in err, f"no stack dump on SIGTERM; stderr was:\n{err}"
+    # The traceback body: the fake's own frame must appear, or the dump is empty.
+    assert "sentence_transformers" in err, f"dump had no useful frames:\n{err}"
+    assert proc.returncode == 124, f"expected the timeout status 124, got {proc.returncode}"
+
+
+def test_the_print_pins_are_byte_exact_for_the_lockstep_check(tmp_path):
+    """--print-model/--print-revision feed the workflow-side lockstep check, so
+    the #7359 completion marker must not contaminate them."""
+    env = _base_env(tmp_path)
+    for flag, expected in (("--print-model", ep.MODEL), ("--print-revision", ep.REVISION)):
+        got = subprocess.run(
+            [sys.executable, str(_SCRIPT), flag],
+            capture_output=True, text=True, env=env, timeout=120,
+        )
+        assert got.returncode == 0
+        assert got.stdout.strip() == expected, (
+            f"{flag} stdout must be exactly the pin; got {got.stdout!r}"
+        )
+        assert ep.DONE_MARKER not in got.stdout
