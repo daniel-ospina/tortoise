@@ -3954,13 +3954,25 @@ class FalkorProjection(
             used, cap = pressure
             detail = (f"used_memory {_fmt_bytes(used)} of maxmemory "
                       f"{_fmt_bytes(cap)}")
+        # The remedy must be usable on the container that actually wedges.
+        # The original text prescribed `GRAPH.DELETE test_*`; on a LONG-LIVED
+        # dev container that family is EMPTY (#2979: measured 2026-10-04, 0 of
+        # 48 graphs were `test_`-prefixed while `org_*`/`team_*`/`tt_*`
+        # residue filled it), so an operator who follows it deletes nothing and
+        # reaches for `FLUSHALL` — which destroys other sessions' in-flight
+        # state (the harm #2979 names). Hence: work from the LIST, and name the
+        # forbidden shortcut instead of leaving it to be discovered.
         return (
             "DB refused writes on open: the graph is INTACT but the server "
             f"has reached its memory ceiling ({detail}). This is NOT "
-            "corruption — do NOT rebuild. Free memory first: delete "
-            "ephemeral test graphs (GRAPH.LIST, then GRAPH.DELETE test_*), "
-            "or raise / relieve the container's --maxmemory. See #2981 for "
-            "the shared-lane form of this."
+            "corruption — do NOT rebuild. Free memory first: GRAPH.LIST, "
+            "then GRAPH.DELETE the disposable test graphs this lane leaked. "
+            "Do NOT assume they are all test_-prefixed — a long-lived "
+            "container also accumulates org_*/team_* residue (#2979), so "
+            "work from the list, not from a prefix. Do NOT FLUSHALL: it "
+            "destroys other sessions' in-flight state. Or raise / relieve "
+            "the container's --maxmemory. See #2981 for the shared-lane "
+            "form of this."
         )
 
     def _backend_failure_message(

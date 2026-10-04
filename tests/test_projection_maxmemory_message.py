@@ -79,6 +79,40 @@ def test_full_but_healthy_is_not_reported_as_corrupt(monkeypatch):
     assert "GRAPH.DELETE" in msg, msg
 
 
+def test_write_refusal_remedy_is_usable_on_a_long_lived_container(monkeypatch):
+    """#2979 — the remedy must work on the container that actually wedges.
+
+    The message told the operator to `GRAPH.DELETE test_*`. On a LONG-LIVED
+    dev container that family is EMPTY — measured 2026-10-04 on a live
+    container: **0 of 48 graphs were `test_`-prefixed**, while the population
+    was `org_*`/`team_*`/`tt_*` residue. So following the advice deletes
+    nothing, and the next move the issue documents is `FLUSHALL`, which
+    destroys other sessions' in-flight state. Pin the two halves that make the
+    remedy usable: it works from the LIST rather than from a prefix, and the
+    data-loss shortcut is forbidden rather than left to be discovered.
+
+    Revert-verified: restore the `GRAPH.DELETE test_*` wording and this test
+    goes RED on the third assertion; drop the `FLUSHALL` sentence and it goes
+    RED on the fifth.
+    """
+    monkeypatch.delenv("FLY_APP_NAME", raising=False)
+    proj = _projection(probe_error=RuntimeError(_MAXMEMORY_ERROR))
+    proj._memory_pressure = lambda: (512 * 1024 * 1024, 512 * 1024 * 1024)  # type: ignore[method-assign]
+
+    msg = proj._write_refusal_message(RuntimeError(_MAXMEMORY_ERROR))
+    assert msg is not None
+    # 1. The mechanism is still named (the operator has a command to run).
+    assert "GRAPH.LIST" in msg, msg
+    assert "GRAPH.DELETE" in msg, msg
+    # 2. ...but not as a bare prefix, which matches nothing on the container
+    #    this issue was filed from.
+    assert "GRAPH.DELETE test_*" not in msg, msg
+    assert "Do NOT assume they are all test_-prefixed" in msg, msg
+    # 3. The destructive workaround is named AS forbidden — the harm the issue
+    #    records is that operators reach for it when the advice frees nothing.
+    assert "Do NOT FLUSHALL" in msg, msg
+
+
 def test_memory_pressure_unreadable_still_avoids_rebuild(monkeypatch):
     """An unreadable INFO must not demote the failure back to 'corrupt'."""
     monkeypatch.delenv("FLY_APP_NAME", raising=False)
