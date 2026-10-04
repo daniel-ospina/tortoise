@@ -1231,6 +1231,18 @@ surfaces:
   - test_extractor_embed_coerce_5060.py  # #5060: execute_embed must not raise on a non-string name/content (whole-session payload loss)
   - test_extractor_v2.py
   - test_falkordb_compat.py
+  # #7076: the degraded-fallback snapshot's OWN guard. test_fallback_snapshot.py
+  # was registered only under `api`, while the module it guards
+  # (tortoise/fallback_snapshot.py) matches no named SOURCE_PATTERNS surface and
+  # therefore falls through to `core` (#2159 first-match) — so a
+  # fallback_snapshot.py-only change selected the `core` pool, its own guard was
+  # not in it, and the change shipped green with the file's own test never run
+  # (the #1349/#3332/#3616/#5545 silent-drop class — worse than no guard, because
+  # the green check reads as coverage). Dual-registered, KEEPING the `api` arm,
+  # for the same reason as test_from_uri_userinfo.py above and
+  # test_source_version_references_5199.py in `api`: the `core` arm is what makes
+  # the source's own diff run it.
+  - test_fallback_snapshot.py
   - test_file_indexer.py
   - test_flip_gate.py
   # #3845 part 2: the module-fork leak's producer + the fork-safe verbosity

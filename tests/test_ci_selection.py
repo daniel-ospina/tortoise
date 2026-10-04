@@ -302,6 +302,175 @@ def test_source_patterns_all_name_something_real():
     )
 
 
+# ── #7076: a guard that its own source's diff never SELECTS ───────────────────
+# `test_every_source_pattern_is_selectable` is the FORWARD check (entry -> runs);
+# `test_source_patterns_all_name_something_real` is entry -> exists, and its
+# docstring names the REVERSE direction (guarded path -> has an entry) as "the
+# open half of this class". These two tests are that half, for the subset where
+# the repository's own naming convention makes the pairing decidable:
+# `tests/**/test_<stem>.py` guarding `tortoise/**/<stem>.py`.
+#
+# WHY THE NAME CONVENTION IS ENOUGH. It is not a guess about intent: a
+# `test_<stem>.py` whose stem also names a real `tortoise/<stem>.py` is a
+# declaration the repository already makes, and the failure it detects is the one
+# #7076 measured — a guard registered on surface A while its source falls through
+# to surface B (#2159 first-match), so a source-only diff runs A's pool and NOT
+# the file's own test. #7076 is the instance in hand; the same shape was reached
+# before through #1349, #3332, #3616, #3950, #4171 and #5545.
+#
+# NOT CLAIMED, and stated so a reader does not over-read an entry:
+#   * pairings the convention cannot express (a guard named after the BEHAVIOUR
+#     rather than the module — most of the suite, which is why this covers 104
+#     of ~795 guards);
+#   * the slow / carve-out / on-demand legs as a *classification* question. The
+#     predicate honours those legs — a test that runs in `slow_selected`, or in
+#     the carve-out pool when that leg runs, counts as running — and a test the
+#     on-demand lane CLASSIFIES is skipped outright, because "does not gate the
+#     merge" is that lane's deliberate meaning rather than drift (the same
+#     reason `integrity()` skips it);
+#   * MARKER-selected whole-tree jobs. `test-d14-hosted-api` runs
+#     `pytest tests/ -m embedded_only` on every PR, so an individually marked
+#     param executes regardless of which surface owns its file: `test_audit.py`
+#     below is the live example (its `embedded_busy` param runs there, while
+#     none of the file is selected for a `tortoise/audit.py` diff). Membership
+#     here therefore means "NO diff-selected leg runs it", which is the property
+#     this check can decide — NOT "no line of it ever executes". Marker coverage
+#     is a whole-tree mechanism with its own pin (`tests/test_markers.py::
+#     test_ci_runs_the_embedded_only_marker_selection`).
+#
+# WHY A FROZEN DEBT LIST AND NOT 21 FIXES: each remaining pair is a per-file
+# registration decision about which surface's pool should carry that guard, and
+# every one of them edits `config/ci-surfaces.yml` (the `merge=union` file). The
+# list stops the class GROWING while it is paid down one PR at a time. It is
+# asserted in BOTH directions, so a fixed pair must be deleted from it and a new
+# pair must be added deliberately — it cannot rot into fiction.
+_SELF_GUARD_DEBT: dict[str, str] = {
+    "tests/test_abuse.py": "tortoise/abuse.py",
+    "tests/test_audit.py": "tortoise/audit.py",
+    "tests/test_audit_events.py": "tortoise/audit_events.py",
+    "tests/test_auth.py": "tortoise/auth.py",
+    "tests/test_billing.py": "tortoise/billing.py",
+    "tests/test_capture_consent.py": "tortoise/capture_consent.py",
+    "tests/test_chain_enforcer.py": "tortoise/chain_enforcer.py",
+    "tests/test_commit_schema.py": "tortoise/commit_schema.py",
+    "tests/test_enforcement.py": "tortoise/enforcement.py",
+    "tests/test_github_indexer.py": "tortoise/indexer/github_indexer.py",
+    "tests/test_github_issue.py": "tortoise/github_issue.py",
+    "tests/test_github_map.py": "tortoise/github_map.py",
+    "tests/test_kind_classifier.py": "tortoise/kind_classifier.py",
+    "tests/test_kind_index.py": "tortoise/kind_index.py",
+    "tests/test_mcp_client.py": "tortoise/mcp_client.py",
+    "tests/test_sentry.py": "tortoise/sentry.py",
+    "tests/test_source_credibility.py": "tortoise/source_credibility.py",
+    "tests/test_subgraph_render.py": "tortoise/subgraph_render.py",
+    "tests/test_telegram_push.py": "tortoise/telegram_push.py",
+    "tests/test_tortoise_client.py": "tortoise/tortoise_client.py",
+    "tests/test_version_vector.py": "tortoise/version_vector.py",
+}
+
+
+def _self_guard_violations(manifest: dict, tracked: list[str]) -> dict[str, str]:
+    """{test path: its source path(s)} for every named guard its diff never SELECTS.
+
+    "Never selected" is decided as a UNION over the legs a pull_request diff can
+    schedule — the fast selection, the slow leg's diff-gate selection, and the
+    carve-out pool when that leg runs — because a guard counts as scheduled
+    wherever it is selected, and reporting a slow-lane guard as missing would be
+    a false alarm about the wrong contract.
+
+    SCOPE. A marker-selected whole-tree job (`test-d14-hosted-api`) can execute
+    an individual marked param whatever this returns, so an entry here means
+    "no diff-selected leg runs the file", not "nothing in the file executes".
+    The narrower claim is the one that is decidable from `select()`, and it is
+    the one #7076 is about.
+    """
+    sources: dict[str, list[str]] = {}
+    for path in tracked:
+        if path.startswith("tortoise/") and path.endswith(".py"):
+            sources.setdefault(Path(path).stem, []).append(path)
+    on_demand = on_demand_files(manifest)
+    carve = cs.carve_out_files(manifest)
+    violations: dict[str, str] = {}
+    for path in sorted(tracked):
+        if not path.startswith("tests/") or path.startswith("tests/e2e/"):
+            continue
+        name = Path(path).name
+        if not (name.startswith("test_") and name.endswith(".py")):
+            continue
+        if name in on_demand or path[len("tests/"):] in on_demand:
+            continue
+        srcs = sources.get(name[len("test_"):-3])
+        if not srcs:
+            continue
+        sel = select(srcs, "pull_request", manifest)
+        if sel["full"] or sel["test_files"] == "ALL":
+            continue
+        ran = set(sel["test_files"]) | set(sel.get("slow_selected") or ())
+        if sel.get("carve_out_run"):
+            ran |= carve
+        if name in ran or path in ran or path[len("tests/"):] in ran:
+            continue
+        violations[path] = ", ".join(srcs)
+    return violations
+
+
+def test_the_degraded_fallback_guard_runs_for_its_own_source():
+    """#7076, pinned as BEHAVIOUR so the fix cannot be undone by a debt entry.
+
+    tests/test_fallback_snapshot.py was registered only under `api` while
+    tortoise/fallback_snapshot.py falls through to `core`, so a
+    fallback_snapshot.py-only diff ran the `core` pool and NOT the file's own
+    test. The ratchet below would accept the pair reappearing in
+    `_SELF_GUARD_DEBT`; this asserts the selection instead of the registration.
+    """
+    sel = _sel(["tortoise/fallback_snapshot.py"])
+    assert sel["surfaces"], (
+        "tortoise/fallback_snapshot.py now selects NO surface, so its guard "
+        "would run only through the tier-1 fallback — coverage by accident, "
+        "which vanishes the moment the test leaves tier1 (#3673)"
+    )
+    assert "test_fallback_snapshot.py" in sel["test_files"], (
+        "the file's own guard is not selected by its own diff (#7076): "
+        f"{len(sel['test_files'])} files ran, test_fallback_snapshot.py was not "
+        "one of them"
+    )
+
+
+def test_every_named_guard_runs_for_its_own_source():
+    """The reverse of `test_every_source_pattern_is_selectable`: path -> selected.
+
+    Every `tests/**/test_<stem>.py` whose stem also names a tracked
+    `tortoise/**/<stem>.py` must be SELECTED for a diff of that source alone.
+    A pair that is not is the #7076 class: the file's guard does not run on its
+    own change's diff-selected legs, and the green check reads as coverage.
+
+    Scope: "selected", not "not one byte of it executes" — see
+    `_self_guard_violations` for the marker-selected whole-tree job that this
+    predicate cannot (and does not claim to) model.
+
+    Both directions are asserted. New pairs fail (the class must not grow); debt
+    entries that now pass also fail (the frozen list must stay true, so fixing a
+    pair is completed by deleting its entry).
+    """
+    root = Path(__file__).resolve().parents[1]
+    violations = _self_guard_violations(load_manifest(), _tracked_files(root))
+    new = sorted(set(violations) - set(_SELF_GUARD_DEBT))
+    fixed = sorted(set(_SELF_GUARD_DEBT) - set(violations))
+    assert not new, (
+        "guards that their own source's diff does not run (#7076 class — the "
+        "same shape as #1349/#3332/#3616/#3950/#4171/#5545). Register the test "
+        "on the surface its source selects, or the source on the test's surface, "
+        "rather than adding it to _SELF_GUARD_DEBT:\n  "
+        + "\n  ".join(f"{p} <- {violations[p]}" for p in new)
+    )
+    assert not fixed, (
+        "pairs listed in _SELF_GUARD_DEBT that now PASS, so the debt list has "
+        "gone stale — delete them (the list is asserted in both directions so "
+        "it cannot rot into fiction):\n  "
+        + "\n  ".join(f"{p} <- {_SELF_GUARD_DEBT[p]}" for p in fixed)
+    )
+
+
 def test_unrelated_website_change_stays_tier1():
     """SITE_CARVEOUTS is not a wholesale `website/` removal.
 
