@@ -2957,7 +2957,7 @@ class TestConjunctFalsifiability:
         all-green fixed commit at the same HEAD as the reviewing checkout, a clean
         tree, and a declared shipping surface — must now reach a CLOSING verdict.
         This is the end-to-end PASS that the hardcoded `at_fixed_commit` /
-        `surface` fields made impossible, and it exercises all thirteen conjuncts
+        `surface` fields made impossible, and it exercises every conjunct
         at once.
         """
         files = list(ee.FAMILY_REPRODUCERS)
@@ -2979,3 +2979,147 @@ class TestConjunctFalsifiability:
         assert reasons == []
         assert ee.exit_code(rec) == 0
         assert rec["verdict"]["status"] == "PAIRED-RED-DEMONSTRATED"
+
+    def test_absence_fails_a_conjunct_and_never_satisfies_one(self, monkeypatch, tmp_path):
+        """#7084: a missing field must be a REFUSAL, not a certification.
+
+        Two absences certified a record for recording nothing, and neither was
+        visible while the function raised instead of returning:
+
+          * `_get(pin,"head_sha") == _get(pin,"commit")` is `None == None` -> True
+            when BOTH keys are missing, so R2/D24 ("certificate bound to the
+            reviewed head SHA") passed on a record binding NO sha at all.
+          * `not _get(run,"tree_moved")` is `not None` -> True for a run that
+            never recorded a tree state, so D11 ("pin not airtight") — the
+            conjunct whose entire purpose is detecting a moved tree — passed on
+            an absent one.
+
+        Both removals below must therefore turn the SAME record from closing into
+        refused, naming the conjunct. The fixture is asserted to close first, so
+        this cannot pass vacuously if the producer changes shape.
+        """
+        import copy
+
+        files = list(ee.FAMILY_REPRODUCERS)
+        green = [self._run(files, 1, "green"), self._run(files, 2, "green")]
+        same = "a" * 40
+        rec = self._produce(
+            monkeypatch, tmp_path,
+            runs=green,
+            pairing_ref="pairref",
+            baseline=self._run(files, 1, "unexpected-divergence"),
+            record_role="closing",
+            checkout_head=same,
+            measured_commit=same,
+            surface="tortoise_search",
+            surface_assertion="tests/test_x.py::test_consumer_surface",
+        )
+        ok, reasons = ee.closes_issue(rec)
+        assert ok is True, f"fixture no longer produces a closing record: {reasons}"
+
+        # (a) the head binding must be PRESENT before it is compared.
+        no_sha = copy.deepcopy(rec)
+        assert "head_sha" in no_sha["pin"] and "commit" in no_sha["pin"], "shape changed"
+        del no_sha["pin"]["head_sha"]
+        del no_sha["pin"]["commit"]
+        ok_sha, why_sha = ee.closes_issue(no_sha)
+        assert ok_sha is False, "a record binding no head SHA was CERTIFIED"
+        assert "certificate-not-bound-to-review-head" in why_sha
+
+        # (b) an unrecorded tree state must not read as "did not move".
+        no_tree = copy.deepcopy(rec)
+        assert "tree_moved" in no_tree["runs"][0], "shape changed"
+        del no_tree["runs"][0]["tree_moved"]
+        ok_tree, why_tree = ee.closes_issue(no_tree)
+        assert ok_tree is False, "a record with no run tree state was CERTIFIED"
+        assert "pin-not-airtight" in why_tree
+
+    def test_a_record_missing_keys_or_carrying_nulls_returns_a_reason_never_a_traceback(self):
+        """#7084: the acceptance claim is "returns a reason, not a traceback".
+
+        A snapshot of `closes_issue`'s verification surface is untrusted JSON, so
+        a missing key, a null, or a non-dict where a dict is expected must produce
+        a named reason. Before this fix each shape below raised — KeyError from the
+        bare subscript, or TypeError from `ok &= None` once an accessor returned
+        None. `exit_code` is hardened on the same terms, because it is the
+        re-evaluation surface for a PERSISTED record.
+
+        Deliberately NOT claimed here: a record whose scalar fields are the wrong
+        TYPE. Wrong-TYPE fields are covered by
+        `test_a_truthy_non_bool_at_a_boolean_field_refuses_instead_of_certifying`
+        where that test reaches them, and by nothing otherwise.
+        """
+        shapes = [
+            {},
+            {"runs": None},
+            {"runs": [{}]},
+            {"runs": []},
+            {"pin": {}},
+            {"runs": [], "selection": {}, "pin": {}, "red": {}, "load": {}},
+            {"runs": [{"bucket": "green", "executed": 1}], "selection": {}, "pin": {}, "red": {}},
+            {"runs": "not-a-list", "selection": "not-a-dict", "pin": 7, "red": []},
+        ]
+        for shape in shapes:
+            ok, reasons = ee.closes_issue(shape)          # must not raise
+            assert ok is False, f"CERTIFIED a malformed record: {shape!r}"
+            assert reasons, f"refused without naming a reason: {shape!r}"
+            assert ee.exit_code(shape) in (1, 2, 3)       # must not raise either
+
+    def test_a_truthy_non_bool_at_a_boolean_field_refuses_instead_of_certifying(
+        self, monkeypatch, tmp_path
+    ):
+        """#7084: a boolean field must be a BOOL, and the fix must not have
+        introduced a fail-open while removing a crash.
+
+        `red.same_file_list` and `load.overlap` were handed to `conj` RAW, so a
+        truthy non-bool (`"x"`, `2.5`, `-1.0`) made `ok &= "x"` raise TypeError.
+        That refused the record — loudly, which is the right outcome, if a poor
+        mechanism. Wrapping them in `bool(...)` to stop `ok &= None` would have
+        converted that refusal into a CERTIFICATION, i.e. the fix for #7084 would
+        have silently certified a record the old code rejected. They are pinned
+        with `is True` instead.
+
+        Only the malformed side is asserted here; the valid side is covered by
+        `test_producer_can_emit_a_closing_record`.
+        """
+        import copy
+
+        files = list(ee.FAMILY_REPRODUCERS)
+        green = [self._run(files, 1, "green"), self._run(files, 2, "green")]
+        same = "a" * 40
+        rec = self._produce(
+            monkeypatch, tmp_path,
+            runs=green,
+            pairing_ref="pairref",
+            baseline=self._run(files, 1, "unexpected-divergence"),
+            record_role="closing",
+            checkout_head=same,
+            measured_commit=same,
+            surface="tortoise_search",
+            surface_assertion="tests/test_x.py::test_consumer_surface",
+        )
+        ok, reasons = ee.closes_issue(rec)
+        assert ok is True, f"fixture no longer produces a closing record: {reasons}"
+
+        def _with(root, path, value):
+            clone = copy.deepcopy(root)
+            node = clone
+            for key in path[:-1]:
+                node = node[key]
+            node[path[-1]] = value
+            return clone
+
+        # The fields this fixture's record actually evaluates. Its `no-rate-change`
+        # OR short-circuits on the rate_change branch, so the mutation-branch field
+        # `red.at_fixed_commit.mutation_red_returned` is NOT reachable from here.
+        for path, reason in (
+            (("pin", "worktree_clean"), "pin-not-airtight"),
+            (("red", "same_file_list"), "red-file-list-differs"),
+            (("load", "overlap"), "load-bands-do-not-overlap"),
+        ):
+            for bad in ("x", 2.5, -1.0):
+                ok_bad, why_bad = ee.closes_issue(_with(rec, path, bad))
+                assert ok_bad is False, (
+                    f"CERTIFIED {'.'.join(path)}={bad!r} — a truthy non-bool must refuse"
+                )
+                assert reason in why_bad, f"{reason} not named for {bad!r}: {why_bad}"
