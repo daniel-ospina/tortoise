@@ -83,6 +83,33 @@ def test_writer_persists_the_lane_and_absence_never_erases_it():
         "a lane-less re-capture erased the stored lane")
 
 
+def test_first_writer_wins_so_store_sync_cannot_relabel_a_hook_session():
+    """#3515 piece 7: the hook and the store-sync backstop ship the SAME session,
+    and the backstop ships AFTER. Storing the lane last-writer-wins would
+    RELABEL a live hook session 'store_sync', and the hook-liveness read
+    (piece 8) would then report a WORKING hook as NOT live. First writer wins —
+    the same effective rule harness uses via `_observed_capture_harness`."""
+    from tortoise.sdk import _write_session_and_turns
+
+    sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
+    proj = sdk._get_proj()
+    turns = [{"role": "user", "content": "hi"}]
+    _write_session_and_turns(proj, sdk, "3516-first-hook", turns,
+                             now="2026-10-04T00:00:00Z", harness="pi",
+                             capture_lane="hook")
+    assert _session_lane(sdk, "3516-first-hook") == "hook"
+    _write_session_and_turns(proj, sdk, "3516-first-hook", turns,
+                             now="2026-10-04T00:00:01Z", harness="pi",
+                             capture_lane="store_sync")
+    assert _session_lane(sdk, "3516-first-hook") == "hook", (
+        "a later store_sync capture RELABELLED a live hook session")
+    # negative control: a store-sync-ONLY session still reads store_sync.
+    _write_session_and_turns(proj, sdk, "3516-first-sync", turns,
+                             now="2026-10-04T00:00:02Z", harness="pi",
+                             capture_lane="store_sync")
+    assert _session_lane(sdk, "3516-first-sync") == "store_sync"
+
+
 def test_store_sync_lane_is_persisted_and_read_back(client):
     """CAPTURE HAPPENED WITH A LANE: a store-sync producer's POST is stored and
     the lane reads back off the :Session."""
@@ -118,6 +145,10 @@ def test_lane_marker_distinguishes_hook_from_store_sync(client):
 def test_absent_lane_is_not_fabricated_and_never_422s(client):
     """A lane-less producer (backfill/import, or a pre-#3516 hook) POSTs
     successfully and the stored lane is ABSENT — not a fabricated default."""
+    # Guard the guard: if the field were removed, the negative assertion below
+    # would pass VACUOUSLY (pydantic ignores an unknown key by default) — this
+    # reads the model surface, which goes red the moment it is reverted.
+    assert "capture_lane" in ha_mod.SessionRequest.model_fields
     sid = "3516-lane-absent"
     sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
     r = client.post("/v1/sessions", json={
@@ -198,4 +229,59 @@ def test_lane_less_entry_posts_without_the_key(tmp_path, monkeypatch):
                                        spool.PostOutcome(ok=True, status=200))[1],
                       only_session_id="3516-lane-less")
     assert posted
-    assert "capture_lane" not in posted[0]
+    assert "capture_lane" not in posted[0], (
+        "the lane-less entry fabricated a lane on the wire")
+    # Positive control: the SAME path DOES put the key on the wire when the
+    # entry has a lane — so the assertion above cannot pass on a revert.
+    spool.write_spool_entry(root, spool.Snapshot(
+        session_id="3516-lane-ful", turns=[{"role": "user", "content": "x"}],
+        source="t", machine_id="m", capture_lane="hook"))
+    posted2: list[dict] = []
+    spool.flush_spool(root, lambda p: (posted2.append(p),
+                                       spool.PostOutcome(ok=True, status=200))[1],
+                      only_session_id="3516-lane-ful")
+    assert posted2 and posted2[0].get("capture_lane") == "hook"
+
+
+def test_spool_lane_survives_a_lane_less_resnapshot(tmp_path, monkeypatch):
+    """The spool is the durability path for a capture whose FIRST POST failed.
+    A lane-less re-snapshot (import/backfill) must not ERASE the lane a hook
+    already claimed, or the eventual POST drops it and a live hook reads as not
+    confirmed (review F3)."""
+    import tortoise.capture_spool as spool
+
+    root = tmp_path / "spool"
+    monkeypatch.setattr(spool, "spool_dir", lambda: root)
+    sid = "3516-spool-carry"
+    spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid, turns=[{"role": "user", "content": "x"}],
+        source="t", machine_id="m", capture_lane="hook"))
+    assert spool.read_spool_meta(root, sid).get("capture_lane") == "hook"
+    spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid,
+        turns=[{"role": "user", "content": "x"},
+               {"role": "assistant", "content": "y"}],
+        source="t", machine_id="m"))  # lane-less, grew
+    assert spool.read_spool_meta(root, sid).get("capture_lane") == "hook", (
+        "a lane-less re-snapshot ERASED the stored lane")
+
+
+def test_spool_lane_upgrade_survives_identical_content_dedup(tmp_path, monkeypatch):
+    """A hook re-snapshot of byte-IDENTICAL turns must still stamp the lane: the
+    content-dedup early-return would otherwise swallow it and the entry would
+    stay lane-less forever (review F6)."""
+    import tortoise.capture_spool as spool
+
+    root = tmp_path / "spool"
+    monkeypatch.setattr(spool, "spool_dir", lambda: root)
+    sid = "3516-spool-upgrade"
+    turns = [{"role": "user", "content": "same"}]
+    spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid, turns=turns, source="t", machine_id="m"))  # lane-less
+    assert spool.read_spool_meta(root, sid).get("capture_lane") is None
+    res = spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid, turns=turns, source="t", machine_id="m",
+        capture_lane="hook"))
+    assert res["written"] is True, (
+        "the content-dedup early-return swallowed the lane upgrade")
+    assert spool.read_spool_meta(root, sid).get("capture_lane") == "hook"

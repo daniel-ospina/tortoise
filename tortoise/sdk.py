@@ -2192,12 +2192,15 @@ def _write_session_and_turns(
         merge_params["harness"] = harness
         session_record["harness"] = harness
     # #3516 §B: the producer lane ('hook' | 'store_sync'). Set-only-when-present
-    # — the SAME rule as harness: a lane-less re-capture (backfill/import, or a
-    # pre-#3516 producer) must never erase a lane the server already stored,
-    # because a stored lane is the only evidence the hook-liveness check can
-    # read. ``None`` is stored as ABSENT, never as a fabricated lane.
+    # AND first-writer-wins — the SAME effective rule as harness, whose plain
+    # SET is made first-writer-wins by its caller's resolution
+    # (`_observed_capture_harness`). The coalesce is load-bearing: the store-sync
+    # backstop ships the SAME session AFTER the hook (#3515 piece 7), so a plain
+    # SET would RELABEL a hook session to 'store_sync' and make the hook-liveness
+    # check report a WORKING hook as not-live. A lane-less re-capture
+    # (backfill/import, or a pre-#3516 producer) never erases either.
     if capture_lane:
-        merge_sets.append("s.capture_lane=$capture_lane")
+        merge_sets.append("s.capture_lane=coalesce(s.capture_lane, $capture_lane)")
         merge_params["capture_lane"] = capture_lane
         session_record["capture_lane"] = capture_lane
     if actor_user_id:

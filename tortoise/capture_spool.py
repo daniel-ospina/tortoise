@@ -736,8 +736,18 @@ def write_spool_entry(
     stored = read_spool_turns(root, snapshot.session_id) if prior else []
     new_digest = content_digest(snapshot.turns)
 
-    # Dedup: an identical snapshot is a no-op (no rewrite, no re-upload).
-    if prior and len(stored) == len(snapshot.turns) and prior.get("content_digest") == new_digest:
+    # Dedup: an identical snapshot is a no-op (no rewrite, no re-upload) —
+    # UNLESS it carries a lane the entry has never had. The lane is metadata,
+    # not content: a hook re-snapshot of byte-identical turns would otherwise
+    # early-return here and the entry would stay lane-less forever, so a
+    # genuinely live hook would read as "not confirmed" (#3516 §B review F6).
+    lane_upgrade = bool(snapshot.capture_lane) and not (prior or {}).get("capture_lane")
+    if (
+        prior
+        and len(stored) == len(snapshot.turns)
+        and prior.get("content_digest") == new_digest
+        and not lane_upgrade
+    ):
         return {"written": False, "bytes": _entry_bytes(root, snapshot.session_id), "discards": discards}
 
     extends = (
@@ -765,7 +775,6 @@ def write_spool_entry(
         "version": 1,
         "session_id": snapshot.session_id,
         "harness": snapshot.harness,
-        "capture_lane": snapshot.capture_lane,
         "source": snapshot.source,
         "machine_id": snapshot.machine_id,
         "created_at": (prior or {}).get("created_at", now),
@@ -783,6 +792,13 @@ def write_spool_entry(
         "attempts": _attempts(prior or {}),
         "next_attempt_at_ms": _carried_window(prior or {}),
     }
+    # Set-only-when-present, and carry a stored lane forward: a lane-less
+    # re-snapshot (backfill/import, or a pre-#3516 producer) must not ERASE the
+    # lane a hook already claimed — absence is stored as ABSENT, never as a
+    # fabricated or null lane (#3516 §B review F3). Same rule as `model` below.
+    _lane = snapshot.capture_lane or (prior or {}).get("capture_lane")
+    if _lane:
+        meta["capture_lane"] = _lane
     if snapshot.model:
         meta["model"] = snapshot.model
     # A re-snapshot whose content is byte-identical to what was already filed

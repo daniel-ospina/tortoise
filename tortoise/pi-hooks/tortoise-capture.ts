@@ -341,6 +341,13 @@ export function buildCapturePayload(args: {
     source: args.source,
     conversation: args.turns,
     machine_id: args.machineId,
+    // #3516 §B: this is the IN-PROCESS HOOK lane, so it claims 'hook'. The
+    // store-sync backstop posts the same session_id with 'store_sync'; the
+    // lane is the ONLY discriminator that makes the hook-liveness check
+    // falsifiable — without it a run whose hook is dead greens. The server
+    // stores it first-writer-wins, so a later store-sync drain cannot relabel
+    // a live hook session as not-live.
+    capture_lane: "hook",
   };
   if (args.model) payload.model = args.model;
   return payload;

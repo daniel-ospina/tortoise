@@ -262,6 +262,10 @@ test("buildCapturePayload carries harness + session_id (the idempotency key)", (
   // Session property is what the dashboard renders; dropping this line shipped
   // silently because no assertion read it (mutation: delete it — suite green).
   assert.equal(payload.model, "deepseek/deepseek-v4-flash");
+  // #3516 §B: the in-process hook claims its lane. Without this the server
+  // stores no lane and the hook-liveness check reports a WORKING hook as
+  // not-live (mutation: delete it — the assertion must go red).
+  assert.equal(payload.capture_lane, "hook");
 });
 
 test("sourceName is a basename only (never a full path)", () => {

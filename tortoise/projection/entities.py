@@ -1423,6 +1423,13 @@ class _EntityHandlers:
         if created_at is not None and _annotator_value_ok(created_at):
             sets.append("s.created_at=coalesce(s.created_at, $created_at)")
             params["created_at"] = created_at
+        # #3516 §B: the producer lane. Folded with coalesce (first writer wins)
+        # to MATCH the live capture write, which is also first-writer-wins — a
+        # plain SET here would make a journal-only replay diverge from live.
+        lane = ev.get("capture_lane")
+        if lane is not None and _annotator_value_ok(lane):
+            sets.append("s.capture_lane=coalesce(s.capture_lane, $v_capture_lane)")
+            params["v_capture_lane"] = lane
         for prop in ("turn_count", "harness", "entity_links_attempted",
                      "entity_links_created", "capture_ok",
                      "capture_extractor", "capture_redactions"):

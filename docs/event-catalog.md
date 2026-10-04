@@ -111,7 +111,7 @@ that the payload does not name:
 - **`SessionRecorded`** (#3664) — the `:Session` node's journal carrier (the
   live capture MERGE is a raw write). Four are emitted per capture, in this
   order: (1) the opening record — `{id, created_at, turn_count, is_episodic}`
-  plus `harness` / `actor_user_id` when set; (2) a trailing record written by
+  plus `harness` / `capture_lane` / `actor_user_id` when set; (2) a trailing record written by
   `sdk._write_capture_turns` right after its batched turn statement, carrying
   `capture_redactions` (#4911); (3) after the entity-linking pass, carrying
   `entity_links_attempted` / `entity_links_created`; (4) the final, trailing
@@ -120,7 +120,7 @@ that the payload does not name:
   Folded by
   `FalkorProjection._fold_session_recorded` as an idempotent MERGE keyed on
   `id` that always sets `is_episodic=true`, coalesce-preserving `created_at` /
-  `actor_user_id` (first writer wins) and taking `turn_count`, `harness`,
+  `actor_user_id` / `capture_lane` (first writer wins) and taking `turn_count`, `harness`,
   `capture_redactions`, `entity_links_attempted`, `entity_links_created`,
   `capture_ok` and
   `capture_extractor` from the latest record (last writer wins). Each later
