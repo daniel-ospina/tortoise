@@ -4200,6 +4200,63 @@ def _refuse_inverted_point_window(g, props: dict, *,
         validate_validity_window(effective_vf, effective_vt)
 
 
+#: Sentinel returned by ``_supersede_window_start_source`` when no READABLE
+#: stored start exists, so the writer's own clock (``now``) decides the end.
+_WRITER_CLOCK = object()
+
+
+def _supersede_window_start_source(stored_vf, successor_created_at):
+    """The stored successor window START ``_supersede_window_end`` will use, or
+    ``_WRITER_CLOCK`` when it falls through to the writer's ``now``.
+
+    THE ONE HOME for this predicate (#3985, #5360): the writer
+    (``_supersede_window_end``) and the hosted pre-write mirror
+    (``hosted_api._prevalidate_supersede_window``) BOTH resolve through it, so
+    the PREDICATE cannot drift. (The two sites still derive its INPUTS
+    independently — the mirror reads before the write, the writer after — a
+    separately-positioned read, the #7000 class.) The mirror's whole question —
+    "does the resolution land on the writer's clock?" — is ``is _WRITER_CLOCK``. A duplicated predicate
+    drifted once already (the mirror kept a truthiness test after #3985 made a
+    falsey stored start resolvable) and deferred a resolution the writer takes:
+    the successor was minted and the boundary then refused it, the #5363
+    orphan.
+
+    The predicate is PRESENT (not truthy) AND ORDERABLE:
+
+    * PRESENT, not truthy (#3985): the read path gates on ``vf is not None``
+      (``_covers``), so a numeric ``0`` is a REAL window start there — the
+      epoch-0 instant. A truthiness test skipped it and fell back to
+      ``successor_created_at``, which lands INSIDE the read path's
+      ``[epoch 0, inf)`` window -> the predecessor and the successor then both
+      cover -> a 2-candidate ``ambiguous`` answer. The ``is not None`` conjunct
+      is kept as the explicit PRESENCE marker: inert while
+      ``_created_sort_key(None)`` stays unorderable, load-bearing if it ever
+      changes.
+    * ORDERABLE (#5360): a stored start that is present but unorderable
+      ("not-a-date", "TBD") names no instant, and persisting it would leave the
+      window unbounded — ``_created_sort_key("not-a-date")`` is ``(1, text)``,
+      so the #4021 inversion guard's ``end >= start`` conjunct is trivially
+      satisfied while ``_covers`` cannot exclude the window either
+      (``(1, x) < (0, y)`` is False). Falling through to
+      ``successor_created_at`` is the SAME treatment a falsey-AND-UNORDERABLE
+      stored start gets, and matches this module's own policy for the identical
+      shape on the predecessor side ("SKIPPED, not refused"): ``create_point``
+      accepts any caller ``validFrom``, so refusing would make a legacy point
+      impossible to supersede until its window was repaired.
+
+    ``successor_created_at`` is itself a normal caller prop (``create_point``'s
+    comments record api.py, ingest.py and the source-inheritance path all pass
+    one), so an unparseable ``createdAt`` is reachable through the public API
+    and gets the same ORDERABLE test — it falls to ``now``, which is always ISO.
+    """
+    from .search_engine import _created_sort_key  # lazy — no cycle; deferred to keep sdk light
+    if stored_vf is not None and _created_sort_key(stored_vf)[0] == 0:
+        return stored_vf
+    if successor_created_at and _created_sort_key(successor_created_at)[0] == 0:
+        return successor_created_at
+    return _WRITER_CLOCK
+
+
 def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
                           stored_vf, successor_created_at, now):
     """Resolve the predecessor's window END and refuse an inverted window (#4021).
@@ -4212,18 +4269,38 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
     the predecessor became unreachable from every read surface with no error
     anywhere — a silent, permanent loss of the old fact.
 
-    Resolution order is unchanged and is the ONE home for it::
+    Resolution order is the same FOUR SOURCES in the same order — the
+    ``stored_vf`` predicate was WIDENED from truthy to presence (#3985) with
+    its orderability conjunct kept (#5360), so the step list is not unchanged::
 
         str(valid_from) [a STRING must name an instant; a numeric is exempt]
-                        → stored_vf (TRUTHY and ORDERABLE)
-                        → successor_created_at (ORDERABLE) → now
+                        -> stored_vf (PRESENT and ORDERABLE — #5360 + #3985)
+                        -> successor_created_at (TRUTHY and ORDERABLE - #5360)
+                        -> now
 
-    ``stored_vf`` is taken only when it is ORDERABLE (#5360), not merely
-    truthy: a present-but-unparseable stored start carries no instant, and
-    persisting it as the end leaves the window unbounded — see the branch
-    comment below.
+    ``stored_vf`` is taken when it is PRESENT and ORDERABLE. PRESENT, not
+    truthy: ``_covers`` gates on ``is not None``, so a numeric ``0`` is a real
+    window start there — the epoch-0 instant (#3985). ORDERABLE, because a
+    present-but-unparseable start carries no instant and persisting it would
+    leave the window unbounded (#5360). ``successor_created_at`` is taken only
+    when it is truthy and ORDERABLE (#5360); otherwise the resolver falls to
+    ``now``.
 
-    Returns the value AS PERSISTED.  The ``stored_vf`` branch stays RAW (no
+    #3985 changed exactly ONE case: a stored start that is FALSEY but
+    orderable (``0``). The old truthiness test skipped it and fell back to
+    ``successor_created_at``, which lands INSIDE the read path's
+    ``[epoch 0, ∞)`` window: the predecessor and the successor then both cover
+    ⇒ a 2-candidate ``ambiguous`` answer instead of the successor.
+
+    Presence is NOT enough on its own: ``is not None`` alone would also absorb
+    the falsey-but-UNPARSEABLE ``""``, stamping the predecessor's end ``""`` —
+    which ``_covers`` reads as an OPEN end, so the predecessor would cover
+    every later instant and the successor would never become the answer. The
+    orderability conjunct is what keeps that out; the residual is tracked as
+    #6140. A truthy-but-unparseable stored start (``"TBD"``) also falls
+    through, to ``successor_created_at``.
+
+    Returns the value AS PERSISTED.  The ``stored_vf`` branches stay RAW (no
     ``str()``): a numeric stored value must keep keying as ``(0, float)``
     (``_created_sort_key`` documents numeric epochs as supported and seeded
     corpora carry them) — passing it through ``str()`` makes it unparseable
@@ -4274,11 +4351,21 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
     ``successor_created_at`` rather than being persisted. A NUMERIC kwarg is
     deliberately exempt there.
 
+    #3985's residual, stated so the next reader does not "tidy" it: the
+    falsey-but-unparseable ``""`` start still falls through to
+    ``successor_created_at``, so write != read for it.  Making it agree means
+    deciding whether ``""`` should be an OPEN end or an absent one, which is
+    a semantic choice of the same CLASS as #3982's (that one ruled on
+    date-only parsing; this is a different question) and an owner decision —
+    not a predicate alignment.  It is tracked as **#6140**.  What #3985 does
+    fix is the case where the two paths CAN be made to agree without one: a
+    start both paths can order.
+
     The ``valid_from``-vs-successor agreement guard is NOT here: it is
     reachable only when a kwarg is passed, and it stays inline at its
     reviewed call site.
     """
-    from .search_engine import _created_sort_key  # lazy — import cycle
+    from .search_engine import _created_sort_key  # lazy — no cycle; deferred to keep sdk light
     if valid_from is not None and not (
         # #5360 — a STRING kwarg that names no instant must not be persisted as
         # the end either. A NUMERIC kwarg is deliberately EXEMPT from this and
@@ -4293,51 +4380,18 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
         and _created_sort_key(valid_from)[0] != 0
     ):
         succ_vf = str(valid_from)
-    elif stored_vf and _created_sort_key(stored_vf)[0] == 0:
-        # #5360 — ORDERABLE, not merely truthy. A stored start that is present
-        # but unorderable ("not-a-date", "TBD") names no instant, and this
-        # branch used to persist it RAW as the predecessor's window END. The
-        # resulting window has no orderable boundary:
-        # ``_created_sort_key("not-a-date")`` is ``(1, text)``, so the #4021
-        # inversion guard's ``end >= start`` conjunct is trivially satisfied
-        # (that guard skips an unorderable successor — see below), while
-        # ``_covers`` cannot exclude the window either, because
-        # ``(1, x) < (0, y)`` is False. The predecessor then appears to cover
-        # EVERY later instant — the exact overlap class #3980 exists to
-        # prevent, on the one path #3980 does not guard.
-        #
-        # Falling through to ``successor_created_at`` is the SAME treatment a
-        # FALSEY stored start already gets (#3985), and normalising rather
-        # than refusing is this function's own documented policy for the
-        # identical shape on the predecessor side, where a present-but-
-        # unparseable start is "SKIPPED, not refused" — because
-        # ``create_point`` accepts any caller ``validFrom``, so refusing would
-        # make a legacy/imported point impossible to supersede until its
-        # window was repaired, foreclosing the very write a caller would use
-        # to move past it. The successor side is the same shape: refuse there
-        # and such a point could never be superseded at all.
-        #
-        # The test for ORDERABILITY lives HERE and NOT as a normalisation of
-        # the resolved value below, because such a normalisation would reverse
-        # a deliberate, pinned decision: a numeric ``valid_from`` kwarg is
-        # persisted as ``str(valid_from)``, which keys ``(1, text)`` (no
-        # ``-``/``T``), and
+    else:
+        _resolved = _supersede_window_start_source(
+            stored_vf, successor_created_at)
+        # ORDERABILITY is decided IN ``_supersede_window_start_source``, and NOT
+        # as a normalisation of the resolved value below, because such a
+        # normalisation would reverse a deliberate, pinned decision: a numeric
+        # ``valid_from`` kwarg is persisted as ``str(valid_from)``, which keys
+        # ``(1, text)`` (no ``-``/``T``), and
         # ``test_window_end_numeric_kwarg_resolved_before_measure`` (B3) pins
         # that the guard measures that RESOLVED value — so the numeric case is
         # NOT an inversion.
-        succ_vf = stored_vf
-    elif successor_created_at and _created_sort_key(successor_created_at)[0] == 0:
-        # #5360, the THIRD route (found in the third review cycle): ``createdAt``
-        # is a normal CALLER prop — ``create_point``'s own comment records that
-        # api.py, ingest.py and the source-inheritance path all pass one, and
-        # ``_create_map`` lets a caller override the ``"$now"`` default — so an
-        # unparseable ``createdAt`` is reachable through the public API, and
-        # this fallback used to persist it RAW as the predecessor's END. Same
-        # unbounded window as the other two routes. Requiring orderability here
-        # sends it to ``now`` instead, which is always ISO.
-        succ_vf = successor_created_at
-    else:
-        succ_vf = now  # monotone fallback — never a gap
+        succ_vf = now if _resolved is _WRITER_CLOCK else _resolved
     if old_vfs:
         k_succ = _created_sort_key(succ_vf)
         # A NUMERIC KWARG can still resolve unparseable here and is
@@ -8622,19 +8676,18 @@ class TortoiseSDK:
         # `(1, <text>)` and IS covered by it, so `""` only hides the successor
         # from parseable queries, which land in the predecessor's window end
         # instead. The resolution
-        # branch below takes a stored start only when it is TRUTHY **and**
-        # ORDERABLE (#5360), so `0` falls through because it is falsey (it IS
-        # orderable, keying `(0, 0.0)`, which is why truthiness cannot be
-        # dropped from the description) and `""` falls through because it is
-        # falsey too. The guard
-        # follows
+        # branch below delegates to ``_supersede_window_start_source`` — PRESENT
+        # (not truthy) AND ORDERABLE: #3985 for the falsey-but-orderable `0`,
+        # #5360 for the truthy-but-unparseable stored start and the unparseable `createdAt`.
+        # The guard follows
         # `_covers`: with a kwarg present it refuses rather than allow an
         # unchecked window end against a start the read path treats as real
-        # (a `validFrom=0` successor's `[epoch0, ∞)` window overlaps any
+        # (a `validFrom=0` successor's `[epoch0, inf)` window overlaps any
         # predecessor end the kwarg writes at or after epoch 0, and gaps
-        # before it). The no-kwarg falsey case keeps
-        # the pre-existing truthiness fallback — its read/write divergence is
-        # real and tracked in #3985, not silently redefined here.
+        # before it). The no-kwarg FALSEY-AND-UNORDERABLE case (`""`) keeps the
+        # pre-existing fallback - its read/write divergence is real and tracked
+        # in #6140; #3985 fixed the falsey-but-ORDERABLE case (`0`), which the
+        # branch above now takes.
         vf_rows = proj.g.query(
             "MATCH (n:Point {id:$id}) RETURN n.validFrom, n.createdAt",
             params={"id": new_id},
