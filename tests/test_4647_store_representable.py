@@ -358,12 +358,18 @@ class TestFractionTakesTheInt64Path:
 
         assert _sanitize_props({"v": fractions.Fraction(3, 1)})["v"] == 3
 
-    def test_an_inexact_fraction_is_refused(self):
+    def test_a_non_integral_fraction_is_refused(self):
+        """Cycle-6 P2: the cycle-5 branch admitted ``Fraction(1, 2)`` because it
+        compared ``Fraction(float(value))`` — but the driver inlines
+        ``str(value)``, which is ``'1/2'``, and the store rejects that with an
+        opaque ``Invalid input '/'``. No non-integral ratio is storable."""
         import fractions
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError) as exc:
             _sanitize_props({"v": fractions.Fraction(1, 3)})
-        assert _sanitize_props({"v": fractions.Fraction(1, 2)})["v"] == fractions.Fraction(1, 2)
+        assert "'v'" in str(exc.value), str(exc.value)
+        with pytest.raises(ValueError):
+            _sanitize_props({"v": fractions.Fraction(1, 2)})
 
     def test_a_fraction_too_large_for_a_float_still_names_its_key(self):
         """Cycle-4 P2: the conversion itself raised ``OverflowError`` before the
@@ -518,3 +524,116 @@ class TestDirectWriterSitesAreGuarded:
                     "e1", "s1", "h", "t", False, None, "s.md", "p.md")
             assert "message_count" in str(exc.value), str(exc.value)
             assert not proj.return_value.g.query.called
+
+
+class TestNumpyTimedeltaIsRefusedNotRaised:
+    """Cycle-6 P2: ``np.timedelta64`` registers as ``numbers.Integral`` but
+    ``int()`` on it raises ``TypeError`` — a bare, key-less TypeError escaped
+    from a helper documented to raise ValueError. It must fail closed with the
+    key instead."""
+
+    def test_a_timedelta64_scalar_names_its_key(self):
+        np = pytest.importorskip("numpy")
+        with pytest.raises(ValueError) as exc:
+            _sanitize_props({"duration": np.timedelta64(5, "s")})
+        assert "duration" in str(exc.value), str(exc.value)
+        assert "TypeError" not in str(exc.value), str(exc.value)
+
+    def test_a_timedelta64_array_is_refused(self):
+        np = pytest.importorskip("numpy")
+        with pytest.raises(ValueError):
+            _sanitize_props({"v": np.array([np.timedelta64(5, "s")])})
+
+
+class TestDirectWriterSitesAreGuardedRoundTwo:
+    """Cycle-6 P1/P2: three more raw-Cypher writers bypass ``_sanitize_props``.
+    Each must refuse BEFORE any query runs."""
+
+    def _bare(self):
+        from tortoise.sdk import TortoiseSDK
+
+        return TortoiseSDK.__new__(TortoiseSDK)
+
+    def test_mitigate_operator_guards_strength(self):
+        from unittest import mock
+
+        from tortoise.sdk import TortoiseSDK
+
+        sdk = self._bare()
+        with mock.patch.object(
+            TortoiseSDK, "_get_proj", autospec=True
+        ) as proj, mock.patch.object(
+            TortoiseSDK, "get_point", autospec=True,
+            return_value={"is_operator": True, "baseline_set": True},
+        ):
+            proj.return_value.g.query.return_value.result_set = []
+            with pytest.raises(ValueError) as exc:
+                TortoiseSDK.mitigate_operator(
+                    sdk, "op1", "reason", strength=D("0.12345678901234567890"))
+            assert "strength" in str(exc.value), str(exc.value)
+            # the only query allowed is the idempotency read
+            assert proj.return_value.g.query.call_count == 1
+
+    def test_connect_issue_objects_guards_oid_and_issue_number(self):
+        from unittest import mock
+
+        from tortoise.sdk import TortoiseSDK
+
+        sdk = self._bare()
+        with mock.patch.object(TortoiseSDK, "_get_proj", autospec=True) as proj:
+            with pytest.raises(ValueError) as exc:
+                TortoiseSDK._connect_issue_objects(
+                    sdk, "e1", {"issues": [{"number": 2**70, "title": "t"}]})
+            assert "'oid'" in str(exc.value) or "issue_number" in str(exc.value), \
+                str(exc.value)
+            assert not proj.return_value.g.query.called
+
+    def test_create_direct_edge_guards_weight_before_coercion(self):
+        from unittest import mock
+
+        from tortoise.sdk import TortoiseSDK
+
+        sdk = self._bare()
+        with mock.patch.object(TortoiseSDK, "_get_proj", autospec=True) as proj:
+            with pytest.raises(ValueError) as exc:
+                TortoiseSDK.create_direct_edge(
+                    sdk, "IMPL", "a", "b", weight=D("0.12345678901234567890"))
+            assert "weight" in str(exc.value), str(exc.value)
+            assert not proj.return_value.g.query.called
+
+    def test_reliability_cache_guard(self):
+        from unittest import mock
+
+        from tortoise.sdk import TortoiseSDK
+
+        sdk = self._bare()
+        with mock.patch.object(
+            TortoiseSDK, "_resolve_source_url", autospec=True, return_value="u"
+        ), mock.patch.object(TortoiseSDK, "_get_proj", autospec=True) as proj:
+            with pytest.raises(ValueError) as exc:
+                TortoiseSDK._write_reliability_cache(
+                    sdk, "u", 2**70, {}, __import__("datetime").datetime.now())
+            assert "reliability" in str(exc.value), str(exc.value)
+            assert not proj.return_value.g.query.called
+
+    def test_ingest_corpus_document_created_branch_guards_frontmatter(self, tmp_path):
+        """The DEFAULT ingest branch (DocumentCreated) — also the MCP tool's
+        path — takes arbitrary-precision frontmatter ints straight to $props."""
+        import textwrap
+        from unittest import mock
+
+        from tortoise.sdk import TortoiseSDK
+
+        f = tmp_path / "doc.md"
+        f.write_text(textwrap.dedent(
+            "---\n"
+            "title: t\n"
+            "type: 12345678901234567890123\n"
+            "---\nbody\n"
+        ))
+        sdk = self._bare()
+        with mock.patch.object(TortoiseSDK, "_get_proj", autospec=True) as proj:
+            proj.return_value.g.query.return_value.result_set = []
+            with pytest.raises(ValueError) as exc:
+                TortoiseSDK.ingest_corpus(sdk, str(tmp_path), extract_metadata=False)
+            assert "document_kind" in str(exc.value), str(exc.value)

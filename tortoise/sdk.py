@@ -31,7 +31,6 @@ import decimal
 import hashlib
 import json as _json
 import logging
-import fractions
 import math
 import numbers
 import os
@@ -2164,7 +2163,19 @@ def _numeric_alteration_reason(
         # is documentation, not a load-bearing branch (cycle-2 P3).
         return None
     if isinstance(value, numbers.Integral):
-        ivalue = int(value)
+        # ``int()`` can raise on a numpy scalar that registers as Integral but
+        # has no integer conversion — ``np.timedelta64`` does exactly this
+        # (``TypeError: ... not 'datetime.timedelta'``), which escaped as a
+        # bare key-less TypeError from a helper documented to raise ValueError
+        # (code-review cycle 6, P2). Fail closed with the key instead.
+        try:
+            ivalue = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return (
+                f"{key!r}: {type(value).__name__} has no faithful INT64 "
+                "representation. Store it as a string if the full value is "
+                "needed."
+            )
         if not (_INT64_MIN <= ivalue <= _INT64_MAX):
             # ``bit_length`` rather than ``str(value)``: ``str`` on a very large
             # int raises the 4300-digit limit error BEFORE the message is built,
@@ -2212,39 +2223,26 @@ def _numeric_alteration_reason(
             )
         return None
     if isinstance(value, numbers.Rational):
-        # ``fractions.Fraction`` and friends: the same domain question as a
-        # Decimal — an integral value is a bare INT64 literal to the store
-        # (cycle-3 P2: ``Fraction(2**70)`` was admitted and then clamped).
+        # ``fractions.Fraction`` and friends. An INTEGRAL Fraction is a bare
+        # INT64 literal to the store (cycle-3 P2: ``Fraction(2**70)`` was
+        # admitted and then clamped). A NON-integral Fraction has no Cypher
+        # number literal at all — the driver inlines ``str(value)``, which for
+        # ``Fraction(1, 2)`` is ``'1/2'``, and the store rejects that with an
+        # opaque ``Invalid input '/'`` rather than holding it. The cycle-5
+        # branch compared ``Fraction(float(value))`` and so ADMITTED it, i.e.
+        # the predicate contradicted the transport (code-review cycle 6, P2).
+        # Model the serialization honestly and refuse every non-integral ratio.
+        # ``bit_length()`` (never ``{value}``) because rendering a huge
+        # numerator hits CPython's 4300-digit int->str limit and would make the
+        # MESSAGE itself raise (cycle-4 P2).
         if value.denominator == 1:
             return _numeric_alteration_reason(key, int(value), _depth)
-        try:
-            _fr = float(value)
-        except OverflowError:
-            # A magnitude beyond the float range. ``float()`` on a non-integral
-            # ``Fraction`` such as ``Fraction(10**400, 3)`` raises BEFORE the
-            # predicate can answer, so the caller got a bare ``OverflowError``
-            # instead of this guard's key-naming ``ValueError`` — the int axis
-            # already names its key at this same boundary (code-review cycle 4,
-            # P2). The store's double domain cannot hold the value either way, so
-            # route it to the same refusal. ``decimal.Decimal`` is NOT affected:
-            # ``float(Decimal('1e400'))`` returns ``inf`` rather than raising, and
-            # the ``isfinite`` arm below already refuses that.
-            _fr = math.inf
-        if not math.isfinite(_fr) or fractions.Fraction(_fr) != value:
-            # ``bit_length()`` rather than interpolating ``value``: ``str()`` on a
-            # ``Fraction`` renders its numerator, so ``Fraction(10**5000, 3)``
-            # hits CPython's 4300-digit int->str limit and the message raises
-            # BEFORE it can name the key — the same reason the integral branch
-            # uses ``bit_length``, and the sibling of the ``OverflowError``
-            # handled just above (code-review cycle 4, P2).
-            return (
-                f"{key!r}: a value with a {value.numerator.bit_length()}-bit "
-                f"numerator and a {value.denominator.bit_length()}-bit "
-                "denominator is not exactly representable as a double, so "
-                "FalkorDB would store a DIFFERENT number. Store it as a string "
-                "if the full precision is needed."
-            )
-        return None
+        return (
+            f"{key!r}: a ratio with a {value.numerator.bit_length()}-bit "
+            f"numerator and a {value.denominator.bit_length()}-bit denominator "
+            "has no Cypher number literal (``str()`` renders '1/2'), so the "
+            "store cannot hold it. Store it as a string (or a float)."
+        )
     if isinstance(value, numbers.Real):
         # Plain ``float`` and the numpy floating scalars (float16/32/64,
         # longdouble). The driver sends ``str(value)`` and Cypher parses that
@@ -2350,6 +2348,11 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
     ``initiated_by``, ``agent_id``) are STRIP-AND-IGNORE — never a 4xx,
     server owns the actor. Popped with a warning after the ``dict(props)``
     copy so the caller's dict is never mutated.
+
+    #4647: after the reserved-key strip, every remaining value is checked
+    against the store's numeric domain (INT64 int / double number) and a value
+    the store would silently alter is REJECTED with a key-naming ValueError —
+    this runs before the ``sourcePath``/``id`` rejects below.
     """
     props = dict(props)
     # #2600: reserved actor keys are STRIP-AND-IGNORE (never a 4xx — the
@@ -9642,6 +9645,12 @@ class TortoiseSDK:
         mid = ulid()
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+        # #4647: this new-mitigation CREATE writes `strength` straight into
+        # `mitigation_strength` (raw parameter), bypassing _sanitize_props —
+        # the idempotent branch above routes through update_point and IS
+        # guarded. EP weights read this value, so an inexact Decimal here
+        # silently corrupts the operator weight. Guard before the write.
+        _reject_unrepresentable_number("strength", strength)
         proj.g.query(
             "CREATE (m:Point {id:$id, content:$c, pointKind:'statement', "
             "mitigation_strength:$s, is_operator:false, createdAt:$now, updatedAt:$now})",
@@ -11916,6 +11925,12 @@ class TortoiseSDK:
                 f"create_direct_edge: direction must be 'bidirectional' or "
                 f"'unidirectional', got {direction!r}"
             )
+
+        # #4647: confidence/weight are narrowed through ``float()`` below, so an
+        # inexact Decimal or an out-of-domain int is silently altered here just
+        # as on the props surface. Guard the CALLER's values before the coercion.
+        _reject_unrepresentable_number("confidence", confidence)
+        _reject_unrepresentable_number("weight", weight)
 
         proj = self._get_proj()
         # Endpoint validation: exist, plain Points, non-terminal.
@@ -15732,8 +15747,6 @@ class TortoiseSDK:
                         # above — guard before the write.
                         for _k, _v in props.items():
                             _reject_unrepresentable_number(_k, _v)
-                        # #244: compute the session embedding (name + summary +
-                        # keywords + topics) and store as vecf32 — None when the
                         # model is unavailable (indexing never depends on it).
                         embedding = self._session_embedding(
                             props["name"], metadata.get("summary", ""),
@@ -15781,6 +15794,13 @@ class TortoiseSDK:
                     "classificationLevel": "internal",
                     "file_hash": file_hash,
                 }
+                # #4647: the DEFAULT ingest branch (and the path the MCP
+                # ``tortoise_ingest_corpus`` tool takes) hands $props straight
+                # to the store; frontmatter values are arbitrary-precision
+                # Python ints from ``yaml.safe_load``, so they must be guarded
+                # here too — the AgentSession branches above already are.
+                for _k, _v in props.items():
+                    _reject_unrepresentable_number(_k, _v)
 
                 if not exists_rows:
                     # New document
@@ -20579,7 +20599,9 @@ class TortoiseSDK:
             ``EventLog.append``'s ``json.dumps`` raise, and ``_emit_event``
             swallows that to a warning, silently losing the mutation; and a key
             the write did NOT apply is absent, so replay can never overwrite a
-            prop the write did not touch.
+            prop the write did not touch. (#4647: an INEXACT Decimal/numpy value
+            is refused by the write-surface guard before it can reach here, so
+            only exactly-representable members of that class occur.)
             ``None`` for a delete — the recorded shape carries *"nothing for a
             delete"* (#3299).
 
@@ -20824,7 +20846,9 @@ class TortoiseSDK:
                 #     it from the creation record;
                 #   * a coerced value (Decimal/numpy -> native) is journalled as
                 #     the stored primitive, so the append cannot silently drop
-                #     the record;
+                #     the record (#4647: only an exactly-representable
+                #     Decimal/numpy reaches this point — the write guard refuses
+                #     the rest);
                 #   * keys the write did NOT apply are absent, so replay never
                 #     overwrites the typed VectorF32 the upsert created
                 #     (`properties(n)` returns a vector as a plain list;
@@ -23470,6 +23494,11 @@ class TortoiseSDK:
                 # rule exists to prevent. Pin:
                 # tests/test_sdk_group3.py::TestConnectIssueObjectsAboutObject
                 # ::test_long_object_name_stored_verbatim_by_both_writers.
+                # #4647: oid/issue_number come from metadata (frontmatter /
+                # LLM output) as arbitrary-precision Python ints; this raw
+                # MERGE bypasses _sanitize_props, so guard before the write.
+                _reject_unrepresentable_number("oid", oid)
+                _reject_unrepresentable_number("issue_number", issue_number)
                 proj.g.query(
                     "MERGE (o:Object {id:$oid}) SET o.name=$name, o.objectKind=$okind, "
                     "o.repo=$repo, o.issue_number=$issue_number, o.url=$url",
@@ -24002,6 +24031,8 @@ class TortoiseSDK:
         url = self._resolve_source_url(url)
         import json as _json
         proj = self._get_proj()
+        # #4647: derived, but still a raw parameter to the store — guard it.
+        _reject_unrepresentable_number("reliability", reliability)
         proj.g.query(
             "MATCH (s:Source {url:$url}) "
             "SET s.reliability = $r, s.reliabilityComponents = $c, "
