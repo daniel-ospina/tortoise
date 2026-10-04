@@ -1159,16 +1159,20 @@ jobs:
       - name: Assert no redislite orphans (issue #1005 / epic #1647 E2E-7)
         # Runs even when pytest failed — the orphan check is independent of
         # test outcomes. The bound is NOT a hand-picked constant: the conftest
-        # session-end sweep reports what it did ({reaped, cleared, left, before})
+        # session-end sweep reports what it did
+        # ({reaped, exited, cleared, left, before})
         # and the gate binds to that report — reading the bound from `left` and
-        # asserting the sweep's own accounting identity `reaped + left >= before`
-        # (see .github/scripts/orphan-bound.sh, #4740). #2032: the docker lane is
+        # asserting the sweep's own accounting identity
+        # `reaped + exited + left >= before`
+        # (see .github/scripts/orphan-bound.sh, #4740; `exited` is #6984 — the
+        # servers the sweep OBSERVED to exit on their own, so a self-shutdown
+        # is not read as a broken sweep). #2032: the docker lane is
         # not always ~0 by construction — the embedded-file-contract atexit race
         # leaves strays on the full matrix
         # too (trunk run 34928488659 measured 7), and that residue is what the
         # sweep's own `left` now accounts for. What this gate reds: a leak
         # that appears AFTER the sweep (COUNT > left), an accounting-identity
-        # violation (reaped + left < before), a probe_failed report above a
+        # violation (reaped + exited + left < before), a probe_failed report above a
         # measured COUNT of zero (no `left` to bind to), an error or skipped
         # report, a no_embedded_servers report above a measured COUNT of zero,
         # and an unaccounted/unreadable report. A `cleared: false` report does
@@ -2029,6 +2033,40 @@ jobs:
           TMPD=$(python3 -c "import tempfile;print(tempfile.gettempdir())")
           find "$TMPD" -maxdepth 1 -type d -name "tmp*" -mmin +30 -exec rm -rf {} + 2>/dev/null || true
           echo "tempdir cleaned"
+      - name: Cache HF embedding model (BAAI/bge-small-en-v1.5)
+        # #4387: the carve-out job runs test_longmem_runner.py, which exercises
+        # the dense leg — so it provisions the embedder OFFLINE like the `test`,
+        # `test-slow` and `test-concurrency-falkor` jobs. Its BUDGET is the two
+        # long-running siblings' (`--attempts 5 --backoff 10` under a 10-minute
+        # cap), not `test`'s tighter `--attempts 3 --backoff 5` under 6 minutes.
+        # Without the cache AND the offline pair on the pytest step, an uncached
+        # load does not fail fast: with the suite-wide egress guard installed it
+        # RETRIES against huggingface.co rather than resolving DNS, and
+        # test_longmem_runner.py re-attempts the load per test — so the shard is
+        # killed by the 15m watchdog with 0 failures (rc=124) instead of
+        # reporting a failure the merge rail can read; and a load that merely
+        # FAILS skips the dense assertion and trips the skip-guard's
+        # embedder-unavailable family (#2573). Same v2 key as the other jobs,
+        # so the cache is shared and a warm restore is a no-op.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-embedding-cache-v2-${{ runner.os }}
+          restore-keys: |
+            hf-embedding-cache-v2-${{ runner.os }}-
+      - name: Embedding model REQUIRED (BAAI/bge-small-en-v1.5) — dense retrieval leg
+        # #4387: hoisted from the `test`/`test-slow`/`test-concurrency-falkor`
+        # jobs for the same reason as the cache above — the carve-out lane runs
+        # the dense leg, so the model must be PRESENT before the offline pytest
+        # step, otherwise those assertions skip and the skip-guard reds.
+        # The command and cap are the two long-running siblings' (see above).
+        # 10 minutes, matching the two `--attempts 5 --backoff 10` siblings
+        # (test-slow, test-concurrency-falkor): five attempts sleep 100s of
+        # backoff before the final probe, which does not fit the `test` job's
+        # tighter `--attempts 3 --backoff 5` budget under a 6-minute cap.
+        timeout-minutes: 10
+        run: |
+          python3 tools/embedder_provision.py --attempts 5 --backoff 10
       - name: Generate coverage manifest (carve-out — expected nodeids, epic #1647 Task 9)
         run: |
           FILES=""
@@ -2045,6 +2083,19 @@ jobs:
         # reaper, backup-restore) must run against FalkorDBLite. junitxml +
         # -r fEs (the manifest's observed-set source); pytest-rc for the
         # guard/orphan gates.
+        env:
+          # #4387: the same deterministic-embeddings pair the four
+          # embedder-provisioning pytest steps carry (see the `test` job's step
+          # env). This job was the one PROVISIONING lane WITHOUT it — the two
+          # other lanes that carry neither are track-b and d14, and neither
+          # provisions — and that gap is why its shards died on the 15m
+          # watchdog with 0 failures (rc=124): see this job's cache step above
+          # for the mechanism. The request/backoff/test counts observed on the
+          # pre-`pytest_configure` revision are deliberately NOT restated here or
+          # in the test that guards this step — multiple copies of a measured
+          # figure in the tree is what drifts.
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
         run: |
           set +e
           FILES=""

@@ -109,8 +109,8 @@ export function harnessAttributionForHarness(state, harness) {
 //               install signal arrived, not which harness sent it.
 //   'install-pending' — recording is on and the server has observed NOTHING for
 //               this harness: no probe, no receipt (#3782). The screen must
-//               render the honest pending/not-installed state — the SAME
-//               "not installed yet" string Settings prints for this state —
+//               render the honest nothing-observed state — the SAME
+//               "not yet observed" string Settings prints for this state —
 //               never a promise. Collapsing this into 'future' is the #3782
 //               defect: the success screen promised a capture the server never
 //               saw while the same deployment's Settings contradicted it.

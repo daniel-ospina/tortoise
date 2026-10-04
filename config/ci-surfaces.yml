@@ -78,6 +78,11 @@ surfaces:
   # the same reason: everything it pins (the canary loop, `_analytics_heartbeat_
   # block`, the /status block) lives in tortoise/hosted_api.py, which selects `api`.
   - test_analytics_sink_absence.py
+  # #4387: the egress guard's stubs are keyed to the analytics sink path and the
+  # JWKS path — both owned by tortoise/hosted_api.py / session_auth.py, which
+  # select `api`. Dual-registered with `core` (below) so a hosted_api.py-only
+  # change runs the file that pins how those paths are intercepted.
+  - test_hermetic_egress_guard.py
   - test_backups_v1_alias.py
   - test_battery_parity_executors.py
   - test_battery_parity_hash.py
@@ -438,6 +443,7 @@ surfaces:
   - test_oauth_token_fault.py  # #2863: /oauth/token fault-injection suite (fake CP + local HTTPServer seam)
   - test_oauth_redemption_state.py  # #3027: durable redemption state machine + reconciler (fake CP, no live DB)
   - test_3036_oauth_retention.py  # #3036: oauth_* retention/GC sweep (fake CP, no live DB)
+  - test_3026_oauth_boundaries.py  # #3026: the five OAuth endpoints' transient-failure boundary (fake CP via #2863's harness; asserts no bare 500 detail reaches a consumer)
   - test_pricing_tiers.py
   - test_probe_reset_inflight_4608.py  # #4608: a probe reset/rebuild must not close a handle an in-flight probe still queries (hosted_api + selfhost)
   - test_provisioning_edge_function.py
@@ -703,6 +709,10 @@ surfaces:
   # guards, dry-run is non-destructive, delete verifies 0 remain) and the suite's
   # write/read marker split. No DB, no network — default `core` surface is correct.
   - test_4220_blog_residue_cleanup.py
+  # #4647: DB-free hermetic unit guard over the numeric domain of
+  # `tortoise/sdk.py`'s write surface (INT64 int / double number). No DB, no
+  # network — `core` surface.
+  - test_4647_store_representable.py
   # #3561/#3359: per-capture graph-op accounting. DB-free units (verb
   # classification, the ContextVar plumbing) plus one embedded capture through
   # the offline MockModel extractor asserting a NON-ZERO, phase-attributed op
@@ -713,6 +723,7 @@ surfaces:
   - test_6131_operator_mutation_vocabulary.py
   - test_comove_dispatch_3627.py
   - test_heavy_import_guard.py
+  - test_hook_stderr_5919.py
   # #4971: the `(op_type, src, dst)` idempotency guard hoisted into
   # `commit_ops.apply_payload_operators` — the helper is core engine code, and
   # the re-key regression drives the real embedded capture commit, so this is
@@ -868,6 +879,7 @@ surfaces:
   - test_embed_metering.py   # #4488: the tally/middleware/hook + the registry-lane writer/reader (dual with `api`/`eval`)
   - test_embedder_provision.py
   - test_embedding_model_required.py   # #4861: the REQUIRED-embedder contract (core: embeddings.py + exceptions.py)
+  - test_hermetic_egress_guard.py  # #4387: pins the suite-wide egress guard installed by tests/conftest.py — a conftest change already forces `full`, so this registration exists to keep the guard's own file in the surface it protects
   - test_embedded_evidence.py
   - test_installer_preserves_foreign_skill_content.py
   - test_lifecycle_guards.py        # #2498: shared lifecycle guard — also runs on a tortoise/live.py-only change (terminal vocabulary pin)
@@ -923,6 +935,31 @@ surfaces:
   # never run.
   - test_source_fts.py
   - test_source_identity.py
+  # #5024 (T6): the `:Source` version transition must be JOURNALLED and
+  # REPEAT-SAFE — a changed `contentHash` writes a `SourceVersioned` record
+  # carrying `previousContentHash`, a no-op re-fetch writes NOTHING, and a
+  # `rebuild_all` reproduces the node field for field. `core` is the arm that
+  # owns the change: `tortoise/projection/entities.py` (where `_upsert_source`
+  # and `_fold_source_versioned` live) selects `core`, per
+  # `python3 tools/ci_selection.py --changed tortoise/projection/entities.py`.
+  # `tortoise/sdk.py` and `tortoise/projection/__init__.py` are SHARED_MODULES
+  # (already the full matrix), so 2 of the 3 changed modules need no separate
+  # arm. **Deliberately NOT dual-registered with `eval`** (contrast
+  # `test_journal_embedding_5004.py` above): this file pins no embedding path,
+  # so an `embeddings.py`-only PR cannot leave a guard here unrun. The
+  # fail-before/pass-after evidence: 12 of the original 21 fail on the unfixed
+  # base and all pass here; the 9 review-round-6 pins (P1-A competing write,
+  # the three P1-B writer-mirror cases, the P1-B hashless-retitle
+  # repeat-safety case, both P2-B cases, the P2-A torn tail, P2-C) each fail
+  # on the unfixed base `b7aef81b4` and pass here; the two review-round-2 pins
+  # (P2-2 the per-call pre-state, P3-1 the alias the writer adds) fail on the
+  # reviewed head `304e8601c` and pass here.
+  # ⛔ `test_a_falsy_non_none_hash_write_is_not_suppressed` is NOT one of the
+  # base-failing pins: it PASSES at `b7aef81b4` in both lanes. It is a FORWARD
+  # guard against a plausible future regression (a no-op predicate that
+  # blanket-skips `contentHash` as "hash-gated"), not fail-before evidence —
+  # do not count it among the pins that fail on the unfixed base.
+  - test_source_rematerialisation_5024.py
   # #5199: the derivation-link version anchor (`sourceVersion` on a derivation
   # `references` link) — `tortoise/projection/edges.py` + `tortoise/projection/entities.py`
   # select the `core` surface, so the guard for the anchor runs with the code it
@@ -1167,6 +1204,10 @@ surfaces:
   - test_derived_names.py
   - test_divergence_conformance.py
   - test_docs_fetcher.py
+  # #2386: the REQUIRED `docs` check's fail-closed changed-markdown detection
+  # (`ci.yml` → `docs` job) and its cli2/config contract. Repo-tooling change,
+  # so `core` (the fallback surface) is the home.
+  - test_docs_lint_gate.py
   - test_doctor.py
   - test_domain_loader_adapter.py
   - test_domain_validators.py
@@ -1236,6 +1277,18 @@ surfaces:
   - test_extractor_embed_coerce_5060.py  # #5060: execute_embed must not raise on a non-string name/content (whole-session payload loss)
   - test_extractor_v2.py
   - test_falkordb_compat.py
+  # #7076: the degraded-fallback snapshot's OWN guard. test_fallback_snapshot.py
+  # was registered only under `api`, while the module it guards
+  # (tortoise/fallback_snapshot.py) matches no named SOURCE_PATTERNS surface and
+  # therefore falls through to `core` (#2159 first-match) — so a
+  # fallback_snapshot.py-only change selected the `core` pool, its own guard was
+  # not in it, and the change shipped green with the file's own test never run
+  # (the #1349/#3332/#3616/#5545 silent-drop class — worse than no guard, because
+  # the green check reads as coverage). Dual-registered, KEEPING the `api` arm,
+  # for the same reason as test_from_uri_userinfo.py above and
+  # test_source_version_references_5199.py in `api`: the `core` arm is what makes
+  # the source's own diff run it.
+  - test_fallback_snapshot.py
   - test_file_indexer.py
   - test_flip_gate.py
   # #3845 part 2: the module-fork leak's producer + the fork-safe verbosity
@@ -1278,6 +1331,12 @@ surfaces:
   - test_hard_reject.py
   - test_helpers.py
   - test_hnsw_vector_index.py
+  # #6976: the id predicate must stay BOUND across a query expansion on
+  # FalkorDB 6.0.0, which DROPS it (returning foreign rows) when a later plain
+  # MATCH re-binds the variable. Hermetic: asserts the SHAPE of the emitted
+  # Cypher via a stub graph, no DB (the pinned engine binds the shape, so the
+  # defect is not behaviourally reproducible here).
+  - test_id_predicate_barrier_6976.py
   - test_idempotency.py
   - test_index_cli.py
   - test_index_directory.py
@@ -1391,6 +1450,17 @@ surfaces:
   - test_pack_state.py
   - test_pipeline_cli.py
   - test_postmerge_verdict.py
+  # #6139: guards `tools/pr_lead_time.py` — the PR lead-time decomposition.
+  # Registered under `core` so the suite is classified and runs when the TEST
+  # file itself changes. NOTE this entry does NOT protect a change to the TOOL:
+  # `tools/` sits in NON_PYTHON_PREFIXES, so a tools-only diff comes back as
+  # `changed=[]` and select() takes the docs-only early return — which bypasses
+  # the `if not matched: matched.add("core")` fallback entirely, so not one of
+  # these guards would run on the very change that can break them. The coverage
+  # comes instead from the TOOL_CARVEOUTS entry in tools/ci_selection.py (the
+  # #3261/#2718 pattern), which fails such a change closed to the FULL matrix.
+  # Pinned by test_ci_selection.test_pr_lead_time_tool_change_fails_closed_to_full.
+  - test_pr_lead_time.py
   - test_pre_migration_safety.py
   - test_probe_json_mode.py
   - test_probe_reset_inflight_4608.py  # #4608: a probe reset/rebuild must not close a handle an in-flight probe still queries (dual-registered with api)
@@ -1560,6 +1630,7 @@ surfaces:
   - test_wipe_server.py
   - test_wiring_phase01.py
   - test_workflow_secret_interpolation.py
+  - test_workflow_gh_token.py
   - test_write_path_unreachable_seam_5148.py
   - test_write_verb.py
   - test_write_consolidation.py
@@ -1835,6 +1906,7 @@ surfaces:
   - test_website_docs_consistency.py  # #3332: checks each public page against its canonical source (status vocab, EP mechanism, ontology link)
   sdk:
   - test_5359_unchecked_window_writers.py
+  - test_7108_operator_scope_predicate.py
   # #3849: the ask_lane-only selection leg. `tortoise/ask_lane.py` maps to
   # `sdk`, so these two must be dual-registered here or they stop running on
   # an ask_lane-only PR (a SOURCE_PATTERNS match REPLACES the core fallback).
@@ -2345,6 +2417,7 @@ durations:
   test_shared_state_imports.py: 0.1
   test_shared_state_monitoring.py: 0.1
   test_shared_state_recovery.py: 0.2
+  test_hermetic_egress_guard.py: 2.0  # #4387: no CI junit measurement exists for this file yet (a file that never ran cannot appear in an artifact), so it takes the #3400 flat 2.0s default. Refresh from the first post-merge run that includes it. Do NOT drop the row without re-deriving the 90% floor at that head (#4348 trap) — and NO figure is restated here on purpose; this row's comment asserted one for three review rounds and each base merge re-staled it.
   test_license_surface_consumer.py: 0.3
   test_installer_preserves_foreign_skill_content.py: 0.6
   test_backup_watcher_health.py: 0.2
@@ -2580,6 +2653,7 @@ durations:
   test_session_context.py: 2.3
   test_slack_connector.py: 2.6
   test_workflow_secret_interpolation.py: 0.6
+  test_workflow_gh_token.py: 2.0  # unmeasured — new in #3092; no source leg sampled it, so this carries the documented flat default for an unmeasured file (same as test_branch_reaper.py), not the sibling's 0.6
   test_action_endpoints_dual_auth.py: 2.7
   test_cross_lens_candidates.py: 3.2
   test_ep_operatorless.py: 1.9
@@ -3028,6 +3102,7 @@ durations:
   test_provenance_extractedfrom_3263.py: 2.2
   test_rebuild_turn_points_3947.py: 4.5
   test_source_version_extractedfrom_5038.py: 38.5  # #5256: 33 tests; docker lane (#1647 default) — not carve_out-registered; locally measured
+  test_source_rematerialisation_5024.py: 20.0  # #5024: 30 tests (21 + 9 review-round-6 pins), docker FalkorDB; locally measured (11-30s across runs, fleet-contention sensitive)
   test_restore_seq_3902.py: 0.8
   test_retention_promise.py: 2.7
   test_retired_tools.py: 0.2
@@ -3148,6 +3223,7 @@ durations:
   # the `# unmeasured` marker until a CI junit artifact carries a measured weight,
   # so it cannot mis-balance the LPT pack.
   test_queue_resweep.py: 2.0  # unmeasured
+  test_docs_lint_gate.py: 2.0  # unmeasured (#5476: registered under core)
 
 # ── ON-DEMAND LANE: runs the pipeline, does not gate the merge ────────────
 # A file here is excluded from EVERY pre-merge leg (fast halves, slow, carve-
