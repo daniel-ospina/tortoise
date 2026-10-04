@@ -716,12 +716,18 @@ def test_event_retention_loop_awaits_the_cost_refresh():
     second iteration.
 
     #5381 also routes every step through the shared ``_guarded_step`` guard, so
-    the refresh is now an ARGUMENT to an awaited guard rather than a bare
-    ``await _refresh_cost_allocation()``. The invariant is unchanged — awaited,
-    inside the periodic body, never an un-awaited call and never inside a
-    never-invoked nested def — so the assertions below are written against that
-    invariant rather than against the old direct-statement spelling, which
-    alone would have FORBIDDEN the per-step guard.
+    the refresh is an ARGUMENT to an awaited guard rather than a bare
+    ``await _refresh_cost_allocation()``. This asserts the invariant that
+    spelling encoded, and more: every top-level statement of the periodic body
+    is an awaited call, every one of them bar the sleep goes through
+    ``_guarded_step``, and all four known steps are guarded.
+
+    The DIRECT statements of the body are inspected, not ``ast.walk`` results,
+    so a step parked in a nested def that is never invoked does not count as
+    scheduled — one of the regressions the original spelling caught.
+    ``test_a_raising_step_cannot_kill_the_retention_loop`` below is the other
+    half: it EXECUTES the loop. This half is what no runtime test can see —
+    that no step sits outside the guard.
     """
     tree = ast.parse((REPO / "tortoise" / "hosted_api.py").read_text(encoding="utf-8"))
     loop = next(
@@ -734,21 +740,54 @@ def test_event_retention_loop_awaits_the_cost_refresh():
          if isinstance(n, ast.While) and isinstance(n.test, ast.Constant)
          and n.test.value is True), None)
     assert while_loop is not None, "_event_retention_loop has no `while True:`"
-    # It must still be INSIDE the loop body (an un-awaited or pre-loop call was
-    # the #4493 dead-hook regression), and it must be reached by an AWAIT.
-    names = {n.id for n in ast.walk(while_loop) if isinstance(n, ast.Name)}
-    assert "_refresh_cost_allocation" in names, (
-        "the cost refresh must be scheduled INSIDE the hourly while-loop body")
-    guarded = [
-        s for s in ast.walk(while_loop)
-        if isinstance(s, ast.Await)
-        and isinstance(s.value, ast.Call)
-        and isinstance(s.value.func, ast.Name)
-        and s.value.func.id == "_guarded_step"
-    ]
-    assert guarded, (
-        "every periodic step must be awaited THROUGH the `_guarded_step` "
-        "guard, so a step added later cannot kill the loop (#5381)")
+
+    def _step_target(call: ast.Call) -> str | None:
+        """The step a ``_guarded_step(label, step)`` call wraps.
+
+        Off-loop work is scheduled as
+        ``functools.partial(run_on_daemon_worker, fn, name=...)``, so the
+        guarded function is the partial's SECOND positional argument.
+        """
+        if len(call.args) < 2:
+            return None
+        step = call.args[1]
+        if isinstance(step, ast.Name):
+            return step.id
+        if (isinstance(step, ast.Call)
+                and isinstance(step.func, ast.Attribute)
+                and step.func.attr == "partial"
+                and len(step.args) >= 2
+                and isinstance(step.args[1], ast.Name)):
+            return step.args[1].id
+        return None
+
+    guarded: set[str] = set()
+    for stmt in while_loop.body:
+        # Every statement must be an AWAITED call: an un-awaited
+        # `_refresh_cost_allocation()` was the #4493 dead hook.
+        assert (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Await)
+                and isinstance(stmt.value.value, ast.Call)), (
+            "every statement of the periodic body must be an awaited call: "
+            + ast.unparse(stmt))
+        call = stmt.value.value
+        if isinstance(call.func, ast.Attribute) and call.func.attr == "sleep":
+            continue
+        assert (isinstance(call.func, ast.Name)
+                and call.func.id == "_guarded_step"), (
+            "this periodic step is NOT routed through the `_guarded_step` "
+            "guard, so a raise in it would end the loop (#5381): "
+            + ast.unparse(stmt))
+        target = _step_target(call)
+        assert target is not None, (
+            "cannot tell which step this guards: " + ast.unparse(call))
+        guarded.add(target)
+
+    expected = {"_sweep_events", "_purge_deleted_orgs",
+                "_sweep_oauth_retention", "_refresh_cost_allocation"}
+    assert guarded == expected, (
+        "the periodic body must guard exactly these steps (#5381); a step "
+        "outside the guard can kill the loop. missing="
+        f"{sorted(expected - guarded)} unexpected={sorted(guarded - expected)}")
 
 
 def test_a_raising_step_cannot_kill_the_retention_loop(monkeypatch, caplog):
