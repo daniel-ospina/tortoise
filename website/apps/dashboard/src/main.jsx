@@ -3086,7 +3086,10 @@ function claimIntentInFlight() {
 
   // #2004 (W8): the registry-backed builder catalog — fetched ONCE per
   // session from GET /v1/capabilities (tortoise/tool_registry.py
-  // CAPABILITY_CATALOG) when the build branch renders on step 2. The static
+  // CAPABILITY_CATALOG) when the build fork renders. #2763: that is the FORK
+  // CARD (wizardStep 1) — the SAME step that renders the catalog — not the
+  // connect step one later, where the payload had no reader (the gate named
+  // step 2, so the fetch could never reach the only call site). The static
   // placeholder in wizardFlow.js renders until the fetch resolves and stays
   // as the OFFLINE fallback (same names — never a blank catalog; the
   // registry-presented swap is SOURCE-only; the dashboard fires NO
@@ -3095,7 +3098,7 @@ function claimIntentInFlight() {
   const [wizardCatalog, setWizardCatalog] = React.useState(null)
   const catalogFetchedRef = React.useRef(false)
   React.useEffect(() => {
-    if (wizardStep !== 2) return
+    if (wizardStep !== 1) return
     const buildFork = (onboarding && onboarding.fork === 'build') || wizardForkChosen === 'build'
     if (!buildFork || catalogFetchedRef.current) return
     catalogFetchedRef.current = true
@@ -8011,11 +8014,13 @@ function claimIntentInFlight() {
                                     claims the install signal, not the harness;
                                     'install-pending' — recording on, nothing
                                     observed for this harness — prints the SAME
-                                    "not installed yet" string Settings renders
+                                    "not yet observed" string Settings renders
                                     for the identical state, instead of promising
                                     a capture the server never saw (#3782: live,
                                     probe AND receipt were null while Settings
-                                    said "not installed yet"). The capability
+                                    said the same — #5450: the wording states
+                                    what was OBSERVED, never a non-installation
+                                    conclusion drawn from its absence). The capability
                                     flag still decides whether ANY sentence may
                                     print ('none' for no install path, recording
                                     off, or NO HARNESS PICKER offered). #3575 was

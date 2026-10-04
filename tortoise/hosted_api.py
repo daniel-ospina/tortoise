@@ -132,12 +132,14 @@ from tortoise.sdk import (
     _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING,  # #3892: shared "stored, never extracted" disclosure
     _CAPTURE_NO_PROVIDER_MODE,  # #3892: keyless-capture receipt mode (reused, not reinvented)
     _CAPTURE_NO_PROVIDER_WARNING,  # #3892: the canonical "stored, not extracted" notice
+    _WRITER_CLOCK,  # #3985: the resolution's "falls to the writer's clock" sentinel
     REPORT_HOOK_URL,  # #2335 WI-2: the bug_report.yml report-hook target
     InvertedSupersedeWindow,  # #5363: the named #4021 refusal the commit path maps to 422
     TortoiseSDK,
     _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
     _capture_ep_target_ids,  # W5 Phase D (#2104): EP pass targets (minted + first-time folds)
     _capture_extraction_window,  # #6246: the shared extraction view (both lanes)
+    _capture_gate_window,  # #4897: strip synthetic markers before the empty/blank gate
     _capture_minted_ids,  # W5 Phase D (#2104): provenance-stamp gate (minted only)
     _capture_redaction_warning,  # #4911: the shared "a secret was redacted" receipt warning
     _capture_resp_error_split,  # #2335 WI-2: customer error contract (headline/diagnostics)
@@ -152,6 +154,7 @@ from tortoise.sdk import (
     _session_extraction_estimate,  # #1532 D4: v2-aware pre-write quota estimate
     _session_llm_transcript,  # P1 #1529: the shared empty/blank conversation gate
     _supersede_window_end,  # #5363: the ONE inverted-window predicate (pre-write check)
+    _supersede_window_start_source,  # #3985: the ONE home for the stored-start predicate
     _write_session_and_turns,  # #3551: the ONE :Session + turn store writer (shared with sdk.capture_session)
 )
 from tortoise.security import redact_error  # billing webhook + checkout error logging
@@ -11331,11 +11334,14 @@ class SessionRequest(BaseModel):
     conversation: list[dict] = Field(..., max_length=1000)
 
     # #1532 D1 (contract change, flagged): hosted previously rejected per-turn
-    # content > 5000 chars with 422 (Pydantic field_validator failure); it now
-    # accepts and truncates to the 5000-char stored window exactly like the SDK
-    # (the shared _capture_turn_window helper in the handler — both paths
-    # produce byte-identical stored turns). Non-str content is coerced in the
-    # handler turn loop (P1 #1529 D10) — no validator-side crash surface.
+    # content over the stored window with 422 (Pydantic field_validator
+    # failure); it now accepts and clips to the stored window exactly like the
+    # SDK (the shared _capture_turn_window helper in the handler — both paths
+    # produce byte-identical stored turns). The window is ONE number
+    # (sdk._CAPTURE_TURN_CAP) and the clip is ONE definition
+    # (sdk._clip_capture_turn_content, which marks a cut so it is never
+    # silent, #4897) — neither is restated here. Non-str content is coerced in
+    # the handler turn loop (P1 #1529 D10) — no validator-side crash surface.
     # W5 P2 (review round 1): session_id becomes the point-level provenance
     # source_session — an unbounded caller string would amplify onto every
     # extracted point (N x len).  Bounded at 256 (real ids are ULIDs / the
@@ -11780,8 +11786,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # #1532 D1: compute the shared stored-window conversation ONCE — the
     # empty/blank gate, the turn-store loop, and the extraction call all
     # consume the SAME window so the extractors can never see a phrase with no
-    # home in any stored turn (stored-source parity; >5000 turns are accepted
-    # and truncated here — the old 422 is removed, D1 contract change).
+    # home in any stored turn (stored-source parity; over-window turns are
+    # accepted and clipped here — the old 422 is removed, D1 contract change;
+    # the clip marks what it cut, #4897).
     windowed = _capture_turn_window(body.conversation)
     # #6246: the SHARED extraction view, built ONCE and handed to whichever
     # lane runs below, so a clipped turn with nothing to say contributes no
@@ -11797,7 +11804,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # empty conversation is never ok=True / a silent extracted:0).
     # 422 over 400: same family as the empty-conversation rejection; a
     # handler-level check because blankness is transcript-derived.
-    transcript, _est = _session_llm_transcript(windowed)
+    transcript, _est = _session_llm_transcript(_capture_gate_window(windowed))
     if not transcript.strip():
         raise HTTPException(
             status_code=422,
@@ -13577,7 +13584,6 @@ def _prevalidate_supersede_window(sdk, pr, *, now: str) -> None:
     Raises ``InvertedSupersedeWindow`` — the caller's ``[5]`` boundary maps it
     to the repo's validation posture (422).
     """
-    from .search_engine import _created_sort_key  # lazy — mirrors sdk.py
     proj = sdk._get_proj()
     old_rows = proj.g.query(
         "MATCH (n:Point {id:$id}) RETURN n.validFrom",
@@ -13610,9 +13616,13 @@ def _prevalidate_supersede_window(sdk, pr, *, now: str) -> None:
     # writer's clock, not a fact — so a resolution that would land on it is NOT
     # pre-validated; the boundary decides instead of this check guessing an
     # instant the writer has not chosen yet.
-    if not (stored_vf and _created_sort_key(stored_vf)[0] == 0) and not (
-            successor_created_at
-            and _created_sort_key(successor_created_at)[0] == 0):
+    # The resolution predicate is SHARED with the writer, not mirrored
+    # (#3985): a duplicated truthiness test drifted and deferred a resolution
+    # that is not the writer's `now`, minting the successor and losing the
+    # #5363 no-orphan guarantee. `_WRITER_CLOCK` is the writer's own answer to
+    # "nothing readable — `now` decides".
+    if _supersede_window_start_source(
+            stored_vf, successor_created_at) is _WRITER_CLOCK:
         return
     _supersede_window_end(
         old_id=pr.existing_id,
