@@ -21754,8 +21754,9 @@ def _capture_extract_enabled(org: dict, state: dict) -> bool:
     gate-resolution worker, and passes it in (#4258). A fallback here would
     defeat that one-read invariant AND run the read ON the event loop (#4625)
     — and the capture path always has the state, so it would be a latent
-    hazard with no caller. Same shape as ``_session_recording_allowed(org,
-    state)``, its sibling on this gate.
+    hazard with no caller. (Its sibling ``_session_recording_allowed`` may keep
+    an optional ``state`` because it is reached ONLY from inside the offload
+    worker; this helper is also reached ON the loop, so it may not.)
     """
     return bool(state.get("capture_extract", True))
 
@@ -21821,10 +21822,9 @@ async def _session_recording_allowed_off_loop(org: dict) -> tuple[bool, str, dic
     It returns the state as its THIRD element so ``_capture_session_impl`` can
     hand that one read to ``_capture_extract_enabled`` and to its completion
     disclosure (#4258) — the hot path reads the control plane ONCE per
-    capture, not twice. There is deliberately only ONE wrapper for this gate:
-    a second, 2-tuple alias of it was added and then left uncalled, which the
-    #4625 registry guard correctly reds (a wrapper nothing calls is not a
-    fix).
+    capture, not twice. This is the gate's ONLY off-loop wrapper: a wrapper
+    nothing calls is not a fix, so the #4625 registry guard pins every name in
+    ``_ONBOARDING_OFFLOAD_WRAPPERS`` to a real call site.
 
     Read-MOSTLY, not read-only (the #4625 work order §2): in the selfhost lane
     ``_get_onboarding_state`` auto-materializes defaults, but that write is
