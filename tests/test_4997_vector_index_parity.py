@@ -335,23 +335,6 @@ def test_raising_inventory_read_is_fail_open(caplog):
     assert "inventory read failed" in caplog.text
 
 
-def test_falkorprojection_init_survives_a_raising_inventory_read(monkeypatch):
-    """The attribute must stay absent-on-failure WITHOUT an exception escaping
-    `FalkorProjection.__init__`, which is the unguarded caller."""
-    original = FalkorProjection._record_vector_index_inventory
-
-    def _boom(self):
-        raise RuntimeError("hostile engine")
-
-    # The method itself is guarded, so this proves the CALL SITE is inside the
-    # method's own try/except contract only if the method swallows it; assert
-    # the guard is what makes it safe by hitting a raising graph instead.
-    proj = _bare(raise_on_indexes=True)
-    proj._record_vector_index_inventory()
-    assert proj._vector_indexed_labels is None
-    assert original is FalkorProjection._record_vector_index_inventory
-
-
 # (e) the gate — the predicate is `_ver is None or _ver[0] >= 4`, so None PASSES
 @pytest.mark.parametrize("ver,should_read", [
     (None, True),        # undetermined version is probed, not assumed old
@@ -626,7 +609,8 @@ def test_live_setup_twice_is_harmless_and_the_index_still_serves():
         vec[0] = 1.0
         proj.g.query(
             "MERGE (p:Point {id: $id}) "
-            "SET p.embedding = $vec, p.status = 'active', p.text = 'probe'",
+            "SET p.embedding = vecf32($vec), p.status = 'active', "
+            "p.text = 'probe'",
             params={"id": "test-4997-seed", "vec": vec},
         )
         try:
@@ -646,8 +630,8 @@ def test_live_setup_twice_is_harmless_and_the_index_still_serves():
             # serving" from "the seed row was filtered out". This assertion
             # isolates the property under test — the HNSW index still serves.
             hits = proj.g.query(
-                "CALL db.idx.vector.queryNodes('Point', 'embedding', $vec, 5) "
-                "YIELD node, score RETURN node.id",
+                "CALL db.idx.vector.queryNodes('Point', 'embedding', 5, "
+                "vecf32($vec)) YIELD node, score RETURN node.id",
                 params={"vec": vec},
             ).result_set
             assert hits, "the Point vector index must still serve after a re-setup"
