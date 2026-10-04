@@ -1205,7 +1205,14 @@ def test_pi_clean_install_names_the_static_comparison(hosted, setup):
         "the status must NOT move — a static comparison is not a pass")
     detail = installed["detail"]
     assert "matches the shipped seam" in detail
-    assert "tortoise-hook-version 1" in detail
+    # DERIVED from the shipped artifact, never re-typed — the same rule this
+    # file already applies to the artifact's basename (#4680 review).  A
+    # literal here is a second copy of the contract, and the marker's whole
+    # purpose is to be bumped on every behavioural edit to the seam, so the
+    # copy is guaranteed to be wrong exactly when the assertion matters.
+    shipped = hook_install.contract_version_for("pi")
+    assert shipped is not None, "the shipped Pi seam must declare a generation"
+    assert f"tortoise-hook-version {shipped}" in detail
     assert "not a pass" in detail
     # …and the ruling the detail is prefixed to must still be present.
     assert "tortoise-capture.test.ts" in detail
@@ -1233,9 +1240,17 @@ def test_pi_static_match_sentence_is_earned_not_unconditional(hosted, setup):
     home, _bindir, _fake = setup
     root = _install(home, "pi")
     extension = next(root.glob("*.ts"))
+    # The tamper target is DERIVED from the shipped generation for the same
+    # reason as the assertion above: a re-typed literal stops matching as soon
+    # as the seam is bumped, at which point this test silently tampers with
+    # nothing and its real claim (that the fabricated "matches the shipped
+    # seam" sentence is withheld) goes unpinned.
+    shipped = hook_install.contract_version_for("pi")
+    assert shipped is not None, "the shipped Pi seam must declare a generation"
     extension.write_text(
         extension.read_text().replace(
-            "// tortoise-hook-version: 1", "// tortoise-hook-version: 9999", 1),
+            f"// tortoise-hook-version: {shipped}",
+            "// tortoise-hook-version: 9999", 1),
         encoding="utf-8")
     report = _verify(hosted, home, "pi", root)
     installed = report["links"]["installed"]
