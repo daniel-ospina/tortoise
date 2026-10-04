@@ -177,10 +177,11 @@ grep -aoE "[0-9]+ passed[^=]* in [0-9.]+s" a.raw   # pytest session banner
 grep -aoE "pytest exit code: [0-9]+"        b.raw
 grep -ac  "stopping after"                  b.raw   # 0 ⇒ --maxfail not hit
 
-# 4. Duration-map weights per half (consumes ci_selection.py, never a second packer)
+# 4. Duration-map weights per SHARD (consumes ci_selection.py, never a second packer)
+#    #6135: push_legs returns N shards under `shards`, not half_a/half_b.
 python3 -c "import sys; sys.path.insert(0,'tools'); import ci_selection as c; \
 m=c.load_manifest(); l=c.push_legs(m); d=c._durations_map(m); \
-print({h: round(sum(c._duration_weight(d.get(f if f.endswith('.py') else f+'.py')) for f in l[h])/60, 2) for h in ('half_a','half_b')})"
+print({s['name']: round(sum(c._duration_weight(d.get(f if f.endswith('.py') else f+'.py')) for f in s['files'])/60, 2) for s in l['shards']})"
 ```
 
 ---
@@ -461,7 +462,7 @@ Task 4b also builds the missing **bridge** from the collector into that map (⟨
 | reading | value | source |
 | --- | --- | --- |
 | `shard_imbalance_minutes` (observed) | **15.43 min** | Jobs API wall time of the two heavy legs, run `36361388386` |
-| map half weights (`half_a` / `half_b`) | 29.25 / 29.26 min | `ci_selection.push_legs` over the committed map |
+| map shard weights (a / b, S=2-era) | 29.25 / 29.26 min | `ci_selection.push_legs` over the committed map (`legs["shards"]`; the `half_a`/`half_b` keys this row used to name were removed in #6135) |
 | map ratio | **1.000×** (tolerance 1.25×) | the map claims perfect balance |
 | observed ratio | **1.60×** | 41.08 / 25.65 |
 
@@ -469,10 +470,10 @@ Task 4b also builds the missing **bridge** from the collector into that map (⟨
 weights to 1.000×, while the observed wall time diverges 1.60×. This is the M2 verdict
 (`m2_verdict: weight_driven`) reproduced on a second run.
 
-**`check shard-balance --max 3` returns `2` (UNKNOWN), never a false 0.** S8 requires **both** heavy
-legs present and `success`; the leg conclusions in this run are `(failure, success)`, so the check
-exits 2 with `2: heavy leg 'a' absent or not success`. A red leg is a coverage failure, not a
-3-minute pass.
+**`check shard-balance --max 3` returns `2` (UNKNOWN), never a false 0.** S8 requires **every**
+configured shard leg present and `success`; the leg conclusions in this run are `(failure, success)`,
+so the check exits 2 with `2: shard leg 'a' absent or not success`. A red leg is a coverage failure,
+not a 3-minute pass.
 
 ### No both-green run exists in the scanned window
 
@@ -544,7 +545,7 @@ over-estimates that the 2026-09-22 sweep carried:
 
 **Resulting pack (scratch copy):** the map's aggregate pack weight falls from **58.51 min** to
 **54.34 min** (the phantom over-estimates removed), and the LPT re-pack stays inside the 1.25×
-tolerance (`half_a` 27.17 = `half_b` 27.17 min). That ~4.2-minute map reduction is the mechanism
+tolerance (the two S=2-era shards 27.17 = 27.17 min). That ~4.2-minute map reduction is the mechanism
 behind T-B's claimed ~4-minute cycle win — **conditional on the collector actually running**, which
 is why this bridge must not land before the collector fix (#5393) and why the committed map is only
 refreshed by the scheduled workflow, never by hand.

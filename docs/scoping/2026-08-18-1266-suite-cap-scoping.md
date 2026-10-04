@@ -15,7 +15,7 @@ ownedBy: platform
 - **Objective:** the `test` (a)/(b) matrix legs (required pre-merge gate) must fit the in-step watchdog with margin, so the #1266 failure mode (SIGKILL at the cap, exit 137, orphan assert fires, false red) can never re-appear even on loaded/degraded runners. The halves must also stop drifting from `config/ci-surfaces.yml` (the #1260/#1270 drift class, which #1262 only closed for the manifest, not for the halves).
 - **Indicators:**
   1. Both fast legs complete with `passed` counts on a clean runner in **≤ ~27 min** (well under the 45m watchdog → margin for runner variance).
-  2. `python3 tools/ci_selection.py --integrity` fails if: a `slow_files` entry leaks into a half, a half entry is unclassified in the manifest, a half entry is a dead file, or the halves tilt beyond ±3 files.
+  2. `uv run python tools/ci_selection.py --integrity` fails if: a `slow_files` entry leaks into a half, a half entry is unclassified in the manifest, a half entry is a dead file, or the halves tilt beyond ±3 files.
   3. New slow files land in `config/ci-surfaces.yml slow_files:` and flow to `test-slow` without touching the halves (already wired via the selector's `slow_files` output).
 - **Targets:** fast legs ≤ ~27 min each on clean runner (measured), halves count-balanced, integrity gate extended + unit-tested, CI run green (modulo pre-existing #647 failures).
 
@@ -46,7 +46,7 @@ ownedBy: platform
 - **S1 — Measure:** local timing pass on the fast halves (per-file, `--durations=0` + aggregation) → the authoritative per-file table for trim/rebalance. CI `--durations` tails as cross-check.
 - **S2 — Trim + rebalance:** edit the two `files:` blocks in `.github/workflows/python-ci.yml` and the `slow_files:` list in `config/ci-surfaces.yml` from the S1 table.
 - **S3 — Integrity:** add `workflow_halves` parsing + checks to `tools/ci_selection.py`, unit tests (leak / unclassified / dead / imbalance / warning), wire nothing new in CI (the `--integrity` step already runs unconditionally).
-- **S4 — Verify:** `uv run pytest tests/test_ci_selection.py tests/bench/test_roundrobin.py -q` + `python3 tools/ci_selection.py --integrity`; push; PR against main (not draft).
+- **S4 — Verify:** `uv run pytest tests/test_ci_selection.py tests/bench/test_roundrobin.py -q` + `uv run python tools/ci_selection.py --integrity`; push; PR against main (not draft).
 
 ## Complexity
 

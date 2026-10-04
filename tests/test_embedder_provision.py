@@ -46,12 +46,12 @@ from tools import embedder_provision as ep
 _ROOT = Path(__file__).resolve().parent.parent
 _SCRIPT = _ROOT / "tools" / "embedder_provision.py"
 _WORKFLOWS = _ROOT / ".github" / "workflows"
-# Every workflow that provisions the embedder. The same heredoc lived in four
+# Every workflow that provisions the embedder. The same heredoc lived in five
 # jobs across these two files; a fix that lands in only one of them is the drift
 # this list exists to catch.
 _PROVISIONING_WORKFLOWS = ("python-ci.yml", "post-merge-validation.yml")
-# The three python-ci jobs that provision the embedder for the dense leg.
-_EMBEDDER_JOBS = ("test", "test-slow", "test-concurrency-falkor")
+# The four python-ci jobs that provision the embedder for the dense leg.
+_EMBEDDER_JOBS = ("test", "test-slow", "test-concurrency-falkor", "test-carve-out")
 
 
 # ── Faithful fakes ───────────────────────────────────────────────────────
@@ -302,7 +302,7 @@ def test_python_ci_embedder_jobs_call_the_gate():
 
 
 def test_every_provisioning_workflow_routes_through_the_gate():
-    """The same heredoc lived in four jobs across two files. A workflow that
+    """The same heredoc lived in five jobs across two files. A workflow that
     still provisions inline is a silent-degrade site the fix missed."""
     for name in _PROVISIONING_WORKFLOWS:
         assert _all_gate_steps(name), f"{name}: no embedder gate step — did provisioning stay inline?"

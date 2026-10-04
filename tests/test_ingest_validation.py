@@ -130,9 +130,36 @@ class TestPhase1Phase2Parity:
                 "points": [{"ref": "sub-0123456789abcdef0123456789",
                             "kind": "statement", "content": "a"}],
             },
+            # #3586 review: rejection is CANONICAL-shape-scoped — a ref whose
+            # digest no minter emits cannot shadow a node, so it is ACCEPTED.
+            # Pinned by test_noncanonical_digest_ref_accepted below (this table
+            # is violations-only).
         }
         for name, bundle in cases.items():  # noqa: B007
             self._assert_both_phases(sdk, bundle)
+
+    def test_noncanonical_digest_ref_accepted(self, sdk):
+        """#3586 review: `_check_refs`'s hard rejection must use the CANONICAL
+        id shape, not the lenient about*-seam one.
+
+        A ref whose digest is not a shape any minter emits (`pr-<hex16>`;
+        `_entity_name_id` is ``label[:3]-<sha256[:26]>``) cannot shadow a
+        canonical node id, so rejecting it fails the WHOLE bundle closed on
+        input that used to ingest. Before, the lenient ``_is_entity_id``
+        (``[a-z]{2,8}-<16..64 hex>``, IGNORECASE) was shared with `_check_refs`,
+        so ``pr-0123456789abcdef`` became a `BundleValidationError` — a
+        backwards-incompatible ingest change. Uppercase digests are likewise
+        accepted (the canonical digest is lowercase, so there is nothing to
+        shadow)."""
+        bundle = {"points": [
+            {"ref": "pr-0123456789abcdef",
+             "kind": "statement", "content": "a"},
+            {"ref": "sub-0123456789ABCDEF0123456789",
+             "kind": "statement", "content": "b"},
+        ]}
+        assert sdk._validate_bundle(bundle) == []
+        res = sdk.ingest(bundle)
+        assert res["created"]["points"] == 2
 
     def test_nonstring_fields_classes(self, sdk):
         # REVIEW-FIX P1/P2 (cycle-26): non-string fields must be Phase-1
@@ -572,11 +599,13 @@ class TestTerminalStatusGuard:
         # rejects the direct edge in Phase 1 via the hash-less content+kind
         # fallback.
         #
-        # Scope note: this simulates the TERMINAL-STATUS state the guard
-        # matches (`status='superseded'`, `outdated` unset). A point superseded
-        # through `supersede_point` also carries `outdated=true` and is NOT
-        # matched by the guard's filter — a pre-existing gap orthogonal to
-        # #2971, tracked in #3142.
+        # Scope note: this simulates the TERMINAL-STATUS state (`status=
+        # 'superseded'`, `outdated` unset) — the shape a direct status write
+        # produces, and ONE of the two legs the guard matches. A point
+        # superseded through `supersede_point` carries `outdated=true` as
+        # well; that second leg was the pre-existing gap #3142 closed (the
+        # guard now matches it, via the shared `_terminal_expression`), so
+        # both legs are covered.
         terminal = sdk.create_point("statement", "same content",
                                     status="superseded")
         _query(sdk, "MATCH (n:Point {id:$id}) REMOVE n.content_hash",

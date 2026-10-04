@@ -123,6 +123,7 @@ The cause is not that we store a lot. **It is that we pay for the *total* rather
 ## 2. The mechanism — and the DECISION: we stay on hosted FalkorDB for now
 
 ### 2.0 ⭐ DECISION (owner, 2026-09-24): **stay on hosted FalkorDB; optimisation is deferred**
+>
 > *"for now we can keep FalkorDB hosted and then we figure out further optimisation"*
 
 **This is the governing decision for this document. Everything below is either (a) the reasoning behind it, or (b) the work that remains once there are users to justify it.** **This document is NOT a migration plan.** Earlier drafts read as *"leave FalkorDB for Postgres"*; that was never the decision, and the two-store model (§9.3) has always put raw files outside the graph — so the graph was never meant to hold the bulk.
@@ -137,6 +138,7 @@ The cause is not that we store a lot. **It is that we pay for the *total* rather
 | **what we do meanwhile** | **write less noise** (the extractor work) | capacity planning per machine |
 
 **Why the deferral costs us little (measured 2026-09-24, §16):**
+
 - **Retrieval latency is a non-issue at our size.** The published *"50–500ms budget"* is **vendor self-report**, not a requirement — and the one published measurement (Mem0) shows retrieval at **20–25% of total turn latency** against a turn of **p50 708ms / p95 1.44s**. At 140 MB the measured equivalent is **single-digit ms**.
 - **The engine is not the bottleneck; the rent is.** `$0.10/GB-hour` ≈ **$73/GB/month on PROVISIONED memory** — so the same code self-hosted on a modest machine costs a fraction, and *that* is the lever, not a rewrite.
 
@@ -153,16 +155,19 @@ The cause is not that we store a lot. **It is that we pay for the *total* rather
 | when it runs out | writes rejected, keys evicted, or **OOM kill** | pages to disk |
 
 **⛔ THE FINDING THAT MATTERS MOST, AND IT IS WHY THE COST IS WHAT IT IS: on hosted FalkorDB there is no such thing as an idle tenant.**
+
 - The **only** documented removal of a graph is `GRAPH.DELETE` — *permanent, no undo*. There is **no unload**.
 - Per-graph eviction **does exist** — `falkordbe.idle-threshold-ms` (LRU idle threshold), `falkordbe.evict-interval-ms`, `falkordbe.load-evict-budget`, reload via `GRAPH.LOAD` from `/data/offload`, and the offloads **survive restart** — but it is documented **only for FalkorDB Enterprise (self-managed)**. It is **not exposed on Cloud** as far as we can establish. **⇒ This is the single most valuable thing to confirm with the vendor, and it is the strongest argument for self-hosting.**
 
 **⇒ Two consequences, and both are load-bearing:**
+
 1. **There is no cheap-idle lever on our current stack.** Our ~140 MB user costs ~**$10/month active or idle**, and that memory is not reclaimable without deleting the graph.
 2. **The only levers are density and size** — pack many graphs onto one instance (≤75% of RAM) and write less noise. **Both are ours to pull without changing engines.**
 
 **⚠️ Also measured: `GRAPH.MEMORY USAGE` is a sampling-based ESTIMATE**, not an exact allocation — it takes `SAMPLES` (default 100, up to 10,000) and *"averages them to estimate"*. It does report a real breakdown (`indices_sz_mb`, `amortized_node_attributes_by_label_sz_mb`, `label_matrices_sz_mb`, …), and it does **not** include per-graph/Redis-key overhead. **So 140 MB is a good number, not an exact one — quote it as an estimate.**
 
 ### 2.2 Why this is still the right call to defer
+
 **The volume is ours to fix, and fixing it is worth more than the engine choice.** Our own measurement: **45 MB of indices + 51.6 MB of embeddings + 16 MB of text**, over a graph that is **62% junk entities and ~20,000 episodic turns**. **Writing less noise reduces the RAM footprint directly on the engine we already have** — no migration, no new ops, and it also improves search and connections (which is the actual goal).
 
 **⇒ The order is: fix the writing, then re-measure, then decide about the engine — with users in hand.**
@@ -172,6 +177,7 @@ The cause is not that we store a lot. **It is that we pay for the *total* rather
 **⇒ Therefore, on FalkorDB, cost IS proportional to total data — and there is no "unread data costs nothing" escape.** The escape only exists in the deferred Postgres option, and it is the main reason that option stays on the table.
 
 ### The class that dominates our bill — measured
+
 **In our graph the vector class — measured (§12.1b) — is ≈50 MB of stored vector properties plus a 45 MB index total (of which only part is the `Point` HNSW index) against a 141 MB graph, i.e. around half.** ⚠️ **An earlier draft said *"95.6 MB of the 140 MB (~68%)"* — that figure added the WHOLE index, which also contains every fulltext index we own. Read §12.1b for the measured breakdown; the honest answer is a range, not a point.**
 
 **⇒ So "what earns an embedding" is the single biggest lever on our memory bill, on the engine we have, today.** That is §12.2's subject, and it is not a Postgres question.
@@ -199,11 +205,14 @@ and §4.2:
 | **Artifacts** | large binary objects (recordings, attachments) | referenced by a `Source` | **object storage** |
 
 **⚠️ Naming caution — two different things are both called "event":**
+
 - **`Event`** — an *ontology* type: a domain occurrence ("what happened when"). Episodic layer.
 - **`GraphEvent`** — the graph's **own mutation journal** (34,020 exist). Not a domain occurrence.
 
 ### Why these four are truth — the test is PER-WRITE, not per-class
+
 **⚠️ CORRECTED 2026-09-23 after review. An earlier draft stated the test as *"append-only — rows are added, never updated"*. That test is FALSE for two of the four types it places in the truth layer**, and it put one class in both layers:
+
 - `Source.updatedAt` is **set ON MATCH** by `_upsert_source`; `Source.reliability` is a **derived** query-time cache written onto the node (`#398`, `sdk.py:20667` `_write_reliability_cache`).
 - `Document.updatedAt` is set, and `doc_status` transitions **`captured`→`extracted`**. **⚠️ `doc_status` is RETIRED under D10/v3.15 (Q3)** — liveness is a READ, not a stored field, and this flip is **one of only two unjournalled raw-`SET` writes in the system** (`ingest.py:262-266`). The statement above describes the code **as it stands today**, not the target.
 - **`Document ⊂ Object`** (`ONTOLOGY.md` §1/§4.4/§6 — `objectKind: document`), so the class appeared in **both** layers. **⚠️ SUPERSEDED (v3.15/D10): a document is a `:Source`, not an Object subclass** — see §9.3/§9.5. This bullet records the state that motivated the change.
@@ -221,7 +230,9 @@ The mechanical form of the same test: **is this write carried by the journal?** 
 | **role** | **the rebuild source** | **droppable and regenerable** |
 
 #### ✅ A derived cache on a truth row is NOT a violation — it is a named pattern
+
 **This dissolves the `Document` problem rather than deferring it.** A read-model cache written through to an aggregate row is the **standard CQRS pattern**, and it is safe under five rules:
+
 1. it is a **deterministic function of truth that is carried**;
 2. it is written in the **same transaction**;
 3. it is **declared** as a cache;
@@ -231,13 +242,17 @@ The mechanical form of the same test: **is this write carried by the journal?** 
 **`Source.reliability` already satisfies all five** — `ONTOLOGY.md` calls it a *"documented cache, never authoritative"* (`#398`). **`Document` needs placing explicitly**: its **existence is truth** (a connector discovered it); its `doc_status` is a **mutable field on a truth row** — and ⚠️ its `captured`→`extracted` flip is currently an **unjournalled raw Cypher write** (`ingest.py:262-266`, `hosted_api.py:10929`), which is a **journal-completeness gap**, filed alongside `#4240`.
 
 #### ⚠️ The truth set is larger than these four — and the invariant is false today
+
 **The truth set is these four types ∪ the preserved config classes** (`_config_classes()`; see `#4641`, `#4653`). So the invariant is:
-```
+
+```text
 derived  =  replay(journal)  ∪  preserved_config
 ```
+
 **⚠️ And `derived = replay(journal)` is FALSE in the code as it stands** (`#4641`, `#4653`). **Journal completeness is a PRECONDITION of this design, not an observation about it** — raw-Cypher writes (`#4240`, the `doc_status` flip above) bypass the journal today.
 
 #### ⛔ AND A RECORDED DECISION COLLIDES WITH THE NEXT PARAGRAPH — OPEN, NOT SILENTLY REWORDED
+
 `docs/durability-posture.md` (**`#2881`**) is a **recorded decision**: the journal *"is **never** the durability mechanism … authority stays in a store-managed artifact."* **The sentence *"the journal, which is truth"* below collides with it.** `#2826` A2 is explicitly *"the owner's to answer."*
 
 **⚠️ This is flagged, not resolved. Do not treat the wording below as settled.** The reconciliation is argued in the research brief — **the rule's premise is the JSONL written OUTSIDE the store transaction; a Postgres journal written INSIDE it removes the dual-write hazard the rule rests on** — but that argument needs the owner, routed as **reopening `#2826` A2 / `#2881`**.
@@ -245,11 +260,13 @@ derived  =  replay(journal)  ∪  preserved_config
 **⚠️ A second finding worth its own issue: the durability gate `tests/test_durability_posture.py` does NOT scan `docs/architecture/`** — so the colliding wording passes CI today.
 
 **Three storage consequences — and the third is what forces the split:**
+
 1. **Different write patterns need different physical design.** An append-only table has no update churn — cheap indexes, natural clustering by time, almost no vacuum pressure. A mutable table has all three. **Put them in one table and both get worse.**
 2. **The cache is per-table, and RAM is finite.** The layer that gets queried earns the cache; the layer that is written and archived does not. **Putting `Point`s and `Object`s in a cold append-only table would mean paying a disk read on every query.**
 3. **⛔ The derived layer must be physically DROPPABLE.** You have to be able to drop the derived tables and regenerate them **without touching the truth**. *That is only possible if they are separate tables* — and it is exactly what `#3895` needs.
 
 **Why `Subject` · `Object` · `Point` land on the mutable side — the mechanical reason:**
+
 - A `Point` is **revised** (`PointRevised`), **superseded**, **promoted**, **retracted**.
 - An `Object` is **mutated**, and its **status folded**.
 
@@ -263,9 +280,11 @@ derived  =  replay(journal)  ∪  preserved_config
 **⚠️ `Object.status` is the one case that mixes both, and it is worth seeing why it is harmless.** `status` is a **mechanical fold over lifecycle `Event`s — which are truth**. So the *field* is reproducible; the *row* is mutable. **A true fold landing in a mutable table is fine: it is simply recomputable in place.**
 
 ### The invariant — and it is a REQUIREMENT ON THE JOURNAL'S SCHEMA
-```
+
+```text
 derived tables  =  replay(the journal)      NOT  recompute(the sources)
 ```
+
 **Writes go to the truth first, then project.** The derived tables are always rebuildable and therefore never the only copy.
 
 **⚠️ This is a storage requirement, and it is precise: journal the NON-RECONSTRUCTIBLE DECISION OUTPUT** — and recompute only what is a **pure function of journalled material with no external dependency.**
@@ -286,7 +305,9 @@ The general rule (research, 2026-09-23):
 **⚠️ And bound the growth, which the cost model currently omits.** Naively, a Point revised N times produces **N full-payload events** and the journal grows without bound. The standard fix: **creation = full snapshot, mutation = DELTA** (the code already does this for entities — `EntityMutated.state`), plus snapshotting/compaction and retention tiering. **The journal is absent from §5/§6 entirely and must be added.**
 
 #### Divergence detection and repair — and the answer is simpler than the doc implies
+
 **The doc has no failure path. The research found the standard answer, in priority order:**
+
 1. **⭐ ONE ATOMIC WRITE** — journal + projection in the **same transaction** (or an outbox with an idempotent projection). **This is the whole answer to *"the append succeeds and the projection fails"*** — the hazard cannot arise. **The Postgres target's own bullet *"one transaction covers both"* IS this fix; the doc states the benefit without naming it as the divergence mechanism.**
 2. **A per-projection watermark** (`last_applied_seq`).
 3. **Replay-diff** — canonical JSON → hash → compare a `projection_hash_sha256` (ESAA §3.3/App D).
@@ -307,18 +328,21 @@ The general rule (research, 2026-09-23):
 **✅ And "derived" does NOT mean "not saved".** `Point`s, `Object`s and `Subject`s are **stored** — in the derived tables, durably, on disk. **They are also recorded in the journal, which is truth.** The distinction between the layers is **which one is authoritative — not which one is persisted.** ⚠️ **The bullet *"the derived layer becomes REBUILDABLE"* in *Why this shape* below must never be read as *"safe to lose"*** — if the derived tables ever existed without the journal, they would be the **only** copy, the invariant above would be false, and `#3895` would be **moved rather than fixed**.
 
 ### The three movements
+
 - **Write:** change → **truth** (append) → project → **derived layer**
 - **Read:** query → derived layer
 - **Recover:** derived layer ← fold(truth)
 
 ### Why this shape
+
 - **Disk pricing** for everything that is not actively queried (~580× per GB vs FalkorDB Cloud).
 - **The derived layer becomes REBUILDABLE** — which removes the current blocker: `#3895` (the restore re-drill that **failed**, 9,687/10,000 edges) exists because *the graph is currently the only durable record*. **⚠️ Rebuildable, not disposable — see the invariant above: the journal is what makes it rebuildable, and without the journal the derived layer is the only copy.**
 - **One transaction covers both** — no two-store sync.
 - It is consistent with the field: GraphRAG-class systems treat the graph as a **derived, rebuildable index**, not the record (Microsoft GraphRAG persists to Parquet; only Cognee and Neo4j physically separate the two).
 
 ### What is already in the code
-The store sits behind a **two-method Protocol** — `apply(event)` and `rebuild(log)` — and an **`InMemoryProjection`** already exists as a second implementation. The architecture is **event-sourced by construction**; the hosted write path simply does not journal (`#4240: no event_log_path`) — a **wiring gap, not a design gap**.
+
+The store sits behind a **two-method Protocol** — `apply(event)` and `rebuild(log)` — and an **`InMemoryProjection`** already exists as a second implementation. The architecture is **event-sourced by construction**; the hosted write path does not journal unless `TORTOISE_EVENT_LOG_BASE_DIR` is set (`#4240` wired the per-graph journal) — a **wiring gap, not a design gap**.
 
 ---
 
@@ -333,6 +357,7 @@ The store sits behind a **two-method Protocol** — `apply(event)` and `rebuild(
 **Consequence for the derived layer.** EP confidence, `Object.status`, and the operator graph are all **tenant-scoped values**, not global ones. Nothing in the derived layer may assume a single tenant.
 
 **⭐ AND ITS CONSEQUENCE FOR THE VECTOR INDEX — corrected 2026-09-23.** *"Rows scoped by tenant"* and *"the index is partitioned by tenant"* are **different physical designs**, and only the second bounds the working set:
+
 - **With RLS row-scoping alone there is ONE index over ALL tenants**, and the tenant predicate arrives as a **policy-injected value — not a plan-time constant** — so the planner cannot match it to a per-tenant partial index and **will not prune**. The working set stays *all* data.
 - **The mechanism that works is declarative partitioning (`PARTITION BY` tenant) + partition pruning**, or binding the tenant key as a **literal on the connection**. **Verify with `EXPLAIN`.** ⚠️ **No measurement covers this yet — §15's M1 measures FalkorDB query latency on the live graph, which is a different system and cannot answer a Postgres partition-pruning question.** *(A prior version of this line cited M2, which is the invoice.)*
 - ⚠️ **Bypass rule, to state explicitly:** RLS is bypassed by the **table owner** and by **`service_role`**. Say which role the app connects as, and why.
@@ -354,6 +379,7 @@ Supabase database storage **$0.125/GB/month**; object storage **$0.0213/GB/month
 ⚠️ Compute tier and max-database size are coupled (a 1 TB database wants the $410 tier) and **effective IOPS is the lower of compute-supported and disk-provisioned** — a small tier caps throughput regardless of disk purchased.
 
 ### 5.1 ⚠️ Corrections to earlier drafts of this section — and the two lines it omitted
+
 **⚠️ These figures were quoted elsewhere in an earlier draft at amounts up to ~14× higher, and that draft was never reconciled.** The numbers in the table above are the ones to use; **the ~$460 and ~$4,100-adjacent figures earlier in the doc came from a different, superseded arithmetic.**
 
 **Two real cost lines are MISSING from the table, and both grow with the design:**
@@ -388,11 +414,13 @@ Supabase database storage **$0.125/GB/month**; object storage **$0.0213/GB/month
 **Neither alone reaches 100×, and the two multiply.** A storage migration presented as a 100× fix would still be comparing one cost line to another.
 
 ### 6.1 ⚠️ The "~10×" is a target, not a measurement — and volume alone is a gameable metric
+
 The extraction document states no target and no aggregate reduction; the number lives outside it. `#4899` records *"Target (owner: 'should have taken 10× longer') ≈ 2.7 per session"* **and, in the same issue, *"Realistic Phase-1 yield ≈ 48% of quota … i.e. ~2×, not 10×"*.** And `#4917` §1.9 records that the ~10× comes from a **per-item conjunction** (`save ≥ 0.5` **AND** `altitude = architecture`) measured on **n = 28, 3 kept = 9.3×**.
 
 **⇒ Two consequences the storage plan depends on:**
+
 - **The mechanical half is ~2×, not 10×.** The headline depends entirely on the salience gate.
-- **⚠️ Volume with no recall floor is gameable** — you can always hit a node target by writing nothing. **Any reduction target must be paired with a retention floor** (a measured share of durable claims kept), or the metric is meaningless. ⚠️ **No retention-floor measurement exists yet (§15 lists none).**
+- **⚠️ Volume with no retention measurement is gameable** — you can always hit a node target by writing nothing. **A volume objective must be paired with the measurement of how many durable claims we kept**, or the metric is meaningless. ✅ **The measurement is now listed (§15 M6): the owner re-affirmed on 2026-09-30 that it is wanted (§14.1 O2, AMENDED) — only the GOAL is deferred.** ⚠️ **Its denominator is a measurement-design question and is not yet specified:** a sample drawn only from the *rejects* estimates how often the rule wrongly drops something, **not** how much was kept, so M6 states the denominator requirement rather than asserting a floor.
 
 ---
 
@@ -450,6 +478,7 @@ State values are personal/entity attribute values that must survive verbatim —
 ## 9. What belongs where — two confirmed placement rules
 
 ### 9.1 The narrative lives in **Supabase storage** — NOT in the graph (D1, amended 2026-09-23)
+
 The S1 narrative (the connected prose form of a captured session) is stored as **text in Supabase storage, referenced by the `Source` it was derived from** — **not** in the graph, **not** a `Document` node, **not** a `Point`.
 
 **Why:** the narrative is **derived from** the source, not a document a connector discovered. Making it a graph node would (a) double the anchor count for the same input, (b) create a second thing to keep in sync, and (c) **put prose into the RAM-resident layer** — paying memory prices forever for text that is only ever *read*, never *argued about*. **The narrative is a searchable string, not a belief**: it has no confidence, is not `NAND`-able, and takes part in no operator. It is stored because it is **cheap and useful for search**, and it is given no topological weight.
@@ -457,6 +486,7 @@ The S1 narrative (the connected prose form of a captured session) is stored as *
 ⚠️ **The same rule applies to raw turns** (owner, 2026-09-23): *"the narrative is not something we're suggesting to store in the graph (same as raw) but store in supabase."* **Both of the two non-entity tiers live outside the graph.** The graph keeps the `Source` — the provenance anchor — and the heavy text lives in Supabase behind it.
 
 ### 9.2 A GitHub PR is an **`Object` + an `Event` + a `Source`** — never a `Source`-per-event (D2, decided)
+
 - the **PR** → an **`Object`** (a `WorkItem`)
 - its **merge** (or close) → an **`Event`**
 - its **body/document** → a **`Source`**
@@ -467,13 +497,15 @@ The S1 narrative (the connected prose form of a captured session) is stored as *
 ---
 
 ### 9.3 ⭐ A document is a **SOURCE**, not a graph node — and this is what makes the entity layer an abstraction
+
 **Raised by the owner, 2026-09-24:** *"I am not suggesting making them first class, I am suggesting making them **sources** so our entity layer can be extracted from them and then we can say whether a document is outdated or not based on the entities it contains being high confidence or live (not superseded, not nanded until shown the doc is no longer reliable). That way our entity layer becomes a proper abstraction over documents, code, meeting transcripts (all sources) — that's the reasoning/knowledge layer."*
 
 **This is not a new idea bolted on — it is what `#3919` (D30) already decided, applied consistently:**
 > *"we have two storages: raw data and then the graph. **the graph indexes the files of raw data and extracts from them into our ontology.** Raw data can be hosted by us (hosted service), in the user machine, or in their own hosting preference."*
 
 **So the shape is:**
-```
+
+```text
 SOURCES  — documents · code files · meeting transcripts · conversations · pull requests
            all the SAME kind of thing: raw, outside the graph, cheap to store
                 ↓  extracted into
@@ -485,11 +517,13 @@ GRAPH    — entities · claims · operators · connections
 > **"Is this document still good?" is not a stored status field — it is a READ of what we extracted from it.** Reliable entities, nothing superseded, nothing under a NAND ⇒ the document is live. A NAND on its central claim ⇒ the document is undermined. **The document inherits its health from its contents.**
 
 **⇒ Two things fall out, and both are simplifications:**
+
 1. **No separate document lifecycle and no `doc_status` to keep in sync.** One mechanism serves every source, and it cannot drift from the graph it describes.
 2. **The reasoning layer stops being special-cased per source type.** "What do we believe about X" does not care whether X came from a spec, a repo file, or a call — **which is the whole point of calling it the knowledge layer.**
 
 **⚠️ What this corrects in an earlier draft.** The earlier version placed `:Document` in the truth layer and then discovered it also appeared in the derived layer:
 > *"**Document is an Object** (`objectKind: document`) … **Graph label is `:Document`** … the subclass relationship to Object is expressed via `objectKind: document`, **not via a second graph label. Do not create a separate `:Object` label for Documents.**"* (`ONTOLOGY.md` §4.4)
+
 - **My "Document sits in two graph layers" finding was WRONG** — it has **one** label; the subclass is conceptual, expressed as a property.
 - **But the owner's point is the real one:** being a *conceptual* subclass means it is **not a first-class entity** — so it cannot be reasoned about like an Object, and its **content** (raw text) is being stored **in the graph**, which is exactly what D30 says should not happen.
 
@@ -498,6 +532,7 @@ GRAPH    — entities · claims · operators · connections
 **✅ Cross-check against the evidence, and it agrees.** The field's nearest comparable (GAAMA, 2026) deliberately keeps a **raw episode layer verbatim** and a **separate distilled node layer** — and Microsoft's consolidation work reports **97.2% retention precision at 58% store reduction**. **Both are the same two-layer instinct: keep the raw as raw, keep the distilled as distilled, and never let one pretend to be the other.**
 
 ### 9.4 ⭐ The Source: **link first**, summary vector second — and identity is never a vector
+
 **Owner, 2026-09-24:** *"do we vectorise the source or link to it?"* — **both, they do different jobs, and the order between them is the decision.**
 
 **The pattern is established and it has a name: parent-document retrieval / small-to-big.** The field converges on: **embed the small units; keep the parent by ID with no vector; fetch it by walking up.** *(Databricks: "search children, return parents".)* **A parent is stored by ID *without* embedding** — because the reference is what the reader needs, not a second copy of the thing.
@@ -508,6 +543,7 @@ GRAPH    — entities · claims · operators · connections
 **So the link is not a citation nicety — it is the mechanism that gets the evidence to the model.** Every committed `Point`/`Object` must walk up to its `Source`. **A claim with no reachable source cannot be served as evidence.**
 
 **② A summary vector is a different capability — and it buys exactly one query class.**
+
 | query | mechanism |
 |---|---|
 | *"which unit mentions the discount?"* | the **claim** vectors ✅ already have them |
@@ -528,7 +564,9 @@ GRAPH    — entities · claims · operators · connections
 **D10 is one sentence. Landing it touches five things**, and each was run through the `AGENTS.md` decision protocol (**research first, contradiction test before anything else**). The outcome is instructive: **three of the five turned out to be *preservation*, not change.** The ruling is applied in `ONTOLOGY.md` **v3.15** (PR **#5022**) — this section is the *reasoning*; the ontology is the *contract*.
 
 #### Q1 — the `aboutDocument` link: **KEEP IT; move only its label.** ⛔ *This is the one hard block.*
+
 Two link types look like near-duplicates:
+
 - `aboutDocument` — *"this event is about document X"*
 - `aboutSource` — *"this point is about source Y"*
 
@@ -545,7 +583,7 @@ Two link types look like near-duplicates:
 
 **What *does* change:** its **target label** (`:Document` → `:Source`), and therefore its **replay key** — `coalesce(title, name)` → **`url`**, because a `:Source` resolves by `url`. **⚠️ These two must change in the same step**: a label retarget with an unchanged key resolves to nothing and **silently mis-points the rebuilt edge**. Equal in spirit: `aboutSource` **cannot** be made derivable by this change, and doing so is real design work — filed separately, not folded in.
 
-#### Q2 — the classification axes: **KEEP BOTH.** They answer different questions.
+#### Q2 — the classification axes: **KEEP BOTH.** They answer different questions
 
 | axis | question it answers | values | where declared |
 |---|---|---|---|
@@ -568,6 +606,7 @@ Two link types look like near-duplicates:
 | `objectKind` | **⛔ RETIRED** | a document is not an Object |
 
 #### Q4 — the `documents` cap: **KEEP IT, RE-POINT IT AT `:Source`.**
+
 **Why the cap exists at all:** the main node cap counts `(:Point …) OR (:Object) OR (:Subject)`. **A `:Document` is none of those, so documents were invisible to it** — `#1726`'s own recorded rationale is *"the points gate is vacuous for Documents."* The separate `documents` resource closed that hole and gates `/v1/index/docs`.
 
 **⚠️ The reason does not expire when a document becomes a source — a `:Source` is equally invisible to the main cap.** So:
@@ -579,20 +618,24 @@ Two link types look like near-duplicates:
 | **keep it, re-point at `:Source`** | ✅ **keeps both the protection and the reason** |
 
 #### Q5 — the replay key: **fold, change the key, migrate — and it is free today.**
+
 A `:Document` resolved by `coalesce(title, name)`; a `:Source` resolves by `url`. **A source keyed the old way would resolve to nothing and mis-point the rebuilt edge.**
 
 **⭐ The whole risk is currently worth $0, and this is the single most time-sensitive item in D10:**
+
 - **Production holds zero `:Document` nodes**, and
 - **the commit lane creator has never run** (`commit_count = 0`).
 
 **⇒ The migration is free NOW and stops being free the moment that lane first runs.** `#2489`'s own boundary is that **rebuild does NOT repair pre-existing graphs** (a `#2500`-style backfill is explicitly out of scope), so there is no later recovery path. **This is why Q5 cannot be deferred behind the commit lane.**
 
 #### ⚠️ And the finding that is NOT about D10 at all — **T6**
+
 While checking D10, a separate defect surfaced and it may be the more consequential one: **a `:Source` mutates in place.** `_upsert_source` bumps `updatedAt` / `version` / `contentHash` on an `ON MATCH` when the hash differs, and the hosted commit path flips a status — **neither is journalled.**
 
 **That breaks §3's central invariant** (`derived = replay(journal)`) **and it contradicts the field's own rule for evidence** — the append-only/write-once convergence is explicit that *"changes are handled by new correction events, not in-place edits"*, which is also what **our own D7** says. **A source that is re-fetched and found changed is a NEW VERSION, not an edit.**
 
 **Two options, and they are not mutually exclusive:**
+
 - **journal the re-materialisation** — makes §3's invariant true, at the cost of log growth unless re-checks are made repeat-safe; or
 - **declare the re-materialised fields *recomputable*** — which fits the field's model and must be applied **field by field, not by class**, or it becomes the same category error as Q2.
 
@@ -631,6 +674,37 @@ The owner raised the gap the D10 pass left open: *"shouldn't we have some form o
 
 **Both are reads; only one has an anchor.** That is the whole gap — and it is why the fix is a field on an edge, not a new subsystem.
 
+#### ⭐ Scope of the anchor — a **Point-level** guarantee, extended to derivation links (decided 2026-09-25)
+
+`sourceVersion` rides on `extractedFrom`, which is declared **`Point → Source`** (`ONTOLOGY.md` §3.3) — so **a class whose provenance does not pass through an `extractedFrom` link carries no recorded version read at all.** `:Object` and `:Event` are reached from a source through the `references` edge (`ONTOLOGY.md` §3.4), not through `extractedFrom`, so **neither was version-scoped before the decision below** (§4.6) — the derivation half is addressed there; the identity half deliberately is not.
+
+**This is not a storage omission, and for the derivation half it is now decided** (below). §12.1's cost question is *where* bytes live; this is *whether the anchor exists*. Two facts follow for sizing, recorded here so they are not discovered later:
+
+- **`references` carries more than one meaning, so the gap is not uniform.** Its declared target set is `Event | Object | Source` (§3.4), and the in-repo writers do not all mean the same thing by it:
+  - **identity / mention** — a connector `Object` materialized at the projection choke point (`projection/entities.py::_materialize_connector_source`; `connectors/github.py:305` mirrors it idempotently). The Source's `url` **is** the artifact. The Source still has versions, but the target is **not read from** them, so a recorded version here would be a non-answer rather than a stale mark.
+  - **derivation** — an `Event` (or `Document`) built from a source's content: the connector path materializes the link at the projection choke point (`projection/entities.py::_materialize_connector_source` → `link_source_to_event`), and the meeting path writes the same edge at `mining.py:621` (the choke point's gate excludes mining events — `ONTOLOGY.md` §3.4). Here the target **is** read from the content, and there was no recorded version to compare against — **this was the live half of the gap, addressed by the decision below**. ⚠️ **Addressed is not the same as closed on this path:** no connector writes `contentHash` and the choke point creates its Source with `contentHash = ''` (the Source MERGE in `projection/entities.py::_materialize_connector_source`), so the anchor is **absent** for connector-derived Events — honest (no version is known), but *"are these entities about the content we currently hold?"* stays unanswerable there until a connector records a content hash (tracked in `#5214`). The anchor does land on the capture path (`sha256(transcript)`) and on the repair path (`e.file_hash`).
+  - **referential containment** — `Source → Source` (the session→external `MERGE (a)-[:references]->(b)` in `hosted_api.py::_execute_commit_writes`). A provenance chain, not a derivation of either target's content.
+
+  ⇒ **The version question is a property of what the link means, not of the target's label.** That is why a blanket `sourceVersion` on every `references` edge is the wrong shape: it would stamp a non-answer on the identity and containment forms.
+
+- **So the cost of closing it falls on the derivation links only** — one hash each, since a version is three timestamps + a hash and never a content copy (D30). ⚠️ **No total is derivable without a census**: the derivation-link count is its own quantity (the connector paths mint per-`Event` links for events that may yield no Point), so it is **not** bounded by the `extractedFrom` count. **Not measured** — the shared instance refused reads when this was written.
+
+**DECIDED — option A (owner-approved 2026-09-25, `#5199`).** The anchor extends to the **derivation** `references` link only — targets `Event` or `Document` (`Document` retires with D10): an *optional* `sourceVersion`, set **at link time** from the version the link's own writer observes (the Source's current `contentHash`; see the repair-path caveat below) — so the **public SDK signature does not change** — and written **`ON CREATE` only**, because a re-link must not advance the recorded version or staleness would silently read as current. **Identity/mention** (`Object`) and **referential-containment** (`Source → Source`) links stay **property-free**, and a source with no content (`contentHash = ''`) anchors nothing. Currency stays a **read** (`r.sourceVersion` vs `s.contentHash`), never a stored status.
+
+⚠️ **The mechanism discriminates on the target's LABEL, which is a proxy for "derived"** — the only signal available without changing the SDK signature. It is applied by every **provenance** writer of a derivation edge: `link_source_to_entity` (the `id`-keyed paths), `link_source_to_event` (the `eventId`-keyed connector choke point and capture path) and `link_source_to_legacy_event` (the crash-repair backfill).
+
+⚠️ **Post-D10 the proxy is carried by the RETIRED label's alias, so it lives at the CALL SITE.** The `:Document` node label is gone (a document is a `:Source`), so the three document-derivation writers — `_upsert_document`, the session→document link in `_execute_commit_writes`, and the doc classifier of the ingest path — pass the retained deprecated alias `"Document"` as the *relation's* spelling, and `link_source_to_entity` reads it for this decision **before** remapping the identity onto `:Source`. The two facts are independent: the stored edge is `(Source)-[:references]->(Source)` either way, so switching a call site to `"Source"` keeps the edge, creates no conflict marker, and silently drops the anchor — which is exactly what the D10 merge did. These call sites are pinned by `tests/test_source_version_references_5199.py` (`test_document_derivation_through_the_production_path_anchors`, `test_index_path_document_link_records_the_version_read`, and the structural `test_document_call_sites_express_derivation_not_containment`); a definitional `grep` for the alias among them is the cheap check before any refactor of these writers.
+
+⚠️ **This is a pipeline guarantee, NOT a graph invariant** — do not read it as "every `references` edge is anchored". Two writers bypass it by design and neither is auto-anchored: the generic escape hatch `create_edge` (public SDK, exposed as the MCP tool `tortoise_create_edge`) takes any allowlisted predicate including `references`, and `graph-scripts/backfill_references.py` is a standalone ops script. A caller minting a derivation edge through either leaves the anchor **absent** unless it supplies the property itself. Tracked in `#5213`.
+
+⚠️ **On the repair path the anchor comes from the TARGET, not the Source.** `backfill_sources` sets the Source to the file's **current** hash while the legacy Event keeps the `file_hash` it was captured with (W2, "file edited since capture") — so anchoring `s.contentHash` there would report a **stale Event as current**, the precise failure this anchor exists to expose. `link_source_to_legacy_event` therefore anchors `e.file_hash` (equal to `s.contentHash` whenever the file has not changed), and anchors nothing when the Event records no hash.
+
+⚠️ **KNOWN LIMITATION — the anchor does not advance when the TARGET is rebuilt in place; the read is then STALE for a current entity.** `ON CREATE` is a property of the *edge* MERGE, so a derivation target rebuilt from a **newer** version through the **same node id** keeps its **original** `sourceVersion`. One real path: `index_directory` → `_index_directory_locked` → `_index_process_unit` (`sdk.py`), where `_index_source_merge` bumps the Source's `contentHash`, `_session_event_write` rewrites the existing Event **in place** under the same `eventId` (`event_id = f"session_{session_id}"` — content-independent), and then `link_source_to_entity` MERGEs an **already existing** edge, so `ON CREATE` does not fire. (`ingest_corpus` is **not** such a path — it rewrites Events but never writes a Source, so it never mints this edge.) The currency read then reports STALE although the target is current: the **converse** of the false-current guarded above, and the **conservative** direction the model prefers (`stale != wrong`, §4.6 — the entity is `stale`-flagged, never hidden or deleted). It is deliberate that this is not "fixed" by removing `ON CREATE`: that would re-open the false-current on a **source-only** re-poll (a connector re-poll that bumps the Source with no target rebuild), and the ON CREATE/ON MATCH pair cannot distinguish the two cases on its own. Recorded for the owner on `#5199`.
+
+⚠️ **No backfill, deliberately.** An edge written before this change carries no recorded version and is **not** retro-stamped: the version it was read from is **unknown**, and writing today's hash would fabricate a `current` read. Its honest state is **absent** — which is precisely why the anchor is a derived comparison and never a stored `status`.
+
+⚠️ **The model statement lives in `ONTOLOGY.md` §3.4 / §4.6** — this section records only what the anchor costs. The ontology wording is in owner review (`#5199`); until it lands, the code and this section are the operative record.
+
 #### ⭐ The policy — **B: mark stale now, supersede on re-inference** (owner)
 
 When a re-fetched source's content differs, the old version's entities are **marked stale immediately** and **superseded when re-inference produces their successors**.
@@ -668,14 +742,17 @@ The convergence is on **two layers with different jobs**: the **source** carries
 ---
 
 ## 10. Two storage patterns worth taking from Hindsight (2026-09-23)
+
 The extractor doc §§11–13 carry the full verification. Two findings are **storage** decisions:
 
 ### 10.1 Invalidate by RELOCATION, not by a flag
+
 Hindsight's `{"state":"invalidated"}` **"does not set a flag to be filtered later. It moves the row out of the active table into a separate archive … So recall needs no state predicate… no query pays for your cleanup."** Causal edges are **snapshotted onto the archived row** (so the archived fact still explains itself), and the move is **reversible**.
 
 **Why it matters here:** it means the **hot table stays the working set** — which is exactly the invariant this whole document rests on (*cost scales with the working set, not with total stored data*). A status column that every query must filter would put the entire history back in the hot path. **Proposed, composes with D7's appended-`Event` lifecycle: the append is the record; relocation is what keeps the read path small.**
 
 ### 10.2 Provenance ids are an ALLOWLIST, never an exclusion list
+
 Because `based_on` carries ids that address **different tables**, a "which of these went missing?" check written as an **exclusion** list **reports every one of them as missing.** Transferable bug — write the check as an allowlist.
 
 ---
@@ -687,6 +764,7 @@ Because `based_on` carries ids that address **different tables**, a "which of th
 **Ruling: the connection layer IS the product and it is KEPT.** The cost problem is solved by **where it is stored**, never by making it smaller or deriving it away.
 
 ### 11.1 Why the connections are not the cost problem — measured
+
 Our `aboutObject` links are **property-free**: a full-repo search found **zero** `aboutObject` edges carrying any property (`rg -n 'aboutObject \{'` → **0 matches / 1,842 files**). **An edge that is two ids and nothing else is the cheapest row a store can hold.**
 
 Estimated footprint in Postgres (two 16-byte ids, one B-tree index, standard tuple + index overhead):
@@ -701,9 +779,11 @@ Estimated footprint in Postgres (two 16-byte ids, one B-tree index, standard tup
 **⇒ The connection layer is ~2% of the 140 MB graph. It is not what costs money.**
 
 ### 11.2 What actually costs money, restated
+
 FalkorDB requires **the entire graph in RAM** — 140 MB × $73/GB/month ≈ **$10/month, whether or not any of it is read.** In Postgres the same bytes sit **on disk at $0.125/GB/month**, and RAM is only a cache. **The connections are cheap; RAM *residency* is expensive.** This is §2's mechanism applied to the exact thing the product is built on.
 
 ### 11.3 Two different things, both called "connections" — they must not be confused
+
 | | what it is | storage |
 |---|---|---|
 | **Entity links** (`aboutObject`, `aboutSubject`) | a bare *"this claim mentions this thing"* | **property-free rows** — the cheapest possible form |
@@ -712,12 +792,14 @@ FalkorDB requires **the entire graph in RAM** — 140 MB × $73/GB/month ≈ **$
 **The epistemic layer is already half-node, half-edge** — which is why it can carry a confidence and an argument while the entity links stay bare. **That split is what makes the whole layer affordable: the expensive, data-bearing part is small and deliberate; the numerous part is a bare id pair.**
 
 ### 11.4 The four rules that keep it cheap
+
 1. **Keep entity links property-free.** Attaching a weight or a date to every link turns 27,310 bare rows into 27,310 rows you must maintain *and index*. Weight and time belong on the **claim**, or on the **operator node** — not on the link.
 2. **Cap the fan-out** *(adopted 2026-09-23, §11.5)* — bounds how many edge pages one hub query pulls, which is the working-set bound this whole document rests on.
 3. **Index the direction you query**, not both by reflex — each direction is a second B-tree over every row.
 4. **Let cold edges stay cold.** An old session's links are never queried, so in Postgres they are never paged in — they cost disk and nothing else. ⚠️ **This is the property FalkorDB cannot give**, and it is the entire reason the migration matters for this layer.
 
 ### 11.5 Fan-out cap — ADOPTED (owner, 2026-09-23; decision protocol)
+
 **Nothing in our write path bounds how many links one entity accumulates.** Measured hubs: `config/ci-surfaces.yml` **123** · `durations map` **111** · `the admin-merge rail` **70** · `cal-trigger.py` **64** · `the plan doc` **63**. Hindsight caps at **200** and *also* carries a timeout that drops the whole expansion arm.
 
 **Adopted in principle; initial value 200** — the comparable's proven value, and **above our current worst hub (123), so it binds nothing today and cannot lose data now.** It is a **guard rail against the runaway case, not an optimisation**; refine with real usage (owner, 2026-09-23: *"we haven't launched yet … we optimise with users"*).
@@ -727,12 +809,14 @@ FalkorDB requires **the entire graph in RAM** — 140 MB × $73/GB/month ≈ **$
 ⚠️ **Note the twist:** deriving `aboutObject` is what *creates* the fan-out problem — a join on a 1,200-claim hub yields ~1,200 intermediate rows **per anchor**, which is exactly why Hindsight needed a cap *and* a signal-dropping timeout. **So the cap is both the guard rail for keeping the edge and the precondition for ever deriving it.**
 
 ### 11.6 What would make this layer expensive (so it is not discovered later)
+
 - **Unbounded fan-out** — a hub query pulling tens of thousands of edges into memory at once.
 - **Properties on the link** — see rule 1.
 - **A query shape that scans instead of seeks** — any lookup not on an indexed id.
 - **Putting the links in a store that requires RAM residency.**
 
 ### 11.7 The exception, unchanged
+
 **Entity links are not vectors.** Keep them separate and the RAM question never touches the connection layer.
 
 ⚠️ **The claim that used to sit here — *"Vectors are the one layer that does not follow the disk rule (§2) — `pgvector`'s HNSW index is RAM-resident"* — was STALE and is removed** (corrected 2026-09-24). It described a **Postgres** target (§12.1c is the open vector-home question), and it rested on the RAM-residency premise that **§2.1 and §12.1 correct**: `pgvector`'s HNSW index is an **ordinary page-cached index that need not fit in memory** (`docs/research/2026-09-23-vector-index-ram-model/`). **It is also not a description of FalkorDB**, where the engine is in-memory throughout (§2.1) and no layer "follows a disk rule" at all. **The conclusion of this section is unchanged either way: the connection layer is not a vector, so this question never reaches it.**
@@ -746,7 +830,9 @@ FalkorDB requires **the entire graph in RAM** — 140 MB × $73/GB/month ≈ **$
 **⚠️ The research reframes the question, and the reframe is the most important result in this document.**
 
 ### 12.1 The vector index — the class that dominates our bill
+
 **⚠️ THIS SECTION WAS REWRITTEN TWICE. Read the version below, not either earlier one.**
+
 - **Draft 1** claimed the index *"is RAM-mandatory and does not follow the disk rule"* and inferred an unprovisionable **7 TB** of RAM.
 - **Draft 2** corrected that to *"disk-backed and page-cached"* — **correct for pgvector, but written for a migration we have now decided NOT to do.**
 - ✅ **Draft 3 (this one) is about the engine we actually run.**
@@ -771,6 +857,7 @@ FalkorDB requires **the entire graph in RAM** — 140 MB × $73/GB/month ≈ **$
 **⇒ Therefore "what earns an embedding" is the largest lever on our bill that requires no engine change and no migration.** That is §12.2's subject. **And see §12.1d — the latency half of this debate is now ANSWERED with our own measurements, so the only open question is cost.**
 
 #### ⭐ A vector is POINTER-SIZED — 1.5 KB, whatever the text says
+
 **Owner, 2026-09-24:** *"I don't want the whole summary vectorised if that needs to go to FalkorDB as it would be too heavy in FalkorDB RAM. We decided to keep summaries in Supabase for that reason."*
 
 **The worry is right in spirit, and this is the shape in which it does not bite:**
@@ -787,11 +874,13 @@ FalkorDB requires **the entire graph in RAM** — 140 MB × $73/GB/month ≈ **$
 **⇒ But the instinct points at the real heavyweight, and it is not the summaries — it is the vectors we ALREADY store.** See §12.1b, and the open decision at §12.1c.
 
 #### What is NOT a problem: latency (measured 2026-09-24 — an earlier draft got this badly wrong)
+
 **An earlier draft claimed a cold index produced *"p90 96ms vs 24ms"* and that this was *"20–50× over every published latency budget, so it cannot be user-facing."* BOTH HALVES WERE WRONG.**
 
 **Wrong half 1 — the number was not ours.** 96ms/24ms came from **OpenSearch's designed disk mode** — a different engine. And the **"10,500ms cold"** figure came from a **billion-vector AWS deployment**. Our dataset is 140 MB. **Neither describes us.**
 
 **Wrong half 2 — the budget is not a requirement.** The *"50–500ms"* figures are **vendor self-report**:
+
 | claimed | actual origin |
 |---|---|
 | *"sub-200ms"* | **Zep's own marketing** — its own 155ms p95, **no methodology published** |
@@ -811,6 +900,7 @@ FalkorDB requires **the entire graph in RAM** — 140 MB × $73/GB/month ≈ **$
 ---
 
 ### 12.1a Why the "just partition per tenant" answer is NOT available to us
+
 **This correction matters even though we are not migrating — it removes the obvious escape hatch from a future analysis.**
 
 On Postgres, giving **each tenant its own index partition** looks like a pure win: the RAM working set becomes one tenant instead of all data. **It is not. A measured study (Postgres 17, pgvector) of one-index-per-tenant:**
@@ -830,10 +920,12 @@ On Postgres, giving **each tenant its own index partition** looks like a pure wi
 ⚠️ **`pgvectorscale`/DiskANN is NOT available on Supabase** (confirmed on the live extensions list; two open requests `#27474`, `#29095`). `pg_prewarm` **is** available. Recorded for the deferred option only.
 
 #### How big our index is, and why "fewer vectors" is the whole game
-```
+
+```text
 footprint_per_vector ≈ 1.1 × (4d + 8M) bytes
 d = 384, M = 16 → 1,830 B ≈ 1.79 KB/vector
 ```
+
 **Our measured reality: 33,580 embeddings ≈ 51.6 MB of vectors, plus a 45 MB index.** Today's graph carries **1.34 embeddings per node** (25,000 nodes, 33,580 embeddings) — so **each extra node costs roughly 1.34 vectors of RAM on top of its own**. That ratio, not the node count, is what drives the bill.
 
 **⚠️ The single most valuable number to stop guessing:** *(caveat kept from the earlier draft)* **`2.5M` has ONE meaning in this document: the product total.** An earlier draft used it a second time for *"one tenant"*, which read ~1,000× smaller — the silent scale flip behind the 7 TB scare. **That second usage is deleted, so any occurrence here means the product total.** If a second meaning is ever needed, give it its own symbol rather than reusing this one.
@@ -841,6 +933,7 @@ d = 384, M = 16 → 1,830 B ≈ 1.79 KB/vector
 ✅ **MEASURED 2026-09-24 — M1 is done. See §12.1d: 1.49 ms network floor, 2.74 ms indexed vector search, 1.55–1.75 ms traversals. Our retrieval layer is single-digit milliseconds and latency is not a constraint.**
 
 ### 12.1b ⚠️ CORRECTED ACCOUNTING — where the vectors actually sit (2026-09-24)
+
 **An earlier draft attributed the whole vector class to one index. Reading the code changed the picture; then the live graph changed it again. One finding is a filed defect.**
 
 **There is exactly ONE vector index in the entire graph — and it is on `Point`.**
@@ -876,6 +969,7 @@ d = 384, M = 16 → 1,830 B ≈ 1.79 KB/vector
 **★ Practical footnote for `:Source`:** `Source` carries **no** embedding and has **no** vector index — but it **already holds `summary`, `topics`, `url` and `contentHash`**. So §9.4's summary vector would be **indexing an existing field**, and §9.4 ③'s *"identity is URL + content hash"* is **already implemented**. *(Avg `Source.title` = 44 bytes — a Source's own text is tiny, so its 1.5 KB vector would be ~35× its title.)*
 
 ### 12.1c ⭐ OPEN DECISION — should the vector index live in FalkorDB at all?
+
 **Raised by the owner, 2026-09-24:** *"I don't want the whole summary vectorised if that needs to go to FalkorDB as it would be too heavy in FalkorDB RAM… or is the idea to vectorise summaries but keep them in supabase (is that even a thing?)"* — **yes, it is a thing, it is the standard pattern, and the question is bigger than summaries.**
 
 **Context.** FalkorDB charges for **provisioned RAM**, not for graph size, with **no eviction** — so every stored vector is permanent rent (§2.1). Measured (§12.1b): **≈50 MB of stored vector properties + `indices_sz_mb` 45 (of which only part is the `Point` HNSW index)**, against **141 MB total** — around half the graph. Everything else — every entity, claim, operator and edge — fits in the remainder. **A vector index needs RAM. A graph needs traversal. Those are two different requirements, and only one of them is expensive.**
@@ -889,6 +983,7 @@ d = 384, M = 16 → 1,830 B ≈ 1.79 KB/vector
 | **3** | vectors in a dedicated vector store | same as 2 | similar | **a third system to run** — and it buys nothing over option 2 at our size |
 
 **Analysis.**
+
 - **The latency cost is noise at our size.** pgvector resident is **8–18 ms at 1M vectors**; in-memory is **4–5 ms** — a **5–15 ms** difference against a model call measured in hundreds to thousands of ms. **The published variance between engines is smaller than the run-to-run variance of one engine** (§12.1).
 - **This is the pattern the architecture already uses.** Raw files and the narrative already live outside the graph, **reached by a reference** — D30 and §9.3. **Moving vectors out is the same move applied to one more asset class.** *"Vectorise it but keep it in Supabase"* is precisely that: the vector is the reference, and the text never moves.
 - ⭐ **AND FALKORDB CHARGES PER-LABEL, WHICH MAKES THIS STRONGER THAN A COST CHOICE (owner's synthesis, 2026-09-24).** HNSW indexes here are created **per `(label, property)`** — `createNodeIndex('Point', 'embedding', …)`, and `CALL db.indexes()` confirms `Point` is the only label with a vector field. **So *"index the objects"* means a SECOND HNSW index for `:Object` and a THIRD for `:Event` — three resident copies of index structures on the most expensive resource we have.** Postgres gives the same capability from **one** index over a shared table, filtered by kind (`WHERE kind = 'object'`), with partial indexes available later if a kind deserves isolation — **which is exactly the deliberate split Hindsight does per `fact_type`.** **⇒ Three resident HNSW indexes vs one filtered index.**
@@ -902,6 +997,7 @@ d = 384, M = 16 → 1,830 B ≈ 1.79 KB/vector
 **And it removes the source-vector objection entirely:** if the vectors live in Supabase, giving a Source a summary vector (§9.4) costs **zero FalkorDB RAM** — it is a row in a table we are already paying for.
 
 ### 12.1d ⭐ M1 — OUR OWN LATENCY, MEASURED (2026-09-24)
+
 **This section existed for a day as *"we have never measured our own query latency"*. We have now. It ends the latency half of the debate.**
 
 Against the live production graph, warm, 6–12 samples per class (`/tmp/lat.py`, executed on the app itself):
@@ -922,11 +1018,13 @@ Against the live production graph, warm, 6–12 samples per class (`/tmp/lat.py`
 **⭐⭐ THE ANSWER: our entire retrieval layer runs in single-digit milliseconds — and the *whole vector leg* is ~3–5 ms against a 1.49 ms network floor.**
 
 **Three things this settles:**
+
 1. **Latency is not a constraint, and never was** (§12.1). It is **~1.5–5 ms** against a model call in the hundreds-to-thousands. **A cross-store hop to Supabase would land around ~10–15 ms — still noise.** The 5–15 ms the research predicted is confirmed as irrelevant at our scale — **so the ONLY open question about where the vectors live is cost** (§12.1c).
 2. **The index earns very little today and more later.** An HNSW lookup is **2.74 ms**; a **full linear scan of all 7,859 Object vectors is 9.26 ms** — **so the index is worth ~6 ms at our size.** At month-6 (~300–500k vectors) a scan would be ~300–500 ms, **so it earns its keep later, not now** — and that is precisely the case for keeping the index but not renting FalkorDB RAM for it (§12.1c).
 3. **⭐ Traversal is cheap enough to be the default.** *"How does this Object relate to events, subjects and points — the why, who, when"* is answered by **1.55–2.35 ms walks** — **and needs no vector at all** (§12.2c).
 
 ### 12.2 ⇒ The lever is "what gets an embedding"
+
 **Every other layer can be small; the vector class is the one we pay RAM rent on** — **≈50 MB of stored vector properties plus a 45 MB index total (of which only part is the `Point` HNSW index), against 141 MB** (§12.1b). Every vector is a fixed cost of the account, **active or idle** (parent §2.1), whether or not it is ever matched.
 
 **⚠️ Correction from the owner's counterexample (2026-09-23).** An earlier draft of this section proposed leaning on **class** ("don't embed Events / Objects / mechanical statements"). **The owner falsified it:** *"Events — when deterministically named? that's often but not always the case, a meeting has an authoritative title from the calendar sometimes but not always."* **A class is not a valid unit** — some Events carry meaning (`"Q3 planning sync with the infra team"`) and some are pure identifiers (`merged PR #465`). **The valid unit is the TEXT:**
@@ -942,12 +1040,14 @@ Against the live production graph, warm, 6–12 samples per class (`/tmp/lat.py`
 | `Object{"the plan doc"}` | no — a name; matched by **lookup** | **no** |
 
 **Consequences of the text rule, and each one matters:**
+
 - **No class is wholly excluded — including `Point`s.** A Point whose content is *"see PR #465"* is as identifier-only as an Event.
 - **`Event`s and `Object`s are treated identically** — the class carries no information.
 - **The gate is at the EMBEDDING step, and it is a NEW gate.** ⚠️ It is **not** `#4899`'s `DISCARD`: `DISCARD` decides whether the **row exists**; this decides whether the row **keeps a vector**. **A row can be worth KEEPING but not worth EMBEDDING** — a merge `Event` is exactly that (it is needed for the lifecycle fold and the audit, and its text is identifiers).
 - ⚠️ **`classify_consolidation` (`extractor_v2.py:3021`) is NOT this gate** — it is the 4-way *consolidation* classifier (ADD/UPDATE/NOOP/DELETE). **And the 34.4% mechanical figure was an audit regex, not shipped code.** The predicate is **buildable from the same signals** and those signals are **proven to fire on real data** — but the code is new work.
 
 ### 12.2a Where the rule lives — ALREADY DECIDED (adoption gate, contradiction test run 2026-09-23)
+
 **The question posed was: does this rule belong in the pack (declared) or in the write path (computed)?** **The question is falsely binary, and it was already answered in this repository. It should not have been asked.**
 
 **⚠️ A decision is recorded — `#1026` §3, verbatim:**
@@ -981,6 +1081,7 @@ embedding:
 **⇒ The meeting case is solved BY the pack, not by escaping it.** It forces the pack to be **per-kind**, which it already is (`pointKinds`/`objectKinds`).
 
 #### ⭐ And the decisive finding: the policy is ALREADY WRITTEN DOWN — as prose, unenforced
+
 **`packs/dev/manifest.yaml` → `memory_granularity` already declares ephemeral as:**
 > *"issue/PR numbers, CI status, test counts, commit hashes, tool workarounds, sprint mechanics"*
 
@@ -1021,6 +1122,7 @@ The tension was posed as *"share one rule set, or let them diverge?"* — **and 
 **⚠️ So the design implication is concrete:** the rule set is **one declared artifact**, and the gate is **a function of `(rule_set, question)`** — not two functions over two rule sets. **The `Event` case is proof of why the parameter is necessary, not proof that the sets differ.**
 
 ### 12.2b The levers, ranked — and one earlier recommendation is WITHDRAWN
+
 | # | lever | what it does | cost |
 |---|---|---|---|
 | **1** | **Don't embed identifier-only text** (§12.2's rule) | removes vectors no semantic query could want — **and improves precision**, since an identifier-only row is a false candidate generator | low, **measurable** |
@@ -1037,6 +1139,7 @@ The tension was posed as *"share one rule set, or let them diverge?"* — **and 
 **⭐ And the lesson worth keeping: lever 4 is a TENANT-COUNT ceiling, not a data ceiling.** It has nothing to do with RAM, volume, or cost — it is a query-planner lock limit. **A cost analysis would never have found it, and a volume target would never have caught it.** That is the argument for measuring before recommending, and it is why §12.1's unmeasured latency claim was so costly.
 
 ### 12.2c ⭐ What earns a VECTOR and what earns a TRAVERSAL — the research answer (2026-09-24)
+
 **Owner, 2026-09-24:** *"the core idea of what we do is being able to understand how an Object relates to events, subjects and points so we can not only have 'what is' but why and the context around it (who, when). So I think storing objects in the vector store is very important but then surprised we're not already doing it, although maybe this is more about enabling a search modality as they can be in the graph and we can do graph traversals without vectorising an Object, right?"*
 
 **⭐⭐ The owner's parenthetical is exactly right, and it is the load-bearing distinction. The research settles both halves.**
@@ -1082,12 +1185,14 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 **⇒ The entity-vector work is DOWNSTREAM of the extractor work, not parallel to it — a reason to sequence, not a reason to drop.**
 
 **⚠️ Also settled, because the distinction is easy to get wrong: *"embedding an entity"* means two unrelated things, and only one is deployed.**
+
 - **(a) a TEXT embedding** of a name/description — a sentence-encoder output, found by cosine against a query string. **This is what every system above uses.**
 - **(b) a KNOWLEDGE-GRAPH EMBEDDING (KGE)** — TransE/RotatE/ComplEx/node2vec/GNN, learned from topology, used to score unknown triples. **No surveyed production memory system uses one** — it optimises link prediction, not node lookup, **a disjoint objective. If we are ever told *"embed the graph"*, ask which of these is meant.**
 
 **⚠️ Adversarial honesty:** the counter-case was **NOT** found — **no system reports adding entity embeddings and removing them**, and **no measured ablation isolates an entity vector's contribution to multi-hop answer quality**. **So Half 1 is strong framework consensus; Half 2 (traversal) is true by construction.** The defensible position: **an entity may carry a vector as an ENTRY/RESOLUTION key, budget-capped as a seed index — never as a resident corpus, and never as the reasoning mechanism.**
 
 ### 12.3 The tiers — and there are TWO, not three
+
 **Owner proposed three tiers; the published architecture uses two, and the two-tier version is the one with measured results.**
 
 | tier | what it holds | where it lives | when it is read |
@@ -1099,6 +1204,7 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 **Why folding the owner's middle tier in is correct:** the owner's tiers 2 and 3 (*"TLDR epistemic/events related to an entity"* vs *"fuller data around an entity"*) are **the same tier at two depths**, and depth is exactly what a **sufficiency router** already controls — see §12.4. **A third tier adds a routing decision and a failure mode, not a capability.**
 
 ### 12.4 Escalate on SUFFICIENCY, not on query type — the load-bearing rule
+
 **The obvious design is to classify the query ("simple → summary, complex → raw") and route on that. It is the design that fails.**
 
 **Why: the write-before-query barrier.** Compression and placement decisions are made **at write time**, before anything knows what a future query will hinge on. So a query-type router is guessing at **a need it cannot observe** — and the published failure modes are exactly that guess going wrong: **router overhead**, **policy drift** (the learned router fetches from the wrong tier), **incorrect promotion** (an episodic fact promoted into a semantic rule).
@@ -1109,6 +1215,7 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 **This is the same discipline `#2354` already records for corrections** (*"sweep never auto-resolves"*): **detect insufficiency, do not guess intent.** It is also cheaper — a sufficiency check runs on the **assembled evidence** (already in hand, one call), whereas a complexity classifier needs its own inference on every query.
 
 ### 12.5 The missing mechanism — the escalation must WRITE BACK
+
 **Escalating to Tier 2 is where the cost is. If the answer is then discarded, the same escalation is paid again next time.**
 
 **The published fix:** *"TierMem then writes back **verified findings as new summary units linked to their raw sources**."*
@@ -1116,6 +1223,7 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 **⚠️ This is the mechanism we do not have, and it is the difference between a tiering scheme that gets cheaper over time and one that does not.** The published failure list names its absence directly as **"no attribution loop."** **⛔ The write-back must respect extractor §2.4.2: a finding written back to Tier 1 carries the SPAN, and the raw fact behind it stays immutable.** Anything else turns the summary tier into a system that quietly overwrites its own evidence.
 
 ### 12.6 The published architecture — `TierMem` (arXiv 2602.17913, 20 Feb 2026)
+
 **The owner's design, published, with measured results — which means we adopt its specifics rather than invent them.**
 
 | | |
@@ -1130,6 +1238,7 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 **Its shape matches ours already:** immutable raw log (extractor §2.4.2) · provenance link (the span) · summary ≠ evidence (extractor §2.4). **We are missing the router and the write-back.**
 
 ### 12.7 Failure modes to design against (adversarial pass — all published, none ours)
+
 | failure | what it looks like here |
 |---|---|
 | **context collapse** | assembling so much that the reader cannot find the decisive fact |
@@ -1140,10 +1249,12 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 | **policy drift / incorrect promotion** | the router learning to fetch from the wrong tier |
 
 **⚠️ Two HNSW-specific ones that are ours to avoid:**
+
 - **HNSW does not reclaim space from deleted vectors in place** — tombstoned nodes persist until a full `REINDEX`. **Our derived layer is mutable by design (§3), so churn bloats the index.** Re-embedding at volume needs a `REINDEX` plan, not just deletes.
 - **The query's operator must match the index's operator class**, or the planner **silently** falls back to a sequential scan. (The same class of failure as Hindsight's `fact_type` filter — *"~50× slower"* without a partial index.)
 
 ### 12.8 What this means for our design — the four things to do
+
 1. **✅ DONE — M1 measured our own latency (§12.1d, 2026-09-24).** The whole retrieval layer is **single-digit ms**; the vector leg is **~3–5 ms**; a **full scan of all 7,859 `:Object` vectors is 9.26 ms**. The 96 ms vs 24 ms trade is invisible in that frame — **and that is now a measured fact about OUR loop, not an assumption.**
 2. **Decide what gets an EMBEDDING, not what goes in the graph.** §12.1–12.2: **the vector class is the one that dominates the measured RAM attribute bytes** (§12.1's `Point` 50 MB / `Object` 13 MB / `Event` 9 MB). ⚠️ **Not because a "disk rule" has an exception — §11.7 corrects that framing; on FalkorDB the engine is in memory throughout (§2.1).** It is simply the largest class we can *choose* not to create. **This makes "fewer vectors" the extractor's highest-value cost lever.**
 3. **Build the sufficiency router, not a complexity classifier** (§12.4) — and check it against `#2354`'s "never auto-resolve" discipline.
@@ -1160,7 +1271,7 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 | §1 the problem | `#4333` | the measured volume, and the true bytes per quota node. ⚠️ **Corrected 2026-09-23:** the earlier *"5.6 KB vs 1 KB, a 5.6× understatement"* divided **total instance RAM (140 MB)** by the **capped node count (25,000)** — but the numerator includes ~19,944 **quota-FREE** episodic turns, plus Events, Sessions, Documents, scaffolding and the full HNSW index. **`#4333` — the authority this row cites — estimates 2.5–4×.** The honest figure is **~3 KB per node (140 MB ÷ ~45k total nodes) ≈ ~3×**; 5.6 KB must be labelled *"total resident bytes per CAPPED node, including uncapped nodes"* |
 | §2 mechanism | `#4333` | why the RAM/disk difference *is* the economics |
 | §3 architecture | `#4333` | the physical split, **in the ontology's own vocabulary** — not a new layer |
-| §3 what is already in code | **`#4240`** | **the hosted path does not journal → a wiring gap, not a design gap** |
+| §3 what is already in code | **`#4240`** | **the hosted path does not journal unless `TORTOISE_EVENT_LOG_BASE_DIR` is set (`#4240` wired the per-graph journal) → a wiring gap, not a design gap** |
 | §3 why this shape | `#3895` | the derived layer becomes **REBUILDABLE** — ⚠️ **NOT "disposable"**: §3 forbids that reading in bold, and `#3895` is a *restore*. "Disposable" is the label that would license dropping the only copy. It regenerates **from the truth layer**, and only because the journal carries the payload |
 | §4 tenancy | `#3885` | **one project, tenant-scoped rows** — not one project per team |
 | §5 cost | `#4333` · `#4614` | published rates; ~10× headroom at 1,000 users |
@@ -1218,27 +1329,31 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 - **Migration effort** — no estimate exists against the cost delta.
 
 ### 14.1 ✅ Decisions — all six closed (owner, 2026-09-24)
+
 **These were escalated per the AGENTS.md protocol rather than settled by the lane. They are now answered. Recorded here so no future lane re-opens them.**
 
 | # | the question | ✅ ANSWER (owner, 2026-09-24) | what changed |
 |---|---|---|---|
 | **O1** | Is the journal allowed to be the authority? | ⭐ **Neither side was ever decided — and the conflict was mine.** `#2826` **A2** (the actual decision row, owner-required) **recommended the journal be authoritative**; `#2881` §7 recommended reversing it; `durability-posture.md` recorded the reversal as *"the rule"* and flagged *"the row is the owner's to answer."* **The two questions are different and both hold: DURABILITY = the store's backup (`#2881`, unchanged); REBUILDABILITY = the journal.** | **No reopen.** The wording is scoped, not overridden: *"the journal is the derived layer's rebuild source; it is not a durability mechanism."* **⚠️ The real work this exposes: `rebuild_all` performs an unconditional wipe + journal-only replay — i.e. the CODE already treats an incomplete log as the authority.** That is a defect, and it gets its own issue. **Embedding in the journal: yes — a re-embed is a re-run, not a replay** (§3). |
-| **O2** | Per-item or per-batch target; what recall floor? | ⛔ **THE QUESTION IS WITHDRAWN — the owner rejected its framing.** *"we're not optimising stupidly for a number… this is not a corporate OKR setting exercise. We need to balance multiple things at each step of the pipeline and on each architecture decision."* | **Removed from this document.** The objective is **great recall and reasoning at an affordable cost**; the method is **manual step-by-step review** until a calibration set exists. **No volume target, no recall floor, no node count.** |
+| **O2** | Per-item or per-batch target; what recall floor? | ⛔ **THE QUESTION IS WITHDRAWN — the owner rejected its framing.** *"we're not optimising stupidly for a number… this is not a corporate OKR setting exercise. We need to balance multiple things at each step of the pipeline and on each architecture decision."* | **Removed from this document.** The objective is **great recall and reasoning at an affordable cost**; the method is **manual step-by-step review** until a calibration set exists. **No volume target, no recall floor, no node count.** ⭐ **AMENDED 2026-09-30 — the owner narrowed WHAT this withdrew: a TARGET, not a MEASUREMENT.** *"Tracking how many facts are useful is good data to have… having that measurement is good"*, with the goals explicitly deferred: *"we can decide what goals we optimise for later."* **⇒ What O2 withdrew is a number to optimise *toward*; measuring how many durable claims we kept is not such a number and survives it.** §6.1 and §15 are corrected to match. ⚠️ **No target, floor value or node count is set by this amendment** — only the measurement is re-affirmed. |
 | **O3** | Which outcome word does the gate emit? | ✅ **ADOPTED — use the declared word (`DISCARD`), matching the engine's existing classifier.** | `#4899`'s text is corrected to the declared vocabulary. |
 | **O4** | Can near-duplicates be merged? | ✅ **YES — the owner authorised it, with Jev as arbiter over the claim plus narrative/raw data.** *"yes we can merge near duplicate claims. maybe we can have jev with the claim and the narrative/raw data/both arbiter that"* | ⛔ **This SUPERSEDES the `OVERRIDES:` ruling on `#4899`** (*"never merging two claims into one"*). **The new ruling is recorded on `#4899`, replacing the old — the owner overriding their own earlier ruling, which is the only valid way to reverse one.** ⚠️ **Shaped by evidence (§16.3): a HIGH merge bar, and merge only when nothing distinguishing is lost — never across differing numbers, names, negations or conditions (the list has since grown; `EXTRACTOR-V4-ARCHITECTURE.md` §16.4 carries the current classes).** Practical thresholds cluster at ~0.95. |
 | **O5** | Sample first, or make it deterministic? | ✅ **Neither as an either/or — draft and iterate.** *"we draft something (a prompt, a step of the extraction workflow, etc) and run it and see the result then refine and run again, until good."* | **The method is: draft → run → look → refine → repeat.** Recorded as the working method for every step. |
 | **O6** | Which layer owns `Document`? | ✅ **Resolved, and better than either option: a document is a SOURCE (§9.3).** *"I am suggesting making them sources so our entity layer can be extracted from them…"* | **`:Document` folds into `:Source`; content moves to raw storage; liveness is a READ of the entities, not a stored field.** ⚠️ **My earlier "Document sits in two layers" P0 was WRONG** (`ONTOLOGY.md` §4.4: one label, conceptual subclass). ⚠️ **Cost of the change: NOT zero.** 0 nodes makes the *data* migration trivial, but the label is **written, read and quota-metered** (`quota.py:524`, `#1726`) and `ONTOLOGY.md` §4.4 still declares it — **the code + ontology change is the work (filed: `#5013`).** |
 
 ### 14.2 ⭐ The engine decision — and it is a DECISION, not a deferral of one
+
 **Owner, 2026-09-24:** *"for now we can keep FalkorDB hosted and then we figure out further optimisation."*
 
 **Recorded as a decision with a named revisit trigger, not as an open question:**
+
 - **Now:** FalkorDB Cloud, hosted. **Optimisation deferred.**
 - **The work that IS in scope now:** write less, and write things worth keeping — **the extractor work, which needs no migration and improves search and connections as well as cost.**
 - **Revisit when:** there are real users and a measured footprint — **and the first thing to price is self-hosting** (SSPLv1, free, same engine, no rewrite), **not a different engine.**
 - **⚠️ Do NOT re-open this as *"shall we migrate to Postgres?"*** The two-store model (D30) already puts raw outside the graph, so the graph was never meant to hold the bulk. **The open question is capacity, not engine.**
 
 ### 14.3 ⚠️ Open — raised 2026-09-24, NOT decided
+
 | # | the question | why it is not settled | what turns on it |
 |---|---|---|---|
 | **V1** | **Should the vector index live in FalkorDB at all?** (§12.1c) | It changes **what the graph holds** — a real change to the retrieval path, not a tune. Owner raised it; owner decides. **The latency half is now measured (§12.1d) — 1.5–5 ms — so the question is purely cost.** | **≈50 MB of stored vectors + a 45 MB index total, on 141 MB**, for an estimated **~10–15 ms**. **The month-6 answer.** |
@@ -1249,7 +1364,8 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 ---
 
 ## 15. The measurement plan — what is actually worth measuring
-**⚠️ CUT HARD 2026-09-24.** An earlier version listed seven measurements, several invented to defend numbers this document has since withdrawn. **A measurement is only worth listing if a decision turns on it.**
+
+**⚠️ CUT HARD 2026-09-24.** An earlier version listed seven measurements, several invented to defend numbers this document has since withdrawn. **A measurement is only worth listing if a decision turns on it.** ⭐ **M6 was added 2026-09-30 under that rule: the owner re-affirmed that the retention measurement is wanted (a decision turns on it — §14.1 O2, AMENDED), while the goal it would be compared against stays deferred.**
 
 | id | question | why it matters | status |
 |---|---|---|---|
@@ -1258,6 +1374,7 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 | **M3** | **How much of the 140 MB is junk?** — re-measure after the extractor work lands | tells us whether the engine decision needs revisiting at all | after extractor work |
 | **M4** | **Does self-hosting beat Cloud at our footprint?** — price a VM holding N tenants at ≤75% RAM | the named revisit lever (§14.2) | when there are users |
 | **M5** | ⭐ **Where should the vector index live?** — our query latency with the index resident, against a real `GRAPH.MEMORY USAGE` read | **decides V1 (§12.1c) — the month-6 answer** | **M1 done (§12.1d); `GRAPH.MEMORY USAGE` read (§12.1b). V1 is now a decision, not a measurement gap.** |
+| **M6** | ⭐ **How many durable claims did we keep?** — the share of the candidate facts the pipeline saw that survived as claims | **The guard §6.1 requires: without it, a volume objective can be satisfied by writing nothing.** The owner re-affirmed **2026-09-30** that this measurement is wanted (§14.1 **O2**, AMENDED) — **only the goal is deferred.** | **needed — the denominator must be stated first** |
 
 **WITHDRAWN (recorded so they are not re-invented):** the cold-index p95/p99 study (**premise was vendor marketing**), the quantization-recall study (**no engine to apply it to**), the 1,000-partition planning study (**§12.1a already answers it — it fails**), and the narrative-vs-raw A/B (**`#3011` is already pre-registered; do not duplicate it**).
 
@@ -1304,6 +1421,7 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 **The owner's position, recorded:** *"less noise is good, move on."* **This is the document's position too, and it is not argued further.**
 
 For the record, since two members of the design rest on it:
+
 - **Supported (HIGH):** distractors measurably hurt retrieval accuracy; a Microsoft consolidation study reports **97.2% retention precision at 58% store reduction** with **+13.3 pp preference recall**.
 - ⭐ **The mega-hub finding (GAAMA, 2026):** entity nodes accumulate hundreds of edges and *"high-degree hubs… **dilute retrieval precision**"* — corroborated by Elastic (prune high-cardinality hubs) and degree-bias research. **This is the evidence behind the fan-out cap (§11.5), and it is about edge QUALITY, not volume.**
 - **Our definite-description problem is textbook:** mainstream NLP treats definite descriptions as **mentions**, not entities — *resolve or drop*, never *mint a node*. Our *"the timeout command"* is a non-referential mention promoted to a node.

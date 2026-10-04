@@ -275,7 +275,8 @@ extractor over the conversation. **A capture is stored unconditionally**:
 with no LLM provider key configured the Session + its turn Points are STORED
 and stay searchable, and only the LLM extraction into memory points is
 skipped — the receipt carries `extraction_mode: "no-provider"` plus a warning
-(#3892 owner ruling, 2026-09-18). The regex extraction loop was removed as a
+(#3892 owner ruling, 2026-09-18), or `extraction_mode: "extraction-disabled"`
+when the team turned extraction OFF in the dashboard (#4258, default ON). The regex extraction loop was removed as a
 product path (#822) and there is no fallback, so with no key no memory points
 are produced. This section is the ops contract for making sure extraction is
 enabled.
@@ -370,7 +371,7 @@ fly ssh console -a tortoise-y4mjjq -C "python -m tortoise doctor"
 curl -s https://api.premiselabs.co/health/ready    # {"status":"ok","db":"connected"}
 # POST /v1/sessions with a team token → expect 200 + "extraction_mode":"llm".
 # A 200 with "extraction_mode":"no-provider" = no key: turns stored,
-# extraction skipped.
+# extraction skipped. "extraction-disabled" = the team turned extraction OFF.
 
 # 4. Local hermetic E2E (offline — MockModel seam, exercises the full path):
 RUN_HOSTED_E2E=1 python -m pytest tests/e2e/hosted/ -q -rs
@@ -490,7 +491,7 @@ The flap only became an outage because of three independent defects:
 
 | # | Defect | Status |
 |---|---|---|
-| 1 | `path = "/health"` was coupled to a downstream — process liveness inherited every DB/probe stall | **mitigated in the app** — `hosted_api.health` (`@app.get("/health")`) returns 200 unconditionally with `status` = `ok`/`degraded`; DB truth lives in `/health/ready` (`hosted_api.health_ready`). `status` is `ok` only when `db.ok` **and** `backup_watcher.ok` are true; read `backup_watcher.state` for which: `running` and `disabled` are `ok` (`disabled` = no sweep config, or `BACKUP_WATCHER_DISABLED=1`), while `stopped` (started, thread gone), `failed` (wanted, the start raised — `backup_watcher.error` carries it) and `unknown` (metadata unreadable) are not. Before this, a watcher that never started was invisible on `/health` while the process served normally (#2851/#2922: ~31 days) |
+| 1 | `path = "/health"` was coupled to a downstream — process liveness inherited every DB/probe stall | **mitigated in the app** — `hosted_api.health` (`@app.get("/health")`) returns 200 unconditionally with `status` = `ok`/`degraded`; DB truth lives in `/health/ready` (`hosted_api.health_ready`). `status` is `ok` only when `db.ok` **and** `backup_watcher.ok` are true; read `backup_watcher.state` for which: `running` and `disabled` are `ok` (`disabled` = no sweep config, or `BACKUP_WATCHER_DISABLED=1`), while `stopped` (started, thread gone), `failed` (wanted, the start raised — `backup_watcher.error` carries it) and `unknown` (metadata unreadable) are not. Before this, a watcher that never started was invisible on `/health` while the process served normally (#2851/#2922: ~31 days). `backup_watcher.expected` rides every state and is what disambiguates `disabled`: `true` = this boot intended to run the watcher (it is a host where backups were supposed to be on — the hosted-boot marker), `false` = the non-hosted/TestClient default. It is a reader's disambiguation and does **not** affect `status`/`ok` |
 | 2 | Routing was decided by an **HTTP** service check, so any application-level latency (probe latency, event-loop queueing) could de-register the only machine | **fixed in config** — `[[services.tcp_checks]]` is kernel-served, so it is not starved by event-loop/thread-pool scheduling and a slow/starved app no longer de-registers the machine (§6.4); the application-level liveness signal is the now-**live** non-routing `[checks.loop_liveness]` check (§6.0/§6.4), which cannot affect routing |
 | 3 | One machine + an implicit, undeclared lifecycle policy | policy now explicit (§6.2); machine redundancy **blocked** (§6.3) |
 
@@ -814,13 +815,23 @@ fly machine restart <id> -a tortoise-y4mjjq
 - **Rolling deploys still replace the only machine** — there is a boot-length
   window with no healthy instance. `canary`/`bluegreen` cannot fix this while a
   volume is attached; only §6.3 can.
-- **`/health` still spawns a DB probe per call** (`asyncio.to_thread`; the probe
-  is bounded at 1.5 s and abandons its worker thread on timeout —
-  `monitoring.probe_db`, via the `executor.shutdown(wait=False)` path). Under a black-holed DB, threads can accumulate
-  slowly. This no longer affects routing (the routing check is TCP), but it still
-  affects the human/operator view and any external probe that hits `/health`.
-  App-layer, tracked outside this runbook; a `wait_for` wrapper would bound the
-  request even if the probe regresses.
+- **`/health` no longer spawns a DB probe per call** — superseded by the
+  background health refresher (#2850 hosted, #2988 selfhost). Neither handler
+  performs request-path I/O: `hosted_api`'s "#2850 (P0) … collects NO I/O and
+  takes NO thread", and `selfhost`'s reads its DB verdict from the single-flight
+  coordinator (`_HEALTH_PROBE.snapshot()`) and "submits nothing to any pool, and
+  never waits on a worker". The `asyncio.to_thread` / `monitoring.probe_db` /
+  `executor.shutdown(wait=False)` shape this bullet used to describe is gone.
+  The probe now runs on the refresher, **off** the request path, which is also
+  what lets it carry the projection cold-start allowance without making the
+  deploy gate slow (#3243).
+  **Residual — SELFHOST ONLY, do not conflate the two surfaces:** selfhost's
+  `/health/ready` still awaits a real DB probe on the request path, and its
+  worker can stay parked past the answer it gave because the client read timeout
+  (10 s) exceeds its outer bound (6.0 s) — tracked as #3320. The HOSTED
+  `/health/ready` does **not** share this: its bound (`DB_PROBE_HARD_TIMEOUT` =
+  `PROBE_HARD_TIMEOUT`, 5.6 s) sits strictly above the probe's inner static bound
+  (`PROBE_DB_TOTAL_TIMEOUT`, ~3.1 s), so its worker frees itself.
 - **Nobody has replayed #2850 in staging.** The fix rests on the in-machine
   evidence and the code path, not on a reproduced failure (the issue's
   indicator list requires this).
@@ -1509,15 +1520,60 @@ tracked as **#5798**.
   explaining the refusal), and the corrupt-ledger message now says explicitly
   that **no escalation page was sent and why**, so the gap is named rather than
   silent. Independent liveness for the pager itself now exists — §7.8a, #4573.
-- **A sustained incident observed through a FLAP gets no escalation page.**
-  When a probe answers UP but the recovery-confirmation probe fails while an
-  incident is already open, the run leaves the incident open and exits GREEN
-  *before* the escalation leg, so no state advances and nothing is paged. That
-  early exit is deliberate (the open incident is the standing alert, and
-  changing when a flap counts as still-failing is a behavioural change with its
-  own design), so the run **names the gap** instead: it logs a warning saying
-  the escalation leg is not reached and **no escalation page is sent this
-  run**, so “no page” is never read as “nothing to page about”.
+- **A sustained incident observed through a FLAP gets no escalation page and
+  advances no state — a recorded DECISION, not an open gap (#5021).** When a
+  probe's verdict is UP but the recovery-confirmation probe fails while an
+  incident is already open, the run leaves the incident open, advances **no**
+  state, does **not** reach the escalation leg, and (since #5021) exits **RED**.
+  Two separate reasons, stated separately because they are not the same:
+  * **Why the state is not advanced — the restart gate.**
+    `decide_escalation`'s RUN leg reads `STATE_DOWN_RUNS`, the same counter
+    `decide_restart`'s run leg reads, and `normalize_escalation_knobs` enforces
+    `ESCALATE_MIN_RUNS >= SUSTAINED_MIN_RUNS`. So any flap that **advanced**
+    that counter to satisfy the pager's run leg would simultaneously satisfy the
+    restart leg's run window, and the flap is a run whose first probe verdict
+    was UP (`probe()` returns on the FIRST UP attempt, so at least one attempt
+    answered — not necessarily all `PROBE_ATTEMPTS`). A self-heal restart of a
+    service that was answering UP moments ago is what the restart gate exists to
+    bound, so the flap advances nothing. The wall-clock leg is not moved here
+    either: it is anchored on the incident's server-side `created_at`.
+  * **Why `last_down_ts` is not advanced either — the same hazard, wall-clock
+    axis.** `last_down_ts` is the staleness input that decides whether
+    `STATE_FIRST_FAILURE_TS` (the restart window's START) is reset to `now`: the
+    reset fires only once the gap since the last recorded failing run exceeds
+    `STALE_RESET_MINUTES`. Stamping `last_down_ts` from a flap would hold the
+    restart window open across a run in which the service answered UP — arming
+    (or keeping armed) a restart in the wall-clock dimension, exactly what the
+    shared-counter argument forbids in the run-count dimension. So a flap
+    advances neither.
+  * **Why a page is not sent — scope, not impossibility.** Because
+    `decide_escalation` is a pure function of **persisted** state, a page IS
+    reachable from here without moving anything: when an incident has already
+    accumulated `ESCALATE_MIN_RUNS` observed failing runs and is past its
+    anchor, the leg can be run against the state the incident already holds and
+    a page sent while persisting **only** `escalate_state`/`escalate_ts`/
+    `page_ok_ts` — `decide_restart` reads none of those, so nothing is armed.
+    That is a change to the **escalation state machine**, and the owner recorded
+    on #5021 that it is consolidated under the one-incident-substrate refactor
+    (tortoise **#5047**) and is *not an independent patch*; the mechanism and
+    its proof are written up there. Residual that #5047 owns: a service that
+    flaps from creation and never records a genuine DOWN run keeps `down_runs`
+    below `ESCALATE_MIN_RUNS`, so its run leg is never satisfied and it does not
+    page at all.
+  * **What #5021 changed:** the run is no longer **GREEN**. The confirmation
+    probe FAILED (a `DOWN` verdict exhausts all `PROBE_ATTEMPTS` attempts, while
+    an `UNEXPECTED` verdict returns on its first attempt), and a run that
+    observed a failure must not read as an all-clear — the same “green while
+    down” rule the no-open-incident sibling already enforces. The message names
+    the refusal and its reason, so “no page” is never read as “nothing to page
+    about”.
+  The convergent practice this refusal is argued against (`keep_firing_for`-style
+  hysteresis: keep a flapping alert *firing* and throttle notifications rather
+  than let it read as resolved) supports the state-preserving page — it says
+  nothing about advancing a restart window — and is cited on #5047. A
+  **cross-kind flap** is unchanged: `any_open` treats either kind as the standing
+  alert, so this path files no new incident either, and the incident's kind can
+  understate the observed failure until the next genuine DOWN/DEGRADED run.
 - **This leg covers the PAGER, not the MONITOR.** If the workflow is disabled,
   the schedule is dropped, or the job never reaches the failing path, no
   escalation can fire and there is no run log to read — “the pager is dead” then
@@ -1566,12 +1622,18 @@ tracked as **#5798**.
   issue is a new outage.
 - **Flapping** (UP→DOWN→UP within minutes) keeps an open incident open
   (recovery needs a confirmation probe) but does churn comments. That
-  unconfirmed-recovery run exits **GREEN** — the open incident, not the run
-  colour, is the standing alert, so do not read a green run as all-clear while
-  an incident is open. The sustained
-  clock is **preserved** while the incident stays open (it is only reset when
-  the gap since the last failing run exceeds `STALE_RESET_MINUTES`), so a flap
-  does not delay self-healing; a flap that recovers long enough to close the
+  unconfirmed-recovery run exits **RED**, not green (#5021): the confirmation
+  probe failed a full `PROBE_ATTEMPTS` cycle, and a run that observed a full
+  failure must not read as an all-clear. The open incident is still the standing
+  alert, and **no escalation page** is sent for it on this path — see the flap
+  entry in §7.8 for why that refusal is deliberate (it is the restart gate).
+  A flap advances **no** failing-run state, so it moves neither clock. The
+  restart window itself runs from `STATE_FIRST_FAILURE_TS`; `last_down_ts` is
+  only the staleness input that decides when that start is reset to `now`. Because
+  a flap does not stamp `last_down_ts`, the gap since the last recorded failing
+  run keeps growing through a flap, so once it exceeds `STALE_RESET_MINUTES` the
+  stale-clock reset fires and restarts the window (fail closed, toward *not*
+  restarting) rather than being held open. A flap that recovers long enough to close the
   incident starts a fresh sustained clock, but the restart budget is **shared
   across incidents** and does not reset (next bullet). If a flap is seen with
   NO incident open, the watchdog files one for the observed failure rather than
@@ -1934,13 +1996,13 @@ stronger one is evidence that the release is actually unready.
 | RESEND_API_KEY | ✅ (billing + transactional email, #310/#307) | — | ✅ |
 | RESEND_FROM_EMAIL | ✅ (single managed sender identity — #1136; default `noreply@premiselabs.co`) | — | ✅ |
 | BILLING_FROM_EMAIL | optional (distinct billing sender override — #1136) | — | — |
-| BILLING_NOTIFY_TO | ✅ (ops inbox for billing/abuse emails) | — | ✅ |
+| BILLING_NOTIFY_TO | ✅ (ops inbox for billing email) | — | ✅ |
 
 ### Runtime Config (non-secret)
 
 | Var | Default | Effect |
 |-----|---------|--------|
-| `RESEND_SEND_BUDGET_DAILY` | `100` | In-process hard cap on provider-accepted sends per UTC day (#1138 — Resend free tier 100/day). When reached, further invite sends are skipped with a loud warning instead of silently 429ing. Estimate only — resets on process restart. |
+| `RESEND_SEND_BUDGET_DAILY` | `100` | In-process hard cap on sends per UTC day (#1138, scope widened #3631 — Resend free tier 100/day). When reached, further **invite, OTP, onboarding and billing** sends are skipped with a loud warning instead of silently 429ing (abuse alerts are Telegram-only, #3639, and consume no slot). Estimate only — resets on process restart. |
 | `RESEND_SEND_BUDGET_MONTHLY` | `3000` | Same as above for the UTC month (free tier 3,000/month). |
 
 ## Reproducibility Test
@@ -1951,7 +2013,7 @@ Can a fresh Fly.io account + Cloudflare account follow §1 from zero and arrive 
 - [ ] `app.premiselabs.co` → resolves, serves dashboard placeholder
 - [ ] GitHub push to main → auto-deploys tortoise-api
 - [ ] ≥1 LLM provider key in GitHub secrets → deployed to Fly (`fly secrets list -a tortoise-y4mjjq`) → `tortoise doctor` reports `Session extraction ✅` on the app
-- [ ] Live `POST /v1/sessions` smoke returns 200 + `extraction_mode: "llm"` (a keyless `"no-provider"` means turns were stored but extraction was skipped)
+- [ ] Live `POST /v1/sessions` smoke returns 200 + `extraction_mode: "llm"` (a keyless `"no-provider"`, or `"extraction-disabled"` for a team with extraction off, means turns were stored but extraction was skipped)
 - [ ] `fly.toml` declares `auto_stop_machines` / `auto_start_machines` / `min_machines_running` explicitly (no implicit platform defaults) and `fly config show` matches (§6.2)
 - [ ] Every machine has its own volume (`fly volumes list` count == `fly machines list` count) — a machine sharing `tortoise_api_data` is impossible and must never be attempted (§6.3)
 - [ ] Routing check is `[[services.tcp_checks]]` (kernel-served: **not starved by event-loop/thread-pool scheduling** — it can still fail if the accept backlog saturates) and no `[[services.http_checks]]` entry remains (§6.4)
