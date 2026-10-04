@@ -1,8 +1,21 @@
 #!/usr/bin/env python3
 """A/B: single flash pass on raw vs solar-clean -> flash. Shows FULL outputs inline."""
 from __future__ import annotations  # noqa: I001
-import json, sys, time  # noqa: E401
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/experiments/extractor-v2/run_ab.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/experiments/extractor-v2/run_ab.py`"
+    )
+
+import json
+import time
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from tests.model_adapters import MODELS
 

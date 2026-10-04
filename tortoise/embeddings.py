@@ -22,6 +22,11 @@ import time
 import numpy as np
 
 from .env_truthy import env_flag  # #4097: the declared truthy contract
+from .exceptions import EmbedderUnavailableError  # #4861: the REQUIRED contract
+from .heavy_imports import (  # #5718: the ONE heavy-import lock + its helpers
+    import_sentence_transformer,
+    import_tfidf_vectorizer,
+)
 from .ids import content_hash
 
 
@@ -34,6 +39,13 @@ def _embedder_warmup_enabled() -> bool:
     return env_flag("TORTOISE_EMBEDDER_WARMUP", True)
 
 logger = logging.getLogger(__name__)
+
+# #5718: the ONE lock that serializes the heavy torch / sklearn / scipy imports,
+# and the lock-taking helpers that own every heavy import in this package, live
+# in ``tortoise.heavy_imports`` (a leaf module — see its docstring for the race,
+# for why the invariant is symmetric, and for its machine check). The two
+# helpers this module calls are imported above; every other call site imports
+# its helper directly from ``tortoise.heavy_imports``.
 
 # The active embedder — single source of truth for the production model id.
 # #1349 embedder-selection swap (2026-08-21): bge-small replaces
@@ -276,6 +288,44 @@ class EmbeddingModel:
     _last_failure_kind: str | None = None
 
     @classmethod
+    def _embedder_required(cls) -> bool:
+        """``TORTOISE_EMBEDDING_MODEL_REQUIRED`` — the fail-loud opt-in (OFF).
+
+        #4861: resolved through the declared truthy contract (#4097), like every
+        other flag here, so ``0``/``false``/``no``/``off`` also opt out. UNSET →
+        :meth:`get` returns ``None`` exactly as before, so dev and hosted
+        behaviour cannot drift: the contract is off by default and reversible.
+        """
+        return env_flag("TORTOISE_EMBEDDING_MODEL_REQUIRED", False)
+
+    @classmethod
+    def _unavailable(cls, *, context: str) -> "EmbeddingModel | None":  # noqa: UP037
+        """The single exit for "no model": ``None``, or raise when REQUIRED.
+
+        #4861 — every ``None`` path in :meth:`get` returns through here, so its
+        four origins (the outer and in-lock negative caches, and the transient
+        load failure) cannot drift apart: a REQUIRED process fails by name, at
+        the point of use, instead of silently running keyword-only while a
+        green run and a runner-down run stay indistinguishable.
+
+        ``failure_kind`` is carried through unchanged so the two cases stay
+        distinguishable — ``not_installed`` (the environment never had the
+        embedder) vs ``load_failed`` / ``load_timeout`` (it had it and the load
+        broke). A REQUIRED process does not accept ``not_installed`` as an
+        excuse: "designed absence" is only designed for a process that did not
+        ask for the embedder.
+        """
+        if not cls._embedder_required():
+            return None
+        raise EmbedderUnavailableError(
+            failure_kind=cls._last_failure_kind or "model_unavailable",
+            model=EMBEDDING_MODEL,
+            revision=EMBEDDING_MODEL_REVISION,
+            last_error=cls._last_error,
+            context=context,
+        )
+
+    @classmethod
     def get(cls, load_timeout: float | None = None) -> "EmbeddingModel | None":  # noqa: UP037
         """Get or create the singleton. Returns None if model unavailable.
 
@@ -301,7 +351,7 @@ class EmbeddingModel:
             # None immediately instead of blocking up to 90s per request in a
             # degraded environment (offline dev, cold CI, OOM). Retry after the
             # cooldown window via the normal "retries on next get()" path.
-            return None
+            return cls._unavailable(context="negative cache, load failed within cooldown")
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
@@ -315,7 +365,8 @@ class EmbeddingModel:
                     now_locked = time.monotonic()
                     if cls._last_failed_at is not None and \
                             (now_locked - cls._last_failed_at) < cls._FAIL_COOLDOWN_S:
-                        return None
+                        return cls._unavailable(
+                            context="negative cache (in-lock), load failed within cooldown")
                     cls._instance = cls(load_timeout=timeout)
         model = cls._instance._model if (cls._instance and cls._instance._model) else None
         if model is None and cls._instance is not None:
@@ -333,6 +384,10 @@ class EmbeddingModel:
             # available=True (P2 review fix).
             cls._last_failure_kind = None
             cls._last_error = None
+        if model is None:
+            # #4861: the transient-failure exit — the last of the four origins,
+            # and the one a REQUIRED runner hits when the load itself broke.
+            return cls._unavailable(context="load failed (timeout/OOM)")
         return model
 
     @classmethod
@@ -470,7 +525,7 @@ class EmbeddingModel:
 
         def _load():
             try:
-                from sentence_transformers import SentenceTransformer
+                SentenceTransformer = import_sentence_transformer()
                 result["model"] = SentenceTransformer(
                     EMBEDDING_MODEL, revision=EMBEDDING_MODEL_REVISION)
             except ImportError as e:
@@ -575,15 +630,64 @@ def compute_embeddings(
         return []
     model = EmbeddingModel.get()
     if model is None:
+        _note_embed_skip(len(texts))
         return [None] * len(texts)
     try:
         truncated = [_truncate_for_embedding(t, max_tokens) for t in texts]
+    except Exception:
+        return [None] * len(texts)
+    try:
+        _t0 = time.perf_counter()
         vecs = model.encode(truncated)
-        if vecs is None or len(vecs) != len(texts):
-            return [None] * len(texts)
+    except Exception:
+        # An encode that RAISED produced no model work, so it is counted as
+        # ``skipped`` rather than silently counted as neither — otherwise the
+        # figure (0 calls, 0 skipped) is indistinguishable from "no encode was
+        # ever attempted", which is exactly the ambiguity ``skipped`` exists to
+        # remove (#4488 failure-mode table).
+        _note_embed_skip(len(texts))
+        return [None] * len(texts)
+    # ⛔ The measurement call sits OUTSIDE every value-guarding ``try``: a
+    # measurement fault must never discard a batch of successfully computed
+    # vectors — the #4280 shape recorded in this function's own docstring, where
+    # a guard that raises inside the try silently NULLs the dense leg.
+    _note_embed_encode(truncated, time.perf_counter() - _t0)
+    if vecs is None or len(vecs) != len(texts):
+        return [None] * len(texts)
+    try:
         return [vec.tolist() for vec in vecs]
     except Exception:
         return [None] * len(texts)
+
+
+def _note_embed_encode(texts: list[str], elapsed_s: float) -> None:
+    """Record one real encode against the active tally (#4488). TOTAL.
+
+    Measured AROUND the encoder call only — building ``truncated`` and the
+    ``tolist`` copy are not model work, and bundling them would make the figure
+    a function of the batch shape rather than of the encode. The import is LAZY
+    so this module stays import-order-independent and the unarmed path pays one
+    function call, not a module import.
+    """
+    try:
+        from .embed_metering import note_encode
+        note_encode(texts=len(texts), chars=sum(len(t) for t in texts),
+                    wall_ms=elapsed_s * 1000.0)
+    except Exception:
+        pass
+
+
+def _note_embed_skip(n: int) -> None:
+    """Record encode attempts that ran NO model work (embedder unavailable).
+
+    Kept distinct from the counted encodes on purpose: a silently-zero figure
+    must not be readable as "the embedder ran and produced nothing" (#4488).
+    """
+    try:
+        from .embed_metering import note_skip
+        note_skip(n)
+    except Exception:
+        pass
 
 
 #: #4280: width mismatches already warned about, keyed ``(expected_dim, actual)``.
@@ -712,7 +816,7 @@ def _encode(texts: list[str]) -> tuple[np.ndarray, bool]:
         except Exception:  # noqa: BLE001, RUF100
             logger.warning("embedding encode failed — TF-IDF fallback", exc_info=True)
     try:
-        from sklearn.feature_extraction.text import TfidfVectorizer  # lazy: [embeddings] extra
+        TfidfVectorizer = import_tfidf_vectorizer()
         return TfidfVectorizer().fit_transform(texts).toarray(), True
     except (ValueError, ImportError):
         # Empty / stopword-only vocabulary or sklearn missing — nothing to
@@ -808,7 +912,7 @@ def search_points(
             model = None
     if model is None:
         try:
-            from sklearn.feature_extraction.text import TfidfVectorizer
+            TfidfVectorizer = import_tfidf_vectorizer()
             tv = TfidfVectorizer()
             doc_vecs = tv.fit_transform(texts).toarray()
             query_vec = tv.transform([query]).toarray()[0]

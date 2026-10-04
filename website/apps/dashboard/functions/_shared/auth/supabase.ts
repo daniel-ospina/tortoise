@@ -23,7 +23,87 @@ export interface TokenResponse {
 
 export type SupabaseResult<T> =
   | { ok: true; data: T }
-  | { ok: false; status: number; error: string; retryable: boolean };
+  | { ok: false; status: number; error: string; retryable: boolean }
+
+/** The session-bearing fields a caller may act on, after shape validation. */
+export interface VerifiedSession {
+  userId: string;
+  refreshToken: string;
+  email: string | null;
+}
+
+/**
+ * Narrow a provider token response to the fields the session path needs.
+ *
+ * `call()` classifies success by STATUS alone — any 2xx becomes `{ ok: true, data }`.
+ * A call's declared `T` is a claim about the body, not a check of it, so a
+ * malformed or partial 2xx (a proxy error page with a 200, a truncated body, an
+ * upstream shape change) would reach `.user.id` / `.refresh_token` and throw a
+ * TypeError. That surfaces as an unhandled **500**, which the auth routes' status
+ * discipline (§8.2) reserves for nothing — an infrastructure fault must be a
+ * **503**, indistinguishable by design from a route crash it is not (#4160).
+ *
+ * Returns `null` when the body cannot be trusted, so the caller answers 503
+ * `provider_unavailable` and mints nothing. `/auth/password`, `/auth/signup` and
+ * `/auth/api-key` each carry a hand-copied version of the same predicate;
+ * `/auth/confirm` (rewritten in the PR that added them) and `/auth/callback`
+ * were missed and are the two callers here. Collapsing those copies onto this
+ * helper is deliberately NOT done in the same change.
+ *
+ * The refresh path is the same class but a DIFFERENT shape — the refresh grant's
+ * response is the token set, and `user` is not required to act on it — so it
+ * narrows through `requireTokenSet` below instead of this helper (#4632).
+ */
+export function requireUserSession(
+  data: Partial<TokenResponse> | null | undefined,
+): VerifiedSession | null {
+  const userId = data?.user?.id;
+  const refreshToken = data?.refresh_token;
+  if (typeof userId !== "string" || !userId) return null;
+  if (typeof refreshToken !== "string" || !refreshToken) return null;
+  const email = data?.user?.email;
+  return { userId, refreshToken, email: typeof email === "string" ? email : null };
+};
+
+/** The token-minting fields a caller may act on, after shape validation. */
+export interface TokenSet {
+  accessToken: string;
+  refreshToken: string;
+  expiresIn: number;
+}
+
+/**
+ * Narrow a provider token response to the fields the REFRESH path needs (#4632).
+ *
+ * The refresh sibling of `requireUserSession`, kept separate because the shape it
+ * needs is not the same: `refreshSession` acts on the token set alone, so it must
+ * not be made to require a `user` the refresh grant has no use for.
+ *
+ * Same mechanism as #4160 and for the same reason: `call()` classifies success by
+ * STATUS alone, so a malformed or partial 2xx — a proxy error page served with a
+ * 200, a truncated body, an upstream shape change — arrives as `{ ok: true }`.
+ * `_shared/auth/token.ts` dereferenced `.refresh_token` / `.access_token` /
+ * `.expires_in` on it, which did not throw: the D1 write of the `undefined`
+ * fields threw into a catch that deliberately swallows write failures ("the token
+ * is valid"), so the function returned `{ ok: true, accessToken: undefined }` — a
+ * failure reported as SUCCESS — while the session row kept its already-rotated
+ * refresh token. `expires_in` absent turned the cached expiry into `NaN`.
+ *
+ * Returns `null` when the body cannot be trusted. `refreshSession` then answers a
+ * RETRYABLE fault, so the caller fails closed with a 503 and does NOT read it as a
+ * dead session (the #3485 class: an upstream fault must never sign the user out).
+ */
+export function requireTokenSet(
+  data: Partial<TokenResponse> | null | undefined,
+): TokenSet | null {
+  const accessToken = data?.access_token;
+  const refreshToken = data?.refresh_token;
+  const expiresIn = data?.expires_in;
+  if (typeof accessToken !== "string" || !accessToken) return null;
+  if (typeof refreshToken !== "string" || !refreshToken) return null;
+  if (typeof expiresIn !== "number" || !Number.isFinite(expiresIn) || expiresIn <= 0) return null;
+  return { accessToken, refreshToken, expiresIn };
+}
 
 async function call<T>(
   env: SupabaseEnv,
@@ -124,13 +204,22 @@ export function isRefreshTokenDead(status: number, errorBody: string): boolean {
   );
 }
 
-export function refreshSession(
+export async function refreshSession(
   env: SupabaseEnv,
   refreshToken: string,
 ): Promise<SupabaseResult<TokenResponse>> {
-  return call<TokenResponse>(env, "/auth/v1/token?grant_type=refresh_token", {
+  const result = await call<TokenResponse>(env, "/auth/v1/token?grant_type=refresh_token", {
     refresh_token: refreshToken,
   });
+  if (!result.ok) return result;
+  // A 2xx is not proof of a usable body — `call()` classifies by STATUS alone.
+  // Validate at this boundary so `ok: true` from this function always means the
+  // token set is real, and a malformed body becomes a RETRYABLE fault rather
+  // than `undefined` written into the session row (#4632).
+  if (!requireTokenSet(result.data)) {
+    return { ok: false, status: 503, error: "malformed token response", retryable: true };
+  }
+  return result;
 }
 
 /**

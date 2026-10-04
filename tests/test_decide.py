@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+from tests import _live_utils
 from tortoise.sdk import TortoiseSDK
 
 # Requires live FalkorDB (Docker). Skip gracefully when unavailable so the
@@ -91,15 +92,15 @@ class TestDecideScriptSmoke:
         _s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         _s.settimeout(1.0)
         try:
-            _s.connect(("localhost", 16379))
+            _s.connect((_live_utils.service_host(), _live_utils.legacy_port()))
         except OSError:
             pytest.skip(
-                "Live FalkorDB legacy (:16379) not available — "
+                f"Live FalkorDB legacy (:{_live_utils.legacy_port()}) not available — "
                 "skip per #1436")
         finally:
             _s.close()
         graph = f"test_decide_smoke_{_uuid.uuid4().hex[:8]}"
-        uri = f"docker://:@localhost:16379/{graph}"
+        uri = _live_utils.legacy_uri(graph)
         res = subprocess.run(
             [sys.executable, "graph-scripts/decide.py",
              "--options", '{"opt:a":"Option A","opt:b":"Option B"}',

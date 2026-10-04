@@ -174,7 +174,7 @@ def test_a_rebuild_reproduces_the_source_field_for_field(src):
                           contentHash=f"h-{i}", summary=f"s-{i}")
     live = _props(sdk, _URL)
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     rebuilt = _props(sdk, _URL)
 
     # `reliability*` are the #398 query-time CACHE (§3's named pattern: never
@@ -217,7 +217,7 @@ def test_a_rebuild_after_a_transition_keeps_the_new_hash_not_the_old_one(src):
     events, sdk = src
     sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
     sdk.create_source(_URL, "document", title="v1", contentHash="h-1")
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     p = _props(sdk, _URL)
     assert (p["contentHash"], p["version"]) == ("h-1", 2), (
         "the rebuild kept the superseded version")
@@ -242,7 +242,7 @@ def test_the_transition_carries_the_callers_extras_into_the_rebuild(src):
     sdk.create_source(_URL, "document", title="v2", contentHash="h-2",
                       summary="third")
     live = _props(sdk, _URL)["summary"]
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert _props(sdk, _URL)["summary"] == live == "third"
 
 
@@ -267,7 +267,7 @@ def test_a_same_hash_write_that_changes_an_extra_is_still_journalled(src):
         "a same-hash write that changed an extra was silently dropped")
     live = _props(sdk, _URL)["summary"]
     assert live == "after"
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert _props(sdk, _URL)["summary"] == live
 
 
@@ -281,7 +281,7 @@ def test_a_hashless_write_is_still_recorded(src):
     assert _props(sdk, _URL)["contentHash"] == "h-0", (
         "a hash-less write must preserve the stored hash (the JOINT-E2E "
         "contract)")
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert _props(sdk, _URL)["contentHash"] == "h-0"
 
 
@@ -298,7 +298,7 @@ def test_a_stub_completion_still_emits_a_create(src):
     sdk.create_source(_URL, "document", title="real", contentHash="h-0")
     assert len(_of_type(events, "SourceCreated")) == 2
     assert _of_type(events, "SourceVersioned") == []
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     p = _props(sdk, _URL)
     assert (p["contentHash"], p["version"]) == ("h-0", 2)
 
@@ -327,7 +327,7 @@ def test_a_legacy_journal_of_sourcecreated_records_still_replays(src, tmp_path):
         }))
     (legacy / "legacy.jsonl").write_text("\n".join(lines) + "\n")
 
-    sdk._get_proj().rebuild_all(str(legacy))
+    sdk._get_proj().rebuild_all(str(legacy), confirm_destructive=True)
     p = _props(sdk, _URL)
     assert (p["contentHash"], p["version"]) == ("h-2", 3)
     assert p["ingestedAt"] == "2026-01-01T00:00:00+00:00", (
@@ -344,7 +344,7 @@ def test_a_legacy_record_without_timestamps_falls_back_to_the_clock(src):
         json.dumps({"type": "SourceCreated", "url": _URL, "id": _URL,
                     "contentHash": "h-legacy", "sourceKind": "document",
                     "title": "old"}) + "\n")
-    sdk._get_proj().rebuild_all(str(legacy))
+    sdk._get_proj().rebuild_all(str(legacy), confirm_destructive=True)
     p = _props(sdk, _URL)
     assert p["contentHash"] == "h-legacy"
     assert p["ingestedAt"], "a missing ingestedAt must still be stamped"
@@ -363,7 +363,7 @@ def test_the_transition_keys_never_become_node_properties(src):
         "become a node property — it is recorded in the journal, not on the "
         "node")
     assert live["version"] == 2, "`version` IS a declared node property (§4.6)"
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert _props(sdk, _URL) == live
 
 
@@ -374,7 +374,7 @@ def test_the_unknown_type_warning_does_not_fire_for_the_transition(src, caplog):
     sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
     sdk.create_source(_URL, "document", title="v1", contentHash="h-1")
     with caplog.at_level(logging.WARNING, logger="tortoise.projection"):
-        sdk._get_proj().rebuild_all(str(events))
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert not [r for r in caplog.records
                 if "unrecognized event type" in r.getMessage()], (
         "the replay logged the type as unrecognized — add it to "
@@ -402,7 +402,7 @@ def test_a_url_variant_transition_replays_onto_the_canonical_node(src):
         "MATCH (s:Source) RETURN count(s)").result_set[0][0]
     assert n == 1, f"the live write minted {n} nodes for one canonical source"
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     rows = sdk._get_proj().g.query(
         "MATCH (s:Source) RETURN properties(s)").result_set
     assert len(rows) == 1, (
@@ -444,7 +444,7 @@ def test_a_same_hash_write_that_adds_a_FALSY_extra_is_still_journalled(src):
         live = _props(sdk, _URL)
         for k, v in extra.items():
             assert live.get(k) == v, f"{k} not written live"
-        sdk._get_proj().rebuild_all(str(events))
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
         assert _props(sdk, _URL) == live, "the falsy extra did not survive replay"
 
 
@@ -461,7 +461,7 @@ def test_a_transition_carrying_source_path_replays_it(src):
                       source_path="corpus/notes/a.md")
     live = _props(sdk, _URL)
     assert live["sourcePath"] == "corpus/notes/a.md"
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert _props(sdk, _URL) == live, (
         "a source_path carried on the transition was lost on replay")
 
@@ -495,7 +495,7 @@ def test_a_same_hash_write_that_FLIPS_A_TYPE_is_still_journalled(src):
         live = _props(sdk, _URL)
         assert not isinstance(live.get(key), bool), (
             f"{key} should now be the int the caller asked for")
-        sdk._get_proj().rebuild_all(str(events))
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
         rebuilt = _props(sdk, _URL)
         assert not isinstance(rebuilt.get(key), bool), (
             f"{key} reverted to a bool on replay — the record did not carry the "
@@ -551,7 +551,7 @@ def test_a_hashless_recheck_of_a_stub_journals_nothing(src):
 
     # ... and the whole sequence still replays field for field.
     live = _props(sdk, _URL)
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert _props(sdk, _URL) == live
 
 
@@ -573,5 +573,5 @@ def test_a_hashless_write_that_changes_an_extra_is_still_recorded(src):
         "a hashless write that changed an extra was suppressed")
     live = _props(sdk, _URL)
     assert live["summary"] == "new", "the extra was not written live"
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert _props(sdk, _URL) == live

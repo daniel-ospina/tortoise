@@ -99,13 +99,36 @@ test('#3874: the at-cap detail wins — it IS the enforced cap', () => {
 // byte-identical to the approved #1147 wording; only the tail moves. The
 // rotate notice (#2229) is untouched.
 
-test('#3874: numbered notices keep the approved number sentence (source change only)', () => {
+test('#3874/#4355: numbered notices keep the approved number sentence (source change only)', () => {
+  // #3874 changed the number's SOURCE; #4355 changed rotate's MECHANISM
+  // clause. The rotate notice is no longer reachable AT the cap at all — a
+  // 1-for-1 rotation is cap-neutral by construction — so its copy describes
+  // the one state it CAN fire in (an org already OVER its limit), and the old
+  // "rotating creates the replacement before revoking this one" clause is
+  // gone because it described the very ordering #4355 replaced.
   assert.equal(
     upgradeNoticeFrom(capDetail(2), { max_api_keys: 2 }),
     "You've reached your plan's limit of 2 API keys. Revoke an existing key to free a slot — or upgrade to add more.")
   assert.equal(
     rotateCapNoticeFrom(capDetail(2), { max_api_keys: 2 }),
-    "You're at your plan's limit of 2 API keys. Rotating creates the replacement before revoking this one, so revoke an unused key first — or upgrade to add more.")
+    "You're over your plan's limit of 2 API keys. Rotating replaces this key without adding one, so revoke keys until you're back within the limit — or upgrade to add more.")
+  assert.doesNotMatch(rotateCapNoticeFrom(capDetail(2), { max_api_keys: 2 }),
+    /before revoking this one/,
+    'the pre-#4355 mint-then-revoke mechanism clause must not return')
+})
+
+test('#4335: the notices drop the upgrade clause when no upgrade path exists', () => {
+  const up = upgradeNoticeFrom(capDetail(2), { max_api_keys: 2 }, false)
+  const rot = rotateCapNoticeFrom(capDetail(2), { max_api_keys: 2 }, false)
+  assert.equal(up,
+    "You've reached your plan's limit of 2 API keys. Revoke an existing key to free a slot.")
+  assert.equal(rot,
+    "You're over your plan's limit of 2 API keys. Rotating replaces this key without adding one, so revoke keys until you're back within the limit.")
+  assert.doesNotMatch(up, /upgrade/)
+  assert.doesNotMatch(rot, /upgrade/)
+  // Degraded (no number) variant too.
+  assert.doesNotMatch(upgradeNoticeFrom('', {}, false), /upgrade/)
+  assert.doesNotMatch(rotateCapNoticeFrom('', {}, false), /upgrade/)
 })
 
 // ── 4b. #2699: the at-cap remedy must be ACHIEVABLE ──────────────────────
@@ -139,34 +162,42 @@ test('#2699: the degraded (no-number) create notice offers the achievable remedy
   assert.doesNotMatch(up, /\bof \d+ API keys\b/, `must not invent a limit: ${up}`)
 })
 
-// ── 4c. #4353: the connect step's existing-key note is cap-aware ─────────
-// Below the cap, rotate is the route that does not grow the count. AT the cap
-// it is a dead end: rotate mints the replacement through the SAME capped
-// POST /v1/team/keys before revoking the old row, so `regenerateKey` 402s on
-// its mint leg and the old key is never revoked. The note therefore returns
-// the canonical at-cap remedy (revoke — a revoked row leaves the gate's
-// count) exactly as the create-path notice states it.
+// ── 4b2. #4355: rotate is CAP-NEUTRAL, so the at-cap surfaces send you TO it ──
+// #4353 made the connect-step note cap-aware on a premise #4355 removed: rotate
+// used to mint its replacement through the SAME capped `POST /v1/team/keys`
+// before revoking the old row, so at the cap it 402'd on the mint leg and was a
+// dead end. `POST /v1/team/keys/{id}/rotate` now creates the replacement
+// against the POST-RELEASE count (the old row's slot), so a 1-for-1 rotation
+// succeeds at N/N. The RED direction of this test is the pre-#4355 note: it
+// returned the cap remedy and explicitly did NOT offer rotate.
 
-test('#4353: at the cap the existing-key note returns the canonical cap remedy, never rotate', () => {
+test('#4355: at the cap the existing-key note offers ROTATE — it is the route that still works', () => {
   const team = { max_api_keys: 2 }
   const note = existingKeyNoteFrom(team, [{ id: 'a' }, { id: 'b' }])
-  // Pinned to the ONE canonical string — a second copy of the remedy here is
-  // exactly how the two surfaces desync.
-  assert.equal(note, rotateCapNoticeFrom('', team),
-    'the note must be the canonical at-cap notice, not a second copy that can drift')
-  assert.match(note, /revoke an unused key first/, note)
-  assert.doesNotMatch(note, /regenerate/i, `the dead end must not return: ${note}`)
-  assert.doesNotMatch(note, /^Rotate the existing key in the API Keys tab/, note)
+  assert.match(note, /^Rotate the existing key in the API Keys tab/,
+    `the cap must not send the user away from the cap-neutral route: ${note}`)
+  assert.match(note, /without adding a key/, note)
+  // What is still true at the cap: a fresh CREATE has no slot to take.
+  assert.match(note, /Creating a new key needs a free slot/, note)
+  assert.match(note, /2 are all in use/, 'the note states the server\'s own limit')
+  // The pre-#4355 dead-end framing must be gone.
+  assert.doesNotMatch(note, /revoke an unused key first/, note)
 })
 
-test('#4353: below the cap the existing-key note keeps the rotate sentence', () => {
-  const note = existingKeyNoteFrom({ max_api_keys: 2 }, [{ id: 'a' }])
+test('#4355: below the cap the existing-key note keeps the rotate sentence and the create price', () => {
+  const team = { max_api_keys: 2 }
+  const note = existingKeyNoteFrom(team, [{ id: 'a' }])
   assert.match(note, /^Rotate the existing key in the API Keys tab/, note)
   assert.match(note, /without adding a key/, note)
-  // The fresh-mint cost clause must survive the move out of main.jsx — the
-  // below-cap note has to name the price of creating another key here.
   assert.match(note, /Creating a new key here spends another of your plan's key slots/, note)
+  assert.doesNotMatch(note, /needs a free slot/, 'below the cap a create has a free slot')
 })
+
+// ── 4c. #4353/#4355: the create-path notice still names the achievable remedy ──
+// Unchanged by #4355: a CREATE at the cap is refused by `_check_org_limit`
+// before the mint, and neither the rotate primitive nor anything else exempts
+// `POST /v1/team/keys`. The remedy must stay achievable (and must not offer a
+// route this surface cannot substantiate).
 
 test('#4353: an unknown allowance never fabricates a limit — the note stays the rotate sentence', () => {
   for (const team of [{}, { max_api_keys: null }, { max_api_keys: undefined }, { max_api_keys: 'x' }]) {
@@ -327,12 +358,18 @@ test('#3874 (wiring backstop): main.jsx renders the pre-cap allowance on both ke
 // for it, and must be empty whenever the server has not said the org is at
 // its limit — so no surface can gain an at-cap warning it cannot substantiate.
 
-test('#4353: at the cap the paste-rejection clause names revoke first', () => {
+test('#4353/#4355: at the cap the paste-rejection clause names create\'s need for a slot and rotate as the route that does not', () => {
   const clause = capRevokeFirstClause({ max_api_keys: 2 }, [{ id: 'a' }, { id: 'b' }])
+  assert.match(clause, /creating a new key needs a free slot/,
+    `the clause must name what actually needs the slot: ${clause}`)
   assert.match(clause, /revoke a key in the API Keys tab/,
-    `the clause must name the achievable at-cap action: ${clause}`)
-  assert.doesNotMatch(clause, /regenerate/i,
-    'at the cap a rotate/regenerate mints through the same capped route — it must never be offered')
+    `and the achievable at-cap action for a create: ${clause}`)
+  // #4355: rotate is cap-neutral, so offering it here is TRUE (the pre-#4355
+  // clause explicitly warned it would fail — that claim is now false).
+  assert.match(clause, /or rotate an existing one instead/,
+    `rotate is the route that needs no free slot: ${clause}`)
+  assert.doesNotMatch(clause, /a rotate mints its replacement before the old key is freed/,
+    'the pre-#4355 false mechanism claim must not return')
 })
 
 test('#4353: below the cap the paste-rejection clause is empty', () => {

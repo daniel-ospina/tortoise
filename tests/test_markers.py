@@ -53,6 +53,11 @@ _TESTS_ROOT = Path(__file__).resolve().parent
 # The swept (renamed) sites are the test_-prefixed literals/constants the
 # guard passes on their own — the table documents the residual declarations.
 ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
+    # The seed helper does `_make_sdk(namespace="registry")._get_registry()
+    # .query(CREATE :Team ...)` — i.e. it seeds a Team through the CANONICAL
+    # namespace PROD code resolves, the same `prod-coupled` class as the
+    # test_agent_signup / test_dr_endpoints / test_billing entries below.
+    "test_github_connect.py": {"registry": "prod-coupled"},
     # 2026-08-28 merge-reconciliation: #1785/#1816 files use the 'registry'
     # literal (session/extraction tests) — routed so the markers gate passes
     # repo-wide.
@@ -64,8 +69,14 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # resolves. Same class as test_quota/test_commit_endpoint.
     "test_cohort_cost_cap.py": {"registry": "prod-coupled"},
     "test_cross_tenant_read_isolation.py": {"registry": "prod-coupled"},  # #3663 — registry control-plane seeding for the cross-tenant read proof
+    "test_graph_storage.py": {"registry": "prod-coupled"},  # #5331 — the byte-meter fixture seeds an org through the registry namespace (the literal is the namespace PROD resolves; same class as test_cross_tenant_read_isolation)
     "test_3926_error_prop_guard.py": {"registry": "prod-coupled"},  # #3926 — the literal IS the canonical namespace PROD code resolves
     "test_index_docs_api.py": {"registry": "index-docs"},
+    # #3553: the CAS concurrency tests provision + tear down REAL Team nodes in
+    # the registry control-plane graph (the same graph `_get_registry()` and the
+    # production onboarding-state reader/writer resolve), so the literal IS the
+    # canonical namespace the code under test uses.
+    "test_onboarding_state_cas.py": {"registry": "prod-coupled"},
     "test_session_extraction_modes.py": {"registry": "session-extraction"},
     "test_agent_signup.py": {"registry": "prod-coupled"},
     "test_agent_signup_idempotency.py": {"registry": "prod-coupled"},
@@ -101,6 +112,11 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # ``:Team`` node and drive the ledger through the production writer; the
     # registry store IS the coupling under test (same class as test_metering).
     "test_metering_period_window.py": {"registry": "prod-coupled"},
+    # #4488: same class as test_metering — the fixture pins TORTOISE_DB_PATH so
+    # the embedding writer resolves the SAME store the fixture seeded, and the
+    # canonical registry namespace IS that coupling. A test_* rename would seed
+    # a different graph than the writer resolves.
+    "test_embed_metering.py": {"registry": "prod-coupled"},
     "test_namespace_uri_mode.py": {"registry": "assertion",
                                    "team-abc123": "assertion"},
     "test_onboarding_endpoints.py": {"registry": "prod-coupled"},
@@ -167,6 +183,12 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_backfill_sources.py": {"e2e-900": "redirect-derived per-path"},
     "test_index_restore.py": {"e2e-900": "redirect-derived per-path"},
     "test_index_directory.py": {"e2e-900": "redirect-derived per-path"},
+    # #5137 landed this fixture without a route, which reds this guard on main.
+    # The gold fixture writes :Source rows into an EMBEDDED graph reached through
+    # the `shared_embedded_db` path (the redirect derives a per-path test_* graph);
+    # "gold" is a fixture graph name, not a server graph the SDK resolves from the
+    # registry and not a production-shape namespace.
+    "test_document_source_gold.py": {"gold": "test-constructed"},
 }
 
 # ── ROUTED_SELECT_GRAPH_SITES (cycle-6 P2-10) ───────────────────────────────
@@ -186,6 +208,22 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
 #                              name, but it must stay CONSISTENT between the
 #                              seed, the call and the read-back assert.
 ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
+    # #5711/#5062: the nine backup-ledger sites take the registry handle
+    # straight from their own FalkorProjection and hand it to `create_backup`
+    # / `_backup_graph` DIRECTLY — the file never imports `tortoise.hosted_api`
+    # and makes no endpoint call, so NOTHING resolves `registry_tortoise`:
+    # `create_backup` consumes the passed handle verbatim
+    # (`hosted_backup.py:1516-1530`; `_stamp_backup_latest` at :1490-1494).
+    # Verified, not assumed: replacing all nine literals with a scratch name
+    # leaves the module green, so the name is NOT production-shape by
+    # contract. Production's backup handle is `registry_control_plane`, a
+    # different name (`hosted_api.py:26682-26704`, `sdk.py:3161`). Declared
+    # `test-constructed`, matching this table's in-file precedent for the
+    # identical direct-create_backup stamp-seam scratch handle `"registry_3895"`
+    # (:283) and its own criterion at :228-232 ("nothing resolves X...").
+    "test_backup_ledger_5062.py": {
+        '"registry_tortoise"': "test-constructed",
+    },
     "test_dr_endpoints.py": {
         'f"org_{org_id}"': "endpoint-constrained",  # seed write — drill/backup resolve org_{id}
         # #2823 Supabase-lane sweep seed — the DATA plane stays FalkorDB in
@@ -553,6 +591,19 @@ def test_no_redirect_stems_registry_exact():
         # pass. Runs embedded in every lane (same rationale as
         # test_hosted_backup).
         "test_cross_tenant_read_isolation",
+        # #4524: the vecf32 overwrite-seam guards assert the EMBEDDED engine's
+        # silent vecf32-overwrite behaviour (the server lane lands the same
+        # write), so the module joins the carve-out lane — registered in
+        # ci-surfaces.yml:carve_out + the core surface and in
+        # TEST_NO_REDIRECT_STEMS.
+        "test_vecf32_overwrite_seams_4524",
+        # #5148: `test_sdk_emit_event_survives_unreachable_seam` is
+        # `embedded_only` (it constructs a real embedded store). Without the
+        # carve-out routing it is collected by every URI-set lane and skipped
+        # via the marker hook — a permanently green, permanently unexecuted
+        # gate on main (the #4047/#4524 shape). Registered in all three homes:
+        # ci-surfaces.yml:carve_out, TEST_NO_REDIRECT_STEMS, and here.
+        "test_write_path_unreachable_seam_5148",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "

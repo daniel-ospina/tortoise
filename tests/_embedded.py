@@ -28,7 +28,97 @@ import pytest
 
 from tortoise.config import is_db_uri
 from tortoise.env_truthy import is_truthy  # #4097: the declared truthy contract
+from tortoise.graph_delete_guard import graph_exists, safe_graph_delete
 from tortoise.projection import FalkorProjection
+
+# ── #4439: no RDB snapshot storm from ephemeral harness fixtures ──────────
+#
+# redislite ships a periodic save schedule in
+# `DEFAULT_REDIS_SETTINGS['save']` (900 1 / 300 100 / 60 200 / 15 1000), so
+# EVERY server it starts is CONFIGURED to fork an `redis-rdb-bgsave` snapshot
+# on those triggers. A short-lived fixture that writes little never reaches
+# one (which is why small-graph RDB snapshots are known not to fire — see
+# `tortoise/projection/__init__.py`); the servers that DO reach the triggers
+# are the long-lived fixtures — the leaked #4299 population and the
+# session-scoped shared projection — whose data is discarded by definition.
+# On a loaded box holding hundreds of them that fork storm is the single
+# largest CPU consumer (#4439). A harness fixture never needs an automatic
+# snapshot:
+# explicit `SAVE`/`BGSAVE`, a graceful explicit `close()` (redislite's
+# `shutdown(save=True)`), and the AOF path (`TORTOISE_EMBEDDED_AOF=1`) are the
+# persistence contracts the suite actually asserts. (Interpreter-exit teardown
+# is `SHUTDOWN NOSAVE` when `TORTOISE_FAST_ATEXIT=1`, as conftest sets — see
+# `tortoise/embedded_lifecycle.py` — so it never relied on the schedule either.)
+#
+# Scope of the relief: this changes the schedule for servers constructed AFTER
+# the patch. Already-running leaked servers (#4299) keep their old schedule and
+# keep forking until reaped — this is the "leak at source" arm, not an instant
+# drop in the measured population.
+#
+# The patch is applied HERE, at module import — `tests/conftest.py` imports
+# this module before any server is constructed — so it covers every
+# in-process construction, including module-import-time ones.
+#
+# ⛔ TRAP (do not "simplify" this to `[]` or `''`):
+# `redislite.configuration.config()` renders only TRUTHY settings
+# (`if config_dict[key]: ... else: del config_dict[key]`). A falsy value
+# therefore OMITS the `save` directive entirely, and Redis then applies its
+# BUILT-IN defaults (measured on the bundled redis-server v8.6.2:
+# `3600 1 300 100 60 10000`) — the storm continues while the change LOOKS
+# correct. The value must be truthy AND equal to Redis's
+# disable form: the two-character string `""`, which `config_line` renders
+# as `save ""`. `tests/test_embedded_lifecycle.py` pins both halves.
+#
+# ⛔ SCOPE (do not "fix" this in product code): `tortoise.FalkorDB` subclasses
+# redislite's client and serves genuinely durable embedded user databases too.
+# Disabling persistence there would change PRODUCT durability semantics for
+# every user of embedded mode, not just test-fixture behaviour — a real
+# embedded graph must keep its automatic snapshot in production. This is a
+# TEST-HARNESS patch only; `tortoise/__init__.py` is deliberately untouched.
+# (The patch is process-global WITHIN a test session, so an in-process
+# `tortoise.FalkorDB(path)` built by a test also gets the fixture schedule.
+# That is deliberate: every durability assertion in the suite drives an
+# explicit `SAVE`/`BGSAVE` or a graceful `close()`, and no test depends on a
+# periodic snapshot — pinned by the embedded carve-out lane.)
+#
+# ⛔ DECISION CONTRADICTION (reconciled, not ignored): the closed #3827 plan doc
+# (docs/plans/2026-09-17-3827-embedded-lane-evidence-producer.md, D19) recorded
+# that the embedded lane RETAINS a save fork source — `CONFIG GET save`
+# non-empty (redislite default) — and `tools/embedded_evidence.py` carries a
+# `save-child-slot` fork-cause class keyed on it. #4439 (the owner-filed issue
+# this patch implements) deliberately supersedes D19's live-axis premise for
+# HARNESS FIXTURES: `CONFIG GET save` is now empty there and `save-child-slot`
+# is unreachable on the embedded lane. D19's enforcing file
+# (tests/test_embedded_save_tripwire.py) was never committed and #3827 is
+# closed, so nothing is red — but any future tripwire must assert the DISABLED
+# form, not the redislite default.
+#
+# Residual (tracked, not absorbed): servers spawned by a test's own SUBPROCESS
+# (`python -c '... FalkorDB() ...'`) do not import this module and keep the
+# default schedule — follow-up issue #4497. Such a spawn exits long before
+# `900 1`'s 900 s window and writes at most a handful of keys (the
+# reaper/lifecycle ones write nothing; the concurrency writer spawns write a
+# few), so no change-count or time trigger is reached; the fork cost is
+# produced by the long-lived in-process fixtures this patch covers. Servers
+# constructed with an explicit `serverconfig={'save': ...}` keep that explicit
+# value (`settings()` applies kwargs over the default).
+REDIS_SAVE_DISABLED = '""'
+
+
+def _disable_redislite_rdb_save() -> None:
+    """Set redislite's default save schedule to Redis's disable form (#4439).
+
+    Idempotent and non-raising: redislite absent means no embedded servers
+    exist, so there is nothing to damp.
+    """
+    try:
+        from redislite import configuration
+    except Exception:  # pragma: no cover - redislite absent
+        return
+    configuration.DEFAULT_REDIS_SETTINGS["save"] = REDIS_SAVE_DISABLED
+
+
+_disable_redislite_rdb_save()
 
 # #4096: session-scoped test trees created by fixtures in this module and in
 # tests/conftest.py. They are reclaimed by `conftest.py::_reclaim_session_tmpdirs`,
@@ -264,6 +354,20 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     "test_redis_guard",
     "test_resume_gate_parity",
     "test_smoke_embedded",
+    # #4524: the vecf32 overwrite-seam guards assert the EMBEDDED engine's
+    # silent vecf32-overwrite behaviour (the server lane lands the same write),
+    # so they must construct a real embedded store — a redirected construction
+    # would run against the server and certify nothing. Registered with the
+    # carve_out list in config/ci-surfaces.yml (the two are one set in two
+    # homes; tests/test_ci_selection.py pins the equality).
+    "test_vecf32_overwrite_seams_4524",
+    # #5148: `test_sdk_emit_event_survives_unreachable_seam` is `embedded_only`
+    # (it constructs a real embedded store), so it is a permanently green,
+    # permanently unexecuted gate on main unless this stem is routed to the
+    # URI-unset carve-out job — the #4047/#4524 shape. Registered with the
+    # ``carve_out`` list in config/ci-surfaces.yml (the two are one set in two
+    # homes; tests/test_ci_selection.py pins the equality).
+    "test_write_path_unreachable_seam_5148",
 )
 
 _HAS_FALKOR: bool | None = None
@@ -361,8 +465,20 @@ def wipe(proj) -> None:
         # leak loudly.
         graphs = [getattr(proj, "_graph_name", "test")]
     for g in graphs:
-        try:  # noqa: SIM105
-            proj.db.select_graph(g).query("MATCH (n) DETACH DELETE n")
+        try:
+            # #2961: presence-gated. A blind DETACH against a name a
+            # concurrent session just dropped RE-CREATES it as an
+            # AOF-invisible phantom; safe_graph_delete checks presence inside
+            # the cross-process lock. detach-only (drop=False) — wipe() clears
+            # contents, it does not drop the graph.
+            # Review P2: wipe() is deliberately best-effort (it swallows
+            # errors) so a refusal must NOT raise — but it must not be SILENT
+            # either, or stale contents leak into the next test unnoticed.
+            if not safe_graph_delete(proj.db, g, detach=True, drop=False) \
+                    and graph_exists(proj.db, g):
+                logging.getLogger(__name__).warning(
+                    "wipe(): the graph-delete guard REFUSED to clear %r — the "
+                    "cross-process lock is unavailable; contents survive", g)
         except Exception:
             pass
 
@@ -650,17 +766,103 @@ def _created_since_last_wipe() -> set[str]:
 # is destroyed (no sweep nor `wipe_server`'s filter can attribute it again).
 #
 # ⚠️ DIVERGENCE (#7795 review P2) — do NOT "dedupe" this set against the
-# journal-BLIND copies: the `wipe_server` prefix literal below,
+# journal-BLIND copies: `_SERVER_WIPE_PREFIXES` below,
 # `test_derived_names.test_from_uri_sites_resolve_test_prefixed`, and
 # `test_pre_migration_safety._docker_projection_target`.
 # CITE SYMBOLS — a line-number pointer re-stales on every rebase (#7795 P2-2).
-# Those carry ONLY ("test_", "tortoise_test") BY DESIGN: their input is
+# Those carry ONLY the `_SERVER_WIPE_PREFIXES` value BY DESIGN: their input is
 # GRAPH.LIST (the whole server, no ownership attribution), and a shared/dev
 # docker legitimately holds real tenant `team_*`/`org_*` graphs — adding a
 # product prefix there would make the last-suite-standing global sweep wipe
 # every tenant graph on the server. This set is safe ONLY because its input
 # is the journal (an ownership record).
+#
+# ── Graph-name ownership vocabulary (#3634) ────────────────────────────────
+# ONE declaration. Each set states its INPUT, because that is what makes it
+# safe: a prefix is not ownership; a journal record is.
+#   input: the JOURNAL (an ownership record). May include product families.
 _SWEEP_OWNED_PREFIXES = ("test_", "tortoise_test", "team_", "org_")
+#   input: GRAPH.LIST (no attribution). Deliberately a SUBSET (#7795).
+_SERVER_WIPE_PREFIXES = ("test_", "tortoise_test")
+#   input: opt-in via `_sweep_team_strays`; these are REAL tenant graphs (the
+#   product's own mint namespace — `org_` current since the #3543 rename,
+#   `team_` retained for graphs minted before it).
+_PRODUCT_GRAPH_PREFIXES = ("org_", "team_")
+#   input: GRAPH.LIST, OPT-IN ONLY. THE #3634 CENSUS COHORT, as recorded on
+#   issue #3634: each entry below is a name verified present in that census,
+#   except `registry_test_` — the ONE deliberate stem (723 census names, so a
+#   stem is required there — the epic CI-3 cohort). Reach is therefore bounded
+#   to the cohort PLUS any future name that extends one of its prefixes
+#   (`startswith`, so `v10fix_c1` also approves `v10fix_c10`), and several
+#   entries are themselves prefixes of longer census names (`ttm_a1` of
+#   `ttm_a1_fresh1/2`, `review_rw_probe` of `review_rw_probe2`). ADDING A STEM
+#   HERE IS A SAFETY DECISION, not a convenience: every entry authorises an
+#   irreversible DETACH DELETE + GRAPH.DELETE, so widen only with a census
+#   name in hand.
+_LEGACY_RESIDUE_PREFIXES = (
+    "registry_test_",                # the epic CI-3 cohort — 723 census names
+    "v10fix_c0", "v10fix_c1", "v10fix_c2", "v10fix_c3", "v10fix_c4",
+    "v10fix_c5", "v10fix_c6", "v10fix_c7", "v10fix_c8", "v10fix_c9",
+    "v10_smoke",
+    "ttm_a1", "ttm_a1_fresh1", "ttm_a1_fresh2", "ttm_a3",
+    "ttm_batch1", "ttm_batch2", "ttm_batch3", "ttm_batch4", "ttm_wave2",
+    "review_rw_probe",               # covers review_rw_probe2 too
+    "askshape_b6_live_1_33760_21",
+    "legbudget_25979_txrx",
+    "tt4524_probe",
+    "probe_d10_doc_fts",
+)
+#
+# `_DIVERGENCE_REGISTER` ties every NAMED prefix constant on the declared
+# surface (`tests/_embedded.py`, `tortoise/sdk.py`,
+# `tortoise/projection/__init__.py`) to its rationale BY OBJECT IDENTITY —
+# tests/test_graph_name_ownership.py asserts the ties and fails on an
+# unregistered named constant. Anonymous prefix LITERALS are out of the
+# scanner's scope; they are governed by the DIVERGENCE comment above.
+_DIVERGENCE_REGISTER = {
+    "_SWEEP_OWNED_PREFIXES": {"set": _SWEEP_OWNED_PREFIXES,
+                              "reason": "the canonical journal-ownership declaration (#7795)."},
+    "_SERVER_WIPE_PREFIXES": {"set": _SERVER_WIPE_PREFIXES,
+                              "reason": "#7795 fail-closed: GRAPH.LIST has no attribution."},
+    "_PRODUCT_GRAPH_PREFIXES": {"set": _PRODUCT_GRAPH_PREFIXES,
+                                "reason": "real tenant graphs; opt-in via _sweep_team_strays."},
+    "_LEGACY_RESIDUE_PREFIXES": {"set": _LEGACY_RESIDUE_PREFIXES,
+                                 "reason": "#3634 journal-blind residue; opt-in only via _sweep_legacy_strays."},
+}
+
+
+def owns_by_ownership_record(name: object) -> bool:
+    """The JOURNAL path's predicate — the only one that may authorise a delete
+    from an ownership record (#7795). Mirrors the gate `_sweep_drop` applies:
+    a non-``str`` name is never owned."""
+    return isinstance(name, str) and name.startswith(_SWEEP_OWNED_PREFIXES)
+
+
+def is_legacy_residue(name: object, *, default_graph: str | None) -> bool:
+    """The GRAPH.LIST residue predicate (#3634). Opt-in only.
+
+    Deny-safe: a non-``str``, the literal production graph name ``tortoise``,
+    the URI default graph, anything the ownership record covers, and any
+    ``tortoise_restored*`` snapshot are all refused.
+
+    The ``tortoise`` and ``tortoise_restored*`` refusals mirror the production
+    guard ``TortoiseSDK.test_guard`` (``tortoise/sdk.py``), which blocks
+    destructive teardowns on BOTH spellings. This predicate must refuse at
+    least that set: its caller performs an irreversible DETACH DELETE +
+    GRAPH.DELETE on the names it approves. The ``name: object`` annotation is
+    deliberate — ``isinstance(name, str)`` is part of the tested contract, so a
+    non-``str`` is refused rather than coerced."""
+    if not isinstance(name, str):
+        return False
+    if name == "tortoise":
+        return False
+    if name.startswith("tortoise_restored"):
+        return False
+    if default_graph is not None and name == default_graph:
+        return False
+    if owns_by_ownership_record(name):
+        return False
+    return name.startswith(_LEGACY_RESIDUE_PREFIXES)
 
 
 def _uri_default_graph_name() -> str | None:
@@ -815,14 +1017,16 @@ def wipe_server(proj, scope: set[str] | None = None, drop: bool = False) -> None
         # sweep (scope=None → global) still owns it.
         if scope is not None and g == default_graph:
             continue
-        # ⚠️ DIVERGENCE (#7795 review P2): deliberately NARROWER than
-        # `_SWEEP_OWNED_PREFIXES` — this literal omits the product
-        # namespaces. This loop's input is GRAPH.LIST (the whole server, no
-        # ownership attribution), so on a shared/dev docker `team_*`/`org_*`
-        # may be a real tenant's (or a live peer's) graph; the journal-based
-        # `_sweep_drop` may include them because there the journal IS the
-        # ownership record. Do NOT dedupe the two sets (#7795 review P2).
-        if not g.startswith(("test_", "tortoise_test")):
+        # ⚠️ DIVERGENCE (#7795 review P2): `_SERVER_WIPE_PREFIXES` is
+        # deliberately NARROWER than `_SWEEP_OWNED_PREFIXES` — it omits the
+        # product namespaces. This loop's input is GRAPH.LIST (the whole
+        # server, no ownership attribution), so on a shared/dev docker
+        # `team_*`/`org_*` may be a real tenant's (or a live peer's) graph;
+        # the journal-based `_sweep_drop` may include them because there the
+        # journal IS the ownership record. Do NOT dedupe the two sets
+        # (#7795 review P2). NAMING the symbol (rather than re-inlining the
+        # tuple) is load-bearing: the register tie cannot detect a literal.
+        if not g.startswith(_SERVER_WIPE_PREFIXES):
             continue  # fail-closed: never wipe a non-test graph
         # #3074/#3214: re-read the live peers' journals IMMEDIATELY before
         # this graph's DETACH. The up-front snapshot's window was
@@ -835,13 +1039,26 @@ def wipe_server(proj, scope: set[str] | None = None, drop: bool = False) -> None
         # with no conditional/transactional delete spanning the two.
         if peer_journals and g in _peer_journaled_graphs(peer_journals):
             continue  # a live PEER session owns this graph
+        # #2961: presence-gated (detach-only at this phase). A blind
+        # `MATCH (n) DETACH DELETE n` against a name a concurrent session
+        # just dropped RE-CREATES it as an AOF-invisible phantom, and the
+        # GRAPH.DELETE below then poisons the shared append-only file.
         try:
-            proj.db.select_graph(g).query("MATCH (n) DETACH DELETE n")
+            if safe_graph_delete(proj.db, g, detach=True, drop=False):
+                if drop:
+                    dropped.append(g)
+            elif graph_exists(proj.db, g):
+                # #2961 review P2: False is "already absent" (fine — nothing
+                # to detach) OR "the guard refused". A silent no-op here loses
+                # this test's isolation, and _wipe_or() would still advance
+                # the wiped cursor as if the wipe had happened. Collect it.
+                failures.append((g, RuntimeError(
+                    "graph-delete guard REFUSED to detach: the cross-process "
+                    "lock is unavailable")))
+            elif drop:
+                dropped.append(g)
         except Exception as e:  # P2-7: collect + re-raise, never pass silently
             failures.append((g, e))
-        else:
-            if drop:
-                dropped.append(g)
     if failures:
         raise RuntimeError(
             "wipe_server() failed on graph(s): " +
@@ -851,11 +1068,28 @@ def wipe_server(proj, scope: set[str] | None = None, drop: bool = False) -> None
             # Cycle-6 P1-0 (FM-2): graph.delete() rides execute_command —
             # NEVER query("GRAPH.DELETE") (that transmits GRAPH.QUERY <g>
             # "GRAPH.DELETE" --compact, a Cypher parse error).
-            proj.db.select_graph(g).delete()
+            # Cycle-5 P2-3 + #2961: safe_graph_delete re-checks presence
+            # under the cross-process lock, so a graph already dropped by a
+            # concurrent suite (last-suite-standing) or an earlier stale
+            # sweep is a SUCCESS that transmits NO command — the poisoning
+            # GRAPH.DELETE is never sent.
+            if not safe_graph_delete(proj.db, g, detach=False, drop=True) \
+                    and graph_exists(proj.db, g):
+                # #2961 review P2: the delete did not happen and the graph is
+                # still there — a refusal, not an idempotent no-op.
+                failures.append((g, RuntimeError(
+                    "graph-delete guard REFUSED GRAPH.DELETE: the "
+                    "cross-process lock is unavailable")))
         except Exception as e:
             # Cycle-5 P2-3: a graph already dropped by a concurrent suite
-            # (last-suite-standing) or an earlier stale sweep is SUCCESS;
-            # only genuine command errors collect.
+            # (last-suite-standing) or an earlier stale sweep is SUCCESS; only
+            # genuine command errors collect. #2961 review P2: this tolerance
+            # is still REQUIRED even though the call above is now guarded —
+            # the guard closes the window only against GUARDED peers, and an
+            # unguarded peer issuing GRAPH.DELETE directly can still win the
+            # race between our presence read and our delete (see the guard
+            # module's own "An UNGUARDED peer ... can still interleave" note).
+            # Dropping it made a benign concurrent delete red the sweep.
             if _is_missing_graph_error(e):
                 continue
             failures.append((g, e))
@@ -949,7 +1183,10 @@ def _proj_for_uri(uri: str):
 def _sweep_proj(uri: str):
     """Context manager yielding a host-mode projection for sweep operations;
     best-effort cleanup deletes the probe graph so a sweep never leaves a
-    mint behind (the projection's _ensure_indexes creates it)."""
+    mint behind (the projection's _ensure_indexes creates it). #2961: the
+    cleanup is presence-gated — the probe graph may never have been
+    materialised, and a GRAPH.DELETE on the resulting phantom key poisons
+    the shared AOF."""
     from contextlib import contextmanager
 
     @contextmanager
@@ -958,8 +1195,19 @@ def _sweep_proj(uri: str):
         try:
             yield proj
         finally:
-            try:  # noqa: SIM105
-                proj.db.select_graph(proj.graph_name).delete()
+            try:
+                # #2961: presence-gated — never GRAPH.DELETE an absent graph.
+                # Review P3: best-effort, so a refusal must not raise — but it
+                # must not be SILENT either. This probe graph is never
+                # journaled, so no sweep retries it; only a later global wipe
+                # reclaims it.
+                if not safe_graph_delete(proj.db, proj.graph_name,
+                                         detach=False, drop=True) \
+                        and graph_exists(proj.db, proj.graph_name):
+                    logging.getLogger(__name__).warning(
+                        "sweep: the graph-delete guard REFUSED to drop the "
+                        "probe graph %r — it is not journaled, so only a "
+                        "global wipe will reclaim it", proj.graph_name)
             except Exception:
                 pass
             try:  # noqa: SIM105
@@ -973,11 +1221,31 @@ def _sweep_proj(uri: str):
 def _drop_one_graph(proj, g: str, *, drop: bool) -> bool:
     """DETACH-then-DELETE one graph (cycle-4 P1-9 + cycle-6 P1-0:
     graph.delete() rides execute_command, never query("GRAPH.DELETE")).
-    Log-and-continue on error (cycle-8 P2-3 — hygiene never fails the suite)."""
+
+    #2961: both commands are SKIPPED entirely when the graph is not
+    currently present. A blind DETACH against a name a concurrent sweep
+    just dropped re-creates it as an AOF-invisible phantom (FalkorDB
+    persists effects, and an empty graph emits none) whose later
+    GRAPH.DELETE poisons the append-only file and crash-loops the shared
+    container. ``safe_graph_delete`` presence-gates inside a cross-process
+    lock, so the race cannot reproduce the phantom.
+
+    Log-and-continue on error (cycle-8 P2-3 — hygiene never fails the suite).
+    An already-absent graph still returns True: the journal entry is
+    satisfied and must not be retried forever (keep-on-partial)."""
     try:
-        proj.db.select_graph(g).query("MATCH (n) DETACH DELETE n")
-        if drop:
-            proj.db.select_graph(g).delete()
+        if safe_graph_delete(proj.db, g, detach=True, drop=drop):
+            return True
+        # False is ambiguous (#2961 review): "already absent" (the journal
+        # entry is satisfied and must not be retried forever — keep-on-partial)
+        # vs "the guard refused because it could not take the lock" (the graph
+        # is STILL THERE — recording a drop would leak it and drop the
+        # journal). Re-check presence to tell them apart.
+        if graph_exists(proj.db, g):
+            logging.getLogger(__name__).warning(
+                "session sweep: %r was NOT dropped (guard refused); "
+                "keeping the journal entry", g)
+            return False
         return True
     except Exception as e:
         logging.getLogger(__name__).warning(
@@ -994,6 +1262,23 @@ def _remove_journal_file(journal_file: str) -> None:
             os.remove(p)
         except OSError:
             pass
+
+
+def _owned_names(names, default_graph) -> set[str]:
+    """The shared ownership filter: owned ∧ journalled ∧ ¬default.
+
+    This is exactly the set `_sweep_drop` may DETACH+DELETE, and the only set
+    `_owned_survivors` may count as an E2E-7 leak (#3634 Task 5 review P2).
+    Factored so the delete path and the leak predicate cannot drift apart: a
+    name the sweep refuses to own must never be reported as a leak the sweep
+    failed to drop, and a name the sweep owns must never be silently exempt.
+
+    The URI-path default graph is excluded here because a per-session sweep
+    must not race other concurrent sessions' writes on the shared default
+    (cycle-4 P2-2 / cycle-8 P1-1); the last-suite-standing full sweep owns it.
+    """
+    return {n for n in names
+            if owns_by_ownership_record(n) and n != default_graph}
 
 
 def _sweep_drop(proj, journal_file: str, *, drop: bool = True,
@@ -1032,24 +1317,20 @@ def _sweep_drop(proj, journal_file: str, *, drop: bool = True,
         return {"skipped": f"non-loopback {host!r}", "journal_removed": False}
     names = _read_journal_file(journal_file)
     default_graph = _uri_default_graph_name()
+    # Duplicate entries (per-test seam re-appends) are idempotent — dedupe once,
+    # preserving order, so `preserved` reports each name exactly once.
+    unique = list(dict.fromkeys(names))
+    # The SAME ownership filter `_owned_survivors` (the E2E-7 gate) counts on —
+    # the delete set and the leak predicate are one predicate by construction.
+    owned = _owned_names(unique, default_graph)
+    # #7795 fail-closed: a name the sweep does not own is PRESERVED — never
+    # DETACH+DELETE a dev/compose/Cloud graph. See the docstring. `unique`
+    # minus `owned` minus the default is exactly that preserved set.
+    preserved = [g for g in unique if g != default_graph and g not in owned]
     dropped: list[str] = []
     failed: list[str] = []
-    preserved: list[str] = []
-    seen: set[str] = set()
-    for g in names:
-        if g in seen:
-            continue  # duplicate entries (per-test seam re-appends) — idempotent
-        seen.add(g)
-        if g == default_graph:
-            # Cycle-4 P2-2 / cycle-8 P1-1: the shared URI-default graph is
-            # swept ONLY by the last-suite-standing full sweep (scope=None) —
-            # a per-session own/stale drop would race other concurrent
-            # sessions' live writes on the shared default.
-            continue
-        if not g.startswith(_SWEEP_OWNED_PREFIXES):
-            # #7795 fail-closed: a name the sweep does not own is PRESERVED —
-            # never DETACH+DELETE a dev/compose/Cloud graph. See the docstring.
-            preserved.append(g)
+    for g in unique:
+        if g not in owned:
             continue
         if _drop_one_graph(proj, g, drop=drop):
             dropped.append(g)
@@ -1090,11 +1371,19 @@ def _session_end_own_sweep(uri: str, journal_file: str, *,
                            skip_on_non_loopback=skip_on_non_loopback)
 
 
-# The product's own mint namespace, for the journal-blind stray pass below.
-# `org_` is current (tenancy rename, #3543); `team_` is retained so an
-# opted-in run still reclaims graphs minted before the rename. Both identify
-# REAL tenant graphs — which is why the pass is opt-in only.
-_PRODUCT_GRAPH_PREFIXES = ("org_", "team_")
+def _live_graph_names(uri: str) -> set[str]:
+    """The live server's graph names. Mirrors the existing probe idiom
+    (conftest.py's `with _sweep_proj(uri) as probe: probe.db.list_graphs()`)."""
+    with _sweep_proj(uri) as probe:
+        return set(probe.db.list_graphs() or [])
+
+
+def _owned_survivors(journal_names, live_names, default_graph) -> set[str]:
+    """Owned ∧ journalled ∧ ¬default ∧ still live.
+
+    Uses the SAME ownership filter `_sweep_drop` drops on (`_owned_names`) —
+    only a name the OWNERSHIP RECORD (the journal) authorises is ever a leak."""
+    return _owned_names(journal_names, default_graph) & set(live_names)
 
 
 def _team_sweep_allowed(uri: str) -> bool:
@@ -1160,12 +1449,113 @@ def _sweep_team_strays(proj, uri: str) -> list[str]:
         if not g.startswith(_PRODUCT_GRAPH_PREFIXES):
             continue
         try:
-            proj.db.select_graph(g).query("MATCH (n) DETACH DELETE n")
-            proj.db.select_graph(g).delete()
-            dropped.append(g)
+            # #2961: presence-gated + serialized — an already-absent graph
+            # transmits NO command instead of the poisoning GRAPH.DELETE.
+            # Only a real drop is recorded: a lock refusal must not append a
+            # name whose graph still exists.
+            if safe_graph_delete(proj.db, g, detach=True, drop=True):
+                dropped.append(g)
         except Exception as e:
             logging.getLogger(__name__).warning(
                 "leftover product-namespace drop failed for %r: %r", g, e)
+    return dropped
+
+
+def _legacy_sweep_allowed() -> bool:
+    """#3634: may the journal-blind LEGACY RESIDUE pass run?
+
+    The residue cohort (``_LEGACY_RESIDUE_PREFIXES``) is names whose journals
+    are GONE, so neither the journal sweep (``_sweep_drop``) nor
+    ``wipe_server``'s test-prefix filter can attribute them — the only handle
+    left is the name SHAPE. That makes this pass journal-blind, and it
+    authorises an irreversible DETACH DELETE + GRAPH.DELETE on shape alone,
+    so it is fail-closed: allowed ONLY via an explicit operator opt-in
+    (``TORTOISE_TEST_SWEEP_LEGACY=1``). The residue set is disjoint from every
+    owned family by construction
+    (``tests/test_graph_name_ownership.py::test_residue_is_disjoint_from_every_owned_family``),
+    so this pass can never become a third copy of ``wipe_server``. The
+    refusal is logged by ``_sweep_legacy_strays``, so the narrowing is
+    discoverable."""
+    # OVERRIDES (#4097): env-truthiness truthy-set parsing ("1"/"true"/"yes"/"on").
+    # This gate requires the exact value "1": it is the SOLE authorization for an
+    # irreversible journal-blind DETACH DELETE + GRAPH.DELETE of the residue
+    # cohort, and widening a destructive opt-in surface is not a
+    # vocabulary-coherence win. Pinned by
+    # tests/test_wipe_server.py::test_legacy_sweep_gate_is_narrow_by_design, and
+    # its deliberate `OVERRIDES` against the ledger's shrink-by-default rule is
+    # recorded as a `_KNOWN_NARROW_READS` entry in tests/test_env_truthy.py and
+    # an OVERRIDES comment on issue #3634.
+    return os.environ.get("TORTOISE_TEST_SWEEP_LEGACY") == "1"
+
+
+def _sweep_legacy_strays(proj, *, default_graph: str | None) -> list[str]:
+    """Drop the journal-blind LEGACY RESIDUE cohort (#3634).
+
+    ⛔ MUST NEVER BE CALLED FROM A DEFAULT TEARDOWN PATH. This pass is
+    journal-blind: its input is ``GRAPH.LIST`` and its only authorization is
+    the name shape plus the explicit ``TORTOISE_TEST_SWEEP_LEGACY=1`` opt-in.
+    Wiring it into a session-end/atexit/stale path would turn a manual
+    reclamation into an automatic delete of unowned names. The AST pin in
+    ``tests/test_graph_name_ownership.py::test_legacy_sweep_has_no_default_call_site``
+    fails if this symbol is called from any of the default-path files it
+    scans.
+
+    Predicate: ``is_legacy_residue(name, default_graph=default_graph)`` — the
+    prefix list lives ONLY in ``_LEGACY_RESIDUE_PREFIXES`` (do not re-list it
+    here). ``default_graph`` is the URI-path default (or None) so the shared
+    default graph is refused exactly as in the journal path. LOOPBACK ONLY: a
+    non-loopback host refuses before any DETACH/DELETE and returns ``[]`` (this
+    pass has no caller to inherit the guard from, unlike ``_sweep_drop`` /
+    ``_sweep_team_strays``). DETACH+DELETE per graph, log-and-continue; returns
+    the dropped names.
+
+    OPERATOR INVOCATION — the AST pin guarantees no default call site, so this
+    is the only path; it is opt-in, loopback-only, and prints what it
+    reclaimed (names the predicate refuses are skipped, not printed)::
+
+        import os
+        from tests._embedded import (
+            _sweep_legacy_strays, _sweep_proj, _uri_default_graph_name,
+        )
+
+        os.environ["TORTOISE_TEST_SWEEP_LEGACY"] = "1"   # the explicit opt-in
+        uri = os.environ["TORTOISE_DB_URI"]              # loopback only
+        with _sweep_proj(uri) as proj:
+            dropped = _sweep_legacy_strays(
+                proj, default_graph=_uri_default_graph_name())
+        print("reclaimed:", dropped)
+
+    Pass ``default_graph=_uri_default_graph_name()`` (the URI-path default, or
+    None when no URI is set) — any other value un-protects the shared default
+    graph. On a loopback host the opt-in logger line names the required env
+    var when it is unset."""
+    from tortoise.projection import _is_loopback_host
+    host = _projection_host(proj)
+    if not _is_loopback_host(host):
+        logging.getLogger(__name__).info(
+            "legacy residue pass SKIPPED non-loopback host %r — refusing to "
+            "delete on a remote server", host)
+        return []
+    if not _legacy_sweep_allowed():
+        logging.getLogger(__name__).info(
+            "legacy residue pass SKIPPED — set TORTOISE_TEST_SWEEP_LEGACY=1 "
+            "to opt in (residue prefixes: %s)",
+            "/".join(_LEGACY_RESIDUE_PREFIXES))
+        return []
+    dropped: list[str] = []
+    for g in proj.db.list_graphs() or []:
+        if not is_legacy_residue(g, default_graph=default_graph):
+            continue
+        try:
+            # #2961: presence-gated + locked. A blind DETACH followed by a
+            # GRAPH.DELETE is the phantom-creating sequence that poisons the
+            # shared AOF; safe_graph_delete re-checks presence inside the
+            # cross-process lock, and refuses when it cannot hold it.
+            if safe_graph_delete(proj.db, g, detach=True, drop=True):
+                dropped.append(g)
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                "legacy residue drop failed for %r: %r", g, e)
     return dropped
 
 

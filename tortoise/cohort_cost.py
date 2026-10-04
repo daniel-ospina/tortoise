@@ -138,6 +138,12 @@ UNENFORCEABLE_INCIDENT_KIND = "COHORT_CAP_UNENFORCEABLE"
 # population this cap is written for.
 _MAX_COHORT_ORGS = 500
 
+# #4614: the machine-readable CATEGORY of a cohort-spend refusal. Distinct from
+# `quota.QUOTA_REFUSAL_CODE` on purpose — the cap is a SPEND ceiling, not a
+# plan node cap, and a client that branches on `detail.code` must not send the
+# user to buy a bigger plan that cannot lift it.
+COHORT_COST_REFUSAL_CODE = "cohort_cost_cap"
+
 
 class CohortCostCapExceeded(QuotaExceededError):
     """The cohort's measured spend is at/over the cap (#3665).
@@ -147,10 +153,16 @@ class CohortCostCapExceeded(QuotaExceededError):
     then covers the cohort cap with **no new mechanism** — which is the whole
     point of reusing ``quota.enforce_org_limit``'s error pair. ``detail``
     carries the cohort-scoped incident payload for the AlertStore sink.
+
+    #4614: it overrides the refusal CATEGORY. A spent cohort budget and a
+    hit plan cap are both 402s, and a caller that branches on
+    ``detail.code`` must be able to tell them apart — reading a spend cap as
+    "you are out of plan allowance" would send the user to buy a bigger plan
+    that does not lift it.
     """
 
     def __init__(self, message: str, *, detail: dict | None = None) -> None:
-        super().__init__(message)
+        super().__init__(message, code=COHORT_COST_REFUSAL_CODE)
         self.incident_detail = dict(detail or {})
 
 

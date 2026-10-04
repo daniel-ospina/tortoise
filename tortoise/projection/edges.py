@@ -1,11 +1,13 @@
 """Edge creation and linking methods for FalkorProjection."""
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from datetime import datetime, timezone
 
 from tortoise.source_identity import normalize_source_url, resolve_source_key
 
+logger = logging.getLogger(__name__)
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017
@@ -41,7 +43,12 @@ STRUCTURAL_REL_LABELS = {
     'aboutObject': 'Object',
     'aboutEvent': 'Event',
     'aboutPoint': 'Point',
-    'aboutDocument': 'Document',
+    # D10 (ONTOLOGY v3.15 §4.4): a document is a :Source, not a graph node.
+    # The label and the replay key MUST move together (below) — a retargeted
+    # label with the old key resolves to nothing and silently mis-points the
+    # rebuilt edge. aboutDocument is NOT collapsed into aboutSource: it stays
+    # in DERIVABLE_STRUCTURAL_RELS (above) and aboutSource stays out.
+    'aboutDocument': 'Source',
     'extractedFrom': 'Source',
 }
 
@@ -51,23 +58,21 @@ def stub_key(rel: str, target: dict):
 
     ``target`` is the target node's property dict (the 2b SELECT returns
     ``properties(target)``). Key map: aboutSubject/aboutObject/aboutEvent/
-    aboutPoint -> ``name``; aboutDocument -> ``coalesce(title, name)``;
-    extractedFrom -> ``url``. NEVER ``target.id`` — Subjects MERGE by name (id
-    may be a webhook stub ulid, #1918), Sources by url, Documents by
-    name-or-title (#211). Returns None for a rel outside the derivable set or an
-    unresolvable key (name-less Point from an id-targeted create_about_edge;
-    extractedFrom target lacking url) — such descriptors are un-replayable and
-    the caller must SKIP emission (those edges die at rebuild today anyway).
+    aboutPoint -> ``name``; aboutDocument/extractedFrom -> ``url`` (D10: a
+    document is a :Source, so it resolves by ``url`` — the SAME key the label
+    moved with. A title-keyed aboutDocument descriptor is no longer
+    resolvable and must not be emitted). NEVER ``target.id`` — Subjects MERGE by
+    name (id may be a webhook stub ulid, #1918), Sources by url. Returns None
+    for a rel outside the derivable set or an unresolvable key (name-less Point
+    from an id-targeted create_about_edge; a Source target lacking url) — such
+    descriptors are un-replayable and the caller must SKIP emission (those
+    edges die at rebuild today anyway).
     """
     label = STRUCTURAL_REL_LABELS.get(rel)
     if label is None:
         return None
-    if rel == 'aboutDocument':
-        key = target.get('title') or target.get('name')
-    elif rel == 'extractedFrom':
-        key = target.get('url')
-    else:
-        key = target.get('name')
+    key = (target.get('url') if rel in ('aboutDocument', 'extractedFrom')
+           else target.get('name'))
     if not isinstance(key, str) or not key:
         return None
     return (label, key)
@@ -163,6 +168,37 @@ def resolve_structural_target(g, label: str, key: str, rel: str):
             return None
         return {"internal": rows[0][0], "logical": rows[0][1]}
     if label == "Source":
+        # D10 (ONTOLOGY §4.4): aboutDocument's target is a document :Source
+        # keyed by ``url``. RESOLVE-ONLY — never mint: a miss must be logged
+        # and skipped, never turned into a phantom Source that silently
+        # mis-points the resurrected edge (adversarial class B1). By contrast,
+        # extractedFrom keeps its create-if-missing stub (live _link_source
+        # parity).
+        if rel == "aboutDocument":
+            # D10 B1 live-parity (adversarial): the LIVE auto-detect
+            # (`_try_about_edge`) resolves an aboutDocument target only when
+            # `e.documentKind IS NOT NULL`, so a session/connector/provenance
+            # Source can never become an aboutDocument target. This replay
+            # match MUST carry the same guard — without it a producer-created
+            # edge (reachable through the public `sdk.create_edge`) to a
+            # provenance Source is re-attached to that non-document Source on
+            # rebuild, i.e. live and replay disagree (the #2489 "one create
+            # path / byte-identical stubs" invariant). The guard is
+            # DELIBERATE live-parity, not an accident: a wrong target must be
+            # refused here, exactly as live refuses it.
+            rows = g.query(
+                "MATCH (s:Source {url:$url}) WHERE s.documentKind IS NOT NULL "
+                "RETURN ID(s), s.id LIMIT 1",
+                params={"url": key}).result_set
+            if not rows:
+                logger.warning(
+                    "aboutDocument replay: no Source at url=%r — descriptor "
+                    "skipped (never minted, never mis-pointed)", key)
+                return None
+            return {"internal": rows[0][0], "logical": rows[0][1]}
+        # S0b (#5012): the stub helper returns the CANONICAL key — the raw
+        # spelling may not be the node's stored ``url``, and the MATCH below
+        # must address the node the stub actually merged onto.
         key = _mint_source_stub(g, key)
         rows = g.query(
             "MATCH (s:Source {url:$url}) RETURN ID(s), s.id LIMIT 1",
@@ -170,15 +206,10 @@ def resolve_structural_target(g, label: str, key: str, rel: str):
         if not rows:
             return None
         return {"internal": rows[0][0], "logical": rows[0][1]}
-    # Non-stubbable labels — resolve-only (never mint). Document matches
-    # name OR title (#211 — Documents store their display name in title);
-    # Event nodes match by name (set by create_event).
-    if label == "Document":
-        q = ("MATCH (d:Document) WHERE d.title = $key OR d.name = $key "
-             "RETURN ID(d), d.id LIMIT 1")
-    else:
-        q = (f"MATCH (x:{label} {{name:$key}}) "
-             f"RETURN ID(x), x.id LIMIT 1")
+    # Non-stubbable labels — resolve-only (never mint). Event nodes match by
+    # name (set by create_event).
+    q = (f"MATCH (x:{label} {{name:$key}}) "
+         f"RETURN ID(x), x.id LIMIT 1")
     rows = g.query(q, params={"key": key}).result_set
     if not rows:
         return None
@@ -198,6 +229,170 @@ _VALID_EDGE_PREDICATES = frozenset({
     'aboutSubject', 'aboutObject', 'aboutEvent', 'aboutDocument',
     'aboutSource', 'aboutAction',
 })
+
+# `references` targets whose node is BUILT FROM the source's content, and therefore
+# carry the version anchor `sourceVersion` (owner-approved option A, 2026-09-25, #5199;
+# the operative record is `STORAGE-ARCHITECTURE.md` §9.6). The anchor is set at LINK
+# TIME from the source's current `contentHash`, which is why the public SDK signature
+# does not change.
+#
+# ⚠️ Source of authority: the approved scope is "the `contentHash` of the source version
+# the target was built from", and it is the CODE's writers that the set is pinned to —
+# NOT a §3.4 enumeration. ONTOLOGY §3.4 declares the `references` target list as
+# `Event|Object|Source` (noting a document is itself a `:Source`) and §4.6 still scopes
+# the anchor to `extractedFrom` (Point-level); that wording is deliberately frozen on
+# this branch, in owner review on #5199.
+#
+# `Object` is deliberately ABSENT. Every in-repo writer of a Source→Object
+# `references` link is identity/mention — a connector artifact whose Source `url`
+# IS the artifact — so a version there would be a non-answer, not a stale mark.
+# Referential-containment links (Source→Source) stay property-free: a `"Source"`
+# caller lands in the property-free branch below, and the in-repo containment
+# writers (the session→external MERGE in `hosted_api.py`) write them outside this
+# method. `references` is in NEITHER `STRUCTURAL_REL_LABELS` nor
+# `DERIVABLE_STRUCTURAL_RELS`, so this anchor adds nothing to the replay surface.
+#
+# The discriminator is the caller-supplied RELATION spelling (`entity_label`), not the
+# target's node label — a proxy for "derived", and the only signature-preserving signal
+# available. `Document` is a member because in-repo writers
+# do mint a DOCUMENT-DERIVATION link (`projection/entities.py::_upsert_document`, the
+# session->document link in `hosted_api.py`, the doc classifier of the ingest path);
+# excluding it would leave that derivation half unanchored. If the ontology rules that
+# the connector `Event` is identity rather than derivation, only this set moves.
+#
+# !! POST-D10 the `:Document` LABEL is retired (a document is a `:Source`), so this set
+# member is reachable ONLY through the retained deprecated alias: those writers keep
+# passing `"Document"` as the RELATION's spelling, and `link_source_to_entity` reads it
+# for exactly this decision BEFORE remapping the identity onto `:Source`. Those are two
+# separate facts — the stored edge is `(Source)-[:references]->(Source)` either way,
+# while the alias is what still marks it a DERIVATION rather than containment. A
+# "tidy-up" that switches those call sites to `"Source"` therefore simplifies nothing:
+# it silently drops the anchor from every document link. That is not hypothetical — it
+# is the merge regression pinned by `test_document_derivation_through_the_production_path_anchors`.
+_DERIVATION_REFERENCES_LABELS = frozenset({"Event", "Document"})
+
+# CQL suffix stamping a version anchor on a link MERGE, `ON CREATE` only.
+#
+# `ON CREATE` is load-bearing: connectors re-poll and the `link_source_to_*` writers are
+# idempotent MERGEs, so advancing a recorded version on a re-link would erase exactly the
+# staleness the anchor exists to expose. And `''` must NOT be stamped: it is the
+# auto-created-Source placeholder (and the "no recorded hash" value on an Event), and
+# `'' = ''` compares equal to the source's current hash — a FALSE current.
+#
+# `version_expr` names the version the edge was READ at. Three expressions are passed:
+# ``s.contentHash`` on the `references` writers (which re-read the Source, including on the
+# rebuild path — ``_upsert_document`` and ``_materialize_connector_source`` in pass 1b),
+# ``e.file_hash`` on the repair path — see
+# :meth:`_EdgeHandlers.link_source_to_legacy_event` — and the caller-bound ``$v`` on the
+# `extractedFrom` writer (:meth:`_EdgeHandlers._link_source`), which LIVE fills from
+# :func:`resolve_source_versions` and REPLAY passes from the Point's own journaled snapshot
+# (``sourceVersionTransit``), so that anchor needs no graph read at replay.
+#
+# ⚠️ KNOWN LIMITATION — the anchor does not advance when the TARGET is rewritten in place
+# (#5199, under owner review). ``ON CREATE`` means a target rebuilt from a NEWER version
+# through the same node id (the agent-session re-index path reuses
+# ``event_id = f"session_{session_id}"``) keeps the ORIGINAL anchor and so reads STALE
+# while the target is in fact current — the converse of the false-current guarded below,
+# and the conservative direction the model prefers (``stale != wrong``, §4.6). Advancing
+# it safely requires distinguishing a target rebuild from a source-only re-poll, which
+# the ON CREATE/ON MATCH pair alone cannot; see the question recorded on #5199.
+def _anchor_on_create(version_expr: str) -> str:
+    return (
+        "ON CREATE SET r.sourceVersion = "
+        f"CASE WHEN {version_expr} IS NULL OR {version_expr} = '' "
+        f"THEN NULL ELSE {version_expr} END"
+    )
+
+
+_DERIVATION_ANCHOR_SET = _anchor_on_create("s.contentHash")
+_BACKFILL_ANCHOR_SET = _anchor_on_create("e.file_hash")
+
+
+def resolve_source_versions(g, source_ref) -> dict[str, str]:
+    """LIVE-only: map each source ref to its :Source's non-blank ``contentHash``.
+
+    #5256 — the create-path ``extractedFrom`` read-version anchor. This is the
+    ONLY place the ``extractedFrom`` read version is read from a Source in
+    Python (the separate ``references`` anchors read ``s.contentHash`` inside
+    their own MERGE — see ``_DERIVATION_ANCHOR_SET``); it runs on the LIVE write
+    path and its result is carried in the Point's own journaled snapshot, so the
+    REPLAY never re-reads the Source for the ``extractedFrom`` anchor (the separate
+    ``references`` anchors DO re-read it on the rebuild path). That distinction is
+    load-bearing:
+    ``_upsert_source``'s in-place ``contentHash`` bump is unjournalled (#5024),
+    so a Source read at replay time can have advanced since the Point was read —
+    a FALSE current.
+
+    Keys are the **raw ``extractedFrom`` ref** — the journal-stable spelling —
+    NOT ``resolve_source_key(g, ref)``'s live-time resolution. ``_link_source``
+    at replay looks the raw ref up directly, and a value keyed by a
+    *resolution* is unstable: the Source node's stored ``url`` can differ
+    between live and replay (an unjournaled stub minted by an earlier Point is
+    absent when pass-1 builds the Source, so the same ref resolves to a
+    different key), and the lookup then misses and leaves the edge bare with no
+    error. The raw ref is the one spelling both lanes share — it is the Point's
+    own payload key. ``resolve_source_key`` is still called for every ref, but
+    ONLY to FIND the Source node whose ``contentHash`` to read; it is never
+    this dict's key. Empty / missing / ``''`` / blank
+    hashes are OMITTED: ``''`` compares equal to a Source's ``''`` and reads as
+    a false CURRENT, so absent is the honest value (ONTOLOGY §4.6). The same
+    rule is applied on the replay side by ``_valid_transit_pairs`` — this
+    function must agree with it or a blank hash is live-only (a live≠replay
+    divergence).
+
+    ``source_ref`` is normalized exactly as ``_link_source`` does — a bare
+    ``str`` is ONE ref, never iterated character-wise.
+
+    Side effect: ``resolve_source_key``'s idempotent adopt-on-touch (it stamps
+    ``canonicalUrl``/``urlAliases`` on an EXISTING pre-canonical node) — the
+    same side effect ``_link_source``/``_mint_source_stub`` already has. It
+    never mints a Source.
+    """
+    refs = [source_ref] if isinstance(source_ref, str) else list(source_ref)
+    out: dict[str, str] = {}
+    for ref in refs:
+        if not ref:
+            continue
+        key = resolve_source_key(g, ref)
+        rows = g.query(
+            "MATCH (s:Source {url:$url}) RETURN s.contentHash",
+            params={"url": key}).result_set
+        if not rows:
+            continue
+        h = rows[0][0]
+        # #5256: blank is ABSENT, exactly as the replay-side
+        # `_valid_transit_pairs` treats it. A truthiness test would admit a
+        # whitespace-only `contentHash` ("   " is truthy): the LIVE writers
+        # would then stamp `r.sourceVersion="   "` (`_anchor_on_create` only
+        # nulls `''`) and carry `[['url','   ']]` on the node, while the
+        # REPLAY predicate drops the pair — a live≠replay divergence reachable
+        # from `create_source(url, kind, contentHash="   ")`.
+        if isinstance(h, str) and h.strip():
+            # Keyed by the RAW ref, not `key`: see the docstring — the
+            # resolution is a live-time fact, the raw ref is journal-stable.
+            out[ref] = h
+    return out
+
+
+def _source_version_transit(versions: dict[str, str] | None):
+    """The Point-node transit for the ``extractedFrom`` read version (#5256).
+
+    A list of ``[raw_ref, contentHash]`` pairs, keyed by the Point's own
+    ``extractedFrom`` spelling (journal-stable — see ``resolve_source_versions``)
+    — the EDGE carries the
+    per-link scalar ``r.sourceVersion``; this list is the prop-as-transit that
+    puts the value into the Point's own journaled snapshot (``get_point`` →
+    ``ev["point"]``) so pass-2 can re-stamp the edge without reading the
+    Source. Nested arrays of scalars are persistable (#2894), so this is a
+    legal node property.
+
+    Returns ``None`` when there is nothing to record, so the key is OMITTED
+    entirely — never ``[]`` and never ``''``: an absent anchor must be ABSENT,
+    not an empty value the replay/gate would compare as present.
+    """
+    if not versions:
+        return None
+    return [[ref, h] for ref, h in versions.items()]
 
 
 class _EdgeHandlers:
@@ -305,8 +500,8 @@ class _EdgeHandlers:
         # Try Event
         if self._try_about_edge(source_id, entity_name, 'Event', 'aboutEvent', 'eventKind', 'other'):
             return
-        # Try Document
-        if self._try_about_edge(source_id, entity_name, 'Document', 'aboutDocument', 'documentKind', 'other'):
+        # Try Source (D10: a document IS a :Source — aboutDocument's target)
+        if self._try_about_edge(source_id, entity_name, 'Source', 'aboutDocument', 'documentKind', 'other'):
             return
         # Try Point (for Event→Point reverse direction)
         if self._try_about_edge(source_id, entity_name, 'Point', 'aboutPoint', 'pointKind', 'statement'):
@@ -328,14 +523,18 @@ class _EdgeHandlers:
                         label: str, edge_type: str, kind_field: str, kind_default: str) -> bool:
         """Try to create an about* edge to a named entity. Returns True if found.
 
-        For Document nodes, matches against both ``name`` and ``title`` properties
-        (Documents store their display name in ``title`` per _upsert_document).
+        D10 (ONTOLOGY v3.15 §4.4/§9.5 Q1): a document is a ``:Source``, so the
+        ``aboutDocument`` target is a document-bearing Source matched on ``url``
+        (its identity key — the document id) or ``title`` (its display name,
+        the old Document convention). The ``documentKind IS NOT NULL`` guard
+        keeps a session/connector/provenance Source from ever becoming an
+        ``aboutDocument`` target.
         """
-        # Documents use 'title' as their display name (#211)
-        if label == 'Document':
+        if label == 'Source':
             r = self.g.query(
-                f"MATCH (e:{label}) WHERE e.name = $name OR e.title = $name "
-                "RETURN coalesce(e.title, e.name, $name) LIMIT 1",
+                "MATCH (e:Source) WHERE (e.url = $name OR e.title = $name) "
+                "AND e.documentKind IS NOT NULL "
+                "RETURN coalesce(e.title, e.url, $name) LIMIT 1",
                 params={"name": target_name},
             ).result_set
         else:
@@ -345,10 +544,11 @@ class _EdgeHandlers:
             ).result_set
         if r:
             for n in self._resolve_entity(source_id, by_id=True):
-                if label == 'Document':
+                if label == 'Source':
                     self.g.query(
-                        f"MATCH (n:{n['label']} {{{n['key']}:$sid}}), (e:{label}) "
-                        f"WHERE e.name = $name OR e.title = $name "
+                        f"MATCH (n:{n['label']} {{{n['key']}:$sid}}), (e:Source) "
+                        "WHERE (e.url = $name OR e.title = $name) "
+                        "AND e.documentKind IS NOT NULL "
                         f"MERGE (n)-[:{edge_type}]->(e)",
                         params={"sid": n["value"], "name": target_name},
                     )
@@ -361,13 +561,22 @@ class _EdgeHandlers:
             return True
         return False
 
-    def create_about_edge(self, source_id: str, target_id: str, edge_type: str) -> bool:
+    def create_about_edge(self, source_id: str, target_id: str, edge_type: str, *,
+                          target_label: str | None = None) -> bool:
         """Create a specific about* edge by source/target IDs. Validates edge type.
         
         Args:
             source_id: ID of source node (Point, Document, or Event)
             target_id: ID of target node
             edge_type: one of aboutSubject, aboutObject, aboutEvent, aboutPoint, aboutDocument
+            target_label: restrict the target to this node label (#3586).
+                ``None`` (default) keeps the historical label-agnostic id/eventId
+                resolution — callers that deliberately wire a structural edge
+                whose target label is not the one the rel implies (Point→Point
+                ``aboutSubject`` transfer tests) must keep working. The about*
+                name/handle seam passes ``STRUCTURAL_REL_LABELS[edge_type]`` so a
+                value that collides with ANOTHER label's id/eventId cannot steal
+                the rel from its intended target.
         
         Returns True if edge was created.
         """
@@ -376,9 +585,14 @@ class _EdgeHandlers:
             raise ValueError(f"Invalid about edge type: {edge_type}. Must be one of {valid}")
         
         # Resolve endpoints via index-backed labeled lookups (issue #327).
-        # Source predicate is id-only; target is id OR eventId (legacy OR-set).
+        # Source predicate is id-only; target is id OR eventId (legacy OR-set),
+        # optionally SCOPED to ``target_label`` (#3586) so the label-agnostic
+        # union cannot let a same-spelling node of a different label win and
+        # strand the intended target.
         sources = self._resolve_entity(source_id, by_id=True)
         targets = self._resolve_entity(target_id, by_id=True, by_eventId=True)
+        if target_label is not None:
+            targets = [t for t in targets if t["label"] == target_label]
         if not sources or not targets:
             return False
         created = False
@@ -395,7 +609,7 @@ class _EdgeHandlers:
                     created = True
         return created
 
-    def _link_source(self, point_id: str, source_ref: str | Sequence[str], source_kind: str | None = None, *, label: str = "Point") -> None:
+    def _link_source(self, point_id: str, source_ref: str | Sequence[str], source_kind: str | None = None, *, label: str = "Point", source_versions: dict[str, str] | None = None) -> None:
         """Link entity → Source via extractedFrom edge (Ontology v3.3).
 
         Creates stub Source if missing, keyed on url. ``source_kind`` defaults
@@ -419,20 +633,56 @@ class _EdgeHandlers:
         flag-less Source would otherwise keep matching the one-time backfill
         (issue #1486). Non-session Sources (documents, connectors) are
         untouched.
+
+        ``source_versions`` (#5256) maps a source ref — keyed by the Point's
+        own RAW ``extractedFrom`` spelling, the journal-stable key — to the
+        ``contentHash`` the Point was read from. It is **handed** to this writer
+        by the caller — the LIVE create path resolves it from the Source; the
+        REPLAY passes the value from the Point's own journaled snapshot
+        (``sourceVersionTransit``, whose pairs are raw-ref keyed by the same
+        contract). This method therefore NEVER
+        reads ``s.contentHash`` itself: pass-2 resurrection calls the same
+        writer, and the Source's hash may have advanced since live time
+        (``_upsert_source``'s in-place bump is unjournalled, #5024), so reading
+        it here would record a FALSE current. Absent / empty ⇒ no property at
+        all (``ON CREATE SET r.sourceVersion = NULL`` is a no-op), never ``''``.
         """
         refs = [source_ref] if isinstance(source_ref, str) else list(source_ref)
-        for ref in refs:
-            if not ref:
+        versions = source_versions or {}
+        for raw_ref in refs:
+            if not raw_ref:
                 continue
             # #2489: Source stub creation routed through the SHARED resolver helper
             # (_mint_source_stub — mirror query text, incl. the session: is_episodic
             # clause) so live wiring and rebuild replay mint byte-identical stubs
             # (one create path).
-            ref = _mint_source_stub(self.g, ref, source_kind)
+            ref = _mint_source_stub(self.g, raw_ref, source_kind)
+            # The carrier is keyed by the RAW ref (the Point's journal-stable
+            # `extractedFrom` spelling), so the raw lookup is the one that must
+            # hit on BOTH lanes; the resolved-key lookup covers a caller that
+            # keyed by `_mint_source_stub`'s return instead. (`ref` is that
+            # return, and it is NOT stable across a rebuild — see
+            # `resolve_source_versions`; a URL variant resolves to the node's
+            # stored url, which can differ between live and replay.) `$v` is
+            # ALWAYS bound so the bare callers
+            # (create_document, the ingest connection leg, direct test calls)
+            # never miss a parameter.
+            v = versions.get(ref)
+            if v is None:
+                v = versions.get(raw_ref)
+            # #5199's shared guard: `ON CREATE` only, and `''`/NULL ⇒ NULL. A
+            # re-link must not ADVANCE a recorded version, and the empty string
+            # is never written (it compares equal to a Source's `''` — a false
+            # current).
+            #
+            # D10: a Source source-side entity resolves by ``url`` (its identity
+            # key); Point/other labels keep the id key.
+            key_clause = "{url:$pid}" if label == "Source" else "{id:$pid}"
             self.g.query(
-                f"MATCH (n:{label} {{id:$pid}}), (s:Source {{url:$url}}) "
-                "MERGE (n)-[:extractedFrom]->(s)",
-                params={"pid": point_id, "url": ref},
+                f"MATCH (n:{label} {key_clause}), (s:Source {{url:$url}}) "
+                "MERGE (n)-[r:extractedFrom]->(s) "
+                + _anchor_on_create("$v"),
+                params={"pid": point_id, "url": ref, "v": v},
             )
 
     def link_source_to_entity(self, source_url: str, entity_id: str, entity_label: str, source_kind: str = "document") -> None:
@@ -444,18 +694,44 @@ class _EdgeHandlers:
         Args:
             source_url: the Source node's url (auto-created if missing)
             entity_id: the Document/Event/Object node id the source references
-            entity_label: the entity label (Document|Event|Object) for the MATCH
+            entity_label: the entity label (Source|Event|Object) for the MATCH.
+                The retired ``"Document"`` is accepted as a DEPRECATED ALIAS and
+                resolved to ``Source`` (D10, ONTOLOGY v3.15 §4.4).
             source_kind: sourceKind to set on auto-created Source (default: "document")
 
+        Anchor (#5199, owner-approved 2026-09-25): a DERIVATION link
+        (``entity_label`` in ``_DERIVATION_REFERENCES_LABELS``) records the version
+        it was read from as ``sourceVersion`` — the source's current
+        ``contentHash``, read HERE so that no caller passes it and the public SDK
+        signature is unchanged. Identity/mention links (``Object``) stay
+        property-free. Written ``ON CREATE`` only: a re-link must NOT advance the
+        recorded version, or staleness would silently read as current.
+
         Raises:
-            ValueError: if entity_label is not one of Document, Event, Object
+            ValueError: if entity_label is not one of Source, Event, Object
                 (Action was dissolved in Ontology v3.0).
         """
-        valid = {"Document", "Event", "Object"}
+        # #5199 × D10 (merge resolution): the DERIVATION question is about the
+        # LINK's meaning, so it is answered from the label the CALLER passed,
+        # BEFORE D10's identity remap below collapses ``Document`` onto
+        # ``Source``. Reading it afterwards would make the ``Document`` member of
+        # ``_DERIVATION_REFERENCES_LABELS`` unreachable — a ``Document`` link is a
+        # derivation link and would silently stop being anchored (caught by
+        # ``test_document_link_records_the_version_read``). Anchoring by the
+        # remapped label instead would wrongly stamp every ``Source -> Source``
+        # referential-containment link, which the model keeps property-free.
+        _is_derivation = entity_label in _DERIVATION_REFERENCES_LABELS
+        if entity_label == "Document":
+            # D10: :Document is retired — a document is a :Source. Kept as a
+            # deprecated alias so existing callers/journal replay converge on
+            # the same node instead of creating a second label.
+            entity_label = "Source"
+        valid = {"Source", "Event", "Object"}
         if entity_label not in valid:
             raise ValueError(
                 f"Invalid entity_label: {entity_label}. Must be one of {valid} "
-                f"(Action was dissolved in Ontology v3.0)."
+                f"(Action was dissolved in Ontology v3.0; 'Document' is a "
+                f"deprecated alias for 'Source')."
             )
         # MERGE Source with auto-create (mirrors _link_source) — #205
         key = resolve_source_key(self.g, source_url)
@@ -472,10 +748,67 @@ class _EdgeHandlers:
             params={"url": key, "raw_url": source_url, "cu": canonical,
                     "sk": source_kind, "now": _now_iso()},
         )
+        # D10: a document is a :Source, and a Source resolves by ``url`` (not
+        # ``id``) — the same identity key the label moved with.
+        key_clause = "{url:$eid}" if entity_label == "Source" else "{id:$eid}"
+        if _is_derivation:
+            self.g.query(
+                f"MATCH (s:Source {{url:$url}}), (e:{entity_label} {key_clause}) "
+                f"MERGE (s)-[r:references]->(e) " + _DERIVATION_ANCHOR_SET,
+                params={"url": key, "eid": entity_id},
+            )
+        else:
+            self.g.query(
+                f"MATCH (s:Source {{url:$url}}), (e:{entity_label} {key_clause}) "
+                f"MERGE (s)-[:references]->(e)",
+                params={"url": key, "eid": entity_id},
+            )
+
+    def link_source_to_event(self, source_key: str, event_id: str) -> None:
+        """MERGE ``(Source {url})-[:references]->(Event {eventId})`` — the
+        ``eventId``-keyed derivation writer, anchoring the version the SOURCE holds.
+
+        Separate from :meth:`link_source_to_entity` because legacy raw-Cypher Events
+        carry no ``id``, so that method's id-keyed MATCH would silently no-op on them.
+        Used by the connector choke point and the capture path. Every provenance
+        writer of a DERIVATION link stamps, so such an edge cannot be anchored on one
+        such path and unanchored on another (the generic ``create_edge`` escape hatch
+        and ``graph-scripts/backfill_references.py`` are not provenance writers and are
+        not auto-anchored; nor are the CONTAINMENT writers — the session->external
+        link in ``hosted_api.py`` and the connector ``Source``->``Object`` link in
+        ``projection/entities.py`` — which are deliberately left property-free; see
+        ``STORAGE-ARCHITECTURE.md`` §9.6).
+
+        ``source_key`` is passed through AS the Source key — callers pass the same
+        value they used for the Source MERGE, so this adds no new resolution step.
+
+        NOTE: on the repair path use :meth:`link_source_to_legacy_event` instead — the
+        Source there is deliberately NOT the version the Event was read from.
+        """
         self.g.query(
-            f"MATCH (s:Source {{url:$url}}), (e:{entity_label} {{id:$eid}}) "
-            f"MERGE (s)-[:references]->(e)",
-            params={"url": key, "eid": entity_id},
+            "MATCH (s:Source {url: $url}), (e:Event {eventId: $eid}) "
+            "MERGE (s)-[r:references]->(e) " + _DERIVATION_ANCHOR_SET,
+            params={"url": source_key, "eid": event_id},
+        )
+
+    def link_source_to_legacy_event(self, source_key: str, event_id: str) -> None:
+        """Repair-link a LEGACY ``Event`` to its ``Source``, anchoring the version
+        **the Event records it was read from** — never the Source's current hash.
+
+        Why this cannot be :meth:`link_source_to_event`: ``backfill_sources`` moves the
+        Source to the file's **CURRENT** hash while the legacy Event keeps the
+        ``file_hash`` it was captured with (W2, "file edited since capture"). The
+        Source's hash there is therefore NOT the version this Event was built from, and
+        anchoring ``s.contentHash`` would report a STALE Event as **current** — the
+        precise failure ``sourceVersion`` exists to expose. ``e.file_hash`` *is* that
+        version (it equals ``s.contentHash`` whenever the file has not changed), so it
+        is the honest anchor; an Event with no recorded hash anchors **nothing** rather
+        than guessing.
+        """
+        self.g.query(
+            "MATCH (s:Source {url: $url}), (e:Event {eventId: $eid}) "
+            "MERGE (s)-[r:references]->(e) " + _BACKFILL_ANCHOR_SET,
+            params={"url": source_key, "eid": event_id},
         )
 
     # ponytail: SDK compat alias (Phase 1b will rename caller)

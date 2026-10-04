@@ -15,6 +15,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import {
+  errorCode,
   errorMessage,
   errorStatus,
   headerUpgradeEligible,
@@ -79,7 +80,8 @@ test('#4639: the limit nudge routes to checkout for a buyer, the portal for a su
   // No price and no customer → no route → the nudge is not rendered (never a
   // dead button on a deployment without a Stripe catalog).
   assert.equal(nudgeRoute({ tier: 'free' }), null)
-  assert.equal(nudgeRoute({ tier: 'solo' }), null)
+  assert.equal(nudgeRoute({ tier: 'solo' }), 'portal',
+    'a paid tier with absent status is a payer — portal, never a checkout that 409s')
   assert.equal(nudgeRoute(null), null)
   // The paid-STATUS branch independent of a paid tier: a customer whose tier
   // has not caught up must reach the portal, never the checkout that 409s.
@@ -134,6 +136,14 @@ test('#4639: a genuine limit refusal still offers the upgrade', () => {
   // qualifies on the STRUCTURED status.
   assert.equal(shouldNudgeUpgrade(Object.assign(
     new Error('Extraction budget exhausted for this period'), { status: 402 })), true)
+  // #4614: a 402 whose `code` names a SPEND cap an upgrade cannot lift must
+  // NEVER produce an upsell — while the canonical plan-limit code still does.
+  assert.equal(shouldNudgeUpgrade(Object.assign(
+    new Error('Cohort LLM spend cap reached'),
+    { status: 402, code: 'cohort_cost_cap' })), false)
+  assert.equal(shouldNudgeUpgrade(Object.assign(
+    new Error('Team points limit reached (25000). Upgrade your plan.'),
+    { status: 402, code: 'quota_exceeded' })), true)
   // Legacy string path (client-side 402 copy, no status threaded).
   assert.equal(shouldNudgeUpgrade('Graph limit reached for this tier — upgrade to add more graphs.'), true)
   assert.equal(shouldNudgeUpgrade('Graph limit reached — delete a graph or upgrade.'), true)
@@ -143,16 +153,23 @@ test('#4639: a genuine limit refusal still offers the upgrade', () => {
     new Error('Graph limit reached — delete a graph or upgrade.'), { status: 409 })), true)
 })
 
-test('#4639: error normalization reads Error objects, {message,status}, and strings', () => {
+test('#4639: error normalization reads Error objects, {message,status,code}, and strings', () => {
   assert.deepEqual(normalizeError(Object.assign(new Error('boom'), { status: 404 })),
-    { message: 'boom', status: 404 })
+    { message: 'boom', status: 404, code: null })
   assert.deepEqual(normalizeError({ message: 'limit reached', status: 402 }),
-    { message: 'limit reached', status: 402 })
-  assert.deepEqual(normalizeError('plain'), { message: 'plain', status: null })
-  assert.deepEqual(normalizeError(null), { message: '', status: null })
+    { message: 'limit reached', status: 402, code: null })
+  assert.deepEqual(normalizeError('plain'), { message: 'plain', status: null, code: null })
+  assert.deepEqual(normalizeError(null), { message: '', status: null, code: null })
+  // #4614: the machine-readable refusal category survives normalization.
+  assert.deepEqual(normalizeError(Object.assign(
+    new Error('x'), { status: 402, code: 'quota_exceeded' })),
+  { message: 'x', status: 402, code: 'quota_exceeded' })
   assert.equal(errorMessage(undefined), '')
   assert.equal(errorStatus('plain'), null)
   assert.equal(errorStatus({ status: '402' }), null) // a string status is not a status
+  assert.equal(errorCode({ code: 'quota_exceeded' }), 'quota_exceeded')
+  assert.equal(errorCode({ code: 402 }), null) // a numeric code is not a code
+  assert.equal(errorCode('plain'), null)
 })
 
 // ── 3. Render-region pins (main.jsx has no runtime harness) ───────────────
@@ -221,14 +238,18 @@ test('#4639: CapNotice shares the route derivation — a subscriber is never sen
   const cap = mainJsx.slice(start, mainJsx.indexOf('\n}', start))
   // Bind each handler to its OWN arm (a body-wide match passes when the two
   // handlers are swapped — the exact defect this PR prevents).
-  const checkoutArm = cap.slice(cap.indexOf("route === 'checkout'"), cap.indexOf("route === 'portal'"))
-  const portalArm = cap.slice(cap.indexOf("route === 'portal'"), cap.indexOf('See pricing'))
-  assert.match(checkoutArm, /onClick=\{onUpgrade\}/, 'the checkout arm must call onUpgrade')
-  assert.match(checkoutArm, /'Upgrade'/, 'the checkout arm must offer Upgrade')
+  // #4335 merged in: the non-portal arm is the honest UpgradeCta (a real
+  // checkout control, a DISABLED control on a catalog outage, or nothing) —
+  // never a marketing link, so there is no 'See pricing' fallback any more.
+  const portalArm = cap.slice(cap.indexOf("route === 'portal'"), cap.indexOf('target ?'))
   assert.match(portalArm, /onClick=\{onManage\}/, 'the portal arm must call onManage')
   assert.match(portalArm, /Manage subscription/, 'the portal arm must offer Manage subscription')
   assert.doesNotMatch(portalArm, /onUpgrade/, 'the portal arm must never call the checkout handler')
-  assert.match(cap, /See pricing/, 'the no-route fallback must remain')
+  const checkoutArm = cap.slice(cap.indexOf('target ?'), cap.indexOf('Compare plans'))
+  assert.match(checkoutArm, /<UpgradeCta/, 'the checkout arm must render the honest upgrade control')
+  assert.match(checkoutArm, /onUpgrade/, 'the checkout arm must call onUpgrade')
+  assert.doesNotMatch(cap, /product\.html#pricing/,
+    '#4335: a marketing link is never the cap-notice CTA')
   assert.doesNotMatch(cap, /team\?\.checkout_price_id/,
     'the raw price-id gate must not decide the CapNotice route')
   // Both call sites pass the shared derivation AND the correct handlers — a
@@ -240,7 +261,7 @@ test('#4639: CapNotice shares the route derivation — a subscriber is never sen
       mainJsx.indexOf('/>', mainJsx.indexOf('<CapNotice text={capNotice}'))),
   ]) {
     assert.match(site, /route=\{nudgeRoute\(team\)\}/, 'each call site must pass the shared route')
-    assert.match(site, /onUpgrade=\{upgrade\}/, 'each call site must wire onUpgrade to upgrade()')
+    assert.match(site, /onUpgrade=\{upgradeToPrice\}/, 'each call site must wire onUpgrade to upgradeToPrice()')
     assert.match(site, /onManage=\{manageBilling\}/, 'each call site must wire onManage to manageBilling()')
     assert.match(site, /billingPending=\{billingPending\}/, 'each call site must pass billingPending')
   }

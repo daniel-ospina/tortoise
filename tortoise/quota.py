@@ -183,12 +183,98 @@ _RESOURCE_LIMIT_KEYS = {
 }
 
 
+# #4614: the machine-readable CATEGORY of a quota refusal — the one value a
+# caller branches on. The message text is for humans only; nothing may key on
+# it (the clients ship independently of the server's wording).
+QUOTA_REFUSAL_CODE = "quota_exceeded"
+
+
+class RefusalPayload(dict):
+    """The structured 402 ``detail`` — a dict that STRINGIFIES to its message.
+
+    #4614: the payload must survive as a structured object (REST returns it as
+    the 402 ``detail`` and callers branch on ``code``), but the MCP capture twin
+    reads ``getattr(e, "detail", ...)`` and stringifies it. It cannot be fixed
+    there: the change would land inside a registered tool's handler and red
+    ``surface-guard`` (CONTRIBUTING: *"Add response fields in the SDK or
+    assembly layer, not inside a tool function"*). Answering the human message
+    from ``__str__`` fixes every ``str(detail)`` consumer at the assembly layer
+    instead, while ``json.dumps`` (and therefore FastAPI) still serializes it as
+    a JSON object.
+    """
+
+    def __str__(self) -> str:
+        message = self.get("message")
+        return message if isinstance(message, str) else super().__str__()
+
+
 class QuotaExceededError(Exception):
-    """Org is at/over its resource limit — the write must be rejected (402)."""
+    """Org is at/over its resource limit — the write must be rejected (402).
+
+    #4614: the refusal carries the STRUCTURED facts of the refusal —
+    ``resource``, ``used``, ``limit``, and (for the capture points gate)
+    ``estimate`` — because a refusal that exists only as prose is not a
+    distinguishable state: every consumer is pushed onto matching the message
+    text, and our own clients are documented as forbidden from doing exactly
+    that (``capture_spool.classify_failure``: *"a capacity/billing refusal is
+    a category, not a string"*). ``quota_refusal_payload`` turns these fields
+    into the house structured-detail shape (#2789, `_one_free_org_detail`);
+    the prose survives as that payload's ``message``, so a human reader loses
+    nothing.
+
+    Every field is optional and keyword-only: a raise site that knows only its
+    message (``QuotaExceededError("…")``) still works and yields a payload
+    without numbers — the dashboard already falls back to ``/v1/team``'s
+    allowance when a refusal carries none. Do NOT populate a field by
+    re-counting: the values must be the ones THIS gate compared.
+
+    ``code`` lives on the EXCEPTION rather than at each raise site, so a
+    generic ``except QuotaExceededError: payload(e)`` cannot mislabel a
+    subclass's refusal as the base category — ``CohortCostCapExceeded``
+    overrides it, and a spend-cap refusal must not read as a plan-limit one
+    (the same one-contract rule the payload exists to enforce).
+    """
+
+    def __init__(self, message: str, *, resource: str | None = None,
+                 used: int | None = None, limit: int | None = None,
+                 estimate: int | None = None,
+                 code: str = QUOTA_REFUSAL_CODE) -> None:
+        super().__init__(message)
+        self.resource = resource
+        self.used = used
+        self.limit = limit
+        self.estimate = estimate
+        self.code = code
 
 
 class QuotaCheckError(Exception):
     """Quota counting/config failed — fail closed (500/503), never pass."""
+
+
+def quota_refusal_payload(exc: QuotaExceededError) -> dict:
+    """The structured 402 ``detail`` for a quota refusal (#4614).
+
+    House shape — a dict whose ``code`` drives client branching and whose
+    ``message`` is the human sentence — matching ``_one_free_org_detail``
+    (#2789) and the ``SUSPENDED`` detail (#308 R5). The quota refusal was the
+    surviving instance of the contract #2789 abandoned: a bare string, so
+    every consumer had to prose-match (`website/apps/dashboard/src/
+    upsellGate.js` records that workaround).
+
+    Only fields the raise site actually knew are emitted: a fabricated
+    ``used``/``limit`` would be worse than an absent one. The ``code`` is read
+    off the exception (never assumed here) so a subclass's category survives a
+    generic caller.
+    """
+    payload: dict = RefusalPayload({
+        "code": getattr(exc, "code", None) or QUOTA_REFUSAL_CODE,
+        "message": str(exc),
+    })
+    for key in ("resource", "used", "limit", "estimate"):
+        value = getattr(exc, key, None)
+        if value is not None:
+            payload[key] = value
+    return payload
 
 
 def derived_tier(org_row: dict) -> str:
@@ -365,6 +451,49 @@ def resolve_org_limits(org_id: str) -> dict:
     }
 
 
+def api_key_occupies_slot(org_id: str, key_id: str, sdk=None) -> bool:
+    """#4355: True iff `key_id` is a row that ``_count_resource(org_id,
+    'api_keys')`` counts RIGHT NOW — i.e. it currently occupies exactly one
+    ``max_api_keys`` slot.
+
+    This is NOT a fourth count. It is the api_keys cap predicate applied to
+    ONE id, and it exists for exactly one caller: the replacement-aware rotate
+    primitive, which may credit the slot it is about to release only when the
+    displaced row is one the cap actually charged. Without this proof a
+    revoked / expired / bootstrap row id would buy a free slot (the count
+    never held it) and rotate would become a cap hole.
+
+    The two lanes read through the SAME sources ``_count_resource`` uses —
+    Supabase: ``active_api_keys`` (the shared live-set reader) minus the
+    ``created_via='bootstrap'`` exclusion; registry: the same WHERE clause the
+    registry count carries — so the two can never disagree about what is LIVE
+    or about what is cap-exempt. ``tests/test_quota.py`` pins the parity
+    (the count equals the number of rows this predicate accepts).
+    """
+    if not org_id or not key_id:
+        return False
+    from tortoise.supabase_control import (  # noqa: I001
+        active_api_keys, get_control_plane, is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        cp = get_control_plane()
+        return any(
+            r.get("id") == key_id and r.get("created_via") != "bootstrap"
+            for r in active_api_keys(cp, org_id)
+        )
+    reg = (sdk if sdk is not None and getattr(sdk, "_namespace", None) == "registry"
+           else _make_sdk(namespace="registry"))
+    rows = reg._get_registry().query(
+        "MATCH (k:APIKey {org_id: $tid, id: $kid}) "
+        "WHERE k.revoked_at IS NULL "
+        "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
+        "AND (k.expires_at IS NULL OR k.expires_at > $now) RETURN k.id",
+        params={"tid": org_id, "kid": key_id,
+                "now": datetime.now(UTC).isoformat()},
+    ).result_set
+    return bool(rows)
+
+
 def count_org_usage(org_id: str, resource: str, sdk=None) -> int:
     """Count current usage for a resource. Raises QuotaCheckError on failure.
 
@@ -372,8 +501,10 @@ def count_org_usage(org_id: str, resource: str, sdk=None) -> int:
     can use it without duplicating the fail-closed handling.
 
     Supported resources: points, api_keys, sessions, users, graphs,
-    documents (#1726: the :Document count with the transcript discriminator).
-    ``points`` counts non-episodic Points + Object/Subject nodes (#1911).
+    documents (#1726: the document-bearing :Source count with the transcript
+    discriminator — D10, ONTOLOGY v3.15 §4.4).
+    ``points`` counts non-episodic Points + Object/Subject nodes (#1911) +
+    non-episodic Event nodes (#1977).
     """
     return _count_resource(org_id, resource, sdk=sdk)
 
@@ -389,7 +520,9 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
       them, R-18) PLUS all Object/Subject nodes (#1911 — the /v1/objects
       + /v1/subjects gates check this resource, and Object/Subject carry
       only their own labels, so they must be counted here or the cap is
-      vacuous for those writes)
+      vacuous for those writes) PLUS non-episodic Event nodes (#1977 — the
+      SAME vacuity on `tortoise_create_event`; the SAME fail-closed flag rule,
+      so capture-minted Events stamped ``is_episodic: true`` stay excluded)
     - api_keys: LIVE (non-revoked, non-expired) API keys that COUNT against
       max_api_keys. A bootstrap (24h session) credential is cap-EXEMPT
       (R13/#4140) and excluded; a NULL/legacy ``created_via`` is a DURABLE
@@ -398,12 +531,17 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
       all-nodes count; #947 P0)
     - users: active Membership nodes in registry
     - graphs: Graph nodes in registry
-    - documents (#1726): :Document nodes in the tenant graph with the
-      discriminator ``COALESCE(documentKind,'') != 'transcript'`` — NULL-kind
-      docs COUNT (no leak; a frontmatter-less docs-endpoint doc is NULL-kind
-      and counts), session transcripts (documentKind='transcript', the
-      /v1/sessions commit MERGE at hosted_api.py) are EXCLUDED so a captured
-      session never consumes the docs gate.
+    - documents (#1726): document-bearing :Source nodes in the tenant graph
+      with the discriminator ``documentKind IS NOT NULL AND documentKind
+      != 'transcript'``. D10 (ONTOLOGY v3.15 §4.4): a document is a :Source,
+      so the cap is RE-POINTED at :Source — never retired (that would ungate
+      /v1/index/docs) and never folded into the node cap (that would silently
+      meter ~2,193 non-document sources). A NULL documentKind is NOT a
+      document (no COALESCE-to-empty: that would meter every session/connector/
+      provenance Source, the exact #1726 price change D10 forbids); session
+      transcripts (documentKind='transcript', the /v1/sessions commit MERGE at
+      hosted_api.py) are EXCLUDED so a captured session never consumes the docs
+      gate.
     """
     try:
         # ── Registry-scoped counts (api_keys, users, graphs) ──
@@ -514,16 +652,20 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
         if sdk is None:
             sdk = _make_sdk(namespace=org_id)
         if resource == "documents":
-            # #1726 Slice 1: the documents resource — :Document count with
-            # the transcript discriminator (T2-P2a). NULL-kind docs COUNT
-            # (COALESCE) — a frontmatter-less docs-endpoint doc never leaks;
-            # session transcripts (documentKind='transcript', hosted_api.py
-            # commit MERGE) are excluded so capture never consumes the docs
-            # gate (the gate fires on /v1/index/docs ONLY).
+            # #1726 Slice 1, re-pointed by D10 (ONTOLOGY v3.15 §4.4): the
+            # documents resource counts document-bearing :Source nodes with
+            # the transcript discriminator (T2-P2a). Only a non-NULL
+            # documentKind is a document — a session/connector/provenance
+            # Source has no documentKind and must NOT be metered (that is the
+            # #1726 price change D10 forbids). Session transcripts
+            # (documentKind='transcript', hosted_api.py commit MERGE) are
+            # excluded so capture never consumes the docs gate (the gate fires
+            # on /v1/index/docs ONLY).
             rows = sdk._get_proj().g.query(
-                "MATCH (d:Document) "
-                "WHERE COALESCE(d.documentKind, '') <> 'transcript' "
-                "RETURN count(d)",
+                "MATCH (s:Source) "
+                "WHERE s.documentKind IS NOT NULL "
+                "AND s.documentKind <> 'transcript' "
+                "RETURN count(s)",
             ).result_set
             return int(rows[0][0])
         if resource == "sessions":
@@ -557,10 +699,41 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
         # after which all points-gated writes 402 until upgrade — the
         # intended "0 uncapped object/subject growth" posture. A future
         # indexer preflight (follow-up) would gate the job itself.
+        #
+        # #1977 (code-review gate on PR #1974): the SAME vacuity recurred on the
+        # Event label — `tortoise_create_event` is `_quota_gated("points")`
+        # (mcp_server.py), but a DIRECT call defaults to `is_episodic=None` and
+        # mints a flag-less Event this query never saw, so a free org could mint
+        # unbounded Events without ever 402ing (the gate was decoration — its
+        # failure mode was indistinguishable from its success mode). Events are
+        # graph NODES and ``max_points`` IS the pricing ``max_graph_nodes`` cap
+        # (the recorded GAP-B / MAIN-DELTA 2 decision,
+        # docs/plans/2026-08-08-310-stripe-billing.md — "the points counter
+        # counts graph nodes"), and #1911 resolved the identical finding for
+        # Object/Subject by ADDING the missing label rather than dropping the
+        # gate — dropping it here would re-open the unbounded-growth hole for
+        # one more writer. So the Event branch carries the SAME fail-closed
+        # R-18 predicate as Point: a MISSING flag counts as non-episodic.
+        #
+        # Events reaching this branch carry ``is_episodic`` UNSET, which is
+        # why they ARE charged. Only three writers stamp it true: the
+        # ``sessionCaptured`` Event minted by ``sdk.capture_session`` and by
+        # the hosted capture path (both pass ``is_episodic=True`` to
+        # ``create_event``), and the hosted commit path, which sets
+        # ``e.is_episodic=true`` on its AgentSession Event and on its
+        # extracted occurrence Events. Those stay EXCLUDED — that exclusion is
+        # what keeps this change from re-charging the capture users the #947
+        # backfill exists for. It is NOT a kind allowlist: the discriminator
+        # stays the ``is_episodic`` flag, exactly as for Points. Conversely,
+        # ``_session_event_write`` (the session index path — its docstring
+        # pins "no is_episodic on the index path") and a direct
+        # ``create_event`` without the explicit kwarg (``tortoise_create_event``)
+        # leave the flag unset and their Events therefore COUNT.
         rows = sdk._get_proj().g.query(
             "MATCH (n) "
             "WHERE (n:Point AND (n.is_episodic IS NULL OR n.is_episodic = false)) "
             "   OR n:Object OR n:Subject "
+            "   OR (n:Event AND (n.is_episodic IS NULL OR n.is_episodic = false)) "
             "RETURN count(n)",
         ).result_set
         return int(rows[0][0])
@@ -576,7 +749,8 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
         raise QuotaCheckError(f"quota count failed for {resource}: {redacted}") from e
 
 
-def enforce_org_limit(limits: dict | None, resource: str, sdk=None) -> None:
+def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
+                      slot_credit: int = 0) -> None:
     """Reject a write when the org is at/over its resource limit.
 
     Args:
@@ -588,6 +762,13 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None) -> None:
         resource: "points" | "api_keys" | "sessions" | "users" | "graphs"
             | "documents".
         sdk: pre-built org SDK (REST callers already hold one) — optional.
+        slot_credit: #4355 — how many slots this write RELEASES as part of the
+            same operation, so the admission check is evaluated against the
+            post-release count. It exists for exactly ONE caller: the
+            replacement-aware rotate primitive, which passes 1 after proving
+            (``api_key_occupies_slot``) that the displaced row is counted once.
+            MUST be 0 everywhere else, and MUST never become reachable from a
+            client-supplied value — an unproven credit is a free slot.
 
     Raises:
         QuotaExceededError: org at/over limit (402-equivalent).
@@ -622,7 +803,8 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None) -> None:
         if count >= limit:
             raise QuotaExceededError(
                 f"Team documents limit reached ({limit}). Upgrade your plan "
-                f"to increase it."
+                f"to increase it.",
+                resource="documents", used=count, limit=limit,
             )
         return
     limit_key = _RESOURCE_LIMIT_KEYS.get(resource)
@@ -644,9 +826,13 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None) -> None:
             return
         raise QuotaCheckError(f"team limits missing {limit_key} for resource {resource!r}")
     count = _count_resource(org_id, resource, sdk=sdk)
-    if count >= limit:
+    # #4614: report what the gate COMPARED (post-credit), never a fresh count —
+    # the refusal's numbers must be the ones that produced it.
+    used = count - slot_credit
+    if used >= limit:
         raise QuotaExceededError(
-            f"Team {resource} limit reached ({limit}). Upgrade your plan to increase it."
+            f"Team {resource} limit reached ({limit}). Upgrade your plan to increase it.",
+            resource=resource, used=used, limit=limit,
         )
 
 

@@ -392,6 +392,113 @@ def test_fatal_4xx_no_failover(monkeypatch):
         assert model.failover_used is False
 
 
+def test_billing_exhausted_fails_over_to_fallback(monkeypatch):
+    """#4960: the NARROW carve-out — a 403 carrying the provider's key-limit
+    body (#4860) fails over to the fallback on the 1-2-provider
+    ``RoutingModel`` shape. The issue's own scenario: keyed deepseek +
+    openrouter, the openrouter leg's key budget spent.
+
+    402 is deliberately NOT included: it stays FATAL on ``RoutingModel`` by
+    the recorded #1987/#1509 decision (see
+    ``test_routing_402_fatal_is_a_recorded_decision_1987_1509`` and its
+    negative control). FAILS on the pre-fix code (the gate consulted only
+    ``is_fatal``, so the fallback was never tried)."""
+    _reset_failover_cooldown()
+    err = _http_error_body(403, OR_KEY_LIMIT_BODY)
+    primary = _StubAdapter("deepseek-direct").fail_with(err)
+    fallback = _StubAdapter("openrouter")
+    model = RoutingModel(primary, fallback, cooldown_s=0)
+    out = model.complete(system="s", user="u")
+    assert out.startswith("openrouter:")
+    assert primary.calls == 1
+    assert fallback.calls == 1, "fallback must be called on the key-limit 403"
+    assert model.last_route == "openrouter"
+    assert model.route == "openrouter"
+    assert model.failover_used is True
+
+
+def test_routing_402_billing_does_not_fail_over():
+    """#4960 split-off negative control: the provider billing class is NOT
+    adopted wholesale on ``RoutingModel``. A bare HTTP 402 stays FATAL and
+    must re-raise WITHOUT calling the fallback — the #1987/#1509 reader-lane
+    decision. (``RotatingModel`` still rotates on 402 — #1951; that contract
+    is pinned by ``test_billing_exhausted_402_unchanged`` and the rotation
+    tests.)"""
+    _reset_failover_cooldown()
+    primary = _StubAdapter("deepseek-direct").fail_with(_http_error(402))
+    fallback = _StubAdapter("openrouter")
+    model = RoutingModel(primary, fallback, cooldown_s=0)
+    with pytest.raises(requests.HTTPError):
+        model.complete(system="s", user="u")
+    assert primary.calls == 1
+    assert fallback.calls == 0, "402 on RoutingModel must stay fatal (recorded decision)"
+    assert model.failover_used is False
+
+
+def test_routing_402_fatal_is_a_recorded_decision_1987_1509():
+    """DECISION MARKER — a 402 on ``RoutingModel`` stays fatal ON PURPOSE.
+
+    This is not a behaviour that merely happens to hold; it is a recorded
+    decision with an owning doc, and it POST-DATES #1951 (which changed
+    ``RotatingModel`` only). Re-applying the broad ``is_billing_exhausted``
+    to this gate to "restore symmetry" with ``RotatingModel`` would reverse
+    it silently — that requires a REOPEN in the decision's own home, argued
+    in front of the owner, not a code change.
+
+      * #1987 — ``docs/plans/2026-08-29-1987-ask-reader.md``: "Reader-lane
+        failover policy (pinned): … RoutingModel re-raises 401/402/403 as
+        fatal … no failover → 502 reader_unavailable" (Task 3 Step 1 (f) and
+        Task 7 (c) pin the same).
+      * #1509 — ``docs/epics/2026-08-20-1509-extractor-v3/05-detailed-e2e.md``
+        line 69, E2E-8 owned negative: "fatal 4xx (401/402/403) → must NOT
+        trigger failover".
+
+    The asymmetry is carried explicitly by the two predicates: the broad
+    ``is_billing_exhausted`` still classifies 402 for ``RotatingModel``
+    (#1951), while ``RoutingModel`` consults only ``is_key_limit_403``. The
+    #4960 fix is scoped to the key-limit 403 alone."""
+    from tortoise.model_adapters import is_billing_exhausted, is_key_limit_403
+
+    err = _http_error(402)
+    # The broad billing predicate still classifies 402 as billing-exhausted —
+    # RotatingModel's contract (#1951), unchanged.
+    assert is_billing_exhausted(err) is True
+    # …and the narrow predicate RoutingModel consults deliberately does not.
+    assert is_key_limit_403(err) is False
+    # RoutingModel therefore keeps 402 fatal by decision:
+    _reset_failover_cooldown()
+    primary = _StubAdapter("deepseek-direct").fail_with(err)
+    fallback = _StubAdapter("openrouter")
+    model = RoutingModel(primary, fallback, cooldown_s=0)
+    with pytest.raises(requests.HTTPError):
+        model.complete(system="s", user="u")
+    assert fallback.calls == 0
+    assert model.failover_used is False
+
+
+def test_fatal_credential_error_reraises_without_failover():
+    """#4960 negative control: a genuinely fatal error — 401, and a 403 with
+    NO key-limit signature (wrong credential, or an unreadable body) — must
+    still re-raise and must NOT call the fallback. The billing carve-out
+    must never widen to the credential class."""
+    cases = [
+        (401, None),
+        (403, OR_BAD_CREDENTIAL_BODY),
+        (403, None),                       # body-less 403 — no proof of the class
+    ]
+    for status, body in cases:
+        _reset_failover_cooldown()
+        err = _http_error(status) if body is None else _http_error_body(status, body)
+        primary = _StubAdapter("deepseek-direct").fail_with(err)
+        fallback = _StubAdapter("openrouter")
+        model = RoutingModel(primary, fallback, cooldown_s=0)
+        with pytest.raises(requests.HTTPError):
+            model.complete(system="s", user="u")
+        assert primary.calls == 1
+        assert fallback.calls == 0, f"fallback must never run on {status}"
+        assert model.failover_used is False
+
+
 def test_fatal_config_4xx_no_failover(monkeypatch):
     """FATAL_CONFIG (400/404/unknown 4xx) → no retry, no failover."""
     for status in (400, 404, 422):
@@ -866,11 +973,12 @@ def test_402_single_provider_raises_loud(monkeypatch):
 @pytest.mark.timeout(10)  # an unbounded-loop regression must fail fast, not hang CI
 def test_402_all_providers_dead_raises_bounded(monkeypatch):
     """#1951 no-infinite-loop bound, n≥2: BOTH providers 402 → the bounded
-    n*3 loop cooldowns each once, spends the rest of its attempts skipping
-    cooldowned lanes, and re-raises the last 402 loudly. Total real
-    attempts = 2 (≤ 6 bound) — no retry storm, no hang. A SECOND call with
-    both lanes still cooldowned raises the all-in-cooldown RuntimeError
-    (bounded, no hang) — the retry-continuity contract."""
+    n*3 rotation budget cooldowns each once, and the #4992 reachability pass
+    finds both already cooldowned and adds no calls, so the last 402 is
+    re-raised loudly. Total real attempts = 2 (≤ the 4n = 8 ceiling) — no
+    retry storm, no hang. A SECOND call with both lanes still cooldowned raises
+    the all-in-cooldown RuntimeError (bounded, no hang) — the
+    retry-continuity contract."""
     import random as _random
 
     from tortoise.model_adapters import RotatingModel
@@ -1408,15 +1516,26 @@ def _http_err(status: int):
 
 
 def test_failover_policy_pin(monkeypatch):
-    """(f) 402 on RoutingModel → re-raised (fatal, no failover); 402 on
-    RotatingModel with >=2 providers → rotates; 429 on RoutingModel WITH a
-    fallback → FAILS OVER (transient); 429 without fallback → re-raised."""
+    """(f) 402 on RoutingModel → re-raised (fatal, no failover — the recorded
+    #1987/#1509 decision, restored unchanged); 403 + key-limit body on
+    RoutingModel → FAILS OVER (the #4960 carve-out); 402 on RotatingModel
+    with >=2 providers → rotates; 429 on RoutingModel WITH a fallback →
+    FAILS OVER (transient); 429 without fallback → re-raised."""
     from tortoise.model_adapters import RotatingModel, RoutingModel
-    # 402 fatal on RoutingModel
+    # 402 fatal on RoutingModel — the recorded #1987/#1509 reader-lane
+    # decision, NOT the #4960 carve-out (that is the 403-key-limit leg below).
     primary = _StubAdapter("deepseek-direct").fail_with(_http_err(402))
     m = RoutingModel(primary, _StubAdapter("openrouter"))
     with pytest.raises(requests.HTTPError):
         m.complete(system="s", user="u")
+    # 403 + key-limit body → failover (the #4960/#4860 carve-out)
+    p403 = _StubAdapter("deepseek-direct").fail_with(
+        _http_error_body(403, OR_KEY_LIMIT_BODY))
+    fb403 = _StubAdapter("openrouter")
+    m403 = RoutingModel(p403, fb403, cooldown_s=0)
+    assert m403.complete(system="s", user="u").startswith("openrouter:")
+    assert fb403.calls == 1, "key-limit 403 must fail over (#4960)"
+    assert m403.failover_used is True
     # 402 on RotatingModel n>=2 rotates: the forced RNG picks venice first
     # (its 402 is consumed exactly once), cooldown 60s skips it on the retry
     # so the fallback answers deterministically.
@@ -1672,3 +1791,160 @@ def test_rotating_note_stall_cooldowns_active_provider(monkeypatch):
     out = model.complete(system="s", user="u")
     assert out.startswith("openrouter:"), out
     assert a.calls <= 1, "cooled provider must not be re-called after the stall"
+
+
+# ── #3873: the billing exhaustion that rotates ALSO files an operator alert ──
+#
+# Before this, ``RotatingModel`` classified the provider's own refusal, cooled
+# the lane, rotated and (with no alternative) raised — and told no operator. The
+# beta's only cohort-aggregate spend bound is the provider credit balance, so the
+# exhaustion arrived as an outage (every lane refusing at once) and was invisible
+# from the repo. These tests pin the post-hoc record (analysis option C).
+
+def test_rotating_model_alerts_operator_on_402_exhaustion(monkeypatch):
+    """The refusal that makes us rotate is also the operator's record.
+
+    REDs on: removing the ``_alert_provider_billing_exhausted`` call from
+    ``_attempt`` (no dispatch — the pre-fix state), and on firing it without the
+    classification (see the credential-403 negative control below).
+    """
+    import random as _random
+
+    import tortoise.operator_alert as oa
+    from tortoise.model_adapters import RotatingModel
+
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        oa, "alert_operator",
+        lambda kind, org_id, detail=None: seen.append((kind, org_id, detail)))
+
+    a = _RotatingStub("a", fail_status=402)
+    b = _RotatingStub("b")
+    _orig = _rotating_rng(monkeypatch, [0.1, 0.9])  # A picked first → B answers
+    try:
+        out = RotatingModel([a, b], cooldown_s=300).complete(system="s", user="u")
+    finally:
+        _random.random = _orig
+
+    assert out == "ok-b"
+    assert seen == [(oa.PROVIDER_BILLING_EXHAUSTED_KIND, "a", {
+        "provider": "a",
+        "error_type": "HTTPError",
+        "status": 402,
+        "has_alternative": True,
+    })], (
+        f"the 402 that rotated was not recorded as an operator incident "
+        f"(alerts seen: {seen}) — the aggregate spend bound stays invisible "
+        "(#3873)"
+    )
+
+
+def test_rotating_model_alert_classification_ignores_credential_and_config_faults(
+        monkeypatch):
+    """The alert rides the SAME classification as the rotation: a key-limit 403
+    (the provider's own budget) files the incident with status 403, while a
+    signature-less 403 — a wrong credential — and a config 4xx file NOTHING
+    (they are not billing events, and alerting on them would be a false spend
+    signal).
+
+    REDs on: alerting on every ``is_fatal`` fault instead of on
+    ``is_billing_exhausted``.
+    """
+    import random as _random
+
+    import tortoise.operator_alert as oa
+    from tortoise.model_adapters import RotatingModel
+
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        oa, "alert_operator",
+        lambda kind, org_id, detail=None: seen.append((kind, org_id, detail)))
+
+    # Positive: the key-limit 403 body rotates AND alerts (status 403).
+    a = _RotatingStub("a", fail_status=403, body=OR_KEY_LIMIT_BODY)
+    b = _RotatingStub("b")
+    _orig = _rotating_rng(monkeypatch, [0.1, 0.9])
+    try:
+        out = RotatingModel([a, b], cooldown_s=300).complete(system="s", user="u")
+    finally:
+        _random.random = _orig
+    assert out == "ok-b"
+    assert seen == [(oa.PROVIDER_BILLING_EXHAUSTED_KIND, "a", {
+        "provider": "a", "error_type": "HTTPError", "status": 403,
+        "has_alternative": True})], seen
+
+    # Negative: a wrong-credential 403 (no limit signature) re-raises without
+    # alerting, and so does a config 4xx.
+    for status, body in ((403, None), (403, OR_BAD_CREDENTIAL_BODY), (400, None)):
+        seen.clear()
+        c = _RotatingStub("a", fail_status=status, body=body)
+        d = _RotatingStub("b")
+        _orig = _rotating_rng(monkeypatch, [0.1])
+        try:
+            with pytest.raises(requests.HTTPError):
+                RotatingModel([c, d], cooldown_s=300).complete(system="s", user="u")
+        finally:
+            _random.random = _orig
+        assert seen == [], (
+            f"a non-billing fault ({status}/{body!r}) filed a spend incident: "
+            f"{seen} — the alert must ride is_billing_exhausted, not is_fatal"
+        )
+
+
+def test_rotating_model_alerts_before_the_no_alternative_raise(monkeypatch):
+    """With NO alternative lane the refusal is RAISED — and the alert must have
+    fired before it: that shape is the cliff itself (the provider refused and
+    nothing could serve). ``has_alternative=False`` records that no alternative
+    existed, so a triager can tell the two shapes apart.
+
+    REDs on: moving the dispatch below the ``billing and n == 1`` raise.
+    """
+    import tortoise.operator_alert as oa
+    from tortoise.model_adapters import RotatingModel
+
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        oa, "alert_operator",
+        lambda kind, org_id, detail=None: seen.append((kind, org_id, detail)))
+
+    pool = RotatingModel([_RotatingStub("a", fail_status=402, fails=10)],
+                         cooldown_s=300)
+    with pytest.raises(requests.HTTPError):
+        pool.complete(system="s", user="u")
+
+    assert seen == [(oa.PROVIDER_BILLING_EXHAUSTED_KIND, "a", {
+        "provider": "a", "error_type": "HTTPError", "status": 402,
+        "has_alternative": False})], (
+        f"the no-alternative cliff raised WITHOUT an operator alert "
+        f"(alerts seen: {seen}) — that is the exact outage shape #3873 owns"
+    )
+
+
+def test_rotating_model_rotation_survives_an_alert_plane_failure(monkeypatch):
+    """Best-effort (#3873 requirement): an alert failure must not change the
+    request's outcome or turn a rotation into a 500.
+
+    REDs on: letting the alert exception propagate (the request would raise
+    instead of rotating onto the healthy lane).
+    """
+    import random as _random
+
+    import tortoise.operator_alert as oa
+    from tortoise.model_adapters import RotatingModel
+
+    def _boom(kind, org_id, detail=None):
+        raise RuntimeError("alert plane down")
+
+    monkeypatch.setattr(oa, "alert_operator", _boom)
+
+    a = _RotatingStub("a", fail_status=402)
+    b = _RotatingStub("b")
+    _orig = _rotating_rng(monkeypatch, [0.1, 0.9])
+    try:
+        out = RotatingModel([a, b], cooldown_s=300).complete(system="s", user="u")
+    finally:
+        _random.random = _orig
+
+    assert out == "ok-b", (
+        "a failing operator alert broke the rotation — the request's outcome "
+        "must not depend on the alert plane (#3873)")

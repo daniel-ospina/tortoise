@@ -32,7 +32,7 @@ from tortoise.hosted_api import (  # noqa: I001
     get_current_user,
     ForwardedProtoMiddleware,
 )
-from tortoise.sdk import TortoiseSDK
+from tortoise.sdk import SESSION_READ_FIELDS, TortoiseSDK
 
 # The autouse ``_reset_health_probe`` fixture replaces
 # ``hosted_api._health_probe_interval`` with a near-infinite lambda for EVERY
@@ -98,6 +98,35 @@ def _count_stub_nodes() -> int:
         "MATCH (n) WHERE (n:Point OR n:Subject OR n:Operator) "
         "AND n.content IS NULL AND n.name IS NULL RETURN count(n)").result_set
     return rows[0][0] if rows else 0
+
+
+def _about_object_targets(point_id: str) -> list:
+    """Every ``(p)-[:aboutObject]->(x)`` target of *point_id* as
+    ``[label, id]`` pairs — label-agnostic, so a wrong-label steal is visible."""
+    import tortoise.hosted_api as ha
+    sdk = ha._make_sdk(namespace=TEST_TEAM["org_id"])
+    proj = sdk._get_proj()
+    return proj.g.query(
+        "MATCH (p:Point {id:$pid})-[:aboutObject]->(x) "
+        "RETURN labels(x), x.id",
+        params={"pid": point_id},
+    ).result_set
+
+
+def _warm_data_graph():
+    """Open the org's data graph and return its SDK.
+
+    The #3834 transport wait bound (10s) measures the FIRST request that opens
+    the embedded graph; on a loaded box that open alone can exceed it, which
+    refuses an unrelated request with 504 (the #4098-class environment flake,
+    not a product failure). The regression test below calls the handler
+    coroutine directly instead of going through that middleware, and warms the
+    graph here so its assertion is about the edge, not about box load.
+    """
+    import tortoise.hosted_api as ha
+    sdk = ha._make_sdk(namespace=TEST_TEAM["org_id"])
+    sdk._get_proj().g.query("RETURN 1")
+    return sdk
 
 
 def _listed_key(client, kid, timeout: float = 3.0) -> dict:
@@ -946,7 +975,8 @@ class TestBootOrder:
 
 class TestVersionEndpoint:
     """GET /v1/version — public version/sha surface so clients (and the
-    onboarding skill) can detect an outdated server before authenticating.
+    onboarding instructions — not a skill, #4365) can detect an outdated
+    server before authenticating.
     """
 
     def test_version_returns_package_version(self, client):
@@ -1340,6 +1370,72 @@ class TestPointsCreate:
         assert r.status_code == 200, r.text
 
 
+class TestPointsCreateConfidenceAndAuthor:
+    """#4032: `confidence` / `authoredBy` were dropped at the REST boundary.
+
+    `CreatePointRequest` declared neither field, so pydantic's default
+    ``extra='ignore'`` discarded them and the route never forwarded them to
+    ``sdk.create_point`` — the write reported ``ok`` while BOTH fields were
+    lost. The wire names are not invented here: the hosted client
+    (agent-infra ``scripts/tortoise-memory.mjs``) sends exactly these on
+    ``write-points`` / ``write-claim``, and the in-repo Python client
+    (``tortoise_client.write_claim``) already persists them through
+    ``sdk.create_point``. Each test below pins one half of the contract: the
+    value is STORED, or the request is ANSWERED with a 4xx — never a success
+    that silently discards it.
+    """
+
+    def _read_point(self, client, point_id: str) -> dict:
+        r = client.get(f"/v1/points/{point_id}")
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    def test_confidence_and_authoredBy_persist(self, client):
+        r = client.post(
+            "/v1/points",
+            json={
+                "content": "confidence round trip",
+                "kind": "hypothesis",
+                "confidence": 0.8,
+                "authoredBy": "research-skill",
+            },
+        )
+        assert r.status_code == 200, r.text
+        props = self._read_point(client, r.json()["id"])
+        assert props.get("confidence") == 0.8, props
+        assert props.get("authoredBy") == "research-skill", props
+
+    def test_confidence_zero_persists_not_dropped(self, client):
+        # 0.0 is FALSY — a truthiness guard at the boundary would drop it.
+        # The client's `is not None` guards are exactly what this pins.
+        r = client.post(
+            "/v1/points",
+            json={"content": "zero confidence", "kind": "hypothesis", "confidence": 0.0},
+        )
+        assert r.status_code == 200, r.text
+        props = self._read_point(client, r.json()["id"])
+        assert props.get("confidence") == 0.0, props
+
+    def test_out_of_range_confidence_is_rejected_not_dropped(self, client):
+        # A value the store cannot hold must be ANSWERED (422), not silently
+        # discarded while the write reports ok.
+        r = client.post(
+            "/v1/points",
+            json={"content": "bad confidence", "kind": "statement", "confidence": 5},
+        )
+        assert r.status_code == 422, r.text
+
+    def test_absent_extras_do_not_write_null_props(self, client):
+        # The fix must ADD props only when supplied — never stamp nulls onto
+        # a point that did not ask for them (a null confidence would look
+        # "recorded" to a reader).
+        r = client.post("/v1/points", json={"content": "no extras", "kind": "statement"})
+        assert r.status_code == 200, r.text
+        props = self._read_point(client, r.json()["id"])
+        assert "confidence" not in props, props
+        assert "authoredBy" not in props, props
+
+
 class TestPointsList:
     """GET /v1/points — list Points."""
 
@@ -1419,6 +1515,23 @@ class TestTeamInfo:
         assert body["max_orgs"] is None
         assert "point_count" in body
         assert isinstance(body["point_count"], int)
+        # #4331: node usage vs the plan's node allowance.
+        assert "nodes_used" in body and isinstance(body["nodes_used"], int)
+        assert body["max_nodes"] == 10000  # TEST_TEAM.max_points (free tier)
+
+    def test_team_info_nodes_used_counts_object_not_point_count(self, client):
+        """#4331: `nodes_used` is the count the points cap gates —
+        non-episodic Points PLUS Object + Subject (#1911) — NOT `point_count`
+        (:Point-only, demo-excluded). An Object write moves nodes_used and
+        leaves point_count alone; rendering point_count against the node cap
+        would be a lying UI."""
+        before = client.get("/v1/team").json()
+        r = client.post("/v1/objects",
+                        json={"name": "node-cap-obj", "objectKind": "project"})
+        assert r.status_code == 200, r.text
+        after = client.get("/v1/team").json()
+        assert after["nodes_used"] == before["nodes_used"] + 1
+        assert after["point_count"] == before["point_count"]
 
     def test_unhandled_500_carries_cors_headers(self, client, monkeypatch):
         """#1591: an unhandled exception must return a 500 WITH the CORS
@@ -1518,6 +1631,43 @@ class TestTeamInfo:
         # No stub Subject/operator nodes were minted.
         assert _count_stub_nodes() == 0, "stub nodes minted (#334 class)"
 
+    def test_point_about_object_rejects_wrong_label_target(self, client):
+        """#3586 review P2: ``about_object`` is an Object handle, so the edge
+        must never land on a non-Object node whose id happens to match.
+
+        The HTTP door forwards a CLIENT-SUPPLIED value straight to
+        ``create_about_edge``. Resolution there was label-agnostic (id OR
+        eventId across EVERY label), so passing a Subject id produced
+        ``(Point)-[:aboutObject]->(Subject)`` — a structurally invalid edge a
+        caller cannot tell from data, and the exact wrong-label steal the
+        ``target_label`` opt-in closes. The call site now scopes to Object.
+
+        The handler coroutine is invoked directly rather than over the ASGI
+        stack: the assertion is about the edge this call site wires, and the
+        shared transport middleware's 10s wait bound (#3834) measures a cold
+        embedded graph open — a box-load reading, not a product property.
+        """
+        import asyncio
+        from types import SimpleNamespace
+
+        import tortoise.hosted_api as ha
+
+        sdk = _warm_data_graph()
+        subj_id = sdk.create_subject("wrong-label-target",
+                                     subjectKind="company")["id"]
+        assert subj_id != "", "subject id must be minted"
+        body = ha.CreatePointRequest(
+            content="a point about_object-addressing a Subject id",
+            kind="statement", about_object=subj_id)
+        # A header-less request stand-in: `_async_audit` explicitly tolerates
+        # one (#2104) and nothing else in the handler reads the request.
+        request = SimpleNamespace(state=SimpleNamespace(), client=None)
+        out = asyncio.run(ha.create_point(body, request, org=dict(TEST_TEAM)))
+        # No aboutObject edge may exist at all: the value addresses a Subject,
+        # and no Object carries that id.
+        targets = _about_object_targets(out["id"])
+        assert targets == [], f"wrong-label steal: aboutObject -> {targets}"
+
 
     def test_team_info_fails_soft_when_graph_unavailable(self, client, monkeypatch):
         """#1591: a missing/broken team graph must NOT hard-500 /v1/team —
@@ -1533,6 +1683,11 @@ class TestTeamInfo:
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["point_count"] == 0
+        # #4331: the node count (a second graph read) degrades the same way —
+        # it must never turn the fail-soft overview into a 500, and a failed
+        # read is None (unknown), NOT a falsely reassuring 0.
+        assert body["nodes_used"] is None
+        assert body["max_nodes"] == 10000
         assert body["graph_ready"] is False
 
     def test_team_info_reflects_point_count(self, client):
@@ -1966,9 +2121,25 @@ class TestKeyAllowance3874:
 
             # (d) AT-CAP: the refusal names the SAME allowance (the dashboard
             # parses this number for its at-cap notice).
+            # #4614: the 402 detail is now the STRUCTURED refusal (a dict with
+            # `code`/`resource`/`used`/`limit`), not a bare string. The prose
+            # survives as `detail["message"]` — byte-identical to the old
+            # detail, which is what keeps the dashboard's number parse working
+            # (`website/apps/dashboard/src/main.jsx`'s `api()` maps
+            # `detail.message` -> `err.message`; `keyAllowance.capLimitFrom`
+            # regexes that message). The structured fields are asserted too:
+            # a `code` is what lets a caller tell a quota refusal from any
+            # other 402 without matching text.
             r = client.post("/v1/team/keys", headers=h)
             assert r.status_code == 402, r.text
-            m = re.search(r"limit reached \((\d+)\)", r.json()["detail"])
+            detail = r.json()["detail"]
+            assert isinstance(detail, dict), r.text
+            assert detail.get("code") == "quota_exceeded", r.text
+            assert detail.get("resource") == "api_keys", r.text
+            assert detail.get("limit") == allowance, (
+                f"the refusal's structured limit {detail.get('limit')!r} != the "
+                f"advertised allowance {allowance!r}")
+            m = re.search(r"limit reached \((\d+)\)", detail.get("message") or "")
             assert m is not None, r.text
             assert int(m.group(1)) == allowance, (
                 f"pre-cap allowance {allowance} != at-cap refusal {m.group(1)} "
@@ -3085,11 +3256,24 @@ class TestSessionCaptureWriteVerb:
             pass
         _orig_query = {cls: cls.query for cls in _graph_classes}
 
+        # #6072: dispatch through the PUBLISHED contract, not `type(self)`.
+        # The cypher guard subclasses the vendor graph class so no un-guarded
+        # query verb is reachable through the MRO — deliberately, and that
+        # isolation stays. The consequence is that `type(self)` here is a
+        # GENERATED SUBCLASS, so `_orig_query[type(self)]` raised KeyError and
+        # this test failed the REQUIRED python-ci-gate leg. Asking the guard for
+        # the vendor class is the supported way and does not depend on how the
+        # guard isolates the verbs.
+        from tortoise.cypher_guard import unguarded_graph_class
+
         def _selective_boom(self, cypher, params=None, timeout=None):
             if "posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL" in cypher:
                 raise RuntimeError("transient graph failure")
-            return _orig_query[type(self)](self, cypher, params=params,
-                                           timeout=timeout)
+            # The guard's overridden verb delegates via super(), so the patched
+            # vendor method still receives the call — the only thing that broke
+            # was resolving WHICH vendor class to dispatch to.
+            return _orig_query[unguarded_graph_class(type(self))](
+                self, cypher, params=params, timeout=timeout)
 
         for cls in _graph_classes:
             monkeypatch.setattr(cls, "query", _selective_boom)
@@ -3136,6 +3320,74 @@ class TestSessionList:
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["sessions"] == []
+
+    def test_sdk_session_read_parity_with_the_hosted_projection(self, client):
+        """#3557: the SDK's session read and the hosted read serve ONE
+        projection.
+
+        The capture lane writes a durable ``:Session`` node (plus a
+        ``sessionCaptured`` Event) and never an ``AgentSession`` Event, so
+        ``TortoiseSDK.get_session`` — which queried the indexer lane's Event
+        kind — returned ``None`` for every captured session: the read half of
+        the capture lane was missing. Both the list and the by-id hosted
+        surfaces must agree with it on the shared projection.
+
+        The assertion iterates ``SESSION_READ_FIELDS`` rather than a
+        hardcoded subset, and pins the hosted response KEY SETS against it,
+        so a field added to the SDK read or to either hosted handler fails
+        here instead of drifting silently. (The tuple itself is declared
+        SDK-side and imports nothing from ``tortoise/hosted_api.py``, whose
+        handlers spell their columns inline — the key-set assertion is what
+        binds the hosted side.)
+        """
+        captured = _ha_mod._make_sdk(namespace=TEST_ORG_ID).capture_session([
+            {"role": "user",
+             "content": "We decided to ship serve --http first."},
+        ])
+        session_id = captured["session_id"]
+
+        served = next(
+            row for row in client.get("/v1/sessions").json()["sessions"]
+            if row["id"] == session_id)
+        detail = client.get(f"/v1/sessions/{session_id}").json()
+
+        read = _ha_mod._make_sdk(namespace=TEST_ORG_ID).get_session(session_id)
+        assert read is not None, (
+            "the SDK session read must see a captured :Session — the capture "
+            "lane writes no AgentSession Event (#3557)")
+        # #3557 review (P2): the tuple is declared SDK-side; nothing imports
+        # it from ``tortoise/hosted_api.py``, whose handlers spell their
+        # columns inline. Pinning the hosted KEY SETS against it is what
+        # converts "a field added to one read surface without the other fails
+        # here" from a claim into a fact — a column ADDED to either handler
+        # (the likely drift direction) reddens these lines.
+        assert set(read) == set(detail) == set(SESSION_READ_FIELDS) | {
+            "actor_display", "turn_points", "extracted_points", "source"}
+        assert set(served) == set(SESSION_READ_FIELDS) | {"actor_display"}
+        for field in SESSION_READ_FIELDS:
+            # #3555: `extracted` is excluded from the LIST comparison — the
+            # one field on which the list endpoint is NOT the shared
+            # projection. `list_sessions` still counts with the legacy typed
+            # filter (pointKind IN ['decision','statement']) while the SDK
+            # and the detail endpoint count every non-turn Point
+            # (pointKind IS NULL OR <> 'event'). For an untyped M2 extraction
+            # — the documented normal shape — the list reports 0 and the
+            # other two report N (measured here: one injected untyped Point
+            # → sdk=2, detail=2, list=1). Asserting the list value would MASK
+            # that divergence rather than bind it; #3555 tracks it.
+            if field != "extracted":
+                assert read[field] == served[field], (
+                    f"{field} diverges between the SDK read ({read[field]!r}) "
+                    f"and GET /v1/sessions ({served[field]!r})")
+            assert read[field] == detail[field], (
+                f"{field} diverges between the SDK read ({read[field]!r}) "
+                f"and GET /v1/sessions/{{id}} ({detail[field]!r})")
+        # The hosted surfaces and the SDK read one node, so the shared field
+        # list is one vocabulary. A zero count would make the parity
+        # assertion vacuous — the mock extractor mints a TYPED point, which
+        # is why the list endpoint's legacy filter happens to agree here; a
+        # real untyped extraction diverges (#3555, excluded above).
+        assert read["extracted"] >= 1
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -4173,6 +4425,46 @@ class TestSessionFloodGate:
         assert "est=" in msg and "max=" in msg, msg
         assert "tier=" in msg, msg
 
+    def test_the_capture_402_is_a_structured_refusal_not_prose(self, client):
+        """#4614: the capture points refusal is a DISTINGUISHABLE state.
+
+        The gate refused with a bare prose ``detail``, so a caller could not
+        tell a quota refusal from any other 402 without matching the message
+        text — and our own capture clients are documented as forbidden from
+        doing exactly that (``capture_spool.classify_failure``: *"a
+        capacity/billing refusal is a category, not a string"*). Assert the
+        machine-readable category and the numbers the gate actually compared,
+        and that the prose survives as ``detail["message"]`` — whose shape the
+        dashboard's number parse and its ``Last attempt — <detail>`` sub-line
+        both depend on.
+        """
+        dense = ("we should go. " * 300)  # 4500 chars < 5000 turn limit
+        conversation = [{"role": "user", "content": dense}] * 51
+        r = client.post("/v1/sessions", json={
+            "session_id": "quota-structured-session",
+            "conversation": conversation,
+        })
+        assert r.status_code == 402, r.text[:200]
+        detail = r.json()["detail"]
+        assert isinstance(detail, dict), (
+            f"the refusal is still a bare string — no caller can distinguish "
+            f"it without matching prose: {detail!r}")
+        assert detail["code"] == "quota_exceeded", detail
+        assert detail["resource"] == "points", detail
+        # The numbers the gate actually COMPARED — never a fresh recount.
+        assert isinstance(detail["used"], int) and detail["used"] >= 0, detail
+        assert isinstance(detail["limit"], int) and detail["limit"] > 0, detail
+        assert isinstance(detail["estimate"], int) and detail["estimate"] > 0, detail
+        # The GATE invariant (the property the refusal actually expresses) —
+        # not `used < limit`, which is only true because this fixture's org
+        # starts empty. An org already at/over its cap is refused with
+        # `used >= limit`, and that case must not read as a broken refusal.
+        assert detail["used"] + detail["estimate"] > detail["limit"], detail
+        msg = detail["message"]
+        assert msg.startswith("Team points limit reached: "), msg
+        assert f"{detail['used']} in use + {detail['estimate']} estimated" in msg, msg
+        assert f"exceeds {detail['limit']}." in msg, msg
+
     def test_extraction_amplifier_402_zero_growth(self, client):
         """Dense sentence content → extraction-aware estimate exceeds the
         points quota → 402 BEFORE any write (zero node growth)."""
@@ -4265,7 +4557,7 @@ class TestQuotaFailClosed:
         from tortoise.quota import QuotaCheckError  # noqa: I001
         import tortoise.quota as quota_mod
 
-        def _fail_count(_limits, _resource, sdk=None):
+        def _fail_count(_limits, _resource, sdk=None, **_kwargs):
             raise QuotaCheckError("simulated count query failure")
 
         monkeypatch.setattr(quota_mod, "enforce_org_limit", _fail_count)
@@ -4283,7 +4575,7 @@ class TestQuotaFailClosed:
         from tortoise.quota import QuotaExceededError  # noqa: I001
         import tortoise.quota as quota_mod
 
-        def _fail_exceeded(_limits, _resource, sdk=None):
+        def _fail_exceeded(_limits, _resource, sdk=None, **_kwargs):
             raise QuotaExceededError("Team points limit reached (1000)")
 
         monkeypatch.setattr(quota_mod, "enforce_org_limit", _fail_exceeded)
@@ -9556,6 +9848,12 @@ class TestCapturePathSkipsDiscardedProjection:
 
         monkeypatch.setattr(_ha_mod, "_get_onboarding_projection", _spy_projection)
         monkeypatch.setattr(_ha_mod, "_get_onboarding_state", lambda org_id: {})
+        # #3553: the write leg now goes through `_write_jsonb_fields_cas`, which
+        # reads via `_read_onboarding_state_and_version` — stub it too, or the
+        # test opens a real registry graph and only reaches `_spy_write` through
+        # the version-None fallback. Same fix as tests/test_telemetry_registration.py.
+        monkeypatch.setattr(_ha_mod, "_read_onboarding_state_and_version",
+                            lambda org_id: ({}, None))
         monkeypatch.setattr(_ha_mod, "_write_onboarding_state", _spy_write)
         return proj_calls, writes
 
@@ -9611,3 +9909,731 @@ class TestCapturePathSkipsDiscardedProjection:
         assert proj_calls == [], (
             "_record_capture_last_error computed the projection it discards — "
             "this is the per-capture hot path across the fleet")
+
+    def test_record_capture_last_error_flattens_a_structured_refusal(
+            self, monkeypatch):
+        """#4614: a dict 402 detail reaches the dashboard as the message.
+
+        Since the quota refusal became the structured house shape, this is the
+        LIVE path — the capture 402 handler passes ``e.detail`` straight in —
+        and the dashboard renders the stored value as
+        ``Last attempt — <detail>`` (`harnesses.js`). A Python repr
+        (``{'code': ...}``) would leak structure into that sentence, and a
+        naive ``str(detail)`` is what the flattening exists to prevent.
+        """
+        _ha = _ha_mod
+        _, writes = self._spy(monkeypatch)
+        key = _ha._capture_last_error_key("codex")
+        assert key is not None, "fixture requires a registered harness key"
+
+        _ha._record_capture_last_error("org-4614", "codex", {
+            "code": "quota_exceeded", "resource": "points",
+            "used": 24965, "limit": 25000,
+            "message": "Team points limit reached: 24965 in use + 1044 "
+                       "estimated for this capture exceeds 25000. "
+                       "Upgrade your plan.",
+        })
+
+        written = writes[0][1].get(key)
+        assert isinstance(written, str), (
+            f"the dashboard sub-line is text — a dict leaked through: {written!r}")
+        assert written.startswith("Team points limit reached: "), written
+        assert "code" not in written and "{" not in written, (
+            f"a Python repr leaked structure into the failure sentence: {written!r}")
+
+    def test_record_capture_last_error_survives_a_dict_without_a_message(
+            self, monkeypatch):
+        """A structured detail with no ``message`` must still write text.
+
+        The flattening falls back to ``str(detail)`` in that case; the point
+        of pinning it is that the write stays a STRING (the dashboard renders
+        it inside a sentence) even for a shape we do not emit today.
+        """
+        _ha = _ha_mod
+        _, writes = self._spy(monkeypatch)
+        key = _ha._capture_last_error_key("codex")
+
+        _ha._record_capture_last_error("org-4614", "codex", {"code": "weird"})
+
+        written = writes[0][1].get(key)
+        assert isinstance(written, str) and written, written
+
+
+# ── #3124: the shared per-IP bucket primitive's store is bounded ─────────────
+# The old shape inserted the bucket BEFORE the 429 check and pruned only
+# *stale* buckets, so a fresh-key flood grew the store unbounded and scanned
+# it O(n) per request once over max_entries. These pin the replacement policy:
+# stated cap + reclaim-inactive + reject-new/shared-overflow + O(1) hot path.
+
+class _BucketCountingStore(dict):
+    """A dict that measures store-wide iteration WORK, not just calls.
+
+    ``scans`` counts wholesale iteration entry points (``.items()`` /
+    ``.keys()`` / ``.values()`` — the O(n) surface the old code ran on every
+    request once over ``max_entries``). ``yielded`` counts the KEYS produced
+    by ``__iter__`` and ``__reversed__``, so the O(1) one-head inspection
+    reclaim does (one key) is distinguishable from a full-store scan (n
+    keys): counting CALLS would let a `list(store)` full scan hide behind a
+    single ``__iter__``. ``__reversed__`` is measured too because
+    `_bucket_touch` peeks at the insertion-order tail with
+    ``next(reversed(store))`` — a full scan written as
+    ``for k in reversed(store)`` must not bypass the seam (it did before,
+    #3124 review).
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.scans = 0
+        self.yielded = 0
+
+    def __iter__(self):
+        for key in super().__iter__():
+            self.yielded += 1
+            yield key
+
+    def __reversed__(self):
+        for key in super().__reversed__():
+            self.yielded += 1
+            yield key
+
+    def items(self):
+        self.scans += 1
+        return super().items()
+
+    def keys(self):
+        self.scans += 1
+        return super().keys()
+
+    def values(self):
+        self.scans += 1
+        return super().values()
+
+
+def _bucket_req(host: str = "1.2.3.4"):
+    from starlette.requests import Request
+    return Request({"type": "http", "method": "POST", "path": "/x",
+                    "headers": [], "query_string": b"",
+                    "client": (host, 1234)})
+
+
+async def _drive_bucket_check(store, lock, keys, **kw):
+    """Drive the primitive over `keys` in ONE event loop; return status codes."""
+    out = []
+    for k in keys:
+        try:
+            await _ha_mod._check_ip_bucket_rate_limit(
+                _bucket_req(), buckets=store, lock=lock, key=k, **kw)
+            out.append(200)
+        except _ha_mod.HTTPException as exc:
+            out.append(exc.status_code)
+    return out
+
+
+class TestBoundedIpBucketStore:
+    """#3124 — the capacity policy for `_check_ip_bucket_rate_limit`."""
+
+    _KW = dict(limit=1, window_s=3600, detail="flood")  # noqa: RUF012
+
+    def test_fresh_key_flood_is_bounded_by_the_store_cap(self, monkeypatch):
+        """#3124 repro: max_entries=8 + many distinct keys in one window.
+
+        Old shape: the store reached the number of keys (20+) and the prune
+        deleted nothing. New shape: owned keys stay ≤ 8, one shared overflow
+        bucket absorbs the next key, and further new keys get a documented
+        429 (the deliberate store-overflow class).
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+
+        async def _run():
+            store, lock = {}, asyncio.Lock()
+            codes = await _drive_bucket_check(
+                store, lock, [f"10.0.0.{i}" for i in range(50)],
+                max_entries=8, **self._KW)
+            return store, codes
+
+        store, codes = asyncio.run(_run())
+        assert _ha_mod._bucket_owned_count(store) <= 8, \
+            f"store grew past max_entries: {len(store)} keys"
+        assert len(store) <= 9, f"store not bounded: {len(store)} keys"
+        assert codes[:9] == [200] * 9, codes[:9]
+        assert codes[9:] == [429] * 41, codes[9:]
+
+    def test_reclaim_never_evicts_an_active_key(self, monkeypatch):
+        """An attacker flood must not reset a victim's consumed budget.
+
+        Fill the owned cap with ACTIVE keys, then admit a fresh key: it goes to
+        the overflow (never evicting an active key). Only a fully-expired head
+        is reclaimable — and the overflow-routed key is itself never handed a
+        second budget while its charge is in-window (per-key sticky), even when
+        a slot has just freed.
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+
+        async def _run():
+            import time
+            store, lock = {}, asyncio.Lock()
+            keys = [f"k{i}" for i in range(8)]
+            await _drive_bucket_check(store, lock, keys, max_entries=8,
+                                      **self._KW)
+            active = set(store)
+            await _drive_bucket_check(store, lock, ["fresh-1"],
+                                      max_entries=8, **self._KW)
+            survived = [k for k in active if k in store]
+            ov = _ha_mod._BUCKET_OVERFLOW_KEY
+            assert ov in store and any(e[1] == "fresh-1" for e in store[ov]), \
+                store
+            # Expire the head only; reclaim frees exactly that slot.
+            head = next(iter(store))
+            store[head] = [time.time() - 10_000]
+            # A key with NO overflow charges takes the freed slot...
+            freed = await _drive_bucket_check(store, lock, ["fresh-2"],
+                                              max_entries=8, **self._KW)
+            # ...while the overflow-routed key stays in the overflow (its own
+            # in-window charge is not orphaned into a second budget).
+            stuck = await _drive_bucket_check(store, lock, ["fresh-1"],
+                                              max_entries=8, **self._KW)
+            return store, active, survived, head, freed, stuck
+
+        store, active, survived, head, freed, stuck = asyncio.run(_run())
+        assert survived == list(active), \
+            f"reclaim evicted active keys: {set(active) - set(survived)}"
+        assert head not in store, "an expired head must be reclaimable"
+        assert freed == [200], freed
+        assert "fresh-2" in store, "a freed slot must admit a fresh key"
+        assert stuck == [429], (
+            "an overflow-routed key was handed a second budget after a slot "
+            f"freed: {stuck}")
+        assert "fresh-1" not in store
+        assert _ha_mod._bucket_owned_count(store) <= 8
+
+    def test_sticky_overflow_blocks_a_second_budget(self, monkeypatch):
+        """#3124 review P1: an overflow-routed key must not get a SECOND budget.
+
+        The shared overflow carries no per-key attribution, so if a key could
+        graduate to an owned bucket as soon as ANY slot freed, its overflow
+        charges would be orphaned and it would be admitted up to 2x its limit
+        in one window — a fail-open regression against the pre-#3124 per-key
+        behaviour, reachable for every client-keyed store. Reproduced against
+        the previous implementation at cap=1/limit=2/window=100: key B was
+        admitted at t=10,11 (overflow) and again at t=101,102 (owned) — 4
+        admissions for a limit of 2. This test fails on that implementation.
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        clock = {"t": 0.0}
+        monkeypatch.setattr(_ha_mod.time, "time", lambda: clock["t"])
+
+        async def _run():
+            store, lock = {}, asyncio.Lock()
+
+            async def check(key, t):
+                clock["t"] = t
+                try:
+                    await _ha_mod._check_ip_bucket_rate_limit(
+                        _bucket_req(), buckets=store, lock=lock, key=key,
+                        limit=2, window_s=100, detail="x", max_entries=1)
+                    return 200
+                except _ha_mod.HTTPException as exc:
+                    return exc.status_code
+
+            a = await check("A", 1)        # A takes the only owned slot
+            b10 = await check("B", 10)     # B -> shared overflow
+            b11 = await check("B", 11)     # B -> shared overflow
+            b12 = await check("B", 12)     # overflow at limit=2 -> refused
+            b101 = await check("B", 101)   # A expired: B must NOT graduate
+            b102 = await check("B", 102)   # ...and must stay refused
+            b111 = await check("B", 111)   # window drained -> fresh budget
+            return store, (a, b10, b11, b12, b101, b102, b111)
+
+        store, codes = asyncio.run(_run())
+        assert codes == (200, 200, 200, 429, 429, 429, 200), codes
+        assert _ha_mod._bucket_owned_count(store) <= 1
+        assert len(store) <= 2
+
+    def test_fresh_key_below_cap_admitted_while_overflow_is_warm(
+            self, monkeypatch):
+        """#3124 review P1: stickiness must be PER KEY, never store-wide.
+
+        `_bucket_route` briefly held EVERY fresh key in the shared overflow
+        while it was warm, so once a transient flood seeded the overflow a
+        legitimate new key was refused (429) for the rest of the window — even
+        with an empty owned store, i.e. up to 86 400 s of onboarding denial on
+        the signup limiter. Fails on the store-wide shape.
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+
+        async def _run():
+            import time
+            store, lock = {}, asyncio.Lock()
+            kw = dict(limit=2, window_s=3600, detail="x", max_entries=2)
+            await _drive_bucket_check(store, lock, ["k0", "k1"], **kw)
+            # A transient flood seeds the shared overflow (store at cap).
+            await _drive_bucket_check(store, lock, ["flood-a", "flood-b"],
+                                      **kw)
+            seeded = list(store.get(_ha_mod._BUCKET_OVERFLOW_KEY, []))
+            # Expire the owned keys so the store has room again.
+            for k in ("k0", "k1"):
+                store[k] = [time.time() - 10_000]
+            # A key with NO overflow charges must take a freed owned slot.
+            legit = await _drive_bucket_check(store, lock, ["legit-new"], **kw)
+            return store, seeded, legit
+
+        store, seeded, legit = asyncio.run(_run())
+        assert len(seeded) == 2 and all(
+            isinstance(e, tuple) and len(e) == 2 for e in seeded), seeded
+        assert legit == [200], (
+            "a fresh key with no overflow charges was refused below cap — the "
+            "stickiness leaked from per-key to store-wide")
+        assert "legit-new" in store
+        assert _ha_mod._bucket_owned_count(store) <= 2
+
+    def test_forget_refunds_only_the_callers_own_overflow_entry(self):
+        """#3124 review: the overflow refund is per-key attributed.
+
+        A forget for a key that was never charged must pop NOTHING. Before
+        attribution it popped an arbitrary in-window entry belonging to another
+        key, which re-opened that key's budget inside its own window (a
+        count-NEGATIVE refund and a per-key fail-open). Fails on the
+        `overflow.pop()` shape.
+        """
+        sentinel = _ha_mod._BUCKET_OVERFLOW_KEY
+        store = {sentinel: [(1.0, "other-key"), (2.0, "mine")]}
+        _ha_mod._forget_bucket_charge(store, "mine")
+        assert store[sentinel] == [(1.0, "other-key")], store[sentinel]
+        # A never-charged key refunds nothing.
+        _ha_mod._forget_bucket_charge(store, "never-charged")
+        assert store[sentinel] == [(1.0, "other-key")], store[sentinel]
+        # A present-but-empty owned bucket still short-circuits first.
+        store2 = {sentinel: [(1.0, "other")], "k": []}
+        _ha_mod._forget_bucket_charge(store2, "k")
+        assert store2[sentinel] == [(1.0, "other")], store2[sentinel]
+        # The reserved sentinel itself must never pop a foreign entry: an owned
+        # lookup for it returns the shared overflow list (#3124 review).
+        store3 = {sentinel: [(1.0, "victim-a"), (2.0, "victim-b")]}
+        _ha_mod._forget_bucket_charge(store3, sentinel)
+        assert store3[sentinel] == [(1.0, "victim-a"), (2.0, "victim-b")], (
+            f"a sentinel-keyed forget popped a foreign entry: {store3[sentinel]}")
+
+    def test_reserved_sentinel_key_cannot_poison_the_overflow(
+            self, monkeypatch):
+        """#3124 review: a key equal to the reserved sentinel must not own it.
+
+        If it could, the store would hold bare floats under
+        `_BUCKET_OVERFLOW_KEY`, and the next fresh-key scan (`entry[1]` on a
+        float) would raise TypeError -> 500 for the whole window. Unreachable
+        over HTTP (h11's field grammar forbids NUL in a header value) — this
+        pins the structural guard, not a transport guarantee.
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        sentinel = _ha_mod._BUCKET_OVERFLOW_KEY
+        kw = dict(limit=1, window_s=3600, detail="x", max_entries=8)
+
+        async def _run():
+            store, lock = {}, asyncio.Lock()
+            codes = await _drive_bucket_check(store, lock, [sentinel] * 3, **kw)
+            # A NORMAL key must still be routed without raising.
+            codes += await _drive_bucket_check(store, lock, ["normal"], **kw)
+            return store, codes
+
+        store, codes = asyncio.run(_run())
+        overflow = store.get(sentinel, [])
+        assert all(isinstance(e, tuple) and len(e) == 2 for e in overflow), (
+            f"a malformed (bare-float) entry poisoned the overflow: {overflow}")
+        assert codes[0] == 200, codes
+        assert codes[3] == 200, codes
+        assert len(overflow) <= 1, overflow  # limit=1
+
+    def test_sentinel_cannot_collide_with_a_client_key(self):
+        """The reserved overflow sentinel must be unreachable from a request.
+
+        If a client-controlled key could equal `_BUCKET_OVERFLOW_KEY` it could
+        address — and drain — the shared overflow directly. The middleware's
+        key is a prefixed `tt_`/`tk_` API key or `ip:<host>`; the primitive's
+        keys are IP strings, `(dimension, ...)` tuples, or server-side token
+        hashes; and a raw NUL cannot appear in an HTTP header value (h11
+        rejects it), so no request path can manufacture the sentinel.
+        """
+        sentinel = _ha_mod._BUCKET_OVERFLOW_KEY
+        assert sentinel == "\x00overflow"
+        mw = _ha_mod.RateLimitMiddleware(lambda *_: None, max_per_minute=100)
+        for auth in ("Bearer tt_abc", "Bearer tk_abc", "Bearer " + sentinel,
+                     "Bearer x", "Bearer ", ""):
+            for host in ("1.2.3.4", "2001:db8::1", "::ffff:1.2.3.4", None):
+                assert mw._bucket_key("/v1/x", auth, host) != sentinel, (
+                    auth, host)
+        # The prefix gate never treats the sentinel as an API key.
+        assert mw._bucket_key("/v1/x", "Bearer " + sentinel, None) is None
+        # The primitive's key shapes / normalization cannot manufacture it.
+        for key in ("1.2.3.4", "::ffff:1.2.3.4", "::1", "not-an-ip",
+                    ("invite-accept", "global"),
+                    ("invite-accept", "ip", "1.2.3.4")):
+            assert _ha_mod._normalize_mapped_ipv6(key) != sentinel, key
+
+    def test_hot_path_does_not_scan_the_store(self, monkeypatch):
+        """Per-request work must not scale with store size.
+
+        Old shape: once `len(buckets) > max_entries` EVERY request ran
+        `for ip, b in buckets.items()`. New shape: a tracked key does no
+        store-wide iteration at all; a fresh key at an all-live cap inspects
+        at most one head.
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+
+        async def _run():
+            store, lock = _BucketCountingStore(), asyncio.Lock()
+            await _drive_bucket_check(store, lock, [f"k{i}" for i in range(12)],
+                                      max_entries=8, **self._KW)
+            over_cap = len(store)
+            store.scans = store.yielded = 0
+            tracked = await _drive_bucket_check(store, lock, ["k0"],
+                                                max_entries=8, **self._KW)
+            tracked_scans, tracked_yielded = store.scans, store.yielded
+            store.scans = store.yielded = 0
+            fresh = await _drive_bucket_check(store, lock, ["brand-new"],
+                                              max_entries=8, **self._KW)
+            fresh_scans, fresh_yielded = store.scans, store.yielded
+            return (over_cap, tracked, tracked_scans, tracked_yielded,
+                    fresh, fresh_scans, fresh_yielded)
+
+        (over_cap, tracked, tracked_scans, tracked_yielded, fresh, fresh_scans,
+         fresh_yielded) = asyncio.run(_run())
+        assert over_cap > 8, "the test must exercise the OVER-cap path"
+        assert tracked == [429]
+        assert tracked_scans == 0 and tracked_yielded == 0, (
+            f"a tracked key scanned the store: scans={tracked_scans} "
+            f"yielded={tracked_yielded}")
+        assert fresh == [429]  # overflow already full at limit=1
+        assert fresh_scans == 0, f"the fresh path ran {fresh_scans} scan(s)"
+        assert fresh_yielded <= 1, \
+            f"the fresh-key path inspected {fresh_yielded} keys (must be ≤1)"
+
+    def test_defer_charge_creates_no_store_entry(self, monkeypatch):
+        """#1719 preserved and strengthened: a 5xx must consume no budget.
+
+        The deferred check charged nothing before and must not even create an
+        empty bucket now — otherwise a store-saturating flood of 5xx-ing
+        requests would still grow the store.
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+
+        async def _run():
+            store, lock = {}, asyncio.Lock()
+            codes = await _drive_bucket_check(
+                store, lock, ["new-key"], max_entries=8,
+                limit=5, window_s=3600, detail="d", defer_charge=True)
+            return store, codes
+
+        store, codes = asyncio.run(_run())
+        assert codes == [200]
+        assert store == {}, f"deferred check wrote to the store: {store}"
+
+    def test_charge_re_admits_and_is_bounded_at_cap(self, monkeypatch):
+        """`_charge_ip_bucket` (the deferred writer) shares the same bound.
+
+        A terminal charge for a key the deferred check could not track must
+        land in the shared overflow (never grow the owned key space), and the
+        overflow obeys the #1738 burst bound at `limit`.
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+
+        async def _run():
+            store, lock = {}, asyncio.Lock()
+            await _drive_bucket_check(store, lock, [f"k{i}" for i in range(8)],
+                                      max_entries=8, **self._KW)
+            await _ha_mod._charge_ip_bucket(
+                store, lock, "brand-new", limit=1, window_s=3600,
+                max_entries=8)
+            owned_after_first = _ha_mod._bucket_owned_count(store)
+            in_store = "brand-new" in store
+            ov_len = len(store.get(_ha_mod._BUCKET_OVERFLOW_KEY, []))
+            await _ha_mod._charge_ip_bucket(
+                store, lock, "brand-new-2", limit=1, window_s=3600,
+                max_entries=8)
+            ov_len_2 = len(store.get(_ha_mod._BUCKET_OVERFLOW_KEY, []))
+            return (store, owned_after_first, in_store, ov_len, ov_len_2)
+
+        store, owned_after_first, in_store, ov_len, ov_len_2 = asyncio.run(_run())
+        assert in_store is False, "the charge grew the owned key space"
+        assert owned_after_first <= 8
+        assert len(store) <= 9
+        assert ov_len == 1, "the terminal charge must land in the overflow"
+        assert ov_len_2 == 1, "the overflow must obey the #1738 limit bound"
+
+    def test_recharge_moves_a_key_to_the_tail_so_the_true_oldest_head_is_reclaimed(
+            self, monkeypatch):
+        """Last-charge ordering is what makes `_bucket_reclaim` correct.
+
+        An INACTIVE bucket behind an ACTIVE insertion-order head is *not*
+        reclaimable (reclaim stops at the head — the no-active-eviction
+        invariant). Re-charging the head must move it to the tail so the
+        genuinely-oldest key becomes the head and its slot is freed. Without
+        `_bucket_touch` the store would route the next new key to the shared
+        overflow and never reclaim the expired slot.
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        kw = dict(limit=2, window_s=3600, detail="x", max_entries=4)
+
+        async def _run():
+            import time as _time
+            store, lock = {}, asyncio.Lock()
+            await _drive_bucket_check(
+                store, lock, ["k0", "k1", "k2", "k3"], **kw)
+            # k1 is expired but NOT the head; k0 is the active head.
+            store["k1"] = [_time.time() - 10_000]
+            # Re-charging k0 (room for a 2nd entry) must move k0 to the tail,
+            # exposing k1 as the head.
+            second = await _drive_bucket_check(store, lock, ["k0"], **kw)
+            fresh = await _drive_bucket_check(store, lock, ["k9"], **kw)
+            return store, second, fresh
+
+        store, second, fresh = asyncio.run(_run())
+        assert second == [200], second
+        assert fresh == [200], fresh
+        assert "k1" not in store, "the expired head was not reclaimed"
+        assert "k9" in store, "the freed slot did not admit a new key"
+        assert _ha_mod._bucket_owned_count(store) <= 4
+
+    def test_mixed_limit_overflow_is_fail_closed(self, monkeypatch):
+        """One store can carry several `limit`s (`_SENSITIVE_BUCKETS` is
+        20/5/5/5 per op).
+
+        The overflow bucket is shared, so a HIGH-limit key class can fill it
+        and a fresh LOW-limit key then sees `len >= its limit` and is refused.
+        That is strictly more restrictive than the key's own budget — never
+        more permissive — so the coupling is fail-closed and reachable only in
+        the genuine store-overflow regime. This test pins that direction so a
+        future lane cannot make it fail-open.
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+
+        async def _run():
+            store, lock = {}, asyncio.Lock()
+            # Fill the owned cap (2) with active keys.
+            await _drive_bucket_check(store, lock, ["a", "b"], max_entries=2,
+                                      limit=20, window_s=3600, detail="hi")
+            # New keys are routed to the shared overflow, filling it at the
+            # HIGH limit's cap (20).
+            await _drive_bucket_check(
+                store, lock, [f"hi{i}" for i in range(20)], max_entries=2,
+                limit=20, window_s=3600, detail="hi")
+            ov = len(store.get(_ha_mod._BUCKET_OVERFLOW_KEY, []))
+            # A fresh LOW-limit key (5) must not be admitted past its budget.
+            low = await _drive_bucket_check(
+                store, lock, ["low"], max_entries=2,
+                limit=5, window_s=3600, detail="lo")
+            return store, ov, low
+
+        store, ov, low = asyncio.run(_run())
+        assert ov == 20, ov
+        assert low == [429], low
+        assert _ha_mod._bucket_owned_count(store) <= 2
+        assert len(store) <= 3, len(store)
+
+    def test_forget_does_not_pop_overflow_for_an_empty_owned_bucket(self):
+        """A present-but-EMPTY owned bucket means nothing was charged for the
+        key, so `_forget_bucket_charge` must not touch the shared overflow
+        (whose entries may belong to another key)."""
+        store = {_ha_mod._BUCKET_OVERFLOW_KEY: [(1.0, "other"), (2.0, "x")],
+                 "k": []}
+        _ha_mod._forget_bucket_charge(store, "k")
+        assert store[_ha_mod._BUCKET_OVERFLOW_KEY] == [(1.0, "other"),
+                                                       (2.0, "x")]
+        assert store["k"] == []
+
+    def test_singleton_global_dimension_never_overflows(self, monkeypatch):
+        """A server-fixed singleton key can never hit the store cap, so the
+        overflow path must not engage for it (global invite budgets)."""
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+
+        async def _run():
+            store, lock = {}, asyncio.Lock()
+            codes = await _drive_bucket_check(
+                store, lock, ["global"] * 5, max_entries=1,
+                limit=2, window_s=3600, detail="g")
+            return store, codes
+
+        store, codes = asyncio.run(_run())
+        assert codes == [200, 200, 429, 429, 429], codes
+        assert list(store) == ["global"]
+        assert _ha_mod._BUCKET_OVERFLOW_KEY not in store
+
+    def test_below_cap_budgets_stay_independent(self, monkeypatch):
+        """Preserved semantics: below the cap each key keeps its OWN window.
+
+        Key A exhausting its budget must not refuse key B, and a request that
+        is allowed must still be charged (the 429 boundary stays at limit).
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+
+        async def _run():
+            store, lock = {}, asyncio.Lock()
+            a = await _drive_bucket_check(store, lock, ["A", "A", "A"],
+                                          max_entries=8, limit=2,
+                                          window_s=3600, detail="x")
+            b = await _drive_bucket_check(store, lock, ["B"],
+                                          max_entries=8, limit=2,
+                                          window_s=3600, detail="x")
+            return store, a, b
+
+        store, a, b = asyncio.run(_run())
+        assert a == [200, 200, 429], a
+        assert b == [200], b
+        assert len(store["A"]) == 2 and len(store["B"]) == 1
+
+    def test_forget_rolls_back_an_overflow_charge(self, monkeypatch):
+        """An overflow-routed successful accept must roll back count-neutral.
+
+        `_forget_invite_accept` popped only the owned bucket, so an
+        overflow-routed accept would leak its charge for the whole window.
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+
+        async def _run():
+            store, lock = {}, asyncio.Lock()
+            await _drive_bucket_check(
+                store, lock, [("tok", i) for i in range(8)], max_entries=8,
+                limit=1, window_s=900, detail="x")
+            key = ("invite-accept", "token", "fresh")
+            await _ha_mod._charge_ip_bucket(
+                store, lock, key, limit=1, window_s=900, max_entries=8)
+            before = list(store.get(_ha_mod._BUCKET_OVERFLOW_KEY, []))
+            _ha_mod._forget_bucket_charge(store, key)
+            after = list(store.get(_ha_mod._BUCKET_OVERFLOW_KEY, []))
+            return before, after, key
+
+        before, after, key = asyncio.run(_run())
+        assert len(before) == 1, before
+        assert before[0][1] == key, (
+            f"the overflow entry must carry the charged key: {before}")
+        assert after == [], "the overflow charge was not rolled back"
+
+    def test_forget_invite_accept_does_not_refund_a_skipped_check(
+            self, monkeypatch):
+        """#3124 review: an accept whose check opted out must refund NOTHING.
+
+        `_check_ip_bucket_rate_limit` returns early — charging nothing — on
+        `RATE_LIMIT_DISABLED=1` and on a missing client host. Because the
+        refund is per-key attributed, the absent keys match no overflow entry
+        and nothing is popped. This exercises the REAL call path (all three
+        invite stores, via `_forget_invite_accept`); it fails if the refund
+        reverts to popping an arbitrary overflow entry.
+        """
+        from starlette.requests import Request
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        stores = (_ha_mod._INVITE_ACCEPT_TOKEN_BUCKETS,
+                  _ha_mod._INVITE_ACCEPT_IP_BUCKETS,
+                  _ha_mod._INVITE_ACCEPT_GLOBAL_BUCKETS)
+        saved = [(s, dict(s)) for s in stores]
+
+        def _seed():
+            for s in stores:
+                s.clear()
+                s[_ha_mod._BUCKET_OVERFLOW_KEY] = [(1.0, "foreign"),
+                                                   (2.0, "other")]
+
+        def _assert_untouched(label):
+            for s in stores:
+                assert s[_ha_mod._BUCKET_OVERFLOW_KEY] == [(1.0, "foreign"),
+                                                           (2.0, "other")], (
+                    f"{label}: a skipped check's forget popped a foreign "
+                    f"overflow entry: {s}")
+
+        try:
+            # case 1 — no client host (the check's 2nd early return)
+            _seed()
+            no_client = Request({"type": "http", "method": "POST",
+                                 "path": "/x", "headers": [],
+                                 "query_string": b"", "client": None})
+            _ha_mod._forget_invite_accept(no_client, "tok")
+            _assert_untouched("no client")
+
+            # case 2 — limiter disabled (the check's 1st early return)
+            _seed()
+            monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
+            _ha_mod._forget_invite_accept(_bucket_req(), "tok")
+            _assert_untouched("limiter disabled")
+        finally:
+            for s, snapshot in saved:
+                s.clear()
+                s.update(snapshot)
+
+
+class TestBoundedMiddlewareStore:
+    """#3124 — `RateLimitMiddleware._buckets` gets a hard key cap."""
+
+    class _MwReq:
+        def __init__(self):
+            import types
+
+            class _Url:
+                path = "/v1/things"
+
+            class _Headers:
+                def get(self, _key, default=None):
+                    return ""
+
+            self.url = _Url()
+            self.headers = _Headers()
+            self.state = types.SimpleNamespace()
+            self.client = types.SimpleNamespace(host="10.0.0.1")
+
+    def _middleware(self, monkeypatch, max_buckets):
+        async def _noop(scope, receive, send):
+            pass
+
+        mw = _ha_mod.RateLimitMiddleware(_noop, max_per_minute=1,
+                                        max_buckets=max_buckets)
+        mw._disabled = False
+        keys = iter([f"ip:10.0.0.{i}" for i in range(500)])
+        monkeypatch.setattr(mw, "_bucket_key", lambda *a, **kw: next(keys))
+
+        async def _next(_req):
+            return "ok"
+
+        return mw, _next
+
+    def test_middleware_store_is_bounded_under_rotating_keys(self, monkeypatch):
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        mw, _next = self._middleware(monkeypatch, max_buckets=8)
+
+        async def _run():
+            codes = []
+            for _ in range(50):
+                resp = await mw.dispatch(self._MwReq(), _next)
+                codes.append(getattr(resp, "status_code", 200))
+            return codes
+
+        codes = asyncio.run(_run())
+        assert _ha_mod._bucket_owned_count(mw._buckets) <= 8, len(mw._buckets)
+        assert len(mw._buckets) <= 9, len(mw._buckets)
+        assert 429 in codes, "an all-live cap must produce the overflow 429"
+
+    def test_middleware_has_no_periodic_full_scan(self, monkeypatch):
+        """#3124: the old 60 s wholesale `.items()` prune is gone — a tracked
+        key must do no store-wide iteration, on ANY dispatch."""
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        mw, _next = self._middleware(monkeypatch, max_buckets=100)
+        assert not hasattr(mw, "_last_cleanup"), (
+            "the 60 s sweep's deadline attribute is back — a periodic O(n) "
+            "prune has been reintroduced")
+        mw._buckets = _BucketCountingStore()
+        now = _ha_mod.time.time()
+        # Pre-seed several OTHER keys so a full reversed()/items() sweep would
+        # be visible (a 1-key store cannot distinguish a scan from the O(1)
+        # tail peek `_bucket_touch` does with next(reversed(store))).
+        for i in range(5):
+            mw._buckets[f"ip:9.9.9.{i}"] = [now - 10_000]
+        keys = iter(["ip:1.1.1.1", "ip:1.1.1.1"])
+        monkeypatch.setattr(mw, "_bucket_key", lambda *a, **kw: next(keys))
+
+        async def _run():
+            await mw.dispatch(self._MwReq(), _next)  # create the bucket
+            mw._buckets.scans = mw._buckets.yielded = 0
+            await mw.dispatch(self._MwReq(), _next)  # tracked key
+            return mw._buckets.scans, mw._buckets.yielded
+
+        scans, yielded = asyncio.run(_run())
+        assert scans == 0, f"middleware scanned the whole store: scans={scans}"
+        assert yielded <= 1, (
+            f"middleware iterated {yielded} keys on the tracked hot path "
+            f"(store holds {len(mw._buckets)} keys) — a full reversed() scan "
+            "must not pass; only the O(1) tail peek may yield one key")

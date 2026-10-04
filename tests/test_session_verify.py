@@ -24,6 +24,7 @@ verified RED individually.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import stat
@@ -36,6 +37,7 @@ from pathlib import Path
 
 import pytest
 
+from tortoise import hook_install
 from tortoise.capture_install import install_capture
 from tortoise.capture_receipts import capture_receipt_key
 from tortoise.session_verify import (
@@ -305,7 +307,10 @@ def _verify(hosted, home, harness, root, *, timeout=None, extra_env=None,
         timeout = _derived_fire_timeout(home, root, harness)
     _graph, api_url = hosted
     env = {**os.environ, "HOME": str(home),
-           "TORTOISE_API_KEY": "tt_test", "TORTOISE_API_URL": api_url}
+           "TORTOISE_API_KEY": "tt_test", "TORTOISE_API_URL": api_url,
+           # #3682: capture is opt-in — the credential alone no longer consents.
+           # This file exists to exercise the capture chain, so it opts in.
+           "TORTOISE_CAPTURE": "1"}
     env.update(extra_env or {})
     return verify_session_capture(
         harness, api_key="tt_test", api_url=api_url, home=home,
@@ -337,6 +342,9 @@ def _hook_fork_seconds(home, root, harness, tmp_path):
         "HOME": str(home),
         "TORTOISE_TEST_FORK_MARKER": str(tmp_path / "calibration-fork-marker"),
         "TORTOISE_TEST_FORK_PROBE": "1",
+        # #3682: without this the hook declines at the consent gate, so the
+        # calibration measures an early exit instead of the capture fork.
+        "TORTOISE_CAPTURE": "1",
     }
     started = time.monotonic()
     subprocess.run(
@@ -1055,15 +1063,219 @@ def test_cursor_is_honestly_unverifiable(hosted, setup):
     assert "IDE-only" in report["links"]["installed"]["detail"]
 
 
+def _names_pi(text: str) -> bool:
+    """True when ``text`` names Pi — bare (``pi`` / ``PI``) or possessive
+    (``Pi's``).  A comment block that refers to the Pi ruling only possessively
+    must still be scanned, or a wrapped line can carry a banned absolute
+    unseen (#4620)."""
+    for word in text.split():
+        token = word.strip("`*_.,;:()<>\"'").lower().replace("\u2019", "'")
+        if token.endswith("'s"):
+            token = token[:-2]
+        if token == "pi":
+            return True
+    return False
+
+
 def test_pi_is_honestly_unverifiable(hosted, setup):
-    """Pi's seam is an in-process TypeScript extension — not script-firable.
-    Installed is UNVERIFIABLE (present, not fired), never a fabricated pass."""
+    """Pi's seam is an in-process TypeScript extension — not a command this
+    verifier can execute.  Installed is UNVERIFIABLE (present, not fired),
+    never a fabricated pass.  The reason must name the suite that DOES exercise
+    it and the manual-only residual, and must never restate the over-broad
+    absolute (the seam's handlers ARE fired headlessly by its own suite, and
+    `pi -p` is non-interactive)."""
     home, _bindir, _fake = setup
     root = _install(home, "pi")
     report = _verify(hosted, home, "pi", root)
     assert report["exit_code"] == EXIT_UNVERIFIABLE
     assert report["links"]["installed"]["status"] == "UNVERIFIABLE-IN-CI"
-    assert "extension" in report["links"]["installed"]["detail"]
+    detail = report["links"]["installed"]["detail"]
+    assert "extension" in detail
+    assert "tortoise-capture.test.ts" in detail
+    assert "tests/test_pi_capture_hooks.py" in detail
+    # ⛔ Not `"installed"`: `_unverifiable_link` builds the detail as
+    # "<link> not exercised: <reason>", and the link IS "installed" — so that
+    # substring is supplied by the PREFIX and the assertion could never fail
+    # (#4620 review).  Anchor on a phrase only the reason can supply.
+    assert "installed artifact" in detail
+    assert "manual-only" in detail
+    assert "not firable by this command" in detail
+    # The over-broad absolutes must never return: the seam IS fired headlessly
+    # by its own suite (the source seam) and by the installed-artifact probe.
+    # Scan the PI RULING's own text, never the whole module.  The phrases are
+    # over-broad ABOUT PI, and one of them — "no headless trigger" — is TRUE of
+    # Cursor (`UNVERIFIABLE_REASON["cursor"]` says exactly that).  The ruling
+    # lives in the module docstring, the `UNVERIFIABLE_REASON["pi"]` value, and
+    # the comments that state it; another harness's text is out of scope.
+    # Comment blocks are JOINED before matching so a phrase wrapped across two
+    # `#` lines is still seen.
+    from tortoise import session_verify as _sv
+
+    absolutes = (
+        "cannot be executed headlessly",
+        "cannot be fired headlessly",
+        "no headless trigger",
+    )
+    for phrase in absolutes:
+        assert phrase not in detail, phrase
+    source = inspect.getsource(_sv)
+
+    def _comment_blocks(text: str) -> list[str]:
+        blocks: list[str] = []
+        current: list[str] = []
+        for raw in text.splitlines():
+            stripped = raw.lstrip()
+            if stripped.startswith("#"):
+                # Strip the marker INCLUDING Sphinx's ``#:`` colon: leaving it
+                # in injects " : " at every join, so a phrase wrapped across
+                # two ``#:`` lines would match nothing.
+                current.append(stripped.lstrip("#").lstrip(": ").rstrip())
+            else:
+                if current:
+                    blocks.append(" ".join(current))
+                    current = []
+        if current:
+            blocks.append(" ".join(current))
+        return blocks
+
+    doc = _sv.__doc__ or ""
+    # Non-vacuity: an empty or truncated read must not pass this pin trivially.
+    # Anchor on STABLE identifiers, never on copy this pin does not own — a
+    # legitimate rewording of the ruling must not be reported as a failed read
+    # (#4620 review).
+    assert "HONEST DISCLOSURE" in doc, "module docstring not read — pin is vacuous"
+    assert "def resolve_install_root" in source, "module source not read — pin is vacuous"
+    pi_comments = [block for block in _comment_blocks(source) if _names_pi(block)]
+    assert pi_comments, "no Pi ruling comment matched — pin is vacuous"
+    for text in [doc, _sv.UNVERIFIABLE_REASON["pi"], *pi_comments]:
+        for phrase in absolutes:
+            assert phrase not in text, (phrase, text[:90])
+
+
+def test_pi_stale_install_is_reported_not_unverifiable(hosted, setup):
+    """The #4680 defect, at the surface that hid it: a present-but-STALE Pi
+    seam used to report ``UNVERIFIABLE-IN-CI`` — indistinguishable from "fine"
+    — while capturing with older logic.  It must instead be a BLOCKING
+    install finding (``stale-artifact``/``unversioned-artifact``), the same
+    way the three shell seams already report ``stale-script``, and nothing may
+    be fired for it.
+
+    Mutation: restore the pre-#4680 ``_static_findings`` Pi branch (existence
+    only, no version comparison) — this REDs: a tampered seam reads
+    UNVERIFIABLE and no finding names the staleness.
+    """
+    home, _bindir, _fake = setup
+    root = _install(home, "pi")
+    # The pre-contract shape: a REAL installed seam with its marker stripped —
+    # present, ours, unmarkered.  The basename is DERIVED from the contract
+    # registry, never re-typed, so a rename of the artifact cannot leave this
+    # test writing a file the installer/detector do not use (#4680 review).
+    seam = root / hook_install.ARTIFACT_CONTRACTS["pi"].install_name
+    seam.write_text(
+        "\n".join(line for line in seam.read_text(encoding="utf-8").splitlines()
+                  if not line.startswith("// tortoise-hook-version:")) + "\n",
+        encoding="utf-8")
+    graph, _url = hosted
+    report = _verify(hosted, home, "pi", root)
+    assert report["links"]["installed"]["status"] == "FAIL", report["links"]
+    detail = report["links"]["installed"]["detail"]
+    assert "not current" in detail
+    assert "unversioned-artifact" in detail
+    assert "tortoise install pi" in detail, (
+        "verify must name the sanctioned repair for the state it reports")
+    assert report["exit_code"] == EXIT_BROKEN
+    assert graph.posts == [], "nothing may be captured for a stale install"
+
+
+def test_pi_clean_install_names_the_static_comparison(hosted, setup):
+    """A CLEAN install must say WHAT was checked (#4710 indicator (2)).
+
+    The status deliberately stays ``UNVERIFIABLE`` — the seam was never fired,
+    and ``test_pi_is_honestly_unverifiable`` pins that — but the sentence a
+    user read said only "not exercised", which is indistinguishable from "not
+    checked at all": a clean install looked exactly like a host that could not
+    be inspected.  The detail now names the static result; the verdict does
+    not move.
+    """
+    home, _bindir, _fake = setup
+    root = _install(home, "pi")
+    report = _verify(hosted, home, "pi", root)
+    installed = report["links"]["installed"]
+    assert installed["status"] == "UNVERIFIABLE-IN-CI", (
+        "the status must NOT move — a static comparison is not a pass")
+    detail = installed["detail"]
+    assert "matches the shipped seam" in detail
+    assert "tortoise-hook-version 1" in detail
+    assert "not a pass" in detail
+    # …and the ruling the detail is prefixed to must still be present.
+    assert "tortoise-capture.test.ts" in detail
+    assert "not firable by this command" in detail
+    assert report["exit_code"] == EXIT_UNVERIFIABLE
+
+
+def test_pi_static_match_sentence_is_earned_not_unconditional(hosted, setup):
+    """The static-match sentence must be withheld when the comparison fails.
+
+    The reachable fabrication path is a NON-BLOCKING marker mismatch: a marker
+    NEWER than the shipped one is reported as an ahead-artifact finding with
+    ``blocking=False``, so ``verify_session_capture`` does NOT return early —
+    it falls through to the non-firable branch, which is exactly where a
+    comparison-free implementation would tell the host its artifact matches
+    the shipped seam (#4710 review).
+
+    ⛔ The marker must be NEWER, not older.  An older marker is a BLOCKING
+    stale-artifact finding, so the run returns at the blocking branch before
+    the non-firable branch is ever reached and this test pins nothing — an
+    earlier version of it used ``0`` and was vacuous: it passed against a
+    no-op helper AND against the pre-change code (measured by the verifier,
+    not assumed).
+    """
+    home, _bindir, _fake = setup
+    root = _install(home, "pi")
+    extension = next(root.glob("*.ts"))
+    extension.write_text(
+        extension.read_text().replace(
+            "// tortoise-hook-version: 1", "// tortoise-hook-version: 9999", 1),
+        encoding="utf-8")
+    report = _verify(hosted, home, "pi", root)
+    installed = report["links"]["installed"]
+    assert installed["status"] == "UNVERIFIABLE-IN-CI", (
+        "an ahead-artifact install is non-blocking by design: it must reach "
+        "the non-firable branch for this test to mean anything")
+    assert "matches the shipped seam" not in installed["detail"]
+    assert "tortoise-hook-version 9999" not in installed["detail"]
+    assert report["exit_code"] == EXIT_UNVERIFIABLE
+
+
+def test_static_result_consumes_the_detector_findings():
+    """The sentence is earned from the DETECTOR's result, not re-derived.
+
+    Guards the invariant found in review (#4710): a helper that tested the
+    marker alone would emit the sentence for a byte-different artifact whose
+    marker matches — safe today only because that finding happens to be
+    BLOCKING, which returns the run before this helper is reached.  Tying the
+    sentence to the detector's own list makes it true by construction: ANY
+    finding withholds it, blocking or not.
+    """
+    from tortoise import session_verify as _sv
+
+    assert _sv._install_static_result("pi", []) is not None
+    assert _sv._install_static_result(
+        "pi", [{"kind": "ahead-artifact", "blocking": False}]) is None
+    assert _sv._install_static_result(
+        "pi", [{"kind": "modified-artifact", "blocking": True}]) is None
+    # A harness with no artifact seam never has one claimed for it.
+    assert _sv._install_static_result("cursor", []) is None
+
+
+def test_pi_ruling_matcher_covers_the_possessive():
+    """A comment block whose only Pi reference is the possessive ``Pi's`` must
+    still count as naming the Pi ruling — otherwise a wrapped line carrying a
+    banned absolute is never scanned (#4620)."""
+    assert _names_pi("Pi's seam cannot be executed headlessly")
+    assert _names_pi("PI's seam cannot be fired headlessly")
+    assert _names_pi("must never restate the over-broad absolute about Pi")
+    assert not _names_pi("Cursor's seam cannot be executed headlessly")
 
 
 # ── hermeticity: root resolution is home-scoped, env only where one exists ──

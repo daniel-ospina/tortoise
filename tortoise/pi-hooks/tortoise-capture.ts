@@ -1,4 +1,14 @@
+// tortoise-hook-version: 1
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
+//
+// The `tortoise-hook-version` marker above is the install-contract generation
+// for this seam (see tortoise/hook_install.py): column-0, one per file, bumped
+// on ANY behavioural edit. It is what lets `tortoise session verify --harness
+// pi` tell an already-installed copy that it is stale — before #4680 the Pi
+// seam carried no marker at all, so a copy predating a seam change kept
+// capturing with the old logic: `session verify` called it UNVERIFIABLE-IN-CI
+// rather than STALE, and `tortoise doctor` printed no freshness row for it at
+// all. Generation 1 is the first contract for this seam.
 //
 // This is the Pi leg of the capture-INSTALL seam. It is installed BY THE
 // PRODUCT — `HARNESS_INSTALL.pi` copies this file into
@@ -10,12 +20,16 @@
 //   session_shutdown → POST /v1/sessions               { harness, session_id,
 //                                                        source, conversation }
 //
-// Recording is ON by default (ToS-covered — the same default as the Claude
-// hooks): the server refuses the capture POST with a 409 while the
-// organization has agent sessions switched off (Memory sources > Agent
-// sessions). There is deliberately NO `autoCapture`-style default-false flag —
-// installing this extension IS the opt-in, so the shipped capture step can
-// never silently do nothing.
+// Installing this extension IS the opt-in, and it is the one IN-REPO capture
+// seam that reads no TORTOISE_CAPTURE — unlike the in-repo Claude Code, Codex
+// and Cursor hooks, which file nothing until the machine sets
+// TORTOISE_CAPTURE=1 (#3615). (The agent-infra `reflect-hook` is the other
+// ungated producer and lives outside this repo — agent-infra#1117.) There is
+// deliberately NO `autoCapture`-style default-false flag, so the shipped
+// capture step can never silently do nothing. The server can still refuse the
+// capture POST with a 409 while the organization has agent sessions switched
+// off (Memory sources > Agent sessions) — that toggle is default-ON
+// (ToS-covered) and can only refuse, never enable.
 //
 // Self-contained on purpose: it talks to the same hosted API the generated
 // `.mcp.json` points at, using `TORTOISE_API_KEY` / `TORTOISE_API_URL` (both
@@ -966,6 +980,13 @@ export function pruneSpool(
  * turn. That bound is real but finite: sustained over-quota still evicts
  * oldest-first at the count/byte ceiling, with a recorded reason, so the two
  * legs describe the same policy (`capture_spool.py`).
+ *
+ * ⚠️ #4614 gave the refusal a machine-readable CATEGORY
+ * (`detail.code === "quota_exceeded"`) so a caller no longer has to match the
+ * message text. This classifier still keys on the STATUS, deliberately: the
+ * category is for REPORTING and for surfaces that can act on it, and treating
+ * a `quota_exceeded` 402 as terminal here would re-open #4714's data loss. The
+ * two legs must keep answering this the same way (`capture_spool.py`).
  *
  * PERMANENT (discard + record): every other 4xx — a malformed payload or an
  * out-of-range turn count never becomes valid by waiting.

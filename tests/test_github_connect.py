@@ -422,3 +422,281 @@ class TestGitHubBranches:
         assert r.status_code == 200
         assert r.json()["branches"] == []
         assert r.json()["default_branch"] == "main"
+
+
+# ── #4946: the real GitHub disconnect (token revocation) ─────────────────
+#
+# The pre-#1924 "disconnect" only wrote github_connected: false while the
+# stored OAuth token stayed live. These pin the real path: GitHub revocation
+# first, then a LOCAL clear + the flag write, with the revocation outcome
+# reported rather than silently downgraded to clear-only.
+
+def _provision_team(org_id: str = "test-team-1", *,
+                    token_enc: str | None = None,
+                    org: str | None = None,
+                    state: str = "{}") -> None:
+    """Create the registry Team node the state/credential writers MATCH on.
+
+    The writers are MATCH…SET (a silent no-op without the node), so the
+    readbacks below are real persistence assertions, not in-memory echoes.
+    ``state`` seeds the stored jsonb — pass ``{"github_connected": true}`` so
+    the flag assertions after a disconnect pin the WRITE, not the default
+    (``_ONBOARDING_DEFAULT_STATE`` already has ``github_connected: False``).
+    """
+    from tortoise.hosted_api import _make_sdk
+    props: dict = {"id": org_id, "onboarding_state": state}
+    if token_enc is not None:
+        props["github_token_enc"] = token_enc
+    if org is not None:
+        props["github_org"] = org
+    map_items = ", ".join(f"{k}: ${k}" for k in props)
+    _make_sdk(namespace="registry")._get_registry().query(
+        f"CREATE (t:Team {{{map_items}}})", params=props)
+
+
+def _stored_credentials(org_id: str = "test-team-1"):
+    from tortoise.hosted_api import _github_credentials
+    return _github_credentials(org_id)
+
+
+class TestGitHubDisconnect:
+    def test_disconnect_requires_auth(self, unauth_client):
+        r = unauth_client.post("/v1/onboarding/github/disconnect")
+        assert r.status_code == 401
+
+    def test_disconnect_not_connected_is_idempotent(self, client, monkeypatch):
+        """No stored token: nothing to revoke, no GitHub call, but the flag
+        is still written false and the endpoint reports the no-op honestly."""
+        import tortoise.hosted_api as ha
+        # Stored state says connected=True while no credential exists — the
+        # endpoint must still write the flag false (never rely on the default).
+        _provision_team(state='{"github_connected": true}')
+        called = []
+
+        async def _spy(token):
+            called.append(token)
+            raise AssertionError("must not call GitHub with no stored token")
+
+        monkeypatch.setattr(ha, "_revoke_github_token", _spy)
+        r = client.post("/v1/onboarding/github/disconnect")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["connected"] is False
+        assert body["revoked"] is True
+        assert body["revoke_reason"] == "not_connected"
+        assert called == []
+        assert client.get("/v1/onboarding/state").json()["onboarding"][
+            "github_connected"] is False
+
+    def test_disconnect_revokes_then_clears_and_flips_flag(
+            self, client, monkeypatch):
+        """Success path: GitHub revokes the token, the local ciphertext is
+        removed AND github_connected is written false by this endpoint."""
+        import tortoise.hosted_api as ha
+        from tortoise.crypto import encrypt_token
+        # Seed connected=True (plus non-default source intents) so the
+        # post-disconnect assertions pin the endpoint's WRITE rather than the
+        # default state, which is already github_connected: False.
+        _provision_team(token_enc=encrypt_token("gho_live_token"),
+                        org="acme",
+                        state='{"github_connected": true, '
+                              '"issues_enabled": false, '
+                              '"docs_enabled": false}')
+        seen = {}
+
+        async def _fake_revoke(token):
+            seen["token"] = token
+            return True, "revoked"
+
+        monkeypatch.setattr(ha, "_revoke_github_token", _fake_revoke)
+        r = client.post("/v1/onboarding/github/disconnect")
+        assert r.status_code == 200, r.text
+        assert seen["token"] == "gho_live_token", "the decrypted token is revoked"
+        body = r.json()
+        assert body == {"connected": False, "revoked": True,
+                        "revoke_reason": "revoked"}, body
+        # local credential gone
+        assert _stored_credentials() == (None, None)
+        # the endpoint (not a source toggle) wrote the connection flag
+        st = client.get("/v1/onboarding/state").json()["onboarding"]
+        assert st["github_connected"] is False
+        # the per-source ENABLE intent is untouched (#1924 separation): the
+        # seeded False values must survive, not be reset to the True default
+        assert st["issues_enabled"] is False
+        assert st["docs_enabled"] is False
+
+    def test_revocation_failure_still_clears_and_reports(self, client, monkeypatch):
+        """A failed revocation never leaves the token stored: the local
+        ciphertext is cleared, the flag flips, and the failure is named."""
+        import tortoise.hosted_api as ha
+        from tortoise.crypto import encrypt_token
+        _provision_team(token_enc=encrypt_token("gho_live_token"),
+                        org="acme", state='{"github_connected": true}')
+
+        async def _net_fail(token):
+            return False, "network"
+
+        monkeypatch.setattr(ha, "_revoke_github_token", _net_fail)
+        r = client.post("/v1/onboarding/github/disconnect")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["revoked"] is False
+        assert body["revoke_reason"] == "network"
+        assert body["connected"] is False
+        assert _stored_credentials() == (None, None), \
+            "a failed revocation must still clear the stored token locally"
+        assert client.get("/v1/onboarding/state").json()["onboarding"][
+            "github_connected"] is False
+
+    def test_undecryptable_token_cleared_but_not_claimed_revoked(
+            self, client, monkeypatch):
+        """A stored-but-undecryptable ciphertext leaves us nothing to send
+        GitHub — the plaintext could still be live, so the clear happens but
+        the outcome is NOT reported as a confirmed revocation."""
+        import tortoise.hosted_api as ha
+        _provision_team(token_enc="not-a-valid-ciphertext", org="acme",
+                        state='{"github_connected": true}')
+
+        async def _spy(token):
+            raise AssertionError("no plaintext → no GitHub call")
+
+        monkeypatch.setattr(ha, "_revoke_github_token", _spy)
+        r = client.post("/v1/onboarding/github/disconnect")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["revoked"] is False
+        assert body["revoke_reason"] == "undecryptable"
+        assert _stored_credentials() == (None, None)
+        assert client.get("/v1/onboarding/state").json()["onboarding"][
+            "github_connected"] is False
+
+    def test_disconnect_uses_supabase_clear_seam(self, client, monkeypatch):
+        """Hosted (Supabase) mode: the local half goes through the
+        service-role seam that PATCHes ``organizations`` — the only writer of
+        the column-REVOKEd github_token_enc."""
+        import tortoise.hosted_api as ha
+        from tortoise.crypto import encrypt_token
+        fake_cp = object()
+        monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
+                            lambda: True)
+        monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
+                            lambda: fake_cp)
+        monkeypatch.setattr(ha, "_github_credentials",
+                            lambda org_id: (encrypt_token("gho_tok"), "acme"))
+        monkeypatch.setattr(ha, "_update_onboarding_state",
+                            lambda *a, **k: None)
+        cleared = []
+        monkeypatch.setattr(
+            "tortoise.supabase_control.clear_github_credentials",
+            lambda cp, org_id: cleared.append((cp, org_id)))
+
+        async def _revoke(token):
+            return True, "revoked"
+
+        monkeypatch.setattr(ha, "_revoke_github_token", _revoke)
+        r = client.post("/v1/onboarding/github/disconnect")
+        assert r.status_code == 200, r.text
+        assert cleared == [(fake_cp, "test-team-1")], \
+            "the clear must run through the Supabase service-role seam"
+        assert r.json()["revoked"] is True
+
+    def test_disconnect_rejects_graph_bound_key(self, client):
+        """#2300 parity: a per-graph key must not tear down the ORG's GitHub
+        connection."""
+        from tortoise.hosted_api import (
+            app,
+            get_current_org_session_ungated,
+        )
+        app.dependency_overrides[get_current_org_session_ungated] = lambda: {
+            "org_id": "test-team-1", "graph_id": "g-1",
+            "legacy_full_access": True,
+        }
+        try:
+            r = client.post("/v1/onboarding/github/disconnect")
+        finally:
+            app.dependency_overrides.pop(get_current_org_session_ungated, None)
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"]["error_code"] == "GRAPH_SCOPED_TEAM_SURFACE"
+
+
+class TestRevokeGitHubToken:
+    """The revocation helper's GitHub contract (#4946) — the endpoint tests
+    above stub it, so its own outcomes are pinned here."""
+
+    @staticmethod
+    def _run(coro):
+        import asyncio
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    @staticmethod
+    def _stub_httpx(monkeypatch, *, status_code=None, exc=None):
+        import httpx
+        seen: dict = {}
+
+        class _Resp:
+            def __init__(self, code):
+                self.status_code = code
+
+        class _Client:
+            def __init__(self, **kw):
+                seen["client_kwargs"] = kw
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def delete(self, url, **kw):
+                seen["url"] = url
+                seen["kwargs"] = kw
+                if exc is not None:
+                    raise exc
+                return _Resp(status_code)
+
+        monkeypatch.setattr(httpx, "AsyncClient", _Client)
+        return seen
+
+    def test_204_is_revoked(self, monkeypatch):
+        import tortoise.hosted_api as ha
+        seen = self._stub_httpx(monkeypatch, status_code=204)
+        assert self._run(ha._revoke_github_token("tok")) == (True, "revoked")
+        assert seen["url"].endswith("/applications/test-client-id/token")
+        assert seen["kwargs"]["json"] == {"access_token": "tok"}
+        assert seen["kwargs"]["auth"] == ("test-client-id", "test-client-secret")
+
+    def test_404_is_not_a_confirmed_revocation(self, monkeypatch):
+        """GitHub documents only 204/422 for DELETE; a 404 (unknown app or
+        token resource) leaves liveness unconfirmed, so it must NOT be
+        reported as revoked — a false "gone" claim is the cosmetic bug."""
+        import tortoise.hosted_api as ha
+        self._stub_httpx(monkeypatch, status_code=404)
+        assert self._run(ha._revoke_github_token("tok")) == (False, "http_404")
+
+    def test_422_is_not_a_confirmed_revocation(self, monkeypatch):
+        """422 is GitHub's documented "validation failed" outcome for the
+        DELETE — reported, never upgraded to a confirmed revocation."""
+        import tortoise.hosted_api as ha
+        self._stub_httpx(monkeypatch, status_code=422)
+        assert self._run(ha._revoke_github_token("tok")) == (False, "http_422")
+
+    def test_unexpected_status_is_reported(self, monkeypatch):
+        import tortoise.hosted_api as ha
+        self._stub_httpx(monkeypatch, status_code=500)
+        assert self._run(ha._revoke_github_token("tok")) == (False, "http_500")
+
+    def test_transport_failure_is_network(self, monkeypatch):
+        import tortoise.hosted_api as ha
+        self._stub_httpx(monkeypatch, exc=RuntimeError("boom"))
+        assert self._run(ha._revoke_github_token("tok")) == (False, "network")
+
+    def test_unconfigured_app_reports_not_configured(self, monkeypatch):
+        import tortoise.hosted_api as ha
+        monkeypatch.delenv("GITHUB_CLIENT_ID", raising=False)
+        assert self._run(ha._revoke_github_token("tok")) == \
+            (False, "not_configured")
+

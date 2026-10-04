@@ -14,10 +14,20 @@ hand-authored to the pinned expected verdict):
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/gen_ask_transcripts.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/gen_ask_transcripts.py`"
+    )
+
 import hashlib
 import json
 import os
-import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -130,8 +140,13 @@ def _render_user_message(sdk: TortoiseSDK, question: str,
                                   pool_size=caps["pool_size"],
                                   include_terminal=True)
     annotated = sdk.annotate_ask_hits(hits)
-    from tortoise.retrieval import dedup_pool
-    deduped = dedup_pool(annotated, max_chunks_per_session=3)
+    from tortoise.retrieval import ask_session_key, dedup_pool
+    # The lane's OWN key. Using the default (``session_key_of``) would re-derive
+    # a different bucket order than the lane it claims to reproduce, so the
+    # rendered transcript would not byte-match the message the reader gets
+    # (#4155).
+    deduped = dedup_pool(annotated, max_chunks_per_session=3,
+                         session_key=ask_session_key)
     assembled = assemble_context(
         deduped, top_k=caps["context_item_cap"],
         max_context_tokens=caps["context_token_cap"],

@@ -5,9 +5,18 @@
     "MD013": false,
     // Allow duplicate headings in sibling sections (common in docs/)
     "MD024": { "siblings_only": true },
+    // Frontmatter `title:` IS the document title; the rendered `# H1` below it is
+    // the same title, not a second top-level heading. MD025 counts the
+    // frontmatter title by default, which false-positives on every doc here that
+    // carries both (an empty string disables that detection).
+    "MD025": { "siblings_only": true, "front_matter_title": "" },
     // Allow inline HTML (used for docs annotations, sup/sub, etc.)
     "MD033": false,
     // Don't require first line to be h1 (frontmatter comes first)
-    "MD041": false
+    "MD041": false,
+    // Table separators across this repo's docs use the compact `|---|---|`
+    // style; MD060 (added in markdownlint 0.38) would reformat every table in
+    // every doc for pure spacing (e.g. docs/ONTOLOGY.md: 261 findings).
+    "MD060": false
   }
 }

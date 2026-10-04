@@ -244,6 +244,7 @@ markers = [
     "v4_conditional: post-baseline follow-up run assertions (E6 #1538, ⛔ G3) — window-indexed restore + recall measurement, skipped in V3",
     "embedded_only: epic #1647 (D-2) — embedded-only behavior (EmbeddedStoreBusyError); skips visibly when TORTOISE_DB_URI is set",
     "live: live-API probe tests (Task 1 #1787) — excluded from the deterministic suite with -m 'not live'",
+    "integration: opt-in integration tests needing live credentials or production access (e.g. a real RESEND_API_KEY, ALLOW_PROD) — excluded from the deterministic lanes with -m 'not integration' (#4750)",
     "blog_write: blog E2E tests that WRITE to the target (create/publish/unpublish) — excluded from the every-deploy job with -m 'not blog_write' (#4220)",
 ]
 

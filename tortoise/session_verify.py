@@ -60,12 +60,23 @@ do).  So after any launch — and after a fire that never returned — the 404 i
 reported as "may still be in flight", never as a clean delete the code cannot
 honour, and there is deliberately no per-harness detach table to drift.
 
-HONEST DISCLOSURE.  A harness whose seam cannot be fired headlessly is NOT
+HONEST DISCLOSURE.  A harness whose seam this command cannot fire is NOT
 faked.  Cursor's ``sessionEnd`` fires only from a local desktop-editor session
 (its cloud agents have no editor-lifetime boundary), and Pi's seam is a
-TypeScript extension the Pi process loads in-process — neither can be fired by
-this command, so their links report ``UNVERIFIABLE-IN-CI`` with the reason.  A
-link is only ever ``PROVEN`` when the path actually ran.
+TypeScript extension the Pi process loads in-process — neither is a command
+this verifier can execute and present as "the harness fired it", so their
+links report ``UNVERIFIABLE-IN-CI``.  That ruling is about the INSTALL leg, not
+the seam's testability: Pi's handler logic is exercised hermetically by
+``tortoise/pi-hooks/tortoise-capture.test.ts``, and the artifact AS INSTALLED
+is loaded and fired by the node probe in
+``tests/test_pi_capture_hooks.py`` (into a temp ``HOME``); the residual (a real
+``pi`` process loading the installed extension against the live API) is
+manual-only.  A link is only ever ``PROVEN`` when the path actually ran.
+
+UNVERIFIABLE is NOT "unjudgeable": the static leg still runs, and since #4680
+Pi's installed artifact is graded by the same version contract as the shell
+seams, so a missing / unmarkered / stale / edited Pi seam is a hard ``FAIL``
+here — it is only the LIVE-FIRE leg that stays ``UNVERIFIABLE-IN-CI``.
 """
 from __future__ import annotations
 
@@ -133,6 +144,14 @@ EXIT_UNVERIFIABLE = 2
 #: editor-lifetime session boundary), and Pi's seam is a TypeScript extension
 #: loaded in-process by Pi — neither is a script this command may execute and
 #: present as "the harness fired it".
+#:
+#: The ruling is about THIS COMMAND's inability to execute the harness's
+#: registration — it is not a claim that the seam is untestable.  Pi's handler
+#: logic is exercised hermetically by its own suite
+#: (``tortoise/pi-hooks/tortoise-capture.test.ts``), and the artifact AS
+#: INSTALLED is loaded and fired by the node probe in
+#: ``tests/test_pi_capture_hooks.py`` (into a temp ``HOME``); see
+#: ``UNVERIFIABLE_REASON['pi']``.
 HEADLESS_FIRABLE: dict[str, bool] = {
     "claude": True,
     "codex": True,
@@ -142,6 +161,17 @@ HEADLESS_FIRABLE: dict[str, bool] = {
 
 #: Why a non-firable harness's links are UNVERIFIABLE.  Named per harness so
 #: the report says exactly what is missing, never a generic shrug.
+#:
+#: Pi's entry is deliberately SCOPED ("not firable by this command") and
+#: PLAIN TEXT (it is printed verbatim into a report line).  The over-broad
+#: absolutes — each denying that this seam could be executed or fired
+#: headlessly, or that any headless entry point existed — are false about Pi:
+#: the seam's handlers are fired headlessly by its own suite, and `pi -p` is
+#: non-interactive.  A test pins the absence of those phrases from the PI
+#: RULING's own text — the report string, this ruling, the enum, and the module
+#: docstring — and deliberately NOT from the whole module: one of the phrases is
+#: TRUE of Cursor (this dict's ``cursor`` entry says so)
+#: (`tests/test_session_verify.py::test_pi_is_honestly_unverifiable`).
 UNVERIFIABLE_REASON: dict[str, str] = {
     "cursor": (
         "Cursor's sessionEnd hook is IDE-only — it fires from a local "
@@ -149,8 +179,14 @@ UNVERIFIABLE_REASON: dict[str, str] = {
         "machine."),
     "pi": (
         "Pi's capture seam is a TypeScript extension loaded in-process by Pi "
-        "(~/.pi/agent/extensions/tortoise-capture.ts); it is not a script and "
-        "cannot be executed headlessly."),
+        f"({capture_install.pi_home('~')}/{capture_install.PI_EXTENSION_NAME}), "
+        "not a command this verifier can execute; the install leg is therefore "
+        "not firable by this command. The seam's handler logic is exercised "
+        "hermetically by tortoise/pi-hooks/tortoise-capture.test.ts (run by "
+        "tests/test_pi_capture_hooks.py), and the installed artifact is "
+        "loaded and fired by that test file's node probe (into a temp HOME); the "
+        "residual — a real pi process loading the installed extension "
+        "against the live API — is manual-only."),
 }
 
 #: The capture EVENT each harness registers (the SessionStart seam is Claude's
@@ -195,14 +231,18 @@ def resolve_install_root(harness: str,
     the harness's own default, resolved through the ONE shared resolver
     ``tortoise hook_install.default_root`` — Codex's ``$CODEX_HOME`` (default
     ``~/.codex``), Cursor's ``~/.cursor`` (no env override — Cursor has none),
-    Claude's cwd (project-scoped).  Pi has no ``HarnessLayout`` (its seam is
-    not a scripted hook), so its root is the extension directory
-    ``~/.pi/agent/extensions``.
+    Claude's cwd (project-scoped).  A harness with no ``HarnessLayout`` (its
+    seam is not a scripted hook) is looked up in ``hook_install``'s
+    ``ARTIFACT_CONTRACTS`` instead and resolved through
+    ``hook_install.artifact_root`` — the SAME registry entry ``_static_findings``
+    and ``doctor`` grade it by, so root resolution cannot be registry-driven in
+    one place and literal in another (#4680 review).
     """
     if install_dir is not None:
         return Path(install_dir)
-    if harness == "pi":
-        return Path(home) / ".pi" / "agent" / "extensions"
+    artifact = hook_install.artifact_root(harness, Path(home))
+    if artifact is not None:
+        return artifact
     layout = hook_install.get_layout(harness)
     return hook_install.default_root(layout, Path(home))
 
@@ -214,18 +254,24 @@ def _static_findings(harness: str, root: Path) -> list[dict[str, Any]]:
     """The install's on-disk drift, through the shared detector.
 
     Claude/Codex/Cursor delegate to ``hook_install.detect_install`` (the same
-    read-only detector ``tortoise hooks status`` uses).  Pi has no layout, so
-    its single artifact is checked directly.
+    read-only detector ``tortoise hooks status`` uses).  A harness whose seam
+    is a non-shell artifact (Pi) has no layout to hand that detector, so it
+    delegates to the ARTIFACT half — ``hook_install.detect_artifact_install``
+    — which is why a stale Pi seam is now reportable rather than only its
+    absence (#4680).  Keyed on the registry, never on a literal ``"pi"``, so a
+    seam registered in ``ARTIFACT_CONTRACTS`` is graded here with no edit; a
+    seam class the registry does not know still falls through to
+    ``detect_install`` (and its repair path may equally carry its own
+    hard-coded harness names — ``resolve_install_root`` does that for ``pi``
+    today — so registry membership is what keeps THIS branch generic, not a
+    guarantee about every branch downstream).
     """
-    if harness == "pi":
-        dst = root / capture_install.PI_EXTENSION_NAME
-        if not dst.is_file():
-            return [{
-                "kind": "missing-extension",
-                "detail": f"{dst} is not installed",
-                "blocking": True,
-            }]
-        return []
+    if harness in hook_install.ARTIFACT_CONTRACTS:
+        return [
+            {"kind": f.kind, "detail": f.detail, "script": f.script,
+             "event": f.event, "blocking": f.blocking}
+            for f in hook_install.detect_artifact_install(root, harness)
+        ]
     return [
         {"kind": f.kind, "detail": f.detail, "script": f.script,
          "event": f.event, "blocking": f.blocking}
@@ -610,6 +656,44 @@ def _unverifiable_link(harness: str, link: str) -> dict[str, Any]:
         f"{link} not exercised: {UNVERIFIABLE_REASON[harness]}")
 
 
+def _install_static_result(harness: str,
+                           findings: list[dict[str, Any]]) -> str | None:
+    """What the STATIC install check established, in plain words, or ``None``.
+
+    The ``installed`` link for a harness this command cannot fire stays
+    ``UNVERIFIABLE-IN-CI``: the seam was never executed, and a static
+    comparison is not evidence that the extension works, so calling it a pass
+    would be a FABRICATED one
+    (``tests/test_session_verify.py::test_pi_is_honestly_unverifiable``).
+
+    The check, however, *did* run — ``_static_findings`` returning no blocking
+    finding is precisely how the install came to be clean — and the sentence a
+    user then read said only that the seam was "not exercised", which is
+    indistinguishable from "not checked at all".  Naming the static result
+    closes that gap without moving the verdict (#4710).
+
+    ``findings`` is the list :func:`_static_findings` already returned for this
+    harness: this CONSUMES the detector's result rather than re-deriving the
+    predicate, so the sentence cannot claim more than the detector established.
+    That distinction is load-bearing — an empty ``findings`` is the detector's
+    own clean arm (installed bytes equal the shipped bytes), whereas testing
+    the marker alone would be a WEAKER condition: a byte-different artifact
+    whose marker matches is reported as ``modified-artifact`` and is blocking
+    today, but that is a reclassification away from this sentence asserting a
+    match that is false.  ANY finding — blocking or not, including an
+    ahead-artifact or a symlinked install — withholds it.
+    """
+    if harness not in hook_install.ARTIFACT_CONTRACTS or findings:
+        return None
+    generation = hook_install.contract_version_for(harness)
+    if generation is None:
+        return None
+    return (
+        f"the installed artifact matches the shipped seam "
+        f"({hook_install.HOOK_VERSION_TOKEN} {generation}); it was not fired, "
+        f"so this is a static comparison and not a pass.")
+
+
 def verify_session_capture(harness: str,
                            *,
                            api_key: str,
@@ -658,6 +742,11 @@ def verify_session_capture(harness: str,
     if not HEADLESS_FIRABLE[harness]:
         report["links"]["installed"] = _unverifiable_link(harness, "installed")
         report["links"]["installed"]["findings"] = findings
+        static_result = _install_static_result(harness, findings)
+        if static_result:
+            report["links"]["installed"]["detail"] = (
+                f"{static_result} "
+                f"{report['links']['installed']['detail']}")
         report["links"]["captured"] = _unverifiable_link(harness, "captured")
         report["links"]["memory"] = _unverifiable_link(harness, "memory")
         report["exit_code"] = _exit_code(report)

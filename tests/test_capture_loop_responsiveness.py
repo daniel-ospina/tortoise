@@ -49,6 +49,7 @@ import pytest
 # also installs the module-level env (pepper/encryption key) on import.
 from tests.test_hosted_api import (
     TEST_ORG_ID,
+    TEST_TEAM,
 )
 from tests.test_hosted_api import (
     client as client,
@@ -1028,7 +1029,7 @@ def test_same_session_retry_during_an_in_flight_capture_is_refused(
             # tenant's in-flight capture refuses another tenant's unrelated
             # capture that happens to use the same generic harness name.
             in_flight_keys = list(ha_mod._CAPTURE_SESSIONS)
-            assert in_flight_keys == [f"team-001:default:{payload['session_id']}"], (
+            assert in_flight_keys == [f"team-001:org_team-001:{payload['session_id']}"], (
                 f"the in-flight session registry is not tenant-scoped: "
                 f"{in_flight_keys} (#3129)")
             try:
@@ -1262,7 +1263,7 @@ def test_session_key_is_held_until_the_marker_write_lands(client, monkeypatch):
     monkeypatch.setattr(ha_mod, "_capture_abandoned_marker", _slow_marker)
     payload = {"conversation": _CONV, "session_id": "s-marker-hold-3129",
                "harness": _HARNESS}
-    key = "team-001:default:s-marker-hold-3129"
+    key = "team-001:org_team-001:s-marker-hold-3129"
 
     async def _run():
         transport = httpx.ASGITransport(app=app)
@@ -1383,7 +1384,7 @@ def test_cancelled_capture_keeps_the_key_and_leaves_a_retryable_attempt(
     monkeypatch.setattr(TortoiseSDK, "_extract_session_v2", _stalled)
     payload = {"conversation": _CONV, "session_id": "s-cancel-3129",
                "harness": _HARNESS}
-    key = "team-001:default:s-cancel-3129"
+    key = "team-001:org_team-001:s-cancel-3129"
 
     async def _run():
         transport = httpx.ASGITransport(app=app)
@@ -1472,7 +1473,7 @@ def test_cancelled_m2_capture_records_the_m2_lane(client, monkeypatch):
     monkeypatch.setattr(TortoiseSDK, "_extract_session_llm", _stalled_m2)
     payload = {"conversation": _CONV, "session_id": "s-m2-cancel-3129",
                "harness": _HARNESS}
-    key = "team-001:default:s-m2-cancel-3129"
+    key = "team-001:org_team-001:s-m2-cancel-3129"
 
     async def _run():
         transport = httpx.ASGITransport(app=app)
@@ -1547,6 +1548,552 @@ def test_in_flight_session_keys_are_scoped_to_their_tenant():
     assert baseline == ha_mod._CAPTURE_IN_FLIGHT, ha_mod._CAPTURE_IN_FLIGHT
     assert ha_mod._CAPTURE_SESSIONS == {}, ha_mod._CAPTURE_SESSIONS
 
+
+def test_cancelled_extraction_disabled_capture_records_the_disabled_lane(
+        client, monkeypatch):
+    """#4258 (+ #3129): the abandoned-capture marker is a THIRD writer of the
+    Session `capture_extractor` lane. A capture abandoned while extraction is
+    turned OFF must leave lane `"disabled"` — NEVER the keyless `"none"` — or
+    the M2-replay disclosure later diagnoses a configured-key team as "stored
+    WITHOUT a provider key".
+
+    Mutation guard: setting either `state["lane"]` write to `"none"` (or to a
+    literal other than the shared `_store_only_lane` derivation) REDs this test
+    while leaving the completed-capture tests green — the marker is observable
+    only on the cancellation path, which is why it is pinned here.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app
+    from tortoise.sdk import _CAPTURE_EXTRACTOR_LANE_DISABLED
+
+    ha_mod._update_onboarding_state(TEST_ORG_ID, capture_extract=False)
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    async def _stalled_audit(*a, **kw):
+        # the disabled branch reaches the audit seam with `state["lane"]`
+        # already set — parking HERE is the window the marker reads.
+        entered.set()
+        for _ in range(600):
+            if release.is_set():
+                break
+            await asyncio.sleep(0.05)
+
+    monkeypatch.setattr(ha_mod, "_async_audit", _stalled_audit)
+    payload = {"conversation": _CONV, "session_id": "s-cancel-disabled",
+               "harness": _HARNESS}
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            task = asyncio.create_task(ac.post("/v1/sessions", json=payload))
+            for _ in range(200):
+                if entered.is_set():
+                    break
+                await asyncio.sleep(0.05)
+            assert entered.is_set(), "the capture never reached the audit seam"
+            task.cancel()  # client goes away mid-capture
+            with suppress(asyncio.CancelledError):
+                await task
+            await asyncio.sleep(0.2)  # let the cancellation settle
+            release.set()  # the parked audit finishes
+            for _ in range(400):
+                if not ha_mod._CAPTURE_SESSIONS:
+                    break
+                await asyncio.sleep(0.05)
+
+    asyncio.run(_run())
+
+    rows = ha_mod._make_sdk(namespace=TEST_ORG_ID)._get_proj().g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, s.capture_extractor",
+        params={"sid": "s-cancel-disabled"}).result_set
+    assert rows, "the capture never merged its Session row"
+    capture_ok, lane = rows[0][0], rows[0][1]
+    assert capture_ok is False, (
+        f"an ABANDONED extraction-disabled capture left capture_ok="
+        f"{capture_ok!r} (#3129)")
+    assert lane == _CAPTURE_EXTRACTOR_LANE_DISABLED, (
+        f"an abandoned extraction-disabled capture recorded lane {lane!r} — "
+        f"the M2-replay disclosure would then diagnose a configured-key team "
+        f"as keyless (#4258)")
+    assert ha_mod._CAPTURE_IN_FLIGHT == 0, ha_mod._CAPTURE_IN_FLIGHT
+    assert ha_mod._CAPTURE_SESSIONS == {}, ha_mod._CAPTURE_SESSIONS
+
+
+# ── #3365: the admission key's graph component is the graph OPENED ─────────
+#
+# `_capture_session_key` keyed on the CREDENTIAL's `graph_id` binding. A
+# legacy/pre-guard API key bound to the team's DEFAULT graph carries that
+# node's real `g_<hex>` id (`sdk._graph_create`; supabase
+# `set_graph_recording`/`set_graph_name` mint the same shape) while writing to
+# the SAME physical graph a team-wide key writes to — so the two shapes landed
+# in different buckets, both passed admission, and the second request read
+# `capture_ok = NULL` / was served 200 + `extraction_mode=replayed` + 0
+# extracted while the first attempt then FAILED: the #3129 silent-loss window,
+# reopened. These tests pin the fix (the key names the graph the data path will
+# open), the NEGATIVE case (genuinely different graphs must stay distinct —
+# the registry/selfhost `org_{name}` lane), and the drift guards tying the
+# gate's resolution to the opener (`_data_sdk`) and to the SDK's own
+# namespace→graph-name mapping (`TortoiseSDK._get_proj`).
+
+# The kind='default' Graph node's real gid — the legacy binding's value.
+_LEGACY_DEFAULT_GID = "g_legacy_default_3365"
+
+
+def test_default_bound_and_org_wide_keys_share_one_bucket():
+    """#3365: two credentials writing ONE physical graph share ONE bucket.
+
+    The hosted (supabase/production) shape: the default graph's real name is
+    `teams.graph_name` = `org_{org_id}` (the `hosted_api.py` writers store
+    `f"org_{org_id}"` — parity with the data-plane namespace, #1903 — and
+    `_data_sdk` reads the dict's `graph_namespace` as
+    `t_graph_name or f"org_{org_id}"`), while an org-wide key opens
+    `_make_sdk(namespace=org_id)`, whose `_get_proj` derivation is also
+    `org_{org_id}` — the SAME graph. A legacy bound-default key resolving to it
+    must therefore REFUSE a concurrent capture of the same session_id instead of
+    running beside it. (The registry/selfhost lane mints its default node as
+    `org_{name}` via `sdk.org_create` — a DIFFERENT graph from an org-wide
+    key's `org_{org_id}`; that lane is the negative case in the next test.)
+    """
+    from fastapi import HTTPException
+
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import _capture_session_key, _reserve_capture_slot
+
+    org_wide = {"org_id": "team-a"}
+    bound_default = {"org_id": "team-a", "graph_id": _LEGACY_DEFAULT_GID,
+                     "graph_namespace": "org_team-a"}
+    assert _capture_session_key(bound_default, "s") \
+        == _capture_session_key(org_wide, "s"), (
+            "a legacy default-bound key and an org-wide key over the SAME "
+            "physical graph produced different admission buckets — the "
+            "#3129 race is reachable for that pair (#3365)")
+
+    baseline = ha_mod._CAPTURE_IN_FLIGHT
+    slot = _reserve_capture_slot(_capture_session_key(org_wide, "s"))
+    try:
+        with pytest.raises(HTTPException) as excinfo:
+            _reserve_capture_slot(_capture_session_key(bound_default, "s"))
+        assert excinfo.value.status_code == 409, excinfo.value
+    finally:
+        slot.release()
+    assert baseline == ha_mod._CAPTURE_IN_FLIGHT, ha_mod._CAPTURE_IN_FLIGHT
+    assert ha_mod._CAPTURE_SESSIONS == {}, ha_mod._CAPTURE_SESSIONS
+
+
+def test_genuinely_distinct_graphs_keep_distinct_buckets():
+    """#3365 NEGATIVE case: the key must still separate DIFFERENT graphs.
+
+    The fix is not "fold every bound key onto the default". In the
+    registry/selfhost lane (`sdk.org_create`) the default node's namespace is
+    `org_{name}` while an org-wide key opens `org_{org_id}` — TWO different
+    physical graphs (`_data_sdk` documents the #2023 divergence) — so folding
+    by the binding's `kind` (the `backup_sweep.enumerate_org_graphs` rule for
+    its persistent object keys) would refuse a legitimate capture with a false
+    409. A ghost binding, a custom graph, and another tenant stay separate too.
+    """
+    from tortoise.hosted_api import _capture_session_key
+
+    org_wide = _capture_session_key({"org_id": "01ULID"}, "s")
+    # registry/selfhost default node: a DIFFERENT physical graph
+    registry_default = _capture_session_key(
+        {"org_id": "01ULID", "graph_id": "g_def",
+         "graph_namespace": "org_acme"}, "s")
+    custom_a = _capture_session_key(
+        {"org_id": "01ULID", "graph_id": "g_a",
+         "graph_namespace": "org_01ULID_g_a"}, "s")
+    custom_b = _capture_session_key(
+        {"org_id": "01ULID", "graph_id": "g_b",
+         "graph_namespace": "org_01ULID_g_b"}, "s")
+    # ghost bindings: namespace unresolved → `_data_sdk` 403s before any
+    # write, so they must never share a real graph's bucket — NOR each other's
+    ghost = _capture_session_key(
+        {"org_id": "01ULID", "graph_id": "g_ghost"}, "s")
+    ghost_b = _capture_session_key(
+        {"org_id": "01ULID", "graph_id": "g_ghost_b"}, "s")
+    other_tenant = _capture_session_key({"org_id": "02OTHER"}, "s")
+
+    keys = {org_wide, registry_default, custom_a, custom_b, ghost, ghost_b,
+            other_tenant}
+    assert len(keys) == 7, sorted(keys)
+    # `graph_id=""` is FALSY for `_data_sdk` (`if gid:`) → the org-wide path.
+    assert _capture_session_key(
+        {"org_id": "01ULID", "graph_id": ""}, "s") == org_wide
+
+
+def test_capture_graph_name_mirrors_the_sdk_mapping(monkeypatch):
+    """#3365 DRIFT GUARD: the gate's restatement must equal `_get_proj`.
+
+    `_graph_name_for_namespace` restates the SDK's namespace→graph-name rule.
+    It is deliberately NOT defined in `tortoise/sdk.py`: any added/removed line
+    there shifts every `sdk.py:N` citation in
+    `docs/product/sdk-rename-table.md` and reds
+    `tests/test_sdk_rename_table.py` (MEMORY.md's sdk_rename_table trap). The
+    copy is therefore pinned against the REAL `_get_proj` here — driven with a
+    recording projection stub, so this does NO graph I/O and cannot depend on
+    the test-redirect/lane in which the file runs.
+
+    The probe corpus and the pinned literal set are GENERATED, not
+    hand-listed, and both come from `_get_proj`'s own AST rather than from a
+    literal SPELLING: every string constant under a CONDITION read by the
+    collector — an `if` / `elif` / `while` / conditional-expression test, a
+    `match` arm's `case "literal":` pattern or `case other if ...` guard, a
+    comprehension's `if` clause, or an `assert` test — is a probe AND must
+    equal the pinned set, whatever shape carries it — a comparison
+    (`==` / `!=` / `in` / `not in` / `>`, `>=`, …), a `startswith` /
+    `endswith` / `__contains__` argument, or a string passed to any other
+    call such as `ns.count("zzz")`. A five-literal spot-check was GREEN
+    against an added `_get_proj` branch (`startswith("01")` →
+    `tenant_{ns}`) because none of its literals was ULID-shaped — exactly
+    the "mirror that is nearly right" this guard exists to catch. See the
+    corpus construction below.
+
+    The pinned set is a UNION over the TWO places the rule lives: the
+    namespace→graph-name derivation was extracted out of `_get_proj` into the
+    module-level `_derive_graph_name` (#4240 review F2), and `_get_proj` now
+    merely calls it. Scanning `_get_proj` ALONE pins an EMPTY set, so a
+    behaviour-preserving extraction reds this guard (it did). Both sources are
+    scanned and the union pinned: a pinned literal moved to a THIRD place
+    still shrinks the union and reds below, so the guard is NOT relaxed to a
+    subset check.
+    """
+    import ast
+    import inspect
+    import random
+    import textwrap
+
+    import tortoise.embeddings as emb_mod
+    import tortoise.hosted_api as ha_mod
+    import tortoise.sdk as sdk_mod
+
+    # `_get_proj` warms the embedder on first open (#2952, default ON) — a
+    # network/model-bound daemon load the namespace→graph-name mapping cannot
+    # depend on. Stub it so the (now much larger) corpus stays cheap: un-stubbed
+    # this test cost ~447 s under fleet load, stubbed ~20 s.
+    monkeypatch.setattr(emb_mod.EmbeddingModel, "start_warm_up",
+                        lambda **kw: None)
+
+    seen: list[str | None] = []
+
+    class _RecordingProj:
+        def __init__(self, path=None, graph_name=None, **kw):
+            seen.append(graph_name)
+            self.graph_name = graph_name
+
+    monkeypatch.setattr(sdk_mod, "FalkorProjection", _RecordingProj)
+
+    def _opened(namespace=None, graph_name=None):
+        sdk = sdk_mod.TortoiseSDK.__new__(sdk_mod.TortoiseSDK)
+        sdk._proj = None
+        sdk._db_uri = None
+        sdk._db_path = ":memory:"
+        sdk._namespace = namespace
+        sdk._graph_name = graph_name
+        seen.clear()
+        sdk._get_proj()
+        return seen[-1]
+
+    # ── probe corpus ──────────────────────────────────────────────────────
+    # (a) PREDICATE-DERIVED: every STRING CONSTANT under the CONDITION of
+    #     any conditional construct in the SCANNED sources (`_get_proj` and
+    #     `_derive_graph_name`) becomes a probe, so a new literal-bearing
+    #     branch is exercised — a mirror that does not restate it then fails
+    #     the parity loop below. Extraction is
+    #     AST-based, not a spelling regex: a constant is collected however
+    #     the predicate is spelled — `== "..."`, a single-quoted literal, an
+    #     `in` / `not in` test, a tuple/list of literals, an `endswith`, or a
+    #     string handed to any other call such as `ns.count("zzz")`.
+    #     Scoping to the CONDITION (not the whole construct) is what keeps a
+    #     string constant that is NOT a predicate (the URI parse's
+    #     `lstrip('/')`) out of the pinned set.
+    #     The set of constructs is the LANGUAGE's, not a list of spellings
+    #     (rounds 1–3 each closed one more missed spelling: regex `==` /
+    #     `startswith`; then an AST operator filter, which still missed
+    #     `ns.count("zzz") > 0` / `ns.find("zzz") >= 0`; round 4 found the
+    #     `match`/`case` escape below). Every construct that carries a
+    #     condition is covered — this is the closed set:
+    #       * `if` / `elif` / `while` / `... if ... else ...`
+    #         (`ast.If` — `elif` IS a nested `ast.If` — `ast.While`,
+    #         `ast.IfExp`) → `.test`
+    #       * `match` → each `case`'s PATTERN and its `if` GUARD
+    #         (`case "zzz":` is a `MatchValue`, a guard is
+    #         `match_case.guard`; NEITHER is an `ast.If`, so both escaped
+    #         the round-3 filter: a novel literal in a `match` arm was
+    #         invisible to BOTH the probe corpus and the pinned set)
+    #       * a comprehension's `if` clauses → `ast.comprehension.ifs`
+    #       * `assert` → `.test`
+    #     The only conditional construct NOT collected is `except`, whose
+    #     "condition" is an exception TYPE — never a string-literal namespace
+    #     predicate — so it can carry no literal this guard should pin.
+    # The rule lives in TWO places since #4240 review F2: `_get_proj` calls
+    # the module-level `_derive_graph_name` for the namespace→graph-name
+    # derivation, taking the predicate literals with it. Scan BOTH ASTs and
+    # pin the UNION — `_get_proj` alone pins an empty set (reding this guard
+    # on a behaviour-preserving extraction), and a literal moved to a THIRD
+    # place still shrinks the union and reds below.
+    srcs = (
+        inspect.getsource(sdk_mod.TortoiseSDK._get_proj),
+        inspect.getsource(sdk_mod._derive_graph_name),
+    )
+
+    def _string_consts(node: ast.AST) -> set[str]:
+        return {n.value for n in ast.walk(node)
+                if isinstance(n, ast.Constant)
+                and isinstance(n.value, str)}
+
+    def _condition_tests(node: ast.AST) -> tuple[ast.AST, ...]:
+        """The CONDITION subtrees of a conditional construct; () otherwise.
+
+        One entry per condition the construct evaluates: an `if` / `while` /
+        conditional-expression test, every `case` PATTERN + GUARD of a
+        `match`, every `if` clause of a comprehension, and an `assert` test.
+        """
+        if isinstance(node, (ast.If, ast.While, ast.IfExp, ast.Assert)):
+            return (node.test,)
+        if isinstance(node, ast.comprehension):
+            return tuple(node.ifs)
+        if isinstance(node, ast.Match):
+            _conds: list[ast.AST] = []
+            for _case in node.cases:
+                _conds.append(_case.pattern)
+                if _case.guard is not None:
+                    _conds.append(_case.guard)
+            return tuple(_conds)
+        return ()
+
+    predicate_lits: set[str] = set()
+    for _src in srcs:
+        for _node in ast.walk(ast.parse(textwrap.dedent(_src))):
+            for _cond in _condition_tests(_node):
+                predicate_lits |= _string_consts(_cond)
+    # (b) REAL-CREDENTIAL SHAPES: a production `org_id` is a ULID
+    #     ("01"-prefixed Crockford base32) — the shape the old spot-check
+    #     lacked — plus the named shapes it carried and a seeded fuzz over the
+    #     namespace alphabet.
+    corpus: list[str] = ["team-001", "test_x", "tortoise_testing", "test-x",
+                         "registry",
+                         "01J8ZZK4M7HQ3X9Z8R2K6VWPB",
+                         "01HZX9K4M7HQ3X9Z8R2K6VWPC", "01ULID"]
+    corpus += sorted(predicate_lits)
+    # a PREFIX / membership literal only fires with something appended
+    corpus += [f"{_lit}{_sfx}" for _lit in sorted(predicate_lits)
+               for _sfx in ("x", "01J8ZZK4M7HQ3X9Z8R2K6VWPB")]
+    # SUFFIX / INFIX: a literal reused in a non-prefix position is shadowed
+    # by an earlier family branch for every `{lit}...` probe above (a
+    # namespace beginning `test_` never reaches a later `endswith("test_")`),
+    # and the literal is already pinned, so the pinned set is blind to it.
+    # `x{lit}` / `x{lit}y` place the literal where no earlier branch owns it,
+    # so such a branch reds the PARITY loop instead of hiding.
+    corpus += [f"x{_lit}" for _lit in sorted(predicate_lits)]
+    corpus += [f"x{_lit}y" for _lit in sorted(predicate_lits)]
+    _rng = random.Random(3365)
+    _ns_alphabet = "abcdefghijklmnopqrstuvwxyz0123456789-_"
+    corpus += ["".join(_rng.choice(_ns_alphabet)
+                       for _ in range(_rng.randint(1, 30)))
+               for _ in range(48)]
+    corpus = list(dict.fromkeys(corpus))
+
+    for ns in corpus:
+        opened = _opened(namespace=ns)
+        mirrored = ha_mod._graph_name_for_namespace(ns)
+        assert opened == mirrored, (
+            f"namespace {ns!r}: `_get_proj` opens {opened!r} but the "
+            f"admission mirror resolves {mirrored!r} — the gate would bucket "
+            f"the request by a graph it never opens (#3365)")
+
+    # Structural half: a NEW predicate in either scanned source must be a
+    # deliberate test edit, not silent corpus drift. This pins the UNION of
+    # the string literals the TEST conditions carry across BOTH `_get_proj`
+    # and `_derive_graph_name`, so a branch introducing a NEW literal reds HERE
+    # even when the parity loop cannot see it — e.g. a behaviour-preserving
+    # `endswith("zzz")` returning the same `org_{ns}` the else branch would.
+    # A branch REUSING an already-pinned literal in a non-prefix position
+    # (`endswith("test_")`) adds no new literal, so the pinned set alone is
+    # blind to it; the suffix/infix probes in the corpus exercise that
+    # position and red parity instead.
+    # (Residual, stated precisely — the ONE blind spot left, and it is NOT a
+    # spelling. The scan covers `_get_proj` and `_derive_graph_name` only, so
+    # a condition whose literal lives OUTSIDE both cannot be seen: a predicate
+    # delegating to a helper (`_is_ulid(ns)`) or comparing against a
+    # module-level constant (`ns == _TEST_PREFIX`) contributes no string
+    # constant here, and a literal-free predicate (`len(ns) == 7`) is the
+    # degenerate case of the same thing. Such a branch adds nothing to pin;
+    # if it changes the mapping, only the parity loop over the seeded fuzz
+    # can catch it, and only when the fuzz names a matching shape. It cannot
+    # however move a pinned literal out of BOTH scanned sources unnoticed: the
+    # pinned set SHRINKS, and this assertion reds. The collector reads each
+    # construct's CONDITION — `if` / `while` / conditional-expression tests,
+    # `match` patterns and guards, comprehension `if` clauses, `assert` tests
+    # (see the corpus notes above) — so this is a blind spot of REACHABILITY
+    # from the scanned ASTs, not an uncollected spelling.)
+    assert predicate_lits == {"registry", "test_", "tortoise_test", "test-"}, (
+        "_get_proj/_derive_graph_name's namespace predicates changed "
+        f"(literals={sorted(predicate_lits)}): re-verify "
+        "_graph_name_for_namespace and extend this guard's corpus")
+    # explicit graph_name: verbatim, and it wins over the namespace family
+    assert _opened(namespace="team-001", graph_name="org_x_g_1") \
+        == ha_mod._graph_name_for_namespace("team-001", graph_name="org_x_g_1") \
+        == "org_x_g_1"
+    # a falsy namespace falls back to the URI's own graph, else "tortoise"
+    assert ha_mod._graph_name_for_namespace(None) == "tortoise"
+    assert ha_mod._graph_name_for_namespace(None, uri_graph="uri_graph") \
+        == "uri_graph"
+    # `_data_graph_name` never passes `uri_graph`, so a falsy org_id keys on the
+    # literal "tortoise" while `_get_proj` would open the URI's graph — the
+    # divergence documented on `_data_graph_name` as unreachable (org_id is a DB
+    # key) and benign (all falsy-id requests resolve to one graph).
+    assert ha_mod._data_graph_name({"org_id": None}) == "tortoise"
+
+
+def test_data_sdk_opens_the_graph_the_gate_keys_on(monkeypatch):
+    """#3365 DRIFT GUARD 2: the opener and the admission key agree.
+
+    `_data_sdk` is the only authority on which graph a request opens. For BOTH
+    credential branches the gate must bucket by the SAME graph name — and the
+    org-wide branch must IGNORE the dict's `graph_namespace`, exactly as
+    `_data_sdk` does (the selfhost `org_{name}` divergence it refuses to
+    honour), or the gate would key on a graph the request never opens.
+    """
+    from fastapi import HTTPException
+
+    import tortoise.hosted_api as ha_mod
+
+    opened: list[dict] = []
+    monkeypatch.setattr(ha_mod, "_make_sdk",
+                        lambda **kw: opened.append(kw) or kw)
+    monkeypatch.setattr(ha_mod, "_assert_graph_owned", lambda *a, **k: None)
+
+    def _opened_kwargs(org):
+        opened.clear()
+        ha_mod._data_sdk(org)
+        return opened[-1]
+
+    def _opened_name(org):
+        """The name the opener will open.
+
+        Load split, stated plainly: for a graph-BOUND org dict this reads the
+        verbatim `graph_name=` the opener hands the SDK, so
+        `_opened_name(org) == _data_graph_name(org)` is a real cross-check. For
+        an ORG-WIDE dict the name is resolved through the same mirror
+        `_data_graph_name` calls, so that leg is a CALL-FORM assertion — the
+        kwargs checks below carry it — not an independent derivation; the
+        value's equality to the real `TortoiseSDK._get_proj` is pinned by
+        `test_capture_graph_name_mirrors_the_sdk_mapping`.
+        """
+        kw = _opened_kwargs(org)
+        return (kw["graph_name"] if "graph_name" in kw
+                else ha_mod._graph_name_for_namespace(kw["namespace"]))
+
+    # The CALL FORM, asserted non-tautologically: a bound key opens its resolved
+    # namespace VERBATIM (`graph_name=`, no namespace resolution), and an
+    # org-wide key hands the SDK only `namespace=org_id` — never the dict's
+    # `graph_namespace`, which `_data_sdk` deliberately ignores.
+    assert _opened_kwargs({"org_id": "team-a", "graph_id": _LEGACY_DEFAULT_GID,
+                           "graph_namespace": "org_team-a"}) \
+        == {"graph_name": "org_team-a"}
+    assert _opened_kwargs({"org_id": "team-a"}) == {"namespace": "team-a"}
+    assert _opened_kwargs({"org_id": "01ULID", "graph_namespace": "org_acme"}) \
+        == {"namespace": "01ULID"}
+
+    for org in ({"org_id": "team-a"},
+                {"org_id": "team-a", "graph_id": _LEGACY_DEFAULT_GID,
+                 "graph_namespace": "org_team-a"},
+                {"org_id": "team-a", "graph_id": "g_c",
+                 "graph_namespace": "org_team-a_g_c"}):
+        assert _opened_name(org) == ha_mod._data_graph_name(org), org
+
+    divergent = {"org_id": "01ULID", "graph_namespace": "org_acme"}
+    assert ha_mod._data_graph_name(divergent) == "org_01ULID"
+    assert _opened_name(divergent) == "org_01ULID"
+
+    # A ghost binding fails closed in BOTH: the opener raises before any write,
+    # and the gate keeps it out of every real graph's bucket.
+    ghost = {"org_id": "team-a", "graph_id": "g_ghost"}
+    with pytest.raises(HTTPException):
+        ha_mod._data_sdk(ghost)
+    assert ha_mod._data_graph_name(ghost) is None
+
+
+def test_capture_under_a_legacy_default_bound_key_is_refused(client,
+                                                             monkeypatch):
+    """#3365 end-to-end: the legacy shape is refused, not served a replay.
+
+    An org-wide capture is in flight when a request carrying a LEGACY key bound
+    to the SAME default graph (`graph_id` = that `kind='default'` node's real
+    gid, namespace = the org graph name — the production supabase shape) posts
+    the same session_id. Before the fix the second request was ADMITTED, read
+    `capture_ok = NULL` and was answered 200 + `extraction_mode=replayed` +
+    0 extracted while the first attempt then failed — a false success receipt
+    (the measured #3129 loss).
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app, get_current_org
+
+    # The default node as `sdk.org_create` mints it and as supabase
+    # `set_graph_recording` upserts it: a real gid whose namespace IS the org
+    # graph name. Raw registry write so the seed is mode-independent.
+    ha_mod._make_sdk(namespace="registry")._get_registry().query(
+        "CREATE (g:Graph {id:$gid, org_id:$tid, name:'default', "
+        "kind:'default', namespace:$ns, status:'active'})",
+        params={"gid": _LEGACY_DEFAULT_GID, "tid": TEST_ORG_ID,
+                "ns": "org_team-001"})
+
+    release = threading.Event()
+
+    def _stalled(_self, windowed, session_id, now, **kw):
+        release.wait(timeout=30)
+        return [], {}
+
+    monkeypatch.setattr(TortoiseSDK, "_extract_session_v2", _stalled)
+    payload = {"conversation": _CONV, "session_id": "s-legacy-shape-3365",
+               "harness": _HARNESS}
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            first = asyncio.create_task(ac.post("/v1/sessions", json=payload))
+            # Wait for ADMISSION — the handler's FIRST gate, before any SDK /
+            # projection / embedding work — not for the extraction. (Waiting on
+            # the extraction entry is cold-start fragile in this file's
+            # URI-less lane: pre-extraction warm-up can outlast the transport's
+            # wait budget and answer a 504, which is orthogonal to #3365.)
+            for _ in range(600):
+                if ha_mod._CAPTURE_SESSIONS:
+                    break
+                await asyncio.sleep(0.05)
+            keys = list(ha_mod._CAPTURE_SESSIONS)
+            assert keys, "the first capture never reached admission"
+            assert keys == [f"{TEST_ORG_ID}:org_team-001:{payload['session_id']}"], (
+                f"the admission bucket is not the graph the capture opens: "
+                f"{keys} (#3365)")
+            # Same GRAPH, different credential SHAPE — the #3365 key pair.
+            app.dependency_overrides[get_current_org] = lambda: dict(
+                TEST_TEAM, graph_id=_LEGACY_DEFAULT_GID,
+                graph_namespace="org_team-001")
+            try:
+                # The refusal is at admission, so it cannot wait on the first
+                # request's (possibly slow) extraction.
+                second = await asyncio.wait_for(
+                    ac.post("/v1/sessions", json=payload), timeout=30.0)
+            finally:
+                release.set()
+            with suppress(Exception):
+                await asyncio.wait_for(first, timeout=30.0)
+            return keys, second
+
+    _, second = asyncio.run(_run())
+
+    assert second.status_code == 409, (
+        f"a capture under a LEGACY default-bound key returned "
+        f"{second.status_code} ({second.text[:200]}) while an org-wide capture "
+        f"of the SAME physical graph and session_id was in flight (#3365) — a "
+        f"2xx here is the #3129 false receipt with 0 turns extracted")
+    assert "Retry-After" in second.headers, second.headers
+
+
 # ── #3086: the capture WRITE path must not block the loop either ───────────
 #
 # The tests above pin the EXTRACTION off the loop and deliberately exclude the
@@ -1565,23 +2112,30 @@ def test_in_flight_session_keys_are_scoped_to_their_tenant():
 #
 # WHY THESE ASSERTIONS AND NOT A WALL-CLOCK GAP: a full-request loop-gap
 # budget is not a valid discriminator on a shared/loaded runner. Measured on
-# this box, the whole-request worst gap is 6-15s for a 2-TURN capture — the
-# floor is dominated by per-request SDK/projection schema bootstraps (~15
-# on-loop `_get_proj()` constructions, ~430 on-loop queries — the issue's own
-# "~450 non-turn queries") plus runner scheduling, neither of which scales
-# with the turn count and neither of which is this issue's seam. A gap budget
-# therefore passes and fails the same way pre- and post-fix, which is exactly
-# the "a green test that measures a different window is not evidence" trap.
-# These tests instead measure the SAME whole-request window and assert the
-# property that actually regressed: the work the capture puts ON the event
-# loop must not scale with the number of turns.
+# this box, the whole-request worst gap is 6-15s for a 2-TURN capture — a
+# floor dominated by per-request setup (projection construction + the
+# synchronous capture gates) and by runner scheduling, neither of which
+# scales with the turn count and neither of which is this issue's seam. A gap
+# budget therefore passes and fails the same way pre- and post-fix, which is
+# exactly the "a green test that measures a different window is not evidence"
+# trap. These tests instead measure the SAME whole-request window and assert
+# the property that actually regressed: the work the capture puts ON the
+# event loop must not scale with the number of turns.
+#
+# (#4465 later removed the largest FIXED contributor to that floor — the
+# per-construction schema bootstrap. Re-measured on current main: 12
+# projections per 2-turn capture, 7 on the loop, 219 on-loop queries on the
+# docker lane / 217 embedded, 182/180 of them that repeated DDL. Post-#4465:
+# 44 / 35 on-loop. The wall-clock rationale above is unchanged — the floor is
+# still not a turn-count signal — and the numbers here are what
+# `test_capture_does_not_repeat_the_schema_bootstrap_on_the_loop` pins.)
 CAPTURE_TURNS_LARGE = 500
 CAPTURE_TURNS_SMALL = 50
-# The on-loop query count is dominated by the fixed SDK/projection bootstraps
-# (~430), identical for both sizes. The per-turn loop added ~2 queries per
-# turn, so the pre-fix delta between these two sizes was ~900; a batched store
-# adds a constant. 60 is generous for a constant and an order of magnitude
-# below the per-row shape it must catch.
+# The on-loop query count is dominated by that fixed per-request setup,
+# identical for both sizes. The per-turn loop added ~2 queries per turn, so
+# the pre-fix delta between these two sizes was ~900; a batched store adds a
+# constant. 60 is generous for a constant and an order of magnitude below the
+# per-row shape it must catch.
 ON_LOOP_QUERY_DELTA_BUDGET = 60
 # Same reasoning as a TIME bound: 900 on-loop round-trips at the ~2.6ms/query
 # the issue measured is ~2.3s of hard blocking, versus a constant that is
@@ -1606,7 +2160,19 @@ def _measure_on_loop_graph_work(monkeypatch, turns: int, sid: str):
     threads have their own names) is counted: that is precisely the work a
     stalled loop cannot interleave.
     """
+    resp, records, writer_threads = _measure_capture_graph_work(
+        monkeypatch, turns, sid)
+    on_loop = [d for name, _, d in records if name == "MainThread"]
+    return (resp, len(on_loop), sum(on_loop), writer_threads,
+            [c for _, c, _ in records])
+
+
+def _measure_capture_graph_work(monkeypatch, turns: int, sid: str):
+    """Like ``_measure_on_loop_graph_work``, but returns the per-thread
+    ``(thread_name, cypher, duration)`` records so a caller can assert on
+    WHICH statements the loop ran, not just how many (#4465)."""
     import tortoise.hosted_api as ha_mod
+    from tortoise import sdk as sdk_mod
     from tortoise.hosted_api import app
 
     monkeypatch.setattr(
@@ -1615,10 +2181,12 @@ def _measure_on_loop_graph_work(monkeypatch, turns: int, sid: str):
 
     graph_cls = type(ha_mod._make_sdk(namespace="registry")._get_proj().g)
     orig_query = graph_cls.query
-    records: list[tuple[str, float]] = []
-    cyphers: list[str] = []
+    records: list[tuple[str, str, float]] = []
     writer_threads: list[str] = []
-    orig_writer = ha_mod._write_capture_turns
+    # #3551: the hosted lane now calls the shared SDK primitive, which calls
+    # `_write_capture_turns` from `tortoise/sdk.py` — patch the DEFINITION site,
+    # not a hosted-module alias (hosted no longer imports it).
+    orig_writer = sdk_mod._write_capture_turns
 
     def _timed_query(self, cypher, *args, **kwargs):
         started = time.perf_counter()
@@ -1626,15 +2194,15 @@ def _measure_on_loop_graph_work(monkeypatch, turns: int, sid: str):
             return orig_query(self, cypher, *args, **kwargs)
         finally:
             records.append((threading.current_thread().name,
+                            " ".join(cypher.split()),
                             time.perf_counter() - started))
-            cyphers.append(" ".join(cypher.split()))
 
     def _wrapped_writer(*args, **kwargs):
         writer_threads.append(threading.current_thread().name)
         return orig_writer(*args, **kwargs)
 
     monkeypatch.setattr(graph_cls, "query", _timed_query)
-    monkeypatch.setattr(ha_mod, "_write_capture_turns", _wrapped_writer)
+    monkeypatch.setattr(sdk_mod, "_write_capture_turns", _wrapped_writer)
 
     async def _run():
         transport = httpx.ASGITransport(app=app)
@@ -1646,9 +2214,8 @@ def _measure_on_loop_graph_work(monkeypatch, turns: int, sid: str):
 
     resp = asyncio.run(_run())
     monkeypatch.setattr(graph_cls, "query", orig_query)
-    monkeypatch.setattr(ha_mod, "_write_capture_turns", orig_writer)
-    on_loop = [d for name, d in records if name == "MainThread"]
-    return resp, len(on_loop), sum(on_loop), writer_threads, cyphers
+    monkeypatch.setattr(sdk_mod, "_write_capture_turns", orig_writer)
+    return resp, records, writer_threads
 
 
 def test_capture_write_does_not_scale_loop_blocking_with_turns(
@@ -1736,9 +2303,14 @@ def test_capture_turn_store_is_one_batched_implementation(client, monkeypatch):
     assert writer is not None, (
         "the shared batched turn writer (_write_capture_turns) is missing "
         "from tortoise/sdk.py (#3086)")
-    assert getattr(ha_mod, "_write_capture_turns", None) is writer, (
-        "the hosted capture lane does not call the SDK's turn writer — the "
-        "per-turn store is forked again (the drift class #3086 deletes)")
+    # #3551: the shared seam the hosted lane must reach is the primitive that
+    # owns the :Session MERGE + turn store (it delegates to `_write_capture_turns`
+    # in sdk.py). The hosted module re-exports it, and the identity must hold.
+    assert getattr(ha_mod, "_write_session_and_turns", None) is \
+        sdk_mod._write_session_and_turns, (
+            "the hosted capture lane does not call the SDK's shared writer "
+            "(_write_session_and_turns) — the capture store is forked again "
+            "(the drift class #3086/#3551 deletes)")
 
     monkeypatch.setattr(
         TortoiseSDK, "_extract_session_v2",
@@ -1788,3 +2360,79 @@ def test_capture_turn_store_is_one_batched_implementation(client, monkeypatch):
     assert is_operator is False, is_operator
     assert has_hash is True, "the turn carries no content_hash"
     assert content.startswith("[user] turn 0 "), content
+
+
+# ── #4465: the capture must not re-run the schema bootstrap per projection ──
+#
+# Every on-loop `_get_proj()` construction used to re-run the projection's
+# whole schema bootstrap (~26 idempotent DDL statements, already satisfied).
+# A hosted capture constructs ~12 projections (7 of them on the event loop),
+# so the SAME 26 statements ran 7 times ON the loop for a schema that had not
+# changed: measured on the docker lane, 182 of the capture's 219 on-loop
+# queries (180 of 217 embedded). #3086 fixed what SCALED with turns; this is
+# the constant it left behind.
+#
+# The fix is a one-round-trip completeness probe that lets the sweep run only
+# when it has work to do (tortoise/projection/__init__.py::_schema_is_current).
+# The assertion below is deliberately about WHICH statements the loop ran, not
+# a raw count: a count budget is sensitive to unrelated capture-path changes,
+# whereas "the repeated DDL is gone" is the defect itself and is lane-stable
+# (0 repeats after, vs once per on-loop construction before).
+_SCHEMA_SWEEP_PREFIXES = (
+    "CREATE INDEX FOR",   # range DDL: Point/Document/entity/Session
+    "DROP INDEX ON",      # the #3154 boolean purge
+)
+
+#: A capture touches at most TWO graphs that can be cold — the tenant graph
+#: and the control-plane registry — so any statement appearing more often than
+#: that was a REPEATED sweep, not a second graph's first bootstrap. (In the
+#: measured runs both graphs are already warm, so the real count is 0.)
+_MAX_GRAPHS_PER_CAPTURE = 2
+
+
+def _is_schema_sweep(cypher: str) -> bool:
+    """Statements that a fully-indexed graph makes redundant.
+
+    The vector-index API probe (`CALL db.idx.vector.createNodeIndex` and its
+    Cypher-native fallback) is NOT here: distinguishing the two APIs is 1–2
+    round trips that `CALL db.indexes()` cannot answer, and it is not
+    *repeated schema* work.
+    """
+    return (cypher.startswith(_SCHEMA_SWEEP_PREFIXES)
+            or "fulltext.createNodeIndex" in cypher
+            or "fulltext.drop" in cypher)
+
+
+def test_capture_does_not_repeat_the_schema_bootstrap_on_the_loop(
+        client, monkeypatch):
+    """#4465: the capture must not re-run the schema sweep per projection.
+
+    Pre-fix every on-loop projection construction re-ran the full sweep, so
+    each of the 26 statements appeared once per construction (7x on the
+    docker lane, measured). Post-fix the first construction on a cold graph
+    may sweep and every later one probes, so no statement may appear more
+    than once per graph the capture actually opened.
+
+    Mutation check (must stay true): removing the `_schema_is_current()`
+    guard from `_ensure_indexes` makes this fail — measured 7x repetition,
+    168 sweep statements on the loop (182 including the health probes).
+    """
+    resp, records, _ = _measure_capture_graph_work(
+        monkeypatch, CAPTURE_TURNS_SMALL, "loop-bootstrap-4465")
+    assert resp.status_code == 200, resp.text[:300]
+
+    on_loop = [c for name, c, _ in records if name == "MainThread"]
+    assert on_loop, (
+        "the capture put NO graph work on the event loop — the graph class's "
+        "`query` was not instrumented, so this run proves nothing")
+
+    sweep = [c for c in on_loop if _is_schema_sweep(c)]
+    repeated = sorted({c for c in sweep
+                       if sweep.count(c) > _MAX_GRAPHS_PER_CAPTURE})
+    assert repeated == [], (
+        f"the capture re-ran already-satisfied schema DDL on the event loop: "
+        f"{repeated[:4]} (each repeated "
+        f"{sweep.count(repeated[0])}x; {len(sweep)} sweep statement(s) in "
+        f"total, cap {_MAX_GRAPHS_PER_CAPTURE} = one first bootstrap for the "
+        f"tenant graph and one for the registry) — every projection "
+        f"construction is bootstrapping again (#4465)")

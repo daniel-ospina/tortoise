@@ -390,6 +390,45 @@ class TestToolFunctions:
         assert callable(tortoise_diary_write)
         assert callable(tortoise_diary_read)
 
+    def test_get_operator_surfaces_transport_failure_not_fabricated_error(self):
+        """#4576: a failed get_point must surface the typed ``_SafeError``,
+        never be mis-read as a successful non-operator point.
+
+        ``_safe`` reports ANY failure (transport, auth, quota, exception) as an
+        ``_SafeError`` — itself a ``dict`` subclass. The old guard
+        (``isinstance(point, dict) and point and not point.get("is_operator")``)
+        matched that failure dict and returned a plain
+        ``{"error": "Point ... is not an operator"}`` — fabricating a domain
+        fact and dropping the real cause and the typed channel. Unset transport
+        mode makes ``_safe`` fail closed before any SDK call (no live DB).
+        """
+        from tortoise.mcp_auth import _transport_mode
+        from tortoise.mcp_server import tortoise_get_operator
+
+        token = _transport_mode.set(None)  # fail-closed: _safe returns auth error
+        try:
+            result = tortoise_get_operator("some-point-id")
+        finally:
+            _transport_mode.reset(token)
+        assert isinstance(result, mcp_mod._SafeError), result
+        assert "is not an operator" not in result.get("error", ""), result
+        assert "Authentication required" in result.get("error", ""), result
+
+    def test_get_operator_still_rejects_real_non_operator(self, monkeypatch):
+        """#4576 other direction: a *successful* fetch of a genuine
+        non-operator point must still return the canonical domain error — the
+        typed-failure gate must not swallow it."""
+        class _StubSDK:
+            def get_point(self, id):
+                return {"id": id, "is_operator": False}
+
+        monkeypatch.setattr(mcp_mod, "_get_org_sdk", lambda: _StubSDK())
+        from tortoise.mcp_server import tortoise_get_operator
+
+        result = tortoise_get_operator("plain-point")
+        assert result == {"error": "Point 'plain-point' is not an operator"}, result
+        assert not isinstance(result, mcp_mod._SafeError), result
+
     def test_github_connect_oauth_unset_returns_canonical_text(self, monkeypatch):
         """#1009: GITHUB_CLIENT_ID unset (self-host HTTP — OAuth is hosted-mode
         only) → the prompt-canonical text, not the misleading

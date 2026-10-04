@@ -253,8 +253,19 @@ def _record_embedding_identity(p: dict, warned: set) -> None:
     Point and bury the signal in O(N) identical warnings. The mismatch is
     keyed by the identity pair, so every DISTINCT divergence still reports.
     """
-    from tortoise.embeddings import embedding_identity
-    cur_model, cur_rev = embedding_identity()
+    try:
+        from tortoise.embeddings import embedding_identity
+        cur_model, cur_rev = embedding_identity()
+    except Exception:  # noqa: BLE001, RUF100
+        # #5119/#5148 review: this is an ADVISORY warning path, and it runs
+        # inside the recovery replay (`_upsert_point_props` -> here, once per
+        # journalled vector). Letting it raise aborted EVERY replayed event, so
+        # `recover_from_log` counted zero applied and refused the DB with
+        # "replay produced an empty graph" — the #5119 failure shape,
+        # re-entered through the identity CHECK rather than the write. A
+        # replay must never fail on a warning: with no configured identity
+        # there is nothing to compare the record against, so say nothing.
+        return
     j_model = p.get("embedding_model")
     j_rev = p.get("embedding_revision")
     if j_model is None and j_rev is None:
@@ -311,6 +322,95 @@ def _warned_set(handler) -> set:
     if warned is None:
         warned = handler._embed_identity_warned = set()
     return warned
+
+
+def _valid_transit_pairs(value):
+    """#5256: the ONE shape check for the `extractedFrom` read-version carrier.
+
+    Returns the value when it is a non-empty list/tuple of 2-element
+    ``[str, str]`` pairs whose members are BOTH non-empty/non-blank, else
+    ``None``. BOTH the node-prop clause (`_upsert_point_props`) and the edge
+    fold (`_upsert_point_edges`) call THIS through the shared
+    `_point_source_transit` selector (which adds the own-ref gate/filter) — an
+    all-or-nothing predicate shared by both writers.
+
+    Why one predicate and all-or-nothing: the two writers must agree on a
+    corrupt payload. With a partial filter on the edge side, a
+    partially-malformed carrier (``[[DOC,'h9'], {"bad":1}]``) stamped
+    ``r.sourceVersion`` from the one valid pair while the node clause wrote NO
+    carrier — an edge anchor with no gate-compared record, the exact opposite
+    of "a corrupt journal contributes no anchor". A body value that is a dict
+    (or a list containing one) is also what would make Falkor raise mid-replay.
+
+    Why the non-empty member rule: an empty (or blank) hash is an ABSENT read
+    version, and ``resolve_source_versions`` now omits both (``h.strip()``),
+    while ``_anchor_on_create`` nulls ``''`` on the edge — so a blank member is
+    never a legitimate value. Enforcing it here keeps the two writers in
+    lockstep even on a hand-written or foreign journal line: without the rule,
+    ``[[DOC, '']]`` left the node carrier claiming a per-link pair for DOC
+    while the authoritative edge carried NULL (and a blank ``'   '`` stamped
+    garbage on the edge, since the CASE only matches ``''``) — a gate-invisible
+    disagreement between the two writers, re-derived from the same journal line
+    so `check_consistency` saw no divergence. (Note: only the SDK
+    ``create_point`` CREATE-map write bypasses this predicate; the EventAPI lane
+    sets the carrier and then emits ``PointAdded``, which reaches
+    ``_upsert_point_props`` and so runs the SAME predicate as replay does. The
+    agreement is a property of both sides applying the same absent rule, which is
+    why ``resolve_source_versions`` must strip-test too.)
+    """
+    if not isinstance(value, (list, tuple)) or not value:
+        return None
+    for pair in value:
+        if not (isinstance(pair, (list, tuple)) and len(pair) == 2
+                and isinstance(pair[0], str) and pair[0].strip()
+                and isinstance(pair[1], str) and pair[1].strip()):
+            return None
+    return value
+
+
+def _point_source_refs(extracted_from) -> list:
+    """The Point's OWN ``extractedFrom`` refs, normalized exactly as
+    ``_link_source`` fans them out: a bare ``str`` is ONE ref (never iterated
+    character-wise), any other value is a sequence, and falsy members are
+    skipped. ``[]`` when the Point has no ``extractedFrom`` at all."""
+    if not extracted_from:
+        return []
+    refs = ([extracted_from] if isinstance(extracted_from, str)
+            else list(extracted_from))
+    return [r for r in refs if r]
+
+
+def _point_source_transit(p: dict):
+    """#5256: the carrier to WRITE for a journal payload — the shape-validated
+    ``sourceVersionTransit`` pairs, gated on the Point OWNING an
+    ``extractedFrom`` and filtered to that Point's own raw refs.
+
+    ``None`` when there is nothing to record. The gate matters because the
+    carrier is a transit for an edge that will be written: without it a
+    hand-written/foreign journal line plants a stray carrier with no
+    ``extractedFrom`` edge at all. (Before this gate the stray made the node equal
+    its own journal payload, so the #5011 gate stayed GREEN and the corruption was
+    invisible; after it the graph is unfaithful to that line and the gate REPORTS
+    the divergence — a deliberate behaviour change, pinned by
+    ``test_carrier_without_an_extractedfrom_is_not_written``.) The filter matters
+    because the pairs are keyed by the RAW ref (see ``resolve_source_versions``),
+    so a pair whose key is not one of the Point's own refs is not one the edge
+    fold can consume — writing it would record an anchor for an edge this Point
+    never has. BOTH writers (``_upsert_point_props`` and ``_upsert_point_edges``)
+    use THIS selector, so the two writers always select the same pair SET. (That
+    is a claim about the SET, not about per-pair VALUES: a foreign/hand-written
+    carrier may list two raw refs that resolve to ONE Source node with different
+    hashes, and the edge fold stamps the resolved-first value while the node keeps
+    both pairs.)
+    """
+    pairs = _valid_transit_pairs(p.get("sourceVersionTransit"))
+    if pairs is None:
+        return None
+    refs = _point_source_refs(p.get("extractedFrom"))
+    if not refs:
+        return None
+    kept = [[k, h] for k, h in pairs if any(k == r for r in refs)]
+    return kept or None
 
 
 class _EntityHandlers:
@@ -417,12 +517,59 @@ class _EntityHandlers:
         # open-set passthrough (which would let a payload clobber the
         # canonical identity).
         "canonicalUrl", "urlAliases",
+        # D10 (ONTOLOGY v3.15 §4.4/§9.5 Q3): a document is a :Source, and
+        # `format` moves onto :Source. It belongs to the fixed clause so a
+        # caller-supplied `format` lands as a node property here instead of
+        # riding the open passthrough.
+        "format",
         # epic #900 T3 (§4.1): the ev keys `source_path` (→ s.sourcePath via
         # the MERGE clause, never persisted verbatim snake_case) and
         # `_searchText` (set by the write path, coalesce-on-create /
         # overwrite-on-hash-diff — §4.1 cycle-4 merge semantics).
         "source_path",
         "_searchText",
+    })
+    # D10 (ONTOLOGY v3.15 §4.4): the document write path now targets a :Source,
+    # so its passthrough skip-set is ``_SOURCE_HANDLED | _DOC_RETIRED``. This
+    # keeps every fixed-clause key off the passthrough AND denies the RETIRED
+    # fields — `content`, `doc_status`/`docStatus`, `objectKind`/`object_kind`
+    # — so they can never re-enter the graph through the open passthrough
+    # (adversarial class B6).
+    # BOTH spellings are denied: the projection normalizes to camelCase for
+    # the FIXED clauses, but a raw journal payload (a hand-written JSONL line,
+    # `EventAPI.add_document`, or a producer's `create_source(**props)`) can
+    # carry the snake_case spelling, which would otherwise persist verbatim as
+    # a node property no reader owns — a B6 re-entry through the snake door.
+    # The historical `_DOCUMENT_HANDLED` set is retained as the base so no
+    # previously-handled key becomes an accidental passthrough key.
+    _DOC_RETIRED: frozenset = _DOCUMENT_HANDLED | frozenset({
+        "needs_extraction",
+        # #5422: the snake_case spelling of the version anchor. The fixed
+        # clause above writes `contentHash` from `ev["content_hash"]`; the
+        # raw journal spelling must therefore ALSO be denied by the
+        # passthrough, or it would persist verbatim as a second, unread
+        # `s.content_hash` property beside the camelCase the readers use
+        # (the same snake-door class as `needs_extraction` below).
+        "content_hash",
+        # D10 B6: snake/camel synonyms of the retired props. ``object_kind``
+        # (synonym of ``objectKind``) and ``docStatus`` (synonym of
+        # ``doc_status``) are the two the write path can actually produce;
+        # ``content`` has no second spelling.
+        "object_kind", "docStatus",
+    })
+    # D10 B6: the RETIRED document fields as a LITERAL set — the keys that must
+    # not be writable through ANY open passthrough.
+    # ⛔ Distinct from `_DOC_RETIRED`, which is a SUPERSET of the historical
+    # `_DOCUMENT_HANDLED` and is therefore only safe on the document path
+    # (there, `_upsert_document`'s fixed clause owns every other key). Applying
+    # the full `_DOCUMENT_HANDLED` union to a Source write would ALSO deny
+    # `summary` / `topics` / `embedding` / `status` / `about_entities`, which
+    # `_upsert_source`'s fixed clause does NOT write and which a Source
+    # legitimately carries (a `SourceCreated` passthrough write of `summary` or
+    # an `embedding` — read by the vector retrieval leg — would be silently
+    # dropped). Deny the retirement, not the history.
+    _DOC_RETIRED_KEYS: frozenset = frozenset({
+        "content", "doc_status", "docStatus", "objectKind", "object_kind",
     })
     # #2795 (D2): every key owned by the fixed SET clauses of
     # `_upsert_point_props` (plus the MERGE key and the structural/edge-carried
@@ -462,6 +609,21 @@ class _EntityHandlers:
         # structural / edge-carried — never node props via passthrough
         "operator", "provenance", "about_entities", "aboutEntities",
         "extractedFrom", "is_episodic", "_nid", "_graph_id",
+        # #5256: a DECLARED node property (own conditional clause below), the
+        # extractedFrom READ-VERSION transit. It rides on the NODE because
+        # `extractedFrom` is a replay-derived projection (the `#4042` recreate
+        # wipe clears only node props, and pass 2 boots edges from scratch) —
+        # the edge is authoritative, but the value must survive in the Point's
+        # own journaled snapshot for pass 2 to re-stamp it without reading the
+        # Source (whose in-place contentHash bump is unjournalled, #5024).
+        # Handled because its own clause owns it — the open-set passthrough
+        # must not also write it.
+        # DELIBERATELY NAMED `sourceVersionTransit`, not `sourceVersion`: the
+        # latter is the EDGE scalar (ONTOLOGY §4.6). A Point read returns this
+        # list-of-pairs carrier, so reusing the canonical name would hand a
+        # consumer a value of a different TYPE than §4.6 documents. The name
+        # states the role: the edge is the model, this is the replay carrier.
+        "sourceVersionTransit",
         # #2958 review: written by its own explicit clause in
         # `_upsert_point_props` (`SET n.provenanceSource=$sid`), gated on
         # provenance.source_id — the open passthrough must not supply it when
@@ -498,6 +660,10 @@ class _EntityHandlers:
     # reported by the undeclared-list warning below, NOT suppressed here.
     _POINT_DECLARED_PROPS: frozenset = frozenset({
         "quote", "when", "search_keys", "speaker", "source_turn_id", "tags",
+        # E4 (#5007): the verbatim span POINTER — offsets into the Source's raw
+        # text, declared so the replay open-set passthrough does not log a
+        # FALSE undeclared-prop drift warning on every rebuild.
+        "span_start", "span_end",
         # #3689 review P2 (A): the four canonical annotator dims are legitimately
         # carried on a PointAdded snapshot by `create_point(annotator_*=…)` /
         # `_update_entity` — declaring them keeps the replay open-set
@@ -587,9 +753,11 @@ class _EntityHandlers:
         the embedded lane reddened). So the node kept its OLD vector and a
         rebuilt Point's ``embedding`` no longer derived from its ``content``.
         ``REMOVE``-first is the workaround this repo's own test helper
-        documents (``tests/test_precision_leak_4028.py``); the OTHER
-        vector-write sites carry the same overwrite shape and are NOT fixed by
-        this clause (tracked in #4520). On the server lane the final state is
+        documents (``tests/test_precision_leak_4028.py``); the sibling entity
+        seams in THIS file (``Subject``/``Object``/``Document``/plain
+        ``Event``) carried the same overwrite shape and are cleared the same
+        way by #4524, while the vector writers in OTHER files still carry it
+        (tracked in #4520). On the server lane the final state is
         unchanged, and because the clause is emitted ONLY when a new vector is
         being written, the preserve-on-None semantics above are untouched.
         See the query below.
@@ -760,6 +928,35 @@ class _EntityHandlers:
             "vf": p.get("validFrom"), "vt": p.get("validTo"),
             "now": _now_iso(),
         }
+        # #5256: the extractedFrom read-version transit. Written ONLY when the
+        # Point OWNS an `extractedFrom` AND the payload carries a well-formed
+        # non-empty list of [raw_ref, contentHash] pairs whose two members are
+        # non-blank strings, kept to that Point's own refs — the SAME shape
+        # check + own-ref filter (the SHARED `_point_source_transit` selector)
+        # `_upsert_point_edges` uses.
+        # An un-sourced Point, or one whose Source has no recorded hash, carries
+        # NO property (never '' and never []: honest-absent, because '' compares
+        # equal to a Source's '' and reads as a false CURRENT). A payload that
+        # carries a shape-valid carrier but NO `extractedFrom` ALSO carries
+        # nothing: the carrier is a transit for an edge, and without the edge it
+        # is a stray record (the node would otherwise equal its own journal
+        # payload and `check_consistency` would stay green). `coalesce` is
+        # deliberately NOT used: the value is a recorded FACT of the reading,
+        # not a derived value to preserve across re-emits.
+        # The shape guard is the SHARED `_valid_transit_pairs` predicate (via
+        # `_point_source_transit`), the same one the edge fold uses — so a
+        # corrupt/foreign journal line
+        # contributes NO anchor on EITHER writer rather than one of them. This
+        # clause is the only writer of a value that came off a journal line, and
+        # a malformed one (a dict/set/bytes, or a list containing one) would
+        # otherwise reach `SET n.sourceVersionTransit=$sv` and raise a Falkor
+        # ResponseError — which, mid-`rebuild_all`, leaves the graph WIPED. A
+        # corrupt/foreign journal must contribute NO anchor, not abort the
+        # recovery path.
+        _sv_transit = _point_source_transit(p)
+        if _sv_transit is not None:
+            set_clauses.append("n.sourceVersionTransit=$sv")
+            params["sv"] = _sv_transit
         # A10 operator-scoped replay extension (cycle-22/23): the OperatorAdded
         # point snapshot carries `direction` (stored ALWAYS) + `label` (stored
         # when truthy) on the node — the fixed SET list above drops them,
@@ -903,9 +1100,28 @@ class _EntityHandlers:
         # Ontology v2.1: link Point → Source via extractedFrom edge.
         # #3263: many-to-many — one edge per source. _link_source fans a list
         # out to N edges (ontology §3.3 amended to many→many).
+        # #5256: the read-version anchor travels in the SAME payload as the
+        # ref, on the node's own `sourceVersionTransit` carrier list. We hand it
+        # to the writer as a {raw_ref: hash} map (the journal-stable key — see
+        # `resolve_source_versions`) — this fold NEVER reads
+        # `s.contentHash` (the Source may have advanced since live time). A
+        # malformed/falsy payload contributes NO anchor rather than crashing
+        # `dict(...)` or stamping a non-str value.
         source_ref = p.get("extractedFrom")
         if source_ref:
-            self._link_source(p["id"], source_ref)
+            # The SHARED `_point_source_transit` selector: the all-or-nothing
+            # `_valid_transit_pairs` shape check — a non-empty list of
+            # 2-element `[str, str]` pairs whose members are BOTH non-blank —
+            # PLUS the Point's own-ref filter, so a
+            # partially-malformed carrier cannot stamp an edge while the node
+            # clause writes no record, and a pair for a source this Point does
+            # not reference is dropped by BOTH writers alike.
+            _svlist = _point_source_transit(p)
+            source_versions = (
+                {pair[0]: pair[1] for pair in _svlist}
+                if _svlist is not None else None)
+            self._link_source(p["id"], source_ref,
+                              source_versions=source_versions)
         # #3947: the episodic turn stream is `(:Session)-[:CONTAINS]->(:Point)`
         # (ONTOLOGY §4.5, the session container's one structural edge). NOT a
         # member of the deferred generic direct-edge replay (#1048: caller-
@@ -944,7 +1160,7 @@ class _EntityHandlers:
         "aboutDocument", "aboutAction", "aboutSource",
     })
     _ENTITY_LINKED_LABELS: frozenset = frozenset({
-        "Session", "Point", "Document", "Event", "Object", "Subject",
+        "Session", "Point", "Event", "Object", "Subject",
         "Source",
     })
     # ONTOLOGY §3.2 triples — the field sets above are their projections, but
@@ -954,18 +1170,17 @@ class _EntityHandlers:
     # pinned by the drift test.
     _ENTITY_LINKED_TRIPLES: frozenset = frozenset({
         ("aboutSubject", "Point", "Subject"),
-        ("aboutSubject", "Document", "Subject"),
         ("aboutSubject", "Event", "Subject"),
         ("aboutObject", "Point", "Object"),
-        ("aboutObject", "Document", "Object"),
         ("aboutObject", "Event", "Object"),
         ("aboutObject", "Session", "Object"),
         ("aboutEvent", "Point", "Event"),
-        ("aboutEvent", "Document", "Event"),
         ("aboutPoint", "Event", "Point"),
-        ("aboutDocument", "Event", "Document"),
+        # D10: aboutDocument targets a :Source; the Document-source triples are
+        # dropped (§3.2 does not permit a Source as an aboutSubject/Object/
+        # Event source). Mirrored EXACTLY from session_link.ENTITY_LINKED_TRIPLES.
+        ("aboutDocument", "Event", "Source"),
         ("aboutSource", "Point", "Source"),
-        ("aboutSource", "Document", "Source"),
         ("aboutSource", "Event", "Source"),
         ("aboutAction", "Point", "Point"),
     })
@@ -1057,11 +1272,29 @@ class _EntityHandlers:
         # fold would faithfully replay an edge the ontology does not have.
         if (rel, src_label, tgt_label) not in self._ENTITY_LINKED_TRIPLES:
             return _malformed("not a permitted ONTOLOGY §3.2 triple")
-        r = self.g.query(
-            f"MATCH (s:{src_label} {{id:$sid}}), (t:{tgt_label} {{id:$tid}}) "
-            f"MERGE (s)-[:{rel}]->(t) RETURN count(s)",
-            params={"sid": sid, "tid": tid},
-        )
+        # #1370: the binding confidence is OPTIONAL on the record. It is SET
+        # only when present, mirroring the live writer's conditional SET — so
+        # a later no-confidence EntityLinked for the same edge cannot clear a
+        # confident one on replay (the live pre-probe short-circuits, and this
+        # fold must agree). The value is coerced fail-closed by the SHARED
+        # helper: non-numeric, bool, NaN/±inf, overflow (10**400) and
+        # out-of-[0,1] values all become None — no SET, no FalkorDB parameter
+        # rejection (a raise here would abort rebuild_all AFTER the wipe).
+        from tortoise.session_link import coerce_confidence
+        conf = coerce_confidence(ev.get("confidence"))
+        if conf is None:
+            r = self.g.query(
+                f"MATCH (s:{src_label} {{id:$sid}}), (t:{tgt_label} {{id:$tid}}) "
+                f"MERGE (s)-[:{rel}]->(t) RETURN count(s)",
+                params={"sid": sid, "tid": tid},
+            )
+        else:
+            r = self.g.query(
+                f"MATCH (s:{src_label} {{id:$sid}}), (t:{tgt_label} {{id:$tid}}) "
+                f"MERGE (s)-[e:{rel}]->(t) SET e.confidence=$conf "
+                "RETURN count(s)",
+                params={"sid": sid, "tid": tid, "conf": float(conf)},
+            )
         n = int(r.result_set[0][0]) if r.result_set else 0
         return (1, "ok") if n else (0, "absent")
 
@@ -1153,20 +1386,29 @@ class _EntityHandlers:
         NO-OP (return 0); a malformed field is OMITTED, never bound.
 
         ``entity_links_attempted`` / ``entity_links_created`` are carried by a
-        SECOND ``SessionRecorded`` the capture emits after the link pass
-        (``sdk.capture_session``), so the counters the live raw SET writes are
-        durable too — ``recover_from_log`` / a journal-only ``rebuild()``
-        otherwise came back with them null (review P2, #3722).
+        ``SessionRecorded`` the capture emits after the link pass
+        (``sdk.capture_session``) — the THIRD of the four, after the turn
+        write's own trailing record (#4911) — so the counters the live raw SET
+        writes are durable too — ``recover_from_log`` / a journal-only
+        ``rebuild()`` otherwise came back with them null (review P2, #3722).
 
-        ``capture_ok`` / ``capture_extractor`` ride a THIRD, TRAILING
+        ``capture_ok`` / ``capture_extractor`` ride the last, TRAILING
         ``SessionRecorded`` the capture emits right after the live
-        ``SET s.capture_ok / s.capture_extractor``. Without it those two came
+        ``SET s.capture_ok / s.capture_extractor`` — the FOURTH record. Without it those two came
         back null on a journal-only rebuild, and null is CONSUMED by the
         #2335 WI-2b TRUE-retry gate as the legacy "presumed captured" case — a
         session whose capture FAILED stopped retrying (review P2, #3722).
         Same overwrite semantics as the live SET (these are not
         coalesce-preserved); a NUL-laden string is OMITTED by the shared value
         gate, never bound.
+
+        ``capture_redactions`` (#4911) rides the trailing record
+        ``sdk._write_capture_turns`` emits after its live
+        ``SET s.capture_redactions`` — the SECOND of the four, emitted right
+        after the capture's opening record and BEFORE the link pass, same
+        reason as the pair below: a
+        journal-only rebuild must not restore the Session as though nothing
+        was ever redacted. Overwrite semantics, like ``turn_count``.
         """
         from tortoise.projection import _annotator_value_ok, _writable_id
 
@@ -1183,7 +1425,7 @@ class _EntityHandlers:
             params["created_at"] = created_at
         for prop in ("turn_count", "harness", "entity_links_attempted",
                      "entity_links_created", "capture_ok",
-                     "capture_extractor"):
+                     "capture_extractor", "capture_redactions"):
             val = ev.get(prop)
             if val is not None and _annotator_value_ok(val):
                 sets.append(f"s.{prop}=$v_{prop}")
@@ -1276,7 +1518,288 @@ class _EntityHandlers:
             params={"id": pid, "now": _now_iso()},
         )
 
-    def _fold_point_superseded(self, ev: dict) -> int:
+    def _fold_point_restamp(self, ev: dict, *,
+                            skip_updated_at: bool = False,
+                            decay: bool = True,
+                            stamp: bool = True,
+                            edge: bool = True) -> int:
+        """#3305: ONE home for the Point-lifecycle terminalizer fold body.
+
+        Two replay engines must reach the same graph fold for a journaled
+        Point terminalizer, and before this method the fold SELECTION lived in
+        only one of them:
+
+          * ``rebuild_all``'s pass-1b trailing sweep (``point_re_stamp_folds``)
+            — the path ``tortoise rebuild`` uses, and ``recover_from_log``'s
+            pre-wipe-sidecar route; and
+          * ``apply()`` — the ONE-RECORD engine behind ``rebuild()``,
+            ``recover_from_log()`` and the backup JSONL restore. It had NO
+            branch for either type: the record fell through to the
+            ``unrecognized event type`` warning, so an apply()-based replay
+            re-materialized a superseded Point as ``status='live'`` (and an
+            invalidated Point with no ``outdated`` flag) — a dead claim served
+            as current, with the CORRECTS edge and the belief decay gone too.
+
+        The SELECTION (survivor rule + supersede canonicalization + both
+        belief anchors) is shared through ``plan_point_restamp_folds``; this
+        method is the shared BODY it drives.
+
+        ``stamp`` folds the status/flag/validity/CORRECTS half.
+        ``PointSuperseded`` → ``_fold_point_superseded`` (status='superseded'
+        + outdated + validTo/expiredAt + successor CORRECTS).
+        ``PointInvalidated`` → ``_fold_point_invalidated`` (outdated +
+        validTo/expiredAt + corrector CORRECTS; status deliberately stays
+        live). The DIVERGENCE between the two is deliberate — see each fold.
+
+        ``decay``: the terminalizers' BELIEF half (``_decay_point_belief``)
+        folds at the event's OWN journal position (#2884 A3). ``apply()``
+        replays chronologically, so it folds here (the default). The
+        ``rebuild_all`` sweep passes ``decay=False``: pass-1b already applied
+        the decay inline at the surviving event's seq, and re-applying it in
+        the trailing sweep would clobber every later same-id belief writer.
+        A record the plan rejects for the STAMP half can still decay (a bare
+        same-id re-emit advances the recreate boundary but not the
+        delete/recreate one), which is why the two halves are separate flags.
+
+        ``skip_updated_at`` is the BOTH families' seq gate (see
+        ``_fold_point_superseded`` / ``_fold_point_invalidated``): it suppresses
+        only the ``updatedAt`` column when a later same-id inline writer exists,
+        so a trailing sweep cannot clobber a newer revision's stamp. A
+        chronological replay never needs it — a later same-id revision simply
+        folds later.
+
+        Returns the fold's matched-row count (the #2164/#2423 fold-miss
+        signal). 0 for an inapplicable record: an empty id, an id the driver
+        cannot take as a query parameter, a ``PointSuperseded`` with no
+        ``new_id``, or a ``stamp=False`` call (the decay-only half). The id
+        gate is ``_writable_id`` — the gate ``_decay_point_belief`` /
+        ``_fold_confidence_changed`` already use — so a corrupt line degrades
+        to a dropped fold instead of aborting a post-wipe recovery at
+        parameter encode.
+        """
+        from tortoise.projection import _writable_id
+        rid = ev.get("id")
+        if not rid or not _writable_id(rid):
+            return 0
+        t = ev.get("type")
+        if t == "PointSuperseded" and not ev.get("new_id"):
+            # The fold's OWN applicability guard (``_fold_point_superseded``
+            # returns 0 without ``new_id``) — and the belief decay must not
+            # fire for an event the fold ignores: live never decayed for one.
+            # Checked BEFORE the decay so the one-record default (``decay=True``)
+            # cannot clobber the target's belief for an ignored event; the
+            # plan already yields ``(decay=False, stamp=False)`` for it.
+            return 0
+        matched = 0
+        if stamp:
+            if t == "PointSuperseded":
+                matched = self._fold_point_superseded(
+                    ev, skip_updated_at=skip_updated_at, edge=edge)
+            elif t == "PointInvalidated":
+                matched = self._fold_point_invalidated(
+                    ev, skip_updated_at=skip_updated_at, edge=edge)
+            else:
+                # Unreachable while ``_POINT_RESTAMP_EVENT_TYPES`` and these
+                # arms agree (pinned by tests). Warn rather than no-op: a
+                # vocabulary member with no arm must be audible, not a fresh
+                # silent drop.
+                logger.warning(
+                    "_fold_point_restamp: no fold arm for %r — skipped", t)
+                return 0
+        if decay:
+            self._decay_point_belief(rid)
+        return matched
+
+    def apply_journal_point_restamp(
+            self, ev: dict, seq: int,
+            plan: dict[int, tuple[bool, bool]]) -> tuple[int, str, str] | None:
+        """#3305: apply the shared whole-journal plan to ONE terminalizer.
+
+        The apply()-based whole-journal engines (``rebuild(EventLog)``,
+        ``consistency.recover_from_log``, ``backup.restore``) replay a journal
+        record at a time, so they cannot call ``apply()``'s inline branch for
+        these two types — that branch folds EVERY terminalizer, which is not
+        ``rebuild_all``'s selection (see ``plan_point_restamp_folds``). They
+        call this instead, with the record's journal ``seq`` and the plan, so
+        both engines obey one selection.
+
+        ``plan`` is keyed by the SAME ``enumerate`` seq the caller passes. The
+        plan NEVER omits a terminalizer seq: an id it cannot write maps to
+        ``(False, False)`` (both halves skipped, and the plan already logged the
+        warning). A seq ABSENT from the plan therefore means the record is not a
+        planned terminalizer at all — a non-terminalizer type, or an ``events``
+        list the plan was not built from — and both halves are skipped here.
+        The belief half folds here, at the record's own
+        position — chronological, so it cannot clobber a later writer.
+
+        A fold that matches NO Point warns (#3299): the apply() one-record
+        branch and ``rebuild_all``'s sweep both emit a fold-miss line, and
+        before this one the whole-journal apply() arm was quieter than both —
+        a ``rebuild(EventLog)`` replay of a terminalizer whose target was never
+        created said nothing, while ``rebuild_all`` warned.
+
+        The record is NORMALIZED here (``self._norm``) because the fold body
+        reads the flat ``id``/``new_id``, and ``_norm`` tolerates a nested
+        payload (``{"type": ..., "point": {...}}``) — the plan normalizes when
+        it decides and ``rebuild_all`` normalizes before folding, so an
+        unnormalized call here would make the engines disagree on a
+        supported-by-``_norm`` record (#325/#3722's raw-vs-normalized class).
+
+        Returns the ``(seq, old_id, successor_id)`` CORRECTS endpoints when a
+        STAMP was applied and the record names a NON-EMPTY writable successor
+        for ITS OWN type — ``PointSuperseded``'s ``new_id`` /
+        ``PointInvalidated``'s ``corrected_by``, each read ALONE, matching the
+        fold dispatch and ``rebuild_all``'s sweep — else ``None``. So every
+        returned element is a writable ``str`` and the callers'
+        ``list[tuple[int, str, str]]`` buffers are accurate.
+        The caller BUFFERS the triple and re-applies it after every creation —
+        this pass is chronological, so the inline MERGE no-ops when the
+        successor is created LATER in the journal, and only the trailing
+        ``fold_deferred_corrects_edges`` sweep can resolve it (the same
+        forward-reference treatment ``EntityLinked`` gets; ``rebuild_all``'s
+        sweep already runs after its pass-1a hoist, which is why the two
+        engines disagreed). The ``seq`` rides along because the sweep needs it
+        for the hard-delete staleness rule.
+        """
+        ev = self._norm(ev)
+        apply_decay, apply_stamp = plan.get(seq, (False, False))
+        if not apply_decay and not apply_stamp:
+            # Ineligible (a non-non-empty-writable id): the plan already warned.
+            return None
+        matched = self._fold_point_restamp(
+            ev, decay=apply_decay, stamp=apply_stamp)
+        if apply_stamp and matched == 0:
+            logger.warning(
+                "apply_journal_point_restamp: %s fold matched no Point "
+                "(event_id=%s id=%r new_id=%r) — the target was never "
+                "created, or the record carries no successor",
+                ev.get("type"), ev.get("event_id"), ev.get("id"),
+                ev.get("new_id"))
+        if not apply_stamp:
+            return None
+        from tortoise.projection import _writable_id
+        rid = ev.get("id")
+        # Scope the successor field to the NORMALIZED type, exactly as the fold
+        # dispatch and ``rebuild_all``'s sweep do: ``_fold_point_superseded``
+        # reads ``new_id`` ONLY and ``_fold_point_invalidated`` reads
+        # ``corrected_by`` ONLY, so taking ``new_id or corrected_by`` would let
+        # a record mint an edge its own fold arm never creates — a phantom
+        # CORRECTS on the apply() engines that ``rebuild_all`` does not
+        # produce (e.g. a ``PointSuperseded`` carrying only ``corrected_by``).
+        successor = (ev.get("corrected_by")
+                     if ev.get("type") == "PointInvalidated"
+                     else ev.get("new_id"))
+        # Gate the BUFFERED triple to non-empty writable strs so the declared
+        # ``tuple[int, str, str]`` is the value actually handed back: the
+        # successor is read raw from the record, and a truthy non-str / NUL /
+        # lone-surrogate one would otherwise ride into the callers' buffers
+        # typed as ``str``. Nothing is lost by skipping it — the inline fold
+        # already refused the edge through ``_merge_corrects_edge`` with a
+        # warning, and the sweep would refuse it again.
+        if (not rid or not successor or not _writable_id(rid)
+                or not _writable_id(successor)):
+            return None
+        return (seq, rid, successor)
+
+    def _merge_corrects_edge(self, old_id: str, new_id: str) -> int:
+        """#3305: the ONE home for a terminalizer fold's CORRECTS edge MERGE.
+
+        Both lifecycle folds (``_fold_point_superseded``,
+        ``_fold_point_invalidated``) and the deferred re-apply
+        (``fold_deferred_corrects_edges``) merge the SAME edge, so the query
+        lives here rather than in three copies.
+
+        Best-effort by construction: the MERGE only binds when BOTH endpoints
+        exist, so a missing successor no-ops the edge without failing the fold
+        (the fold's status/validity stamp needs only the target). Returns 1
+        when the edge was merged, 0 when an endpoint was absent.
+
+        An endpoint that is empty or that ``_writable_id`` rejects (NUL / lone
+        surrogate) is REFUSED here, with a warning, before it reaches the
+        query: the plan's gate covers the terminalizer's target, not this
+        successor, so a corrupt successor would otherwise reach parameter
+        encode and raise — aborting a post-wipe replay at the trailing sweep
+        (the same class the target gate exists to prevent). Note ``_writable_id``
+        alone admits ``""``, hence the explicit emptiness test. Returns 0 for
+        it; nothing is merged.
+
+        The edge names the SUCCESSOR, which a chronological replay may not
+        have materialized yet — the caller is responsible for the trailing
+        re-apply in that case (see ``fold_deferred_corrects_edges``).
+        """
+        from tortoise.projection import _writable_id
+        if (not old_id or not new_id or not _writable_id(old_id)
+                or not _writable_id(new_id)):
+            logger.warning(
+                "_merge_corrects_edge: refusing an unwritable endpoint "
+                "(old_id=%r new_id=%r) — CORRECTS edge not merged",
+                old_id, new_id)
+            return 0
+        # ``RETURN a.id`` is load-bearing: without it FalkorDB yields an empty
+        # ``result_set`` even when the MERGE CREATES the edge, so the merged-1
+        # contract below would always report 0 (a swallowed signal for any
+        # caller that reports a dropped edge).
+        result = self.g.query(
+            "MATCH (a:Point {id:$new_id}), (b:Point {id:$old_id}) "
+            "MERGE (a)-[:CORRECTS]->(b) RETURN a.id LIMIT 1",
+            params={"new_id": new_id, "old_id": old_id},
+        )
+        return 1 if result.result_set else 0
+
+    def fold_deferred_corrects_edges(self, edges, hard_delete_seqs=None) -> int:
+        """#3305: re-apply a replayed terminalizer's CORRECTS edge AFTER every
+        creation has applied.
+
+        The SIBLING arm of the target-existence gate. ``plan_point_restamp_folds``
+        gates each fold on the id it TERMINALIZES, but the fold's CORRECTS edge
+        names the SUCCESSOR (``PointSuperseded.new_id`` /
+        ``PointInvalidated.corrected_by``) — a second endpoint the record may
+        name before it exists. On a chronological replay of
+        ``[PointAdded a, PointSuperseded a→s2, PointAdded s2]`` the inline
+        MERGE finds no ``s2`` and no-ops, so the apply()-based engines lost the
+        edge while ``rebuild_all``'s trailing sweep (which runs after pass-1a
+        hoists every creation) created it — the mirror of #3305's own symptom.
+        The edge MERGE is idempotent and order-free, so the fix is the SAME
+        forward-reference treatment ``fold_deferred_entity_links`` gives
+        ``EntityLinked``: buffer the endpoints during the pass and re-apply
+        them here. Deferring the flags instead would drag the invalidate
+        family's ``updatedAt`` seq-gate along and risk a NEW divergence.
+
+        ``edges`` is a sequence of ``(journal_seq, old_id, new_id)`` triples.
+
+        ``hard_delete_seqs`` (``projection.journal_hard_delete_seqs``) is the
+        SAME staleness rule ``fold_deferred_entity_links`` applies, and it is
+        REQUIRED for parity rather than a nicety: a sweep that ran purely on
+        node existence would re-merge an edge onto a successor that was
+        hard-deleted (``EntityMutated op=delete`` / ``PointsMerged``) AFTER the
+        terminalizer and later re-created under the same id — an edge live does
+        not have, and one ``rebuild_all`` does not produce. Ids are reused
+        routinely, so without the rule the deferred sweep RESURRECTS a deleted
+        edge and puts the engines back into disagreement. An edge is skipped
+        when EITHER endpoint was hard-deleted after this record's seq.
+
+        Returns the number of edges actually merged.
+        """
+        from tortoise.projection import _hard_delete_suppresses
+
+        hard_delete_seqs = hard_delete_seqs or {}
+        applied = 0
+        for seq, old_id, new_id in edges:
+            if not old_id or not new_id:
+                continue
+            if (_hard_delete_suppresses(
+                    hard_delete_seqs, old_id, "Point", seq)
+                    or _hard_delete_suppresses(
+                        hard_delete_seqs, new_id, "Point", seq)):
+                # Stale: the endpoint was hard-deleted after this terminalizer
+                # and its re-creation does not bring the edge back (live parity).
+                continue
+            applied += self._merge_corrects_edge(old_id, new_id)
+        return applied
+
+    def _fold_point_superseded(self, ev: dict,
+                               skip_updated_at: bool = False,
+                               edge: bool = True) -> int:
         """#2423: fold a PointSuperseded event into Point.status/validity +
         CORRECTS edge.
 
@@ -1324,20 +1847,32 @@ class _EntityHandlers:
         valid_to = ev.get("valid_to")
         expired_at = ev.get("expired_at") or _now_iso()
         updated_at = ev.get("ts") or _now_iso()
+        # ``skip_updated_at`` is the SAME seq-gate ``_fold_point_invalidated``
+        # applies. Without it the trailing sweep is the id's LAST writer and
+        # writes the journaled supersede ts, while the chronological apply()
+        # arm leaves the LATER PointRevised's replay-now stamp (measured) — the
+        # engines would disagree. status/outdated/validTo/expiredAt/CORRECTS
+        # always fold; the gate suppresses ONLY the updatedAt column. (Live
+        # ``update_point`` on a plain Point does not itself advance updatedAt;
+        # the replay-now value is the separate, pre-existing replay-vs-live
+        # class, not claimed here.) ``edge=False`` suppresses the CORRECTS arm
+        # for a successor the journal hard-deleted after this record (see
+        # ``fold_deferred_corrects_edges`` / the pass-1b sweep).
+        if skip_updated_at:
+            set_clause = ("SET n.status='superseded', n.outdated=true, "
+                          "n.validTo=$vt, n.expiredAt=$ea ")
+            params = {"id": oid, "vt": valid_to, "ea": expired_at}
+        else:
+            set_clause = ("SET n.status='superseded', n.outdated=true, "
+                          "n.validTo=$vt, n.expiredAt=$ea, n.updatedAt=$ua ")
+            params = {"id": oid, "vt": valid_to, "ea": expired_at,
+                      "ua": updated_at}
         result = self.g.query(
-            "MATCH (n:Point {id:$id}) "
-            "SET n.status='superseded', n.outdated=true, "
-            "    n.validTo=$vt, n.expiredAt=$ea, n.updatedAt=$ua "
-            "RETURN n.id LIMIT 1",
-            params={"id": oid, "vt": valid_to, "ea": expired_at,
-                    "ua": updated_at},
+            "MATCH (n:Point {id:$id}) " + set_clause + "RETURN n.id LIMIT 1",
+            params=params,
         )
-        if result.result_set:
-            self.g.query(
-                "MATCH (a:Point {id:$new_id}), (b:Point {id:$old_id}) "
-                "MERGE (a)-[:CORRECTS]->(b)",
-                params={"new_id": new_id, "old_id": oid},
-            )
+        if result.result_set and edge:
+            self._merge_corrects_edge(oid, new_id)
         return len(result.result_set)
 
     def _decay_point_belief(self, oid) -> int:
@@ -1369,7 +1904,8 @@ class _EntityHandlers:
         )
         return len(result.result_set)
 
-    def _fold_point_invalidated(self, ev: dict, skip_updated_at: bool = False) -> int:
+    def _fold_point_invalidated(self, ev: dict, skip_updated_at: bool = False,
+                                edge: bool = True) -> int:
         """#2488: fold a PointInvalidated event into the outdated flag +
         validity stamps + CORRECTS edge (NO status write).
 
@@ -1442,17 +1978,15 @@ class _EntityHandlers:
             "MATCH (n:Point {id:$id}) " + set_clause + "RETURN n.id LIMIT 1",
             params=params,
         )
-        if result.result_set and corrected_by:
+        if result.result_set and corrected_by and edge:
             # Best-effort edge arm: a missing/deleted corrected_by point
             # (never re-created, hard-deleted) silently no-ops the MERGE.
             # A RAW producer omitting corrected_by entirely still gets the
             # outdated flag + stamps (the #2488 fix needs only oid) — only
-            # the CORRECTS arm is gated on it (P2-2, code-review).
-            self.g.query(
-                "MATCH (a:Point {id:$new_id}), (b:Point {id:$old_id}) "
-                "MERGE (a)-[:CORRECTS]->(b)",
-                params={"new_id": corrected_by, "old_id": oid},
-            )
+            # the CORRECTS arm is gated on it (P2-2, code-review). A
+            # corrected_by created LATER in the journal is re-applied by the
+            # trailing ``fold_deferred_corrects_edges`` sweep (#3305).
+            self._merge_corrects_edge(oid, corrected_by)
         return len(result.result_set)
 
     def _fold_confidence_changed(self, ev: dict) -> int:
@@ -1557,6 +2091,22 @@ class _EntityHandlers:
         # producer without a deterministic id (api.add_subject, which unlike
         # add_object has no id= override) can re-id a canonical node — blast
         # radius is id-based wiring only (about* edges match by name).
+        # #4524: the embedded engine's ``vecf32`` overwrite hazard, same as
+        # the Point seam above (#4457): writing a vector onto a property that
+        # already holds one can be SILENTLY DISCARDED by falkordblite, leaving
+        # the stale vector in place with no error. This write sits inside the
+        # MERGE's ON CREATE/ON MATCH clauses, where the dialect will not accept
+        # an interleaved REMOVE — so clear the property in a SEPARATE query
+        # first (the shape tests/test_precision_leak_4028.py documents;
+        # atomicity is not required). Emitted ONLY when a new embedding is being
+        # written, so the ``ELSE s.embedding`` preserve branch is untouched and
+        # a fresh MERGE has nothing to remove. Key is ``name`` — the SAME key
+        # the MERGE uses (not ``id``), or this misses its own node.
+        if embedding is not None:
+            self.g.query(
+                "MATCH (s:Subject {name:$name}) REMOVE s.embedding",
+                params={"name": name},
+            )
         self.g.query(
             "MERGE (s:Subject {name:$name}) "
             "ON CREATE SET s.id=$id, s.subjectKind=$sk, s.createdAt=coalesce($ca, $now), "
@@ -1617,6 +2167,15 @@ class _EntityHandlers:
         # same deterministic id for a given name across producers (this
         # function early-returns when the caller sends no id, so entities
         # without ids never fire the clause).
+        # #4524: as for Subject above — the embedded engine can silently
+        # discard a ``vecf32`` overwrite, and this embedding sits inside
+        # ON CREATE/ON MATCH, so PRE-REMOVE it in a separate query. Emitted
+        # only when a new vector is being written; key ``name``, the MERGE key.
+        if embedding is not None:
+            self.g.query(
+                "MATCH (o:Object {name:$name}) REMOVE o.embedding",
+                params={"name": name},
+            )
         self.g.query(
             "MERGE (o:Object {name:$name}) "
             "ON CREATE SET o.id=$id, o.objectKind=coalesce($ok, 'other'), o.createdAt=coalesce($ca, $now), o.title=coalesce($title, ''), "
@@ -1705,7 +2264,20 @@ class _EntityHandlers:
         name = ev.get("name")
         if not oid and not name:
             return (0, 0)
-        supersedes_by = str(ev.get("supersedes_by") or "")[:200]
+        # #5370: store the successor name VERBATIM — no 200-char cap. A cap
+        # here is LOSSY: a successor named >200 chars is stored on its
+        # Object in full (identity is the NAME — `_upsert_object` MERGEs on
+        # it — and `create_entity` has never capped), but the fold would
+        # record only its 200-char prefix — a value that names NO Object.
+        # The ask path's name-keyed successor probe
+        # (assembly._probe_visible_successors — MATCH (o:Object) WHERE
+        # o.name IN $names) then matches nothing and the renderer reports
+        # "no successor record found" for a successor that exists and is
+        # live. The old comment claimed this cap MIRRORED a writer cap in
+        # sdk.py `_connect_issue_objects`; that writer-side surface is a
+        # separate, session-indexing-only concern (still capped on main;
+        # #3574/#5314 removes it) and the fold must not truncate to it.
+        supersedes_by = str(ev.get("supersedes_by") or "")
         # #2164 final-review P4: prefer the journaled event's ORIGINAL ts —
         # rebuild pass-1b replays the raw journaled event (sdk._emit_event
         # stamps ts on the JSONL line) — without this a JSONL wipe+rebuild
@@ -1773,7 +2345,26 @@ class _EntityHandlers:
         return _classify(result)
 
     def _upsert_document(self, ev: dict) -> None:
-        """MERGE Document node."""
+        """MERGE the document node as a ``:Source`` (D10, ONTOLOGY §4.4).
+
+        A document is a ``:Source`` keyed ``url = <document id>``; there is no
+        ``:Document`` graph label. Node TOPOLOGY is preserved: the document
+        node stays distinct from the corpus ``#205`` Source (``url =
+        source_url``), which keeps its ``references`` edge — the
+        index-completeness gate's ``edge`` clause depends on it, so collapsing
+        the two into one node would make the edge a dropped self-loop and every
+        doc unit permanently incomplete. `content`, `doc_status` and
+        `objectKind` are RETIRED and are never written (nor re-admissible via
+        the open passthrough).
+
+        #5422: ``contentHash`` is the node's **version anchor** on the
+        extraction path (ONTOLOGY §4.6 — the hash identifies a version;
+        identity is ``url``). It is written by the fixed clause above, gated
+        so a hash-less write preserves it, and stays out of the open
+        passthrough because BOTH spellings (``contentHash`` via
+        ``_SOURCE_HANDLED``, ``content_hash`` via ``_DOC_RETIRED``) are
+        denied. ``version`` is advanced in the same clause, per §4.6.
+        """
         did = ev.get("id")
         if not did:
             return
@@ -1805,10 +2396,21 @@ class _EntityHandlers:
         summary = ev.get("summary")
         sid = ev.get("session_id")
         eid = ev.get("event_id")
-        ds = ev.get("doc_status")
         # #133: needs_extraction — explicit signal for --upgrade-all discovery.
         # coalesce-null sentinel: None default so partial updates preserve.
         nx = ev.get("needs_extraction")
+        # #5422: the document's contentHash — the version anchor on the
+        # extraction path. None (absent key, or a metadata-only re-emit) is
+        # the preserve sentinel: the clause below must never clear an anchor
+        # a prior write established, so a hash-less DocumentCreated is a
+        # no-op on it (the same back-compat shape #5256's anchor reader and
+        # the corpus index path already depend on). BOTH spellings are read:
+        # the journal contract is snake_case (§4.3, matching every sibling
+        # field on this event) while hand-written JSONL and older producers
+        # may carry camelCase, and either must land on the node rather than
+        # one of them silently no-opping the anchor.
+        _ch_snake = ev.get("content_hash")
+        ch = _ch_snake if _ch_snake is not None else ev.get("contentHash")
         # _searchText computed only when the event carries meaningful text
         has_text = bool(ev.get("title") or summary or topics)
         st = (_build_search_text(ev.get("title", ""), summary, topics)
@@ -1816,47 +2418,119 @@ class _EntityHandlers:
         # #167: sourcePath — coalesce-null sentinel (no "" default) so
         # partial updates preserve existing value
         sp = ev.get("source_path")
+        # #4524: the embedded engine's ``vecf32`` overwrite hazard (#4457).
+        # This one is a plain MERGE + SET list (no ON CREATE/ON MATCH), so the
+        # conditional REMOVE rides in the SAME atomic query exactly as
+        # _upsert_point_props does — emitted only when a new embedding is being
+        # written, so the ``ELSE s.embedding`` preserve branch is untouched.
+        # #5026/D10: the node is the document ``:Source`` (retired ``:Document``),
+        # so the REMOVE and the SET list both bind ``s``.
+        embed_clear = "REMOVE s.embedding " if embedding is not None else ""
         self.g.query(
-            "MERGE (d:Document {id:$id}) "
-            "SET d.title=coalesce($title, d.title), "
-            "    d.documentKind=coalesce($dk, d.documentKind), "
-            "    d.format=coalesce($fmt, d.format), "
-            "    d.content=coalesce($content, d.content), "
-            "    d.topics=coalesce($topics, d.topics, []), "
-            "    d.summary=coalesce($summary, d.summary, ''), "
-            "    d.sessionId=coalesce($sid, d.sessionId, ''), "
-            "    d.eventId=coalesce($eid, d.eventId, ''), "
-            "    d.doc_status=coalesce($ds, d.doc_status, 'draft'), "
-            "    d.needs_extraction=coalesce($nx, d.needs_extraction, false), "
-            "    d.sourcePath=coalesce($sp, d.sourcePath), "
-            "    d._searchText=coalesce($st, d._searchText, d.title), "
-            "    d.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE d.embedding END, "
-            "    d.updatedAt=$now",
+            "MERGE (s:Source {url:$id}) " + embed_clear +
+            "SET s.id=coalesce(s.id, $id), "
+            "    s.title=coalesce($title, s.title), "
+            # #5422: the document :Source's version anchor (ONTOLOGY §4.6 —
+            # the hash names a version, identity is `url`). Gated so a write
+            # that CARRIES no hash ($ch IS NULL) or an EMPTY one ($ch = '' —
+            # the spelling `_mint_source_stub`/`_materialize_session_source`/
+            # `hosted_api` use for "no hash") PRESERVES the stored value: a
+            # metadata-only re-emit and the #900 index path's `_doc_write`
+            # cannot un-anchor a document. An empty STORED hash (a
+            # `_mint_source_stub` stub, or a pre-#5422 document node) is
+            # COMPLETED by a real hash; a DIFFERING hash REPLACES it on the
+            # SAME node (never a second `:Source`).
+            # `version` advances with the hash exactly as §4.6 specifies
+            # ("1 at creation, +1 on each content-hash change") and exactly
+            # as `_upsert_source` does — so the pair is never half-written,
+            # and because the gate can only move the hash to a value it does
+            # not already hold, running BOTH folds over one url cannot
+            # double-bump (the second sees stored == $ch).
+            "    s.contentHash=CASE "
+            "        WHEN $ch IS NULL OR $ch = '' THEN s.contentHash "
+            "        WHEN s.contentHash IS NULL OR s.contentHash = '' "
+            "             OR s.contentHash <> $ch THEN $ch "
+            "        ELSE s.contentHash END, "
+            "    s.version=CASE "
+            "        WHEN $ch IS NULL OR $ch = '' THEN coalesce(s.version, 1) "
+            "        WHEN s.contentHash IS NULL OR s.contentHash = '' "
+            "             OR s.contentHash <> $ch "
+            "             THEN coalesce(s.version, 0) + 1 "
+            "        ELSE coalesce(s.version, 1) END, "
+            # D10 B3 (adversarial): the three-argument coalesce gives a
+            # document node a NON-NULL kind on CREATE. `$dk` is Cypher null
+            # for an explicit `document_kind: null` (ingest's YAML `type:`
+            # decodes to None; `EventAPI.add_document(document_kind=None)`; a
+            # null field in a replayed JSONL line) AND for an omitted key, so
+            # the old two-argument form left `documentKind` NULL on CREATE —
+            # and the documents meter (`documentKind IS NOT NULL`) then read
+            # 0, letting the document escape the cap. The trailing `''` is the
+            # SAME non-null CREATE default the sibling clauses already use
+            # (topics/summary/sessionId/eventId/needs_extraction); on a
+            # re-write that OMITS the kind the middle term preserves the
+            # stored value (#125 coalesce semantics).
+            "    s.documentKind=coalesce($dk, s.documentKind, ''), "
+            "    s.format=coalesce($fmt, s.format), "
+            "    s.topics=coalesce($topics, s.topics, []), "
+            "    s.summary=coalesce($summary, s.summary, ''), "
+            "    s.sessionId=coalesce($sid, s.sessionId, ''), "
+            "    s.eventId=coalesce($eid, s.eventId, ''), "
+            "    s.needs_extraction=coalesce($nx, s.needs_extraction, false), "
+            "    s.sourcePath=coalesce($sp, s.sourcePath), "
+            "    s.ingestedAt=coalesce(s.ingestedAt, $now), "
+            "    s._searchText=coalesce($st, s._searchText, s.title), "
+            "    s.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE s.embedding END, "
+            "    s.updatedAt=$now "
+            # D10 B6 (fourth door, review round 3): the retired fields must be
+            # SCRUBBED on promotion, not merely refused on write. A node can
+            # legitimately carry `content`/`objectKind` while it is still a
+            # NON-document `:Source` — the target-aware `update_entity` guard
+            # allows exactly that — and a later document creator MERGEs onto
+            # that SAME node by `url`, inheriting the retired values live AND
+            # on replay. The deny-sets above (and in `_upsert_source`) stop NEW
+            # writes; this REMOVE clears an INHERITED one. Keys =
+            # `_DOC_RETIRED_KEYS`.
+            "REMOVE s.content, s.doc_status, s.docStatus, s.objectKind, "
+            "       s.object_kind",
             params={"id": did, "title": ev.get("title", did),
-                    "dk": ev.get("document_kind", ""),
+                    # NO "" default here: a present null and an omitted key
+                    # both stay Cypher null and fall to the third coalesce
+                    # term ("") only on CREATE, so a partial re-write cannot
+                    # wipe the stored kind (see the clause comment above).
+                    "dk": ev.get("document_kind"),
                     "fmt": ev.get("format", "markdown"),
-                    "content": ev.get("content"),
                     "topics": topics, "summary": summary, "sid": sid,
-                    "eid": eid, "ds": ds, "nx": nx, "st": st, "sp": sp,
+                    "eid": eid, "nx": nx, "st": st, "sp": sp,
+                    "ch": ch,
                     "embedding": embedding,
                     "now": _now_iso()},
         )
         # #228: persist arbitrary caller-supplied props (before edge wiring
-        # so that extra props land on the Document node regardless of edge success)
+        # so that extra props land on the Source node regardless of edge
+        # success). D10 retired keys (content/doc_status/objectKind) are denied
+        # here — the fixed clause above already covers every other doc key.
         self._persist_extra_props(
-            "MATCH (n:Document {id: $id})", {"id": did},
-            ev, self._DOCUMENT_HANDLED,
+            "MATCH (n:Source {url: $id})", {"id": did},
+            ev, self._SOURCE_HANDLED | self._DOC_RETIRED,
         )
-        # #205 — wire references edge (Source → Document) for provenance chain.
-        # Epic #900 T3 (§4.1 route pin): under OQ-6 doc ids are `doc_<rel-path>`
-        # ≠ the corpus:// Source url, so the hard-coded did==did auto-wire would
-        # MERGE a PHANTOM Source (url=doc_<rel>, empty contentHash). The
-        # optional `source_url` ev-key override (default falls back to did —
-        # legacy ingest flow byte-identical) routes the #205 link onto the real
-        # Source the indexer created first. The override rides the journaled
-        # DocumentCreated event, so replay re-creates the edge onto the real
-        # Source (S13/T12 split: doc-unit references edges SURVIVE rebuild).
-        self.link_source_to_entity(ev.get("source_url") or did, did, "Document")
+        # #205 — wire references edge (Source → document Source) for provenance
+        # chain. D10: only when the corpus Source is DISTINCT from the document
+        # node; the legacy fallback (no source_url) would otherwise be a
+        # degenerate self-loop. The index path always passes the corpus
+        # `source_url`, so the index-completeness gate's `edge` clause holds.
+        # The legacy no-`source_url` path (every `tortoise/ingest.py` site)
+        # therefore mints NO `references` hop — the document node IS the
+        # Source — and `get_provenance_chain` serves that path from the
+        # `extractedFrom` target itself (ONTOLOGY §3.4 layering truncated at
+        # its first hop), so the chain still resolves.
+        ref = ev.get("source_url")
+        if ref and ref != did:
+            # "Document" is the RELATION's spelling, not a node label: D10 retired
+            # `:Document` and the writer remaps it onto `:Source` for identity, but it is
+            # what marks this link a DERIVATION — and only a derivation link takes the
+            # `sourceVersion` anchor (#5199, STORAGE-ARCHITECTURE.md 9.6). Switching this
+            # to "Source" keeps the edge and silently drops the anchor.
+            self.link_source_to_entity(ref, did, "Document")
         # #125 — aboutSubject edges when about_entities present (Task 1
         # self-contained: label-agnostic generalization lives in edges.py)
         about = ev.get("about_entities") or []
@@ -1952,6 +2626,17 @@ class _EntityHandlers:
     def _event_plain_merge(self, eid: str, props: dict, embedding,
                            inner: dict) -> None:
         """The legacy single-statement Event MERGE (+ edges + extra props)."""
+        # #4524: the ON MATCH embedding write below can be a SILENT no-op on
+        # the embedded engine — a ``vecf32`` overwrite of an existing vector is
+        # discarded (#4457). It sits inside ON CREATE/ON MATCH, so clear the
+        # property in a separate query first. Emitted ONLY when a new embedding
+        # is being written, leaving the ``ELSE e.embedding`` preserve branch
+        # untouched.
+        if embedding is not None:
+            self.g.query(
+                "MATCH (e:Event {eventId: $eid}) REMOVE e.embedding",
+                params={"eid": eid},
+            )
         self.g.query(
             "MERGE (e:Event {eventId: $eid}) "
             "ON CREATE SET e += $props, e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) END "
@@ -1979,19 +2664,21 @@ class _EntityHandlers:
         object_type = inner.get("objectType", "")  # 'Document' | 'Object' | '' (legacy)
         if obj:
             if object_type == "Document":
-                # #329: the minted Document id is tenant-influenced (event
+                # #329: the minted document id is tenant-influenced (event
                 # props passthrough) — validate it so it can never be a host
                 # path (the read side also fails closed via resolve_under_base).
                 from tortoise.security import validate_document_id
                 validate_document_id(str(obj))
+                # D10 (ONTOLOGY §4.4): a document is a :Source keyed by url.
                 self.g.query(
-                    "MERGE (d:Document {id:$id}) "
-                    "ON CREATE SET d.title=$id, d.documentKind='transcript'",
+                    "MERGE (s:Source {url:$id}) "
+                    "ON CREATE SET s.id=$id, s.title=$id, "
+                    "              s.documentKind='transcript'",
                     params={"id": obj},
                 )
                 self.g.query(
-                    "MATCH (d:Document {id:$id}), (e:Event {eventId:$eid}) "
-                    "MERGE (e)-[:produces]->(d)",
+                    "MATCH (s:Source {url:$id}), (e:Event {eventId:$eid}) "
+                    "MERGE (e)-[:produces]->(s)",
                     params={"id": obj, "eid": eid},
                 )
             else:
@@ -2177,12 +2864,9 @@ class _EntityHandlers:
             params={"url": key, "raw_url": url, "cu": canonical,
                     "sk": sk or "document", "now": _now_iso()},
         )
-        # (Source)-[:references]->(Event) — always, when the event exists.
-        self.g.query(
-            "MATCH (s:Source {url: $url}), (e:Event {eventId: $eid}) "
-            "MERGE (s)-[:references]->(e)",
-            params={"url": key, "eid": eid},
-        )
+        # (Source)-[:references]->(Event) — always, when the event exists, and
+        # anchored ON CREATE by the shared derivation writer (#5199).
+        self.link_source_to_event(key, eid)
         # #388 conf-62/conf-60: a fallback-key materialization (`slack:{channel}` /
         # `linear:{team_key}` / bare `source`) can predate the real URL (a
         # permalink becomes available later, or a later poll resolves the
@@ -2257,7 +2941,12 @@ class _EntityHandlers:
         full = dict(props)
         skip = self._META_KEYS | self._EVENT_HANDLED
         for k, v in inner.items():
-            if k not in skip and v is not None and k not in full:
+            # #2962: this inline site builds its own extras, so it must apply
+            # the SAME `_is_persistable_prop_value` filter `_persist_extra_props`
+            # uses — a dict/nested-valued unknown prop would otherwise reach
+            # the engine and crash `SET e += $props` (no crash, dropped).
+            if k not in skip and v is not None and k not in full \
+                    and _is_persistable_prop_value(v):
                 full[k] = v
         # (1) MERGE candidate — creates if absent, no-op if present (ON CREATE
         # SET is the supported directive; the props NEVER land on a colliding
@@ -2333,8 +3022,11 @@ class _EntityHandlers:
             is completed — the JOINT-E2E sweep's stub-handling);
           - ``s.sourcePath = coalesce($sp, s.sourcePath)`` (§4.1 — the
             sanctioned source_path route maps to camelCase on the node);
-          - ``s._searchText`` — coalesce ON CREATE, OVERWRITE on hash-diff
-            MERGE (§4.1 cycle-4 merge semantics; E2E-5 retitle refresh);
+          - ``s._searchText`` — coalesce ON CREATE, and on a hash-diff MERGE
+            overwrite only when the incoming text is present (``coalesce($st,
+            s._searchText)``, #3518: a text-less write must never NULL the
+            value a prior capture/index write established); E2E-5 retitle
+            refresh still overwrites.
           - ``s.__runId = $rid`` on the ON CREATE branch ONLY when
             ``merge_run_id`` is given — the creator's per-run token. The
             embedded FalkorDBLite reports ``Nodes created: 1`` for BOTH of two
@@ -2384,6 +3076,7 @@ class _EntityHandlers:
             "              s.ingestedAt = coalesce($ingestedAt, $now), "
             "              s.version = 1, "
             "              s.externalId = $ext, "
+            "              s.format = coalesce($fmt, s.format), "
             "              s.sourcePath = coalesce($sp, s.sourcePath), "
             "              s._searchText = $st" + run_clause + " "
             # JOINT-E2E (epic #900 #1032): when the caller carries NO
@@ -2421,7 +3114,17 @@ class _EntityHandlers:
             "               ELSE coalesce(s.urlAliases, []) + [$raw_url] END, "
             "           s._searchText = CASE WHEN $hash IS NULL THEN s._searchText "
             "                        WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
-            "                        THEN $st ELSE s._searchText END",
+            # #3518: coalesce — a hash-diff write that carries NO searchable
+            # text ($st IS NULL, the commit path's session Source) must not
+            # ERASE the text a prior capture/index write established. A write
+            # that does carry text (the indexer's retitle) still overwrites,
+            # so the #900 T3 cycle-4 retitle-refresh semantics are unchanged.
+            "                        THEN coalesce($st, s._searchText) "
+            "                        ELSE s._searchText END, "
+            # D10 (§4.4/§9.5 Q3): `format` is a Source property now; a caller
+            # supplying it must land on the node, overwriting an existing value
+            # (parity with the old open-passthrough write it replaces).
+            "           s.format = coalesce($fmt, s.format)",
             params={
                 "url": key, "id": sid or key,
                 "cu": canonical,
@@ -2435,15 +3138,28 @@ class _EntityHandlers:
                 "ingestedAt": ev.get("ingestedAt"),
                 "updatedAt": ev.get("updatedAt"),
                 "ext": ev.get("externalId", ""),
+                "fmt": ev.get("format"),
                 "sp": ev.get("source_path"),
                 "st": search_text,
                 **({"rid": merge_run_id} if merge_run_id is not None else {}),
             },
         )
-        # #228: persist arbitrary caller-supplied props
+        # #228: persist arbitrary caller-supplied props.
+        # D10 B6 (adversarial): a document IS a :Source (url = <doc id>), so a
+        # SourceCreated whose url equals a document id MERGEs onto the SAME
+        # node the document path owns — without a deny-set here a SourceCreated
+        # could write `content`/`doc_status`/`objectKind` (or their snake/camel
+        # synonyms) back onto a document Source, and the write would survive a
+        # rebuild.
+        # ⛔ `_DOC_RETIRED_KEYS`, NOT `_DOC_RETIRED`: the retired-KEYS set is used
+        # deliberately, because `_DOC_RETIRED` is a superset of the historical
+        # `_DOCUMENT_HANDLED` and would also park `summary`/`topics`/
+        # `embedding`/`status`/`about_entities` off a Source passthrough — keys
+        # this Source fixed clause does not write and a Source legitimately
+        # carries (see the `_DOC_RETIRED_KEYS` definition).
         self._persist_extra_props(
             "MATCH (n:Source {url: $url})", {"url": key},
-            ev, self._SOURCE_HANDLED,
+            ev, self._SOURCE_HANDLED | self._DOC_RETIRED_KEYS,
         )
         return r
 

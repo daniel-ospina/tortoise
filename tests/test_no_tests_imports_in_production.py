@@ -23,7 +23,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 TORTOISE_DIR = REPO_ROOT / "tortoise"
 
 # Anchored at line start so prose can't false-match. Covers both forms:
-#   from tests.model_adapters import MODELS      (sdk.py:1926 — the #1468 bug)
+#   from tests.model_adapters import MODELS (``sdk.py::TortoiseSDK._extract_session_v2`` —
+#                                            where the #1468 bug lived)
 #   import tests.model_adapters
 _TESTS_IMPORT = re.compile(r"^\s*(?:from\s+tests\b|import\s+tests\b)")
 

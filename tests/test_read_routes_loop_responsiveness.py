@@ -464,6 +464,12 @@ _KNOWN_INLINE_ROUTE_RESIDUAL = frozenset({
     "session_key", "public_demo", "github_callback", "backups_create",
     "backups_restore", "backups_sweep", "backups_purge", "backups_rebaseline",
     "backups_drill", "backups_drill_scheduled", "webhooks_stripe",
+    # #4355: the replacement-aware rotate route. Same declared residual as its
+    # siblings create_api_key / revoke_api_key — its READS are off-loaded
+    # (_rotatable_key_row, api_key_occupies_slot, _claim_key_revocation via
+    # asyncio.to_thread) but _mint_key is inline exactly as create_api_key's
+    # is, so the mint stays atomic under the same all-sync critical section.
+    "rotate_api_key",
 })
 
 #: Non-route async bodies with inline sync FalkorDB I/O — the per-request auth
@@ -479,6 +485,11 @@ _KNOWN_INLINE_HELPER_RESIDUAL = frozenset({
     "_rollback_restore_name_race", "_trash_name_conflict",
     "_require_owner_admin", "_require_owner", "_registry_mismatch_accept_v2",
     "_registry_accept_by_id", "_quarantine_import", "_run_indexing",
+    # #4355: the mint's #528 analytics actor resolution, extracted verbatim out
+    # of create_api_key so the rotate route shares it (one implementation). It
+    # was inline-on-the-loop before the extraction and still is — same residual,
+    # now named.
+    "_key_created_analytics",
 })
 
 

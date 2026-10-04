@@ -8,7 +8,7 @@ tortoise host; both hosts share the premise-labs Pages project).
 Two test groups:
 1. Static/live tests — no Supabase session needed:
    - page loads, shows loading state then the no-session error
-   - the live tortoise-onboarding skill mirror serves markdown
+   - the live tortoise-onboarding instructions mirror serves markdown
      (ONBOARDING_SKILL_URL contract — #1998 superseded the retired
      onboarding-prompt.md URL; see the module constant comment)
 2. Mocked-session tests — drive the success state (harness tabs, copy
@@ -43,7 +43,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 # Canonical host for the auth surface is tortoise.premiselabs.co (host
 # consolidation 2026-08-17: premiselabs.co 301s /welcome → the tortoise host).
 WELCOME_URL = os.environ.get("WELCOME_URL", "https://tortoise.premiselabs.co/welcome")
-# The canonical onboarding artifact is the tortoise-onboarding skill mirror
+# The canonical onboarding artifact is the tortoise-onboarding instructions mirror
 # (app.premiselabs.co/skills/tortoise-onboarding/SKILL.md) — W2 #1998 archived
 # the AGENT_ONBOARDING.md prompt pipeline (stage_variants.py -> website/
 # onboarding-prompt.md) under tortoise/onboarding/archive/ (M8: one live
@@ -91,18 +91,21 @@ def test_welcome_page_no_session_redirects_to_auth(page: Page) -> None:
     expect(page).to_have_url(re.compile(r"/auth($|\?|#)"), timeout=25_000)
 
 
-def test_onboarding_skill_serves_markdown(page: Page) -> None:
-    """The live tortoise-onboarding skill (#1998) must be fetchable as
-    markdown from the deployed dashboard mirror — the onboarding artifact URL
-    the CLI prints after `tortoise onboard` (#544, repointed by #1998)."""
+def test_onboarding_instructions_serves_markdown(page: Page) -> None:
+    """The live tortoise-onboarding INSTRUCTIONS document (#4365) must be
+    fetchable as markdown from the deployed dashboard mirror — the onboarding
+    artifact URL the CLI prints after `tortoise onboard` (#544, repointed by
+    #1998). Since #4365 it is instructions the agent READS, not an installed
+    skill: the installer ships the three reusable capabilities only. The
+    skill-shaped filename/URL is kept deliberately (it is the served path)."""
     resp = page.request.get(ONBOARDING_SKILL_URL, timeout=15_000)
-    assert resp.ok, f"skill URL returned {resp.status}"
+    assert resp.ok, f"instructions URL returned {resp.status}"
     assert "text/markdown" in (resp.headers.get("content-type") or "")
     body = resp.text()
-    assert body.startswith("---"), "unexpected skill body (frontmatter missing)"
-    assert "name: tortoise-onboarding" in body, "unexpected skill body (frontmatter name)"
+    assert body.startswith("---"), "unexpected instructions body (frontmatter missing)"
+    assert "name: tortoise-onboarding" in body, "unexpected instructions body (name)"
     assert "tortoise_health" in body and "harness-connected" in body, (
-        "skill missing canonical content markers"
+        "instructions missing canonical content markers"
     )
 
 

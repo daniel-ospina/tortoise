@@ -47,6 +47,11 @@ export function planOptions() {
       price: t.price_usd_monthly ?? 0,
       limits: [graphs, users, `${fmtInt(t.included_write_ops_per_month ?? 0)} write ops/mo`, nodes, `${fmtInt(t.max_api_keys ?? 0)} API keys`],
       overage: Boolean(t.overage),
+      // #4815: the disclosure a metered tier must show on the plan card the
+      // user upgrades from. The STRING is pricing.json's own
+      // `display.overage_line` (never a second hardcoded copy of the price);
+      // null for a non-metered tier, so the card renders no line at all.
+      overageLine: t.overage ? (pricing.display?.overage_line ?? null) : null,
       popular: tier === 'pro',
     }
   }).filter(Boolean)

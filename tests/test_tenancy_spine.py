@@ -323,10 +323,10 @@ def test_onboarding_state_rejects_graph_bound(spine_env):
 
 
 def test_github_rest_family_rejects_graph_bound(spine_env):
-    """REST github twins (status/repos/branches/connect) reject graph-bound
-    keys — the #2300 REST residual close (the MCP github tools reject after
-    #2300; github index/reindex already rejected in C5). The dashboard's
-    session flows and team-wide keys keep working."""
+    """REST github twins (status/repos/branches/connect/disconnect) reject
+    graph-bound keys — the #2300 REST residual close (the MCP github tools
+    reject after #2300; github index/reindex already rejected in C5). The
+    dashboard's session flows and team-wide keys keep working."""
     sdk, tid, g, tc, _def_pt = spine_env
     ro = _mint_key(sdk, tid, scopes=["graphs:read"],
                    graph_id=g["graph_id"], deleg=0)
@@ -347,6 +347,12 @@ def test_github_rest_family_rejects_graph_bound(spine_env):
     assert r.status_code == 403, r.text
     detail = r.json().get("detail")
     assert detail.get("error_code") == "GRAPH_SCOPED_TEAM_SURFACE", detail
+    # #4946: the disconnect route is in the same family — a per-graph key
+    # must never tear down the ORG's GitHub credential.
+    r = tc.post("/v1/onboarding/github/disconnect", headers=h_rw)
+    assert r.status_code == 403, r.text
+    detail = r.json().get("detail")
+    assert detail.get("error_code") == "GRAPH_SCOPED_TEAM_SURFACE", detail
     # Team-wide scoped key: the authz gate passes (no credentials seeded in
     # this spine env → the endpoints report disconnected, never 403).
     wide = _mint_key(sdk, tid, scopes=["graphs:read"])
@@ -361,5 +367,9 @@ def test_github_rest_family_rejects_graph_bound(spine_env):
     r = tc.post("/v1/onboarding/github/connect", headers=h_wide, json={})
     # 503 (OAuth env unset) is PAST the authz gate — never GRAPH_SCOPED.
     assert r.status_code in (200, 503), r.text
+    # #4946: a team-wide key disconnects cleanly (no credentials seeded in
+    # this spine env → the idempotent not-connected no-op, never 403).
+    r = tc.post("/v1/onboarding/github/disconnect", headers=h_wide)
+    assert r.status_code == 200, r.text
 
 

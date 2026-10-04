@@ -34,6 +34,17 @@ unrelated assertion red.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/longmem_eval/run.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python -m tools.longmem_eval.run`"
+    )
+
 import argparse
 import contextlib
 import hashlib
@@ -42,7 +53,6 @@ import math
 import os
 import random
 import re
-import sys
 import tempfile
 import threading
 import time
@@ -68,6 +78,11 @@ from tortoise.model_adapters import (
     RoutingModel,
     is_fatal,
 )
+
+# #2969: the PRODUCT parser owns the socket-timeout vocabulary — the eval
+# reuses it (and its product-knob fallback) so the run diagnostic reports the
+# exact effective bound the graph client will be built with.
+from tortoise.projection import _resolve_socket_timeout, _socket_timeouts
 
 # #2578 (Task 1): the product-verbatim abstained-phrases classifier — the
 # measurement gate's raw reader_refusal marker uses EXACTLY the vocabulary
@@ -143,6 +158,14 @@ from .retrieve import (
     resolve_answer_session_indices,
     retrieve_for_question,
     run_integrity_gate,
+)
+from .stall_guard import (
+    DEFAULT_EVAL_SOCKET_CONNECT_TIMEOUT_S,
+    DEFAULT_EVAL_SOCKET_TIMEOUT_S,
+    ENV_SOCKET_CONNECT_TIMEOUT,
+    ENV_SOCKET_TIMEOUT,
+    ENV_STALL_TIMEOUT,
+    resolve_stall_timeout_s,
 )
 
 DEFAULT_KS = (5, 10, 20)
@@ -640,6 +663,65 @@ def _finalize_embedder_preflight(status: dict, *,
     # the PreflightError path's SystemExit(1); a string code made CLI exit
     # status 1 ambiguous and broke the exit-code contract.
     raise SystemExit(1)
+
+
+def _resolved_graph_read_timeout() -> float | None:
+    """The graph-client READ bound the eval lane will ACTUALLY use (#2969).
+
+    Mirrors ``tortoise/projection``'s host branch EXACTLY:
+    ``_resolve_socket_timeout(TORTOISE_DB_SOCKET_TIMEOUT,
+    _socket_timeouts()[1])`` — the per-lane var wins when set, and the #2850
+    product knob (``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S``) supplies the
+    fallback. P2-2: the banner must not carry its own fallback (it used to use
+    the eval default, 120s, while the client fell back to the product value,
+    10s — and the two disagreed on any path that reaches the banner WITHOUT
+    ``run_main``'s env preset). Both the banner and the run-start validation
+    go through THIS function, so the reported bound and the client's cannot
+    drift apart.
+    """
+    return _resolve_socket_timeout(ENV_SOCKET_TIMEOUT, _socket_timeouts()[1])
+
+
+def _ingest_bound_banner(stall_timeout_s: float, *,
+                         db_uri: str | None,
+                         ingest_mode: str = "v2") -> str:
+    """#2969 diagnostic: the effective ingest bounds for THIS run.
+
+    A stalled run is silent by nature; this line makes the socket bound and
+    the no-progress budget visible in the run log so "stalled" is
+    distinguishable from "slow" without stack sampling. The read bound comes
+    from :func:`_resolved_graph_read_timeout` — the SAME resolution the graph
+    client uses — so on the HOST lane the reported value is exactly the
+    client's, including the product-knob fallback.
+
+    The stall budget is armed by the **v2** ingest path only. The default
+    ``--ingest-mode deterministic`` path never constructs a heartbeat and
+    never reads this budget, so on that path the line says INERT rather than
+    printing a live-looking number for a guard that cannot fire.
+
+    The embedded lane reports n/a for the READ bound, and NOT because it has
+    no graph socket: it runs a Unix-domain-socket client that IS read-bounded
+    by the product knob (``socket_timeout=read_to`` in
+    ``tortoise/projection``). It reports n/a because
+    :func:`_resolved_graph_read_timeout` resolves the PER-LANE var, which the
+    embedded branch never applies — so printing that number here would name a
+    bound the embedded client does not use. The embedded lane's bound is
+    ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S``.
+    """
+    stall_txt = (f"{stall_timeout_s:g}s" if stall_timeout_s else "disabled")
+    if ingest_mode != "v2":
+        stall_txt = (f"{stall_txt} (INERT — --ingest-mode {ingest_mode} "
+                     f"does not use the heartbeat; set --ingest-mode v2)")
+    if db_uri is None:
+        read_txt = "n/a (embedded lane)"
+    else:
+        read_val = _resolved_graph_read_timeout()
+        read_txt = (f"{read_val:g}s" if read_val
+                    else "UNBOUNDED (explicit opt-out)")
+    return (f"[longmem_eval] ingest stall budget: {stall_txt} "
+            f"({ENV_STALL_TIMEOUT}); graph socket read timeout: {read_txt} "
+            f"({ENV_SOCKET_TIMEOUT})")
+
 
 @contextlib.contextmanager
 def _temporary_env_var(name: str, value: str):
@@ -1317,6 +1399,11 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        # C2 knob (a boosted/expanded checkpoint resumed
                        # without the arm is refused by the fingerprint gate).
                        entity_key_expansion: bool | None = None,
+                       # C6 (#2520, #2513): the time-aware query expansion
+                       # arm — conditional presence like the sibling C-arm
+                       # knobs (an armed checkpoint resumed without the arm
+                       # is refused by the fingerprint gate).
+                       time_aware_qe: bool | None = None,
                        # C3-1 (#2519, #2567): the coverage-completeness
                        # loop arm — conditional presence (a looped
                        # checkpoint resumed without the arm is refused by
@@ -1496,6 +1583,7 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
             ("evidence_boost_verbatim", evidence_boost_verbatim),
             ("evidence_boost_source", evidence_boost_source),
             ("entity_key_expansion", entity_key_expansion),
+            ("time_aware_qe", time_aware_qe),
             ("coverage_loop", coverage_loop),
             # C4 (#2513): the resolved injection total budget — conditional
             # presence like the sibling knobs (absent for an arm-OFF run:
@@ -3521,6 +3609,12 @@ def run_evaluation(
     # the methodology — an expanded checkpoint resumed without the arm is
     # refused by the fingerprint gate (same contract as evidence_boost).
     entity_key_expansion: bool | None = None,
+    # C6 (#2520, #2513): time-aware query expansion — tri-state (explicit
+    # flag > ``TORTOISE_LME_TIME_AWARE_QE`` env > OFF, the #1745 fail-safe
+    # default). Resolved once, fingerprinted, and recorded in the
+    # methodology — an armed checkpoint resumed without the arm is refused
+    # by the fingerprint gate (same contract as entity_key_expansion).
+    time_aware_qe: bool | None = None,
     # C3-1 (#2519, #2567): the coverage-completeness loop — tri-state
     # (explicit flag > ``TORTOISE_LME_COVERAGE_LOOP`` env > OFF, the #1745
     # fail-safe default). The #2519 all-or-nothing lever (2×2 covariate
@@ -3588,6 +3682,10 @@ def run_evaluation(
     ingest_write_retries: int = INGEST_WRITE_RETRIES,
     ingest_question_retries: int = INGEST_QUESTION_RETRIES,
     resume_attempts_cap: int = RESUME_ATTEMPTS_CAP,
+    # #2969: per-question ingest no-progress budget (seconds; None → the
+    # env/default resolution inside ingest_v2). NOT fingerprinted — it
+    # bounds a stall, it does not change the measurement definition.
+    ingest_stall_timeout_s: float | None = None,
     # #1786 (R5): the eval's HYBRID-arm retrieval deadline (ms) — the eval
     # (run_main) always passes EVAL_RETRIEVAL_BUDGET_MS (1500); None keeps
     # the SDK-default 500 ms for programmatic callers.
@@ -3687,6 +3785,15 @@ def run_evaluation(
         eke_env = (os.environ.get("TORTOISE_LME_ENTITY_KEY_EXPANSION")
                    or "")
         entity_key_expansion = eke_env.strip().lower() in _TRUTHY
+    # C6 (#2520, #2513): resolve the time-aware query expansion tri-state
+    # ONCE, before the loop — same contract as the sibling C-arms: a None
+    # with the TORTOISE_LME_TIME_AWARE_QE env set must not record `false`
+    # in the methodology while the per-question retrieval armed
+    # (methodology records the knobs truthfully; fail-safe OFF: only
+    # 1/true/yes/on enables — the #1745 default decision).
+    if time_aware_qe is None:
+        ta_env = (os.environ.get("TORTOISE_LME_TIME_AWARE_QE") or "")
+        time_aware_qe = ta_env.strip().lower() in _TRUTHY
     # C3-1 (#2519, #2567): resolve the coverage-completeness loop tri-state
     # ONCE, before the loop — same contract as evidence_boost/entity_key_
     # expansion: a None with the TORTOISE_LME_COVERAGE_LOOP env set must
@@ -3841,6 +3948,10 @@ def run_evaluation(
         # fingerprint — an expanded checkpoint resumed without the arm is
         # refused by the fingerprint gate (A/B arm isolation).
         entity_key_expansion=bool(entity_key_expansion),
+        # C6 (#2520, #2513): the resolved time-aware arm rides the
+        # fingerprint — an armed checkpoint resumed without the arm is
+        # refused by the fingerprint gate (A/B arm isolation).
+        time_aware_qe=bool(time_aware_qe),
         # C3-1 (#2519, #2567): the resolved coverage-loop arm rides the
         # fingerprint — a looped checkpoint resumed without the arm is
         # refused by the fingerprint gate (2×2 arm isolation with #2518).
@@ -4186,7 +4297,15 @@ def run_evaluation(
                                     # resume-internal whole-question retry
                                     # budget, P1-1).
                                     ingest_write_retries=ingest_write_retries,
-                                    write_marker_armed=not resume_reattempt)
+                                    write_marker_armed=not resume_reattempt,
+                                    # #2969: the per-question liveness
+                                    # signal + no-progress budget — a
+                                    # stalled ingest aborts the QUESTION
+                                    # with a retryable classification
+                                    # instead of hanging forever.
+                                    # (None → env/default resolution
+                                    # inside ingest_v2.)
+                                    stall_timeout_s=ingest_stall_timeout_s)
                             return ingest_haystack(
                                 _sdk, question, chunk_turns=chunk_turns)
 
@@ -4312,6 +4431,10 @@ def run_evaluation(
                             # key expansion arm (resolved above; OFF by
                             # default — the sealed A/B decides adoption).
                             entity_key_expansion=entity_key_expansion,
+                            # C6 (#2520, #2513): the time-aware query
+                            # expansion arm (resolved above; OFF by
+                            # default — the sealed A/B decides adoption).
+                            time_aware_qe=time_aware_qe,
                             # C3-1 (#2519, #2567): the coverage-completeness
                             # loop arm (resolved above; OFF by default — the
                             # sealed A/B decides adoption).
@@ -4549,6 +4672,12 @@ def run_evaluation(
                         # reconstructs which arm each outcome ran on).
                         "entity_key_expansion": ret.get(
                             "entity_key_expansion"),
+                        # C6 (#2520, #2513): the time-aware query expansion
+                        # arm per question (the A/B arm marker + the
+                        # reorder stamps — read via ret.get so a
+                        # pre-feature checkpoint stays readable).
+                        "time_aware_qe": ret.get("time_aware_qe"),
+                        "time_aware_stats": ret.get("time_aware_stats"),
                         # C3-1 (#2519, #2567): the coverage-completeness
                         # loop arm per question — the resolved bool + the §8
                         # per-outcome markers (loop_iterations /
@@ -5005,6 +5134,10 @@ def run_evaluation(
             # arm — recorded verbatim in the methodology (published numbers
             # carry which A/B arm produced them).
             "entity_key_expansion": bool(entity_key_expansion),
+            # C6 (#2520, #2513): the time-aware query expansion arm —
+            # recorded verbatim in the methodology (published numbers carry
+            # which A/B arm produced them).
+            "time_aware_qe": bool(time_aware_qe),
             # C3-1 (#2519, #2567): the coverage-completeness loop arm —
             # recorded verbatim in the methodology (published numbers carry
             # which of the 2×2 arms produced them; the §5 gate deltas are
@@ -5207,6 +5340,10 @@ def outcomes_to_report(
                 # arm marker rides the projection (read via o.get — absent
                 # on pre-feature checkpoints).
                 "entity_key_expansion",
+                # C6 (#2520, #2513): the time-aware query expansion arm +
+                # the reorder stamps ride the projection (read via o.get —
+                # absent on pre-feature checkpoints).
+                "time_aware_qe", "time_aware_stats",
                 # C3-1 (#2519, #2567): the coverage-completeness loop arm +
                 # the §8 per-outcome markers ride the projection (read via
                 # o.get — absent on pre-feature checkpoints).
@@ -5676,6 +5813,25 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="disable the C2 evidence-mark boost even when "
                          "TORTOISE_LME_EVIDENCE_BOOST is set "
                          "(tri-state: explicit flags beat the env)")
+    # C6 (#2520, #2513): time-aware query expansion — tri-state
+    # --time-aware-qe / --no-time-aware-qe (None default so the
+    # TORTOISE_LME_TIME_AWARE_QE env still applies; OFF by default in code
+    # — the sealed #2513 A/B decides adoption). The A/B switch: identical
+    # questions run once with the arm OFF (baseline) and once ON; the
+    # report's shared-question evidence_recall@k / recall_all@5 deltas gate
+    # the +recall claim.
+    ta = p.add_mutually_exclusive_group()
+    ta.add_argument("--time-aware-qe", dest="time_aware_qe",
+                    action="store_true", default=None,
+                    help="Time-aware query expansion: anchor the dense-leg "
+                         "query with the question date and reorder the "
+                         "final pool live-before-stale on a prefer-latest "
+                         "question (non-TR only). Default: OFF; "
+                         "TORTOISE_LME_TIME_AWARE_QE=1 also enables.")
+    ta.add_argument("--no-time-aware-qe", dest="time_aware_qe",
+                    action="store_false",
+                    help="Force time-aware query expansion OFF (overrides "
+                         "the env var).")
     # C2 (#2518, #2513): entity/fact-augmented key expansion — tri-state
     # --entity-key-expansion / --no-entity-key-expansion (None default so
     # the TORTOISE_LME_ENTITY_KEY_EXPANSION env still applies; OFF by
@@ -6199,7 +6355,15 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
                 f"--db must be a FalkorDB URI (docker://|redis://|rediss://|"
                 f"bolt://), got {db_uri!r} — the per-question isolated graphs "
                 f"derive from the URI's server")
-        with _temporary_env_var("TORTOISE_DB_URI", db_uri):
+        with _temporary_env_var("TORTOISE_DB_URI", db_uri), \
+                _temporary_env_var(
+                    ENV_SOCKET_TIMEOUT,
+                    (os.environ.get(ENV_SOCKET_TIMEOUT)
+                     or str(DEFAULT_EVAL_SOCKET_TIMEOUT_S))), \
+                _temporary_env_var(
+                    ENV_SOCKET_CONNECT_TIMEOUT,
+                    (os.environ.get(ENV_SOCKET_CONNECT_TIMEOUT)
+                     or str(DEFAULT_EVAL_SOCKET_CONNECT_TIMEOUT_S))):
             return _run_main(parser, args, db_uri)
     return _run_main(parser, args, db_uri)
 
@@ -6234,6 +6398,20 @@ def _run_main(parser: argparse.ArgumentParser, args,
     max_chunks_per_session = _resolve_int_knob(
         "TORTOISE_LME_MAX_CHUNKS_PER_SESSION",
         DEFAULT_MAX_CHUNKS_PER_SESSION, args.max_chunks_per_session)
+    # #2969: the ingest no-progress budget (env-only knob — it changes
+    # resilience, not the measurement definition, so it stays out of the
+    # run fingerprint). Fail loud on a malformed value: a typo must never
+    # silently disable the guard. The graph read bound is validated here too
+    # (and reported below via the PRODUCT parser, so the socket-timeout
+    # vocabulary has one home) — a typo fails at RUN START, not mid-question.
+    try:
+        ingest_stall_timeout_s = resolve_stall_timeout_s()
+        _resolved_graph_read_timeout()
+    except ValueError as _e:
+        raise SystemExit(str(_e)) from None
+    print(_ingest_bound_banner(ingest_stall_timeout_s, db_uri=db_uri,
+                               ingest_mode=args.ingest_mode),
+          file=sys.stderr)
     # C1 (#1745): reader-context item cap (env first, CLI overrides;
     # >= 1 validated). TR questions ignore it — tr_top_k is the pinned TR
     # item cap.
@@ -6294,6 +6472,16 @@ def _run_main(parser: argparse.ArgumentParser, args,
         eke_env = (os.environ.get("TORTOISE_LME_ENTITY_KEY_EXPANSION")
                    or "")
         entity_key_expansion = eke_env.strip().lower() in _TRUTHY
+    # C6 (#2520, #2513): time-aware query expansion — tri-state (CLI flag
+    # > TORTOISE_LME_TIME_AWARE_QE env > OFF — fail-safe: only
+    # 1/true/yes/on enables). Resolved once and threaded into
+    # run_evaluation (methodology == actual; the #2513 retrieval A/B
+    # switch).
+    if args.time_aware_qe is not None:
+        time_aware_qe = args.time_aware_qe
+    else:
+        ta_env = (os.environ.get("TORTOISE_LME_TIME_AWARE_QE") or "")
+        time_aware_qe = ta_env.strip().lower() in _TRUTHY
     # C3-1 (#2519, #2567): coverage-completeness loop — tri-state (CLI flag
     # > TORTOISE_LME_COVERAGE_LOOP env > OFF — fail-safe: only
     # 1/true/yes/on enables, mirroring the boost gate above). Resolved once
@@ -6529,6 +6717,10 @@ def _run_main(parser: argparse.ArgumentParser, args,
                 # arm (tri-state resolved above; OFF by default — the
                 # sealed #2513 A/B decides adoption).
                 entity_key_expansion=entity_key_expansion,
+                # C6 (#2520, #2513): time-aware query expansion arm
+                # (tri-state resolved above; OFF by default — the sealed
+                # #2513 A/B decides adoption).
+                time_aware_qe=time_aware_qe,
                 # C3-1 (#2519, #2567): coverage-completeness loop arm
                 # (tri-state resolved above; OFF by default — the sealed
                 # #2519 A/B decides adoption).
@@ -6571,6 +6763,7 @@ def _run_main(parser: argparse.ArgumentParser, args,
                 ingest_write_retries=INGEST_WRITE_RETRIES,
                 ingest_question_retries=INGEST_QUESTION_RETRIES,
                 resume_attempts_cap=RESUME_ATTEMPTS_CAP,
+                ingest_stall_timeout_s=ingest_stall_timeout_s,
                 retrieval_budget_ms=EVAL_RETRIEVAL_BUDGET_MS,
                 # #1785 (Task 1 Step 4 / Task 3): revalidation mode + the
                 # loss-location replay flags (CLI > env > default).

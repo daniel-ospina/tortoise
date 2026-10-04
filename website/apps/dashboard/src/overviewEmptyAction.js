@@ -1,5 +1,7 @@
 // #3890 — the D5 "connected and genuinely empty" Overview empty state's ONE
 // primary action, and the deep-link wiring that makes it land on a REAL screen.
+// #4637 — the graph-missing empty state's action set, whose second action names
+// a ROUTE and must therefore read what the build fork actually offers.
 //
 // The owner-approved copy (d5-copy-v2.md ③) names its two ways to add memory:
 // **Integrations** (where the agent-session recorder lives) and **Tortoise
@@ -83,5 +85,73 @@ export function OverviewEmptyActions({ snippetKey }) {
           ),
         )
       : null,
+  )
+}
+
+// ── #4637: the graph-missing card's ACTION ROUTE ───────────────────────────
+//
+// The graph-missing card's second action is a ROUTE to "connect your agent"
+// and the BUILD fork renders no such route at all (its step 2 is the SDK block,
+// `main.jsx` `wizardStep === 2 && (isBuildFork ?`), so the card offered a
+// build-fork organization a route that branch never creates. This module owns
+// that ACTION — its label and its destination; the PROSE that names the same
+// route lives with the lead-ins it belongs to (`onboardingEmptyStateKeyNote.js`,
+// which owns `SELF_ROUTE_CLAUSE`), and both derive from the same `buildFork`
+// main.jsx derives. They are two registers of one fact (a button label and a
+// clause inside a sentence), so they are asserted to take the same arm per fork
+// rather than forced into one string (note test, cross-module).
+//
+// The build arm names the route the build fork's OWN step-2 block offers (the
+// SDK documentation anchor there), so the two cannot promise different things.
+// ⚠️ Two named limits of this module's single-sourcing, so the claim is not
+// overread:
+//   * the self/undecided arm keeps the destination the card has always had —
+//     the onboarding funnel URL, which for a SIGNED-IN user is a round trip
+//     (it 301s to the app origin, where the funnel's server function sends a
+//     signed-in visitor to the app root). That dead destination is PRE-EXISTING
+//     and out of #4637's scope: evidence recorded on #3890, which owns that root
+//     (it removed the same destination from the D5 card).
+//   * the docs URL also appears in `wizardPrompts.js` as prompt-text content;
+//     those literals are not consolidated here (that module is owned by another
+//     in-flight change) and the SDK_DOCS_HREF claim is scoped to the two
+//     `main.jsx` surfaces this change unifies.
+// #4637: the SDK documentation URL. It is owned HERE because this is the module
+// that ships it to an action a user can click; its consumers are this file's
+// build arm and `main.jsx`'s two wizard docs anchors (step 2's "SDK
+// documentation →" and the closing card's "Read the docs"), which import it
+// rather than re-typing the URL. It is NOT the only literal of that URL in the
+// repo — see the ⚠️ above.
+export const SDK_DOCS_HREF = 'https://tortoise.premiselabs.co/docs'
+// The agent-connection route the self/undecided arm has always offered. Named
+// for what it IS (the onboarding funnel's url), not for the surface it is
+// supposed to lead to: for a signed-in user it round-trips (see the ⚠️ above).
+export const ONBOARDING_FUNNEL_HREF = 'https://tortoise.premiselabs.co/welcome'
+
+export function emptyStateActionRoute(buildFork) {
+  return buildFork === true
+    ? { label: 'SDK documentation →', href: SDK_DOCS_HREF }
+    : { label: 'Connect your agent →', href: ONBOARDING_FUNNEL_HREF }
+}
+
+// The graph-missing empty state's action set: the API Keys tab (a real
+// first-party surface on every branch) plus the fork-derived route above. A
+// component rather than two inline elements so the suite can render the LIVE
+// route per fork and assert what a build-fork organization is actually offered
+// (the rest of this file's pattern).
+export function GraphMissingEmptyStateActions({ buildFork, onGoToKeys }) {
+  const route = emptyStateActionRoute(buildFork)
+  return React.createElement(
+    React.Fragment,
+    null,
+    React.createElement(
+      'button',
+      { type: 'button', className: 'btn-primary', onClick: onGoToKeys },
+      'Go to API Keys →',
+    ),
+    React.createElement(
+      'a',
+      { className: 'ghost', href: route.href, target: '_blank', rel: 'noreferrer' },
+      route.label,
+    ),
   )
 }

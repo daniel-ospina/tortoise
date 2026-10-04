@@ -11,15 +11,18 @@ Design (from docs/scoping/2026-08-13-307-email-notifications-scope.md, Approach 
   (provider accepted) — never "delivered" (bounces happen later).
 - Env-gated: RESEND_API_KEY / RESEND_FROM_EMAIL / EMAIL_LINK_BASE_URL; absent
   key → channel skipped with a once-per-process log.
-- Send budget (#1138): Resend free tier is 100 emails/day / 3,000/month — a
-  bulk invite blast must never silently exhaust it (budget/rate 429s). We
+- Send budget (#1138, widened #3631): Resend free tier is 100 emails/day /
+  3,000/month — no single path may silently exhaust it (budget/rate 429s). We
   track an in-process estimate of sends per UTC day + month and hard-stop
   (skip + loud warning) when the env-tunable cap is reached. A slot is
   RESERVED at schedule time — closing the burst TOCTOU where N>cap concurrent
   schedules all passed the check before any provider POST completed — and
-  refunded when the provider rejects/fails the POST. The guard covers the
-  INVITE path only (billing/abuse notifications share the Resend account but
-  are not counted) and is per-process (N replicas × cap).
+  refunded when the provider rejects/fails the POST.
+  Scope: EVERY Resend send taken on this budget is counted — invite, OTP and
+  the onboarding offer here, plus billing (``tortoise.notify`` reserves via
+  ``reserve_send_slot``). Abuse alerts are Telegram-only (#3639) and never
+  touch Resend. The counter is per-process (N replicas × cap): a global cap
+  needs shared state and is deliberately out of scope (#3631).
 - Secrets never logged: ``redact_safe`` on exception paths.
 """
 from __future__ import annotations
@@ -29,6 +32,7 @@ import html
 import logging
 import os
 import re
+import threading
 from datetime import datetime, timezone
 
 import httpx
@@ -92,12 +96,18 @@ def _skip_channel(channel: str, secret: str | None) -> bool:
 # concurrent schedules all passed the check before any POST completed. Counters
 # reset on process restart, so they bound a single process's burst — NOT an
 # absolute usage meter (upgrade/usage-API monitoring is a separate concern).
-# Scope: INVITE path only — billing/abuse notifications share the Resend
-# account but are not counted; per-process (N replicas × cap).
+# Scope (#3631): every Resend send on this budget is counted — invite, OTP,
+# onboarding (all below) and billing (notify.py reserves via reserve_send_slot).
+# Abuse alerts are Telegram-only (#3639) and never touch Resend.
 _send_counts_day: int = 0
 _send_counts_month: int = 0
 _send_counts_day_period: str = ""   # "YYYY-MM-DD" UTC — day counter resets on day change
 _send_counts_month_period: str = ""  # "YYYY-MM" UTC — month counter resets on month change
+# Serializes check-then-reserve so the pair is atomic. All CURRENT callers
+# (the schedule paths here and the billing leg in notify.py) run on the event
+# loop, so it is uncontended today — it is retained as defence for any future
+# off-loop caller, and it never wraps the network POST (#3631).
+_budget_lock = threading.Lock()
 
 
 def _budget_limit(env_name: str, default: int) -> int:
@@ -169,6 +179,30 @@ def _refund_send() -> None:
     global _send_counts_day, _send_counts_month
     _send_counts_day = max(0, _send_counts_day - 1)
     _send_counts_month = max(0, _send_counts_month - 1)
+
+
+def reserve_send_slot() -> str | None:
+    """Atomically check + reserve one shared Resend budget slot (#3631).
+
+    The single entry point for a Resend sender outside this module (billing
+    email, ``tortoise.notify``). Returns ``None`` when a slot was reserved,
+    else the exhausted-budget reason for the caller to log. The
+    check-then-reserve pair is held under a lock so it stays atomic if a
+    caller ever runs off the event loop; it never wraps the POST itself.
+    """
+    with _budget_lock:
+        exceeded, reason = _budget_exceeded()
+        if exceeded:
+            return reason
+        _reserve_send()
+        return None
+
+
+def refund_send_slot() -> None:
+    """Return a slot reserved by :func:`reserve_send_slot` after a provider
+    reject/failure. NEVER raises."""
+    with _budget_lock:
+        _refund_send()
 
 
 # ── Templates ────────────────────────────────────────────────────────────────
@@ -283,7 +317,7 @@ async def _send_invite_attempt(invitee_email: str, org_name: str, role: str,
             break
     logger.warning("email notify: invite email failed for %s (%s)",
                    invitation_id, redact_safe(last_err))
-    _refund_send()  # #1138 P1: provider rejected/failed the POST — free the slot
+    refund_send_slot()  # #1138 P1: provider rejected/failed the POST — free the slot
     # Ops incident (GH issue + Telegram) — the invite is the ONLY automated
     # token-delivery path (the dashboard discards the token), so a provider
     # failure means the invitee never receives a way in, and before this it was
@@ -307,19 +341,19 @@ def send_invite_email(org_name: str, invitee_email: str, role: str,
     if _skip_channel("resend", api_key):
         return
 
-    # #1138: hard-stop before scheduling when the send budget is exhausted — a
-    # bulk blast must never silently 429 past the free-tier cap. Skip loud.
-    # A slot is RESERVED here (synchronously, before create_task) — closing the
-    # TOCTOU where N>cap concurrent schedules all passed the check before any
-    # provider POST completed; _refund_send() gives it back on failure.
-    exceeded, reason = _budget_exceeded()
-    if exceeded:
+    # #1138/#3631: hard-stop before scheduling when the shared send budget is
+    # exhausted — a bulk blast must never silently 429 past the free-tier cap.
+    # Skip loud. A slot is RESERVED here (synchronously, before create_task),
+    # closing the TOCTOU where N>cap concurrent schedules all passed the check
+    # before any provider POST completed; refund_send_slot() gives it back on
+    # failure.
+    reason = reserve_send_slot()
+    if reason is not None:
         logger.warning(
             "email notify: invite email for %s (%s) SKIPPED — send budget exhausted (%s)",
             invitation_id, invitee_email, reason,
         )
         return
-    _reserve_send()
 
     task = asyncio.create_task(
         _send_invite_attempt(invitee_email, org_name, role, token, invitation_id, on_sent)
@@ -386,7 +420,7 @@ async def _send_otp_attempt(invitee_email: str, org_name: str, code: str,
             break
     logger.warning("email notify: OTP email failed for %s (%s)",
                    invitee_email, redact_safe(last_err))
-    _refund_send()  # #1138: provider rejected/failed the POST — free the slot
+    refund_send_slot()  # #1138: provider rejected/failed the POST — free the slot
 
 
 def send_otp_email(org_name: str, invitee_email: str, code: str,
@@ -397,14 +431,13 @@ def send_otp_email(org_name: str, invitee_email: str, code: str,
     if _skip_channel("resend", api_key):
         return
 
-    exceeded, reason = _budget_exceeded()
-    if exceeded:
+    reason = reserve_send_slot()
+    if reason is not None:
         logger.warning(
             "email notify: OTP email for %s SKIPPED — send budget exhausted (%s)",
             invitee_email, reason,
         )
         return
-    _reserve_send()
 
     task = asyncio.create_task(
         _send_otp_attempt(invitee_email, org_name, code, on_sent)
@@ -544,7 +577,7 @@ async def _send_onboarding_attempt(email: str, greeting: str,
     logger.warning(
         "email notify: onboarding offer email failed for team %s (%s)",
         org_id, redact_safe(last_err))
-    _refund_send()  # #1138: provider rejected/failed the POST — free the slot
+    refund_send_slot()  # #1138: provider rejected/failed the POST — free the slot
     return {"status": "failed"}
 
 
@@ -565,15 +598,14 @@ async def send_onboarding_offer_email(email: str,
     if _skip_channel("resend-onboarding", api_key):
         return {"status": "skipped"}
 
-    # #1138: hard-stop before sending when the shared send budget is
+    # #1138/#3631: hard-stop before sending when the shared send budget is
     # exhausted (same reserve/refund posture as the invite/OTP paths).
-    exceeded, reason = _budget_exceeded()
-    if exceeded:
+    reason = reserve_send_slot()
+    if reason is not None:
         logger.warning(
             "email notify: onboarding offer for team %s SKIPPED — send budget "
             "exhausted (%s)", org_id, reason)
         return {"status": "skipped"}
-    _reserve_send()
 
     greeting = _onboarding_greeting_name(display_name, email, org_name)
     return await _send_onboarding_attempt(email, greeting, org_id)

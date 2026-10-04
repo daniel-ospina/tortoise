@@ -291,3 +291,92 @@ class HybridReadUnavailableError(RuntimeError):
             f"retrieval and must not be labelled hybrid (#2952). "
             f"marker={self.marker!r}"
         )
+
+
+class EmbedderUnavailableError(RuntimeError):
+    """(C) #4861 — a process that REQUIRED the embedder must not be handed
+    ``None``.
+
+    Raised by ``tortoise.embeddings.EmbeddingModel.get`` when
+    ``TORTOISE_EMBEDDING_MODEL_REQUIRED`` is truthy and the model cannot be
+    loaded, instead of returning ``None``. This is the **third surface of one
+    invariant**: a lane that cannot run hybrid must not run (#2985,
+    ``retrieval_preflight.require_hybrid_retrieval``), a read that could not
+    run its vector leg must not be labelled hybrid (#2952,
+    :class:`HybridReadUnavailableError`) — and this one, at the ``None``
+    itself, where neither of the other two can see it. Without it a
+    keyword-only (FTS-only) run is indistinguishable from a healthy one: the
+    degrade is invisible, which is the defect #2898 describes.
+
+    Unlike :class:`HybridReadUnavailableError` this carries no leg *trace* — a
+    load failure has no legs to report, and synthesizing a marker would make
+    that class mean two different things. It carries the **cause** instead:
+    ``failure_kind`` is ``not_installed`` (the environment never had it — a
+    runner-down or missing-extra run) or ``load_failed`` / ``load_timeout``
+    (the environment had it and the load broke — a different thing to fix).
+    ``model_unavailable`` is the fallback when no kind was recorded.
+    """
+
+    def __init__(self, *, failure_kind: str, model: str,
+                 revision: str | None = None,
+                 last_error: str | None = None,
+                 context: str | None = None):
+        self.failure_kind = failure_kind
+        self.model = model
+        self.revision = revision
+        self.last_error = last_error
+        self.context = context
+        where = f" ({context})" if context else ""
+        rev = f" @ {revision}" if revision else ""
+        err = f"; last error: {last_error}" if last_error else ""
+        super().__init__(
+            f"embedding model REQUIRED but unavailable{where}: {model}{rev} "
+            f"could not be loaded (failure_kind={failure_kind!r}){err} — this "
+            f"process set TORTOISE_EMBEDDING_MODEL_REQUIRED, so any retrieval "
+            f"result it produced would be keyword-only (FTS) while claiming to "
+            f"be the product's hybrid retrieval. Install the embedder "
+            f"(uv sync --extra embeddings) or unset the variable to allow the "
+            f"documented keyword-only degrade (#4861)."
+        )
+
+
+class UnsupportedCypherOperatorError(ValueError):
+    """#3595 — a Cypher query used an operator FalkorDB does not implement.
+
+    FalkorDB has no ``=~`` regex-match operator, and it does not error: it
+    prints ``FalkorDB does not currently support =~`` *in place of results*,
+    so the surrounding query returns an **empty result set** — a confident
+    false negative that is indistinguishable from "no matches". Two agents in
+    one session read exactly that: an enumeration for legacy ``obj-<26hex>``
+    ids returned 0 across every graph, where the supported ``STARTS WITH``
+    found 5 nodes in 2 graphs.
+
+    Raised by the guarded-handle seam (``tortoise.cypher_guard``) BEFORE the
+    statement is sent, so a caller cannot mistake an unsupported operator for
+    an empty answer.
+    Subclasses ``ValueError``: an unsupported operator is a caller-side
+    predicate bug, and the historical ``ValueError`` for invalid input keeps
+    working.
+
+    ``operator`` is the offending token (currently always ``"=~"``); the
+    message names the supported alternatives.
+
+    ``cypher`` is retained as an ATTRIBUTE for a caller that wants it, but is
+    deliberately NOT interpolated into the message: this exception propagates
+    through `mcp_server`'s ``_SafeError(_scrub_error(str(e)))`` to the tenant, and
+    ``_scrub_error`` strips credentials and host:port but nothing else — so a
+    query in the message would reach a tenant verbatim. That is exactly what
+    `security.redact_error`'s contract forbids ("Never includes full Cypher,
+    query text, or tracebacks … so tenants never see DB/query internals").
+    """
+
+    def __init__(self, operator: str, cypher: str = ""):
+        self.operator = operator
+        self.cypher = cypher
+        super().__init__(
+            f"FalkorDB does not support the Cypher {operator!r} regex-match "
+            f"operator, and it fails SILENTLY — the query returns an EMPTY "
+            f"result set indistinguishable from 'no matches' (#3595). "
+            f"Use a supported operator instead: STARTS WITH / ENDS WITH / "
+            f"CONTAINS."
+        )

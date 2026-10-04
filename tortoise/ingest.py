@@ -32,7 +32,7 @@ from .idempotency import document_key
 from .log import EventLog
 from .models import OllamaModel, OpenAICompatModel
 from .projection import FalkorProjection, fold, split
-from .ids import ulid
+from .ids import content_hash, ulid
 from .render import render
 
 # OpenAI-compatible providers (Ollama is handled separately via its native API).
@@ -174,26 +174,31 @@ def _run_ep_propagation(proj, api=None, *, label: str = "EP"):
             raise
 
 def _do_upgrade(transcript, text, source_id, proj, api, args):
-    """Upgrade a single Document: re-run extraction + SET doc_status='extracted'.
+    """Upgrade a single Document: re-run extraction, clear needs_extraction.
+
+    D10 (ONTOLOGY v3.15 §4.4): a document is a :Source and ``doc_status`` is
+    RETIRED — liveness is a read of the extracted entities, and the only
+    stored extraction signal is ``needs_extraction``.
 
     Guards:
-    - Already-extracted → no-op "doc already extracted, skipped"
+    - Already-extracted (needs_extraction false) → no-op
     - Non-Document transcript → graceful "not a Document" error
     - Uses begin_ingest for idempotency (content-hash + extractor version)
-    - doc_status flip via raw Cypher SET, NOT add_document (P0 — coalesce
-      would overwrite 'captured' because add_document always passes non-null)
+    - needs_extraction cleared via raw Cypher SET after the extraction attempt
+      (``--upgrade-all`` discovers on this flag, so clearing it preserves the
+      discovery loop)
     """
-    # 1. Check Document exists + current doc_status
+    # 1. Check the document Source exists + its extraction signal.
     rows = proj.g.query(
-        "MATCH (d:Document {id: $id}) "
-        "RETURN coalesce(d.doc_status, 'captured') AS status",
+        "MATCH (s:Source {url: $id}) "
+        "WHERE s.documentKind IS NOT NULL "
+        "RETURN coalesce(s.needs_extraction, false) AS needs_extraction",
         params={"id": source_id},
     ).result_set
     if not rows:
-        print(f"not a Document: {source_id} (no Document node with this id)")
+        print(f"not a Document: {source_id} (no document Source with this url)")
         return
-    current_status = rows[0][0]
-    if current_status == "extracted":
+    if not rows[0][0]:
         print(f"doc already extracted, skipped: {source_id}")
         return
 
@@ -205,7 +210,7 @@ def _do_upgrade(transcript, text, source_id, proj, api, args):
         print(f"upgrade skip: {result.reason} (run {result.run_id}); use --force to reprocess")
         return
 
-    print(f"upgrading {source_id} (doc_status={current_status}) …")
+    print(f"upgrading {source_id} …")
 
     # 3. Re-run full extraction (the same path as normal full ingest)
     from .extractor import extract_from_document  # noqa: I001
@@ -221,7 +226,6 @@ def _do_upgrade(transcript, text, source_id, proj, api, args):
             domain = resolve_domain_from_path(str(transcript))
         topics_raw = fm.get("topics", "")
         topics = [t.strip() for t in topics_raw.split(",") if t.strip()] if topics_raw else []
-        default_doc_status = fm.get("doc_status", "captured")
         api.add_document(
             doc_id=source_id,
             title=fm.get("title", transcript.stem),
@@ -231,9 +235,9 @@ def _do_upgrade(transcript, text, source_id, proj, api, args):
             owned_by=fm.get("ownedBy", ""),
             managed_by=fm.get("managedBy", ""),
             governing_agreement=fm.get("governedBy", fm.get("governingAgreement", "")),
-            doc_status=default_doc_status,
             format=_infer_format(transcript),
             version=fm.get("version", ""),
+            content_hash=content_hash(text),
             createdAt=fm.get("created", None),
             updatedAt=fm.get("updated", None),
             topics=topics,
@@ -241,7 +245,8 @@ def _do_upgrade(transcript, text, source_id, proj, api, args):
             session_id=fm.get("sessionId", ""),
             event_id=str(ulid()),
             source_path=str(transcript),
-            needs_extraction=fm.get("needs_extraction", False),
+            needs_extraction=True,
+            about_entities=_s7_document_entities(text, source_id, api, args),
         )
 
         stats = extract_from_document(
@@ -259,14 +264,14 @@ def _do_upgrade(transcript, text, source_id, proj, api, args):
     else:
         print(f"  warning: {source_id} is not a Document (no ## headers) — extraction skipped")
 
-    # 4. CRITICAL P0: flip doc_status via raw Cypher SET, NOT add_document.
-    #    add_document always passes non-null doc_status (default 'draft'),
-    #    and coalesce($ds, d.doc_status, 'draft') would OVERWRITE 'captured'.
+    # 4. Mark extracted: clear the needs_extraction signal (the D10
+    #    replacement for the retired doc_status flip). add_document reads the
+    #    flag freshly above, so a raw SET is correct here.
     proj.g.query(
-        "MATCH (d:Document {id: $id}) SET d.doc_status = 'extracted'",
+        "MATCH (s:Source {url: $id}) SET s.needs_extraction = false",
         params={"id": source_id},
     )
-    print(f"  doc_status: {current_status} → extracted")
+    print("  needs_extraction: true → false")
 
     # 5. Lazy EP re-propagation on affected subgraph (#133 Task 3)
     _run_ep_propagation(proj, api)
@@ -285,13 +290,17 @@ def _resolve_ingest_base() -> str | None:
 
 
 def _do_upgrade_all(proj, api, args):
-    """Discover captured/needs_extraction Documents and upgrade each.
+    """Discover needs_extraction document Sources and upgrade each.
+
+    D10 (ONTOLOGY v3.15 §4.4): ``doc_status`` is retired — the only stored
+    extraction signal is ``needs_extraction``, set true by the
+    ``--capture-metadata`` path and cleared here after a successful extraction.
 
     Uses inline Cypher via proj.g.query (no SDK method needed — plan §Task 2).
     Loop-safe: each attempt gated by begin_ingest key (content-hash + extractor
     version) so identical content is a no-op on re-run.
 
-    #329 containment: the file read path (d.sourcePath OR d.id — both are
+    #329 containment: the file read path (s.sourcePath OR s.url — both are
     tenant-mutable graph state) is resolved strictly under TORTOISE_INGEST_BASE_DIR;
     anything not provably under base is SKIPPED (fail-closed), never read.
     """
@@ -302,31 +311,26 @@ def _do_upgrade_all(proj, api, args):
               "documents are skipped unless their path resolves under a configured base. "
               "Set TORTOISE_INGEST_BASE_DIR to your corpus root to enable re-upgrade.")
 
-    # Discover matching Documents
+    # Discover document Sources awaiting extraction (D10: needs_extraction is
+    # the signal; documentKind IS NOT NULL restricts to documents).
     rows = proj.g.query(
-        "MATCH (d:Document) "
-        "WHERE d.doc_status = 'captured' OR d.needs_extraction = true "
-        "RETURN d.id, coalesce(d.sourcePath, d.id) AS sourcePath, "
-        "coalesce(d.doc_status, 'captured') AS status, "
-        "coalesce(d.needs_extraction, false) AS needs_extraction"
+        "MATCH (s:Source) "
+        "WHERE s.documentKind IS NOT NULL "
+        "AND coalesce(s.needs_extraction, false) = true "
+        "RETURN s.url, coalesce(s.sourcePath, s.url) AS sourcePath, "
+        "coalesce(s.needs_extraction, false) AS needs_extraction"
     ).result_set
 
     if not rows:
-        print("upgrade-all: no documents found with doc_status='captured' or needs_extraction=true")
+        print("upgrade-all: no document Sources found with needs_extraction=true")
         return
 
     print(f"upgrade-all: {len(rows)} document(s) to upgrade")
 
     upgraded = 0
     skipped = 0
-    for doc_id, source_path, status, needs_ext in rows:
-        # Already extracted → no-op
-        if status == "extracted":
-            print(f"  skip {doc_id}: already extracted")
-            skipped += 1
-            continue
-
-        # #329: resolve the candidate (sourcePath OR d.id — BOTH are
+    for doc_id, source_path, needs_ext in rows:
+        # #329: resolve the candidate (sourcePath OR s.url — BOTH are
         # tenant-mutable) strictly under the configured base. Fail-closed:
         # anything not provably under base is skipped, never read.
         candidate = source_path or doc_id
@@ -354,7 +358,7 @@ def _do_upgrade_all(proj, api, args):
             skipped += 1
             continue
 
-        print(f"  upgrading {doc_id} (doc_status={status}, needs_extraction={needs_ext}) …")
+        print(f"  upgrading {doc_id} (needs_extraction={needs_ext}) …")
 
         # Emit DocumentCreated for metadata (idempotent via MERGE)
         from .extractor import extract_from_document  # noqa: I001
@@ -378,9 +382,9 @@ def _do_upgrade_all(proj, api, args):
                 owned_by=fm.get("ownedBy", ""),
                 managed_by=fm.get("managedBy", ""),
                 governing_agreement=fm.get("governedBy", fm.get("governingAgreement", "")),
-                doc_status=fm.get("doc_status", "captured"),
                 format=_infer_format(filepath),
                 version=fm.get("version", ""),
+                content_hash=content_hash(text),
                 createdAt=fm.get("created", None),
                 updatedAt=fm.get("updated", None),
                 topics=topics,
@@ -388,7 +392,8 @@ def _do_upgrade_all(proj, api, args):
                 session_id=fm.get("sessionId", ""),
                 event_id=str(ulid()),
                 source_path=str(filepath),
-                needs_extraction=fm.get("needs_extraction", False),
+                needs_extraction=True,
+                about_entities=_s7_document_entities(text, source_id, api, args),
             )
 
             stats = extract_from_document(
@@ -407,12 +412,13 @@ def _do_upgrade_all(proj, api, args):
             skipped += 1
             continue
 
-        # doc_status flip via raw Cypher SET (not add_document — P0)
+        # Mark extracted: clear the needs_extraction signal (the D10
+        # replacement for the retired doc_status flip).
         proj.g.query(
-            "MATCH (d:Document {id: $id}) SET d.doc_status = 'extracted'",
+            "MATCH (s:Source {url: $id}) SET s.needs_extraction = false",
             params={"id": source_id},
         )
-        print(f"    doc_status: {status} → extracted")
+        print("    needs_extraction: true → false")
         upgraded += 1
 
     # Lazy EP re-propagation ONCE after all upgrades (#133 Task 3 — review P2:
@@ -439,6 +445,56 @@ def build_model(spec: str, *, reasoning: bool = False):
     return OpenAICompatModel(id=model, base_url=base_url, api_key_env=api_key_env)
 
 
+def _s7_document_entities(text, source_id, api, args, extractor=None):
+    """#4938: run S7 and return the document's Subject names (wiring targets).
+
+    The names are handed to ``add_document(about_entities=...)`` so the
+    document Source gets its ``aboutSubject`` edges through the sanctioned
+    ``_upsert_document → _create_about_edges`` route. Returns ``[]`` when S7 is
+    opted out, in capture-metadata mode, or when the entity stage fails before
+    creating any Subject (a later failure returns the partial list — below).
+
+    FAIL-OPEN (deliberate): ``begin_ingest`` has already claimed the content
+    hash when this runs, so letting an entity-stage failure escape would leave
+    the document unwritten AND make a plain re-run SKIP ("already processed") —
+    the document would be silently lost. Per-SECTION failures are tolerated by
+    the stage itself (``skip_on_failure=True``); a NON-section failure (e.g. a
+    graph/journal write during a mint) propagates, but ``extract_entities``
+    attaches the names whose ``add_subject`` had already returned as
+    ``partial_subject_names``, and those are still returned and wired. The
+    guarantee is exactly that: returned-by-``add_subject`` names are wired; a
+    call that raises after its MERGE committed is not in the list and can
+    still leave a durable Subject unwired.
+    """
+    if not (args.semantic_extract and not args.capture_metadata):
+        return []
+    if extractor is None:
+        extractor = LLMExtractor(build_model(args.point_model),
+                                 build_model(args.relation_model, reasoning=True))
+    try:
+        ent_stats = extractor.extract_entities(
+            text, source_id, api, domain=args.domain, skip_on_failure=True)
+    except Exception as e:
+        # #4938: Subjects created earlier in this run are still durable (the
+        # journal is written before the projection), so wire THEM rather than
+        # leaving Subjects no document points at.
+        partial = list(getattr(e, "partial_subject_names", []))
+        print(f"warning: S7 entity extraction failed "
+              f"({type(e).__name__}: {e}) — "
+              + (f"wiring the {len(partial)} Subject(s) already minted"
+                 if partial else
+                 "continuing without document→Subject wiring"))
+        return partial
+    print(f"entities: {ent_stats['subjects']} Subjects, "
+          f"{ent_stats['objects']} Objects")
+    failed = ent_stats.get("failed_sections") or []
+    if failed:
+        print(f"warning: S7 entity extraction failed for {len(failed)} "
+              f"section(s) ({', '.join(failed)}) — their Subjects are "
+              f"omitted; the minted Subjects are still wired")
+    return ent_stats["subject_names"]
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Tortoise live ingest")
     ap.add_argument("transcript", type=Path, nargs='?', default=None,
@@ -456,16 +512,25 @@ def main(argv=None):
                     help="cap utterances (0=all) — for exploration; relations don't scale yet")
     ap.add_argument("--domain", type=str, default=None,
                     help="domain ontology key for domain-specific kind values (e.g. product-strategy)")
-    ap.add_argument("--semantic-extract", action="store_true",
-                    help="run S7 semantic extraction (Subjects + Objects + aboutEntities) after points")
+    ap.add_argument("--semantic-extract", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="run S7 semantic extraction (Subjects + Objects + "
+                         "aboutEntities) before the document write, and wire "
+                         "the document's aboutSubject edges from it; ON by "
+                         "default since #4938 — the document path's only "
+                         "Subject producer, and the owner's "
+                         "document→Source+Subjects model requires it. Pass "
+                         "--no-semantic-extract to skip it (one extra model "
+                         "call per section).")
     ap.add_argument("--capture-metadata", action="store_true",
-                    help="#125 metadata-only capture: emit Document + sessionCaptured Event, "
-                         "SKIP LLM point extraction (topics/summary from frontmatter)")
+                    help="#125 metadata-only capture: emit document Source + "
+                         "sessionCaptured Event, SKIP LLM point extraction "
+                         "(sets needs_extraction=true; topics/summary from frontmatter)")
     ap.add_argument("--upgrade", action="store_true",
-                    help="#133: re-run full extraction on captured Document, "
-                         "SET doc_status=extracted (requires transcript positional arg)")
+                    help="#133: re-run full extraction on a captured document "
+                         "Source (requires transcript positional arg)")
     ap.add_argument("--upgrade-all", action="store_true",
-                    help="#133: discover captured/needs_extraction Documents and upgrade each")
+                    help="#133: discover needs_extraction document Sources and upgrade each")
     args = ap.parse_args(argv)
 
     # #133: --upgrade requires a transcript file
@@ -505,14 +570,14 @@ def main(argv=None):
     api = EventAPI(log, initiated_by="extractor", agent_id=extractor.version,
                    projection=proj)
     try:
-        # #133 --upgrade: re-run extraction on captured Document, then
-        # SET doc_status='extracted' via raw Cypher (NOT add_document, which
-        # always passes non-null doc_status and would overwrite 'captured').
+        # #133 --upgrade: re-run extraction on a captured document Source.
+        # D10 (ONTOLOGY §4.4): the extraction signal is needs_extraction (the
+        # retired doc_status flip is gone).
         if args.upgrade:
             _do_upgrade(args.transcript, text, source_id, proj, api, args)
             # --upgrade is terminal: do NOT fall through to full ingest
-            # (which would re-run begin_ingest + add_document and overwrite
-            # the doc_status flip — review cycle 3 caught this).
+            # (which would re-run begin_ingest + add_document and re-set the
+            # needs_extraction flag — review cycle 3 caught this).
             return
 
         # #133 --upgrade-all: discover captured/needs_extraction Documents
@@ -553,10 +618,26 @@ def main(argv=None):
                 summary = fm.get("summary", "")
                 session_id = fm.get("sessionId", "")
                 event_id = str(ulid())
-                # #133: --capture-metadata defaults doc_status to 'captured'
-                # (not 'draft') so captured vs extracted is queryable.
-                # Frontmatter doc_status is authoritative on creation only.
-                default_doc_status = "captured" if args.capture_metadata else "draft"
+                # #133 / D10: --capture-metadata SKIPS extraction, so it
+                # marks the document Source needs_extraction=true — the
+                # --upgrade / --upgrade-all discovery signal (doc_status is
+                # retired, ONTOLOGY §4.4). A normal full ingest extracts
+                # immediately, so it leaves the flag false unless frontmatter
+                # requests otherwise.
+                needs_extraction = (True if args.capture_metadata
+                                    else bool(fm.get("needs_extraction", False)))
+                # S7 (#4938, default-ON): extract the document's Subjects +
+                # Objects BEFORE the DocumentCreated event, so the Subjects it
+                # names can be wired to the document through `about_entities`
+                # (the sanctioned `_upsert_document` → `_create_about_edges`
+                # route). Running S7 after the write — as it did behind the
+                # opt-in flag — left the document's Subject producer minting
+                # nodes it never connected to the document. `--capture-metadata`
+                # deliberately SKIPS all LLM extraction (a metadata-only op);
+                # `--no-semantic-extract` opts out of S7 alone. Fail-open —
+                # see `_s7_document_entities`.
+                doc_about_entities = _s7_document_entities(
+                    text, source_id, api, args, extractor)
                 api.add_document(
                     doc_id=source_id,
                     title=fm.get("title", args.transcript.stem),
@@ -566,9 +647,15 @@ def main(argv=None):
                     owned_by=fm.get("ownedBy", ""),
                     managed_by=fm.get("managedBy", ""),
                     governing_agreement=fm.get("governedBy", fm.get("governingAgreement", "")),
-                    doc_status=fm.get("doc_status", default_doc_status),
                     format=_infer_format(args.transcript),
                     version=fm.get("version", ""),
+                    # #5422: the version anchor is written on the path that
+                    # actually EXTRACTS. `--capture-metadata` deliberately
+                    # skips extraction (it emits no Points to anchor), so it
+                    # passes no hash and the fold's preserve gate leaves any
+                    # existing anchor exactly as it was.
+                    content_hash=(None if args.capture_metadata
+                                  else content_hash(text)),
                     createdAt=fm.get("created", None),
                     updatedAt=fm.get("updated", None),
                     topics=topics,
@@ -576,7 +663,8 @@ def main(argv=None):
                     session_id=session_id,
                     event_id=event_id,
                     source_path=str(args.transcript),
-                    needs_extraction=fm.get("needs_extraction", False),
+                    needs_extraction=needs_extraction,
+                    about_entities=doc_about_entities,
                 )
                 if args.capture_metadata:
                     # #125 metadata-only: emit sessionCaptured Event with uses→Skill,
@@ -610,15 +698,6 @@ def main(argv=None):
                 # #1157: shared helper — priors from stored confidence only;
                 # refuses (loud flag) when the graph has none.
                 _run_ep_propagation(proj, api, label="EP")
-
-                # S7: Semantic extraction (Subjects + Objects + aboutEntities)
-                if args.semantic_extract and is_doc:
-                    ent_stats = extractor.extract_entities(
-                        text, source_id, api,
-                        domain=args.domain,
-                    )
-                    print(f"entities: {ent_stats['subjects']} Subjects, "
-                          f"{ent_stats['objects']} Objects")
             else:
                 extractor.run(text, source_id, api, max_utterances=args.max_utterances)
 

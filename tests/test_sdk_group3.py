@@ -539,3 +539,104 @@ class TestConnectIssueObjectsAboutObject:
             "RETURN o.name, o.repo, o.issue_number, o.url",
             params={"eid": ev["eventId"]}).result_set
         assert pr == [["just-a-string-pr", None, None, None]]  # lists, not tuples
+
+    def test_long_object_name_stored_verbatim_by_both_writers(self, sdk):
+        """#3574 — a >200-char Object name must be persisted IDENTICALLY by
+        both Object writers: the registered-entity path (``create_object`` →
+        ``_create_entity`` → ``_upsert_object``, which MERGEs on the name)
+        and the session-indexing path (``_connect_issue_objects``).
+
+        ``name`` IS the Object's identity — ``_upsert_object`` MERGEs on it,
+        ``_fold_object_superseded`` MATCHes it, and ``_entity_name_id``
+        derives the canonical id from the FULL name. Before this fix
+        ``_connect_issue_objects`` silently truncated its ``SET o.name`` to
+        200 chars, so one logical GitHub issue landed under two different
+        names depending on the door it entered, and the truncated carrier was
+        unreachable by every name-keyed read/write path (it could never be
+        matched, updated, or superseded by name).
+
+        The assertion is deliberately "the two writers agree", not "the name
+        is long": a future third writer that re-introduces a cap trips it too.
+        """
+        long_name = "gh-issue-title-" + ("x" * 240)
+        assert len(long_name) > 200
+
+        # writer 1 — registered entity, journaled, MERGE-by-name.
+        sdk.create_object(long_name, objectKind="issue")
+        # writer 2 — the session-indexing lane's aboutObject writer.
+        ev = sdk.create_event("AgentSession", eventKind="AgentSession",
+                              session_id="s3574")
+        sdk._connect_issue_objects(ev["eventId"], {"issues": [{"title": long_name}]})
+
+        g = sdk._get_proj().g
+        stored = [r[0] for r in g.query(
+            "MATCH (o:Object) RETURN o.name").result_set]
+        assert stored, "both writers must have persisted an Object"
+        assert all(n == long_name for n in stored), (
+            "Object name diverges between the two writers: "
+            f"{sorted(stored)!r} — both must store the full name "
+            f"({len(long_name)} chars); a truncated name is invisible to "
+            "every name-keyed reader and writer (#3574)")
+        # Every persisted carrier is addressable by the full name, and NONE
+        # is stored under the 200-char prefix.
+        assert g.query("MATCH (o:Object {name:$n}) RETURN count(o)",
+                       params={"n": long_name}).result_set[0][0] == len(stored)
+        assert g.query("MATCH (o:Object {name:$n}) RETURN count(o)",
+                       params={"n": long_name[:200]}).result_set[0][0] == 0
+
+
+# ── #3574 follow-up: the supersession fold stores the successor verbatim ─
+
+def test_fold_stores_superseded_by_verbatim_independently_of_the_write_path(sdk):
+    """#3574 follow-up / #5370: the Object supersession fold stores
+    ``supersededBy`` VERBATIM — the FOLD's OWN 200-char cap is gone, and it
+    was never a mirror of a write-path name cap. The write path holds no cap
+    either (``test_long_object_name_stored_verbatim_by_both_writers`` above
+    pins that), so a >200-char successor name is stored verbatim on both
+    sides and the stored value NAMES the successor Object.
+
+    This pin flipped when #5370 landed, as its own characterization
+    docstring required: the fold used to record only the successor's
+    200-char prefix — a value that named NO Object, so the ask path's
+    name-keyed probe (``_probe_visible_successors``, assembly.py) could not
+    verify it and ``_state_header_hit`` rendered "no successor record found"
+    for a successor that exists and is live.
+
+    The test exists so the `commit_ops.apply_supersessions` comment cannot
+    drift back into claiming the fold's cap mirrors a write-path cap.
+    """
+    from tortoise.commit_ops import apply_supersessions
+
+    long_name = "gh-issue-title-" + ("y" * 240)
+    assert len(long_name) > 200
+
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "fold-target")
+    sdk.create_entity("object", long_name)
+
+    warns: list[str] = []
+    applied = apply_supersessions(
+        proj, sdk,
+        [{"superseded": "fold-target", "supersedes_by": long_name,
+          "evidence": "#5370 identity pin"}],
+        session_id="s3574_fold", warn=warns.append)
+    assert applied == 1, f"the fold must apply: {warns}"
+
+    # (a) the WRITE path stored the successor's name verbatim (no cap).
+    assert proj.g.query("MATCH (o:Object {name:$n}) RETURN o.status",
+                        params={"n": long_name}).result_set == [["live"]], \
+        "write path must store the >200-char Object name verbatim (#3574)"
+
+    rows = proj.g.query(
+        "MATCH (o:Object {name:'fold-target'}) RETURN o.status, o.supersededBy",
+    ).result_set
+    assert rows and rows[0][0] == "superseded", rows
+    stored = rows[0][1]
+    # (b) the FOLD stored that verbatim name — it holds no cap of its own.
+    assert stored == long_name, (
+        f"fold's stored supersededBy is {len(stored)} chars, expected the "
+        f"full {len(long_name)}-char successor name (#5370)")
+    # (c) hence the stored value NAMES the successor Object — a name-keyed
+    #     probe on it (the ask path's own probe) finds it (the #5370 fix).
+    assert proj.g.query("MATCH (o:Object {name:$n}) RETURN count(o)",
+                        params={"n": stored}).result_set[0][0] == 1

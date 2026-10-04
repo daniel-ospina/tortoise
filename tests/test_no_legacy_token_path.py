@@ -103,6 +103,12 @@ COPY_ONLY_SOURCES = (
     "website/apps/dashboard/src/harnesses.js",
     "website/apps/dashboard/src/harnesses.test.js",
     "website/apps/dashboard/src/overviewEmptyAction.js",
+    # docs.html RENDERS install/config snippets for the user's own agent (in <code>
+    # blocks, with no <script> at all). The `${TORTOISE_API_KEY}` /
+    # `${env:TORTOISE_API_KEY}` forms are the config-file syntax Claude Code, Cursor and
+    # Pi require verbatim — so they must be shown, not rewritten. The file performs no
+    # network I/O, so it cannot be a credential path (guarded below).
+    "website/docs.html",
 )
 
 _NETWORK_IO = re.compile(

@@ -51,8 +51,7 @@ export function headerUpgradeEligible(team) {
 
 // Where the banner's limit nudge should send the user — or null when this
 // team/deployment has no working route, in which case the nudge is not
-// rendered at all (never a dead control; mirrors the header gate and
-// CapNotice's "See pricing" fallback).
+// rendered at all (never a dead control; mirrors the header gate).
 //   'checkout' — free/anon with a server-resolved price id: start the purchase
 //   'portal'   — a team that already has a Stripe customer (active/trialing/
 //                past_due/canceled/unpaid): checkout 409s on an active
@@ -61,7 +60,11 @@ export function headerUpgradeEligible(team) {
 export function nudgeRoute(team) {
   if (!team) return null
   if (headerUpgradeEligible(team) && team.checkout_price_id) return 'checkout'
-  if (PAID_STATUSES.includes(team.subscription_status)) return 'portal'
+  // Route on the SAME fail-safe the header uses: a PAID TIER whose status is
+  // absent/unrecognized (e.g. a manually granted solo) is still a payer, and
+  // checkout 409s on an active subscription — so it must reach the portal, not
+  // a button that can only fail.
+  if (isPaidTeam(team)) return 'portal'
   return null
 }
 
@@ -84,8 +87,21 @@ export function errorStatus(error) {
   return typeof error.status === 'number' ? error.status : null
 }
 
+// The machine-readable refusal CATEGORY a banner value carries, when it
+// carries one. `api()` attaches `detail.code` from a structured error body
+// (#2789); a client-side notice or a legacy string detail has none (null).
+// #4614 makes this load-bearing: a 402 is no longer always a plan limit.
+export function errorCode(error) {
+  if (error == null || typeof error === 'string') return null
+  return typeof error.code === 'string' ? error.code : null
+}
+
 export function normalizeError(error) {
-  return { message: errorMessage(error), status: errorStatus(error) }
+  return {
+    message: errorMessage(error),
+    status: errorStatus(error),
+    code: errorCode(error),
+  }
 }
 
 // The refusal phrasings our servers actually emit for a limit that an upgrade
@@ -100,18 +116,25 @@ const LIMIT_SIGNAL_RE = /\blimit (?:reached|exceeded)\b/i
 // does not relieve it, so it must never produce an upsell.
 const RATE_LIMIT_RE = /\brate[ -]?limit\b/i
 
+// 402s that are NOT plan limits, so an upgrade cannot relieve them and the
+// banner must never sell one (#4614). `cohort_cost_cap` is a SPEND ceiling
+// (tortoise/cohort_cost.py) — buying a bigger plan does not lift it, so
+// nudging an upgrade would be an upsell the user can pay for and still hit.
+const NON_PLAN_402_CODES = new Set(['cohort_cost_cap'])
+
 // The banner's "— Upgrade plan" affordance.
 //
 // A STRUCTURED 402 is the canonical plan-limit refusal and always qualifies
 // (it also covers 402 details that do not contain the literal phrase, e.g. a
-// budget-exhausted reason). Otherwise the message must carry an explicit
+// budget-exhausted reason) — EXCEPT a 402 whose `code` names a cap an upgrade
+// cannot lift (#4614). Otherwise the message must carry an explicit
 // "limit reached/exceeded" signal.
 //
 // A generic billing/checkout/portal error — most importantly our own billing
 // 404/500 — carries neither, so it reads as a defect, never a sales prompt.
 export function shouldNudgeUpgrade(error) {
-  const { message, status } = normalizeError(error)
-  if (status === 402) return true
+  const { message, status, code } = normalizeError(error)
+  if (status === 402) return !NON_PLAN_402_CODES.has(code)
   if (RATE_LIMIT_RE.test(message)) return false
   return LIMIT_SIGNAL_RE.test(message)
 }

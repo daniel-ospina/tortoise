@@ -17,9 +17,14 @@ silently drops the pathname the SPA branches on.
 """
 from __future__ import annotations
 
+import json
 import re
+import shutil
+import subprocess
 from html.parser import HTMLParser
 from pathlib import Path
+
+import pytest
 
 PUBLIC = (
     Path(__file__).resolve().parents[1]
@@ -36,6 +41,11 @@ SRC = PUBLIC.parent / "src"
 # visitor. Routing has two mechanisms; this guard must know both, or it reports
 # a served pathname as unrouted.
 FUNCTIONS = PUBLIC.parent / "functions"
+
+# #3048: the missing-ASSET contract's server half. A matching Function is
+# consulted BEFORE the static asset router, so this file — not `404.html` — is
+# what decides the response for a `/assets/*` path that resolves to no file.
+ASSETS_FUNCTION = FUNCTIONS / "assets" / "[[path]].ts"
 
 # Pathnames that are app routes even though they are not the root — they are
 # not derived from main.jsx (Stripe builds /team from the server side), so
@@ -597,3 +607,320 @@ def test_every_pathname_the_app_branches_on_is_routed() -> None:
         f"the app branches on {missing!r} but neither public/_redirects nor a "
         "Function on this origin serves it — that pathname would 404 (#3523)"
     )
+
+
+def _strip_comments(source: str) -> str:
+    """Remove `/* … */` and `// …` comments so a pin reads CODE, not prose.
+
+    A `//` inside a URL (`https://…`) must survive, so the line-comment pattern
+    uses a negative lookbehind for `:`. Without this the pin matched
+    `index.html` inside the Function's own doc block and failed on its own
+    rationale — a reminder that a substring assertion over a whole source file
+    is only meaningful once comments are excluded.
+    """
+    source = re.sub(r"/\*.*?\*/", "", source, flags=re.S)
+    return re.sub(r"(?<!:)//[^\n]*", "", source)
+
+
+def test_missing_assets_are_a_non_html_404_not_the_shell() -> None:
+    """#3048: a missing `/assets/*` path must not read as a valid asset.
+
+    The measured defect (2026-09-11): a hashed chunk that was never deployed
+    answered `200 text/html` with the SPA shell, so a deleted or rotated chunk
+    looked PRESENT, deploy verification false-positived on asset existence, and
+    a client holding a stale shell died on `Unexpected token '<'` instead of
+    failing cleanly.
+
+    #4006 fixed the STATUS for every path (`404.html`), and
+    `test_top_level_404_html_exists` pins that. It did not fix the CONTENT TYPE
+    for this prefix: `404.html` is an HTML document, so a missing `.js` was
+    answered `404 text/html` — still an HTML document where JavaScript was
+    asked for. `functions/assets/[[path]].ts` is the file that closes it, and
+    this test pins the two properties that make it work, because BOTH are
+    silently regression-prone:
+
+    * the Function must PASS REAL ASSETS THROUGH. A matching Function is
+      consulted BEFORE the static asset router (verified on the real runtime,
+      `npx wrangler@4 pages dev dist`), so a Function that answered everything
+      with its own 404 would take the entire dashboard bundle down while an
+      assertion that only proved "missing assets 404" stayed green.
+    * the not-found body must be NON-HTML. A `text/html` body is exactly what
+      makes a missing `.js` read as a document again.
+
+    The live half of this contract (the deployed host, and the Pages project
+    setting that lives outside the repo) is asserted post-deploy in
+    `.github/workflows/deploy-pages.yml`'s `deploy-dashboard` job — a repo-file
+    guard cannot see an out-of-repo re-widening of the fallback.
+    """
+    assert ASSETS_FUNCTION.is_file(), (
+        "website/apps/dashboard/functions/assets/[[path]].ts is missing — a "
+        "missing /assets/* path falls back to the generic 404.html, whose "
+        "Content-Type is text/html, so a missing .js still reads as an HTML "
+        "document (#3048)"
+    )
+    body = ASSETS_FUNCTION.read_text()
+    # The pins below read CODE, not prose: the file's doc block quotes the bug
+    # report (which names `index.html`) and explains `text/plain` and
+    # `ASSETS.fetch`, so a raw substring scan would pass on comments alone.
+    code = _strip_comments(body)
+    assert "ASSETS.fetch" in code, (
+        "the /assets/* Function no longer resolves through `env.ASSETS.fetch` — "
+        "a matching Function is consulted BEFORE the static asset router, so "
+        "every real bundle request would 404 (#3048)"
+    )
+    assert "text/plain" in code, (
+        "the /assets/* Function no longer answers the not-found case with a "
+        "non-HTML content type — a text/html body is what makes a missing .js "
+        "read as a document (#3048)"
+    )
+    assert "index.html" not in code, (
+        "the /assets/* Function serves index.html — that is the SPA fallback "
+        "this issue exists to remove from the asset prefix (#3048)"
+    )
+
+
+# ── #3048 — execute the not-found branch, do not describe it ────────────────
+#
+# The source pins above are necessary but NOT sufficient, and two of the
+# defects this test exists for proved it: `text/plain` also appears in the 503
+# branch (so swapping the not-found branch's type to `text/html` still
+# satisfied the pin), and NO pin asserted the STATUS at all (so rewinding the
+# not-found branch to `200` also passed). Those are the issue's own defects —
+# the `200 text/html` soft-404 and its `404 text/html` residue. The response
+# the Function BUILDS is only observable by EXECUTING the real exported
+# handler with a stubbed `env.ASSETS`, the convention of
+# tests/test_blog_agent_delete_guard.py and tests/test_admin_return_to.py.
+#
+# Node is optional (same convention): the source pins above still run when it
+# is unavailable, and this half skips cleanly.
+
+_ASSETS_DRIVER = """
+const mod = await import(process.argv[2]);
+const cases = JSON.parse(process.argv[3]);
+const out = [];
+for (const c of cases) {
+  // The stub is KEYED ON THE REQUEST: it echoes back exactly what it was
+  // handed, so the caller can assert the Function forwarded the ORIGINAL
+  // request (method, URL and headers) rather than a rebuilt one that silently
+  // drops `If-None-Match` / `Range` / `Accept-Encoding`.
+  const seen = [];
+  const env = c.binding === false ? {} : {
+    ASSETS: {
+      fetch: async (received) => {
+        seen.push({
+          method: received.method,
+          url: received.url,
+          headers: Object.fromEntries(received.headers),
+          probe: received.__probe ?? null,
+        });
+        return new Response(c.body === undefined ? null : c.body, {
+          status: c.status,
+          headers: c.headers || {},
+        });
+      },
+    },
+  };
+  const request = new Request('https://app.premiselabs.co' + c.path, {
+    method: c.requestMethod || 'GET',
+    headers: c.requestHeaders || {},
+  });
+  // A property only the ORIGINAL request object carries: a rebuilt request
+  // (e.g. `new Request(request.url)`) cannot show it.
+  request.__probe = c.path;
+  const res = await mod.onRequest({ request, env, params: { path: [] }, waitUntil: () => {} });
+  out.push({
+    status: res.status,
+    contentType: res.headers.get('Content-Type'),
+    cacheControl: res.headers.get('Cache-Control'),
+    etag: res.headers.get('ETag'),
+    headers: Object.fromEntries(res.headers),
+    body: await res.text(),
+    forwarded: seen,
+  });
+}
+console.log(JSON.stringify(out));
+"""
+
+# `miss` is the state the asset router is in for an undeployed chunk — the
+# #4006 `404.html` fallback, i.e. `404` with an HTML body. The rest model the
+# responses the pass-through must preserve unchanged: a real bundle asset (with
+# its request headers), a revalidation `304`, and a range `206`.
+_ASSETS_CASES: dict[str, dict] = {
+    "miss": {
+        "path": "/assets/index-DOES-NOT-EXIST.js",
+        "status": 404,
+        "headers": {"Content-Type": "text/html; charset=utf-8"},
+    },
+    "real_asset": {
+        "path": "/assets/index-DSI3aDc5i.js",
+        "status": 200,
+        # Non-ASCII so the byte-for-byte body check is a real byte check.
+        "body": 'console.log("caf\u00e9");\n',
+        # The last header is deliberately NOT one the assertions name: it pins
+        # that the WHOLE header set survives, not just the fields asserted here.
+        "headers": {
+            "Content-Type": "application/javascript",
+            "ETag": '"abc123"',
+            "Cache-Control": "public, max-age=0, must-revalidate",
+            "X-Content-Type-Options": "nosniff",
+        },
+        # What a real bundle request carries. They change the response (304 on
+        # `If-None-Match`, 206 on `Range`, compression on `Accept-Encoding`),
+        # so the Function must hand the request on untouched.
+        "requestHeaders": {
+            "Accept-Encoding": "gzip, br",
+            "If-None-Match": '"abc123"',
+            "Range": "bytes=0-0",
+            "X-Test-Marker": "real_asset",
+        },
+    },
+    "not_modified": {
+        "path": "/assets/index-DSI3aDc5i.js",
+        "status": 304,
+        "headers": {"ETag": '"abc123"'},
+        "requestHeaders": {"If-None-Match": '"abc123"'},
+    },
+    "range": {
+        "path": "/assets/font.woff2",
+        "status": 206,
+        "body": "x",
+        "headers": {"Content-Type": "font/woff2", "Content-Range": "bytes 0-0/4"},
+        "requestHeaders": {"Range": "bytes=0-0"},
+    },
+    "no_binding": {"path": "/assets/anything.js", "binding": False},
+}
+
+
+def _lower_headers(headers: dict[str, str]) -> dict[str, str]:
+    """HTTP header names are case-insensitive; undici lowercases them."""
+    return {k.lower(): v for k, v in headers.items()}
+
+
+# A module-scoped fixture: each node start costs seconds and the cases are
+# independent, so the real handler is invoked once for the whole module.
+@pytest.fixture(scope="module")
+def assets_results() -> dict[str, dict]:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not available")
+    import tempfile
+
+    order = list(_ASSETS_CASES)
+    with tempfile.TemporaryDirectory() as td:
+        driver = Path(td) / "driver.mjs"
+        driver.write_text(_ASSETS_DRIVER, encoding="utf-8")
+        proc = subprocess.run(
+            [
+                node,
+                "--experimental-strip-types",
+                str(driver),
+                str(ASSETS_FUNCTION),
+                json.dumps([_ASSETS_CASES[k] for k in order]),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    assert proc.returncode == 0, f"node failed:\n{proc.stderr}"
+    out = json.loads(proc.stdout)
+    assert len(out) == len(order), f"driver returned {len(out)} results for {len(order)} cases"
+    return dict(zip(order, out, strict=True))
+
+
+def test_missing_asset_answers_404_with_a_non_html_content_type(assets_results) -> None:
+    """#3048: the not-found branch must ANSWER the miss, not pass it through.
+
+    Behavioural, not source-shape. The handler is executed with a stub
+    `env.ASSETS` whose `fetch` answers like the asset router does for a miss
+    (`404 text/html`), and the response the Function BUILDS is asserted.
+
+    Falsifiable against the exact defects that motivated this test:
+      * re-widening the fallback to `200 text/html` fails the status pin — the
+        failure the source pins could NOT see;
+      * leaving the #3048 residue, `404 text/html`, fails the content-type pin;
+      * so does answering `404` with any other asset-ish type, because
+        `text/plain` is the deliberate one (the status is the existence signal,
+        and the body must not impersonate what was asked for).
+    """
+    res = assets_results["miss"]
+    assert res["status"] == 404, (
+        f"a missing asset answered {res['status']} — an asset that does not "
+        f"exist must not read as present (#3048): {res}"
+    )
+    ctype = (res["contentType"] or "").lower()
+    assert not ctype.startswith("text/html"), (
+        f"the missing-asset 404 carries Content-Type {res['contentType']!r} — an "
+        f"HTML body is what makes a missing .js read as a document (#3048): {res}"
+    )
+    assert ctype.startswith("text/plain"), (
+        f"the missing-asset body is no longer text/plain but "
+        f"{res['contentType']!r} (#3048): {res}"
+    )
+    assert res["cacheControl"] == "no-store", (
+        "a cacheable missing-asset 404 keeps answering for a path a later deploy "
+        f"may legitimately ship (#3048): {res}"
+    )
+
+
+def test_real_asset_responses_pass_through_verbatim(assets_results) -> None:
+    """A matching Function is consulted BEFORE the asset router, so the real
+    bundle's responses must survive it: a Function answering every request with
+    its own 404 would take the dashboard down while a "missing assets 404"
+    assertion stayed green (#3048).
+
+    "Verbatim" is asserted, not assumed. The stub is keyed on the request it is
+    handed, so this pins the HANDOFF (the original request — method, URL and the
+    `If-None-Match` / `Range` / `Accept-Encoding` headers — reaches the asset
+    router untouched), the BODY byte-for-byte, and the FULL header set (including
+    `X-Content-Type-Options`, which the Function's doc block claims survives).
+    Dropping the request headers kills `304`/`206`/compression in production;
+    rebuilding the response with only the named headers drops the `_headers`
+    policy — neither was visible to the previous, four-field version.
+    """
+    real = assets_results["real_asset"]
+    case = _ASSETS_CASES["real_asset"]
+
+    # 1. The handoff: the ORIGINAL request object reached `env.ASSETS.fetch`.
+    forwarded = real["forwarded"]
+    assert len(forwarded) == 1, f"the asset router was consulted {len(forwarded)} time(s): {real}"
+    handed = forwarded[0]
+    assert handed["method"] == "GET" and handed["url"].endswith(case["path"]), (
+        f"the request forwarded to the asset router was rewritten: {handed}"
+    )
+    assert handed["headers"] == _lower_headers(case["requestHeaders"]), (
+        "the request forwarded to the asset router lost or rewrote headers — "
+        "If-None-Match / Range / Accept-Encoding must reach it untouched or the "
+        f"304, 206 and compressed responses break: {handed}"
+    )
+    assert handed["probe"] == case["path"], (
+        "the Function handed the asset router a NEW request instead of the original — "
+        "a rebuilt request silently drops If-None-Match / Range / Accept-Encoding, "
+        f"killing 304, 206 and compressed responses: {handed}"
+    )
+
+    # 2. The response: status, the WHOLE header set, and the body, untouched.
+    assert (real["status"], real["contentType"]) == (200, "application/javascript"), real
+    assert real["etag"] == '"abc123"', f"the pass-through dropped the ETag: {real}"
+    assert real["cacheControl"] == "public, max-age=0, must-revalidate", real
+    assert real["headers"].get("x-content-type-options") == "nosniff", (
+        "the pass-through dropped X-Content-Type-Options, which the Function's "
+        f"doc block claims survives: {real}"
+    )
+    assert real["headers"] == _lower_headers(case["headers"]), (
+        "the pass-through rebuilt the response with a partial header set — every "
+        "header the asset router produced must survive, not only the ones this "
+        f"test names: {real}"
+    )
+    assert real["body"].encode() == case["body"].encode(), (
+        f"the pass-through altered the asset body: {real['body']!r} != {case['body']!r}"
+    )
+
+    assert assets_results["not_modified"]["status"] == 304, assets_results["not_modified"]
+    assert assets_results["range"]["status"] == 206, assets_results["range"]
+
+
+def test_missing_assets_binding_is_a_503_not_a_404(assets_results) -> None:
+    """An unbound ASSETS is a deployment fault, never "your asset is missing"."""
+    res = assets_results["no_binding"]
+    assert res["status"] == 503, f"a missing ASSETS binding answered {res['status']}: {res}"
+    assert res["status"] != 404, "a deployment fault was reported as a missing asset (#3048)"

@@ -5,15 +5,16 @@ The P3 canary-drop instrumentation: after N=5 consecutive green post-merge
 docker runs, the embedded canary lane is retired (the plan's instrumented
 streak). This script is the CLASSIFIER half of the mechanism:
 
-  Producer (fast-matrix job, gated half=='b' && post-merge)  -> artifacts
+  Producer (fast-matrix job, gated matrix.canary_producer && post-merge)
+                                                             -> artifacts
   Classifier (this script, run by the canary-streak job)      -> streak file
   `config/testdb-canary-streak.json` records {runs, consecutive_green,
   canary_dropped} — the drop is gated on `consecutive_green >= 5`.
 
-The classifier consumes the P1-7 ARTIFACT CONTRACT ONLY — the half-b
-artifact set (junitxml + expected-nodeids + step_wall, uploaded by Task 6
-Step 2 item 7) + the committed divergence-confirmation log + the PREVIOUS
-streak file. It NEVER reads a steps-output/$GITHUB_OUTPUT value (cycle-6
+The classifier consumes the P1-7 ARTIFACT CONTRACT ONLY — the producer-shard
+artifact set (junitxml + expected-nodeids + step_wall + producer marker,
+uploaded by Task 6 Step 2 item 7 / #6135) + the committed
+divergence-confirmation log + the PREVIOUS streak file. It NEVER reads a steps-output/$GITHUB_OUTPUT value (cycle-6
 P1-7 int-2: $GITHUB_OUTPUT is job-scoped and cannot cross to the
 canary-streak job).
 
@@ -24,8 +25,9 @@ input files always classify the same run. Buckets, in order:
                    unparseable; manifest missing/unreadable; a failure whose
                    message matches the connection-refused / health-check-
                    failed family (docker service down)  -> reset to 0
-  step-wall-gate   step_wall >= 3300s (55m — the E2E-5 watchdog gate) even
-                   with green junitxml+manifest              -> reset to 0
+  step-wall-gate   step_wall >= the producer shard's watchdog budget
+                   (E2E-5 gate; carried on the marker, #6135) even with a
+                   green junitxml+manifest                    -> reset to 0
   guard-red        a junitxml <skipped message> in the FalkorDB
                    availability-REGRESSION family (skip-guard's
                    is_falkor_reason_violation — the intentional families are
@@ -40,10 +42,13 @@ input files always classify the same run. Buckets, in order:
                    -> consecutive_green = prev + 1 (capped at the drop
                    threshold N=5); canary_dropped flips once >= N (sticky).
 
-Only the DOCKER half (half b) is classified — the embedded lane cannot
-prove the docker lane. Population: ONLY post-merge full-matrix runs count
-(the workflow gates the canary-streak job on push/schedule; PR runs never
-reach this script).
+Only the DOCKER lane is classified — the embedded lane cannot prove the
+docker lane. #6135: the classified leg is the PRODUCER SHARD (the matrix's
+`canary_producer`, positionally the last of the configured fast shards), not a
+fixed `half b`; its junit + manifest are self-consistent, so the buckets below
+are computed on that shard's own file set. Population: ONLY post-merge
+full-matrix runs count (the workflow gates the canary-streak job on
+push/schedule; PR runs never reach this script).
 
 Usage:
   python3 tools/testdb_canary_classify.py --run-id <id> \
@@ -55,20 +60,35 @@ the streak.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/testdb_canary_classify.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/testdb_canary_classify.py`"
+    )
+
 import argparse
 import json
 import os
 import re
-import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
-# The E2E-5 watchdog gate: the fast-matrix run step's `timeout -s INT -k 10
-# 55m` — a step that silently rides the 55m watchdog and passes green is a
-# masked wall regression (cycle-4 P2-4: step_wall is a MANDATORY input; it
-# must break the streak like any other failure).
+# The E2E-5 watchdog gate: the fast-matrix run step's
+# `timeout -s INT -k 10 <watchdog>m` — a step that silently rides its watchdog
+# and passes green is a masked wall regression (cycle-4 P2-4: step_wall is a
+# MANDATORY input; it must break the streak like any other failure).
+#
+# #6135: this constant is now only the FALLBACK for a marker that does not
+# carry its own budget. The fast pool is split per-shard and the budget is
+# PER-LEG, so `classify()` prefers `marker["watchdog_minutes"] * 60` — a fixed
+# 55m gate would let a 15m shard run to 25m and still read green.
 STEP_WALL_GATE_SECONDS = 55 * 60
 
 # The epic's N (epic indicator #2): consecutive green docker runs before the
@@ -233,11 +253,18 @@ def _read_step_wall(path: str | None) -> int | None:
 
 
 def _read_producer_marker(path: str | None) -> dict | None:
-    """The canary-producer marker (half-b leg, post-merge). None when
+    """The canary-producer marker (the producer shard, post-merge). None when
     missing/unreadable. The marker is the population gate's executable form:
-    only a full==true half-b leg qualifies for the streak — a marker proving
-    any other shape (or none) is an infra-flake (the run is not a valid
-    canary population member)."""
+    only a full==true PRODUCER leg qualifies for the streak — a marker proving
+    any other shape (or none) is an infra-flake (the run is not a valid canary
+    population member).
+
+    #6135: the qualification is the `producer` ROLE the workflow writes, not a
+    shard NAME. The old `half == 'b'` test stopped being meaningful the moment
+    the fast pool was split more than two ways — the producer is now the last
+    shard, and its label (`c`..`i`) must never gate the streak. `half` is still
+    carried, but only as evidence of which shard produced the artifact.
+    """
     if not path or not os.path.exists(path):
         return None
     try:
@@ -269,7 +296,7 @@ def classify(junitxml: str | None, manifest: str | None, step_wall: str | None,
              run_id: int, threshold: int = CANARY_DROP_THRESHOLD,
              step_wall_gate: int = STEP_WALL_GATE_SECONDS,
              producer_marker: str | None = None) -> dict:
-    """Deterministic classification of one post-merge docker-half run.
+    """Deterministic classification of one post-merge producer-shard run.
 
     Returns the NEW streak record + the classification bucket. Reads ONLY
     the declared input files (P1-7 artifact contract).
@@ -279,21 +306,36 @@ def classify(junitxml: str | None, manifest: str | None, step_wall: str | None,
     detail = ""
 
     # Population gate (review finding #7): the producer marker is the proof
-    # this run is a full==true half-b post-merge leg. Missing or wrong shape
-    # -> infra-flake reset (the run never qualified for the streak).
+    # this run is a full==true PRODUCER-SHARD post-merge leg. Missing or wrong
+    # shape -> infra-flake reset (the run never qualified for the streak).
+    # #6135: the `detail` strings are persisted in the streak file and printed
+    # into the step summary, so they must name the ROLE — "half-b" would send an
+    # operator to a leg that is not the producer at S>2.
     marker = _read_producer_marker(producer_marker)
     if producer_marker and marker is None:
         bucket = "infra-flake"
-        detail = "canary-producer marker missing/unreadable (half-b leg did not qualify)"
+        detail = "canary-producer marker missing/unreadable (the producer shard did not qualify)"
         return _settle(prev, bucket, detail, run_id, threshold)
     if marker is not None and (
-            str(marker.get("half")) != "b"
+            marker.get("producer") is not True
             or str(marker.get("full")) != "true"):
         bucket = "infra-flake"
         detail = (f"canary-producer marker proves a non-qualifying leg "
-                  f"(half={marker.get('half')!r}, full={marker.get('full')!r}) — "
-                  f"only full==true half-b runs populate the streak")
+                  f"(producer={marker.get('producer')!r}, "
+                  f"half={marker.get('half')!r}, full={marker.get('full')!r}) — "
+                  f"only full==true producer-shard runs populate the streak")
         return _settle(prev, bucket, detail, run_id, threshold)
+
+    # #6135: the step-wall gate is the PRODUCER SHARD's watchdog, carried on
+    # the marker — a smaller shard has a smaller budget, so a fixed 55m gate
+    # would let a 15m shard run to 25m and still read green (the E2E-5 wall
+    # signal goes blind). An absent/invalid value falls back to the CLI gate
+    # (the parameter default), so an older marker read by a newer classifier
+    # is not silently unbounded.
+    marker_watchdog = marker.get("watchdog_minutes") if marker else None
+    if isinstance(marker_watchdog, int) and not isinstance(marker_watchdog, bool) \
+            and marker_watchdog > 0:
+        step_wall_gate = marker_watchdog * 60
 
     wall = _read_step_wall(step_wall)
     if wall is None:

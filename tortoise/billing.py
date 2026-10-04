@@ -501,6 +501,22 @@ def apply_limits(sdk, org_id: str, tier: str) -> None:
     )
 
 
+def _supabase_mode() -> bool:
+    """True when billing must use the Supabase control plane (#669).
+
+    The lazy import mirrors ``apply_limits``: a selfhost/minimal install
+    without ``supabase_control`` stays registry-only and never pays the import.
+    Explicit ``TORTOISE_CONTROL_PLANE=supabase`` with missing creds returns
+    True (fail-closed) — the seam's ``get_control_plane()`` then raises, so a
+    Supabase-only deployment can never silently fall back to the registry.
+    """
+    try:
+        from tortoise.supabase_control import is_supabase_enabled
+    except ImportError:
+        return False
+    return is_supabase_enabled()
+
+
 def _subscription_items(sub: dict) -> list:
     """A Stripe subscription's item rows, for either payload shape.
 
@@ -577,8 +593,16 @@ def mirror_subscription(sdk, org_id: str, sub: dict, *,
     """Authoritative push of a Stripe Subscription onto the Org mirror.
 
     Order: resolve price→tier (raises on unknown price BEFORE any write) →
-    ``apply_limits`` → idempotent status/period SET. Used by boot reconcile and
-    the ``customer.subscription.updated`` webhook handler.
+    ``apply_limits`` → idempotent status/period write. The ONLY caller is
+    ``reconcile_org`` (boot reconcile was removed in #4262; the live
+    ``customer.subscription.updated`` handler inlines its own ``_set``).
+
+    The status/period write is seam-aware exactly like the webhook's ``_set``
+    and ``apply_limits`` (#4726): Supabase mode PATCHes the authoritative
+    ``organizations`` row — #669 deletes the registry graph there, so the old
+    unconditional ``MATCH (t:Team) SET`` matched 0 rows and reported success
+    (a silent billing loss) and, worse, RESURRECTED the deleted graph by
+    executing on it (#878). Registry/selfhost mode keeps the ``:Team`` twin.
 
     Returns {"tier", "interval", "status"} for audit/analytics.
     """
@@ -592,17 +616,6 @@ def mirror_subscription(sdk, org_id: str, sub: dict, *,
     else:
         tier, interval = subscription_plan(sub)
     apply_limits(sdk, org_id, tier)
-    params: dict = {
-        "id": org_id,
-        "status": status,
-        "cancel_at_period_end": bool(sub.get("cancel_at_period_end")),
-    }
-    set_fields = (
-        "SET t.subscription_status=$status, t.cancel_at_period_end=$cancel_at_period_end"
-    )
-    if sub.get("id"):
-        set_fields += ", t.subscription_id=$subscription_id"
-        params["subscription_id"] = sub["id"]
     # #4216: read the bounds through the top-level-then-item helper, so a
     # Basil-or-later Stripe account (period fields on the subscription ITEMS)
     # still writes a window. Each bound is written ONLY when the payload
@@ -610,26 +623,45 @@ def mirror_subscription(sdk, org_id: str, sub: dict, *,
     # already stored.
     #
     # A payload that carries ONE bound and not the other leaves a half-known
-    # REGISTRY anchor here (this writer owns the ``:Team`` graph twin). That is
-    # NOT repaired by ``20260919000001`` — that migration updates the Supabase
-    # ``organizations`` row, a different lane this writer never touches. The
-    # half-known twin is REPORTED, not silent (the meter refuses it and
-    # ``cohort_cost`` raises the #3981 alert) and is COMPLETED by the next
-    # authoritative push — a later ``mirror_subscription`` or
-    # ``customer.subscription.updated`` payload carrying the missing bound.
+    # anchor. That is REPORTED, not silent — ``metering._current_period``
+    # refuses a half-known window and ``cohort_cost`` raises the #3981 alert —
+    # and is COMPLETED by the next authoritative push carrying the missing
+    # bound. ``20260919000001`` additionally repairs the Supabase
+    # ``organizations`` row, which this writer now updates in Supabase mode
+    # (#4726).
     period_start, period_end = subscription_period_bounds(sub)
+    # One field set, derived once for both stores. ``cancel_at_period_end`` is
+    # a REGISTRY-TWIN property only: ``organizations`` has no such column
+    # (0012 adds subscription_status / customer_email / grace_until /
+    # current_period_end; 20260918000001 adds current_period_start) and no
+    # reader consumes it. It is therefore absent from the control-plane dict
+    # rather than passed and silently dropped by ``update_org_billing``'s
+    # allow-list — the exact silent-drop class this change removes.
+    twin: dict = {
+        "subscription_status": status,
+        "cancel_at_period_end": bool(sub.get("cancel_at_period_end")),
+    }
+    if sub.get("id"):
+        twin["subscription_id"] = sub["id"]
     if period_start:
-        set_fields += ", t.current_period_start=$period_start"
-        params["period_start"] = period_start
+        twin["current_period_start"] = period_start
     if period_end:
-        set_fields += ", t.current_period_end=$period_end"
-        params["period_end"] = period_end
+        twin["current_period_end"] = period_end
     if customer_email:
-        set_fields += ", t.customer_email=$customer_email"
-        params["customer_email"] = customer_email
-    sdk._get_registry().query(
-        f"MATCH (t:Team {{id:$id}}) {set_fields}", params=params
-    )
+        twin["customer_email"] = customer_email
+
+    if _supabase_mode():
+        from tortoise.supabase_control import get_control_plane, update_org_billing
+        update_org_billing(
+            get_control_plane(), org_id,
+            {k: v for k, v in twin.items() if k != "cancel_at_period_end"},
+        )
+    else:
+        set_fields = "SET " + ", ".join(f"t.{k}=${k}" for k in twin)
+        sdk._get_registry().query(
+            f"MATCH (t:Team {{id:$id}}) {set_fields}",
+            params={"id": org_id, **twin},
+        )
     return {"tier": tier, "interval": interval, "status": status}
 
 
@@ -641,21 +673,37 @@ def reconcile_org(sdk, org_id: str, force: bool = False) -> dict:
       → LIST subscriptions → first active/trialing/past_due → mirror.
     - else no-op.
 
+    #4726: the identifiers are read from the SAME store ``mirror_subscription``
+    writes — the authoritative ``organizations`` row via the control-plane
+    seam in Supabase mode (#669 deletes the registry graph there, so the old
+    registry read found nothing and any write resurrected it, #878); the
+    ``:Team`` node in registry/selfhost mode. ``sdk`` may be ``None`` in
+    Supabase mode: this path must never construct a registry-namespaced SDK.
+
     Best-effort by contract: raises ``BillingError`` (unknown price — caller
-    logs + keeps stored tier/status) and ``StripeAPIError`` / ``BillingConfigError``
-    (outage / unconfigured — caller catches and logs; never breaks boot).
+    logs + keeps stored tier/status, and org-not-found) and ``StripeAPIError``
+    / ``BillingConfigError`` (outage / unconfigured — caller catches and logs;
+    never breaks boot).
 
     ``force`` is accepted for signature compatibility; reconcile always repairs
     from Stripe truth.
     """
-    reg = sdk._get_registry()
-    rows = reg.query(
-        "MATCH (t:Team {id:$id}) RETURN t.subscription_id, t.stripe_customer_id",
-        params={"id": org_id},
-    ).result_set
-    if not rows:
-        raise BillingError(f"reconcile_org: org {org_id!r} not found in registry")
-    sub_id, customer_id = rows[0]
+    if _supabase_mode():
+        from tortoise.supabase_control import get_control_plane, org_billing_state
+        row = org_billing_state(get_control_plane(), org_id)
+        if not row:
+            raise BillingError(f"reconcile_org: org {org_id!r} not found")
+        sub_id = row.get("subscription_id")
+        customer_id = row.get("stripe_customer_id")
+    else:
+        reg = sdk._get_registry()
+        rows = reg.query(
+            "MATCH (t:Team {id:$id}) RETURN t.subscription_id, t.stripe_customer_id",
+            params={"id": org_id},
+        ).result_set
+        if not rows:
+            raise BillingError(f"reconcile_org: org {org_id!r} not found in registry")
+        sub_id, customer_id = rows[0]
     if not sub_id and not customer_id:
         return {"org_id": org_id, "action": "noop"}
     client = StripeClient()

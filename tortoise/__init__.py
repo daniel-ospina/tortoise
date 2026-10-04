@@ -20,6 +20,12 @@ Import-time loud-fail guard (issue #176, plan Task 8):
   ORIGINAL class regardless of this re-export. Protection for the projection
   path comes from FalkorProjection's hard-reject (Task 7) — this guard covers
   code importing `tortoise.FalkorDB` or importing redislite after tortoise.
+
+  #5386: the redislite import is DEFERRED to the first access of
+  `tortoise.FalkorDB` (PEP 562 module `__getattr__`, below). Deferral changes
+  WHEN redislite loads, never WHICH class `tortoise.FalkorDB` returns: the
+  original redislite class is still the subclass base, and the guard still
+  covers exactly the same surface described above.
 """
 from __future__ import annotations
 
@@ -30,28 +36,27 @@ __version__ = "0.2.0"
 
 import os
 
-try:
-    from redislite.falkordb_client import FalkorDB as _OriginalFalkorDB
-except ModuleNotFoundError:  # pragma: no cover - dep-missing environment
-    # falkordblite not installed: do NOT crash at import time, or the CLI
-    # install guidance in `tortoise init` can never run (issue #716). The
-    # subclass below falls back to a placeholder that raises a clear
-    # ImportError at construction instead.
-    _OriginalFalkorDB = None  # type: ignore[assignment]
+from tortoise.config import RELATIVE_PATH_ERROR
 
-from tortoise.config import RELATIVE_PATH_ERROR  # noqa: I001
+# #1371/#5386: the eager import binds `atexit_fast_close` (used at the
+# registration seam below) and arms the redislite guard finder at
+# module-import time, before any client construction.
+from tortoise.embedded_lifecycle import atexit_fast_close
 from tortoise.fork_safety import (
     enforce_embedded_fork_safety,
     fork_safe_serverconfig,
 )
-# #1371: eager import registers the batch atexit flush (module-import time,
-# before any client construction) so LIFO ordering runs it LAST.
-from tortoise.embedded_lifecycle import atexit_fast_close
 
 
-if _OriginalFalkorDB is not None:
+def _build_guarded_falkordb(_OriginalFalkorDB):
+    """Build the guarded subclass over redislite's FalkorDB (#5386).
 
-    class FalkorDB(_OriginalFalkorDB):
+    Reached only from `__getattr__` below, on the first access of
+    `tortoise.FalkorDB` — so `import tortoise` no longer pays redislite's
+    import cost. The class body is the pre-existing guard, unchanged.
+    """
+
+    class FalkorDB(_OriginalFalkorDB):  # type: ignore[valid-type]  # a class object, not a type alias (#5414)
         """Guarded subclass of redislite's FalkorDB.
 
         Raises RuntimeError when `path` is relative (never permitted — relative
@@ -179,8 +184,8 @@ if _OriginalFalkorDB is not None:
             _atexit.register(self._atexit_close)
 
         def _atexit_close(self) -> None:
-            """#1371: atexit seam — collect ephemeral test servers for the
-            batch flush first.
+            """#1371: atexit seam — collect ephemeral test servers so interpreter
+            exit takes the fast close.
 
             Falls through to the normal _t_close when the fast path does not
             apply (non-ephemeral path, flag unset, other clients connected,
@@ -211,10 +216,33 @@ if _OriginalFalkorDB is not None:
             """
             if getattr(self, "_t_owner_released", False):
                 return
-            self._t_owner_released = True
-            from tortoise.embedded_lifecycle import forget_owner, owner_socket_of
+            from tortoise.embedded_lifecycle import (
+                begin_owner_release,
+                end_owner_release,
+                forget_owner,
+                owner_socket_of,
+            )
             sock = getattr(self, "_t_socket_file", None) or owner_socket_of(self)
-            forget_owner(sock)
+            # #3630 F1: publish this release as IN FLIGHT before the flag is
+            # set and before the count moves. A `fork()` from another thread
+            # can land on either side of the flag-set, and the child inherits
+            # no threads, so the marker is what lets the adoption hook tell the
+            # two apart: a marker whose flag is already True belongs to a
+            # release the child can never complete (drop the claim), while a
+            # marker whose flag is still False belongs to a release the
+            # child's own `_t_release_owner` will still perform (keep it).
+            # Without the marker the flag-set side would leak (a claim that can
+            # never be decremented → the server is never reaped).
+            #
+            # `forget_owner` consumes THIS client's marker itself (by identity —
+            # #3630 P1); `end_owner_release` is the cleanup net for a
+            # `forget_owner` that never ran.
+            release_key = begin_owner_release(self, sock)
+            try:
+                self._t_owner_released = True
+                forget_owner(sock, self)
+            finally:
+                end_owner_release(release_key, self)
 
         def close(self, *args, **kwargs):
             """#3599: release the owner-record claim on the PUBLIC close seam.
@@ -306,7 +334,11 @@ if _OriginalFalkorDB is not None:
             self._t_close()
             return False
 
-else:
+    return FalkorDB
+
+
+def _build_placeholder_falkordb():
+    """Build the dep-missing placeholder (issue #716)."""
 
     class FalkorDB:
         """Placeholder for when falkordblite is absent (issue #716).
@@ -321,3 +353,31 @@ else:
                 "falkordblite is not installed — embedded mode requires it. "
                 "Run: pip install falkordblite"
             )
+
+    return FalkorDB
+
+
+# `importlib.reload()` re-executes this module into its EXISTING dict, and the
+# first access of `FalkorDB` caches the class there. Drop any cache carried
+# over from a previous execution so a reload re-derives the class: otherwise
+# the stale binding would shadow `__getattr__` below forever, and after a
+# reload that hid redislite the dep-missing placeholder branch (issue #716)
+# could never be reached again.
+globals().pop("FalkorDB", None)
+
+
+def __getattr__(name: str):
+    """Expose `FalkorDB` lazily (PEP 562) — see the module docstring (#5386)."""
+    if name != "FalkorDB":
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    try:
+        from redislite.falkordb_client import FalkorDB as _OriginalFalkorDB
+    except ModuleNotFoundError:  # pragma: no cover - dep-missing environment
+        # falkordblite not installed: do NOT crash at import time, or the CLI
+        # install guidance in `tortoise init` can never run (issue #716). The
+        # placeholder raises a clear ImportError at construction instead.
+        FalkorDB = _build_placeholder_falkordb()
+    else:
+        FalkorDB = _build_guarded_falkordb(_OriginalFalkorDB)
+    globals()["FalkorDB"] = FalkorDB
+    return FalkorDB

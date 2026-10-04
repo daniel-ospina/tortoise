@@ -29,7 +29,7 @@ from tortoise.hook_install import count_canonical_markers, read_hook_version
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOK = REPO_ROOT / "tortoise" / "cursor-hooks" / "session-end.sh"
-VERSION_MARKER = "# tortoise-hook-version: 2"
+VERSION_MARKER = "# tortoise-hook-version: 3"
 
 #: The machine's REAL home, resolved from the password database — NOT from
 #: ``$HOME``, which tests monkeypatch.  ``~/.cursor`` under this path is the
@@ -117,11 +117,11 @@ def _wait_for_done(log: Path, timeout: float = 12) -> None:
 def test_hook_artifact_carries_the_version_marker():
     """The install contract is one marker, column-0, one per file.
 
-    Mutation: delete ``# tortoise-hook-version: 2`` from the shipped hook — the
+    Mutation: delete ``# tortoise-hook-version: 3`` from the shipped hook — the
     install then has no generation to compare and this REDs."""
     text = HOOK.read_text(encoding="utf-8")
     assert text.startswith(f"#!/usr/bin/env bash\n{VERSION_MARKER}\n"), text[:120]
-    assert read_hook_version(HOOK) == 2
+    assert read_hook_version(HOOK) == 3
     assert count_canonical_markers(HOOK) == 1, (
         "exactly one column-0 marker (an in-body mention is not a declaration)")
 
@@ -259,6 +259,9 @@ def test_real_transcript_parses_and_imports_through_the_real_cli(tmp_path, monke
     # 2. The REAL CLI path, with only the network transport stubbed (a receipt
     # is a 2xx server fact; `_cmd_sessions_import` builds the request for real).
     monkeypatch.setenv("TORTOISE_API_KEY", "tt_test")
+    # #3615: capture is gated on EXPLICIT consent — a credential is not consent.
+    # This test exercises the real import path, so opt in.
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
     monkeypatch.delenv("TORTOISE_API_URL", raising=False)
     monkeypatch.setenv("TORTOISE_IMPORT_RECEIPT_DIR", str(tmp_path / "receipts"))
     monkeypatch.setenv("HOME", str(tmp_path))

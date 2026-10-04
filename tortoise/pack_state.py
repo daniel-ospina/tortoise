@@ -347,3 +347,140 @@ def _read_installs(g) -> list[tuple[str, str, str, str, str | None]]:
         "ORDER BY p.namespace",
     ).result_set
     return [tuple(r) for r in rows]
+
+
+# ── #2714 layer 1 (APPROVAL): the graph's active-namespace set ────────────
+#
+# The compile seams (``compile_value_brief``, the ``build_master_list`` prompt
+# it feeds, and ``compile_vocab``) used to iterate the CATALOG UNION — every
+# pack in ``packs/``, in every graph. #2714 gates them on the GRAPH's
+# installed set instead. The gating itself is a pure filter; the only thing
+# that needs the graph is this reader.
+
+#: The node properties that carry a ``ns:kind`` value. Mirrors the ontology's
+#: kind fields (``hosted_api._KIND_PROP_KEYS`` is the import-time twin — kept
+#: as a local copy so this reader never depends on the hosted import path).
+_KIND_PROP_KEYS: tuple[str, ...] = (
+    "objectKind", "pointKind", "eventKind", "sourceKind",
+    "documentKind", "subjectKind", "actionKind", "kind",
+)
+
+
+def graph_kind_namespaces(g) -> frozenset[str]:
+    """Namespaces already PRESENT IN THE GRAPH'S DATA (the back-compat union).
+
+    A pack that was installed when data was written can stop being installed
+    (``delete_tenant_manifest`` flips its ``PackInstall`` to
+    ``status='removed'``) while its kinds remain all over the graph. Those
+    kinds must stay READABLE and WRITABLE — a gate that rejects vocabulary
+    the graph already contains would make old data un-updatable (#2714
+    indicator 2).
+
+    Un-namespaced kind values (legacy/core forms) contribute nothing: only a
+    ``ns:kind`` string names a pack to keep alive.
+
+    ⚠️ COST: one property scan per key (8) — a whole-graph read. The
+    caller's memo does NOT shelter it: ``tenant_view`` folds the approval set
+    into its cache key, so the scan runs on every call (measured ~6 ms at
+    300 nodes, and O(nodes) in the graph's size). The gate is a compile-time
+    decision, not a render-time one — the cost is per capture, not per prompt
+    render. An index on the kind properties, or a cheap data-version signal
+    feeding the key, is the optimization.
+
+    ⚠️ FAILURE DIRECTION — NARROWING, not widening. A property scan that
+    raises omits that key's namespaces (logged at WARNING) and the loop
+    continues, so the returned union can only be SMALLER than a complete
+    scan — never larger. The consequence is deliberate and bounded: a
+    namespace discoverable ONLY through the failed key drops out of the
+    back-compat union, so historical data using it could be refused at the
+    write gate until a later successful scan. The record leg (the inline
+    ``recorded`` set in ``graph_installed_namespaces``) and the core
+    vocabulary are unaffected. The alternative — failing open to the catalog
+    union — would silently DISABLE the gate on a graph error and re-create
+    the exact "every graph mints every pack's kinds" defect #2714 exists to
+    fix. Pinned by ``test_kind_scan_failure_narrows_never_widens``.
+    """
+    out: set[str] = set()
+    for key in _KIND_PROP_KEYS:
+        try:
+            rows = g.query(
+                f"MATCH (n) WHERE n.{key} IS NOT NULL "
+                f"RETURN DISTINCT n.{key}",
+            ).result_set
+        except Exception as e:  # noqa: BLE001, RUF100
+            # Narrow the union, never widen it — see FAILURE DIRECTION above.
+            log.warning("pack_state: kind-namespace scan failed for %s — "
+                        "that key's namespaces are omitted from the "
+                        "back-compat union: %s", key, e)
+            continue
+        try:
+            for row in rows:
+                val = row[0] if row else None
+                if isinstance(val, str) and ":" in val:
+                    ns = val.split(":", 1)[0].strip()
+                    if ns:
+                        out.add(ns)
+        except Exception as e:  # noqa: BLE001, RUF100
+            # The DECODE is inside the same NARROWING guard as the scan: a
+            # row we cannot decode (a non-subscriptable row, a None
+            # result_set) contributes nothing, and everything decoded so
+            # far stays. Letting it escape would break the contract the
+            # FAILURE DIRECTION note above states — and, because
+            # graph_installed_namespaces does not catch it, would abort the
+            # approval-set read rather than narrow it.
+            log.warning("pack_state: kind-namespace row decode failed for "
+                        "%s — the remaining rows for that key are omitted "
+                        "from the back-compat union: %s", key, e)
+            continue
+    return frozenset(out)
+
+
+def graph_installed_namespaces(sdk: TortoiseSDK, *,
+                               graph_name: str | None = None
+                               ) -> frozenset[str] | None:
+    """The graph's APPROVAL set (#2714 layer 1) — which packs this graph allows.
+
+    ``None`` is a MEANINGFUL return, not an empty one:
+
+    * ``None`` — the graph has **no ``:PackInstall`` records at all**. The
+      caller MUST fall back to the catalog union (today's behaviour). Every
+      pre-#318 graph, every self-hosted graph, and every graph restored
+      without pack state has no records — gating those to ``core``-only would
+      break them while the new tests still passed (#2714 indicator 3).
+    * a frozenset — the graph HAS records. The set is
+      ``recorded ∪ already-in-data``: the recorded namespaces (any status —
+      see the removal note below) plus every namespace already present in
+      the graph's data (``graph_kind_namespaces``).
+
+    ``ensure_tenant_packs``/``get_tenant_packs`` are deliberately NOT used
+    here: both SELF-HEAL an empty graph by re-activating the starter set
+    (#318 convergence), which would make "no activation records"
+    indistinguishable from "starter set installed" and destroy the union
+    fallback above. This reads the raw records instead.
+
+    ⚠️ This is a whole-graph read (it runs the per-property kind scans).
+    ``tenant_view`` — its only caller — folds the returned set into its memo
+    KEY, so the scan runs per call and the memo caches the compiled brief,
+    not the scan. That is deliberate: a memo whose key omitted the data leg
+    served a stale approval set (an imported graph, or a commit through a
+    write door that does not yet consult the gate — see #5163).
+
+    **Removal semantics (#2714 open decision (a) — uninstall vs tombstone):**
+    the non-destructive default is taken — a namespace with a non-active
+    record (``status='removed'``) STAYS in the set, because its kinds are
+    still in the data and the compile seams must keep accepting them. This
+    is the "keep writable union" arm of the recorded open decision; the
+    "tombstone" arm would filter ``status != 'active'`` out here. Nothing
+    is decided silently about the USER surface — per-graph selection/removal
+    UI is #2728, gated on the #318-D1 decision.
+
+    Graph-unreachable RAISES (same posture as ``get_tenant_packs``: an
+    outage must never read as "this graph has no packs" and silently widen
+    or narrow the gate).
+    """
+    g = _target_graph(sdk, graph_name)
+    rows = _read_installs(g)
+    if not rows:
+        return None
+    recorded = {ns for ns, _v, _status, _src, _at in rows if ns}
+    return frozenset(recorded) | graph_kind_namespaces(g)

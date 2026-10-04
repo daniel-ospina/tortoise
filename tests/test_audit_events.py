@@ -5,8 +5,10 @@ skipped when TEST_AUDIT_DB_URI is not set.
 """
 from __future__ import annotations  # noqa: I001
 
+import hashlib
 import json
 import os
+import traceback
 from pathlib import Path  # noqa: F401
 from unittest import mock
 
@@ -24,6 +26,61 @@ def audit_logger(tmp_path, monkeypatch):
     logger._fallback_dir = fallback_dir
     logger._fallback_path = fallback_dir / "audit_fallback.jsonl"
     return logger
+
+
+class TestAuditDsnRedaction:
+    """#2903: the ``TORTOISE_AUDIT_DSN`` validation error must not echo the DSN.
+
+    Same leak class as #2796 (``backup_config`` / ``secret_store`` /
+    ``hosted_backup``): a malformed-but-secret-bearing connection string is
+    still secret material, so the error reports a non-reversible fingerprint,
+    never a raw prefix. The pre-fix code emitted ``self._dsn[:20]`` — for the
+    DSN below that is the scheme plus the password head.
+    """
+
+    # 20 chars = "redis://:Hunter2Swor" — includes 12 chars of the password.
+    _SECRET_DSN = "redis://:Hunter2Swordfish@host:6379/0"
+
+    def _logger(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("TORTOISE_AUDIT_DSN", self._SECRET_DSN)
+        fallback_dir = tmp_path / ".tortoise"
+        fallback_dir.mkdir(parents=True, exist_ok=True)
+        logger = AuditLogger()
+        logger._fallback_dir = fallback_dir
+        logger._fallback_path = fallback_dir / "audit_fallback.jsonl"
+        return logger
+
+    def test_malformed_dsn_is_not_echoed(self, monkeypatch, tmp_path):
+        logger = self._logger(monkeypatch, tmp_path)
+
+        with pytest.raises(ValueError, match="postgresql://") as exc:
+            logger._connect()
+
+        msg = str(exc.value)
+        # Assert on the 20-char prefix the pre-fix code emitted (asserting
+        # only "a message exists" would pass vacuously) and on the password
+        # head itself.
+        assert self._SECRET_DSN[:20] not in msg
+        assert "Hunter2Sword" not in msg
+        # Pin the fingerprint so a constant/placeholder also fails.
+        assert hashlib.sha256(self._SECRET_DSN.strip().encode()).hexdigest()[:8] in msg
+
+    def test_append_path_redacts_dsn_in_rendered_traceback(self, monkeypatch, tmp_path):
+        """The leak's destination is a log/telemetry line rendering the
+        traceback (the unhandled-exception handler and the purge sweep log
+        with ``exc_info=True``). Drive the public ``append`` path and assert
+        nothing secret survives rendering."""
+        logger = self._logger(monkeypatch, tmp_path)
+
+        with pytest.raises(ValueError) as exc:
+            logger.append("team-1", "user-1", "op")
+
+        rendered = "".join(
+            traceback.format_exception(type(exc.value), exc.value, exc.value.__traceback__)
+        )
+        assert self._SECRET_DSN[:20] not in rendered
+        assert "Hunter2Sword" not in rendered
+        assert hashlib.sha256(self._SECRET_DSN.strip().encode()).hexdigest()[:8] in rendered
 
 
 class TestAuditLoggerJSONL:

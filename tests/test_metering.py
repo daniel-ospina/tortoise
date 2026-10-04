@@ -19,6 +19,7 @@ from tortoise.metering import (
     _reset_thresholds_for_tests,
     _thresholds_fired,  # noqa: F401
     get_current_usage,
+    record_ask_usage,
     record_write_ops,
 )
 from tortoise.quota import QuotaCheckError
@@ -161,8 +162,11 @@ class TestRecordWriteOps:
         and window resolution RAISES by design — so the old shape could not
         tell "I could not resolve the window" apart from "the row write
         failed". The window resolves; the MERGE raises; the write is non-fatal
-        (the increment is dropped — it is NOT retried at any call site; that
-        residual is #3824's representation scope).
+        (the increment is dropped — it is NOT retried at any call site; since
+        #4779 that drop is REPRESENTED durably as
+        ``drop_class="increment_write_unconfirmed"``. #3824 does NOT represent
+        it: that counter rides the capture-cost MEASUREMENT row, a different
+        surface).
         """
         sdk, tid = reg_sdk
         _break_increment_only(monkeypatch, sdk)
@@ -299,7 +303,9 @@ class TestThresholdEvents:
         )
 
     def test_no_threshold_for_free_tier(self, reg_sdk, caplog):
-        """Free/Solo tiers never trigger threshold events (no overage)."""
+        """Free (a zero-price tier) never triggers threshold events: no
+        overage. Solo is PAID and therefore metered since #4815 — see
+        test_paid_solo_tier_triggers_threshold_events."""
         sdk, tid = reg_sdk
         _reset_thresholds_for_tests()
         # Switch team to free tier
@@ -314,6 +320,37 @@ class TestThresholdEvents:
         warnings = _metering_records(caplog)
         assert len(warnings) == 0, (
             f"Free tier should not trigger threshold events, got: {warnings}"
+        )
+
+    def test_paid_solo_tier_triggers_threshold_events(self, reg_sdk, caplog):
+        """#4815: solo is a PAID tier, so overage is ON — it emits the
+        80%/100% threshold events exactly as pro/team do. This is the
+        ruling's observable metering consequence."""
+        sdk, tid = reg_sdk
+        _reset_thresholds_for_tests()
+        sdk._get_registry().query(
+            "MATCH (t:Team {id: $tid}) SET t.tier = 'solo'",
+            params={"tid": tid},
+        )
+
+        # Scoped to the METERING logger (#4957) — see _metering_records. This
+        # is a PRESENCE assertion, which is exactly the shape an unscoped
+        # caplog.records scan can false-PASS: any other module logging "80%"
+        # at WARNING would satisfy it without solo being metered at all.
+        with caplog.at_level(logging.WARNING, logger=_METERING_LOGGER):
+            record_write_ops(tid, tier="solo", n=99999)
+
+        warnings = _metering_records(
+            caplog, needle="80%", levelno=logging.WARNING)
+        errors = _metering_records(
+            caplog, needle="100%", levelno=logging.ERROR)
+        assert warnings, (
+            "Solo (paid) must fire the 80% threshold, got: "
+            f"{_metering_records(caplog)}"
+        )
+        assert errors, (
+            "Solo (paid) must fire the 100% threshold, got: "
+            f"{_metering_records(caplog)}"
         )
 
     def test_unrelated_logger_is_not_a_threshold_event(self, reg_sdk, caplog):
@@ -358,7 +395,6 @@ class TestThresholdEvents:
             f"event: {_metering_records(caplog)}"
         )
 
-
 # ── Usage query tests ───────────────────────────────────────────────────────
 
 class TestGetCurrentUsage:
@@ -379,6 +415,24 @@ class TestGetCurrentUsage:
         assert usage["period"] == _current_period(team["id"]).label
         assert usage["overage_eligible"] is False  # free tier
         sdk.close()
+
+    def test_an_ask_only_org_reads_as_zero_without_a_false_query_failure(
+            self, reg_sdk, caplog):
+        """A row whose ``write_ops`` is unset is a ZERO, not a failed query.
+
+        The ask/embed writers MERGE their own ``MeteringRecord`` and never set
+        ``write_ops``, so a row with the property absent is the ordinary
+        multi-lane shape. ``int(None)`` raised inside this best-effort read and
+        logged "metering usage query failed" on the ``/v1/team`` hot path — a
+        false alarm naming the wrong cause. The returned view was already
+        correct; the diagnostic was not.
+        """
+        sdk, tid = reg_sdk  # noqa: RUF059
+        record_ask_usage(tid, calls=1, tokens_in=1, tokens_out=1, cost_usd=0.0)
+        with caplog.at_level("WARNING"):
+            usage = get_current_usage(tid)
+        assert usage["write_ops_used"] == 0
+        assert "metering usage query failed" not in caplog.text
 
     def test_usage_reflects_accumulated_ops(self, reg_sdk):
         sdk, tid = reg_sdk  # noqa: RUF059
@@ -612,7 +666,12 @@ class TestPricingIntegration:
     def test_free_tier_has_no_overage(self):
         from tortoise.pricing import has_overage
         assert has_overage("free") is False
-        assert has_overage("solo") is False
+        assert has_overage("anon") is False
+
+    def test_solo_tier_has_overage(self):
+        # #4815: solo is a PAID tier → metered (no longer a hard cap).
+        from tortoise.pricing import has_overage
+        assert has_overage("solo") is True
 
     def test_pro_and_team_have_overage(self):
         from tortoise.pricing import has_overage
