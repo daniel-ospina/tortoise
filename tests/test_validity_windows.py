@@ -1056,9 +1056,11 @@ def test_window_end_unorderable_starts_fall_through_to_createdat():
       covers.
 
     Value that makes it fail: ``''`` and ``'TBD'`` as the stored successor
-    start.  Both fixtures reach them — ``create_point`` stores any caller
-    ``validFrom`` verbatim, and ``test_unparseable_predecessor_start_matches_
-    the_sibling_5358`` writes ``'TBD'`` through the same public path.
+    start.  ``create_point`` stores any caller ``validFrom`` verbatim, so the
+    public path stores either.  ``test_unparseable_predecessor_start_matches_
+    the_sibling_5358`` calls that same ``create_point`` with a ``'TBD'``
+    ``validFrom`` — in the PREDECESSOR slot; the storage path is
+    position-independent, so the successor slot is reachable the same way.
     """
     created = "2026-09-28T00:00:00+00:00"
     # falsey + unorderable: fallback, NOT the stored ''
