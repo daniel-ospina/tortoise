@@ -2282,16 +2282,17 @@ slow_files:
 # pre-merge docker pools needs no such declaration and loses no coverage —
 # which is why it is the instrument used here.
 #
-# WHICH FILES, AND WHY THIS CUT. Selected in descending `durations` weight —
-# the packer's own metric, so the removal keeps the fast halves balanced by
-# construction. 43 files, 1,604.2s of committed `durations` weight. Four
-# exclusions, all load-bearing:
-#   * test_capture_install.py and test_session_verify.py are NOT moved. The
-#     self-guard predicate counts FAST-leg selection, and a `slow_files` home
-#     takes the file out of every fast surface — so their source's diff
-#     selects neither the fast nor the slow leg, and
-#     `test_every_named_guard_runs_for_its_own_source` reds on the #7076
-#     class. They stay in the fast pool.
+# WHICH FILES, AND WHY THIS CUT. 43 files leave the fast pool; that drops the
+# fast pool's heaviest shard to the single-file floor
+# (`test_onboarding_state_split.py`, 310.7s = 5.18 min), which is what puts the
+# fast leg at ~8.6 min wall. 43 files, 1,604.2s of committed `durations`
+# weight. Four exclusions, all load-bearing:
+#   * test_capture_install.py and test_session_verify.py are NOT moved. Each is
+#     registered under `api` while its own source's diff selects `core`, and
+#     `classify_test_file` takes the FIRST match — so with a `slow_files` home
+#     the `core` diff's `slow_selected` never contains them and the guard runs
+#     on neither leg (`test_every_named_guard_runs_for_its_own_source`, the
+#     #7076 class). They stay in the fast pool.
 #   * the `onboarding` surface is EXCLUDED. A `website/*` or docs-only PR
 #     selects `onboarding` and is pinned to `slow_run is False`
 #     (test_ci_selection.py::test_public_site_surface_change_selects_onboarding_
@@ -3455,15 +3456,15 @@ durations:
   # #6137: register the fast pool's unmeasured files. The relocation
   # removes 43 measured files from the fast pool, which takes
   # `duration_coverage_issues` from main's 90.1% (667/740) to 89.5% —
-  # under the 90% floor. Every fast-pool file that has no duration key
-  # is registered here: measured from the junit of main run 37225357047
-  # (2026-10-04, fast shards a-i), or carried at the flat 2.0s default
-  # with the `# unmeasured` marker above where no artifact carries a
-  # weight (the #3400/#4221 convention). Same values the packer already
-  # applied (2.0 IS DEFAULT_FAST_WEIGHT) except where measurement
-  # replaced it — the S=9 shards tighten from 1.06x to 1.00x.
-  eval/write_path/test_write_path_prescreen.py: 2.0  # unmeasured
-  eval/write_path/test_write_path_semantic_judge.py: 2.0  # unmeasured
+  # under the 90% floor. Every fast-pool file that has no duration key is
+  # registered here, each measured from the junit of main run 37225357047
+  # (2026-10-04, fast shards a-i): the sum of `testcase/@time` per module.
+  # The module is the longest dotted `classname` prefix that names a real
+  # test file — a class-scoped case's `classname` ends in the CLASS, so a
+  # last-segment split silently misses the whole file and reports it
+  # unmeasured.
+  eval/write_path/test_write_path_prescreen.py: 0.2
+  eval/write_path/test_write_path_semantic_judge.py: 0.2
   test_2500_terminal_ep_backfill.py: 1.7
   test_3026_oauth_boundaries.py: 0.7
   test_3660_session_upload_identity.py: 0.1
@@ -3472,9 +3473,9 @@ durations:
   test_4041_breadcrumb_reader.py: 2.4
   test_4199_dense_scope_coverage.py: 0.6
   test_4542_retract_fold_decay.py: 0.1
-  test_4647_store_representable.py: 2.0  # unmeasured
+  test_4647_store_representable.py: 0.3
   test_4716_capture_operator_ref_remap.py: 1.2
-  test_4999_vector_mechanism.py: 2.0  # unmeasured
+  test_4999_vector_mechanism.py: 0.1
   test_5359_unchecked_window_writers.py: 0.6
   test_5361_inverted_window_audit.py: 0.4
   test_5361_inverted_window_read_path.py: 0.2
@@ -3490,12 +3491,12 @@ durations:
   test_ci_last_failed.py: 1.9
   test_ci_manifest.py: 7.2
   test_ci_verdict.py: 0.2
-  test_compute_attribution.py: 2.0  # unmeasured
+  test_compute_attribution.py: 0.6
   test_connector_scope.py: 0.9
   test_cypher_regex_guard_3595.py: 0.2
   test_definite_description_backfill_5059.py: 0.3
   test_document_source_gold.py: 0.1
-  test_egress_bytes.py: 2.0  # unmeasured
+  test_egress_bytes.py: 1.1
   test_entry_point_python_guard.py: 4.6
   test_extractor_embed_coerce_5060.py: 0.2
   test_graph_name_ownership.py: 0.1
@@ -3509,7 +3510,7 @@ durations:
   test_merge_throughput.py: 5.8
   test_mergify_config_guard.py: 7.1
   test_notify_offloop_4456.py: 1.7
-  test_pack_extraction_slots_v31.py: 2.0  # unmeasured
+  test_pack_extraction_slots_v31.py: 0.2
   test_pr_lead_time.py: 0.2
   test_pytest_attribution.py: 0.3
   test_queue_conflict_census.py: 0.5
@@ -3522,19 +3523,19 @@ durations:
   test_session_confirm.py: 0.3
   test_session_semantic_retrieval.py: 0.4
   test_source_dedup_registration.py: 0.9
-  test_source_identity.py: 2.0  # unmeasured
-  test_source_kind_runtime_registration.py: 2.0  # unmeasured
+  test_source_identity.py: 0.2
+  test_source_kind_runtime_registration.py: 0.3
   test_source_version_read_wiring_5199.py: 0.6
   test_source_version_references_5199.py: 1.1
-  test_subject_binding_1370.py: 2.0  # unmeasured
-  test_subject_layer_read_surfaces_4889.py: 2.0  # unmeasured
+  test_subject_binding_1370.py: 7.1
+  test_subject_layer_read_surfaces_4889.py: 0.9
   test_surface_guard_pin_4606.py: 0.9
   test_uri_requiring_selection.py: 52.7
   test_uri_username_consumed_3081.py: 0.5
   test_validity_window_contract_5374.py: 0.8
   test_value_gate_4899.py: 0.9
   test_vet_gate_5005.py: 0.5
-  test_vocab_gating_by_graph.py: 2.0  # unmeasured
+  test_vocab_gating_by_graph.py: 5.1
 
 # ── ON-DEMAND LANE: runs the pipeline, does not gate the merge ────────────
 # A file here is excluded from EVERY pre-merge leg (fast halves, slow, carve-

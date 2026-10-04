@@ -1278,8 +1278,8 @@ jobs:
           # The in-step watchdog below is sized from the heavier leg
           # (`test_slow_leg_bounds_clear_the_committed_work` pins it), because
           # a leg that outruns its watchdog is killed mid-suite and reports a
-          # red — the trap the #3239 budget was written for when these legs
-          # carried 4.70 min rather than 16.2.
+          # red — the trap the #3239 budget was written for when these legs'
+          # committed weight was 2.84 min rather than 16.2.
           #
           # That drift is why these lists should be COMPUTED, not committed —
           # `push_legs()` already LPT-packs the fast halves from `durations`.
@@ -1317,7 +1317,8 @@ jobs:
     # #3239: OUTER cap, strictly above the in-step watchdog below — that kill
     # is the one that PRINTS the pass/fail counts (#798); a runner-level cap
     # that fires first cancels the step and loses them. #6137 moved 43 files
-    # into these legs, taking the committed weight from 4.70m to 16.21m, so
+    # into these legs, taking their committed `durations` weight from 2.84m to
+    # 16.21m, so
     # the #3239 literal budget no longer clears the work: the watchdog goes to
     # 35m (2.16x the 16.21m heavier leg) and this cap to 40m (2.47x). The cap
     # still clears the watchdog, so a hung leg prints its counts before the
@@ -1544,7 +1545,9 @@ jobs:
           # the leg's committed weight — the same factor #6135 validated for
           # the fast shards. #6137 moved 43 files in, so the heavier leg now
           # carries 16.21m and the literal is 35m (2.16x); it was 10m when the
-          # legs carried 4.70m. Re-deriving the budget when the leg set moves is
+          # legs' committed weight was 2.84m (the measured pytest step was
+          # 4.70m, which does not enter the headroom arithmetic). Re-deriving
+          # the budget when the leg set moves is
           # the whole point of `test_slow_leg_bounds_clear_the_committed_work`,
           # which reds here if this literal stops clearing the committed work.
           timeout -s INT -k 10 35m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1

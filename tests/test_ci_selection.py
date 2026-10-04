@@ -2961,11 +2961,11 @@ def test_slow_leg_bounds_clear_the_committed_work():
 
     The slow legs are the only bounded pytest job whose budget is a LITERAL
     while its work moves with `slow_files`, so a changed leg set can outgrow
-    the budget silently. #6137 moved 43 files in — the committed weight went
-    from 4.70m to 16.21m per leg — and left the #3239 literal at 10m, so BOTH
-    legs were killed mid-suite on every full-selection run and took the
-    required `python-ci-gate` red with them (PR #6234 run 37229875496: both
-    legs exited 124 with the 10m WATCHDOG banner and 739/1257 tests passed).
+    the budget silently. #6137 moved 43 files in — the legs' committed
+    `durations` weight went from 2.84m to 16.21m each — and left the #3239
+    literal at 10m, so BOTH legs were killed by the 10m WATCHDOG banner on a
+    full-selection run and took the required `python-ci-gate` red with them
+    (PR #6234 run 37229875496; 739 and 1257 tests had passed before the kill).
     `test_every_bounded_pytest_job_caps_above_its_watchdog` could not see it:
     a 10m watchdog under a 20m cap is a consistent PAIR whatever the work.
 
