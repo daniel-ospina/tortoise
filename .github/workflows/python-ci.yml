@@ -1159,16 +1159,20 @@ jobs:
       - name: Assert no redislite orphans (issue #1005 / epic #1647 E2E-7)
         # Runs even when pytest failed — the orphan check is independent of
         # test outcomes. The bound is NOT a hand-picked constant: the conftest
-        # session-end sweep reports what it did ({reaped, cleared, left, before})
+        # session-end sweep reports what it did
+        # ({reaped, exited, cleared, left, before})
         # and the gate binds to that report — reading the bound from `left` and
-        # asserting the sweep's own accounting identity `reaped + left >= before`
-        # (see .github/scripts/orphan-bound.sh, #4740). #2032: the docker lane is
+        # asserting the sweep's own accounting identity
+        # `reaped + exited + left >= before`
+        # (see .github/scripts/orphan-bound.sh, #4740; `exited` is #6984 — the
+        # servers the sweep OBSERVED to exit on their own, so a self-shutdown
+        # is not read as a broken sweep). #2032: the docker lane is
         # not always ~0 by construction — the embedded-file-contract atexit race
         # leaves strays on the full matrix
         # too (trunk run 34928488659 measured 7), and that residue is what the
         # sweep's own `left` now accounts for. What this gate reds: a leak
         # that appears AFTER the sweep (COUNT > left), an accounting-identity
-        # violation (reaped + left < before), a probe_failed report above a
+        # violation (reaped + exited + left < before), a probe_failed report above a
         # measured COUNT of zero (no `left` to bind to), an error or skipped
         # report, a no_embedded_servers report above a measured COUNT of zero,
         # and an unaccounted/unreadable report. A `cleared: false` report does
