@@ -34,23 +34,6 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: website/apps/blog-admin/package-lock.json
-      - name: Onboarding instructions are staged for the dashboard deploy
-        # #1998 (W2, M8): the OLD prompt-staging pipeline (the
-        # archived prompt + harness variants -> deployed .md copies via the
-        # retired staging script) is ARCHIVED — never two live onboarding
-        # scripts. The ONE live script is the tortoise-onboarding
-        # SKILL.md, mirrored byte-identically into
-        # website/apps/dashboard/public/skills/tortoise-onboarding/ (parity
-        # test) and served at
-        # app.premiselabs.co/skills/tortoise-onboarding/SKILL.md by the
-        # deploy-dashboard job below (dist build copies public/).
-        # (The trailing-slash DIRECTORY URL is not a route — since #3523 an
-        # unknown path on the app host is an honest 404, not the dashboard.)
-        run: |
-          test -s tortoise/onboarding/SKILL.md
-          cmp tortoise/onboarding/SKILL.md \
-            website/apps/dashboard/public/skills/tortoise-onboarding/SKILL.md
-          test -f website/apps/dashboard/public/install-tortoise-skills.sh
       - name: Sync DNS — tortoise.premiselabs.co → premise-labs Pages project (best-effort)
         # The subdomain previously CNAME'd to the legacy tortoise-landing-v2
         # Pages project (stale content: welcome v1, no retired onboarding
@@ -673,6 +656,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # #2691: this check lives here because it guards the DASHBOARD's skills
+      # mirror, so a parity failure must fail THIS job. The two jobs carry no
+      # `needs:` between them, so this placement is what keeps a mirror break
+      # from blocking the unrelated marketing deploy (premiselabs.co) — and
+      # what makes it gate the surface that actually ships the mirror. It is
+      # local (`test`/`cmp` on tracked files) and needs no network and no setup
+      # step, so it is placed ahead of the bindings preflight's retry loop and
+      # ahead of the build that stages `public/` into `dist/`.
+      - name: Onboarding instructions are staged for the dashboard deploy
+        # #1998 (W2, M8): the OLD prompt-staging pipeline (the
+        # archived prompt + harness variants -> deployed .md copies via the
+        # retired staging script) is ARCHIVED — never two live onboarding
+        # scripts. The ONE live script is the tortoise-onboarding
+        # SKILL.md, mirrored byte-identically into
+        # website/apps/dashboard/public/skills/tortoise-onboarding/ (parity
+        # test) and served at
+        # app.premiselabs.co/skills/tortoise-onboarding/SKILL.md by THIS job
+        # (dist build copies public/).
+        # (The trailing-slash DIRECTORY URL is not a route — since #3523 an
+        # unknown path on the app host is an honest 404, not the dashboard.)
+        run: |
+          test -s tortoise/onboarding/SKILL.md
+          cmp tortoise/onboarding/SKILL.md \
+            website/apps/dashboard/public/skills/tortoise-onboarding/SKILL.md
+          test -f website/apps/dashboard/public/install-tortoise-skills.sh
       # #4054: the BFF moved onto `tortoise-dashboard`, which when the move
       # landed had 0 env vars and 0 D1 bindings — every /auth/* and /api/*
       # request would have 503'd on a green deploy. The same #3616 gate that

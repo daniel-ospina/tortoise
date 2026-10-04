@@ -428,7 +428,7 @@ def sup_2490(tmp_path):
 
 
 def _rebuild_2490(sdk, events_dir) -> None:
-    sdk._get_proj().rebuild_all(str(events_dir))
+    sdk._get_proj().rebuild_all(str(events_dir), confirm_destructive=True)
 
 
 def ep_store(sdk: TortoiseSDK, pid: str) -> dict:

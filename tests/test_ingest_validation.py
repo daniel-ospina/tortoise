@@ -599,11 +599,13 @@ class TestTerminalStatusGuard:
         # rejects the direct edge in Phase 1 via the hash-less content+kind
         # fallback.
         #
-        # Scope note: this simulates the TERMINAL-STATUS state the guard
-        # matches (`status='superseded'`, `outdated` unset). A point superseded
-        # through `supersede_point` also carries `outdated=true` and is NOT
-        # matched by the guard's filter — a pre-existing gap orthogonal to
-        # #2971, tracked in #3142.
+        # Scope note: this simulates the TERMINAL-STATUS state (`status=
+        # 'superseded'`, `outdated` unset) — the shape a direct status write
+        # produces, and ONE of the two legs the guard matches. A point
+        # superseded through `supersede_point` carries `outdated=true` as
+        # well; that second leg was the pre-existing gap #3142 closed (the
+        # guard now matches it, via the shared `_terminal_expression`), so
+        # both legs are covered.
         terminal = sdk.create_point("statement", "same content",
                                     status="superseded")
         _query(sdk, "MATCH (n:Point {id:$id}) REMOVE n.content_hash",

@@ -1,17 +1,17 @@
 ---
-title: "Tortoise — Canonical Ontology v3.18"
+title: "Tortoise — Canonical Ontology v3.19"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-09-27
+updated: 2026-09-28
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.18
+# Tortoise — Canonical Ontology v3.19
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -32,6 +32,31 @@ doc_status: live
 > **⭐ If this document and the code disagree, THIS DOCUMENT IS RIGHT and the code
 > has a defect.** The single exception is a *factual* error — the model itself
 > being wrong — which is corrected here and recorded in the changelog.
+>
+> **Changelog v3.19 (2026-09-28, issue #3985 — a falsey-but-ORDERABLE stored `validFrom` is a real window start):**
+> - §4.7 (`validTo`): the resolution branch and the read path now agree for every successor
+>   start both can *order*. `_supersede_window_end` resolved with a truthiness test while
+>   `_covers` gates on presence, so a stored `validFrom = 0` was a real epoch-0 start to the
+>   read path (`[epoch 0, ∞)`) but was treated as undated by the write path, which stamped the
+>   predecessor's `validTo` at the successor's `createdAt` — inside that window, so the
+>   predecessor and the successor both covered and `restore_point_at` returned a two-candidate
+>   `ambiguous` instead of the successor. The resolution now takes a present, **orderable**
+>   start (`is not None` and `_created_sort_key(...)[0] == 0`), so `0`/`0.0` becomes the
+>   predecessor's `validTo`; where it precedes the predecessor's own start the existing #4021
+>   guard refuses the write rather than persisting an inverted window.
+> - §4.7 (`validTo`): **narrows, and does not resolve,** the v3.13 sentence below. The
+>   falsey-**and-unorderable** `""` still falls through to `createdAt`, so `write != read` for
+>   `""` remains. Which of the two is intended — an OPEN window start or an ABSENT one — is an
+>   owner decision over temporal semantics, not a predicate alignment, so it is left open and
+>   tracked as **#6140** (deliberately not decided here; it is NOT #3982, which ruled on
+>   date-only parsing — a different question).
+> - Supersedes the v3.13 no-kwarg sentence's scope from "the falsey case" to "the
+>   falsey-and-unorderable case", and supersedes v3.13's contrast that the **presence**
+>   predicate is "the read path's … not the resolution branch's truthiness": the resolution
+>   branch now ALSO gates on presence (plus the #5360 orderability conjunct), so that contrast no
+>   longer holds.
+>   This entry records only what the code now does. (The two entries below that both carry
+>   "v3.18" are a pre-existing duplicated label — filed as **#7214**, not renumbered here.)
 >
 > **Changelog v3.18 (2026-09-27 — issue #5025, owner ruling — `related` is the neutral association link and carries no EP):**
 >
@@ -217,8 +242,12 @@ doc_status: live
 > - **Implementation status:** `#5026` (the label migration) **landed** — PR
 >   #5127 merged 2026-09-25 (`294d5847e`): the `:Document` label is retired, and
 >   the legacy spelling survives only as a deprecated alias whose writes route to
->   `:Source` keyed `url`. Still **open**: `#5024` (the unjournalled version
->   transition) and `#5038` (the version model).
+>   `:Source` keyed `url`. `#5024` **landed** — a content-changing re-fetch now
+>   journals a `SourceVersioned` record naming the superseded `contentHash`, a
+>   no-op re-fetch journals nothing, and a replay reproduces the node (the
+>   per-field split is in `docs/durability-posture.md` → R2). Still open: the
+>   version **window** `validFrom`/`validTo`/`expiredAt`, which no writer sets
+>   (**#3644**); and `#5038` (the version model).
 >
 > **Changelog v3.14 (2026-09-20, issue #4369 — the "claim" gloss is declared):**
 >
@@ -893,7 +922,7 @@ A document is a **`:Source`** (§4.6). Its bytes live **outside the graph**, rea
 | `contentHash` | string | ✅ | `premis:messageDigest` | ✅ | **Version anchor** — the digest of the content read. A differing hash on re-fetch is a **new version**, not an edit (see *Versioning* below) |
 | `title` | string | — | `dc:title` | ⚠️ | Human-readable label. Defaults to url |
 | `ingestedAt` | ISO8601 | ✅ | `pav:importedOn` | ✅ | When Tortoise first saw this source — **Source's spelling of the canonical transaction-time start `createdAt`** (§4.7) |
-| `updatedAt` | ISO8601 | — | `dc:modified` | ✅ | Last version transition. Set **in place** on `ON MATCH` by `_upsert_source` — **unjournalled today** (`#5024`) |
+| `updatedAt` | ISO8601 | — | `dc:modified` | ✅ | Last version transition. **Journalled since `#5024`:** a hash transition emits `SourceVersioned` carrying `previousContentHash` + the recorded instant, and the fold reads that instant — never the replay clock. Pre-`#5024` the write bumped it in place with no record of its own, so a rebuild re-stamped it (`#5024`) |
 | `validFrom` / `validTo` | ISO8601 | — | `prov:generatedAtTime` / `prov:invalidatedAtTime` | ❌ | **The CURRENT version's valid-time window** — when the content held in the world (declared §4.7, #3642). A prior version's window is a journal record — see *Versioning* |
 | `expiredAt` | ISO8601 | — | — | ❌ | Transaction-time expiry — when our record of this version stopped being current (declared §4.7, #3642) |
 | `documentKind` | string | — | `bibo:Document` subclasses | ⚠️ | **Genre**, when `sourceKind: document` — the core vocabulary is in **§5**. Distinct from `sourceKind` (§4.4) |
@@ -930,6 +959,8 @@ A document is a **`:Source`** (§4.6). Its bytes live **outside the graph**, rea
 **Closing the interval is part of the write.** An unclosed `validTo` reads as *"still true"* indefinitely — the failure mode the whole model exists to prevent — so the journal record that opens a new version closes the old one **in the same act**; it is never a later repair.
 
 **`updatedAt` records the last version transition.** It is not a currency flag — currency is computed from `sourceVersion` against `contentHash`.
+
+**Implementation status (`#5024`, 2026-09-24).** The *version-anchor* half of this section is now implemented: a hash transition journals a `SourceVersioned` record naming `previousContentHash` and the transition instant, a no-op re-fetch journals **nothing** (`STORAGE-ARCHITECTURE.md` §9.6's cost bound), and a `rebuild_all` replay reproduces the current node field for field. **The window half is still a declared gap:** the record names the superseded *version* but does not close a `validTo`/open a `validFrom`, because no writer sets those fields on the node at all (**#3644**). The per-field recorded/recomputable split lives in `docs/durability-posture.md` → *`:Source` — recorded vs recomputable, field by field* (R2).
 
 ### §4.7 Temporal Model (canonical)
 
@@ -988,7 +1019,8 @@ declared, not built (implementation is tracked separately):
 | txn end | `expiredAt` ✅ | `expiredAt` ❌ | `expiredAt` ❌ | — | `expiredAt` ❌ |
 | supersession | `status='superseded'` ✅ ‡ | — | `supersededAt` ✅ | — | — |
 
-> † **A source's temporal slots are the Source column's.** No `:Object`-labelled write path reaches a Source, so the Object-labelled supersession fold (`_fold_object_superseded` / `apply_supersessions`, which `MATCH`es `(o:Object {id|name})`) **cannot stamp a Source** — **Source supersession is unreachable, not merely unimplemented (`—`).** `_upsert_source` writes no `validFrom`/`validTo`/`expiredAt`. **⚠️ A re-fetched source whose content changed currently mutates in place (`updatedAt`, `version`) with no journal record (`#5024`).**
+> † **A source's temporal slots are the Source column's.** No `:Object`-labelled write path reaches a Source, so the Object-labelled supersession fold (`_fold_object_superseded` / `apply_supersessions`, which `MATCH`es `(o:Object {id|name})`) **cannot stamp a Source** — **Source supersession is unreachable, not merely unimplemented (`—`).** `_upsert_source` writes no `validFrom`/`validTo`/`expiredAt` (**#3644**). **A content-changing re-fetch is no longer a silent in-place mutation:** since `#5024` it journals a `SourceVersioned` record naming the superseded `contentHash`, so the prior version is addressable and a replay reproduces the node.
+
 >
 > **Point valid start is ⚠️, not ✅** — populated by the date-carrying write
 > paths, with the legacy mining W-4 post-pass falling back to the wall clock when
