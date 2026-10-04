@@ -4,8 +4,9 @@
 count from authored data, so a citation in the generated doc cannot be wrong. What it
 CAN still do is go *stale* — someone edits `tool_registry.py`, `tools/bridge_table.py`'s
 destination map, or the registry's `RETIRED_USE_INSTEAD` and never regenerates — and
-that is the drift the generator's own docstring promises cannot happen. Nothing runs
-`--check` unless a test does. This is that enforcement.
+that is the drift the generator's own docstring promises cannot happen. Nothing used
+to run `--check`: this test is the matrix's enforcement, and since #4454 the required
+`docs` job runs `tools/mcp_rename_table.py --check` on every PR as well.
 
 WHY EVERY EXPECTED VALUE HERE IS A LITERAL OR AN INDEPENDENT WALK
 -----------------------------------------------------------------
@@ -934,14 +935,24 @@ def test_generator_names_only_existing_source_paths() -> None:
     )
 
 
-def test_docs_only_edit_of_the_generated_doc_is_unguarded_by_ci() -> None:
-    """The ci-surfaces note must not overstate a guard that does not exist.
+def test_docs_only_edit_of_the_generated_doc_is_guarded_by_the_docs_job() -> None:
+    """The docs-only gap is closed by the required `docs` job; the matrix still cannot close it.
 
     A docs-only edit of the GENERATED document selects NO surface (#4454), so
-    this test file does not run — and no workflow runs the generator's `--check`
-    standalone. The `core` note once claimed the guard was "the `api` arm plus
-    the `--check` drift form"; both halves are false for a docs-only change
-    (P2-7). This pins the real selection behaviour and forbids the claim.
+    this test file does not run for it. Until #4454 was fixed that was the whole
+    story: no workflow ran the generator's `--check` either, so a hand-edit could
+    ship stale numbers. The `core` note once claimed the guard was "the `api` arm
+    plus the `--check` drift form"; both halves were false for a docs-only
+    change (P2-7).
+
+    BOTH halves of the fixed behaviour are pinned, because either one alone makes
+    the other a false claim:
+      * the matrix STILL skips a docs-only edit — which is precisely why the
+        check cannot live there, and why "register it in `core`" does not fix
+        #4454; and
+      * the standalone check DOES run, from `ci.yml`'s `docs` job — the only home
+        that is a required context AND carries no `paths:` filter, so it cannot
+        inherit the very skip it exists to close.
     """
     sys.path.insert(0, str(ROOT))
     from tools.ci_selection import load_manifest, select
@@ -957,8 +968,144 @@ def test_docs_only_edit_of_the_generated_doc_is_unguarded_by_ci() -> None:
 
     workflows = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
     assert workflows, "no workflows found — the standalone `--check` claim cannot be checked"
-    runners = [w.name for w in workflows if "mcp_rename_table.py --check" in w.read_text()]
-    assert not runners, f"a workflow now runs the standalone check: {runners}"
+
+    def _code(text: str) -> str:
+        # Comments are not invocations: a `#`-prefixed command still contains the
+        # substring, so matching raw text reports a guard that would never run.
+        # Same intent as `_code` in tests/test_ci_selection.py.
+        return "\n".join(
+            ln for ln in text.splitlines() if not ln.strip().startswith("#")
+        )
+
+    runners = [
+        w.name
+        for w in workflows
+        if "mcp_rename_table.py --check" in _code(w.read_text())
+    ]
+    assert runners == ["ci.yml"], (
+        "the standalone check must run, from ci.yml and nowhere else — a second "
+        f"home means the guard has drifted, and none means #4454 is open again: {runners}"
+    )
+
+    # WHERE it runs is what makes it a guard, so the properties are pinned rather
+    # than the file name. A path-gated or conditional home would silently restore
+    # the #4454 hole while every assertion above still passed.
+    import json
+
+    import yaml
+
+    ci = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yml").read_text())
+    # PyYAML reads a bare `on:` key as the boolean True, not the string "on".
+    on_block = ci.get("on") or ci.get(True) or {}
+    assert not (on_block.get("pull_request") or {}).get("paths"), (
+        "the `docs` job must run on EVERY pull_request — a `paths:` filter would "
+        "make the check inherit the docs-PR skip it exists to close"
+    )
+    docs_job = ci["jobs"]["docs"]
+    assert "if" not in docs_job, (
+        "the docs job must be unconditional — a job-level `if` makes the guard skippable"
+    )
+    required = json.loads((ROOT / "docs" / "ci" / "required-contexts.json").read_text())
+    assert "docs" in required["required_contexts"], (
+        "the docs job must be a REQUIRED context, or a skipped check blocks nothing"
+    )
+    matching = [
+        s
+        for s in docs_job["steps"]
+        if "mcp_rename_table.py --check" in _code(str(s.get("run", "")))
+    ]
+    assert len(matching) == 1, (
+        f"exactly one step may run the drift checks; found {len(matching)} — a "
+        "second step carrying the same command can hide a disabled real step, and "
+        "a bare `next(...)` lookup would accept the decoy"
+    )
+    step = matching[0]
+    # The step may carry only the keys that cannot silence it. Enumerating
+    # silencing keys one at a time is what left the next one open, so the rule is
+    # an ALLOW-list instead: `if:`/`continue-on-error:` skip a real failure,
+    # `shell:` swallows its exit code, `working-directory:` can point at a stub
+    # `tools/` tree, and `env:` (a PATH shim) shadows `python3` so the real
+    # `--check` never runs. `id:`/`timeout-minutes:` are allowed because they
+    # neither skip nor mask the step (measured GREEN on the enumerated form here
+    # for a step-level `env: {PATH: ...}` shim).
+    _allowed_step_keys = {"name", "run", "id", "timeout-minutes"}
+    _extra_keys = sorted(set(step) - _allowed_step_keys)
+    assert not _extra_keys, (
+        f"the drift step may carry only {sorted(_allowed_step_keys)}; found "
+        f"{_extra_keys}. Any other Actions step key is a silencing vector (#2656)"
+    )
+    for scope, label in ((ci, "ci.yml"), (docs_job, "the docs job")):
+        _run_defaults = (scope.get("defaults") or {}).get("run") or {}
+        for key in ("shell", "working-directory"):
+            assert not _run_defaults.get(key), (
+                f"a `defaults.run.{key}` on {label} can swallow the drift check's "
+                "exit code or run it against a stub tree (#2656)"
+            )
+        # Neither of these is a key ON the drift step, so the allow-list above
+        # cannot see them, and each shims `python3` for the whole scope beneath.
+        assert "if" not in scope, (
+            f"an `if:` on {label} can skip the guard entirely — the `docs` job is a "
+            "REQUIRED context and a skipped job never runs the `--check`s (#2656)"
+        )
+        assert not scope.get("env"), (
+            f"an `env:` on {label} can shim PATH for every step beneath it — "
+            "including the drift check (#2656)"
+        )
+        assert "container" not in scope, (
+            f"a `container:` on {label} replaces the image the `--check`s run in; "
+            "with a doctored image they pass vacuously and the drift step's own "
+            "shape stays clean (#2656)"
+        )
+    # A sibling step can install the shim without touching the drift step:
+    # appending a directory holding an `exit 0` stub named `python3` to
+    # `$GITHUB_PATH` leaves the drift step's own shape pristine. This scan reds
+    # on that edit, and on any sibling `$GITHUB_PATH`/`$GITHUB_ENV` write. It
+    # does not detect an obfuscated token build, a stub interpreter written to
+    # /usr/local/bin, or a generator overwritten under `tools/` — measured GREEN.
+    _shim_writers = sorted(
+        str(s.get("name") or s.get("uses") or "<unnamed>")
+        for s in docs_job.get("steps") or []
+        if s is not step
+        and (
+            "GITHUB_PATH" in _code(str(s.get("run", "")))
+            or "GITHUB_ENV" in _code(str(s.get("run", "")))
+        )
+    )
+    assert not _shim_writers, (
+        f"a sibling step writes `$GITHUB_PATH`/`$GITHUB_ENV` (found: "
+        f"{_shim_writers}) — appending a shim directory makes `python3` resolve "
+        "to a stub that exits 0, leaving the drift step's own shape clean (#2656)"
+    )
+    # THE INVOCATION IS EXACT, as the ci.yml pin asserts and as the sibling
+    # required gates already enforce (tests/test_ci_selection.py:3055 —
+    # `run.strip() == expected`). Substring matching alone is not enough, and the
+    # masking scan used below is not either: `echo "python3 tools/x.py --check"`
+    # contains the command text with NO shell operator at all, so it satisfies
+    # both while the real check never runs (measured: this exact edit left this
+    # pin GREEN). Exactness is what closes the family — `|| true`, `; true`, an
+    # `echo` decoy, and a commented-out command alike, since `_code` has already
+    # filtered comments.
+    expected = (
+        "pip install -e . --quiet\n"
+        "python3 tools/bridge_table.py --check\n"
+        "python3 tools/mcp_rename_table.py --check\n"
+        "python3 tools/sdk_surface.py --check"
+    )
+    assert _code(str(step.get("run", ""))).strip() == expected, (
+        "the drift step must invoke EXACTLY the installer plus the three "
+        "`--check` commands — no shell operator, no `echo` decoy, no wrapper, no "
+        f"trailing anything, or a real failure reports green (#2656); got "
+        f"{_code(str(step.get('run', '')))!r}"
+    )
+    assert not docs_job.get("continue-on-error"), (
+        "a job-level continue-on-error on `docs` would let a failing drift check "
+        "report success (#2656)"
+    )
+    _needs = docs_job.get("needs") or []
+    assert not (_needs if isinstance(_needs, list) else [_needs]), (
+        "the `docs` job must have no `needs:` — an upstream failure would SKIP "
+        "the guard instead of failing it (#2656)"
+    )
 
     note = (ROOT / "config" / "ci-surfaces.yml").read_text(encoding="utf-8")
     m = re.search(r"((?:^  #.*\n)+)  - test_mcp_rename_table\.py", note, re.M)
@@ -975,7 +1122,7 @@ def test_docs_only_edit_of_the_generated_doc_is_unguarded_by_ci() -> None:
     )
     assert "the `api` arm plus the `--check` drift form" not in flat, (
         "the `core` note again claims the `--check` drift form guards a docs-only "
-        "change — no workflow runs it standalone"
+        "change — the drift form runs in ci.yml's docs job, not in a selection"
     )
 
 

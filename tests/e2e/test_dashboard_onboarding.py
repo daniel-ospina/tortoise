@@ -205,10 +205,11 @@ def _wire(page: Page, *, seed_objects: list = None,  # noqa: RUF013
                 # returns a module name that exists ONLY here, so the fork test
                 # can tell a registry-backed render from the static offline
                 # fallback (wizardFlow.js BUILD_CATALOG_PLACEHOLDER).
-                # #2763: the payload currently CANNOT reach the card (fetch is
-                # gated on wizardStep 2, the catalog renders on wizardStep 1),
-                # so the test pins the shipped placeholder render + the fetch
-                # count and will flip when #2763 is fixed.
+                # #2763 (fixed): the fetch is gated on the FORK CARD — the step
+                # that renders the catalog — so this payload reaches it and
+                # REPLACES the static placeholder (never merges). The test
+                # asserts the registry-only name below and the fallback's
+                # absence.
                 cap["capabilities"] += 1
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"modules": [
@@ -1104,11 +1105,11 @@ def test_first_timer_wizard_build_fork_records_no_catalog_presented(page: Page) 
     removal: the ONLY client checkpoint on the journey is the set-once fork.
     #2323: the org-holding journey never mints a second org.
 
-    The catalog pin is deliberately two-sided (#2763): the fork card renders the
-    STATIC placeholder because the registry fetch is gated on the connect step
-    while the catalog renders one step earlier — the fetch is counted so the
-    mock is genuinely exercised, and the assertion flips to the registry-only
-    name when #2763 lands."""
+    #2763 (fixed): the registry fetch was gated on the CONNECT step while the
+    # catalog renders one step earlier, so the payload could never reach the
+    # card. The gate now names the FORK CARD, and the assertion below is the
+    # registry-only name the mock serves — a registry-backed render, not the
+    # static offline fallback."""
     _seed_cookie(page, "u-bld")
     cap = _wire(page, role="owner")
     # #2744: the DOCUMENT always loads from the local built-dist preview.
@@ -1124,23 +1125,26 @@ def test_first_timer_wizard_build_fork_records_no_catalog_presented(page: Page) 
     expect(page.locator("body")).to_contain_text("You're set up in", timeout=5_000)
     page.get_by_role("button", name="Continue →").click()
     expect(page.locator("body")).to_contain_text("Choose how you'll use Tortoise", timeout=10_000)
-    # STEP 1: fork card — pick the BUILD fork. #2763: the catalog renders from
-    # the static placeholder here (the registry fetch fires one step later than
-    # the only call site that renders it), so assert the SHIPPED names and then
-    # prove the registry request is genuinely issued on the connect step.
+    # STEP 1: fork card — pick the BUILD fork. #2763: the registry fetch is
+    # gated on the step that RENDERS the catalog (this card), so the payload
+    # reaches it. The mock's module name exists ONLY in the mocked registry and
+    # the payload REPLACES the placeholder rather than merging with it, so
+    # asserting that name plus the fallback names' absence proves a
+    # registry-backed render and not the offline fallback.
     page.get_by_role("button", name=re.compile("Build an application on top")).click()
     expect(page.locator("body")).to_contain_text("Build catalog", timeout=10_000)
-    expect(page.locator("body")).to_contain_text("Session recorder", timeout=5_000)
-    assert cap["capabilities"] == 0, \
-        "the registry catalog must not be fetched from the fork card (it renders one step earlier — #2763)"
+    # The fetch is issued by a passive effect when the card mounts — poll
+    # instead of snapshotting immediately after the text appears.
+    _wait_until(lambda: cap["capabilities"] == 1, timeout_ms=5_000,
+                message="the registry catalog fetch (exactly once, from the fork card)")
+    expect(page.locator("body")).to_contain_text("Registry-only module", timeout=10_000)
+    expect(page.locator("body")).not_to_contain_text("Session recorder")
     page.get_by_role("button", name="Continue →").click()
     expect(page.locator("body")).to_contain_text("Connect your agent", timeout=10_000)
-    # The fetch is issued by a passive effect when the connect step mounts —
-    # poll instead of snapshotting immediately after the text appears.
-    _wait_until(lambda: cap["capabilities"] == 1, timeout_ms=5_000,
-                message="the registry catalog fetch (exactly once)")
+    # #2763: the fetch is once per session and the gate no longer names the
+    # connect step at all — advancing past the card must not add a request.
     assert cap["capabilities"] == 1, \
-        f"#2004 (W8): the registry catalog must be fetched exactly once: {cap['capabilities']}"
+        f"#2004 (W8): the registry catalog must be fetched exactly once, from the fork card: {cap['capabilities']}"
     # #3913: the fork is the ONLY checkpoint the dashboard writes. The old
     # assertion here was the opposite — it required the catalog-presented mark;
     # that write is deleted, so the meaningful pin is now its ABSENCE, and the
@@ -1199,7 +1203,7 @@ def _connected_projection(*, receipt: str | None = None, probe: str | None = Non
     whose capture receipt was observed; `probe` names the harness whose install
     PROBE was observed (install confirmed server-side, capture not fired yet).
     With NEITHER, the projection is the #3782 live state — recording on with
-    nothing observed for the harness — which must read "not installed yet",
+    nothing observed for the harness — which must read "not yet observed",
     never a future promise. The projection must be WRAPPED by `_wire`
     (`{"onboarding": …}`) — the app reads `st.onboarding`.
 
@@ -1249,7 +1253,7 @@ def test_connected_screen_states_capture_in_future_tense_after_an_install_probe(
     available, NO receipt, but an install PROBE was observed server-side. The
     probe is exactly what makes the future tense honest — the screen states what
     WILL happen, must NOT print the present-tense sentence, and must NOT claim
-    the honest "not installed yet" state (the install was observed)."""
+    the honest "not yet observed" state (the install was observed)."""
     _seed_cookie(page, "u-b3-no-receipt")
     _wire(page, role="owner", onboarding_projection=_connected_projection(probe="claude"))
     _walk_to_connect(page)
@@ -1257,18 +1261,28 @@ def test_connected_screen_states_capture_in_future_tense_after_an_install_probe(
     expect(page.locator(".welcome-title")).to_have_text("You're all set", timeout=10_000)
     done = page.locator("div.done")
     expect(done).to_contain_text("Connected", timeout=10_000)
-    expect(done).to_contain_text("Tortoise will capture your agent's sessions.")
+    # #3661: claude's hook seam is gated on the machine opt-in, so the future
+    # tense must NAME the opt-in it still requires — the bare promise is only
+    # honest for seams whose install IS the opt-in (pi). The STEM plus the
+    # opt-in clause is asserted rather than the whole sentence: the branch and
+    # the condition are this test's contract, exact copy is the snapshot's.
+    expect(done).to_contain_text("Tortoise will capture your agent's sessions")
+    expect(done).to_contain_text(
+        "once this machine opts in (export TORTOISE_CAPTURE=1)")
     assert "Tortoise is capturing your agent's sessions." not in done.inner_text(), \
         "no receipt means the present-tense claim is false"
-    assert "not installed yet" not in done.inner_text(), \
-        "#3782: an observed install probe means the install IS installed — not installed yet is false"
+    # #5450: asserted against the CURRENT honest wording, not the retired
+    # "not installed yet" — a negative assertion on a string that no longer
+    # exists anywhere would pass vacuously and stop catching this at all.
+    assert "not yet observed" not in done.inner_text(), \
+        "#3782/#5450: an observed install probe means the server DID observe the install — the nothing-observed label is false"
 
 
-def test_connected_screen_without_probe_or_receipt_reports_not_installed(page: Page) -> None:
+def test_connected_screen_without_probe_or_receipt_reports_nothing_observed(page: Page) -> None:
     """#3782: the live defect. `harness-connected` (a real server-observed
     connection) with recording ON but NEITHER an install probe NOR a capture
     receipt must not promise a capture the server never observed. The screen
-    states the honest "not installed yet" — the identical string Settings
+    states the honest "not yet observed" — the identical string Settings
     renders for the same state — and neither the present- nor the future-tense
     sentence."""
     _seed_cookie(page, "u-b3-no-probe-no-receipt")
@@ -1278,11 +1292,15 @@ def test_connected_screen_without_probe_or_receipt_reports_not_installed(page: P
     expect(page.locator(".welcome-title")).to_have_text("You're all set", timeout=10_000)
     done = page.locator("div.done")
     expect(done).to_contain_text("Connected", timeout=10_000)
-    expect(done).to_contain_text("not installed yet")
+    expect(done).to_contain_text("not yet observed")
     text = done.inner_text()
     assert "Tortoise is capturing your agent's sessions." not in text, \
         "#3782: no receipt — the present-tense claim is false"
-    assert "Tortoise will capture your agent's sessions." not in text, \
+    # #3661: the future-tense STEM (no trailing period) is asserted absent, so
+    # the pin still catches the opt-in-gated wording the screen now renders —
+    # the old full-sentence form only matched the pre-#3661 copy and would
+    # wave through a leaked promise.
+    assert "Tortoise will capture your agent's sessions" not in text, \
         "#3782: no probe — the future-tense promise is not server-observed"
 
 
@@ -1311,14 +1329,18 @@ def test_keyless_no_capability_leaf_prints_no_capture_sentence(page: Page) -> No
 
 
 def test_build_fork_done_step_never_claims_a_harness_or_filing(page: Page) -> None:
-    """#3428/#2937 (lane B3, review cycle 2 P1-2): the build fork's step 2 is
-    the SDK call (POST /v1/points), which files NO onboarding step — so the
-    self-fork body ("hasn't filed anything … head back to Claude Code") is
-    false the moment the user runs the wizard's own curl, and names a harness
-    this branch never offered. The build leaf must say neither.
+    """#3428/#2937 (lane B3, review cycle 2 P1-2): the self-fork body ("hasn't
+    filed anything … head back to Claude Code") is false the moment the user
+    runs the wizard's own curl, and names a harness this branch never offered.
+    The build leaf must say neither.
 
-    (The server-side gap — a REST-first org has no server-observed completion
-    signal — is a separate defect, filed by the lane orchestrator.)"""
+    #5378: the older rationale here said the build fork's step-2
+    ``POST /v1/points`` "files NO onboarding step", and treated the REST-first
+    org's missing completion signal as a separate server-side defect. #3670
+    (2026-09-22) landed that signal — an agent-credentialed, non-graph-bound
+    ``POST /v1/points`` now files ``harness-connected`` — so these assertions
+    pin the leaf's SHAPE only, never the false claim that the REST route files
+    nothing."""
     _seed_cookie(page, "u-b3-build")
     _wire(page, role="owner")  # GET unmocked → nothing connected
     _walk_to_fork(page)

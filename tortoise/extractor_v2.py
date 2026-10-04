@@ -1992,7 +1992,7 @@ def _derive_queries(embed_list: dict, story: str) -> dict:
     return queries
 
 
-# #2552: a capture's OWN turn echoes are TRANSCRIPT, not memory.
+# #2552 / #4509: a capture's OWN turn echoes are TRANSCRIPT, not memory.
 # capture_session writes the turn Points (deterministic ids ``{session_id}_t{i}``,
 # ``is_episodic=true``, content ``[role] <text>`` via ``sdk._capture_turn_texts``)
 # BEFORE extraction runs, so on a fresh capture they are the ONLY content in the
@@ -2004,102 +2004,56 @@ def _derive_queries(embed_list: dict, story: str) -> dict:
 # it from_content_missing / to_content_missing / edge_missing. S3 must never
 # dedup the extraction against the transcript it is extracting.
 #
-# The row test is the extractor's OWN predicate (not a copy of the graded
-# layer's): an id ANCHORED on the capture's ``session_id``
-# (``\A{session_id}_t\d+\Z`` — the same identity ``runner._turn_id_pattern``
-# builds, applied more strictly: ``fullmatch`` rejects the trailing newline that
-# its ``.match`` + ``$`` would accept) AND a turn marker on the row (the
-# production ``pointKind == "event"``, or the ``[role] …`` content leg
-# ``retrieval._is_turn_point`` uses). The graded layer's two legs are
-# independently sufficient (a union); here the id is deliberately conjoined with
-# a marker (an intersection), because ``create_point`` accepts explicit caller
-# ids, ``retrieval.py`` records the D3 decision that the ``{session_id}_t{i}``
-# prefix "is unverifiable — ANY caller id ending in ``_t<digits>`` would be read
-# as a session … the shape of an id is not evidence that a capture happened",
-# and a caller-minted Point whose id merely collides with the session's turn
-# namespace (the class ``tests/test_d3_session_identity.py`` documents as
-# reachable) must survive the prior set. With no session id the filter is a
-# NO-OP: keeping an echo is a missed dedup, dropping a real prior is memory loss.
+# #2552 dropped the echoes HERE, after ``tortoise_fts_query`` had already
+# truncated to ``limit`` — an unsound seam, because the exclusion could only
+# refill from a finite caller-side over-fetch window. #4509 moves it to the
+# retrieval layer's OWN pre-truncation seam (``exclude_turn_echo_session``,
+# alongside ``exclude_status``; the predicate is
+# ``retrieval.is_turn_echo_row``): ``limit`` now counts the ALREADY-FILTERED
+# candidate set, so no over-fetch and no refill are needed. The
+# ``_PRIOR_OVERFETCH`` window this comment used to document is DELETED, not
+# merely widened.
 #
-# Scope and its bound — two things this does NOT do, both tracked in #4509:
-#   * other ingest lanes' transcript rows with different id shapes (the longmem
-#     lane's ``lme:{qid}:s{si}:t{ti}`` episodic points) do not match; and
-#   * ``tortoise_fts_query`` truncates to ``limit`` internally — i.e. BEFORE this
-#     drop runs — so asking for exactly ``limit`` lets the echoes consume every
-#     slot and hide a real prior ranked below them (the "filtering after the
-#     limit cut silently shrinks the result" defect epic #898 fixed for
-#     ``exclude_status``). The point leg over-fetches ``_PRIOR_OVERFETCH`` and
-#     refills to ``limit``, absorbing up to that many echoes; a session whose
-#     echoes exceed the pool (a capture can hold ``MAX_SESSION_TURNS`` = 500) can
-#     still starve a prior. The durable fix is a pre-truncation exclusion in the
-#     retrieval layer (#4509) — this bound is deliberately local and pinned by a
-#     test rather than pretended away.
-_PRIOR_OVERFETCH = 12
-
-#: Mirror of ``tortoise.retrieval._ROLE_PREFIX_RE`` (keep-in-sync — that is the
-#: production "is this a transcript turn" content leg). Pinned structurally by
-#: ``tests/test_extractor_v2.py::test_turn_echo_content_pattern_matches_retrieval``.
-_TURN_ECHO_CONTENT_RE = re.compile(
-    r"^\[(user|assistant|system|tool|unknown)\]\s*", re.IGNORECASE)
-
-#: ``tortoise_fts_query``'s documented ``limit`` bound (tortoise/sdk.py). The
-#: point leg's over-fetch must not push the call past it — ``limit=9990`` would
-#: otherwise ask for 10002 and raise ``ValueError``.
-_FTS_LIMIT_MAX = 10000
-
-
-def _is_turn_echo_id(session_id, point_id) -> bool:
-    r"""True for one of ``session_id``'s own turn echoes (``{session_id}_t{i}``).
-
-    The anchored ID leg only — pair it with :func:`_is_turn_echo_row`. The match
-    is ``\A{session_id}_t\d+\Z`` (``re.fullmatch``) — NOT a shape test, and NOT
-    ``str.isdigit``: ``isdigit()`` also accepts category-No numerics such as
-    ``²``, and ``fullmatch`` is deliberately stricter than the graded layer's
-    ``_turn_id_pattern`` + ``.match`` (whose ``$`` accepts one trailing
-    newline). Stricter can only MISS a drop, never lose a real prior. False
-    whenever the session id is unknown, so a caller that cannot name its session
-    never drops a row."""
-    if not session_id or not point_id:
-        return False
-    return bool(re.fullmatch(
-        rf"{re.escape(str(session_id))}_t\d+", str(point_id)))
-
-
-def _is_turn_echo_row(session_id, row: dict) -> bool:
-    """This session's turn ID **and** a turn marker on the row.
-
-    The id is the reliable turn/claim discriminator (``runner._turn_id_pattern``'s
-    identity). The marker is EITHER the production turn kind
-    (``pointKind == "event"`` — what ``capture_session`` stamps on every turn
-    Point, ``tortoise/sdk.py``) OR the ``[role] …`` transcript prefix
-    (``retrieval._is_turn_point``'s content leg). The kind leg is what keeps a
-    capture whose role is not in the prefix allowlist from silently retaining
-    its own echoes: ``_normalize_turn_role`` passes ANY role string through, so
-    a ``[developer] …`` / ``[human] …`` turn matches no alternation.
-
-    Requiring a marker at all is what keeps a caller-minted Point — whose id
-    merely sits in the session's turn namespace, the class
-    ``tests/test_d3_session_identity.py`` documents as reachable — in the
-    prior set."""
-    if not _is_turn_echo_id(session_id, row.get("id")):
-        return False
-    if row.get("point_kind") == "event":
-        return True
-    content = row.get("content")
-    return bool(_TURN_ECHO_CONTENT_RE.match(str(content or "").strip()))
+# RESIDUAL — measured, not assumed: the exclusion can only drop echoes that are
+# already IN the fused candidate set, and that set is the UNION of the legs, not
+# any one leg's window. ``_fts_rows`` passes no ``pool_size``, so each leg's own
+# window is the callee's product default (``retrieval.DEFAULT_POOL_SIZE``, 120) —
+# and with both the fts and vector legs live (the kind-less point prior query;
+# the structural leg returns ``[]`` without a ``kind``) the fused set reaches
+# roughly 2 x 120, while a capture can hold ``MAX_SESSION_TURNS`` (500). The
+# bound this fix moves is therefore 15 -> that fused set (~120 keyword-only,
+# ~240 hybrid), NOT to 500: a session whose echoes fill the set still starves a
+# real prior ranked below them. That residual is pinned — in the single-leg
+# (no-embedder) shape, because that is what fixes the bound to one number — by
+# ``test_prior_bound_4509.py::test_production_pool_bound_still_starves_the_prior``
+# so it stays visible and falsifiable instead of being asserted away by an
+# over-claim here. Raising the bound to cover the worst case means passing an
+# explicit ``pool_size`` on this leg (or a raised ``TORTOISE_POOL_FLOOR``), which
+# is a retrieval-cost trade-off and is deliberately not made in this change.
 
 
 def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3, *,
               session_id: str | None = None) -> list[dict]:
-    # Only the point leg over-fetches, and only when there is a session to filter
-    # by and a `limit` in the callee's valid range; every other call keeps the
-    # exact ``limit`` window it always had (so an out-of-range `limit` still
-    # raises from the callee, on every leg, as before). The over-fetch is clamped
-    # to the callee's documented bound so it cannot itself raise.
-    fetch = (min(limit + _PRIOR_OVERFETCH, _FTS_LIMIT_MAX)
-             if (entity_type == "point" and session_id
-                 and 0 < limit <= _FTS_LIMIT_MAX) else limit)
-    rows = sdk.tortoise_fts_query(query, entity_type=entity_type, limit=fetch)
+    # #4509: the point leg names its capture session so the callee excludes this
+    # capture's own turn echoes from the fused candidate set BEFORE its
+    # ``[:limit]`` cut (the same pre-truncation contract as ``exclude_status``).
+    # No over-fetch, no caller-side drop, and every other leg keeps the exact
+    # ``limit`` window it always had. The kwarg is passed ONLY when there is a
+    # session to exclude, so a caller that cannot name its session sends the
+    # pre-#4509 call shape verbatim.
+    extra = ({"exclude_turn_echo_session": session_id}
+             if entity_type == "point" and session_id else {})
+    # #3301: the four search legs now exclude terminal Objects by DEFAULT,
+    # so the S3 entity/subject prior set must opt back INTO the
+    # terminal-inclusive view. This leg is a link-before-create /
+    # supersession-RESOLUTION prior, never a surfaced search result, and
+    # ``commit_ops.apply_supersessions``' documented entity-terminal
+    # idempotency branch is reachable through it — hiding terminal Objects
+    # here would silently drop that prior set. The POINT leg keeps the
+    # default (terminal Points stay out of capture priors, as before).
+    rows = sdk.tortoise_fts_query(query, entity_type=entity_type, limit=limit,
+                                  include_terminal=entity_type in ("object", "subject"),
+                                  **extra)
     out = []
     for r in rows or []:
         # #4511: the callee returns ``SearchResult.to_dict()`` rows, which key
@@ -2112,9 +2066,6 @@ def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3, *,
         if entity_type in ("object", "subject"):
             out.append({"id": r.get("id", ""), "name": r.get("content", ""),
                         "kind": row_kind})
-        elif entity_type == "point" and _is_turn_echo_row(session_id, r):
-            # #2552: this capture's transcript echo — never a memory prior.
-            continue
         else:
             out.append({"id": r.get("id", ""), "content": r.get("content", ""),
                         "kind": row_kind})
@@ -2182,7 +2133,8 @@ def search_graph(sdk, embed_list: dict, story: str, *,
 
     ``session_id`` is the capture being extracted: it is the anchor that lets
     the point leg drop the capture's OWN turn echoes from the prior set
-    (#2552 — see ``_is_turn_echo_id``). Callers that cannot name their session
+    (#2552, moved to the retrieval layer's pre-truncation seam by #4509 — see
+    ``retrieval.is_turn_echo_row``). Callers that cannot name their session
     pass nothing and get the unfiltered priors.
 
     Returns:
@@ -2854,14 +2806,12 @@ def _clean_slots(raw, warnings: list[str], ctx: str,
 
     Deterministic and CARRY-ONLY — this never binds (threshold gating is
     the #1370 write path's job): non-dict entries dropped, blank names/
-    kinds dropped, minted kinds repaired to the family fallback. The ENTITY
-    lane applies the write gate's ``_object_kind_forms`` vocabulary (matching
-    S5's entity gate). The EVENT lane is NARROWER — core ``EVENTS`` only — so a
-    kindDefs-less declared ``eventKinds`` entry is repaired here while S5's
-    ``_event_kind_forms`` gate would accept it; that asymmetry is tracked as
-    #5806 and was not introduced by this comment:
-    subject/object kinds gate against the entity vocabulary, event kinds
-    against the core event vocabulary. Confidence coerced to float and clamped to [0,1]
+    kinds dropped, minted kinds repaired to the family fallback. BOTH slot
+    lanes apply the write gate's own vocabulary — subject/object kinds
+    against ``_object_kind_forms`` and event kinds against
+    ``_event_kind_forms`` — so a slot referencing a kind the write gate
+    accepts is never repaired to a fallback (#5806). Confidence coerced to
+    float and clamped to [0,1]
     (non-numeric → 0.0), unknown role keys and non-list role values dropped
     with a warning. The classify-later ``unclassified`` sentinel is carried
     WITHOUT the minted-kind repair warning (FIX G — it is a terminal, not a
@@ -2880,9 +2830,15 @@ def _clean_slots(raw, warnings: list[str], ctx: str,
     # referencing an emitted pack-kind entity (e.g. dev:apiSpec) must keep
     # its kind and resolve, not be repaired to core:other and dropped.
     entity_forms = _object_kind_forms(master) if master else None
-    event_forms = {k.lower() for k in master.get("events", {})}
-    event_forms_bare = {k.lower().rsplit(":", 1)[-1]
-                        for k in master.get("events", {})}
+    # FIX M's event-side mirror (#5806): the event lane gates against the
+    # SAME widened vocabulary as execute_embed's event gate
+    # (_event_kind_forms — master forms plus pack DECLARED eventKinds,
+    # themselves full + bare and case-folded), so a slot referencing an
+    # emitted pack-declared event kind keeps its kind and resolves instead
+    # of being repaired to _EVENT_FALLBACK and dropped. Previously this
+    # lane read only master["events"] (core EVENTS), which is narrower
+    # than the gate that admits the point.
+    event_forms = _event_kind_forms(master) if master else None
     out: dict[str, list[dict]] = {}
     for role in ("subject", "object", "event"):
         raw_refs = raw.get(role)
@@ -2916,8 +2872,7 @@ def _clean_slots(raw, warnings: list[str], ctx: str,
                     # to the event fallback SILENTLY (a terminal, not a
                     # minted kind — FIX G's no-noise intent).
                     kind = _EVENT_FALLBACK["kind"]
-                elif kind.lower() not in event_forms and \
-                        kind.lower().rsplit(":", 1)[-1] not in event_forms_bare:
+                elif event_forms and kind.lower() not in event_forms:
                     warnings.append(f"minted slot kind {kind!r} ('{name[:60]}'"
                                     f") → repaired to {_EVENT_FALLBACK['kind']}")
                     kind = _EVENT_FALLBACK["kind"]

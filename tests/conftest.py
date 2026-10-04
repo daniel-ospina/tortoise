@@ -6,10 +6,13 @@ directly (no user-facing tier path in v1). Used by E2E-1/3/4/5/10/11/12/13.
 """
 from __future__ import annotations
 
+import ipaddress
+import logging
 import os
 import shutil
 import tempfile
 
+import httpx
 import pytest
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
@@ -41,6 +44,25 @@ os.environ.setdefault("TORTOISE_HEALTHZ_PORT", "0")
 # install gate needs the env early.)
 os.environ.setdefault("TORTOISE_TEST_MODE", "1")
 
+# #7015: the embedder autouse opt-out below is a *test* fixture, so it is too
+# late for COLLECTION — and collection is where the race bites. Three shard
+# files (test_3815_mitigation_moves_weight, test_ep_directional,
+# test_issue94_annotate_ep_batch) build an SDK and call `_get_proj()` at MODULE
+# level as a live-DB availability probe, so importing the module starts the
+# #2952 background embedder warm-up (`EmbeddingModel.start_warm_up`) before any
+# fixture runs. That thread's cold `import sentence_transformers` -> `torch`
+# then overlaps a cold `sklearn`/`scipy` import in another collected module, and
+# scipy's array-API dispatch raises `AttributeError: partially initialized
+# module 'torch' has no attribute 'Tensor'` (mechanism in
+# ``tortoise/heavy_imports.py``). On 1bb0b1a6c that ONE collection error failed
+# shard (d)'s manifest step closed and reddened the required `python-ci-gate`.
+# The opt-out must be in force BEFORE any test module is imported, so it is set
+# here at conftest import. ASSIGNED, not `setdefault`: a pre-set value (a dev
+# shell, a wrapper) must not be able to re-open the window, exactly as the
+# per-test fixture does not honour one. Tests that need the warm-up ON
+# delenv/patch it (`test_2952_degraded_read`).
+os.environ["TORTOISE_EMBEDDER_WARMUP"] = "0"
+
 # #1642 FIX 6: the session-end sweep loops discover->reap until the backlog
 # is cleared or this wall-clock budget is exhausted, at a raised batch size
 # — one completing suite can clear a multi-hundred orphan backlog (the old
@@ -67,6 +89,42 @@ os.environ.setdefault("TORTOISE_FAST_ATEXIT", "1")
 import sys  # noqa: E402, I001
 from pathlib import Path  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# ── #3752: private per-session temp root (FIRST, before anything can write) ─
+# The suite used to scratch directly in the SHARED system temp dir (35k
+# entries; ~2k of them test-owned) and socket/pid discovery then scanned that
+# whole tree — 2 minutes at 53% CPU, and a lookup that could match another
+# test's or another session's socket. `install_session_tmpdir()` creates one
+# private root (a `tt_` dir under a SHORT temp base, so ordinary scratch paths
+# stay under the AF_UNIX sun_path cap and the reaper's `tt_`/ephemeral
+# classification still applies), redirects `tempfile.tempdir` + `$TMPDIR` into
+# it, and registers an atexit teardown that removes it wholesale — the leak
+# class is fixed structurally, not per test file.
+#
+# Placement is load-bearing, exactly like TORTOISE_TEST_SESSION above: this
+# must run at CONFTEST IMPORT and BEFORE the `tortoise.embedded_reaper` import
+# below (transitively via `tests._embedded`), because that module resolves
+# `ACTIVE_SUITES_DIR` and `_LOCK_PATH` from the temp dir ONCE, at import time.
+# `TORTOISE_HOST_TMPDIR` (exported by the same call) keeps the marker dir
+# host-global so a production/cron sweep still sees a live suite (#3752),
+# while `_LOCK_PATH` stays in the sweep domain (the private root).
+# The scan guard is installed unconditionally: any test that discovers files by
+# walking the shared temp dir fails loudly, naming itself.
+from tests._tmpdir_hygiene import (  # noqa: E402
+    install_scan_guard,
+    install_session_tmpdir,
+    sweep_stale_session_roots,
+)
+
+install_session_tmpdir()
+# AFTER the redirect, deliberately: this scans HOST_TMPDIR (the module constant,
+# captured before the redirect) and its pid+start probe lazily imports
+# tortoise.embedded_reaper — which must happen only once the private root is
+# the temp dir, or _LOCK_PATH freezes on the shared temp dir for the whole
+# session.
+sweep_stale_session_roots()  # reclaim a SIGKILLed prior run's root, if any
+install_scan_guard()
+
 from tests._embedded import shared_proj  # noqa: E402, F401, I001
 
 # ── Epic #1647 (D-1=A): the test-session signal + redirect env ────────────
@@ -124,11 +182,29 @@ os.environ.setdefault("TORTOISE_TEST_NO_REDIRECT", ",".join(TEST_NO_REDIRECT_STE
 # guards). The overwrite is paired with a 12-hex shape guard: os.urandom(6)
 # always yields 12 hex chars, so the assert can only fire on a broken
 # platform — fail loudly rather than export a malformed nonce.
+#
+# #6323: the re-roll is scoped to a NEW PROCESS, so re-executing this body in
+# the SAME process is idempotent. pytest loads this file as the top-level
+# `conftest`, so `import tests.conftest` is a SECOND module whose body re-runs
+# mid-session; an unconditional re-roll re-points the journal and makes the
+# session read its OWN pre-import journal as a live peer, so
+# `wipe_server(scope=None)` spares graphs the session minted. The owner-pid
+# marker keeps the decision above intact in every other case: an externally
+# pre-set value carries no marker and is still overwritten, and a forked child
+# (marker pid != its own) still mints a fresh nonce exactly as before.
 import re as _re  # noqa: I001, E402
-_SESSION_NONCE = os.urandom(6).hex()
-assert _re.fullmatch(r"[0-9a-f]{12}", _SESSION_NONCE), \
-    f"TORTOISE_TEST_SESSION must be 12 hex (48 bits), got {_SESSION_NONCE!r}"
-os.environ["TORTOISE_TEST_SESSION"] = _SESSION_NONCE
+_SESSION_OWNER_PID = str(os.getpid())
+_prior_nonce = os.environ.get("TORTOISE_TEST_SESSION")
+if (os.environ.get("TORTOISE_TEST_SESSION_OWNER_PID") == _SESSION_OWNER_PID
+        and _prior_nonce
+        and _re.fullmatch(r"[0-9a-f]{12}", _prior_nonce)):
+    _SESSION_NONCE = _prior_nonce
+else:
+    _SESSION_NONCE = os.urandom(6).hex()
+    assert _re.fullmatch(r"[0-9a-f]{12}", _SESSION_NONCE), \
+        f"TORTOISE_TEST_SESSION must be 12 hex (48 bits), got {_SESSION_NONCE!r}"
+    os.environ["TORTOISE_TEST_SESSION"] = _SESSION_NONCE
+    os.environ["TORTOISE_TEST_SESSION_OWNER_PID"] = _SESSION_OWNER_PID
 
 # ── Epic #1647 Task 2 Step 7: the session created-graph journal ───────────
 # The journal path is resolved at CONFTEST IMPORT (cycle-4 P2-9) — product-
@@ -929,6 +1005,25 @@ def _server_graph_hygiene(_redislite_hygiene):
 
 
 # ── Epic #1647 Task 4 (P2): session-start backend-identity tripwire ────────
+def _poisoned_aof_hint_for_uri(uri: str) -> str | None:
+    """#2961 recovery hint when the backend for ``uri`` shows a poisoned AOF.
+
+    Diagnosis aid for the tripwire's failure path — never raises, never
+    gates a green session, returns None whenever the state cannot be
+    established (no Docker, no matching container, malformed URI).
+    """
+    from urllib.parse import urlparse
+    try:
+        port = urlparse(uri).port or 6379
+    except ValueError:
+        return None
+    try:
+        from tortoise.graph_delete_guard import diagnose_poisoned_aof
+        return diagnose_poisoned_aof(port)
+    except Exception:
+        return None
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _assert_backend_identity():
     """Epic #1647 E2E-6 tripwire: on docker-URI sessions, the session must
@@ -1025,6 +1120,17 @@ def _assert_backend_identity():
                 and "health check failed" in str(exc)):
             from tests._embedded import _remove_journal_file
             _remove_journal_file(os.environ.get("TORTOISE_TEST_JOURNAL_FILE", ""))
+            # #2961: at this point a poisoned-AOF crash loop and a genuine
+            # backend outage are INDISTINGUISHABLE — both surface as a
+            # connection-class failure, and the poison path silently blocks
+            # every verification run. When the backend's container log
+            # shows the AOF-load signature, fail with the actionable
+            # recovery steps instead of a bare connection error. Best-effort
+            # only: no Docker / no matching container / a clean log leaves
+            # the original failure untouched.
+            _hint = _poisoned_aof_hint_for_uri(uri)
+            if _hint:
+                raise RuntimeError(f"{exc}\n\n{_hint}") from exc
         raise
     try:
         assert probe._is_embedded is False, (
@@ -1227,6 +1333,347 @@ def _disable_embedder_autowarmup(monkeypatch):
     yield
 
 
+# ── #4387 item 2: hermetic egress BY DESIGN, not by accident of DNS ───────
+#
+# Two product paths build a default httpx client and therefore leave the
+# process the moment SUPABASE_URL names a real host:
+#   * the analytics sink — POST {SUPABASE_URL}/rest/v1/analytics_events
+#     (tortoise/hosted_api.py::_track_analytics_event);
+#   * the JWKS cold pre-warm — GET {SUPABASE_URL}/auth/v1/.well-known/
+#     jwks.json (tortoise/session_auth.py::_fetch_jwks, driven from
+#     tortoise/hosted_api.py::_first_contact_prewarm at app startup).
+# Neither was stubbed suite-wide, so the test files that set SUPABASE_URL +
+# SUPABASE_SERVICE_ROLE_KEY were hermetic only because test.supabase.co /
+# x.supabase.co / testref.supabase.co happen to be NXDOMAIN. A wildcard A
+# record, a resolver that answers with a parking page, or one typo in a
+# fixture URL would turn all of them into live callers at once.
+#
+# The guard patches the two CONCRETE httpx transports — the narrowest seam
+# that still exercises the real request-building code (URL join, headers,
+# JSON encoding). It deliberately does NOT patch the client classes, so tests
+# that install their own `httpx.Client` stub (the recording pattern at
+# tests/test_analytics_write_path_resolution.py:_CapturingClient and
+# tests/test_analytics_fallback_alert.py:_StubClient) keep observing exactly
+# what they observed before. Transport subclasses a test builds directly
+# (httpx.MockTransport, the ASGI transport behind starlette's TestClient,
+# tests/_github_mock.py:MockGitHubTransport) are different classes and are
+# never touched — they are already hermetic.
+#
+# SCOPE: the httpx transports only. Product egress that goes through
+# `requests` or `urllib.request` (tortoise/session_indexer.py,
+# tortoise/model_adapters.py, tortoise/github_issue.py, tortoise/models.py,
+# tortoise/connectors/linear.py) is NOT intercepted, so for those callers the
+# suite is still hermetic by accident of DNS. Extending the guard to them is a
+# scope decision recorded on #4387, not part of this change.
+#
+# Policy, in order:
+#   1. @pytest.mark.live / @pytest.mark.integration items reach the real
+#      network by design (the #1787 probes, the Resend integration test);
+#      `_hermetic_egress_live_bypass` flips `allow_live` for them.
+#   2. loopback is delegated to the real transport — the suite boots local HTTP
+#      servers (e.g.
+#      tests/test_supabase_control.py::test_real_client_survives_multiple_queries)
+#      and the hosted e2e suite serves JWKS from 127.0.0.1. Loopback is decided
+#      by ADDRESS (127.0.0.0/8, ::1) plus the one exact name `localhost` — never
+#      by a host STRING suffix. `*.localhost` is reserved for loopback by RFC
+#      6761, but honouring it would hand the classification to the OS resolver,
+#      which is the accident-of-DNS this guard exists to remove, so it is
+#      blocked (fail-closed) like any other unknown name. `127.evil.example`
+#      is the same class of slip and gets the same answer.
+#   3. the two known test endpoints are served from memory and recorded. The
+#      match is method + path on ANY host — deliberately, so a fixture's
+#      made-up host is served (test_analytics_post_is_served_by_the_stub_and_
+#      recorded pins host=hermetic-guard.invalid). It is a WIRE stub, not a
+#      host allow-list: the product's request-building still runs in full, and
+#      the call is recorded under its kind so a test can assert the payload. The
+#      JWKS stub answers the 503 a missing upstream produces — deliberately
+#      NOT a healthy 200: a canned 200 would flip the process-global
+#      `session_auth._jwks` cache from cold to warm and change every
+#      fail-closed session-auth surface in the suite, and a canned EMPTY 200
+#      would be the exact #2922 misreport ("0 usable keys" during a transport
+#      outage). The stub is deterministic, not a fabricated upstream.
+#   4. anything else raises httpx.ConnectError — the same class blocked egress
+#      produces — and is recorded. It is raised, not test-failing: the #4387
+#      item 3 call sites (Resend / GitHub send paths) swallow transport errors
+#      by design, so blocking them behaves exactly as blocked egress does while
+#      a call site that lets the error escape fails loudly. Stubbing those call
+#      sites is #4387 item 3, not this change.
+_HERMETIC_ANALYTICS_PATH = "/rest/v1/analytics_events"
+_HERMETIC_JWKS_PATH = "/auth/v1/.well-known/jwks.json"
+# Bracketed IPv6 is deliberately NOT a member (#4387 review): httpx strips the
+# brackets before the host reaches the guard, so `httpx.Request("GET",
+# "http://[::1]/x").url.host == "::1"` — a `"[::1]"` entry can never match and
+# would read as coverage that does not exist. The `::1` address is covered by
+# the `ipaddress` range test in `_hermetic_is_loopback`, and `localhost` is the
+# one non-address spelling honoured (policy 2).
+_HERMETIC_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+_HERMETIC_NETWORK_MARKERS = ("live", "integration")
+_HERMETIC_CALL_CAP = 2000
+
+_hermetic_logger = logging.getLogger("tortoise.tests.egress")
+
+
+class _HttpxEgressCall:
+    """One request observed at the #4387 transport guard."""
+
+    __slots__ = ("host", "kind", "method", "path", "request", "transport",
+                 "url")
+
+    def __init__(self, kind, request, transport):
+        self.kind = kind
+        self.method = request.method
+        self.url = str(request.url)
+        self.host = request.url.host
+        self.path = request.url.path
+        self.transport = transport
+        self.request = request
+
+    def __repr__(self):  # pragma: no cover — debug aid
+        return f"<{self.kind} {self.method} {self.url} via {self.transport}>"
+
+
+class _HermeticEgress:
+    """Recorder + policy state for the #4387 transport guard."""
+
+    def __init__(self):
+        self.calls = []
+        self.allow_live = False
+        self.recording = False
+
+    def clear(self):
+        self.calls = []
+
+    def _record(self, kind, request, transport):
+        # Quiet unless a test opted in via `hermetic_egress` (#4387 review): the
+        # recorder is a process global, and nothing but an opted-in test ever
+        # clears it, so without this gate EVERY test appended to the list an
+        # opted-in test asserts on. Blocking and answering are unaffected — only
+        # the observation is suppressed.
+        #
+        # This narrows the window; it does NOT close it. A straggling off-loop
+        # request (#4608) that lands AFTER `recording` flips is recorded like any
+        # other, whatever its kind — so there is no kind the gate exempts. The
+        # guard tests compensate only where the host identifies the call: their
+        # analytics, JWKS and blocked counts filter to the host that test itself
+        # used, and their `loopback` check is a membership test on that same
+        # host. A straggler aimed at the SAME host stays indistinguishable from
+        # the test's own call; attributing a call to its originator is not
+        # something this recorder can do.
+        if not self.recording:
+            return
+        if len(self.calls) < _HERMETIC_CALL_CAP:
+            self.calls.append(_HttpxEgressCall(kind, request, transport))
+
+    @property
+    def analytics_posts(self):
+        return [c for c in self.calls if c.kind == "analytics"]
+
+    @property
+    def jwks_gets(self):
+        return [c for c in self.calls if c.kind == "jwks"]
+
+    @property
+    def blocked(self):
+        return [c for c in self.calls if c.kind == "blocked"]
+
+    @property
+    def loopback(self):
+        return [c for c in self.calls if c.kind == "loopback"]
+
+
+_HERMETIC_EGRESS = _HermeticEgress()
+# `handle_request` is a plain function on the transport class, so this is a
+# METHOD patch, not an instance patch — it covers the default transport AND
+# every proxy mount httpx builds from HTTP(S)_PROXY, which an `_init_transport`
+# seam would miss (the proxy mounts come from `_init_proxy_transport`).
+_ORIGINAL_SYNC_HANDLE_REQUEST = httpx.HTTPTransport.handle_request
+_ORIGINAL_ASYNC_HANDLE_ASYNC_REQUEST = httpx.AsyncHTTPTransport.handle_async_request
+
+
+def _hermetic_is_loopback(host):
+    if not host:
+        return False
+    if host in _HERMETIC_LOOPBACK_HOSTS:
+        return True
+    # Parse, do not pattern-match (#4387 review). A STRING test fails OPEN on
+    # exactly the shapes this guard exists to catch: `host.startswith("127.")`
+    # delegated `127.evil.example`, and `host.endswith(".localhost")` delegated
+    # every `*.localhost` name — each handing the classification to the OS
+    # resolver. `ipaddress.ip_address()` is the actual range test; the exact
+    # name `localhost` is the only non-address spelling honoured (policy 2).
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _hermetic_canned_response(request):
+    """(kind, response) for an endpoint the suite stubs; (None, None) else."""
+    method = request.method.upper()
+    path = request.url.path
+    if method == "POST" and path.endswith(_HERMETIC_ANALYTICS_PATH):
+        return "analytics", httpx.Response(201, content=b"", request=request)
+    if method == "GET" and path.endswith(_HERMETIC_JWKS_PATH):
+        return "jwks", httpx.Response(
+            503,
+            json={"message": "no JWKS upstream in the hermetic test suite "
+                             "(#4387)"},
+            request=request,
+        )
+    return None, None
+
+
+def _hermetic_blocked(request, transport):
+    message = (
+        "hermetic egress guard (#4387): blocked a real network request to "
+        f"{request.url} from {transport} — the test suite allows only "
+        "loopback and the stubbed analytics/JWKS endpoints. Mark the test "
+        "@pytest.mark.live (or @pytest.mark.integration) if it genuinely "
+        "needs the network."
+    )
+    _HERMETIC_EGRESS._record("blocked", request, transport)
+    _hermetic_logger.warning(message)
+    return httpx.ConnectError(message, request=request)
+
+
+def _hermetic_dispatch_sync(request, transport, delegate):
+    # `allow_live` is checked BEFORE the loopback test so a live item's real
+    # (non-loopback) egress is never recorded as `loopback` (#4387 review).
+    if _HERMETIC_EGRESS.allow_live:
+        return delegate()
+    if _hermetic_is_loopback(request.url.host):
+        _HERMETIC_EGRESS._record("loopback", request, transport)
+        return delegate()
+    kind, response = _hermetic_canned_response(request)
+    if response is not None:
+        _HERMETIC_EGRESS._record(kind, request, transport)
+        return response
+    raise _hermetic_blocked(request, transport)
+
+
+async def _hermetic_dispatch_async(request, transport, delegate):
+    # Same split as the sync arm: `loopback` must mean loopback.
+    if _HERMETIC_EGRESS.allow_live:
+        return await delegate()
+    if _hermetic_is_loopback(request.url.host):
+        _HERMETIC_EGRESS._record("loopback", request, transport)
+        return await delegate()
+    kind, response = _hermetic_canned_response(request)
+    if response is not None:
+        _HERMETIC_EGRESS._record(kind, request, transport)
+        return response
+    raise _hermetic_blocked(request, transport)
+
+
+def _hermetic_handle_request(self, request):
+    return _hermetic_dispatch_sync(
+        request, "httpx.HTTPTransport",
+        lambda: _ORIGINAL_SYNC_HANDLE_REQUEST(self, request))
+
+
+async def _hermetic_handle_async_request(self, request):
+    return await _hermetic_dispatch_async(
+        request, "httpx.AsyncHTTPTransport",
+        lambda: _ORIGINAL_ASYNC_HANDLE_ASYNC_REQUEST(self, request))
+
+
+# #4387 review: the guard is installed at CONFIGURE time, not from the
+# session-scoped fixture. A fixture is too late — pytest imports every test
+# module (and sub-conftest) during COLLECTION, before the first fixture runs,
+# so module-level or collection-time egress (including the `--collect-only`
+# invocation that emits the skip-guard manifest) would run unguarded. The
+# previous "in place before ANY test" was true of test EXECUTION only.
+#
+# Reference-counted rather than a boolean (#4387 review): an in-process nested
+# pytest session (pytester, or a test that calls `pytest.main()`) would
+# otherwise have its own `pytest_unconfigure` restore the pristine transports
+# while the OUTER session's remaining tests are still to run — silently
+# disarming the guard for the rest of the run.
+_HERMETIC_GUARD_DEPTH = 0
+
+
+def _install_hermetic_egress_guard():
+    """Patch the two concrete httpx transports; idempotent, ref-counted."""
+    global _HERMETIC_GUARD_DEPTH
+    _HERMETIC_GUARD_DEPTH += 1
+    if _HERMETIC_GUARD_DEPTH > 1:
+        return
+    httpx.HTTPTransport.handle_request = _hermetic_handle_request
+    httpx.AsyncHTTPTransport.handle_async_request = _hermetic_handle_async_request
+
+
+def pytest_configure(config):
+    _install_hermetic_egress_guard()
+
+
+def pytest_unconfigure(config):
+    global _HERMETIC_GUARD_DEPTH
+    if _HERMETIC_GUARD_DEPTH == 0:
+        return
+    _HERMETIC_GUARD_DEPTH -= 1
+    if _HERMETIC_GUARD_DEPTH:
+        return
+    httpx.HTTPTransport.handle_request = _ORIGINAL_SYNC_HANDLE_REQUEST
+    httpx.AsyncHTTPTransport.handle_async_request = (
+        _ORIGINAL_ASYNC_HANDLE_ASYNC_REQUEST)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _hermetic_egress_guard():
+    """#4387 item 2: the process-wide transport guard's recorder.
+
+    Session-scoped and autouse so a test — or a module-scoped `client` fixture
+    whose TestClient boot fires the JWKS pre-warm — has the recorder in place.
+    The INSTALL itself happens in `pytest_configure`, so collection is covered
+    too (see above); this fixture is the stable name for it.
+    """
+    yield _HERMETIC_EGRESS
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_egress_live_bypass(request):
+    """Let @pytest.mark.live / @pytest.mark.integration reach the real net.
+
+    Those tests are excluded from the deterministic suite and reach real
+    upstreams by design (the #1787 probes, the Resend integration test).
+
+    `allow_live` is a process global, so the guarantee is "blocked unless a
+    live item is in flight", NOT "blocked by policy for all non-live work":
+    egress from a straggling worker (#4608) during a live test is delegated to
+    the real transport. Keying the decision on the requesting thread/context
+    would tighten it; that is a separate change, not this one (#4387 review).
+    """
+    previous = _HERMETIC_EGRESS.allow_live
+    _HERMETIC_EGRESS.allow_live = any(
+        request.node.get_closest_marker(marker)
+        for marker in _HERMETIC_NETWORK_MARKERS)
+    try:
+        yield
+    finally:
+        _HERMETIC_EGRESS.allow_live = previous
+
+
+@pytest.fixture
+def hermetic_egress():
+    """The recorded #4387 egress interactions, cleared for this test.
+
+    Exposed so a test can assert what the analytics sink actually POSTed (or
+    that a JWKS fetch was answered) now that the transport — not the
+    individual test — owns the stub. The payload-asserting tests that install
+    their own `httpx.Client` stub keep observing their own recorder; they do
+    not need this one.
+
+    The recorder is OPT-IN: `recording` defaults to False, so tests that do not
+    ask for this fixture do not accumulate calls into it (#4387 review).
+    """
+    _HERMETIC_EGRESS.clear()
+    _HERMETIC_EGRESS.recording = True
+    try:
+        yield _HERMETIC_EGRESS
+    finally:
+        _HERMETIC_EGRESS.recording = False
+
+
 # ── #3820 (cycle-2 P1): the analytics-alert channel is OFF for every test ───
 # The write path now has a terminal outcome, and three of its four exits can
 # reach the alert leg (`dropped` at once, `fallback` once the streak crosses
@@ -1315,6 +1762,14 @@ def _analytics_alert_isolation(monkeypatch, tmp_path):
     # connection_across_emits``).
     monkeypatch.setattr(ha, "_ANALYTICS_HTTP_CACHE",
                         {"key": None, "client": None})
+    # #3944: the heartbeat and the canary counter are process globals too. The
+    # heartbeat must not leak a delivered timestamp into a later absence test
+    # (it would read FRESH), and the counter must not accumulate across the
+    # suite. The canary TASK itself is armed at TestClient lifespan entry and
+    # sleeps first, so with the production 300 s period it never emits during a
+    # test; tests that mean to exercise it patch the period themselves.
+    monkeypatch.setattr(ha, "_ANALYTICS_LAST_DELIVERED_AT", None)
+    monkeypatch.setattr(ha, "_ANALYTICS_CANARY_ATTEMPTS", 0)
     mon.ANALYTICS_OUTCOME_COUNT.clear()
 
 

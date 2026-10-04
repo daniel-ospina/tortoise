@@ -29,9 +29,107 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple, Protocol, runtime_checkable
 
-from tortoise.env_truthy import env_flag  # #4097: the declared truthy contract
+from tortoise.cypher_guard import (  # #3595 `=~` guard — the ONE seam
+    _guard_execute_command,
+    _guard_unsupported_cypher,
+    _skip_cypher_quoted,  # noqa: F401  re-export: the scanner's public test surface
+    _unsupported_cypher_operator,  # noqa: F401  re-export
+    guarded_client,
+)
+from tortoise.env_truthy import FALSY, env_flag  # #4097: the declared truthy contract
 
 logger = logging.getLogger(__name__)
+
+# ── #2969: bounded graph socket reads (env-tunable) ─────────────────────────
+# The server/Docker FalkorDB client MUST carry a bounded socket READ timeout:
+# a server-side stall (FalkorDB active-defrag loop / MERGE lock — #2969,
+# #2838) otherwise blocks the caller in ``recv()`` forever, and the run looks
+# alive (process present, 0% CPU) with no error, no log output and no way to
+# tell "stalled" from "slow".
+#
+# What is ALREADY true without this block: the host branch below resolves
+# ``_socket_timeouts()`` and passes it, so the docker lane was bounded in
+# practice at the product defaults — 10s read / 2s connect
+# (``_DB_SOCKET_TIMEOUT_DEFAULT`` / ``_DB_CONNECT_TIMEOUT_DEFAULT``).
+# redis-py imposes nothing of its own here: measured on the pinned
+# `redis 7.4.1`, `Connection().socket_timeout` is ALREADY `None`, and
+# ``falkordb.FalkorDB.__init__`` defaults ``socket_timeout=None`` and passes it
+# explicitly — its historical 5s default is gone from this path either way.
+#
+# What this block ADDS is a PER-LANE override of those product defaults, so a
+# lane can raise its read bound without changing the product's. The longmem
+# eval lane raises it to 120s for its legitimately long ingest writes (see
+# ``tools/longmem_eval/stall_guard.py``). An operator can tune either knob:
+#
+#   TORTOISE_DB_SOCKET_TIMEOUT          seconds (default: the product read
+#                                       bound — 10s)
+#   TORTOISE_DB_SOCKET_CONNECT_TIMEOUT  seconds (default: the product connect
+#                                       bound — 2s)
+#
+# ``none`` / ``off`` / ``false`` / ``0`` / any number ≤ 0 disables the bound —
+# an explicit, documented opt-out for a workload whose reads legitimately
+# exceed any fixed budget (NOT recommended: it restores the unbounded-hang
+# failure mode). Above ``_DB_TIMEOUT_MAX_PER_LANE_S`` the knob fails loud
+# rather than clamping.
+_SOCKET_TIMEOUT_ENV = "TORTOISE_DB_SOCKET_TIMEOUT"
+_SOCKET_CONNECT_TIMEOUT_ENV = "TORTOISE_DB_SOCKET_CONNECT_TIMEOUT"
+# NOTE: there is deliberately no `_DEFAULT_SOCKET*` mirror here. Such a pair
+# existed and was dead — nothing in production read them — and the connect one
+# named 5.0 while the client's real connect default is
+# `_DB_CONNECT_TIMEOUT_DEFAULT` = 2.0 (see `_socket_timeouts`), so it advertised
+# a value the product never used. Assert against the real defaults instead.
+# #4097: this knob's "off" spellings come from the DECLARED contract
+# (`FALSY`), so an operator who reaches for `false` is not meeting a second
+# vocabulary. `none` is this knob's own spelling (a timeout is absent, not
+# false), and the numeric equivalents `0.0`/`-1` are below — keeping all three
+# here means the whole accepted set is readable in one place.
+_SOCKET_TIMEOUT_UNBOUNDED = FALSY | {"none", "0.0", "-1"}
+
+
+def _resolve_socket_timeout(name: str, default: float) -> float | None:
+    """Parse a seconds-valued socket-timeout knob (env > default).
+
+    Unset/blank → ``default``. ``none`` or any declared falsy spelling
+    (``off``/``no``/``false``/``0``), or any number ≤ 0 (the numeric off forms
+    ``0.0``/``-1``) → ``None`` (unbounded — the explicit opt-out). A value
+    below ``_DB_TIMEOUT_MIN_S`` falls back to ``default`` (see that constant).
+    A non-numeric, non-finite or above-``_DB_TIMEOUT_MAX_PER_LANE_S`` value
+    raises ``ValueError``: a typo must fail loud at connection time, never
+    silently leave the client effectively unbounded (``inf``/``1e30`` would).
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    token = raw.strip().lower()
+    if token in _SOCKET_TIMEOUT_UNBOUNDED:
+        return None
+    try:
+        value = float(token)
+    except ValueError:
+        raise ValueError(
+            f"{name}={raw!r} is not a number of seconds (use e.g. '120', "
+            f"or 'none' to disable the bound)") from None
+    if not math.isfinite(value):
+        raise ValueError(
+            f"{name}={raw!r} is not a finite number of seconds (inf/nan "
+            f"would leave the client unbounded; use 'none' to opt out "
+            f"explicitly)")
+    if value > _DB_TIMEOUT_MAX_PER_LANE_S:
+        raise ValueError(
+            f"{name}={raw!r} exceeds the {_DB_TIMEOUT_MAX_PER_LANE_S:g}s "
+            f"ceiling for this knob — above it the value is a typo, not a "
+            f"request (see _DB_TIMEOUT_MAX_PER_LANE_S)")
+    if value <= 0:
+        return None
+    if value < _DB_TIMEOUT_MIN_S:
+        # The same "finite but absurd" class the PRODUCT knob floors (#3350
+        # round-4): ``float()`` accepts ``1e-9``, which turns every FalkorDB
+        # operation into an instant timeout — a typo-induced total outage.
+        # Fall back to the default, exactly as ``_socket_timeouts()`` does.
+        # The absent CEILING on this knob is deliberate (the eval lane needs
+        # 120s); the absent FLOOR was not.
+        return default
+    return value
 
 
 def _embedded_aof_enabled() -> bool:
@@ -96,6 +194,17 @@ _DB_TIMEOUT_MAX_S = 60.0
 #: (fail-closed, so not #2850, but the same "finite but absurd" class floored
 #: for the health-probe interval). Below the floor we fall back to the default.
 _DB_TIMEOUT_MIN_S = 0.05
+#: Ceiling on the #2969 PER-LANE knob (``TORTOISE_DB_SOCKET_TIMEOUT`` /
+#: ``TORTOISE_DB_SOCKET_CONNECT_TIMEOUT``). The PRODUCT knob clamps at
+#: ``_DB_TIMEOUT_MAX_S`` (60s), but this knob exists so the eval lane can ask
+#: for its ``DEFAULT_EVAL_SOCKET_TIMEOUT_S`` (120s) — so it needs HEADROOM
+#: above that, not no ceiling at all. Beyond this a read bound stops being a
+#: bound, and it is the same "finite but absurd" class as the floor:
+#: ``sock.settimeout(1e30)`` raises ``OverflowError``, which redis-py does NOT
+#: catch (``except OSError`` only), so the client can never connect AND the
+#: failure is not retryable. Fails loud rather than clamping, per this knob's
+#: own typo contract (a silent clamp would hide the typo that caused it).
+_DB_TIMEOUT_MAX_PER_LANE_S = 600.0
 
 #: #3350: explicit, bounded retry policy for the EMBEDDED client.
 #:
@@ -220,7 +329,10 @@ def _reset_falkordb_version_cache() -> None:
 # A query is a bulk wipe when it contains DETACH DELETE but has NO property map
 # ({...} — e.g. MATCH (n:Label {id:$id})) and NO real WHERE clause.
 # A WHERE clause is "real" only if it references a property (n.xxx) or a
-# parameter ($id) or CONTAINS/IN — tautologies (WHERE true, WHERE 1=1) don't count.
+# parameter ($id) or CONTAINS / ``IN (`` — tautologies (WHERE true, WHERE 1=1)
+# don't count. Note ``IN [list]`` is NOT recognized (only ``IN (``), so a
+# scoped delete whose only reference is `id(n) IN [..]` is misclassified as a
+# bulk wipe (#3007).
 _WHERE_REAL_RE = re.compile(
     r"\b[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*|\$[a-zA-Z_]|CONTAINS|IN\s*\(",
     re.IGNORECASE,
@@ -239,6 +351,13 @@ def _is_bulk_wipe(cypher: str) -> bool:
     if m and _WHERE_REAL_RE.search(m.group(1)):  # noqa: SIM103
         return False
     return True
+
+
+# ── #3595: unsupported-Cypher-operator guard (`=~`) ──────────────────────
+# The scanner and the guarded graph/client classes live in
+# ``tortoise.cypher_guard`` (the single seam). They are re-exported above so
+# `_GuardedGraph` can share them and so the tests that pin the scanner keep
+# resolving through this module. See that module for the doctrine.
 
 
 # ── #2943: durable pre-wipe snapshot sidecar ────────────────────────────────
@@ -1566,6 +1685,115 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
             "onboarding_snapshot": onboarding_nodes,
             "onboarding_step_links": onboarding_links,
             "config_snapshot": config_entries}
+# ── Destructive-op guard: TWO independent layers (#99 P0, hardened #2944) ──
+#
+# The unconditional graph wipe (``MATCH (n) DETACH DELETE n``) is the most
+# destructive statement in the system. It is protected by two layers that
+# cover different attack surfaces — L2 alone left embedded mode unsupervised
+# and L1 alone left hand-written Cypher unguarded, so each layer exists
+# because the other does not cover it:
+#
+#   L1 — STRUCTURAL, per-call opt-in (#2944), on the rebuild lane. The only
+#        AUTHORIZED rebuild-lane path in this package that issues the literal
+#        whole-graph statement (``MATCH (n) DETACH DELETE n`` with no
+#        label/WHERE/LIMIT) is ``FalkorProjection._wipe_all_nodes()``, and it
+#        refuses unless the CALLER passed ``confirm_destructive=True`` through
+#        ``rebuild_all()`` / ``rebuild()``. There is no default-allow, no
+#        module-level flag, no env var, and no instance attribute that can
+#        authorize a wipe: a new caller on this lane cannot wipe a graph by
+#        *forgetting* something, it must deliberately opt in at its own call
+#        site. L1 applies to embedded DBs too — "embedded" means *isolated*,
+#        not *unsupervised*: an embedded wipe may be unrecoverable (missing or
+#        empty replay log, or a log that only parses after the wipe), so it too
+#        needs a deliberate per-call opt-in. (The raw-query lane below can also
+#        issue that literal statement; there it is authorized by L2's
+#        embedded/test-name exemption, NOT by a token — see KNOWN GAPS.)
+#
+#   L2 — DEFENCE IN DEPTH, disposable-graph check (#99), on the guarded
+#        ``query`` verb. ``_GuardedGraph`` wraps the graph handle reached as
+#        ``proj.g``, so a bulk DETACH DELETE
+#        issued through ``proj.g.query`` / ``FalkorProjection.query``
+#        (hand-written Cypher included) is refused on a server graph whose name
+#        is not a disposable test graph. On the L1 lane a name is no longer
+#        SUFFICIENT (the token is required first); on the raw-query lane L2 is
+#        the ONLY layer and it deliberately lets the embedded and
+#        test-named-server cases through without a token. On a server graph the
+#        name remains NECESSARY — L2 refuses a real-looking graph
+#        (`prod_tortoise`, `team_<id>`) even when an L1 opt-in was given.
+#        That is deliberate (#2944 evaluated replacing L2 with an explicit
+#        disposable registry and chose the per-call token as the structural
+#        gate); L2 was kept because removing it would refuse strictly less
+#        than before.
+#        SCOPE OF L2, stated exactly because the difference is a live hole:
+#        the ``_is_bulk_wipe`` classifier runs in ``_GuardedGraph.query`` and
+#        ``FalkorProjection.query`` ONLY. The wrapper's other query verbs
+#        (``ro_query``, ``_query``, ``profile``, ``explain``,
+#        ``execute_command``) are overridden and carry the #3595 ``=~``
+#        operator guard, but NOT the bulk-wipe check — see KNOWN GAPS. (The
+#        name check itself is not confined to a ``query`` verb: the L1 lane
+#        calls ``_assert_test_graph`` directly from ``rebuild_all`` and
+#        ``_wipe_all_nodes``, which is why the token, not L2, is the gate
+#        there.)
+#
+# KNOWN GAPS (pre-existing, NOT fixed by #2944):
+#   * ``proj.db`` is built through ``tortoise.cypher_guard.guarded_client``
+#     (it is NOT a bare FalkorDB client), so it carries the #3595 ``=~``
+#     operator guard — but NOT the L1/L2 bulk-wipe guard. Three destructive
+#     forms reach a graph without passing either layer:
+#     (i) ``select_graph(name).query("MATCH (n) DETACH DELETE n")`` (e.g.
+#     tortoise/graph_delete_guard.py:252, reached from
+#     battery/testing/seeds.py via ``safe_graph_delete``;
+#     graph-scripts/smoke_test.py:140 in both modes, :121 on the embedded
+#     branch);
+#     (ii) ``select_graph(name).delete()`` (GRAPH.DELETE — used by
+#     ``sdk.team_delete``, ``hosted_api``, ``backup_sweep``); and
+#     (iii) the raw command channel itself,
+#     ``proj.db.execute_command("GRAPH.QUERY", name, "MATCH (n) DETACH
+#     DELETE n")``, which ``guarded_client`` rebinds to
+#     ``_guard_execute_command`` — a ``=~``-only check that never runs
+#     ``_is_bulk_wipe``. The same holds for the guarded handle's other verbs
+#     (``select_graph(name)._query`` / ``.execute_command`` / ``.profile``),
+#     which the next bullet enumerates for ``proj.g``. This surface
+#     cannot be closed inside the guard: a caller holding ``proj.db`` can
+#     equally build its own ``falkordb.FalkorDB(...)``. The guard's contract
+#     is "no wipe by *forgetting* an opt-in"; those callers carry their own
+#     confirmation/authorization (e.g. ``team_delete`` requires the team name
+#     to match).
+#   * ``_GuardedGraph`` is a "guarded QUERY" wrapper, not a guarded handle, and
+#     only its ``query`` verb applies the bulk-wipe check. It EXPLICITLY
+#     defines ``query``, ``ro_query``, ``_query``, ``profile``, ``explain``
+#     and ``execute_command``; ``__getattr__`` forwards only the remaining,
+#     non-Cypher attributes (``name``, ``schema``, ...). So
+#     ``proj.g._query("MATCH (n) DETACH DELETE n")``, ``proj.g.profile(...)``
+#     (PROFILE executes) and ``proj.g.execute_command("GRAPH.QUERY", <graph>,
+#     "MATCH (n) DETACH DELETE n")`` each reach a whole-graph wipe on a
+#     NON-test server graph passing NEITHER layer, and ``proj.g.delete()``
+#     (GRAPH.DELETE — e.g. tests/test_hosted_backup.py) is a non-Cypher verb
+#     no query guard can see at all. All of these PRE-DATE #2944 (``query`` was
+#     the only verb that checked ``_is_bulk_wipe`` before it too); they are
+#     recorded because this comment is the guard's own map of its holes.
+#     Closing them is a separate change, not a doc fix: it first needs a
+#     decision on ``_is_bulk_wipe``'s scope (#3007/#3037), because more verbs
+#     applying a classifier with those two defects would REFUSE more
+#     legitimate operations than it catches.
+#   * ``_is_bulk_wipe`` over-classifies label/LIMIT/WITH-scoped deletes and
+#     ``WHERE id(n) IN [..]``-scoped ones, so ``event_store.purge_overflow`` is
+#     refused on a non-test server graph and
+#     its callers swallow it (the hosted sweeper at DEBUG, the SDK lazy hook at
+#     WARNING) — the per-team event cap no-ops without a build failure
+#     (tracked: #3007).
+#   * ``_is_bulk_wipe`` also UNDER-classifies: a bare ``"{" in cypher``
+#     exemption means a whole-graph wipe whose text contains a brace
+#     (``MATCH (n) DETACH DELETE n // {``, ``CALL { MATCH (n) DETACH DELETE
+#     n }``) is treated as targeted, so on the raw-query lane it reaches a
+#     production server graph with no name check and no token (tracked:
+#     #3037).
+#
+#
+# History: the pre-#2944 bypass was ``_skip_guard``, a plain boolean
+# attribute (``self._skip_guard = False``) read by both query paths. It has
+# been REMOVED — a mutable attribute is exactly the "flippable by accident"
+# shape this hardening eliminates.
 
 
 class _GuardedGraph:
@@ -1578,6 +1806,30 @@ class _GuardedGraph:
     Intercepts bulk DETACH DELETE (no property map, no real WHERE) and asserts
     the graph is a test graph before allowing execution. Targeted deletes
     (MATCH (n:Label {id:$id}) ...) pass through unchanged.
+    This is L2 of the two-layer guard (see the module comment above): it is
+    unconditional — there is deliberately NO bypass attribute. It is also the
+    ONLY layer on the raw-query lane (``proj.g.query`` / ``query``), where a
+    bulk DETACH DELETE on an embedded or test-named graph is allowed through
+    without a token. The rebuild lane additionally requires L1 —
+    ``FalkorProjection._wipe_all_nodes()`` asserts the caller's explicit
+    per-call opt-in BEFORE reaching here.
+
+    #3595: also refuses the unsupported Cypher ``=~`` operator, so a future
+    ``=~`` written directly against ``proj.g`` fails loudly. This class covers
+    ONE of the repo's handle paths (the projection's write handle); the
+    remaining paths (``proj.db.select_graph(...)`` in hosted_api/backup_sweep/
+    navigation/..., the SDK registry handles) are covered because ``proj.db``
+    and every other FalkorDB client the ``tortoise`` package builds are
+    constructed through ``tortoise.cypher_guard.guarded_client``, whose handles
+    guard every query entry point against the #3595 ``=~`` operator. For
+    defence in depth this wrapper also overrides every query entry point itself
+    (``query``, ``ro_query``, ``_query``, ``profile``, ``explain``,
+    ``execute_command``), so it does not depend on the inner handle's class to
+    refuse the ``=~`` operator. NOTE the override is NOT uniform: only
+    ``query`` applies the bulk-wipe check (L2) as well — the other five verbs
+    carry the operator guard only (see KNOWN GAPS in the module comment
+    above). ``__getattr__`` below forwards only the remaining non-query
+    attributes (``name``, ``delete``, ``schema``, ...) to the underlying handle.
     """
 
     __slots__ = ("_g", "_proj")
@@ -1587,18 +1839,68 @@ class _GuardedGraph:
         self._proj = projection
 
     def query(self, cypher: str, params=None, timeout=None):
-        if _is_bulk_wipe(cypher) and not getattr(self._proj, "_skip_guard", False):
+        # #3595: refuse an unsupported operator BEFORE it is sent. FalkorDB
+        # answers `=~` with an EMPTY result set, so this is the one decision
+        # point for the `proj.g` path. The decision itself lives in
+        # ``cypher_guard._guard_unsupported_cypher`` — shared with the guarded
+        # handles so the two paths cannot drift.
+        _guard_unsupported_cypher(cypher)
+        if _is_bulk_wipe(cypher):
             self._proj._assert_test_graph(
                 "REFUSING to run bulk DETACH DELETE on non-test graph"
             )
+        # #3359: count the op as ISSUED to the raw handle, AFTER the destructive
+        # guard — a refused bulk wipe is not work the capture caused, and the
+        # count is "ops issued", not "ops succeeded" (a query that raises on a
+        # dead socket is still an op the capture generated). No-op (one
+        # ContextVar read) when no capture is active.
+        record_graph_op(cypher)
         return self._g.query(cypher, params=params, timeout=timeout)
+
+    def ro_query(self, cypher: str, params=None, timeout=None):
+        # Same refusal for the read-only verb: the raw handle this wrapper
+        # holds is guarded too, but keep the projection's own wrapper complete
+        # rather than relying on the inner handle's class.
+        _guard_unsupported_cypher(cypher)
+        return self._g.ro_query(cypher, params=params, timeout=timeout)
+
+    def _query(self, cypher: str, params=None, timeout=None, read_only=False):
+        # The vendor's `query`/`ro_query` both delegate to `_query`; a caller
+        # reaching `_query` directly must not slip past the refusal either.
+        _guard_unsupported_cypher(cypher)
+        return self._g._query(
+            cypher, params=params, timeout=timeout, read_only=read_only
+        )
+
+    def profile(self, cypher: str, params=None):
+        # PROFILE/EXPLAIN put the statement on the wire WITHOUT routing through
+        # `_query`, so they carry their own refusal.
+        _guard_unsupported_cypher(cypher)
+        return self._g.profile(cypher, params=params)
+
+    def explain(self, cypher: str, params=None):
+        _guard_unsupported_cypher(cypher)
+        return self._g.explain(cypher, params=params)
+
+    def execute_command(self, *args, **kwargs):
+        # #3595 (review round 2, P2): the raw Redis command channel carries
+        # `GRAPH.QUERY` / `GRAPH.PROFILE` / ... too, and the guarded handles
+        # beneath `self._g` already intercept it — but keep the wrapper's own
+        # refusal complete rather than depending on the inner handle's class.
+        _guard_execute_command(args)
+        return self._g.execute_command(*args, **kwargs)
 
     def __getattr__(self, name):
         return getattr(self._g, name)
 
 from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES, LOOPBACK_HOSTS, parse_uri_userinfo  # noqa: E402, I001
 from tortoise.fork_slot import is_fork_refusal  # noqa: E402
-from tortoise.live import _live_only, _terminal_excluded  # noqa: E402
+from tortoise.graph_ops import record_graph_op  # noqa: E402  #3359: per-capture graph-op accounting
+from tortoise.live import (  # noqa: E402
+    VACUITY_BELIEF,
+    _live_only,
+    _terminal_excluded,
+)
 
 # #2981 — a FalkorDB/Redis server that has reached `maxmemory` with
 # `noeviction` REFUSES WRITES while the graph is perfectly intact. The reply
@@ -2316,6 +2618,10 @@ _NO_POINT_FOLD = _NO_PROJECTION_FOLD | frozenset({
     "ObjectSuperseded",
     "DocumentCreated",
     "SourceCreated",
+    # #5024 (T6): the `:Source` version transition. Same reason as
+    # `SourceCreated` above — a real fold in `apply`/`rebuild_all`, but a
+    # `:Source` node has no representation in this `{id: point}` index.
+    "SourceVersioned",
     "DirectEdgeRepoint",
     # JSONL-only siblings of the two above: both have REAL fold branches in
     # ``apply``/``rebuild_all``, but neither has a representation in this
@@ -2736,7 +3042,19 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
         rid = ev.get("id")
         p = points.get(rid) if isinstance(rid, str) else None
         if p:
+            # #4542: a retract is a BELIEF write, not just a tombstone —
+            # ``_retract`` (the graph arm) writes ``decay_clause('n')``
+            # beside the status, and live ``retract_point`` CASes the same
+            # two halves. Writing only ``status`` left ``fold()`` holding
+            # the PRE-retract belief while ``rebuild_all`` held the vacuous
+            # one — a divergence on EVERY retract, and the #330 parity
+            # contract this function owns. ``VACUITY_BELIEF`` is the single
+            # declaration both arms render, so they cannot re-drift.
+            # (``updatedAt`` is the one prop this fold still does not
+            # stamp; that divergence is a #5048 symptom — recorded from
+            # #4666 — not this one.)
             p["status"] = "retracted"
+            p.update(VACUITY_BELIEF)
     elif t == "PointsMerged":
         # #331 (review r2): `or []` also covers an explicit "merge_ids": null
         # in the log — dict.get(key, []) only covers the missing key.
@@ -2833,7 +3151,17 @@ def split(points: dict[str, dict]) -> tuple[list[dict], list[dict]]:
 @runtime_checkable
 class Projection(Protocol):
     def apply(self, event: dict) -> None: ...
-    def rebuild(self, log) -> None: ...
+
+    def rebuild(self, log, *, confirm_destructive: bool = False) -> None:
+        """Rebuild from `log`. The keyword is part of the contract (#2944).
+
+        A backend that wipes a graph MUST refuse when `confirm_destructive`
+        is False (see `FalkorProjection.rebuild`); a backend with nothing to
+        wipe may accept and ignore it (`InMemoryProjection`). Keeping the
+        parameter on the Protocol lets a generic caller opt in explicitly
+        instead of discovering a backend-specific refusal at runtime.
+        """
+        ...
 
 
 class InMemoryProjection:
@@ -2843,7 +3171,16 @@ class InMemoryProjection:
     def apply(self, event: dict) -> None:
         _apply_one(self.points, event)
 
-    def rebuild(self, log) -> None:
+    def rebuild(self, log, *, confirm_destructive: bool = False) -> None:
+        """Fold the log into memory.
+
+        `confirm_destructive` exists for `Projection` parity and is IGNORED:
+        this backend wipes no graph (it replaces the in-memory dict), so
+        there is nothing to authorize. `FalkorProjection.rebuild` REFUSES
+        without the token (#2944) — that divergence is deliberate and
+        documented here so a Protocol-typed caller knows a graph-backed
+        implementation may refuse while this one does not.
+        """
         # #3316: the same refusal as the Falkor engines — a dropped torn
         # trailing removal record must not be folded away into a projection
         # that serves the removed state as current.
@@ -3146,7 +3483,10 @@ class FalkorProjection(
     Docker:    FalkorProjection(host='localhost', port=16379, password='...')
     URI:       FalkorProjection.from_uri('docker://:pass@host:6379/graph')
 
-    Same API regardless of backend — constructor swap is the only difference.
+    Same API regardless of backend — constructor swap is the only difference,
+    EXCEPT the destructive `rebuild()`/`rebuild_all()` wipe, which requires an
+    explicit per-call `confirm_destructive=True` (#2944) and is refused on a
+    non-disposable server graph.
     """
 
     def __init__(self, path: str | None = None, *,
@@ -3392,7 +3732,14 @@ class FalkorProjection(
             # black hole: the read leg is. (Operators wanting that leg too
             # need a custom connection class — filed separately.)
             read_to = _socket_timeouts()[1]
-            self.db = FalkorDB(
+            # #3595: build through `cypher_guard.guarded_client` — the ONE
+            # client-construction seam — so every handle this client yields
+            # (here and from the direct `proj.db.select_graph(...)` sites
+            # elsewhere) refuses the unsupported `=~` operator. Passing the
+            # vendor class down means the embedded path keeps its own
+            # lifecycle/path guards and only gains the query guard on top.
+            self.db = guarded_client(
+                FalkorDB,
                 path,
                 serverconfig=(
                     {"appendonly": "yes", "appenddirname": aof_dir}
@@ -3404,10 +3751,45 @@ class FalkorProjection(
         elif host is not None:
             # Docker FalkorDB
             from falkordb import FalkorDB  # ponytail: lazy import, only needed for Docker mode
+            # Resolved at CONNECTION time so an env knob covers every CONSUMER
+            # of this client (SDK sessions, ingest, hosted) — NOT every
+            # FalkorDB client even in `tortoise/`: `session_indexer.py`,
+            # `backup.py` and the probe in `__main__.py` construct their own,
+            # and neither knob reaches them. ACTUAL
+            # precedence: #2969's per-lane TORTOISE_DB_SOCKET_CONNECT_TIMEOUT /
+            # TORTOISE_DB_SOCKET_TIMEOUT (fail-loud, explicit none/off/0
+            # opt-out) WINS whenever it is set; #2850's product-wide
+            # `_socket_timeouts()` (TORTOISE_FALKORDB_CONNECT_TIMEOUT_S /
+            # _SOCKET_TIMEOUT_S) only supplies the DEFAULT, read when the
+            # per-lane var is unset. So the product knob is live for a bare
+            # SDK / hosted construction, but DEAD on the `--db` eval lane:
+            # `tools/longmem_eval/run.py::run_main` UNCONDITIONALLY presets the
+            # per-lane var to `DEFAULT_EVAL_SOCKET_TIMEOUT_S` (120s) when the
+            # operator has not set it, so the per-lane var is always set
+            # there. That 120s is deliberate headroom for a loaded/defragging
+            # server, NOT a size-derived bound (#2969) — measured on the pinned
+            # default split, the largest single graph write is ~76 KB, so the
+            # eval's DATA fits the product 10s; the point is that a healthy
+            # long write must not be cut off. It is NOT
+            # clamped by `_DB_TIMEOUT_MAX_S` (60s) — the per-lane parser has its
+            # OWN ceiling, `_DB_TIMEOUT_MAX_PER_LANE_S` (600s), deliberately set
+            # above the eval's 120s so the product's tighter bound is not
+            # re-imposed here; above 600s the knob fails loud. Only an explicit
+            # none/off/false/0 (or any non-positive number) removes the bound
+            # entirely — the block-forever mode #2850 exists to PREVENT, reachable
+            # only through that opt-out.
             connect_to, read_to = _socket_timeouts()
-            self.db = FalkorDB(host=host, port=port, username=username, password=password,
-                               socket_connect_timeout=connect_to, socket_timeout=read_to,
-                               ssl=ssl)
+            # #3595: same guarded-construction seam on the server lane — the
+            # ~142 `reg.query(...)` sites behind TortoiseSDK._get_registry and
+            # the direct `proj.db.select_graph(...)` sites all reach the wire
+            # through handles this client produces.
+            self.db = guarded_client(FalkorDB, host=host, port=port,
+                                     username=username, password=password,
+                                     socket_connect_timeout=_resolve_socket_timeout(
+                                         _SOCKET_CONNECT_TIMEOUT_ENV, connect_to),
+                                     socket_timeout=_resolve_socket_timeout(
+                                         _SOCKET_TIMEOUT_ENV, read_to),
+                                     ssl=ssl)
             # Epic #1647 (cycle-3 P0-1): record the host ON THE PROJECTION so
             # wipe_server/session sweep/tripwire read it instead of the raw
             # client (redis-py 8.1.0 has no .host on the client — the host
@@ -3423,7 +3805,13 @@ class FalkorProjection(
         self._probe_error: BaseException | None = None
         self.graph_name = graph_name
         self._graph_name = graph_name
-        self._skip_guard = False
+        # NOTE (#2944): there is deliberately NO `_skip_guard` attribute here.
+        # The former bypass was removed. On the REBUILD LANE the only
+        # authorization for an unconditional wipe is the per-call
+        # `confirm_destructive=True` token threaded through
+        # rebuild()/rebuild_all() (L1); the raw-query lane has no token and is
+        # authorized instead by L2's embedded / test-name exemption — see the
+        # two-layer guard comment above _GuardedGraph and its KNOWN GAPS note.
         self._is_embedded = (path is not None)
         self._path = path
         # #5119: `_vector_index_api` MUST exist before the health check below.
@@ -3628,6 +4016,14 @@ class FalkorProjection(
 
     def _auto_health_recover(self) -> None:
         """Health check on open + transparent JSONL recovery (embedded only).
+
+        #2944: recovery goes through ``recover_from_log``, which reaches its
+        destructive ``rebuild_all`` branch only on a graph it has already
+        proven to be EMPTY (0 nodes) — the wipe is a no-op there, and that
+        call site passes ``confirm_destructive=True`` explicitly. If a
+        non-empty wipe is ever added, it must route through
+        ``_wipe_all_nodes`` like every other REBUILD-LANE wipe (the raw-query
+        lane has no token — see the module comment's KNOWN GAPS note).
 
         The projection is a derived view folded from the domain event log (the
         reconstruction source — not the durability authority; see
@@ -3970,6 +4366,13 @@ class FalkorProjection(
             # popped here so it never reaches _persist_extra_props.
             return self._upsert_source(
                 ev, merge_run_id=ev.pop("_merge_run_id", None))
+        elif t == "SourceVersioned":
+            # #5024 (T6): the re-materialisation record. `_upsert_source`'s
+            # hash-diff ON MATCH bumps version/updatedAt/contentHash in place
+            # and journals nothing OF ITS OWN; this is that write's record.
+            # A no-op re-check (identical hash) emits NOTHING, so the journal
+            # does not grow on every re-check (§9.6's cost bound).
+            self._fold_source_versioned(ev)
         elif t == "ConfidenceChanged":
             # #2884 D3: the EP/dream belief-state write-back. Inline (a
             # non-terminalizing property SET — parity with the PointRevised
@@ -4152,7 +4555,21 @@ class FalkorProjection(
             "RDB backup, instead of trusting this rebuild."
         )
 
-    def rebuild(self, log) -> None:
+    def rebuild(self, log, *, confirm_destructive: bool = False) -> None:
+        """Wipe the graph and replay one EventLog. DESTRUCTIVE.
+
+        #2944: the wipe is gated by L1 — the caller MUST pass
+        ``confirm_destructive=True``. The default refuses, so a new caller
+        cannot wipe a graph by forgetting the opt-in. L2 (`_assert_test_graph`)
+        then still refuses a non-disposable server graph even with the token.
+
+        WIPE-AFTER-PARSE (mirrors ``rebuild_all``, epic #900 T12): the log is
+        read in FULL before the wipe, so an unreadable/corrupt log raises with
+        the graph still intact instead of leaving a wiped, empty graph.
+        """
+        # L1 fast-fail (mirrors rebuild_all): a caller that did not opt in must
+        # not even reach the parse. (The wipe re-asserts it via _wipe_all_nodes.)
+        self._assert_destructive_confirmed(confirm_destructive, "rebuild")
         # #3947: read the journal FIRST (a torn/failed read must not wipe),
         # then PROVE the replay can recreate every episodic Point BEFORE the
         # wipe. #2943: verifying only after the wipe turns a durability bug
@@ -4166,7 +4583,8 @@ class FalkorProjection(
             getattr(log, "torn_tail_revival_records", lambda: [])())
         episodic_before = self._episodic_point_ids()
         self._assert_episodic_points_recreatable(episodic_before, events)
-        self.g.query("MATCH (n) DETACH DELETE n")
+        self._wipe_all_nodes(confirm_destructive=confirm_destructive,
+                             operation="rebuild")
         # #3664: this engine feeds ``apply()`` ONE record at a time, so an
         # ``EntityLinked`` whose endpoint is created LATER in the journal would
         # fold to nothing. Defer the type to a trailing sweep — the same
@@ -4237,8 +4655,14 @@ class FalkorProjection(
             "db_path": _prewipe_db_path_identity(self._path),
         }
 
-    def rebuild_all(self, log_dir: str) -> dict:
+    def rebuild_all(self, log_dir: str, *,
+                    confirm_destructive: bool = False) -> dict:
         """Rebuild from all .jsonl files in a directory. Returns counts.
+
+        DESTRUCTIVE: this wipes the whole graph before replaying. #2944 gates
+        the wipe on an explicit per-call opt-in — the caller MUST pass
+        ``confirm_destructive=True`` (default refuses). L2 still refuses a
+        non-disposable server graph even with the token.
 
         Two-pass: creates all Point nodes first (pass 1), then operator edges
         and all other event types second (pass 2), so cross-file operator→Point
@@ -4275,6 +4699,11 @@ class FalkorProjection(
         """
         import os  # noqa: I001
         from tortoise.log import EventLog
+
+        # L1 (#2944): fail the structural precondition FIRST — a caller that
+        # did not opt in must not reach the #548 snapshot, the log parse, or
+        # the wipe. (The wipe re-asserts it via _wipe_all_nodes.)
+        self._assert_destructive_confirmed(confirm_destructive, "rebuild_all")
 
         # #2958 review: reset the once-per-key deny-drop warning set for this
         # rebuild pass (see `_upsert_point_props`) so the report is emitted once
@@ -4771,10 +5200,11 @@ class FalkorProjection(
         # Guard the wipe BEFORE persisting the sidecar: a REFUSED wipe (a
         # non-test graph in server mode) must not leave a sidecar behind, or a
         # later rebuild of this directory would re-merge it. The wipe itself
-        # re-checks through _GuardedGraph (idempotent).
-        if not self._skip_guard:
-            self._assert_test_graph(
-                "REFUSING to run bulk DETACH DELETE on non-test graph")
+        # re-checks through _GuardedGraph (idempotent). No bypass (#2944):
+        # the pre-#2944 `_skip_guard` attribute is gone, so this is
+        # unconditional like every other guard on the path.
+        self._assert_test_graph(
+            "REFUSING to run bulk DETACH DELETE on non-test graph")
 
         # Persist immediately before the destructive wipe: after DETACH DELETE
         # these nodes exist nowhere else, so replay must be able to recover
@@ -4905,7 +5335,8 @@ class FalkorProjection(
             episodic_before | recovered_session_turns, events,
             snapshot_ids=snapshot_ids)
 
-        self.g.query("MATCH (n) DETACH DELETE n")
+        self._wipe_all_nodes(confirm_destructive=confirm_destructive,
+                             operation="rebuild_all")
 
         # Pass 1: create all Point/Operator nodes (skip edges) + non-edge events
         # Pass 1a: create all Point/Operator nodes first
@@ -5649,6 +6080,11 @@ class FalkorProjection(
             elif t == "SourceCreated":
                 # #330 parity with apply(): SourceCreated was dropped by rebuild.
                 self._upsert_source(ev)
+            elif t == "SourceVersioned":
+                # #5024 (T6): apply()/rebuild parity — the transition must be
+                # replayed in pass 1b exactly as it was applied live, or the
+                # rebuilt `:Source` keeps the pre-transition hash/version.
+                self._fold_source_versioned(ev)
             elif t in _NO_PROJECTION_FOLD:
                 # Recognized, intentionally not folded here — the audit-only
                 # markers, the JSONL-only batch snapshot (replayed in pass
@@ -6967,23 +7403,96 @@ class FalkorProjection(
                 "onboarding_state_unknown": onboarding_unknown}
 
     def query(self, cypher: str, **params):
-        # P0 guard (#99): refuse bulk graph-wipe on non-test graphs.
-        # Respect _skip_guard (consistent with _GuardedGraph.query) so a
-        # legitimate maintenance bypass works through either call path.
-        if _is_bulk_wipe(cypher) and not self._skip_guard:
+        # L2 guard (#99): refuse bulk graph-wipe on non-test graphs. There is
+        # NO bypass attribute (#2944 removed `_skip_guard`): this path is
+        # unconditional, exactly like _GuardedGraph.query. The authorized
+        # REBUILD-LANE wipe path is FalkorProjection._wipe_all_nodes() (L1);
+        # on THIS raw-query lane L2 alone is the gate, so an embedded or
+        # test-named graph passes with no token — see KNOWN GAPS above.
+        if _is_bulk_wipe(cypher):
             self._assert_test_graph(
                 f"REFUSING to run bulk DETACH DELETE on non-test graph "
                 f"'{self._graph_name}'"
             )
         return self.g.query(cypher, params=params or None)
 
+    def _assert_destructive_confirmed(self, confirm_destructive: bool,
+                                      operation: str) -> None:
+        """L1 of the destructive-op guard (#2944): require an explicit opt-in.
+
+        Raises unless the CALLER of a destructive projection operation passed
+        ``confirm_destructive=True``. Default = refuse, so a new caller cannot
+        wipe a graph by forgetting something — it has to opt in deliberately,
+        per call, at its own call site. Deliberately NOT settable as an
+        instance/module attribute, an env var, or a constructor flag: there is
+        nothing to flip from ordinary production code.
+        """
+        if confirm_destructive is not True:
+            raise RuntimeError(
+                f"Graph guard: {operation} performs an unconditional bulk "
+                f"wipe (MATCH (n) DETACH DELETE n) on graph "
+                f"'{self._graph_name}'. Refusing: pass "
+                f"confirm_destructive=True to authorize this wipe at the call "
+                f"site. This is a deliberate per-call opt-in — no flag, env "
+                f"var, or instance attribute can authorize a wipe by accident."
+            )
+
+    def _wipe_all_nodes(self, *, confirm_destructive: bool,
+                        operation: str) -> None:
+        """The only AUTHORIZED REBUILD-LANE path in this package that issues
+        the literal whole-graph statement (`MATCH (n) DETACH DELETE n`).
+
+        "Unconditional" here means that literal statement (no label, WHERE, or
+        LIMIT) — the rebuild lane only ever passes it. THIS METHOD never
+        receives a scoped delete; whether a scoped delete is *allowed*
+        elsewhere is `_is_bulk_wipe`'s (L2's) business, and that classifier is
+        both broader (#3007) and narrower (#3037) than this statement — see
+        the KNOWN GAPS note in the module comment. The raw-query lane can wipe
+        an embedded or test-named graph with no token at all; that lane is
+        L2's, not this method's.
+
+        L1 (#2944) enforces the caller's explicit per-call opt-in; the wipe
+        itself then still passes L2 (`_assert_test_graph` via the guarded
+        handle), so a non-disposable graph is refused even when L1 was
+        satisfied.
+        """
+        self._assert_destructive_confirmed(confirm_destructive, operation)
+        # L2: name/embedded check. Redundant with _GuardedGraph.query below
+        # on purpose — this method is the readable contract; the guarded
+        # handle is the last line of defence for every other caller that goes
+        # through it. Callers on ``proj.db``, on the wrapper's OTHER query
+        # verbs (``proj.g._query`` / ``profile`` / ``execute_command`` — only
+        # ``query`` applies the bulk-wipe check), or on the non-Cypher verbs
+        # ``_GuardedGraph.__getattr__`` forwards (e.g. ``proj.g.delete()`` →
+        # GRAPH.DELETE) bypass BOTH layers — see the KNOWN GAPS note in the
+        # module comment.
+        self._assert_test_graph(
+            f"REFUSING to run bulk DETACH DELETE on non-test graph "
+            f"({operation})"
+        )
+        self.g.query("MATCH (n) DETACH DELETE n")
+
     def _assert_test_graph(self, reason: str = "") -> None:
-        """Raise RuntimeError if the active graph is not a test graph.
+        """L2 of the destructive-op guard: refuse bulk wipe on a non-test graph.
 
         Test graphs must start with 'test_' or 'tortoise_test'.
-        Embedded mode (path=) is inherently isolated (per-instance temp DB) —
-        the guard does NOT apply to it. Only server mode (docker) needs the
-        graph-name check, protecting the shared real graph (#99).
+        Embedded mode (path=) is exempt from the NAME check — the graph-name
+        rule does not apply to it. That is a name-check exemption, NOT a
+        supervision exemption: an embedded DB opened with ``path`` is a
+        persistent user database (``python -m tortoise rebuild --db <path>``),
+        and a raw-query wipe on it is supervised by NEITHER layer (L1 is only
+        consulted on the rebuild lane). Embedded REBUILDS are supervised —
+        ``_assert_destructive_confirmed`` / ``_wipe_all_nodes`` require the
+        per-call token in embedded mode too. See KNOWN GAPS in the module
+        comment.
+
+        #2944 scope note: this is DEFENCE IN DEPTH, not the structural gate.
+        The structural gate (L1, per-call ``confirm_destructive=True``) lives
+        in ``_assert_destructive_confirmed`` / ``_wipe_all_nodes`` and applies
+        to embedded mode too. L2 stays because it refuses strictly more than
+        L1 alone: a hand-written ``MATCH (n) DETACH DELETE n`` straight to the
+        guarded handle is still refused on a non-test server graph, regardless
+        of whether any L1-authorized operation was in flight.
         """
         if getattr(self, "_is_embedded", False):
             return
@@ -7190,6 +7699,420 @@ class FalkorProjection(
                     f"{r['label']!r}/{r['key']!r} (contract: constant tuple only)")
         return out
 
+    #: #4465 — the RANGE index set ``_ensure_indexes`` guarantees, as
+    #: ``(label, property, kind)``. Every entry mirrors an index the sweep
+    #: actually creates, so a graph missing any of them is NOT bootstrapped.
+    #: ⛔ The retired ``:Document`` label has NO entry here: D10 (ONTOLOGY
+    #: v3.15 §4.4) made a document a ``:Source``, and the sweep's own comment
+    #: says "No :Document range index is created". An entry for it could never
+    #: be satisfied, so ``_schema_is_current`` would return False on every
+    #: graph — making the fast path dead code (measured: the whole #4465 guard
+    #: was inert until these two entries were removed).
+    _REQUIRED_RANGE_INDEXES = (
+        ("Point", "id", "RANGE"),
+        ("Point", "pointKind", "RANGE"),
+        ("Point", "content_hash", "RANGE"),
+        ("Point", "lastDreamedAt", "RANGE"),
+        ("Subject", "id", "RANGE"),
+        ("Subject", "name", "RANGE"),
+        ("Object", "id", "RANGE"),
+        ("Object", "name", "RANGE"),
+        ("Event", "eventId", "RANGE"),
+        ("Source", "id", "RANGE"),
+        ("Source", "url", "RANGE"),
+        ("Source", "canonicalUrl", "RANGE"),
+        ("Session", "actor_user_id", "RANGE"),
+        ("Session", "id", "RANGE"),
+    )
+
+    #: #4465 — the FULLTEXT index set, required only on engines that support
+    #: it (``_ver is None or _ver[0] >= 4`` — the same gate the DDL sweep
+    #: uses). The FIELD SET is the migration contract: a legacy one-field
+    #: index (``Point.content`` only / ``Event.subject`` only) is missing here
+    #: on purpose, so such a graph takes the full path and its drop→recreate
+    #: migration still runs.
+    _REQUIRED_FULLTEXT_INDEXES = (
+        ("Point", "content", "FULLTEXT"),
+        ("Point", "search_keys", "FULLTEXT"),
+        ("Event", "subject", "FULLTEXT"),
+        ("Event", "name", "FULLTEXT"),
+        ("Subject", "name", "FULLTEXT"),
+        ("Object", "name", "FULLTEXT"),
+        # #4465 — the doc-node FTS leg rides ``:Source``, NOT the retired
+        # ``:Document``: the sweep creates ``("Source", ["_searchText"])``
+        # under the comment "#125 Document FTS" (D10: the doc node is a
+        # :Source). Naming the retired label here made the requirement
+        # unsatisfiable for the same reason as the range set above.
+        ("Source", "_searchText", "FULLTEXT"),
+    )
+
+    def _schema_is_current(self) -> bool:
+        """#4465: is this graph already indexed?
+
+        ``_ensure_indexes`` is idempotent but pays ~26 round-trips of
+        already-satisfied DDL on every construction, and one hosted capture
+        constructs ~12 projections (7 of them on the event-loop thread).
+        Measured before this guard, on an unchanged schema: 182 of the
+        capture's 219 on-loop queries (180 of 217 embedded) were that repeated
+        DDL.
+
+        The answer is read from the GRAPH, never from process memory. A
+        process-wide "already bootstrapped" flag keyed on the graph name is a
+        correctness bug: a graph dropped and re-created in-process (org-graph
+        deletion, ``GRAPH.COPY``, embedded recovery, the GC drill) would be
+        remembered as indexed while carrying no indexes, and
+        ``required_embedding_dim`` would then claim a vector index that does
+        not exist. A per-graph catalogue read cannot go stale and cannot
+        collide across tenants.
+
+        **Fail-safe, not fail-open.** Any error — an engine without
+        ``db.indexes()``, a row whose per-property KINDS are not reported —
+        returns ``False`` and runs the full sweep. A probe that cannot PROVE
+        the schema is current must never be able to skip the work.
+
+        ⭐ THE TRADE THIS CHANGE MAKES. Trusting the ``point_fts_v2`` marker
+        FAILS OPEN. The marker records that the data fixup was handled at
+        MINT time, and a later ``update_entity`` (``SET n += $props``, no
+        flatten — #5482) invalidates that fact, so a graph could be certified
+        current while holding array-valued ``search_keys``: permanently
+        invisible to FTS, and silent. (The export/DR surface does read the
+        marker, as a migration watermark — that is unaffected.)
+
+        So the fixup's real precondition is tested instead:
+
+            an array-valued ``search_keys`` anywhere, or — for the legacy
+            single-field index — a Point FULLTEXT index still missing
+            ``search_keys``.
+
+        That check is CORRECT but NOT CHEAP. It is an unindexed label scan
+        over ``:Point`` (``EXPLAIN`` → ``Node By Label Scan``; no RANGE index
+        on ``search_keys``, and ``typeof()`` cannot use the FULLTEXT one),
+        linear in the Point count and paid on every fast-path probe. Measured
+        on docker FalkorDB 4.20.4: 1.4 ms @1k, 8.1 ms @30k, 26.9 ms @120k,
+        66.2 ms @300k (≈0.2 µs/point). #5444 carries removing that cost (a
+        write-maintained signal); #5482 carries restoring the invariant that
+        would make the marker trustworthy. Until one of them lands, this is
+        what not losing points silently costs.
+
+        ``event_fts_v2`` is deliberately NOT consulted: no data fixup rides it
+        (it guards only the drop→recreate churn), and a fresh graph sets the
+        Event two-field index WITHOUT setting that marker — only the
+        "already indexed" path sets it.
+        """
+        try:
+            rows = self.g.query("CALL db.indexes()").result_set
+        except Exception:  # a probe that cannot run is not a pass
+            return False
+        if not rows:
+            return False
+        present: set[tuple[str, str, str]] = set()
+        for row in rows:
+            # ``CALL db.indexes()`` rows are [label, properties,
+            # {prop: [kind, ...]}, ...] on every engine this store opens. A
+            # row without the kinds map cannot answer the RANGE/FULLTEXT
+            # question, so it fails the probe rather than guessing.
+            if not row or len(row) < 3 or not isinstance(row[2], dict):
+                return False
+            label, props, kinds = str(row[0]), row[1] or (), row[2]
+            # #3154: a boolean is_operator index is never VALID — its presence
+            # (single or composite, so either column can carry it) means the
+            # purge below still has work to do. Match the property name
+            # EXACTLY: a substring test also matches an unrelated property such
+            # as ``is_operator_flag``, and because a false positive returns
+            # False FOREVER for that graph the fast path would be permanently
+            # disabled — the exact churn #4465 exists to remove. The sibling
+            # detector this purge feeds (``hosted_backup
+            # ._audit_copied_boolean_indexes``) matches exactly for the same
+            # reason; the DROP below only targets the two exact forms.
+            if any(str(p) == "is_operator" for p in props):
+                return False
+            for prop, prop_kinds in kinds.items():
+                if str(prop) == "is_operator":
+                    return False
+                for kind in prop_kinds or ():
+                    present.add((label, str(prop), str(kind).upper()))
+        required = set(self._REQUIRED_RANGE_INDEXES)
+        _ver = getattr(self, "_falkordb_version", None)
+        fts_required = _ver is None or _ver[0] >= 4
+        if fts_required:
+            required |= set(self._REQUIRED_FULLTEXT_INDEXES)
+        # The FIELD SET proves the indexes EXIST, not that the one-time DATA
+        # FIXUP is done (#5444): it flattens array-valued ``search_keys``
+        # because the fulltext index does not index array properties, so a
+        # Point left as an array is permanently unfindable by ``queryNodes``.
+        # Test that precondition itself — no array ⇒ nothing owed, whatever
+        # the marker says. The check's cost, and the trade it makes, are
+        # documented on this method.
+        if (required <= present and fts_required
+                and self._array_valued_search_keys_exist()):
+            return False
+        return required <= present
+
+    #: Cap-immune fixup precondition. ``typeof`` is a per-row predicate and
+    #: the read takes a single bounded row, so FalkorDB's server-global
+    #: ``RESULTSET_SIZE`` (default 10 000) cannot truncate it into a FALSE
+    #: NEGATIVE. A client-side read of every ``search_keys`` returns only the
+    #: first ``RESULTSET_SIZE`` rows, so on a large graph an array beyond the
+    #: cap was invisible and the fixup was skipped again — the #5444 symptom
+    #: surviving precisely where the data volume is real (measured on docker
+    #: 4.20.4: 10 050 Points with arrays only in rows 10 001-10 050 → a plain
+    #: read returns 10 000 rows and 0 array-typed; this probe finds them).
+    _ARRAY_SEARCH_KEYS_PROBE = (
+        "MATCH (n:Point) WHERE n.search_keys IS NOT NULL "
+        "AND typeof(n.search_keys) = 'List' RETURN 1 LIMIT 1"
+    )
+
+    def _point_fts_search_keys_field_missing(self) -> bool:
+        """Is the Point FULLTEXT index still the legacy single-field form?
+
+        The SCHEMA half of the legacy branch's precondition (#5444).
+        That branch exists to drop→recreate ``Point(content)`` into
+        ``Point(content, search_keys)``, and gating it on the DATA precondition
+        alone meant a legacy graph whose data is already FLAT never upgraded:
+        the field stayed missing, the probe stayed not-current, and every
+        construction re-ran the whole sweep — #4465's churn, permanently, with
+        ``search_keys`` never indexed.
+
+        A probe that cannot run returns True (repair, never assume done).
+        """
+        try:
+            for row in self.g.query("CALL db.indexes()").result_set:
+                if row and row[0] == "Point":
+                    return "search_keys" not in (row[2] or {})
+            return True
+        except Exception:
+            return True
+
+    def _array_valued_search_keys_exist(self) -> bool:
+        """Does any Point still store ``search_keys`` as an ARRAY?
+
+        The one-time fixup's real precondition, and the probe's ONLY extra
+        read: FalkorDB's fulltext index does not index array-valued properties,
+        so such Points are invisible to ``queryNodes`` until ``_ensure_indexes``
+        flattens them.
+
+        Fails CLOSED on any error — including an engine without ``typeof``.
+        Both supported engines have it (verified on embedded FalkorDBLite 4.18.3
+        and docker FalkorDB 4.20.4), and the previous fallback was an unbounded
+        untyped scan, whose ``RESULTSET_SIZE`` false negative a caller would
+        MINT the marker on, freezing the owed fixup forever.
+        Assuming owed is the correct polarity: it costs a sweep, not
+        permanent unfindability.
+        """
+        try:
+            return bool(self.g.query(self._ARRAY_SEARCH_KEYS_PROBE).result_set)
+        except Exception:
+            return True
+
+    def _array_search_keys_rows(self) -> list:
+        """``(id, search_keys)`` for Points whose ``search_keys`` is an array.
+
+        Cap-aware: the ``typeof`` predicate means the ``RESULTSET_SIZE`` cap can
+        only truncate the BATCH, never hide arrays behind string rows — so the
+        caller loops until this returns empty. Returns ``[]`` on error (never an
+        untyped scan): the caller re-checks ``_array_valued_search_keys_exist``
+        before minting, and that check fails closed, so an engine which cannot
+        answer never gets a marker minted over an owed fixup.
+        """
+        try:
+            return self.g.query(
+                "MATCH (n:Point) WHERE n.search_keys IS NOT NULL "
+                "AND typeof(n.search_keys) = 'List' "
+                "RETURN n.id, n.search_keys"
+            ).result_set
+        except Exception:
+            return []
+
+    def _fix_point_search_keys(self) -> None:
+        """The ONE-TIME Point data fixup, callable from EITHER create branch.
+
+        Flattens array-valued ``search_keys`` to a space-joined string, then
+        drop→recreates the Point FTS index and mints ``point_fts_v2``.
+
+        A shared helper so BOTH branches flatten identically: a RESTORE/DR
+        graph — array-valued ``search_keys`` with no index (the dump carries
+        no indexes and skips the marker) — reaches the FRESH-CREATE branch,
+        which would otherwise mint the marker without flattening. That cements
+        "current" over an owed fixup and makes it undetectable by the probe.
+
+        Batched: the read is bounded by ``RESULTSET_SIZE``, so loop until no
+        array rows remain rather than assuming one pass sees them all.
+        """
+        created = False
+        dropped = False
+        try:
+            for _ in range(200):  # bounded; 200 × RESULTSET_SIZE rows
+                rows = self._array_search_keys_rows()
+                if not rows:
+                    break
+                flattened = 0
+                for nid, sk in rows:
+                    if not isinstance(sk, (list, tuple)):
+                        continue
+                    flat = " ".join(
+                        str(k).strip() for k in sk if str(k).strip()
+                    )
+                    self.g.query(
+                        "MATCH (n:Point {id:$id}) SET n.search_keys = $flat",
+                        params={"id": nid, "flat": flat},
+                    )
+                    flattened += 1
+                if flattened == 0:
+                    break  # no progress — never spin
+
+            # Do NOT mint over an owed fixup. The loop above counts
+            # SET ATTEMPTS, not verified writes, and is capped at 200 batches;
+            # an unverified SET, the ceiling, or an engine that cannot answer
+            # would otherwise leave arrays behind AND cement a marker that makes
+            # them permanently invisible. Re-verify first.
+            if self._array_valued_search_keys_exist():
+                return
+
+            for drop_proc in ("db.idx.fulltext.drop",
+                              "db.idx.fulltext.dropIndex"):
+                try:
+                    self.g.query(f"CALL {drop_proc}('Point')")
+                    dropped = True
+                    break
+                except Exception:
+                    continue
+            # #H05: the recreate used the historical procedure only, which
+            # FalkorDB 6.0.0 REJECTS -- so this migration could never complete
+            # on that engine, and the failure was swallowed. The helper tries
+            # the Cypher DDL first.
+            self._create_fulltext_index("Point", ["content", "search_keys"])
+            created = True
+            self.g.query("MERGE (m:Meta {key:'point_fts_v2'}) SET m.v = true")
+        except Exception as e:
+            # #H05: was a bare `pass`. How LOUDLY to report depends on which
+            # step got through, which is what _classify_fts_migration_failure
+            # decides; never fatal (an engine that cannot hold FTS must still
+            # open).
+            _level, _msg = self._classify_fts_migration_failure(
+                "Point", created, dropped, e
+            )
+            logger.log(_level, _msg)
+
+    def _create_fulltext_index(self, label: str, fields: list[str]) -> None:
+        """Create a FULLTEXT index over ``fields`` on ``label``.
+
+        Raises the engine's error when creation fails — including the
+        ``already indexed`` case, which the caller's one-time migration
+        branches match on, so its text is re-raised unchanged.
+
+        The FORM is engine-version-dependent (measured 2026-09-30 on the
+        live images):
+
+          * ``CREATE FULLTEXT INDEX FOR (n:Label) ON (n.f1, n.f2)`` — the
+            Cypher-native DDL — is accepted by 4.16.7 (module ver 41607),
+            4.20.4 (42004), 4.20.6 (42006) and 6.0.0 (60000); the resulting
+            index answers ``db.idx.fulltext.queryNodes`` on EVERY field
+            (verified per field, not just the last).
+          * the historical multi-field procedure is REJECTED by 6.0.0 —
+            ``Received 3 arguments to procedure
+            'db.idx.fulltext.createNodeIndex', expected at most 1`` — which
+            is the shape ``falkordb-server:latest`` (what CI's service
+            resolved to) reports. Every call site using only the procedure
+            failed there and left the index silently absent (#H05).
+
+        So the DDL is tried first and the procedure is kept as the fallback
+        for engines that register the procedure but not the DDL. An engine
+        that registers NEITHER (embedded FalkorDBLite on some builds) ends
+        here with a RuntimeError carrying both failures, which the caller
+        surfaces loudly rather than swallowing.
+        """
+        fields_expr = ", ".join(f"n.{f}" for f in fields)
+        fields_sql = ", ".join(f"'{f}'" for f in fields)
+        forms = (
+            f"CREATE FULLTEXT INDEX FOR (n:{label}) ON ({fields_expr})",
+            f"CALL db.idx.fulltext.createNodeIndex('{label}', {fields_sql})",
+        )
+        errors: list[str] = []
+        for query in forms:
+            try:
+                self.g.query(query)
+                return
+            except Exception as e:
+                if "already" in str(e).lower():
+                    raise
+                errors.append(str(e))
+        raise RuntimeError(
+            f"no supported FULLTEXT index creation form for {label}{fields}: "
+            + "; ".join(errors)
+        )
+
+    @staticmethod
+    def _report_fulltext_index_failure(label: str, fields: list[str], exc: object) -> None:
+        """#H05: report a failed FULLTEXT index creation LOUDLY.
+
+        This used to be a ``WARNING`` while execution continued, so the index
+        was simply absent and full-text search on the label degraded with NO
+        signal at the point of failure — the only symptom arrived later, as a
+        missing index. Deliberately NOT fatal: an engine that cannot hold a
+        FULLTEXT index at all (embedded FalkorDBLite builds) must still open,
+        its retrieval covered by the sparse TF-IDF path.
+        """
+        import logging
+        logging.getLogger(__name__).error(
+            "Failed to create fulltext index on %s.%s: %s — full-text search "
+            "on this label is DEGRADED (the index is absent, so a query "
+            "returns an EMPTY result set, recorded as `empty_results` and "
+            "indistinguishable from a genuine zero-match; a driver that "
+            "raises instead is recorded as `index_missing`)",
+            label, fields, exc,
+        )
+
+    @staticmethod
+    def _classify_fts_migration_failure(
+        label: str, created: bool, dropped: bool, exc: object
+    ) -> tuple[int, str]:
+        """#H05: decide how LOUDLY to report a failed one-time FTS migration.
+
+        The migration is drop -> recreate -> persist-marker, and WHICH of
+        those steps got through decides what is actually true. Deriving the
+        message from the two recorded facts (rather than from the bare fact
+        that something raised) is what keeps it from asserting an absence
+        that does not hold:
+
+        ``created`` -- the intended index was (re)created, so a later failure
+        is only the one-time marker failing to persist. The index IS in
+        place and the next boot retries; reporting that at ERROR would train
+        readers to ignore the real thing.
+        ``dropped`` -- the legacy index was actually removed. Only then can
+        the label be left with NO full-text index, which is the degradation
+        that earns an ERROR.
+
+        A drop that reports success while the recreate still answers
+        "already" is a third outcome: an index EXISTS, just not the intended
+        multi-field form -- so absence is NOT asserted there either.
+        """
+        if created:
+            return logging.WARNING, (
+                f"fulltext index MIGRATION for {label} recreated the index but "
+                f"could not persist its one-time marker: {exc} -- the index IS "
+                f"in place; the marker is retried on the next boot"
+            )
+        if dropped and "already" in str(exc).lower():
+            return logging.WARNING, (
+                f"fulltext index MIGRATION for {label} dropped the legacy index "
+                f"and the recreate then reported the index already exists: {exc} "
+                f"-- an index IS present, but NOT the intended multi-field form"
+            )
+        if dropped:
+            return logging.ERROR, (
+                f"fulltext index MIGRATION for {label} dropped the legacy index "
+                f"(the drop call returned without error) and the recreate "
+                f"failed: {exc} -- {label} is left without the intended "
+                f"full-text index, so a query returns an EMPTY result set "
+                f"(recorded as `empty_results`, indistinguishable from a "
+                f"genuine zero-match). The migration marker was NOT set, so "
+                f"this retries on the next boot"
+            )
+        return logging.WARNING, (
+            f"fulltext index MIGRATION could not run for {label}, so the legacy "
+            f"content-only index REMAINS (its sparse path covers retrieval): {exc}"
+        )
+
     def _ensure_indexes(self) -> None:
         """Create indexes on frequently-filtered Point properties.
 
@@ -7218,7 +8141,26 @@ class FalkorProjection(
         staleness ordering. See the purge block below and
         ``hosted_backup._audit_copied_boolean_indexes`` for the copy-path
         verification.
+
+        #4465: the sweep is GUARDED by ``_schema_is_current()``, which
+        answers the same question this DDL answers ("is the
+        schema already there?"). A fully-indexed graph skips straight to the
+        vector-API handle below; a graph with any missing index, any
+        forbidden ``is_operator`` index, or an unreadable index catalogue
+        takes the full sweep exactly as before. The bootstrap is never
+        skipped, only the repeat of work already done.
         """
+        if self._schema_is_current():
+            # #4465 fast path. Everything the sweep would do is already true
+            # of this graph; only the vector-index API handle has to be
+            # re-derived, because it is a property of the ENGINE's index API
+            # (procedure vs Cypher-native) that ``CALL db.indexes()`` does not
+            # report. The existing index is never reconciled here (same as the
+            # sweep) and a MISSING one is still created — so a server graph
+            # that lost only its vector index still gets it back.
+            self._ensure_vector_index_api()
+            return
+
         # ── Range indexes (always safe, pre-4.x compatible) ──
         # NOTE: no index on `is_operator` is created here on ANY backend —
         # see the boolean-index policy in the docstring and the #3154 purge
@@ -7233,7 +8175,6 @@ class FalkorProjection(
                 if "already indexed" in msg or "already exists" in msg:
                     pass  # expected — index exists from prior startup
                 else:
-                    import logging
                     logging.getLogger(__name__).error(
                         "Failed to create index on n.%s: %s", prop, e)
 
@@ -7290,7 +8231,6 @@ class FalkorProjection(
             if "already indexed" in msg or "already exists" in msg:
                 pass  # expected — index exists from prior startup
             else:
-                import logging
                 logging.getLogger(__name__).error(
                     "Failed to create index on :Point(lastDreamedAt): %s", e)
 
@@ -7359,7 +8299,6 @@ class FalkorProjection(
                     if "already indexed" in msg or "already exists" in msg:
                         pass
                     else:
-                        import logging
                         logging.getLogger(__name__).error(
                             "Failed to create index on %s.%s: %s", label, prop, e)
 
@@ -7376,7 +8315,6 @@ class FalkorProjection(
             if "already indexed" in msg or "already exists" in msg:
                 pass
             else:
-                import logging
                 logging.getLogger(__name__).error(
                     "Failed to create index on Session.actor_user_id: %s", e)
 
@@ -7395,7 +8333,6 @@ class FalkorProjection(
             if "already indexed" in msg or "already exists" in msg:
                 pass
             else:
-                import logging
                 logging.getLogger(__name__).error(
                     "Failed to create index on Session.id: %s", e)
 
@@ -7432,19 +8369,37 @@ class FalkorProjection(
                                   # deliberately NOT indexed: a second
                                   # vocabulary the FTS surface does not read.
                 try:
-                    fields_sql = ", ".join(f"'{f}'" for f in fields)
-                    self.g.query(f"CALL db.idx.fulltext.createNodeIndex('{label}', {fields_sql})")
+                    # #H05: the creation FORM is version-dependent -- the
+                    # historical multi-field procedure is rejected by FalkorDB
+                    # 6.0.0 (`expected at most 1`), so EVERY call here failed
+                    # on that engine and left the index absent. The helper tries
+                    # the Cypher DDL first and keeps the procedure as the
+                    # fallback (its docstring records the measured forms).
+                    self._create_fulltext_index(label, fields)
                     if label == "Point":
                         # R2 (#1541) D3: a FRESH DB created the two-field
                         # index directly — mark the migration done so a later
                         # boot (create → "already") never re-enters the
                         # drop→recreate path (marker guards churn).
-                        try:  # noqa: SIM105
-                            self.g.query(
-                                "MERGE (m:Meta {key:'point_fts_v2'}) SET m.v = true"
-                            )
-                        except Exception:
-                            pass
+                        #
+                        # Mint the marker ONLY when nothing is owed. A
+                        # RESTORE/DR graph reaches THIS branch too —
+                        # array-valued search_keys with no index, because the
+                        # dump carries no indexes and skips the marker — so an
+                        # unconditional marker here would record "fixup done"
+                        # over an owed fixup. Consumers read that marker as the
+                        # migration watermark (`docs/durability-posture.md`,
+                        # the DR checks), so minting it over owed work is false
+                        # bookkeeping regardless of who reads it.
+                        if self._array_valued_search_keys_exist():
+                            self._fix_point_search_keys()
+                        else:
+                            try:  # noqa: SIM105
+                                self.g.query(
+                                    "MERGE (m:Meta {key:'point_fts_v2'}) SET m.v = true"
+                                )
+                            except Exception:
+                                pass
                 except Exception as e:
                     msg = str(e).lower()
                     if "already" in msg:
@@ -7470,41 +8425,18 @@ class FalkorProjection(
                             # flat space-joined string (the sdk write path
                             # already stores flat; this fixes existing nodes).
                             try:
-                                done = self.g.query(
-                                    "MATCH (m:Meta {key:'point_fts_v2'}) RETURN 1"
-                                ).result_set
-                                if not done:
-                                    rows = self.g.query(
-                                        "MATCH (n:Point) WHERE n.search_keys IS NOT NULL "
-                                        "RETURN n.id, n.search_keys"
-                                    ).result_set
-                                    for nid, sk in rows:
-                                        if isinstance(sk, (list, tuple)):
-                                            flat = " ".join(
-                                                str(k).strip() for k in sk
-                                                if str(k).strip()
-                                            )
-                                            self.g.query(
-                                                "MATCH (n:Point {id:$id}) "
-                                                "SET n.search_keys = $flat",
-                                                params={"id": nid, "flat": flat},
-                                            )
-                                    for drop_proc in ("db.idx.fulltext.drop",
-                                                      "db.idx.fulltext.dropIndex"):
-                                        try:
-                                            self.g.query(
-                                                f"CALL {drop_proc}('Point')"
-                                            )
-                                            break
-                                        except Exception:
-                                            continue
-                                    self.g.query(
-                                        "CALL db.idx.fulltext.createNodeIndex("
-                                        "'Point', 'content', 'search_keys')"
-                                    )
-                                    self.g.query(
-                                        "MERGE (m:Meta {key:'point_fts_v2'}) SET m.v = true"
-                                    )
+                                # Gate on BOTH preconditions (#5444).
+                                # The data half (an array still owed) is the
+                                # fixup's real precondition and replaces the
+                                # unsound marker check. The SCHEMA half is what
+                                # this branch exists for in the first place — a
+                                # legacy single-field index whose data is
+                                # already flat still needs the drop→recreate,
+                                # and without it the probe stays not-current and
+                                # every construction re-runs the full sweep.
+                                if (self._array_valued_search_keys_exist()
+                                        or self._point_fts_search_keys_field_missing()):
+                                    self._fix_point_search_keys()
                             except Exception:
                                 pass
                         elif label == "Event":
@@ -7517,80 +8449,118 @@ class FalkorProjection(
                             # FalkorDBLite embedded lacks dropIndex — leave
                             # subject-only there (name search still covered by
                             # the keyword fallback + vector strategies).
+                            created = False
+                            dropped = False
                             try:
                                 done = self.g.query(
                                     "MATCH (m:Meta {key:'event_fts_v2'}) RETURN 1"
                                 ).result_set
                                 if not done:
-                                    self.g.query("CALL db.idx.fulltext.dropIndex('Event')")
-                                    self.g.query("CALL db.idx.fulltext.createNodeIndex('Event', 'subject', 'name')")
+                                    # #H05: the drop procedure NAME varies by
+                                    # engine (db.idx.fulltext.drop on server
+                                    # builds, dropIndex on older ones) -- the
+                                    # single hardcoded name could never migrate
+                                    # on a build registering only the other.
+                                    for drop_proc in ("db.idx.fulltext.drop",
+                                                      "db.idx.fulltext.dropIndex"):
+                                        try:
+                                            self.g.query(
+                                                f"CALL {drop_proc}('Event')"
+                                            )
+                                            dropped = True
+                                            break
+                                        except Exception:
+                                            continue
+                                    self._create_fulltext_index(
+                                        "Event", ["subject", "name"]
+                                    )
+                                    created = True
                                     self.g.query(
                                         "MERGE (m:Meta {key:'event_fts_v2'}) SET m.v = true"
                                     )
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                # #H05: was a bare `pass` -- same pure level
+                                # decision as the Point branch.
+                                _level, _msg = self._classify_fts_migration_failure(
+                                    "Event", created, dropped, e
+                                )
+                                logger.log(_level, _msg)
                     else:
-                        import logging
-                        logging.getLogger(__name__).warning(
-                            "Failed to create fulltext index on %s.%s: %s", label, fields, e)
+                        self._report_fulltext_index_failure(label, fields, e)
 
             # ── Vector index (HNSW) — Docker/server FalkorDB only (#7764) ──
-            # Embedded mode (redislite) uses brute-force vec.euclideanDistance instead.
-            # HNSW requires RediSearch module, not bundled with redislite.
-            # #1359: the engine's index API varies by version — try the
-            # RediSearch-style procedure first, fall back to the Cypher-native
-            # form on engines that don't register it (verified: falkordblite
-            # 0.10.0's bundled module exposes `CREATE VECTOR INDEX ... OPTIONS`
-            # but NOT `db.idx.vector.createNodeIndex`). Record which API
-            # succeeded on self._vector_index_api for the query path.
-            if not getattr(self, '_is_embedded', False):
-                # #4194/#4280: the width is the ONE constant the STORE declares
-                # (`FalkorProjection.required_embedding_dim`), so a FRESH index
-                # creation and the write path cannot disagree — a bare literal
-                # here plus a rotated `EMBEDDING_DIM` would bless vectors the
-                # index cannot hold (the mismatched-vector trap).
-                # ⛔ This single-sources CREATION only: an EXISTING index is
-                # never reconciled (both 'already' branches below assume it is
-                # correct). A dimension change is still the documented
-                # drop-and-recreate operation, not a constant edit.
-                from ..embeddings import EMBEDDING_DIM
-                try:
-                    self.g.query(
-                        "CALL db.idx.vector.createNodeIndex('Point', 'embedding', "
-                        f"{EMBEDDING_DIM}, 'HNSW')"
-                    )
-                    self._vector_index_api = 'procedure'
-                except Exception as e:
-                    msg = str(e).lower()
-                    if "already" in msg:
-                        # Index already exists (prior startup). Assume the
-                        # procedure API — it either created it or the engine
-                        # is procedure-capable (docker/server image v4.16.7).
-                        self._vector_index_api = 'procedure'
-                    else:
-                        # Unknown procedure / not registered / invalid args →
-                        # Cypher-native form (the modern falkordb client's own
-                        # create_node_vector_index emits exactly this).
-                        try:
-                            self.g.query(
-                                "CREATE VECTOR INDEX FOR (p:Point) ON (p.embedding) "
-                                f"OPTIONS {{dimension: {EMBEDDING_DIM}, "
-                                "similarityFunction: 'cosine'}"
-                            )
-                            self._vector_index_api = 'cypher'
-                        except Exception as e2:
-                            msg2 = str(e2).lower()
-                            if "already" in msg2:
-                                self._vector_index_api = 'cypher'
-                            else:
-                                import logging
-                                logging.getLogger(__name__).warning(
-                                    "Failed to create vector index on Point.embedding: %s", e2)
+            self._ensure_vector_index_api()
         else:
-            import logging
             logging.getLogger(__name__).info(
                 "Skipping FTS and vector indexes: FalkorDB %s < 4.x",
                 '.'.join(map(str, _ver)))
+
+    def _ensure_vector_index_api(self) -> None:
+        """Resolve ``_vector_index_api`` — the engine's vector-index API.
+
+        #4465: extracted from ``_ensure_indexes`` unchanged so the schema fast
+        path can re-derive the handle without re-running the DDL sweep. The
+        handle is NOT recoverable from ``CALL db.indexes()``: the catalogue
+        says an index EXISTS, not whether the engine registers the
+        ``db.idx.vector.createNodeIndex`` procedure or only the Cypher-native
+        ``CREATE VECTOR INDEX ... OPTIONS`` form. The attempts below answer
+        exactly that in one round trip on a graph whose index already exists
+        (the procedure raises "already"), and CREATE the index on a graph that
+        lacks it — both paths are the #1359/#4194/#4280 semantics verbatim.
+
+        Embedded mode (redislite) uses brute-force vec.euclideanDistance
+        instead — HNSW requires the RediSearch module, which redislite does not
+        bundle — and engines below 4.x skip the whole block, so both leave the
+        handle ``None`` (``required_embedding_dim`` documents the three
+        ``None`` lanes).
+        """
+        _ver = getattr(self, "_falkordb_version", None)
+        if _ver is not None and _ver[0] < 4:
+            return
+        if getattr(self, '_is_embedded', False):
+            return
+        # #4194/#4280: the width is the ONE constant the STORE declares
+        # (`FalkorProjection.required_embedding_dim`), so a FRESH index
+        # creation and the write path cannot disagree — a bare literal
+        # here plus a rotated `EMBEDDING_DIM` would bless vectors the
+        # index cannot hold (the mismatched-vector trap).
+        # ⛔ This single-sources CREATION only: an EXISTING index is
+        # never reconciled (both 'already' branches below assume it is
+        # correct). A dimension change is still the documented
+        # drop-and-recreate operation, not a constant edit.
+        from ..embeddings import EMBEDDING_DIM
+        try:
+            self.g.query(
+                "CALL db.idx.vector.createNodeIndex('Point', 'embedding', "
+                f"{EMBEDDING_DIM}, 'HNSW')"
+            )
+            self._vector_index_api = 'procedure'
+        except Exception as e:
+            msg = str(e).lower()
+            if "already" in msg:
+                # Index already exists (prior startup). Assume the
+                # procedure API — it either created it or the engine
+                # is procedure-capable (docker/server image v4.16.7).
+                self._vector_index_api = 'procedure'
+            else:
+                # Unknown procedure / not registered / invalid args →
+                # Cypher-native form (the modern falkordb client's own
+                # create_node_vector_index emits exactly this).
+                try:
+                    self.g.query(
+                        "CREATE VECTOR INDEX FOR (p:Point) ON (p.embedding) "
+                        f"OPTIONS {{dimension: {EMBEDDING_DIM}, "
+                        "similarityFunction: 'cosine'}"
+                    )
+                    self._vector_index_api = 'cypher'
+                except Exception as e2:
+                    msg2 = str(e2).lower()
+                    if "already" in msg2:
+                        self._vector_index_api = 'cypher'
+                    else:
+                        import logging
+                        logging.getLogger(__name__).warning(
+                            "Failed to create vector index on Point.embedding: %s", e2)
 
     @property
     def required_embedding_dim(self) -> int | None:

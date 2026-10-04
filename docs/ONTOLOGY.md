@@ -1,17 +1,17 @@
 ---
-title: "Tortoise — Canonical Ontology v3.18"
+title: "Tortoise — Canonical Ontology v3.19"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-09-27
+updated: 2026-09-28
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.18
+# Tortoise — Canonical Ontology v3.19
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -33,7 +33,33 @@ doc_status: live
 > has a defect.** The single exception is a *factual* error — the model itself
 > being wrong — which is corrected here and recorded in the changelog.
 >
+> **Changelog v3.19 (2026-09-28, issue #3985 — a falsey-but-ORDERABLE stored `validFrom` is a real window start):**
+> - §4.7 (`validTo`): the resolution branch and the read path now agree for every successor
+>   start both can *order*. `_supersede_window_end` resolved with a truthiness test while
+>   `_covers` gates on presence, so a stored `validFrom = 0` was a real epoch-0 start to the
+>   read path (`[epoch 0, ∞)`) but was treated as undated by the write path, which stamped the
+>   predecessor's `validTo` at the successor's `createdAt` — inside that window, so the
+>   predecessor and the successor both covered and `restore_point_at` returned a two-candidate
+>   `ambiguous` instead of the successor. The resolution now takes a present, **orderable**
+>   start (`is not None` and `_created_sort_key(...)[0] == 0`), so `0`/`0.0` becomes the
+>   predecessor's `validTo`; where it precedes the predecessor's own start the existing #4021
+>   guard refuses the write rather than persisting an inverted window.
+> - §4.7 (`validTo`): **narrows, and does not resolve,** the v3.13 sentence below. The
+>   falsey-**and-unorderable** `""` still falls through to `createdAt`, so `write != read` for
+>   `""` remains. Which of the two is intended — an OPEN window start or an ABSENT one — is an
+>   owner decision over temporal semantics, not a predicate alignment, so it is left open and
+>   tracked as **#6140** (deliberately not decided here; it is NOT #3982, which ruled on
+>   date-only parsing — a different question).
+> - Supersedes the v3.13 no-kwarg sentence's scope from "the falsey case" to "the
+>   falsey-and-unorderable case", and supersedes v3.13's contrast that the **presence**
+>   predicate is "the read path's … not the resolution branch's truthiness": the resolution
+>   branch now ALSO gates on presence (plus the #5360 orderability conjunct), so that contrast no
+>   longer holds.
+>   This entry records only what the code now does. (The two entries below that both carry
+>   "v3.18" are a pre-existing duplicated label — filed as **#7214**, not renumbered here.)
+>
 > **Changelog v3.18 (2026-09-27 — issue #5025, owner ruling — `related` is the neutral association link and carries no EP):**
+>
 > - §3.9: **`related` is defined.** It means *connected, and nothing more* — no
 >   direction (symmetric), no chaining (non-transitive), and never a substitute for a
 >   hierarchy relation (`hasPart` / `memberOf` / `reportsTo`). The shape follows the
@@ -62,6 +88,7 @@ doc_status: live
 >   (belief model, DECISION-LEDGER §22).
 >
 > **Changelog v3.18 (2026-09-25, issue #4021 — the inverted predecessor window is refused):**
+>
 > - §4.7/§4.1 (`validTo`): the supersession end is now checked against the
 >   **predecessor's own `validFrom`** before it is stamped. The resolution order is
 >   unchanged (`valid_from` kwarg → successor `validFrom` → successor `createdAt`
@@ -102,6 +129,7 @@ doc_status: live
 >   behaviour changes is the one that used to corrupt silently.
 >
 > **Changelog v3.17 (2026-09-24 — issue #4937, the F1 ruling recorded on #2552 — MITIGATES retires from the operator menu):**
+>
 > - §2: the operator KINDS are `IMPL`/`NAND` (+ declared labels). `MITIGATES`
 >   leaves the generic operator menu: a **mitigation** is not a peer operator
 >   but a Point that attaches to the IMPL/NAND operator bridge it damps
@@ -135,6 +163,7 @@ doc_status: live
 > **Changelog v3.16 (2026-09-24 — issues #2726 + #2727, meeting source kinds +
 > object-kind alignment; original branch change dated 2026-09-09, renumbered from
 > v3.11 on merge because main had taken v3.11 for #3263):**
+>
 > - §4.6/§5: sourceKind vocabulary gains `meeting_transcript` (raw, first-hand)
 >   and `meeting_minutes` (structured, mediated) — the two meeting-capture
 >   kinds. Both register **NEUTRAL** in `SOURCE_KIND_DEFAULTS` (precedent:
@@ -180,6 +209,7 @@ doc_status: live
 >   Object Kind Vocabulary; pinned in tests.
 >
 > **Changelog v3.15 (2026-09-24, issue #5013 — a document is a `:Source`; sources are versioned):**
+>
 > - §4.4: **rewritten.** A document is a `:Source`, not an entity. The
 >   `:Document` label and `objectKind: document` are retired; **`content` leaves
 >   the graph**; **`doc_status` is retired** — liveness is a read of the entities
@@ -212,10 +242,15 @@ doc_status: live
 > - **Implementation status:** `#5026` (the label migration) **landed** — PR
 >   #5127 merged 2026-09-25 (`294d5847e`): the `:Document` label is retired, and
 >   the legacy spelling survives only as a deprecated alias whose writes route to
->   `:Source` keyed `url`. Still **open**: `#5024` (the unjournalled version
->   transition) and `#5038` (the version model).
+>   `:Source` keyed `url`. `#5024` **landed** — a content-changing re-fetch now
+>   journals a `SourceVersioned` record naming the superseded `contentHash`, a
+>   no-op re-fetch journals nothing, and a replay reproduces the node (the
+>   per-field split is in `docs/durability-posture.md` → R2). Still open: the
+>   version **window** `validFrom`/`validTo`/`expiredAt`, which no writer sets
+>   (**#3644**); and `#5038` (the version model).
 >
 > **Changelog v3.14 (2026-09-20, issue #4369 — the "claim" gloss is declared):**
+>
 > - §5: **"claim"** is declared as the sanctioned user-facing **gloss** for a logic-layer
 >   Point (the asserted belief — the logic layer's canonical kind is `pointKind: statement`;
 >   the legacy write kinds remain valid Point kinds). It is **not a distinct kind**: no `claim` type and no
@@ -230,6 +265,7 @@ doc_status: live
 >   `tortoise/weights.py`'s single-source docstring and the shipped skill keep the word.
 >
 > **Changelog v3.13 (2026-09-18, issue #3980 — the `valid_from` kwarg precondition):**
+>
 > - §4.7/§4.1 (`validTo`): the resolution order is unchanged
 >   (`valid_from` kwarg → successor `validFrom` → successor `createdAt` → `now`),
 >   but the kwarg is now a **claim** rather than an unconditional input. When the
@@ -263,6 +299,7 @@ doc_status: live
 >   wins" pin — recorded on #1538.
 >
 > **Changelog v3.12 (2026-09-15, issue #3642 — declared temporal model):**
+>
 > - §4.7: rewritten as the canonical statement of the temporal model — two
 >   orthogonal axes (valid time `validFrom`/`validTo`; transaction time
 >   `createdAt`/`expiredAt`), supersession as a **third, separate fact**
@@ -314,6 +351,7 @@ doc_status: live
 >   with `CORRECTS` framed as the shared replacement marker (§4.7 ‡).
 >
 > **Changelog v3.11 (2026-09-12, issue #3263 — provenance written by construction):**
+>
 > - §3.3: `extractedFrom` cardinality amended **`many→1` → `many→many`**. The
 >   edge is written per source; a claim extracted from several sessions carries
 >   one `extractedFrom` edge each, with no upper bound. (`create_point` now
@@ -333,6 +371,7 @@ doc_status: live
 >   tracked separately.
 >
 > **Changelog v3.10 (2026-09-05, #2238 dirty-hub salvage landing — Problem family):**
+>
 > - §5: registers core object kind `Problem` (deviation between actual and desired
 >   state) + Problem-family note — dev `bug`/`incident` and product-strategy
 >   `customerProblem` subclass it; `risk` is its potential/claim form (dev point kind).
@@ -342,6 +381,7 @@ doc_status: live
 > - §1/§4.3/§6: core-subclass enumerations extended with `Problem`.
 >
 > **Changelog v3.9 (2026-09-02, issue #2101 / epic #2080 — §5 response-contract vocabulary, W4 why-layer DM-12):**
+>
 > - §5: new Response-Contract Vocabulary section — additive response-contract
 >   labels (dig_deeper kinds/labels, why-block sections, conflict severity,
 >   degraded_reason), NOT new entity kinds. Registered so the W4 why-block
@@ -352,6 +392,7 @@ doc_status: live
 >   analyze.py consensus pattern).
 >
 > **Changelog v3.8 (2026-08-13, issue #388 — connector Source nodes):**
+>
 > - §3.4: connector events (GitHub/Linear/Slack poll + webhook + entity paths)
 >   now materialize Source nodes at the projection choke point (`_upsert_event`,
 >   projection/entities.py) — `(Source {url})-[:references]->(Event {eventId})`
@@ -371,6 +412,7 @@ doc_status: live
 >
 > **Changelog v3.6 (2026-08-11, epic #909 slice 3 — 13 ontology amendments, issue #948):**
 > Registration only — no new design (plan §4.3, numbered exactly 13):
+>
 > 1. §4.5/§5: eventKind `AgentSession` (EXACT code spelling — capital A, sdk.py/session_indexer.py) + `sessionCaptured` declared an alias of the same concept — both remain valid kinds, no migration.
 > 2. §4.5: `capturedAt` field (transaction time — bi-temporal capture).
 > 3. §4.5: content-addressed Event ID (deterministic MERGE anchor for the agentSession Event).
@@ -386,6 +428,7 @@ doc_status: live
 > 13. §4.1/§4.5/§4.6: `is_episodic` registered on Point/Event/Source — plus the `:Session` capture node (§4.5 note) (quota exemption discriminator; NOT on Object — plan §4.3 #13 entity set, review P2 PR #973).
 >
 > **Changelog v3.5 (2026-08-11, epic #898 — reification rule):**
+>
 > - §8: Reification rule added — an edge carries an operator only when it needs
 >   mitigation (or is a Point↔Point support/contradict). Structural edges stay
 >   plain and carry confidence as an edge attribute. IMPL/NAND may be direct
@@ -394,6 +437,7 @@ doc_status: live
 >   the edge and initialize edge messages directly.
 >
 > **Changelog v3.4 (2026-08-10, issue #690 — status vocabulary reconciliation):**
+>
 > - §5: Point status vocabulary upgraded from narrative note to canonical table
 >   (six statuses: draft, live, retracted, superseded, outdated, archived).
 >   Every status has a defined write path, allowed transitions, and EP semantics.
@@ -402,6 +446,7 @@ doc_status: live
 >   condition, not a stored status.
 >
 > **Changelog v3.2 (2026-08-07, issue #398 — Source credibility):**
+>
 > - §4.6/§3.4: Source `sourceKind` clarified — it is the extensible source TYPE
 >   vocabulary (connectors write `github_issue`, `slack_message`, `linear_card`);
 >   the T0–T4 credibility TIER is carried by `credibilityTier` (the property the
@@ -411,9 +456,11 @@ doc_status: live
 >   (documented derivation cache — see §11) and `sourceDate` (evidence-age clock).
 > - §5: pointKind vocabulary gains `assessment` (agent source evaluations).
 > - §10: recency-modulation decision log (per-field/per-sourceType decay deferred).
+>
 > > **Changelog v3.7 (2026-08-12, core hypothesis — state-centric model):**
+>
 > - §2: state-centric model block — the graph stores STATE (Objects + lifecycle
->   + derived confidence) + POINTS (the logic) + EVENTS (timeline incl.
+>   - derived confidence) + POINTS (the logic) + EVENTS (timeline incl.
 >   decision-as-event); decisions are NOT first-class Points.
 > - §5 (v3.8): extraction point kind = `statement` ONLY; `observation` removed
 >   (anything can be called one) and `hypothesis` folded into confidence
@@ -487,7 +534,7 @@ Each layer answers a different question. All four are live mechanisms.
 > read time from the attached Points' EP confidence (§11) — never stored
 > independently on the Object.
 
-**Structural vs Epistemic Edges**
+### Structural vs Epistemic Edges
 
 | Edge | Type | Confidence | Example |
 |------|------|-----------|---------|
@@ -514,10 +561,11 @@ Each layer answers a different question. All four are live mechanisms.
 > **Structural-edge transfer is journaled + replayable (#2489):** the 2b structural-edge transfer (`extractedFrom` + snapshot-derivable `about*` edges) is journaled as flat `DirectEdgeRepoint` descriptors `{src=old_id, tgt=<replay key>, target_label, edge_type}` emitted **before** the transfer, and replayed by `rebuild_all` pass-2b (delete the pass-2 resurrection at old + create at the final successor). The journaled set is the **snapshot-derivable rel set only** — `extractedFrom`, `aboutSubject`/`aboutObject`/`aboutEvent`/`aboutDocument`/`aboutPoint` (the edges rebuild pass-2 re-creates from a point's immutable `extractedFrom` prop / `aboutEntities` list). `aboutAction` (Action dissolved in Ontology v3.0), `aboutSource`, and `wasDerivedFrom` are never snapshot-recreated → no descriptor (they never resurrect at old; the A10 raw-edge family is out of scope). Keys are label-scoped and resolved via the shared resolver in `projection/edges.py` (`stub_key`/`resolve_structural_target` — Subjects MERGE by `name`, Sources **and `aboutDocument`** by `url`; never `target.id`). **⚠️ A predicate's label and its key are one unit: a retargeted label with a stale key resolves to nothing and silently mis-points the rebuilt edge.** `aboutDocument` targets a `:Source` (§4.4), so it resolves by `url` — the same key a `:Source` resolves by. Full `about*` parity additionally depends on #2501 (create_point never live-wires `aboutEntities` — the only lane where 2b sees live `about*` edges is rebuild→supersede→rebuild). The 2b no-self-edge guard (target node == successor) emits a `delete_only` descriptor instead of a transfer. **Pre-fix journal boundary:** descriptors exist only for supersedes journaled post-deploy — a pre-fix journal rebuilt with this consumer replays with no delete-leg, so old's pass-2 resurrection persists (rebuild does NOT repair pre-existing graphs; a #2500-style backfill is out of scope).
 >
 > **Restatement-vs-correction policy (#2421):** two supersede cases look alike but demand opposite edge handling, so edge disposition is decided **per edge at write time** (never silently bulk-transferred):
+>
 > - **Case 1 — restatement:** the new point says the same thing more precisely (better source, fixed typo, merged duplicate). Every connection still applies; edges and belief transfer — belief-preservation is asserted (eval-spec P6.1/P6.2).
 > - **Case 2 — substantive correction:** the new point exists *because* a refutation landed. The refuting NAND must **not** re-attach to the successor (it motivated the change); belief recomputes structurally with the refutation gone.
 > Deterministic policy is safe only for content-independent edges (identity edges like `aboutObject` when the target is unchanged; merges carry everything). Semantic edges (IMPL/NAND) route to a carry / drop / **pend** triage with the rationale stored per edge; pended edges are non-voting placeholders surfaced by the ask lane only when an answer depends on them. A refutation that motivated a correction never re-attaches; a refutation that still applies is kept. *Implementation status:* `supersede_point` currently performs the legacy universal transfer (all operator + structural edges); the per-edge triage decomposes under #2421.
-
+>
 > **Direction flag (code note):** operator direction is an explicit flag on the operator Point. Creation default is **bidirectional** for all op types (#753 — NAND is logically mutual; `unidirectional` is the agent-declared directed attack). Pre-migration operators lacking the property are read as bidirectional (legacy semantics preserved).
 >
 > **Edge properties (IMPL/NAND — EP message state, epic 903):** these are **graph-persisted** belief-propagation messages written by `TortoiseEP._flush_cache` and read back by `_load_cache` (warm-start seed, 903-C4). They are load-bearing graph state — documented here so they are not treated as throwaway cache:
@@ -530,6 +578,7 @@ Each layer answers a different question. All four are live mechanisms.
 > **Warm-start note (903-C4):** `run(warm_start=True)` loads these graph-persisted messages as seed and skips updates whose delta ≤ fixed threshold γ; the fast path (`compute_confidence`) runs `warm_start=False` and never touches γ-skip state.
 >
 > **Extraction NAND direction policy (epic #909 §4.3 #5 / research addendum §1 — pipeline spec):** the EXTRACTOR explicitly sets direction per this policy; the SDK creation default stays `bidirectional` (#807 — API-user path):
+>
 > - **New-claim-attacks-existing-claim → `unidirectional`** (directed): "you now claim ¬D against D" is an attack on an existing belief — the new claim attacks the old. This is the common, measured-correct case (the one that makes contradiction surfacing work; `nand_precision` A11 measures it).
 > - **Mutual restatement → `bidirectional`**: when both claims are asserted together as mutually exclusive (e.g., the conversation itself declares "A and B can't both be true").
 > - **Default for extraction-emitted NANDs: `unidirectional`** — extraction is always asserting something NEW against something EXISTING; mutual is the rare explicit case.
@@ -550,9 +599,9 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 | `TAGGED` | Point → Tag | unidirectional | many→many | `schema:keywords` | Free-form label on a Point. Tags are `:Tag` nodes (Object subclass, `objectKind: tag`) shared across Points via MERGE. Created by hosted-api point ingestion (hosted_api.py:695-787). ⚠️ **Write-only today — no tag-filter query surfaced yet** (see follow-up). |
 
 > **Legacy:** `aboutEntities` property → per-type `about*` edges. `_create_about_edges()` auto-detects Subject/Object from the legacy property. `schema:about` is polymorphic; we split per-type for graph performance.
-
-> **Session as an aboutObject source (#1727 Slice 2, Task 12; SDK parity + durability #3664):** the capture path links `(s:Session)-[:aboutObject]->(o:Object)` and `(p:Point)-[:aboutObject]->(o:Object)` for episodic turn Points (the stored windowed turns — not LLM-extracted points), driven by a regex trigger over the conversation text (`github.com/{org}/{repo}/issues/{n}`, `{repo}#{n}`, bare `#n` with a false-positive guard). First-match per point is form-priority — the URL form before `{repo}#{n}` before bare `#n`, independent of textual position; all-matches for the Session node (deduped by target id). Name-suffix matches (org-ambiguous) link only when exactly ONE Object matches — zero or multiple ⇒ no-op, honest. Resolution is by the stable WorkItem Object id (`github-issue-{org}/{repo}-{n}` — computable only from the full URL form; suffix forms resolve by name), so aboutObject never dangles on supersede. Outcomes are tracked on the Session node (`entity_links_attempted` / `entity_links_created`) and journaled via a follow-up `SessionRecorded` so a wipe+replay restores them; the pass re-runs on index completion. **#3664:** the SDK `capture_session` now runs the same pass as hosted `_capture_session_impl` (it previously did not — a self-hosted capture was an unattached island). Edges the pass writes are journaled as an `EntityLinked` JSONL record (flat logical ids `{source_label, source_id, target_label, target_id, edge_type}`) **when the SDK is built with an `event_log_path`**; the record is folded idempotently by `FalkorProjection._fold_entity_linked`, and all four whole-journal replay engines (`rebuild_all`, and the `apply()`-based `rebuild`/`recover_from_log`/`backup.restore` JSONL fallback) defer it to a trailing sweep so a forward reference still folds; a link whose endpoint was hard-deleted after it is skipped (the record carries no `seq` — each engine pairs it with its journal position, which the hard-delete boundary is compared against), so a same-id re-creation does not resurrect the deleted link. A journal-less SDK — every hosted-lane SDK (`_make_sdk`/`_data_sdk` set no `event_log_path`; #4240) — emits no record and the edges stay live-only (#2296). The extractor's `(claim Point)-[:aboutObject]->(Object)` edges ride the same journal **only when the resolved Object carries an `id`**; an id-less NAME-matched stub (the hosted path's `MERGE (o:Object {name:$name})` objects) is attached by a raw name-based `MERGE` that emits no `EntityLinked`, so it is live-only and does NOT survive replay. The `:Session` node's journal carrier is `SessionRecorded` (#3664) — with a journal wired, the node (and any aboutObject edge from it) is recreated on rebuild. `aboutSubject` has no producer here: the ONTOLOGY registers Session as an `aboutObject` source only (see the §3.2 table), and the capture entity model mints Objects, not Subjects.
-
+>
+> **Session as an aboutObject source (#1727 Slice 2, Task 12; SDK parity + durability #3664):** the capture path links `(s:Session)-[:aboutObject]->(o:Object)` and `(p:Point)-[:aboutObject]->(o:Object)` for episodic turn Points (the stored windowed turns — not LLM-extracted points), driven by a regex trigger over the conversation text (`github.com/{org}/{repo}/issues/{n}`, `{repo}#{n}`, bare `#n` with a false-positive guard). First-match per point is form-priority — the URL form before `{repo}#{n}` before bare `#n`, independent of textual position; all-matches for the Session node (deduped by target id). Name-suffix matches (org-ambiguous) link only when exactly ONE Object matches — zero or multiple ⇒ no-op, honest. Resolution is by the stable WorkItem Object id (`github-issue-{org}/{repo}-{n}` — computable only from the full URL form; suffix forms resolve by name), so aboutObject never dangles on supersede. Outcomes are tracked on the Session node (`entity_links_attempted` / `entity_links_created`) and journaled via a follow-up `SessionRecorded` so a wipe+replay restores them; the pass re-runs on index completion. **#3664:** the SDK `capture_session` now runs the same pass as hosted `_capture_session_impl` (it previously did not — a self-hosted capture was an unattached island). Edges the pass writes are journaled as an `EntityLinked` JSONL record (flat logical ids `{source_label, source_id, target_label, target_id, edge_type}`) **when the SDK is built with an `event_log_path`**; the record is folded idempotently by `FalkorProjection._fold_entity_linked`, and all four whole-journal replay engines (`rebuild_all`, and the `apply()`-based `rebuild`/`recover_from_log`/`backup.restore` JSONL fallback) defer it to a trailing sweep so a forward reference still folds; a link whose endpoint was hard-deleted after it is skipped (the record carries no `seq` — each engine pairs it with its journal position, which the hard-delete boundary is compared against), so a same-id re-creation does not resurrect the deleted link. A journal-less SDK — a hosted-lane SDK when `TORTOISE_EVENT_LOG_BASE_DIR` is unset (`_make_sdk`/`_data_sdk`; the base dir wires a per-graph `event_log_path` when set, #4240) — emits no record and the edges stay live-only (#2296). The extractor's `(claim Point)-[:aboutObject]->(Object)` edges ride the same journal **only when the resolved Object carries an `id`**; an id-less NAME-matched stub (the hosted path's `MERGE (o:Object {name:$name})` objects) is attached by a raw name-based `MERGE` that emits no `EntityLinked`, so it is live-only and does NOT survive replay. The `:Session` node's journal carrier is `SessionRecorded` (#3664) — with a journal wired, the node (and any aboutObject edge from it) is recreated on rebuild. `aboutSubject` has no producer here: the ONTOLOGY registers Session as an `aboutObject` source only (see the §3.2 table), and the capture entity model mints Objects, not Subjects.
+>
 > **`aboutEvent` is content-only (#1417):** the edge means "this Point describes this Event" — never "this Point was produced by this Event". Capture-path provenance (a Point produced from a session/meeting) lives on the Point's **`eventId` property** (the provenance surface, stamped by `capture_session`, hosted `/v1/sessions`, and the mining path), with the full chain `(Point)-[:extractedFrom]->(Source)-[:references]->(Event)` (§3.3/§3.4). Pre-#1417 `aboutEvent`-as-provenance edges remain readable and are semantically reinterpreted (no migration); new writes must not mint them. NOTE: the D10 subject-resolution fallback (point's source-event's subject) now requires the `eventId` property — legacy aboutEvent-only points silently stop resolving that fallback (review P2).
 
 ### §3.3 Point → Source (Provenance)
@@ -614,7 +663,7 @@ Connector entities (GitHub/Linear/Slack) get Source nodes at the projection chok
 
 > **#531 — canonical Event→Point pattern (`humanApproval`):** a human approval of a planning artifact is recorded as an Event (`eventKind: humanApproval`) + a decision Point (`pointKind: humanApproval`). The Event carries occurrence provenance (approver `performs`, artifact `uses`, claim `aboutPoint`, decision `produces`); the decision Point is a live epistemic claim that seeds the grounding a-vector and receives an EP evidence prior `Beta(10,1)` so dependent claims strengthen. Fan-out is `-[:IMPL {direction: "unidirectional", label: "approvedBy"}]->` per approved claim — deliberately unidirectional so claim weakness never back-propagates into the approval. No stored `approved` status on Objects — approval is derived from the event stream at query time. Worked example (`file_human_approval`, #531):
 >
-> ```
+> ```cypher
 > (:Subject "Daniel")-[:performs]->(:Event {eventKind:"humanApproval", startedAt:T})
 >   (:Event)-[:uses]->(:Object "Customer Profile CP-001")
 >   (:Event)-[:aboutPoint]->(:Point "CP-001 targets SMB segment")
@@ -626,7 +675,7 @@ Connector entities (GitHub/Linear/Slack) get Source nodes at the projection chok
 
 All structural edges must use one of (enforced in `_create_edge`):
 
-```
+```text
 performs, produces, uses, authoredBy, ownedBy, managedBy,
 hasMember, holdsRole, memberOf, reportsTo,
 participatesIn, hasPart, related, dependsOn, references,
@@ -650,12 +699,12 @@ wasDerivedFrom
 >
 > Three meanings follow, and they are what make it safe to use freely:
 >
->   * **It has no direction.** "A is related to B" and "B is related to A" are the
+> - **It has no direction.** "A is related to B" and "B is related to A" are the
 >     same statement — so it can never be used to say "A adds information to B",
 >     which does have a direction.
->   * **It does not chain.** A related to B, and B related to C, tells you nothing
+> - **It does not chain.** A related to B, and B related to C, tells you nothing
 >     directly about A and C.
->   * **It is not a hierarchy.** It never substitutes for "part of", "member of" or
+> - **It is not a hierarchy.** It never substitutes for "part of", "member of" or
 >     "reports to".
 >
 > **It carries no epistemic weight, by decision (#5025, owner ruling 2026-09-27).**
@@ -794,7 +843,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `updatedAt` | ISO8601 | — | `dc:modified` | ❌ | **Not written by `_upsert_subject`** — planned follow-up |
 
 > **Subject registration durability (#2295)** — SDK-created Subjects (`create_entity("subject")`, the capture/entity write path) journal a `SubjectAdded` event on their FIRST canonical registration **when the SDK is built with an `event_log_path`** (probe-gated on the deterministic `sub-<sha26(name)>` id + name — a canonical re-mention after the fix never double-journals; a probe failure fails open to a replay-safe duplicate line; an EventAPI `add_subject` mention under a random ulid between SDK creates re-ids the live node and double-registers by design — `add_subject` has no canonical-id override, api.py:240-246), so SDK-created Subjects survive `rebuild_all` (the JSONL event stream is the rebuild source; replay consumers pre-date the fix because EventAPI always journaled). Byte-identity is **node-property scope**: Subject org/ownership edges ride the mirror but replay wires node properties only (EventAPI-parity). **Residual non-durable classes**: pre-#2295 journals (no backfill), unjournaled/legacy raw producers and journal-less SDK instances sharing the graph, deleted Subjects — `_delete_entity` leaves no tombstone, so a deleted Subject **resurrects** on the next rebuild and delete→recreate's replay first-wins the earlier incarnation's `createdAt`; and an EventAPI-first-then-SDK create (separate logs) replays a synthesized `createdAt` that differs from the live adopted node's pre-existing value under existing-wins (#2296 scope hook: the durability write-surface invariant must cover the delete side of the lifecycle + the Object/Subject loss backstop). EventAPI `add_subject` remains a separate unconditional producer (random-ulid, #1918). **Reserved-name narrowing**: `point`/`payload` props passed to an SDK Subject create are dropped (unconditional, both lanes — Event-precedent parity, #2061/#2194); they are `_emit_event`-reserved kwargs and must never reach the journal mirror or live node. `is_episodic` is NOT a registered Subject quota discriminator (the §4.7 cell is `—`), but the internal `create_entity(..., is_episodic=)` extras lane does round-trip it on SDK-created Subjects (pinned by the #2295 suite test 1) — same extras quirk as Object.
-
+>
 > **Why no `subjectStatus`?** PROV-O, W3C ORG, and FOAF model agent existence temporally (`validFrom`/`validTo`) with termination events, not status enumerations. A simple shared `status` covers "is this team active?" while Events capture the how/why of changes.
 
 ### §4.3 Object
@@ -813,8 +862,9 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `createdAt` | ISO8601 | ✅ | `dc:created` | ✅ | Timestamp (set ON CREATE; adopted ON MATCH only when absent — #2194) |
 | `updatedAt` | ISO8601 | — | `dc:modified` | ❌ | **Not written by `_upsert_object`** — planned follow-up |
 | `passes_frequency_gate` | bool | — | — | ❌ | S5 frequency-gate result flag — false entities are still written, flagged (registered #909 §4.3 #12; planned for the capture path, slice 5+) |
-> **Responsibility fields (authoredBy / ownedBy / managedBy) are EDGES, not node properties** — see §3.5-3.6. `_upsert_object` does not store them as properties; they exist as graph edges to Subject nodes.
 
+> **Responsibility fields (authoredBy / ownedBy / managedBy) are EDGES, not node properties** — see §3.5-3.6. `_upsert_object` does not store them as properties; they exist as graph edges to Subject nodes.
+>
 > **Object registration durability (#2194)** — SDK-created Objects (`create_entity("object")`, the capture/entity write path) journal an `ObjectRegistered` event on their FIRST canonical registration **when the SDK is built with an `event_log_path`** (probe-gated on the deterministic `obj-<sha26(name)>` id + name — a canonical re-mention after the fix never double-journals; a probe failure fails open to a replay-safe duplicate line, and an EventAPI `add_object` mention under a non-canonical ulid followed by an SDK create of the same name double-registers by design), so capture-created Objects and their `ObjectSuperseded` folds survive `rebuild_all` (the JSONL event stream is the rebuild source). **Subjects ride the same probe-gated design since #2295 (see the §4.2 note).** Byte-identity is **node-property scope**: `authoredBy`/`ownedBy`/`managedBy` ride the mirror but replay wires node properties only — responsibility edges are not durable for Object replay (EventAPI-parity, §3.5 edges). **Residual non-durable classes** (they apply without journaling, or were never registered — dropped by rebuild without a warning unless a fold references them): pre-#2194 journals (no backfill), unjournaled/legacy raw producers and journal-less SDK instances sharing the graph, and deleted Objects — `_delete_entity` leaves no tombstone, so a deleted Object **resurrects** on the next rebuild and a delete→recreate's replay first-wins the earlier incarnation's `createdAt`/fold state over the live one (#2296 scope hook: the durability write-surface invariant must cover the delete side of the lifecycle). EventAPI `add_object` remains a separate unconditional producer. **Reserved-name narrowing**: `point`/`payload` props passed to an SDK Object create are dropped (unconditional, both lanes — Event-precedent parity, #2061); they are `_emit_event`-reserved kwargs and must never reach the journal mirror or live node. **createdAt synthesis**: first-registration Object creates synthesize `createdAt` pre-apply when the event carries none OR an explicit `None` (the is-None gate — #2309 review hardening, mirrored for Subjects in #2295) so live == journal == replay; re-mentions and journal-less SDKs keep the projection's `coalesce($now)` behavior.
 
 ### §4.4 Document — a source, not an entity
@@ -872,7 +922,7 @@ A document is a **`:Source`** (§4.6). Its bytes live **outside the graph**, rea
 | `contentHash` | string | ✅ | `premis:messageDigest` | ✅ | **Version anchor** — the digest of the content read. A differing hash on re-fetch is a **new version**, not an edit (see *Versioning* below) |
 | `title` | string | — | `dc:title` | ⚠️ | Human-readable label. Defaults to url |
 | `ingestedAt` | ISO8601 | ✅ | `pav:importedOn` | ✅ | When Tortoise first saw this source — **Source's spelling of the canonical transaction-time start `createdAt`** (§4.7) |
-| `updatedAt` | ISO8601 | — | `dc:modified` | ✅ | Last version transition. Set **in place** on `ON MATCH` by `_upsert_source` — **unjournalled today** (`#5024`) |
+| `updatedAt` | ISO8601 | — | `dc:modified` | ✅ | Last version transition. **Journalled since `#5024`:** a hash transition emits `SourceVersioned` carrying `previousContentHash` + the recorded instant, and the fold reads that instant — never the replay clock. Pre-`#5024` the write bumped it in place with no record of its own, so a rebuild re-stamped it (`#5024`) |
 | `validFrom` / `validTo` | ISO8601 | — | `prov:generatedAtTime` / `prov:invalidatedAtTime` | ❌ | **The CURRENT version's valid-time window** — when the content held in the world (declared §4.7, #3642). A prior version's window is a journal record — see *Versioning* |
 | `expiredAt` | ISO8601 | — | — | ❌ | Transaction-time expiry — when our record of this version stopped being current (declared §4.7, #3642) |
 | `documentKind` | string | — | `bibo:Document` subclasses | ⚠️ | **Genre**, when `sourceKind: document` — the core vocabulary is in **§5**. Distinct from `sourceKind` (§4.4) |
@@ -909,6 +959,8 @@ A document is a **`:Source`** (§4.6). Its bytes live **outside the graph**, rea
 **Closing the interval is part of the write.** An unclosed `validTo` reads as *"still true"* indefinitely — the failure mode the whole model exists to prevent — so the journal record that opens a new version closes the old one **in the same act**; it is never a later repair.
 
 **`updatedAt` records the last version transition.** It is not a currency flag — currency is computed from `sourceVersion` against `contentHash`.
+
+**Implementation status (`#5024`, 2026-09-24).** The *version-anchor* half of this section is now implemented: a hash transition journals a `SourceVersioned` record naming `previousContentHash` and the transition instant, a no-op re-fetch journals **nothing** (`STORAGE-ARCHITECTURE.md` §9.6's cost bound), and a `rebuild_all` replay reproduces the current node field for field. **The window half is still a declared gap:** the record names the superseded *version* but does not close a `validTo`/open a `validFrom`, because no writer sets those fields on the node at all (**#3644**). The per-field recorded/recomputable split lives in `docs/durability-posture.md` → *`:Source` — recorded vs recomputable, field by field* (R2).
 
 ### §4.7 Temporal Model (canonical)
 
@@ -967,8 +1019,9 @@ declared, not built (implementation is tracked separately):
 | txn end | `expiredAt` ✅ | `expiredAt` ❌ | `expiredAt` ❌ | — | `expiredAt` ❌ |
 | supersession | `status='superseded'` ✅ ‡ | — | `supersededAt` ✅ | — | — |
 
-> † **A source's temporal slots are the Source column's.** No `:Object`-labelled write path reaches a Source, so the Object-labelled supersession fold (`_fold_object_superseded` / `apply_supersessions`, which `MATCH`es `(o:Object {id|name})`) **cannot stamp a Source** — **Source supersession is unreachable, not merely unimplemented (`—`).** `_upsert_source` writes no `validFrom`/`validTo`/`expiredAt`. **⚠️ A re-fetched source whose content changed currently mutates in place (`updatedAt`, `version`) with no journal record (`#5024`).**
+> † **A source's temporal slots are the Source column's.** No `:Object`-labelled write path reaches a Source, so the Object-labelled supersession fold (`_fold_object_superseded` / `apply_supersessions`, which `MATCH`es `(o:Object {id|name})`) **cannot stamp a Source** — **Source supersession is unreachable, not merely unimplemented (`—`).** `_upsert_source` writes no `validFrom`/`validTo`/`expiredAt` (**#3644**). **A content-changing re-fetch is no longer a silent in-place mutation:** since `#5024` it journals a `SourceVersioned` record naming the superseded `contentHash`, so the prior version is addressable and a replay reproduces the node.
 
+>
 > **Point valid start is ⚠️, not ✅** — populated by the date-carrying write
 > paths, with the legacy mining W-4 post-pass falling back to the wall clock when
 > the session carries no date (a clock-stamped start is reachable, though not the
@@ -979,7 +1032,7 @@ declared, not built (implementation is tracked separately):
 > old window is the open start's consequence — never read contiguity as
 > unconditional. This matches the ⚠️ convention `capturedAt` follows; §4.1 marks
 > `validFrom` and `validTo` separately.
-
+>
 > ‡ **Point supersession discriminator.** `supersede_point` and
 > `invalidate_point` write the **same** four markers — `outdated=true`,
 > `validTo`, `expiredAt`, and a `CORRECTS` edge. Only `status='superseded'`
@@ -1013,10 +1066,11 @@ authoritative for the temporal slots. Event's transaction-time start is
 
 ### Point Kind Vocabulary (core)
 
-```
+```text
 statement    # the LOGIC layer — THE extraction write kind (state-centric, option B 2026-08-12)
 decision, vision, strategy, plan, goal, target, observation, hypothesis, humanApproval, event   # LEGACY write kinds (write-compat only)
 ```
+
 > **State-centric alignment (2026-08-12, option B):** Points are the LOGIC layer
 > only, and the logic is one kind: **`statement`** — the asserted belief.
 > `hypothesis` is FOLDED INTO CONFIDENCE semantics (a conjecture is a
@@ -1027,7 +1081,7 @@ decision, vision, strategy, plan, goal, target, observation, hypothesis, humanAp
 > removed (issue #1013 — episodic records are Event nodes with eventKind
 > `occurrence`/`turn`). The legacy kinds remain valid write kinds for
 > compatibility; extraction emits `statement` only.
-
+>
 > **Sanctioned gloss — "claim" (#4369).** Where **"claim"** names a belief node, it is a
 > **logic-layer Point** — the asserted belief (the logic layer's canonical kind is
 > `pointKind: statement`; the legacy write kinds remain valid Point kinds for write-compat,
@@ -1044,11 +1098,12 @@ decision, vision, strategy, plan, goal, target, observation, hypothesis, humanAp
 
 ### Object Kind Vocabulary (core)
 
-```
+```text
 Project, WorkItem, Problem, tag, user, skill, tool, agent, workflow, agreement, standard, other,
 strategy, plan, goal, target    # commitment-state family (state-centric, 2026-08-12) — states that
                                 # commitments produce; carry lifecycle + derived confidence
 ```
+
 > **Legacy extraction path (pinned, #2727):** the Phase-2 entity stage in
 > `tortoise/extractor.py` (`_OBJECT_KIND_VOCAB`) intentionally supports a
 > narrower 12-kind subset only — it omits the four commitment-state kinds
@@ -1074,32 +1129,33 @@ strategy, plan, goal, target    # commitment-state family (state-centric, 2026-0
 
 ### Event Kind Vocabulary (core)
 
-```
+```text
 meeting, decision, experiment, deployment, review, friction, extraction,
 documentCreated, roleCreated, pointAdded, sessionCaptured, AgentSession, humanApproval,  # #531
 occurrence, turn    # state-centric (2026-08-12): occurrence = generic extracted occurrence;
                     # turn = capture turn records (replaces pointKind 'event', issue #1013)
 ```
+
 > **State-centric alignment (2026-08-12):** eventKind `decision` is the
 > TIMELINE record of a commitment (the resolution is expressed as lifecycle
 > writes on the state objects); `occurrence` covers extracted happenings;
 > `turn` covers capture turn records. The Episodic layer is the truth for
 > lifecycle: Object status is a fold cache over its event stream — never authoritative on its own (§2).
-
+>
 > **#909 §4.3 #1:** `AgentSession` (EXACT code spelling — capital A; sdk.py `ingest_corpus`/session_indexer.py) is the canonical kind for session-capture Events; `sessionCaptured` (the core kind written by the regex capture path) is an **alias of the same concept** — both remain valid kinds, **no migration**.
 
 ### Document Kind Vocabulary — the GENRE axis (core)
 
 > This is a **`documentKind`** vocabulary — the **GENRE** of a document, applied to a `:Source` whose `sourceKind` is `document`. It is **not** an Object subclass vocabulary, and it is **not** the same axis as `sourceKind`.
 
-```
+```text
 research, reflectPostmortem, strategyDoc, visionDoc, planDoc, decisionDoc,
 meetingNotes, experimentResults, evidenceLog, handoff, transcript, roadmap, brief
 ```
 
 ### Subject Kind Vocabulary (core)
 
-```
+```text
 organization, team, role, legalPerson, naturalPerson, other
 ```
 
@@ -1109,21 +1165,21 @@ organization, team, role, legalPerson, naturalPerson, other
 
 **The canonical `sourceKind` values** — what kind of source this is. The vocabulary is extensible: **core values are here**, pack kinds are declared in the pack manifests (§9) and registered at load time.
 
-```
+```text
 conversation, document, agentSession,
 github_issue, github_pr, slack_message, linear_card, linear_cycle
 ```
 
 **Credibility tiers** — a *different* axis, carried on `credibilityTier`:
 
-```
+```text
 T0 (meta-analysis), T1 (peer-reviewed), T2 (expert), T3 (anecdotal), T4 (unverified)
 ```
 
 > **v3.2 (#398):** `sourceKind` is the extensible source TYPE vocabulary — pack-declared kinds (github_issue, github_pr, linear_card, linear_cycle, slack_message, document, meeting_transcript, meeting_minutes...) resolve to a tier ONLY via explicit registration (`register_source_kind_default`) or an explicit `credibilityTier` assignment; **unknown kinds stay neutral** (no inheritance). Connector kinds register explicitly neutral in `SOURCE_KIND_DEFAULTS` (`source_credibility.py`) — connector Source materialization (#388) therefore never alters EP inheritance. The T0–T4 tier semantics above live on `credibilityTier`. The Beta-prior mapping (T0=(10,1), T1=(5,1), T2=(3,1), T3=(2,1), T4=(1.1,1)) is the validated model (docs/ep-source-credibility-experiment.md §1.1).
-
+>
 > **Expansion-pack kinds live in the packs, not here.** Pack-declared kinds (dev:epic, product-strategy:product, etc.) are defined in their pack manifests (§9) and registered at load time via the pack registry. This file documents only the core vocabulary; it is not the home for pack kinds.
-
+>
 > **(#2726) Meeting-capture kinds:** `meeting_transcript` (raw, first-hand) and
 > `meeting_minutes` (structured, mediated) are registered source kinds as of
 > v3.16, both **NEUTRAL** (`None`) — operational captures sit outside the
@@ -1132,7 +1188,7 @@ T0 (meta-analysis), T1 (peer-reviewed), T2 (expert), T3 (anecdotal), T4 (unverif
 > deliberately deferred to #398's mechanism; `register_source_kind_default`
 > makes the eventual choice a one-line, reversible registration. Pack manifests
 > may declare both in `extraction.sourceTypes` (the validator unions the registry).
-
+>
 > **#909 §4.3 #6:** `sourceKind: agentSession` is a registered source-type VALUE (the four-node capture model's session Source — the provenance bridge — carries it; the value belongs to the `sourceKind` vocabulary above, alongside github_issue/slack_message/linear_card/…). Credibility-tier inheritance is keyed on **sourceKind** (#398): the tier resolves via the kind's registered tier default (`register_source_kind_default`) or an explicit `credibilityTier` assignment; unregistered kinds stay neutral (no inheritance).
 
 ### Response-Contract Vocabulary (W4 why-layer, #2101 / epic #2080 DM-12)
@@ -1141,7 +1197,7 @@ Additive response-contract labels — NOT new entity kinds. Registered so the
 W4 why-block assembly and the S6 contract test share one vocabulary (vocabulary
 drift is prevented by the S15 schema-correctness review).
 
-```
+```text
 dig_deeper kinds   supports | nand | superseded | tradeoff     # dig_deeper[k].kind (deterministic labels, never LLM prose)
 dig_deeper labels  read supports · read the counterargument (NAND)
                    · see what changed · weigh the alternatives  # derived from kind + target verb phrases (UXD 4)
@@ -1163,6 +1219,7 @@ degraded_reason    timeout | assembly_error | breaker_open      # degradations o
 | `archived` | terminal (reserved) | *(no v1 SDK write path)* | *(none)* | Reserved for future lifecycle operations |
 
 > **`challenged` is NOT a state** — it is a DERIVED condition emerging from the presence of a NAND operator edge on a live point, queryable as such:
+>
 > ```cypher
 > MATCH (p:Point {status:'live'})<-[:NAND]-(:Point {is_operator:true}) RETURN p
 > ```
@@ -1218,7 +1275,7 @@ Bidirectional: querying `dev:issue` also returns `pm:task`, and vice versa.
 A relationship operates on two layers — **semantic** (relation type) and **epistemic**
 (confidence / contradiction). It carries an operator **only when it needs one**.
 
-#### Reification rule — when an edge gets an operator
+### Reification rule — when an edge gets an operator
 
 **An edge carries an operator iff it needs mitigation, or is an epistemic
 support/contradict between Points and/or Events (Point↔Point, Event→Point,
@@ -1255,7 +1312,7 @@ edge attribute.
 
 Operator-mediated case (support/contradict, with mitigation anchor):
 
-```
+```text
 Semantic:   (Feature) ──[addresses]──→ (CustomerNeed)    ← operator.label
 Epistemic:        ↑ IMPL, confidence: 0.85               ← EP propagation
 Operator:      (op-123)                                   ← mitigation anchor
@@ -1356,7 +1413,7 @@ depend on it through operator chains are **re-evaluated, not stored-flagged**.
 Invalidation is a *derived* cascade — consistent with the ontology's
 "Object.status is a cache of the event stream, never authoritative" doctrine (§2, §11):
 
-```
+```text
 supersede_point / invalidate_point          (§3.1: mark old outdated:true,
                                             create (new)-[:CORRECTS]->(old))
    → _mark_dirty(affected)                  (sdk.py — dirty roots queued)
@@ -1411,7 +1468,7 @@ bidirectional — `_affected_claims` follows these directions.
 
 `compute_reputation(subject_id)` is a query-time primitive:
 
-```
+```text
 subject -[:performs]-> events → outcome operators (Event→Point IMPL/NAND)
   → aggregate success/failure, optionally weighted by recency
   → return reputation score
@@ -1424,7 +1481,6 @@ subject -[:performs]-> events → outcome operators (Event→Point IMPL/NAND)
   (recomputed on write events, consistency-checked on read, stamped with
   `reliability_derived_at`) — the derivation is the truth, the cache is a
   performance artifact.
-
 
 ---
 

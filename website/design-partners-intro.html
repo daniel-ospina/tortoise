@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Design Partner Introduction — Tortoise</title>
+  <meta name="description" content="Tortoise is context and reasoning infrastructure for agents. Computational memory that connects state, events, evidence and beliefs — so agents align with the bigger picture, reason around tradeoffs, and understand downstream consequences.">
+  <meta name="theme-color" content="#060b14">
+  <!-- noindex, deliberately — but NOT because a search visitor would be
+       stranded. It carries a home link in its top bar and footer links to
+       /privacy and /tos, so there is a way back. The reason is that this is an
+       OUTREACH DOCUMENT delivered by link to specific prospective design
+       partners, not a discovery page: an indexed copy would compete in search with the public
+       marketing pages that are written to be found, and would surface a
+       point-in-time document long after its contents have moved on. It is also
+       why it is absent from sitemap-product.xml — a noindex page listed in a
+       sitemap is a contradiction Search Console flags.
+       The route is still public and shareable; only indexing is declined.
+
+       This also keeps the page out of the #3950 blog-discoverability guard's
+       scope by that guard's OWN declared rule (a `<meta name="robots"
+       content="noindex">` page declares itself out) — rather than by adding a
+       /blog link to it. The chrome links the product, not the blog: this is
+       an outreach document, and its reader is on their way to the product. -->
+  <meta name="robots" content="noindex,follow">
+  <link rel="canonical" href="https://tortoise.premiselabs.co/design-partners-intro">
+  <link rel="icon" type="image/png" href="/logo.png">
+  <meta property="og:title" content="Design Partner Introduction — Tortoise">
+  <meta property="og:description" content="Context and reasoning infrastructure for agents. Computational memory that connects state, events, evidence and beliefs.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://tortoise.premiselabs.co/design-partners-intro">
+  <!-- A summary_large_image card is UNSATISFIABLE without an image, so the card
+       type and the image have to be declared together. This page is delivered
+       as a link to prospects, which makes the social/chat preview one of its
+       primary surfaces — a card with no artwork is the first thing they see.
+       The image is the owned 1200x630 brand mark (same geometry as the video
+       poster), not a video frame, so the two cannot drift. Absolute URL
+       required: OG consumers do not resolve relative paths. -->
+  <meta property="og:image" content="https://tortoise.premiselabs.co/assets/design-partners-intro-og.jpg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Design Partner Introduction — Tortoise, context and reasoning infrastructure for agents.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://tortoise.premiselabs.co/assets/design-partners-intro-og.jpg">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #060b14;
+      --border: #1e293b;
+      --text: #cbd5e1;
+      --text-dim: #94a3b8;
+      --accent: #06b6d4;
+      --green: #4ade80;
+      --gold: #f59e0b;
+      /* Menlo/Monaco/'Andale Mono' are the reachable macOS families. Without
+         them the whole stack falls through to the `monospace` generic, which
+         Chromium on macOS resolves to Courier — see tortoise#6870. */
+      --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', Menlo, Monaco, 'Andale Mono', monospace;
+      --serif: 'Georgia', 'Times New Roman', serif;
+      --col: 660px;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 15px;
+      line-height: 1.75;
+      -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
+    }
+
+    /* ── Graph canvas — the ambient layer ─────────────────────────────── */
+    #graph-canvas {
+      position: fixed; inset: 0;
+      width: 100%; height: 100%;
+      z-index: 0; pointer-events: none;
+    }
+    .page { position: relative; z-index: 1; }
+
+    .wrap { max-width: var(--col); margin: 0 auto; padding: 0 1.5rem; }
+
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; text-underline-offset: 3px; }
+
+    /* ── Top bar — the mark left, an explicit way home right ─────────────
+       The mark is a home link, but only to a reader who already treats a logo
+       as one. "Home" says it outright, and sits at the far end so the bar
+       reads as chrome rather than as a second title beside the mark. */
+    .masthead {
+      /* 1.5rem horizontally, NOT the `padding: 2rem 0 0` shorthand: this rule
+         follows `.wrap` at equal specificity, so a zero horizontal value wins and
+         the bar renders with no gutter — its ends level with the column edge
+         instead of with the content inside it. */
+      padding: 2rem 1.5rem 0;
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 1rem;
+    }
+    .masthead .logo { display: inline-block; line-height: 0; }
+    .masthead .logo img { height: 34px; width: auto; display: block; opacity: 0.9; }
+    .masthead .logo:hover { text-decoration: none; opacity: 1; }
+
+    .masthead .topbar { display: flex; align-items: center; gap: 1.25rem; font-size: 0.78rem; }
+    .masthead .topbar a { color: var(--text-dim); }
+    .masthead .topbar a:hover { color: var(--accent); text-decoration: none; }
+
+    /* ── Title block ──────────────────────────────────────────────────── */
+    .doc { padding: 3.5rem 0 4rem; }
+    .doc-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 2.25rem;
+      align-items: center;
+    }
+
+    h1 {
+      font-family: var(--serif);
+      font-weight: 400;
+      font-size: clamp(1.85rem, 3.9vw, 2.6rem);
+      line-height: 1.12;
+      letter-spacing: -0.02em;
+      color: #fff;
+    }
+    .doc-sub {
+      margin-top: 0.9rem;
+      font-size: 0.9rem;
+      line-height: 1.65;
+      color: var(--text-dim);
+    }
+    .doc-sub strong { color: var(--accent); font-weight: 400; }
+
+    /* ── Video — self-hosted, so the footage is the only thing on screen ─ */
+    .video { margin: 0; width: 224px; flex: 0 0 auto; }
+    .video .frame {
+      position: relative;
+      display: block;
+      width: 100%;
+      aspect-ratio: 9 / 16;
+      border: 1px solid var(--border);
+      border-radius: 0.75rem;
+      overflow: hidden;
+      background: #000;
+    }
+    .video .frame video {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      object-fit: cover; display: block;
+      background: #060b14;
+    }
+
+    /* The overlay is a real <button>: keyboard-focusable, and the video file
+       itself is not fetched until it is activated. */
+    .overlay {
+      position: absolute; inset: 0;
+      appearance: none; -webkit-appearance: none;
+      border: 0; background: none; padding: 0;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .overlay:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; border-radius: 0.75rem; }
+    .play {
+      width: 62px; height: 62px;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: 999px;
+      color: #04121a;
+      background: var(--accent);
+      box-shadow: 0 10px 34px -8px rgba(6, 182, 212, 0.75);
+      transition: transform .2s, background .2s;
+    }
+    .play svg { width: 24px; height: 24px; margin-left: 3px; }
+    .overlay:hover .play { transform: scale(1.06); background: #22d3ee; }
+
+    .video figcaption {
+      margin-top: 0.8rem;
+      font-size: 0.7rem; letter-spacing: 0.12em;
+      color: var(--text-dim); text-transform: uppercase;
+    }
+
+    /* ── Sections ─────────────────────────────────────────────────────── */
+    section { padding: 3rem 0; border-top: 1px solid var(--border); }
+    section:last-of-type { padding-bottom: 4rem; }
+
+    /* Section titles carry the same serif voice as the H1 — in Menlo they
+       were indistinguishable from the mono body and the page read flat. */
+    h2 {
+      font-family: var(--serif);
+      font-weight: 400;
+      font-size: clamp(1.25rem, 2.6vw, 1.5rem);
+      line-height: 1.3;
+      letter-spacing: -0.01em;
+      color: #fff;
+      margin-bottom: 1.5rem;
+    }
+
+    p { max-width: 68ch; }
+    p + p { margin-top: 1.15rem; }
+
+    /* The two claims the page turns on. */
+    .hl { color: var(--accent); }
+
+    /* ── The six outcomes ─────────────────────────────────────────────── */
+    .outcomes {
+      display: grid; grid-template-columns: 1fr 1fr;
+      gap: 0.6rem 3rem;
+      margin-top: 2.25rem;
+      max-width: 620px;
+    }
+    .outcomes ul { list-style: none; }
+    .outcomes li { display: flex; gap: 0.7rem; align-items: baseline; font-size: 0.95rem; }
+    .outcomes .a { flex: 0 0 auto; }
+    .up .a { color: var(--green); }
+    .down .a { color: var(--gold); }
+
+    /* ── Profile — label above value, two columns, no boxes ───────────── */
+    .profile { display: grid; grid-template-columns: 1fr 1fr; gap: 2.5rem 3rem; }
+    .profile h3, .more h3 {
+      font-weight: 500;
+      font-size: 0.68rem; letter-spacing: 0.14em; text-transform: uppercase;
+      color: var(--text-dim); margin-bottom: 0.7rem;
+    }
+    .profile p { font-size: 0.9rem; }
+    .profile p strong { color: #fff; font-weight: 600; }
+
+    /* ── More info ────────────────────────────────────────────────────── */
+    .more { display: grid; grid-template-columns: 1fr 1fr; gap: 2.5rem 3rem; }
+    .more p { font-size: 0.9rem; }
+
+    /* ── CTA — the one action the document asks for ───────────────────── */
+    .cta-row { margin-top: 2.75rem; }
+    .cta {
+      display: inline-block;
+      background: var(--accent);
+      color: #04121a;
+      font-size: 0.85rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      padding: 0.8rem 1.5rem;
+      border-radius: 0.5rem;
+      transition: background .2s, transform .2s;
+    }
+    .cta:hover {
+      background: #22d3ee; color: #04121a;
+      text-decoration: none; transform: translateY(-1px);
+    }
+
+    /* ── Footer ───────────────────────────────────────────────────────── */
+    /* `footer.wrap`, NOT a bare `footer`: the element also carries `.wrap`, whose
+       `padding: 0 1.5rem` shorthand out-specifies an element-only selector (class
+       beats element), so a `footer`-only padding was silently discarded and the
+       footer rendered at zero vertical padding — flush against its own rule and
+       against the bottom of the document. Same conflict the masthead fixes above;
+       this one is scoped in rather than left as the other half of it. */
+    footer.wrap {
+      border-top: 1px solid var(--border);
+      padding: 1.75rem 1.5rem 3rem;
+      font-size: 0.7rem;
+      color: var(--text-dim);
+      display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem;
+    }
+    footer a { color: var(--text-dim); }
+    footer a:hover { color: var(--accent); text-decoration: none; }
+
+    /* ── Narrow ───────────────────────────────────────────────────────── */
+    @media (max-width: 620px) {
+      body { font-size: 14px; }
+      .doc { padding: 2.5rem 0 3rem; }
+      section { padding: 2.5rem 0; }
+      .doc-grid { grid-template-columns: minmax(0, 1fr); gap: 2rem; }
+      .video { width: 100%; max-width: 232px; margin: 0 auto; }
+      .video figcaption { text-align: center; }
+      .outcomes, .profile, .more { grid-template-columns: 1fr; gap: 1.9rem; }
+      .outcomes { gap: 0.6rem; }
+    }
+
+    /* ── Reduced motion — MUST stay the LAST block in this stylesheet ────
+       These overrides are equal-specificity, so SOURCE ORDER decides: a
+       transition declared after this block wins against it. That is not
+       hypothetical — the CTA was added below this block's old position and its
+       transition/transform silently survived the preference. Every transition
+       this stylesheet declares is switched off here. */
+    @media (prefers-reduced-motion: reduce) {
+      .play, .overlay, .cta { transition: none; }
+      .overlay:hover .play { transform: none; }
+      .cta:hover { transform: none; }
+    }
+  </style>
+</head>
+<body>
+
+  <canvas id="graph-canvas" aria-hidden="true"></canvas>
+
+  <div class="page">
+
+    <div class="wrap masthead">
+      <a class="logo" href="/" aria-label="Tortoise — home">
+        <img src="/logo.png" alt="Premise Labs" onerror="this.style.display='none'">
+      </a>
+      <nav class="topbar" aria-label="Site navigation">
+        <a href="/">Home</a>
+      </nav>
+    </div>
+
+    <!-- ══ Title + video ═══════════════════════════════════════════════ -->
+    <div class="doc">
+      <div class="wrap doc-grid">
+        <div>
+          <h1>Design Partner Introduction</h1>
+          <p class="doc-sub"><strong>Tortoise</strong> — context and reasoning infrastructure for agents.</p>
+        </div>
+
+        <figure class="video">
+          <!-- Self-hosted. YouTube's embed paints its own title bar, channel
+               avatar, share and watch-later buttons and an end-card grid of
+               unrelated videos over the footage — none of which we control.
+               An owned <video> shows the footage and nothing else.
+
+               `preload="none"` means the file is not fetched until the
+               visitor asks for it, so the page still loads without it. The
+               poster is ours too: an owned mark, not a video frame and not a
+               thumbnail YouTube would have picked. It is rendered at the
+               video's own 720x1280 from the page's brand mark, so the two
+               cannot drift in layout. -->
+          <div class="frame" id="video-frame">
+            <video id="video" playsinline preload="none"
+                   poster="assets/design-partners-intro-poster.jpg"
+                   aria-label="Tortoise — 1-minute introduction">
+              <source src="assets/design-partners-intro.mp4" type="video/mp4">
+            </video>
+            <button class="overlay" type="button" id="video-play"
+                    aria-label="Play the 1-minute introduction">
+              <span class="play" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
+              </span>
+            </button>
+          </div>
+          <figcaption>1-minute video</figcaption>
+        </figure>
+      </div>
+    </div>
+
+    <!-- ══ The problem ═════════════════════════════════════════════════ -->
+    <section id="problem">
+      <div class="wrap">
+        <h2>The problem</h2>
+        <p>Agents are increasingly capable, but fundamentally <span class="hl">struggle with complex work that unfolds over time</span>. They forget previous decisions, lose important variables as context grows, sub-optimise, and can be disproportionately influenced by the latest information.</p>
+        <p>Regular memory systems are filing cabinets, providing retrieval of facts but unable to provide an understanding of how the pieces of a company, product, or technical system work together.</p>
+      </div>
+    </section>
+
+    <!-- ══ How it works ════════════════════════════════════════════════ -->
+    <section id="how-it-works">
+      <div class="wrap">
+        <h2>How it works</h2>
+        <p>Tortoise provides <span class="hl">“computational” memory</span>: it connects state (what is), events (when), evidence (sources), and beliefs (why) through logical chains (support, contradict, etc) and quantifies the relationships: as new evidence arrives, the system learns by propagating confidence. This enables agents to align with the bigger picture, reason around tradeoffs, and understand downstream consequences.</p>
+
+        <div class="outcomes">
+          <ul class="up">
+            <li><span class="a">↑</span><span>Agent Autonomy</span></li>
+            <li><span class="a">↑</span><span>Token Efficiency</span></li>
+            <li><span class="a">↑</span><span>Complex Reasoning</span></li>
+          </ul>
+          <ul class="down">
+            <li><span class="a">↓</span><span>Sub-optimisation</span></li>
+            <li><span class="a">↓</span><span>Drift &amp; Sidetracks</span></li>
+            <li><span class="a">↓</span><span>Constant Supervision</span></li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══ Design partners profile ═════════════════════════════════════ -->
+    <section id="profile">
+      <div class="wrap">
+        <h2>Design partners profile</h2>
+        <div class="profile">
+          <div>
+            <h3>Companies</h3>
+            <p><strong>AI-native and AI-forward companies</strong> with ~20–500 employees already deploying agents into meaningful workflows.</p>
+          </div>
+          <div>
+            <h3>Ideal contacts</h3>
+            <p>COO, Head of Ops, CIO, technical co-founder, Heads of AI, VP Engineering, and teams building internal agent systems.</p>
+          </div>
+          <div>
+            <h3>Pilots in</h3>
+            <p>Persistent agent memory · Cross-agent context · Long-horizon reasoning · Organizational knowledge</p>
+          </div>
+          <div>
+            <h3>Deployment</h3>
+            <p>Both hosted or local/private deployments available.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══ More info ═══════════════════════════════════════════════════ -->
+    <section id="more-info">
+      <div class="wrap">
+        <h2>More info</h2>
+        <div class="more">
+          <div>
+            <h3>Website</h3>
+            <p>tortoise.premiselabs.co</p>
+          </div>
+          <div>
+            <!-- The source PDF for this document printed the founder's own
+                 address here. That contradicts the recorded OWNER RULING on
+                 #2409 — "for outside product should be hello@" / "Where the
+                 outside surface shows an address, it is hello@" — and this page
+                 is unambiguously the outside surface. Every other public page
+                 in this directory (aviso-privacidad, contact, docs, dpa,
+                 license, privacy, tos — 8 of 8) already shows hello@, and the
+                 guard in tests/test_contact_form.py states the rule outright:
+                 "no outside surface may show a competing address." The founder
+                 address was also recorded as a BLACK HOLE on #2409 (its
+                 FORWARD_TO is unbound), so a design partner writing to it would
+                 get silence — the precise opposite of what an outreach document
+                 is for. Complied with the ruling rather than the PDF; the label
+                 drops "(Founder)" because a shared outside channel is not a
+                 founder-direct address. -->
+            <h3>Contact</h3>
+            <p><a href="mailto:hello@premiselabs.co">hello@premiselabs.co</a></p>
+          </div>
+        </div>
+
+        <!-- The document named the website in plain text and never linked it,
+             so a reader who finished it had no next action. The CTA ends the
+             LAST section deliberately: it is what a reader who has read to the
+             bottom does next. Absolute URL rather than "/": this document
+             exists to point a prospect at the product website, and on a
+             preview host a relative "/" is not the product surface. -->
+        <p class="cta-row">
+          <a class="cta" href="https://tortoise.premiselabs.co">See product website →</a>
+        </p>
+      </div>
+    </section>
+
+    <footer class="wrap">
+      <span>Premise Labs</span>
+      <a href="/privacy">Privacy</a>
+      <a href="/tos">Terms</a>
+    </footer>
+
+  </div>
+
+  <script src="/consent.js" defer></script>
+  <script>
+    /* ── Video overlay ───────────────────────────────────────────────────
+       The poster and the play button are the only things on the footage
+       before activation. On click the overlay is removed and the native
+       player takes over — no third-party chrome is ever injected. */
+    (function () {
+      var overlay = document.getElementById('video-play');
+      var video = document.getElementById('video');
+      if (!overlay || !video) { return; }
+      overlay.addEventListener('click', function () {
+        overlay.parentNode.removeChild(overlay);
+        video.controls = true;
+        var p = video.play();
+        // A rejected play() is not worth shouting about: the native controls
+        // are already visible, so the visitor can simply press play.
+        if (p && p.catch) { p.catch(function () {}); }
+        video.focus();
+      });
+    })();
+
+    /* ── Ambient network ─────────────────────────────────────────────────
+
+       An owned canvas behind the document. Three properties make it read as
+       one deliberate figure rather than weather:
+
+         1. UNIFORM OVER THE DISC. Nodes are placed by random angle and
+            sqrt(radius) — the uniform-disc sampler. An even angular spread
+            plus a radial floor is an ANNULUS, which draws a hollow ring with
+            a visible rim; that is exactly what this used to look like.
+         2. FIXED 3-NEAREST TOPOLOGY. Edges are each node's 3 nearest
+            neighbours, so the figure is local and organic. k=3 matters: at
+            k=2 a sparse disc splits into disconnected islands, and the split
+            MOVES WITH VIEWPORT WIDTH, so the figure would be connected at one
+            size and shattered at another. k=3 is connected at every size.
+         3. NO LENGTH PRUNE. A distance cutoff was once used to kill spikes
+            from the old annulus. A uniform disc has no such spikes, and the
+            cutoff severed ordinary links into islands, so it is gone.
+
+       The motion is the point, the brightness is not: nodes fly in from
+       scattered start positions and assemble, then keep drifting, and the
+       whole figure rotates and slides with the scroll. Alphas stay low so it
+       never competes with the copy. */
+    (function () {
+      var canvas = document.getElementById('graph-canvas');
+      if (!canvas) { return; }
+      var ctx = canvas.getContext('2d');
+      if (!ctx) { return; }
+
+      var CYAN = '6, 182, 212';
+      var GREEN = '74, 222, 128';
+      var N = 24;
+      var NEIGHBOURS = 3;       // 2-NN splits a sparse disc into islands
+      var EDGE_A = 0.12;        // peak edge alpha — deliberately faint
+      var NODE_A = 0.38;
+      var SPIN = 0.00040;       // idle rotation, rad/frame
+      var ASSEMBLE = 2100;      // ms
+      var STAGGER = 55;         // ms per node
+      var REDUCED = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+      var w = 0, h = 0, cx = 0, cy = 0, R = 0;
+      var nodes = [], links = [], t = 0, raf = null, scrollY = 0, startedAt = 0;
+      // Rotation is module state, NOT a property of `nodes`. It used to live on
+      // the array, and `build()` replaces that array — so every rebuild threw
+      // the accumulated rotation away and the figure snapped back to its
+      // un-rotated orientation.
+      var spin = 0;
+      var seeded = false;
+
+      function hash(i) {
+        var x = Math.sin(i * 127.1 + 311.7) * 43758.5453;
+        return x - Math.floor(x);
+      }
+      function easeOut(p) { return 1 - Math.pow(1 - p, 3); }
+
+      function build() {
+        var narrow = w < 760;
+        cx = w * 0.5;
+        cy = h * (narrow ? 0.34 : 0.42);
+        // COMPACT on purpose. A cluster scaled to the viewport looks like a
+        // random web — premiselabs.co's reads as one small figure because
+        // `spread` is min(w,h)*0.20, not a fraction of the screen.
+        R = Math.max(88, Math.min(200, Math.min(w, h) * 0.17));
+
+        nodes = [];
+        for (var i = 0; i < N; i++) {
+          // Uniform over the DISC, not an annulus. Even angular spacing plus a
+          // radial floor of 0.32R is what made this read as a hollow ring —
+          // "just a circle floating" — and left a gap where the even angles
+          // were skipped. Random angle + sqrt(radius) is the uniform-disc
+          // sampler: no hole, no seam, no rim.
+          nodes.push({
+            ang: hash(i + 200) * Math.PI * 2,
+            rad: R * (0.18 + 0.82 * Math.sqrt(hash(i + 100))),
+            phase: hash(i + 700) * Math.PI * 2,
+            // Scattered start, off-canvas on every edge so they fly in.
+            sx: -0.12 * w + hash(i + 300) * 1.24 * w,
+            sy: -0.12 * h + hash(i + 400) * 1.24 * h,
+            r: 1.5 + hash(i + 500) * 1.7,
+            accent: hash(i + 600) > 0.76,
+            x: 0, y: 0
+          });
+        }
+
+        var bx = [], by = [];
+        for (var k = 0; k < N; k++) {
+          bx.push(cx + Math.cos(nodes[k].ang) * nodes[k].rad);
+          by.push(cy + Math.sin(nodes[k].ang) * nodes[k].rad);
+        }
+        links = [];
+        var seen = {};
+        for (var a = 0; a < N; a++) {
+          var order = [];
+          for (var b = 0; b < N; b++) {
+            if (b === a) { continue; }
+            var dx = bx[a] - bx[b], dy = by[a] - by[b];
+            order.push({ j: b, d: dx * dx + dy * dy });
+          }
+          order.sort(function (p, q) { return p.d - q.d; });
+          for (var m = 0; m < NEIGHBOURS && m < order.length; m++) {
+            var j = order[m].j;
+            var key = a < j ? a + '-' + j : j + '-' + a;
+            if (seen[key]) { continue; }
+            seen[key] = 1;
+            links.push([a, j]);
+          }
+        }
+      }
+
+      function resize() {
+        var dpr = Math.min(window.devicePixelRatio || 1, 2);
+        w = window.innerWidth;
+        h = window.innerHeight;
+        canvas.width = Math.round(w * dpr);
+        canvas.height = Math.round(h * dpr);
+        canvas.style.width = w + 'px';
+        canvas.style.height = h + 'px';
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        build();
+        // Play the fly-in only on the FIRST paint. A viewport resize must move
+        // the figure, not dissolve and reform it: mobile browsers change
+        // `innerHeight` whenever the URL bar shows or hides, so replaying here
+        // made a scrolled page pulse — and even a 20px desktop resize dropped
+        // the figure from ~3600 lit pixels to single digits for ~2.5s.
+        // `startedAt = 0` is the "already assembled" sentinel `place()` reads,
+        // so every node lands on its target immediately.
+        //
+        // `seeded` is set on EVERY first build, reduced motion included. Setting
+        // it only on the animated branch meant a page that LOADED reduced never
+        // seeded, so the first resize after the preference was switched back to
+        // normal started a full 2.5s fly-in — the same pulse, through the other
+        // door (measured: 2,495 lit px -> 71 at +150ms).
+        if (REDUCED || seeded) {
+          startedAt = 0;
+        } else {
+          startedAt = performance.now();
+        }
+        seeded = true;
+
+        // The `canvas.width`/`canvas.height` assignments above CLEAR the bitmap,
+        // so every resize MUST repaint. The reduced-motion path has no animation
+        // loop to do it, so leaving this out blanked the figure permanently for
+        // the rest of the visit — measured 2,515 lit pixels -> 0, and still 0
+        // six seconds later; the only recovery was a tab switch. `resize` fires
+        // on mobile every time the URL bar shows or hides, so for a
+        // reduced-motion reader on a phone this was not an edge case.
+        if (REDUCED) { draw(performance.now()); }
+      }
+
+      function place(now) {
+        // Scroll drives the drama: the figure spins faster than idle and
+        // slides up the screen as the page moves.
+        var oy = -(scrollY * 0.055);
+        // A SETTLED figure has no clock, and saying so explicitly is what keeps
+        // the sentinel truthful. Settling only the positions left `startedAt`
+        // at its original load timestamp, so a preference flip back to normal
+        // resumed the loop and the progress branch recomputed p from a value
+        // still < 1 — rewinding the assembled figure and replaying the fly-in
+        // backwards (measured 250px -> 424px bbox and lit 3,182 -> 6,622, then
+        // ~1.2s of re-assembly). Committing `startedAt = 0` here means "already
+        // assembled" and "clock at zero" agree, so a resume CONTINUES instead.
+        if (REDUCED) { startedAt = 0; }
+        for (var i = 0; i < nodes.length; i++) {
+          var n = nodes[i];
+          var a = n.ang + spin;
+          var breathe = 1 + 0.035 * Math.sin(t * 0.0032 + n.phase);
+          var tx = cx + Math.cos(a) * n.rad * breathe;
+          var ty = cy + oy + Math.sin(a) * n.rad * breathe;
+
+          if (REDUCED || startedAt === 0) {
+            n.x = tx; n.y = ty;
+            // Settle the alpha as well as the position. `draw()` paints each
+            // node and edge at NODE_A * p, so a node that keeps the `p` it had
+            // when the fly-in was interrupted stays dim — and nothing ever
+            // recomputes it. Switching to reduced motion mid-assembly therefore
+            // froze the figure at ~5% of its intended brightness (measured
+            // alpha-sum 5,095 vs 98,637), and a rebuild after a partial fly-in
+            // did the same.
+            n.p = 1;
+            continue;
+          }
+          var p = easeOut(Math.max(0, Math.min(1, (now - startedAt - i * STAGGER) / ASSEMBLE)));
+          n.x = n.sx + (tx - n.sx) * p;
+          n.y = n.sy + (ty - n.sy) * p;
+          n.p = p;
+        }
+      }
+
+      function draw(now) {
+        if (!REDUCED) { t += 1; }
+        spin += (REDUCED ? 0 : SPIN) + (scrollY * 0.0000021);
+        place(now || 0);
+        ctx.clearRect(0, 0, w, h);
+
+        var i, a, b, prog;
+        // The figure is a hero element. Left at full strength it lays chords
+        // straight across the document's two-column copy — the noise the
+        // original scrim existed to hide. Receding with scroll keeps the
+        // drama where it was designed and leaves the prose clean, without
+        // ever going to zero (the texture is the page's identity).
+        var fade = Math.max(0.14, 1 - scrollY / (h * 1.05));
+        ctx.lineWidth = 1;
+        for (i = 0; i < links.length; i++) {
+          a = nodes[links[i][0]];
+          b = nodes[links[i][1]];
+          // Edges draw in only as their endpoints settle.
+          prog = Math.min(a.p === undefined ? 1 : a.p, b.p === undefined ? 1 : b.p);
+          if (prog <= 0) { continue; }
+          ctx.strokeStyle = 'rgba(' + CYAN + ', ' + (EDGE_A * prog * fade) + ')';
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+          ctx.stroke();
+        }
+
+        for (i = 0; i < nodes.length; i++) {
+          a = nodes[i];
+          ctx.fillStyle = 'rgba(' + (a.accent ? GREEN : CYAN) + ', ' + (NODE_A * (a.p === undefined ? 1 : a.p) * fade) + ')';
+          ctx.beginPath();
+          ctx.arc(a.x, a.y, a.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      function loop(now) { draw(now); raf = requestAnimationFrame(loop); }
+      function start() { if (raf === null) { raf = requestAnimationFrame(loop); } }
+      function stop() { if (raf !== null) { cancelAnimationFrame(raf); raf = null; } }
+
+      window.addEventListener('scroll', function () {
+        scrollY = window.scrollY || window.pageYOffset || 0;
+      }, { passive: true });
+
+      var rt = null;
+      window.addEventListener('resize', function () {
+        clearTimeout(rt);
+        rt = setTimeout(function () { resize(); }, 150);
+      });
+
+      document.addEventListener('visibilitychange', function () {
+        if (document.hidden) {
+          stop();
+        } else if (REDUCED) {
+          draw(performance.now());   // repaint the STILL figure, never start the loop
+        } else {
+          start();
+        }
+      });
+
+      // Follow a runtime change of the preference rather than sampling it once
+      // at load: turning reduced-motion ON must settle the figure, and turning
+      // it OFF must resume it.
+      var mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+      var onPrefChange = function (e) {
+        REDUCED = e.matches;
+        if (REDUCED) { stop(); draw(performance.now()); } else { start(); }
+      };
+      if (mq.addEventListener) { mq.addEventListener('change', onPrefChange); }
+      else if (mq.addListener) { mq.addListener(onPrefChange); }   // Safari < 14
+
+      resize();
+      // Under reduced motion the loop is deliberately never started, and
+      // `resize()` — which owns the one-shot paint for that mode — has already
+      // run. Painting here too would be a second paint site that can drift out
+      // of sync with the resize path.
+      if (!REDUCED) { start(); }
+    })();
+  </script>
+</body>
+</html>

@@ -73,7 +73,11 @@ def _cmd_rebuild(args):
         # skip_health_check: `rebuild` IS the recovery tool — a broken DB must
         # not block its own rebuild (ops safety #428).
         proj = FalkorProjection(args.db, skip_health_check=True)
-        counts = proj.rebuild_all(args.dir)
+        # #2944 L1: `tortoise rebuild` IS the operator-invoked wipe+replay
+        # recovery tool — the human running this command is the authorization.
+        # The token is passed HERE, at the entry point, so a new caller of
+        # rebuild_all() elsewhere cannot wipe a graph by forgetting it.
+        counts = proj.rebuild_all(args.dir, confirm_destructive=True)
         print(f"Done: {counts['nodes']} nodes, {counts['edges']} edges from {counts['events']} events")
         # #2814: the operator surface for the config third state. Without this a
         # SUCCESSFUL rebuild that staged the `config_reset` marker would print
@@ -3399,6 +3403,111 @@ def _install_read_hook_impl(args) -> int:
     return 0
 
 
+def _upgrade_artifact_seam(args, root, home) -> int:
+    """Repair a non-shell capture seam through the installer that owns it.
+
+    The ARTIFACT half of `hooks upgrade`.  A seam with no ``hooks_dir`` has no
+    ``upgrade_install``, so the repair is the file copy that IS the install —
+    ``capture_install.install_capture``, the same entry point
+    ``tortoise install <harness>`` calls.  A second writer would be the
+    two-detectors defect inverted: two installers that drift, with the stale
+    one reported by `hooks status` and the fresh one by `install` (#5351).
+
+    ``home`` is the validated ``$HOME`` the artifact root is scoped under
+    (``<home>/<root_relpath>``), derived by the caller from ``root`` — so
+    ``--dir`` is honoured rather than ignored in favour of the process HOME,
+    which would install into a different tree and leave ``--dir`` untouched.
+    """
+    import sys as _sys
+
+    from tortoise.capture_install import install_capture
+    from tortoise.hook_install import detect_artifact_install
+
+    dry_run = getattr(args, "dry_run", False)
+    try:
+        result = install_capture(args.harness, root=root, home=home,
+                                 dry_run=dry_run)
+    except MemoryError:
+        raise  # resource exhaustion is not a refusal; the handler allocates
+    except Exception as e:
+        # The installer's contract is "refuse, never raise"; this catch-all is
+        # the same belt-and-suspenders the layout path carries, because a
+        # traceback out of the CLI is never a reportable outcome (#4024 P2-2).
+        print(f"Upgrade failed: {e.__class__.__name__}: {e}",
+              file=_sys.stderr)
+        return 1
+    if not result.ok:
+        print(result.error, file=_sys.stderr)
+        return 1
+    prefix = "[dry-run] " if dry_run else ""
+    if not result.actions:
+        print(f"{prefix}✅ {args.harness} capture seam at {root} already "
+              "current — nothing to do.")
+        return 0
+    for action in result.actions:
+        # `install_capture` already prefixes its planned actions in dry-run;
+        # prefixing again here would print `[dry-run] [dry-run]`.
+        print(action)
+    if dry_run:
+        return 0
+    # The repair's own evidence: re-read through the SAME detector `status`
+    # prints, so "upgraded" is never claimed over bytes still reported stale.
+    remaining = [f for f in detect_artifact_install(root, args.harness)
+                 if f.blocking]
+    if remaining:
+        print(f"⚠️ {len(remaining)} issue(s) remain after upgrade:",
+              file=_sys.stderr)
+        for f in remaining:
+            print(f"  {f.line()}", file=_sys.stderr)
+        return 1
+    print(f"✅ {args.harness} capture seam upgraded.")
+    return 0
+
+
+def _artifact_detail_would_refuse(finding, harness: str, *,
+                                  unrepairable: bool) -> bool:
+    """Whether rendering ``finding``'s OWN detail would prescribe a repair
+    the installer refuses (#5351).
+
+    Declared ONCE, because BOTH surfaces that render an artifact finding —
+    ``hooks status`` line by line and ``doctor``'s one summary row — must make
+    this call identically; a copy in each caller drifts, and the drifted copy
+    either prints a command that refuses or deletes an instruction the user
+    needs.
+
+    Three conditions, each load-bearing for a specific kind:
+
+    * ``unrepairable`` — the seam's installer refuses right now (a MANUAL kind
+      or the legacy collision; the caller decides which findings those are).
+      In a repairable seam the detail's command WORKS and must be printed.
+    * the detail embeds one of :data:`hook_install.ARTIFACT_INSTALLER_CLAUSES`.
+      The details that name no command are never withheld, because the pointer
+      does not always recover them — ``tortoise session verify`` resolves its
+      transmit identity first and, with no API key configured, returns before
+      printing a single finding.  The clauses are matched whole so an install
+      PATH cannot masquerade as one, and a note that merely MENTIONS the
+      installer (``ahead-artifact``: ``would replace it with N``) embeds none.
+    * the kind is not a MANUAL one.  That exempts the third way a detail can
+      name the installer without being the repair the verdict calls for: a
+      conditional two-step whose first action is the user's — ``foreign-artifact``
+      (``move it aside, then re-run …``) and the ``symlinked-install`` note
+      (``replace it with a real directory, then re-run …``).  Withholding those
+      would delete the step that clears the refusal.
+
+    ``Finding.blocking`` is deliberately NOT consulted: every clause-bearing
+    kind that is a note rather than a verdict is already exempt above, so the
+    test would change no reachable state (measured — dropping it leaves every
+    state's rendering identical), and a future non-blocking detail that names
+    the installer would be one whose first step is the user's, exactly like
+    ``symlinked-install``.
+    """
+    from tortoise.hook_install import ARTIFACT_INSTALLER_CLAUSES, is_manual_fix
+    return (unrepairable
+            and not is_manual_fix(finding.kind)
+            and any(clause.format(harness=harness) in finding.detail
+                    for clause in ARTIFACT_INSTALLER_CLAUSES))
+
+
 def _cmd_hooks(args) -> int:
     """Detect and repair drift in an already-installed capture-hook seam.
 
@@ -3406,26 +3515,46 @@ def _cmd_hooks(args) -> int:
     ``# tortoise-hook-version: N``) and the ``settings.json`` entry that must
     carry the load-bearing per-hook ``timeout`` (#3754/#3801).  Both are
     checked here; ``upgrade`` merges the settings half rather than
-    overwriting it, and re-copies the scripts.  Harness-agnostic: the layout
-    registry in ``tortoise.hook_install`` supplies the targets.
+    overwriting it, and re-copies the scripts.  Seam-agnostic: the two
+    registries in ``tortoise.hook_install`` — ``HARNESS_LAYOUTS`` for the
+    shell hooks and ``ARTIFACT_CONTRACTS`` for a non-shell seam like Pi's
+    TypeScript extension — supply the targets, and neither class is a
+    hand-written harness list (#5351).
     """
     import sys as _sys
     from pathlib import Path as _P
 
+    from tortoise.capture_install import legacy_extension_obstacle
     from tortoise.hook_install import (
+        ARTIFACT_CONTRACTS,
+        artifact_home,
+        artifact_root,
         contract_version_for,
         default_root,
+        detect_artifact_install,
         detect_install,
         get_layout,
         is_manual_fix,
         upgrade_install,
     )
 
+    # `--harness` is implicit for the default (claude) in every hint this
+    # command prints; declared once so the hints cannot drift apart.
+    hsel = "" if args.harness == "claude" else f" --harness {args.harness}"
+
+    # TWO seam classes, ONE command (#5351).  A shell-hook harness resolves
+    # through `HARNESS_LAYOUTS`; a non-shell seam (Pi's TypeScript extension)
+    # through `ARTIFACT_CONTRACTS` — the SAME registries the verifier and
+    # `doctor` read, never a third hand-written harness list.  Anything in
+    # NEITHER is genuinely unknown, and `get_layout` owns that message (one
+    # home for the wording).
     try:
         layout = get_layout(args.harness)
     except ValueError as e:
-        print(str(e), file=_sys.stderr)
-        return 1
+        if args.harness not in ARTIFACT_CONTRACTS:
+            print(str(e), file=_sys.stderr)
+            return 1
+        layout = None
     # An explicit `--dir` always wins (Claude's project-scoped install depends
     # on it). With NO `--dir`, a layout that declares an env root (Codex)
     # resolves through it — `${CODEX_HOME:-$HOME/.codex}` — because Codex reads
@@ -3439,6 +3568,9 @@ def _cmd_hooks(args) -> int:
     # written ONLY for a genuinely HOME-scoped root — an explicit `--dir` never
     # consults HOME (#4110).
     resolved_home = None
+    # The `$HOME` an ARTIFACT seam's install root is scoped under, derived from
+    # the resolved root once so `status` and `upgrade` cannot disagree (#5351).
+    artifact_home_dir = None
     try:
         # `_P.home()` is INSIDE the boundary because it can RAISE, not merely
         # return a non-absolute path: with `$HOME` set to a literal `~` (or
@@ -3468,7 +3600,31 @@ def _cmd_hooks(args) -> int:
             root = _P(explicit_dir)
         else:
             resolved_home = _P.home()
-            root = default_root(layout, resolved_home)
+            # A non-shell seam has no layout to resolve a default from: its
+            # root is the ARTIFACT contract's `root_relpath` under the same
+            # HOME (`~/.pi/agent/extensions`), never a cwd default.
+            if layout is not None:
+                root = default_root(layout, resolved_home)
+            else:
+                root = artifact_root(args.harness, resolved_home)
+        if layout is None:
+            # The artifact installer is scoped by HOME and `--dir` names the
+            # ROOT it installs into (`<home>/<root_relpath>`), so derive that
+            # HOME back out.  A `--dir` that is NOT the contract's root has no
+            # install this command can inspect OR repair — the installer would
+            # write under HOME and leave the named directory untouched — so it
+            # is refused rather than guessed at.  Doing it HERE, before either
+            # subcommand, is what keeps `status` from ever recommending an
+            # `upgrade` that refuses.
+            artifact_home_dir = artifact_home(args.harness, root)
+            if artifact_home_dir is None:
+                print(
+                    f"--dir {root} is not {args.harness}'s artifact install "
+                    f"root (expected a path ending in "
+                    f"{ARTIFACT_CONTRACTS[args.harness].root_relpath}) — pass "
+                    f"that directory, or omit --dir to use $HOME.",
+                    file=_sys.stderr)
+                return 1
     except MemoryError:
         raise  # resource exhaustion is not a refusal; the handler allocates
     except Exception as e:
@@ -3478,13 +3634,19 @@ def _cmd_hooks(args) -> int:
         # could not be resolved, so echoing one back would teach a path that
         # is itself unresolvable.
         print("\nRun `tortoise hooks upgrade"
-              f"{'' if args.harness == 'claude' else ' --harness ' + args.harness}"
-              " --dir <absolute-dir>` to repair.", file=_sys.stderr)
+              f"{hsel}" " --dir <absolute-dir>` to repair.", file=_sys.stderr)
         return 1
 
     if args.hooks_cmd == "status":
         try:
-            findings = detect_install(root, args.harness)
+            # ONE detector per seam class, and the SAME pair `session verify`
+            # grades with (#5351): a Pi finding printed here is the finding the
+            # verifier already reported, not a second, differently-worded
+            # opinion about the same file.
+            if layout is None:
+                findings = detect_artifact_install(root, args.harness)
+            else:
+                findings = detect_install(root, args.harness)
         except MemoryError:
             raise  # resource exhaustion is not a refusal; the handler allocates
         except Exception as e:
@@ -3513,6 +3675,12 @@ def _cmd_hooks(args) -> int:
                 # "installed and ran" from "never ran" too.  `None` means this
                 # harness's hooks do not write a record at all.
                 "hook_run": _hook_run_json(args.harness, layout, root),
+                # `detail` is the DETECTOR's own finding, verbatim (#5351): it
+                # is data about the install, not a recommendation to execute,
+                # and the TEXT surface — which owns the human-facing repair
+                # wording — is where a prescription that would refuse is
+                # withheld.  A consumer that RENDERS `detail` to a human owns
+                # that distinction.
                 "findings": [
                     {"kind": f.kind, "script": f.script, "event": f.event,
                      "detail": f.detail, "blocking": f.blocking}
@@ -3523,35 +3691,73 @@ def _cmd_hooks(args) -> int:
             print(f"✅ {args.harness} capture hooks in {root} are current "
                   f"(contract v{version}).")
         else:
+            # Repairability is decided BEFORE the findings are rendered, because
+            # an ARTIFACT finding's OWN detail can embed a repair command
+            # ("reinstall with `tortoise install pi`") — unconditionally — and
+            # the installer REFUSES that command whenever this seam is
+            # unrepairable.  That detail is the "second place a refusing
+            # recommendation can come from" (the same reason `doctor` withholds
+            # it, through the SAME predicate).  TWO independent reasons make the
+            # installer refuse: a MANUAL kind (`is_manual_fix` is the DECLARED
+            # conservative proxy for refusal — see its docstring; for an
+            # artifact leaf link it can be true where the installer would in
+            # fact succeed, which is the documented cheap error), and the legacy
+            # collision (#3713).  A manual step does not clear the collision, so
+            # both are reported below.
+            blocking = [f for f in findings if f.blocking]
+            # Some blocking kinds are NOT repairable by `upgrade` (it refuses
+            # rather than clobber an unreadable/unsafe/foreign path), so the
+            # hint must name the manual fix for those instead of recommending
+            # a command that will refuse.  Which kinds those are is declared
+            # ONCE, in `hook_install`, because `doctor` recommends a repair for
+            # the same kinds (#4680 review).  It is asked over ALL findings,
+            # not just the blocking ones, so a non-blocking symlink note still
+            # blocks the recommendation.
+            manual = {f.kind for f in findings if is_manual_fix(f.kind)}
+            # An artifact seam's installer has ONE refusal state no finding
+            # kind expresses — a legacy extension already disabled at its
+            # backup name (#3713) — so repairability cannot be read off the
+            # kinds alone.  Consult the ONE declaration `doctor` also reads,
+            # never a second copy of the condition (#5351).
+            obstacle = ("" if layout is not None
+                        else legacy_extension_obstacle(args.harness, root))
+            unrepairable = bool(manual) or bool(obstacle)
             print(f"Capture-hook install at {root} (contract v{version}):")
             for f in findings:
-                print(f"  {f.line()}")
-            blocking = [f for f in findings if f.blocking]
+                # The call is the SHARED predicate; the two rules it replaces
+                # each failed a measured case.  A kind-based rule withheld
+                # `bytes differ from the shipped seam` (non-manual) while
+                # exempting the manual details, and the round-5 collision arm
+                # withheld `chmod it so the seam can load` the moment any
+                # collision existed — neither is a command the installer owns.
+                if (layout is None
+                        and _artifact_detail_would_refuse(
+                            f, args.harness, unrepairable=unrepairable)):
+                    print(f"  ❌ {f.kind}: run `tortoise session verify "
+                          f"--harness {args.harness}` for the repair path")
+                else:
+                    print(f"  {f.line()}")
             if blocking:
-                # Some blocking kinds are NOT repairable by `upgrade` (it
-                # refuses rather than clobber an unreadable/unsafe/foreign
-                # path), so the hint must name the manual fix for those
-                # instead of recommending a command that will refuse.  Which
-                # kinds those are is declared ONCE, in `hook_install`, because
-                # `doctor` recommends a repair for the same kinds (#4680
-                # review).
                 kinds = {f.kind for f in blocking}
-                # `upgrade` refuses on ANY symlink in a target path, and the
-                # finding kinds for those are not knowable in advance, so
-                # `is_manual_fix` treats every symlink kind as manual — and it
-                # is asked over ALL findings, not just the blocking ones, so a
-                # non-blocking symlink note still blocks the recommendation.
-                manual = {f.kind for f in findings if is_manual_fix(f.kind)}
                 if manual:
                     # A manual kind makes `upgrade` refuse the WHOLE run, so
                     # recommending it (even alongside repairable findings)
                     # would point at a command that refuses.
                     print("\nSome findings need a manual fix before upgrade "
                           "can run: " + ", ".join(sorted(manual)) + ".")
-                elif kinds:
+                # NOT an `elif`: the two obstacles are INDEPENDENT — clearing
+                # the manual kind (e.g. re-pointing a symlink) does not clear
+                # the legacy collision, so suppressing this line would promise
+                # a repair that still refuses.  Both are named when both hold.
+                if obstacle:
+                    # The installer's own refusal, in its own words: `upgrade`
+                    # would refuse, so name the obstacle instead of a command
+                    # that cannot run until a human clears it.
+                    print("\nUpgrade cannot run until this is fixed: "
+                          + obstacle + ".")
+                elif not manual and kinds:
                     print("\nRun `tortoise hooks upgrade"
-                          f"{'' if args.harness == 'claude' else ' --harness ' + args.harness}"
-                          f" --dir {root}` to repair.")
+                          f"{hsel}" f" --dir {root}` to repair.")
         # #3797: the hook-run observation — the install's OWN evidence that
         # it ran, which is what separates "installed and ran" from "not
         # installed" without a credential.  Human-readable branch ONLY: the
@@ -3561,11 +3767,18 @@ def _cmd_hooks(args) -> int:
         # rendering an absence of observation for a harness that structurally
         # never writes one would assert what was never observed — the very
         # defect this line removes.
-        if not getattr(args, "json", False) and layout.writes_hook_run:
+        if (not getattr(args, "json", False) and layout is not None
+                and layout.writes_hook_run):
             _print_hook_run(args.harness, layout, root)
         return 1 if any(f.blocking for f in findings) else 0
 
     # upgrade (also performs a fresh install when nothing is present)
+    if layout is None:
+        # The artifact half's installer, not `upgrade_install` — a seam with no
+        # `hooks_dir` has no layout-driven upgrade, and a second writer would
+        # be the two-detectors defect inverted (#5351).  `artifact_home_dir` is
+        # the validated HOME: the guard above refused a `--dir` outside it.
+        return _upgrade_artifact_seam(args, root, artifact_home_dir)
     try:
         result = upgrade_install(root, args.harness,
                                  dry_run=getattr(args, "dry_run", False),
@@ -3955,8 +4168,16 @@ def _spool_transcript(args) -> dict:
     # (hosted 400) → the spool entry is discarded as a permanent error instead
     # of being filed.
     from tortoise.quota import MAX_SESSION_TURNS
+    from tortoise.sdk import _clip_capture_turn_content
     from tortoise.session_import import window_turns
-    turns = [{"role": t["role"], "content": t["content"][:5000]} for t in turns]
+    # #4897: the per-turn clip is the SDK's ONE definition of the stored window
+    # — this leg used to slice to a bare `5000`, which both re-declared the cap
+    # and cut SILENTLY (a reader could not tell a complete turn from a cut one).
+    # The clip reserves its marker inside the cap, so the server's own
+    # re-application of the window cannot remove it.
+    turns = [{"role": t["role"],
+              "content": _clip_capture_turn_content(t["content"])}
+             for t in turns]
     # The spool's store IS the record and the meta digest is computed over it, so
     # what is stored must be what is posted. Non-conversational roles (the
     # transcript's `System:` lines) are excluded by POLICY — the same policy the
@@ -4130,22 +4351,27 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
         return 1
     # #4188: never report an unqualified success for a DEFERRED capture — a
     # keyless store is a 2xx with extraction skipped. Surface the receipt's
-    # no-provider mode + additive warnings (stderr), mirroring
-    # _cmd_session_import. Only the no-provider mode means "not extracted":
-    # "replayed" means a PRIOR capture SUCCEEDED, so its memory points DO
-    # exist — printing "memory points were not extracted" for it would be a
-    # false statement about the session.
+    # store-only mode + additive warnings (stderr), mirroring
+    # _cmd_session_import. BOTH store-only modes mean "not extracted"
+    # (#4258 adds the team's extraction-disabled setting); "replayed" means a
+    # PRIOR capture SUCCEEDED, so its memory points DO exist — printing
+    # "memory points were not extracted" for it would be a false statement
+    # about the session.
     #
-    # #3971 merge resolution: this block is origin/main's (#4188) and is kept
-    # for its INTENT, but RETARGETED to this branch's variables. Main binds
-    # `result` only in its own direct-POST version of this function; on this
-    # branch the response body arrives via `summary.outcomes` as `body`, so
-    # `result` is unbound here and adopting the hunk verbatim would raise
-    # NameError. The success line also keeps `server_session` (the
-    # server-assigned id) rather than main's locally-derived `session_id`.
-    from tortoise.sdk import _CAPTURE_NO_PROVIDER_MODE
+    # #3971 merge resolution: main's hunk (#4188) is kept for its INTENT, but
+    # RETARGETED to this branch's variables + #4258's mode set. Main binds
+    # `result` only in its own direct-POST version of this function; here the
+    # response body arrives via `summary.outcomes` as `body`, so `result` is
+    # unbound and either side's hunk adopted verbatim would raise NameError.
+    # The success line keeps `server_session` (the server-assigned id) rather
+    # than the locally-derived `session_id`.
+    from tortoise.sdk import (
+        _CAPTURE_EXTRACTION_DISABLED_MODE,
+        _CAPTURE_NO_PROVIDER_MODE,
+    )
     _capture_mode = body.get("extraction_mode")
-    if _capture_mode == _CAPTURE_NO_PROVIDER_MODE:
+    if _capture_mode in (_CAPTURE_NO_PROVIDER_MODE,
+                         _CAPTURE_EXTRACTION_DISABLED_MODE):
         print(f"  Extraction: {_capture_mode} — the turns were STORED but no "
               "memory points were extracted", file=_sys.stderr)
     if body.get("warnings"):
@@ -4690,7 +4916,7 @@ def _hook_run_json(harness: str, layout, root) -> dict | None:
     observed run was not observed.  Best-effort and exit-code-neutral, like
     its text sibling.
     """
-    if not layout.writes_hook_run:
+    if layout is None or not layout.writes_hook_run:
         return None
     try:
         path = str(_hook_run_file(harness))
@@ -4795,7 +5021,8 @@ def _cmd_sessions_import(args) -> int:
     configured. Re-import of the
     same content is a no-op (receipt exists ⇒ already imported). A re-POST of
     an already-extracted session converges server-side (same session_id ⇒ no
-    new Session or turn Points); a re-POST of a DEFERRED keyless session
+    new Session or turn Points); a re-POST of a DEFERRED store-only session
+    (keyless, or the team's extraction-disabled setting — #4188/#4258)
     re-attempts extraction and mints its memory Points (#4188). pi parses its
     own record shape (#3667 — it no longer
     aliases the codex parser, which returned 0 turns for real Pi sessions).
@@ -4950,6 +5177,7 @@ def _cmd_sessions_import(args) -> int:
                 spool_dir,
                 write_spool_entry,
             )
+            from tortoise.sdk import _clip_capture_turn_content
             from tortoise.session_attribution import (
                 derive_machine_id,
                 sanitize_attribution_field,
@@ -4957,12 +5185,15 @@ def _cmd_sessions_import(args) -> int:
 
             if classify_failure(status, detail) != "retry":
                 return
-            # Clamp exactly as `session capture` does. The spool's per-entry
-            # bound is sized on the CLAMPED maximum (500 turns x 5000 chars), so
-            # an unclamped turn can overflow it — and write_spool_entry then
-            # DISCARDS the entry, losing the very session this exists to save.
-            # The server clamps to the same width, so nothing stored differs.
-            spool_turns = [{"role": t["role"], "content": t["content"][:5000]}
+            # Clamp exactly as `session capture` does — through the SDK's ONE
+            # clip definition (#4897), never a bare literal: the spool's
+            # per-entry bound is sized on the CLAMPED maximum (500 turns x the
+            # stored window), so an unclamped turn can overflow it — and
+            # write_spool_entry then DISCARDS the entry, losing the very
+            # session this exists to save. The clip keeps the bound AND marks
+            # the cut, so nothing stored differs from what the server stores.
+            spool_turns = [{"role": t["role"],
+                            "content": _clip_capture_turn_content(t["content"])}
                            for t in turns]
             root = spool_dir()
             spooled = write_spool_entry(root, Snapshot(
@@ -5171,23 +5402,65 @@ def _cmd_sessions_import(args) -> int:
             result.get("errors") or result.get("warnings")
             or result.get("extraction_mode")), file=_sys.stderr)
 
-    # A keyed 2xx ⇒ the receipt lands (the server also wrote the per-harness
-    # receipt state key; this LOCAL marker makes re-import a cheap no-op) and
-    # the local failure breadcrumb is cleared.
-    # #4188: a keyless capture STORES the turns and SKIPS extraction. Writing
-    # the local "imported" receipt would make every later explicit re-import
-    # skip the POST, so the session could never gain memory points once a key
-    # appears — and the owner ruling requires an EXPLICIT re-capture to
-    # extract (nothing here spends automatically). Deferred ⇒ NO local
-    # receipt: the server keeps the graph state truthful (capture_ok=False,
-    # lane "none") and re-running this import after the key is set re-attempts
+    # #4188/#4258: ANY store-only 2xx is DEFERRED — the keyless capture (no
+    # provider key) and the extraction-disabled capture (the team's per-org
+    # `capture_extract` setting) both STORE the turns and SKIP extraction.
+    # Writing the local "imported" receipt would make every later explicit
+    # re-import skip the POST, so the session could never gain memory points
+    # once extraction can run — and the owner ruling requires an EXPLICIT
+    # re-capture to extract (nothing here spends automatically). Deferred ⇒
+    # NO local receipt: the server keeps the graph state truthful
+    # (capture_ok=False; lane "none" for the keyless store, "disabled" for
+    # the setting-disabled store) and re-running this import re-attempts
     # extraction on the #2335 TRUE-retry lane.
-    from tortoise.sdk import _CAPTURE_NO_PROVIDER_MODE
+    from tortoise.sdk import (
+        _CAPTURE_EXTRACTION_DISABLED_MODE,
+        _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING,
+        _CAPTURE_EXTRACTION_DISABLED_WARNING,
+        _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING,
+        _CAPTURE_NO_PROVIDER_MODE,
+    )
     _clear_capture_error(harness)
-    if result.get("extraction_mode") == _CAPTURE_NO_PROVIDER_MODE:
-        print("import deferred: no LLM provider key — turns stored, "
-              "extraction skipped; re-run this import once a key is "
-              "configured.", file=_sys.stderr)
+    _capture_mode = result.get("extraction_mode")
+    _warns = result.get("warnings") or []
+    # #4258/#4188: a store-only 2xx is DEFERRED in TWO shapes — the store-only
+    # MODES, and a "replayed" receipt carrying an upgrade-refused warning (the
+    # server REPLAYS a FAILED store-only prior on the non-convergent M2 lane,
+    # which is still "no extraction ever ran"). Writing a local receipt for
+    # either would make every later re-import skip the POST on a stale receipt,
+    # so the session could never gain memory points, and would leave the
+    # warning's own remedy an instruction the CLI itself makes unreachable.
+    _upgrade_refused = (
+        _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING in _warns
+        or _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING in _warns)
+    if (_capture_mode in (_CAPTURE_NO_PROVIDER_MODE,
+                          _CAPTURE_EXTRACTION_DISABLED_MODE)
+            or _upgrade_refused):
+        # #4258: the missing key and the turned-off setting are INDEPENDENT
+        # reasons. When BOTH hold, the mode is "no-provider" but the receipt
+        # also carries the disabled warning — the remedy must then name both
+        # levers, or it sends the user to a key that will not extract.
+        _setting_off = (
+            _capture_mode == _CAPTURE_EXTRACTION_DISABLED_MODE
+            or _CAPTURE_EXTRACTION_DISABLED_WARNING in _warns
+            or _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING in _warns)
+        _keyless = (
+            _capture_mode == _CAPTURE_NO_PROVIDER_MODE
+            or _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING in _warns)
+        if _setting_off and _keyless:
+            _why = ("no LLM provider key, and extraction into memory is "
+                    "turned OFF for this team (capture_extract)")
+            _remedy = ("re-run this import once a key is configured and "
+                       "extraction is turned back on.")
+        elif _setting_off:
+            _why = ("extraction into memory is turned OFF for this team "
+                    "(capture_extract)")
+            _remedy = "re-run this import once extraction is turned back on."
+        else:
+            _why = "no LLM provider key"
+            _remedy = "re-run this import once a key is configured."
+        print(f"import deferred: {_why} — turns stored, extraction skipped; "
+              f"{_remedy}", file=_sys.stderr)
         return 0
     receipt_dir.mkdir(parents=True, exist_ok=True)
     receipt.write_text(_json.dumps({
@@ -7006,10 +7279,12 @@ def _cmd_doctor(args):
             # surfaces as a clean ❌ + rc 1, never a traceback (#720 P2 conf 75).
             probe_port = parsed.port or 16379
             from falkordb import FalkorDB
-            dbc = FalkorDB(host=probe_host, port=probe_port,
-                           username=probe_user, password=probe_pass,
-                           ssl=(parsed.scheme == "rediss"),
-                           socket_connect_timeout=5, socket_timeout=10)
+
+            from tortoise.cypher_guard import guarded_client  # #3595: guard seam
+            dbc = guarded_client(FalkorDB, host=probe_host, port=probe_port,
+                                 username=probe_user, password=probe_pass,
+                                 ssl=(parsed.scheme == "rediss"),
+                                 socket_connect_timeout=5, socket_timeout=10)
             dbc.select_graph(graph_name).query("RETURN 1")
             results.append(("Graph: FalkorDB", "✅", f"connected at {probe_host}:{probe_port} (graph {graph_name})"))
         except ImportError:
@@ -7323,10 +7598,7 @@ def _cmd_doctor(args):
     # green row for an install Codex never reads (#3818) — the same silent
     # no-capture the row exists to catch.
     try:
-        from tortoise.capture_install import (
-            LEGACY_PI_DIRNAME,
-            PI_DISABLED_DIRNAME,
-        )
+        from tortoise.capture_install import legacy_extension_obstacle
         from tortoise.hook_install import (
             ARTIFACT_CONTRACTS,
             HARNESS_LAYOUTS,
@@ -7422,44 +7694,63 @@ def _cmd_doctor(args):
                               if is_manual_fix(f.kind)})
             # A collision the DETECTOR cannot see, so it cannot arrive as a
             # finding: `install_capture` refuses when a REAL legacy extension
-            # directory is already disabled at `PI_DISABLED_DIRNAME` (it will
-            # not overwrite the previous backup).  The condition MIRRORS the
-            # installer's, which handles a symlinked legacy entry by unlinking
-            # it and never reaches the refusal — so `exists()` alone would fire
-            # the guard on a state the install repairs and withhold a working
-            # command.  The detector's legacy blind spot is #3713; this guard
-            # exists only so the hint never names a command that refuses.
-            _legacy = _root / LEGACY_PI_DIRNAME
-            _legacy_disabled = _root / PI_DISABLED_DIRNAME
-            _legacy_collision = (
-                _harness == "pi"
-                and _legacy.is_dir()
-                and not _legacy.is_symlink()
-                and (_legacy_disabled.exists()
-                     or _legacy_disabled.is_symlink())
-            )
+            # directory is already disabled at its backup name (it will not
+            # overwrite the previous backup).  The condition lives in
+            # `capture_install`, the module that owns BOTH the names and the
+            # refusal, and `hooks status` consults the SAME declaration for the
+            # artifact seams (#5351) — a copy in each caller drifts, and the
+            # drifted copy tells the user to run a command that refuses (the
+            # argument `MANUAL_FIX_KINDS` is declared once for).  The detector's
+            # legacy blind spot is #3713.
+            _legacy_obstacle = legacy_extension_obstacle(_harness, _root)
             if _manual:
                 _hint = ("needs a manual fix before "
                          f"`tortoise hooks upgrade --harness {_harness}` "
                          f"can run ({', '.join(_manual)})" if _layout is not None
                          else "needs a manual fix before `tortoise install "
                          f"{_harness}` can run ({', '.join(_manual)})")
-            elif _legacy_collision:
-                _hint = (f"a legacy capture extension is already disabled at "
-                         f"{PI_DISABLED_DIRNAME} — move one aside")
+                # NOT an `elif`, for the reason recorded at the same pair of
+                # arms in `hooks status`: the two obstacles are INDEPENDENT, so
+                # clearing the manual kind (re-pointing a symlink, moving a
+                # foreign file aside) does not clear the legacy collision —
+                # naming only the manual one promises a repair that still
+                # refuses, and no other line in this row would mention it.
+                if _legacy_obstacle:
+                    _hint += f"; also {_legacy_obstacle}"
+            elif _legacy_obstacle:
+                # The predicate's own sentence IS the hint: one home for the
+                # wording, so a reworded refusal cannot leave a stale copy here.
+                _hint = _legacy_obstacle
             else:
                 _hint = (f"run `tortoise hooks status --harness {_harness}` "
                          "for the repair path" if _layout is not None else
                          f"run `tortoise install {_harness}` to repair")
             # The finding's OWN detail names the repair command too, so it is
-            # the second place a refusing recommendation can come from.  In the
-            # collision state that command is replaced — and it must be one that
-            # ACCEPTS `--harness pi`: `tortoise hooks status` is layout-keyed and
-            # exits 1 with "unknown harness 'pi'", so naming it would swap one
-            # refusal for another.  `session verify` takes the artifact seam.
-            _detail = (f"({first.kind}: {first.detail})" if not _legacy_collision
-                       else f"({first.kind}; run `tortoise session verify "
-                            f"--harness {_harness}` for the repair path)")
+            # the SECOND place a refusing recommendation can come from, and
+            # BOTH surfaces decide that through the same predicate
+            # (`_artifact_detail_would_refuse`): the seam is unrepairable
+            # (`_manual` OR the collision — the installer refuses either way),
+            # the detail embeds one of `hook_install.ARTIFACT_INSTALLER_CLAUSES`,
+            # and the kind is not MANUAL.  Exempting the manual kinds keeps
+            # instructions whose first step is the user's (`foreign-artifact`,
+            # the `symlinked-install` note), and matching whole clauses keeps a
+            # note that merely mentions the installer (`ahead-artifact`) out,
+            # together with a path that merely looks like a command.
+            # A MANUAL kind's second step can still be blocked by the collision,
+            # and the collision is named in the hint above it (the non-`elif`
+            # arms), so the row carries that counter-signal — `doctor` puts it
+            # in the same summary row, `hooks status` prints it as the following
+            # paragraph.  The replacement names a command that ACCEPTS the
+            # harness: the read-only diagnostic that carries the finding.
+            _withhold = (_layout is None
+                         and _artifact_detail_would_refuse(
+                             first, _harness,
+                             unrepairable=(bool(_manual)
+                                           or bool(_legacy_obstacle))))
+            _detail = (
+                f"({first.kind}; run `tortoise session verify "
+                f"--harness {_harness}` for the repair path)" if _withhold
+                else f"({first.kind}: {first.detail})")
             results.append((
                 _label, "❌",
                 f"{len(blocking)} stale issue(s) — {_hint} {_detail}",
@@ -8543,7 +8834,7 @@ def main(argv: list[str] | None = None) -> int:
     cc = sp.add_parser("check-consistency", help="Verify event log matches graph state")
     cc.add_argument("--db", required=True, help="Docker URI or file path")
     cc.add_argument("--log", required=True, help="Path to events.jsonl")
-    au = sp.add_parser("audit", help="Audit graph wiring quality (8 checks: source tiering, superseded gaps, mitigation coverage)")
+    au = sp.add_parser("audit", help="Audit graph wiring quality (9 checks: source tiering, superseded gaps, mitigation coverage, inverted validity windows)")
     au.add_argument("--db", default=None, help=(
         f"DB target override — URI ({uri_schemes_hint}) or absolute path "
         "(default: TORTOISE_DB_URI / FALKORDB_* / embedded path)"))

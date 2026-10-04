@@ -871,6 +871,225 @@ def test_integrity_problems_agrees_with_the_integrity_cli(
     assert cs.main() == 1
     assert any("duration-imbalanced" in p
                for p in ci_timing.integrity_problems(skewed))
+    # #6145: the duration skew above trips several checks at once, so a bare
+    # "non-empty" assertion cannot see a MISSING term. Pin the headroom term by
+    # name — the 90000s skew clamps a shard to the ceiling (1500 min -> 55m =
+    # 0.04x). The list is hand-maintained against `--integrity`, so an omission
+    # here would let the refresh WRITE a manifest the required
+    # `manifest-integrity` check immediately reds.
+    assert any("its emitted budget retains" in p
+               for p in ci_timing.integrity_problems(skewed)), (
+        "the refresh's pre-write gate must compose the watchdog-headroom check "
+        "(#6145) — otherwise the refresh writes what `--integrity` rejects")
+
+
+def test_integrity_problems_mirrors_the_spot_checked_validators() -> None:
+    """W37/#5373 MUTATION PROOF: the refresh's gate must surface the same REAL
+    violations as the gate of record.
+
+    `refresh_durations` gates on :func:`integrity_problems`, so a validator
+    present in `ci_selection.py --integrity` and missing here lets the weekly
+    durations writer persist a manifest the gate of record rejects. This test
+    builds a real violation for the two validators whose violation is cheap to
+    construct in isolation — a `carve_shards` explicit null (W37) and a
+    same-surface duplicate (#5373, a GATE FAILURE under the manifest's
+    `merge=union`) — each by MUTATION of the real manifest, so the pin does not
+    depend on a literal value and still fires if `carve_shards` is later rolled
+    back or a surface is renamed. It is NOT a per-validator sweep of the whole
+    composition: the composition-parity test below covers the remaining
+    validators, requiring each one's problems to be surfaced on BOTH entry
+    points, rather than building a real violation for each.
+    """
+    import ci_selection as cs
+
+    real = cs.MANIFEST.read_text()
+
+    # `carve_shard_issues`: an explicit null (absence is legitimate; null is a typo).
+    broken = yaml.safe_load(real)
+    broken["carve_shards"] = None
+    carve_case = (broken, "carve_shards is explicitly null")
+
+    # `duplicate_entries`: a same-surface repeat — what `merge=union` emits when
+    # two lanes append the same registration (#5373).
+    dup = yaml.safe_load(real)
+    surface = next(iter(dup["surfaces"]))
+    entry = dup["surfaces"][surface][0]
+    dup["surfaces"][surface] = [*list(dup["surfaces"][surface]), entry]
+    duplicate_case = (dup, f"{surface}: {entry}")
+
+    for name, (broken_manifest, expected) in {
+        "carve_shard_issues": carve_case,
+        "duplicate_entries": duplicate_case,
+    }.items():
+        # The gate of record refuses it …
+        assert getattr(cs, name)(broken_manifest), (
+            f"the {name} validator no longer rejects the mutation this pin builds")
+        # … and the refresh's gate must agree, naming the same problem rather than
+        # some unrelated one the re-serialization happened to introduce.
+        problems = ci_timing.integrity_problems(
+            yaml.safe_dump(broken_manifest, sort_keys=False))
+        assert any(expected in p for p in problems), (
+            f"integrity_problems does not surface the {name} validator the "
+            f"gate of record runs — the weekly refresh could write a manifest "
+            f"--integrity refuses: {problems}")
+
+
+def test_integrity_problems_mirrors_the_listed_integrity_composition(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The parity contract `integrity_problems`' docstring claims, over the
+    validators listed below.
+
+    The per-validator violation test above can only cover validators whose
+    violation is cheap to build. `tools/ci_timing.py::integrity_problems`
+    claims a stronger property — "Composed by CALLING the same functions as the
+    `--integrity` entry point — never a re-derived subset, so the two cannot
+    disagree about what a valid manifest is" — and the SAME docstring then warns
+    "⛔ The list is HAND-MAINTAINED, so it can drift out of that parity
+    silently". This test pins that claim over the validators listed below: wrap
+    each with a recorder that appends a unique sentinel to the real result, run
+    BOTH compositions over the same manifest, and require the two to call the
+    SAME functions and to surface the SAME sentinels.
+
+    ⛔ What is pinned is the SET, not the ORDER — see the assertion below for why
+    the order is not a contract in the post-#5050 shape.
+
+    ⛔ The pin is BOUNDED BY the hand-maintained `validators` tuple below — it
+    equals both compositions today and must be extended when a validator is
+    added. `validators` is an ALLOW-LIST, not a derivation of either
+    composition: a validator NOT listed there is never wrapped, so it never
+    reaches `calls`, and its presence in one composition and absence from the
+    other is invisible here. Only a LISTED validator's removal or reordering
+    reds. `set(cli_calls) == set(validators)` additionally reds if a listed
+    validator stops being called by the gate of record at all, so the spy
+    cannot pass by finding nothing.
+    """
+    import ci_manifest
+    import ci_selection as cs
+
+    # Two module IDENTITIES, one file. `ci_manifest` resolves `ci_selection`
+    # through its own accessor, which prefers the `tools.ci_selection` module
+    # object over the `ci_selection` this test imports (the accessor checks
+    # `sys.modules` for `"tools.ci_selection"` before `"ci_selection"`). The
+    # SHARED composition reaches the delegated validators through whichever copy
+    # that accessor returns, so patching only `cs` makes the spy miss all five
+    # when an earlier test in the session has caused `tools.ci_selection` to be
+    # imported — and the miss is SESSION-DEPENDENT, which is how it hid: this test
+    # passed when the file ran alone and lost five validators when it ran beside
+    # tests/test_ci_selection.py. Patch every identity the composition can reach.
+    spy_targets = [cs]
+    _delegated = ci_manifest._ci_selection()
+    if _delegated is not cs:
+        spy_targets.append(_delegated)
+
+    # ⛔ HAND-MAINTAINED ALLOW-LIST, NOT A DERIVATION — see the docstring. A
+    # validator absent from this tuple is never wrapped, so a composition that
+    # gains it on ONE side alone is invisible to the parity assertions below.
+    # The tuple's ORDER is NOT asserted (the pins below are order-insensitive —
+    # see the assertion for why order is not a contract after #5050); keep it
+    # stable and extend it whenever a validator is added to either composition.
+    # Deriving the set would mean
+    # introspecting an inline `main()` block or guessing which list-returning
+    # helpers are validators; a wrong guess would inject sentinels into a
+    # filename list and corrupt the run.
+    validators = (
+        "integrity",
+        "slow_file_issues",
+        "fast_shard_issues",
+        "carve_shard_issues",
+        "duration_issues",
+        "leg_coverage_issues",
+        "watchdog_headroom_issues",
+        "duration_coverage_issues",
+        "duplicate_entries",
+        "workflow_matrix_issues",
+        "workflow_halves_issues",
+    )
+    sentinel = "SENTINEL<{}>"
+    calls: list[str] = []
+    for name in validators:
+        for target in spy_targets:
+            real_validator = getattr(target, name)
+
+            def recorder(*args, _name=name, _real=real_validator, **kwargs):
+                calls.append(_name)
+                return [sentinel.format(_name), *_real(*args, **kwargs)]
+
+            monkeypatch.setattr(target, name, recorder)
+
+    real = cs.MANIFEST.read_text()
+
+    # The gate of record: run `python3 tools/ci_selection.py --integrity`.
+    monkeypatch.setattr(sys, "argv", ["ci_selection.py", "--integrity"])
+    cli_rc = cs.main()
+    cli_out = capsys.readouterr().out
+    assert cli_rc == 1, "the injected sentinel problems must make --integrity red"
+    cli_calls = list(calls)
+    calls.clear()
+
+    # … and the refresh's gate over the same manifest.
+    problems = ci_timing.integrity_problems(real)
+    mirror_calls = list(calls)
+
+    assert set(cli_calls) == set(validators), (
+        f"the gate of record no longer calls every validator this parity test "
+        f"guards: missing {sorted(set(validators) - set(cli_calls))}, "
+        f"extra {sorted(set(cli_calls) - set(validators))} — update the list "
+        f"if a validator was deliberately removed")
+    # ORDER is deliberately NOT pinned across the whole list, and this is the
+    # post-#5050 shape rather than a relaxation for convenience. Five of the
+    # listed validators (`fast_shard_issues`, `duration_issues`,
+    # `leg_coverage_issues`, `duration_coverage_issues`, `duplicate_entries`)
+    # are evaluated from the SHARED `ci_manifest` composition: `--integrity`
+    # reaches it inside `_manifest_contract_issues` (after `integrity` and
+    # `slow_file_issues`), while `integrity_problems` reaches it up front,
+    # because the stamp promotion that `ci_manifest.check`'s `red` feeds must be
+    # computed FIRST (it also decides which UNKNOWN reasons stay non-gating).
+    # Every listed validator is a pure list-builder whose result is concatenated,
+    # so which side of the composition evaluates it cannot change the SET of
+    # problems either entry point reports — and the set is what guards the
+    # property this test exists for: the weekly refresh must not be able to
+    # persist a manifest `--integrity` rejects. The sentinel assertions below
+    # still red if either side fails to surface ANY listed validator's problems.
+    assert sorted(mirror_calls) == sorted(cli_calls), (
+        f"integrity_problems and --integrity called DIFFERENT validators "
+        f"(integrity_problems: {mirror_calls}; --integrity: {cli_calls}) — every "
+        f"listed validator must be called by BOTH, or the weekly refresh can "
+        f"persist a manifest --integrity rejects")
+    missing_cli = [n for n in validators if sentinel.format(n) not in cli_out]
+    assert not missing_cli, (
+        f"--integrity did not report these validators' problems: {missing_cli}")
+    missing_mirror = [n for n in validators if sentinel.format(n) not in problems]
+    assert not missing_mirror, (
+        f"integrity_problems did not surface these validators' problems: "
+        f"{missing_mirror} — the weekly refresh could write a manifest "
+        f"--integrity refuses")
+
+
+
+def test_integrity_problems_promotes_a_present_but_unparseable_stamp() -> None:
+    """#6243 review cycle 3 (L3): the refresh gate composes the SAME promotion
+    as `--integrity`, so the claimed parity is real.
+
+    A refreshed manifest is NOT guaranteed a parseable stamp:
+    `render_refreshed_manifest` writes the caller's `captured_at` verbatim via
+    `_set_captured_at` — it OVERWRITES any stamp the input carried rather than
+    preserving it, so nothing validates it — the `CI_TIMING_NOW` override can
+    set it to anything, and this file's own tests render with `"T"`. Gating on
+    `check`'s `red` alone therefore accepted exactly the manifests the gate
+    rejects. A present-but-unparseable stamp must be refused here too, while a
+    GENUINELY ABSENT one stays the one soft class.
+    """
+    before = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+    rendered, _ = ci_timing.render_refreshed_manifest(
+        before, {"test_bridge_table.py": 12.0}, "T")
+    # The DURATION subset is blind to it — which is why the full gate is what
+    # must catch it, and why this test exists rather than trusting the subset.
+    assert ci_timing.validate_refreshed_manifest(rendered) == []
+    problems = ci_timing.integrity_problems(rendered)
+    assert any("not a parseable timestamp" in p for p in problems), problems
+    # Absence is still the notice-only class: no stamp key, no problem.
+    assert ci_timing.integrity_problems(before) == []
 
 
 def test_ci_timing_docstring_no_longer_claims_it_never_gates_ci() -> None:
@@ -917,3 +1136,611 @@ def test_ci_timing_workflow_is_the_durations_bridge_scheduler() -> None:
     assert "cp generated-map/ci-surfaces.yml config/ci-surfaces.yml" in open_pr["run"]
     assert ("git add docs/ci-timing.md docs/ci-timing.json "
             "config/ci-surfaces.yml" in open_pr["run"])
+
+
+# ── The refresh job's missing token + its fail-open swallow (#3092) ──────
+#
+# `refresh` is the ONLY job in the whole workflow set that called `gh` with no
+# token in scope, and its result was consumed in a way that reported success on
+# failure. Both halves are load-bearing: the token makes the PR openable, the
+# un-swallowed error makes a missing/insufficient token RED instead of green.
+
+def _refresh_job() -> dict:
+    wf = yaml.safe_load(CI_TIMING_WORKFLOW.read_text())
+    return wf["jobs"]["refresh"]
+
+
+def _refresh_step_body() -> str:
+    """The `Open refresh PR if content changed` step body. GitHub expands its own
+    `${{ }}` expressions into this text before bash ever sees it."""
+    for step in _refresh_job()["steps"]:
+        if (step.get("name") or "").startswith("Open refresh PR"):
+            body = step["run"]
+            # The harness below runs the body under a bare `bash -e`, so it does NOT
+            # emulate expression expansion. That is faithful only while this body
+            # contains NO Actions expressions — pin that assumption. (Note: the
+            # marker is the DOUBLE brace `${{`; a single `${` is ordinary shell
+            # parameter expansion and is present all over this body.)
+            assert "${{" not in body, (
+                "the refresh body now contains a `${{ }}` expression; the test harness "
+                "runs it under a bare `bash -e` and must expand it (or substitute it) "
+                "the way the runner does before executing"
+            )
+            return body
+    raise AssertionError("ci-timing.yml refresh job lost its 'Open refresh PR' step")
+
+
+def test_refresh_job_binds_the_automatic_github_token() -> None:
+    """`gh` reads its credential from the ENVIRONMENT, and Actions exposes the
+    token only as a CONTEXT — so a job that calls `gh` must bind it in `env:`.
+
+    The `measure` job always had this; `refresh` never did, which is why
+    `gh pr list` exited non-zero on every run and no refresh PR was ever opened
+    in this workflow's history (#3092). The auto token is required rather than a
+    PAT: the branch is pushed into this repo (no cross-repo write needed), the
+    token is minted per run and expires with the job (nothing to store or
+    rotate), and it is CAPPED by the job's `permissions:` block — a PAT carries
+    its own scopes and would escape that ceiling.
+    """
+    env = _refresh_job().get("env") or {}
+    token = next((v for k, v in env.items() if k.upper() in {"GH_TOKEN", "GITHUB_TOKEN"}), None)
+    assert token is not None, (
+        "the refresh job calls `gh` but binds no GH_TOKEN/GITHUB_TOKEN in its env: — "
+        "gh refuses to run inside Actions without one (#3092)"
+    )
+    assert token.strip() in {"${{ github.token }}", "${{ secrets.GITHUB_TOKEN }}"}, (
+        f"refresh must use the workflow's own token, not a long-lived credential: {token!r}"
+    )
+
+
+def test_refresh_job_grants_the_scopes_its_gh_calls_need() -> None:
+    """`gh pr create` needs `pull-requests: write`; pushing the branch needs
+    `contents: write`. Job-level `permissions:` REPLACE the workflow-level block
+    for this job, so both must appear here (the workflow-level block is read-only)."""
+    perms = _refresh_job().get("permissions") or {}
+    assert perms.get("contents") == "write", perms
+    assert perms.get("pull-requests") == "write", perms
+
+
+def _shell_code(body: str) -> str:
+    """Only the EXECUTABLE lines of a step body — full-line shell comments dropped.
+
+    The step documents the pre-fix swallow in a comment (deliberately: it is the
+    reason the guard exists), so a raw-text scan would match its own explanation.
+    Trailing comments are NOT stripped: `#` occurs inside quoted strings here (the
+    PR title carries `(#1477)`), so a naive trailing strip would corrupt the text
+    it is meant to inspect.
+    """
+    return "\n".join(line for line in body.splitlines() if not line.lstrip().startswith("#"))
+
+
+def test_refresh_step_does_not_infer_a_skip_from_a_failed_query() -> None:
+    """The static half of the fail-open guard. The pre-fix shape
+
+        if [ "$(gh pr list ...)" = "0" ]; then … else echo "already open"; fi
+
+    is gone: a failed substitution yields "" and `[ "" = "0" ]` is false, so the
+    `else` fired and the job exited 0 — the failure was reported as "a PR is
+    already open". The query's own exit status must now be tested."""
+    code = _shell_code(_refresh_step_body())
+    assert '"$(gh pr list' not in code, (
+        "gh pr list is back inside a command substitution used as a test — a failed "
+        "query would again be read as 'no PR needed' (#3092)"
+    )
+    # Command position only: the step's own ::error:: diagnostics also spell the
+    # invocation inside a quoted string, and those are not calls.
+    calls = re.findall(r"(?:^|[|&;(]|\$\()\s*gh pr list\b", code, re.M)
+    assert len(calls) == 1, f"expected exactly one gh pr list CALL, found {len(calls)}"
+    assert re.search(r"if\s+!\s+pr_count=\$\(gh pr list", code), (
+        "the gh pr list call must test its own exit status"
+    )
+    assert re.search(r'if\s+\[\s*"\$pr_count"\s*=\s*"0"\s*\]', code), (
+        "the create/skip decision must branch on a real count"
+    )
+
+
+def test_refresh_step_requires_the_token_before_any_git_mutation() -> None:
+    """A missing token must fail BEFORE the branch is committed and pushed — the
+    pre-fix job pushed a branch it could never open a PR for, every week."""
+    body = _refresh_step_body()
+    guard = body.index('if [ -z "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]')
+    assert guard < body.index("git switch -c"), (
+        "the token preflight must run before the step starts mutating the checkout"
+    )
+
+
+def test_the_refresh_harness_neutralises_a_signing_global_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hermeticity against a developer's `commit.gpgsign = true`.
+
+    Neither the step body nor this fixture sets `commit.gpgsign`, so signing is
+    inherited from the ambient config — and on a machine that signs, BOTH the
+    fixture's `git commit` and the body's own fail. CI never sees it (the runner has
+    no such config), so the property can only be pinned by forcing the config here.
+    """
+    forced = tmp_path / "gitconfig-forced"
+    # Deterministic hostility. `commit.gpgsign = true` alone only REQUESTS signing:
+    # on a keyless machine the bare commit fails because signing is impossible, and
+    # on a machine that can sign it SUCCEEDS — making the control below
+    # environment-dependent. Pointing gpg at a missing program and pinning a
+    # non-existent key makes the config itself the cause.
+    forced.write_text(
+        "[commit]\n\tgpgsign = true\n"
+        "[user]\n\tsigningkey = 0000000000000000000000000000000000000000\n"
+        "[gpg]\n\tprogram = /nonexistent/gpg-does-not-exist\n"
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(forced))
+
+    # CONTROL — the forced config really is hostile. Without this the test could
+    # pass on a machine where the knob does nothing, proving nothing at all.
+    control = tmp_path / "control"
+    control.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=control,
+                   check=True, capture_output=True)
+    (control / "f").write_text("x\n")
+    subprocess.run(["git", "add", "f"], cwd=control, check=True, capture_output=True)
+    bare = subprocess.run(
+        ["git", "-c", "user.email=ci@example.com", "-c", "user.name=ci",
+         "commit", "-qm", "control"],
+        cwd=control, capture_output=True, text=True, timeout=120,
+    )
+    assert bare.returncode != 0, (
+        "a bare commit SUCCEEDED under a forced `commit.gpgsign = true`, so this "
+        "test could not detect the regression it exists for"
+    )
+
+    # (a) the fixture's own commit passes because it carries -c commit.gpgsign=false
+    repo = _make_refresh_repo(tmp_path)
+    assert subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                          capture_output=True).returncode == 0
+
+    # (b) the STEP BODY's commit passes because the harness points git at an EMPTY
+    # global config, so the developer's config is out of scope altogether.
+    proc, _ = _run_refresh_step(tmp_path, monkeypatch, repo=repo)
+    assert proc.returncode == 0, (
+        "the step body's own git commit must not inherit the developer's signing "
+        f"config\n{proc.stdout}\n{proc.stderr}"
+    )
+
+
+def _make_refresh_repo(tmp_path: Path) -> Path:
+    """A throwaway repo whose committed artifact differs from `generated/`, with a
+    local bare `origin` so the step's `git push` is exercised for real."""
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+    (repo / "generated").mkdir()
+    (repo / "generated-map").mkdir()
+    (repo / "config").mkdir()
+    (repo / "docs" / "ci-timing.md").write_text("old md\n")
+    (repo / "docs" / "ci-timing.json").write_text("old json\n")
+    (repo / "generated" / "ci-timing.md").write_text("new md\n")
+    (repo / "generated" / "ci-timing.json").write_text("new json\n")
+    # #5215 Task 4b: the refresh step ALSO diffs and copies the durations map, so
+    # the throwaway repo must carry a committed copy and a differing generated one
+    # or the `cp` aborts the step before it reaches the push.
+    (repo / "config" / "ci-surfaces.yml").write_text("durations:\n  a.py: 1.0\n")
+    (repo / "generated-map" / "ci-surfaces.yml").write_text("durations:\n  a.py: 2.0\n")
+
+    def run(*argv: str) -> None:
+        subprocess.run(argv, cwd=repo, check=True, capture_output=True)
+
+    run("git", "init", "-q", "-b", "main")
+    run("git", "config", "user.email", "ci@example.com")
+    run("git", "config", "user.name", "ci")
+    run("git", "add", "docs", "generated", "generated-map", "config")
+    # Neutralise the developer's global git config: on a machine with
+    # `commit.gpgsign = true` the bare form fails (verified), and the step body's
+    # own `git commit` would fail the same way. Matches
+    # tests/test_finding_provenance.py's handling of the same trap.
+    run("git", "-c", "commit.gpgsign=false", "commit", "-qm", "init")
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True, capture_output=True)
+    run("git", "remote", "add", "origin", str(bare))
+    run("git", "push", "-q", "-u", "origin", "main")
+    return repo
+
+
+_GH_PR_STUB = """#!/usr/bin/env bash
+# Records every invocation; behaviour is baked in per test.
+echo "gh $*" >> "@@RECORD@@"
+if [ "$1 $2" = "pr list" ]; then
+@@LIST_BODY@@
+  exit @@LIST_RC@@
+fi
+if [ "$1 $2" = "pr create" ]; then
+  echo "https://github.com/daniel-ospina/tortoise/pull/9999"
+  exit @@CREATE_RC@@
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 2
+"""
+
+
+def _install_gh_pr_stub(
+    bin_dir: Path,
+    record: Path,
+    *,
+    list_rc: int = 0,
+    list_out: str | None = "0",
+    create_rc: int = 0,
+) -> None:
+    body = "  :" if list_out is None else f"  printf '%b' {list_out!r}"
+    script = (
+        _GH_PR_STUB.replace("@@RECORD@@", str(record))
+        .replace("@@LIST_BODY@@", body)
+        .replace("@@LIST_RC@@", str(list_rc))
+        .replace("@@CREATE_RC@@", str(create_rc))
+    )
+    (bin_dir / "gh").write_text(script)
+    (bin_dir / "gh").chmod(0o755)
+
+
+def _run_refresh_step(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    token: str | None = "stub-token",
+    github_token: str | None = None,
+    repo: Path | None = None,
+    **stub_kwargs: object,
+) -> tuple[subprocess.CompletedProcess, str]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    record = tmp_path / "gh-argv.txt"
+    record.write_text("")
+    _install_gh_pr_stub(bin_dir, record, **stub_kwargs)  # type: ignore[arg-type]
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    # The runner sets this as a default env var; the step's diagnostics reference it
+    # and the body runs under `set -u`.
+    monkeypatch.setenv("GITHUB_REPOSITORY", "daniel-ospina/tortoise")
+    # The step body commits, so an empty GLOBAL config keeps a developer's
+    # `commit.gpgsign = true` from failing a run that is green in CI.
+    empty_global = tmp_path / "gitconfig-empty"
+    empty_global.write_text("")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(empty_global))
+    if token is None:
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("GH_TOKEN", token)
+    # ⛔ BOTH NAMES MUST BE CONTROLLED. The step's preflight accepts `GH_TOKEN` OR
+    # `GITHUB_TOKEN`, so clearing only the first does not construct the no-token
+    # premise when the ambient shell exports the second — the step then commits,
+    # pushes and "opens" a PR on the no-token test.
+    if github_token is None:
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("GITHUB_TOKEN", github_token)
+    repo = repo or _make_refresh_repo(tmp_path)
+    proc = subprocess.run(["bash", "-e", "-c", _refresh_step_body()],
+                          cwd=repo, capture_output=True, text=True)
+    return proc, record.read_text()
+
+
+def test_refresh_step_fails_loudly_when_gh_cannot_authenticate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE REGRESSION. With an unauthenticated `gh` the pre-fix step printed
+    "refresh PR already open … skipping" and exited 0; this asserts it now goes
+    red and does not claim a PR exists."""
+    proc, record = _run_refresh_step(tmp_path, monkeypatch, list_rc=1, list_out=None)
+    assert proc.returncode != 0, (
+        "an unauthenticated gh must fail the refresh step, not pass it (#3092)\n"
+        f"{proc.stdout}\n{proc.stderr}"
+    )
+    assert "::error::" in proc.stdout, proc.stdout
+    assert "already open" not in proc.stdout, (
+        "a FAILED query must never be reported as 'a PR is already open' — that is "
+        "the exact fail-open this issue is about"
+    )
+    assert "gh pr create" not in record, "no PR may be attempted after a failed query"
+    # ⛔ CLEANUP MUST COVER THIS PATH TOO. The branch is pushed before the query, so
+    # the list-failure and empty-count exits strand it unless the cleanup trap
+    # handles every post-push failure — the trap must fire on more than the
+    # create-failure exit.
+    remote = subprocess.run(
+        ["git", "ls-remote", "origin"], cwd=tmp_path / "repo",
+        capture_output=True, text=True,
+    ).stdout
+    assert "chore/ci-timing-refresh" not in remote, (
+        f"the pushed branch must be removed when the PR query fails:\n{remote}"
+    )
+
+
+def test_refresh_step_fails_loudly_when_the_query_returns_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The second guard: `gh pr list` succeeded but printed nothing. That is not
+    a count of zero, and must not be read as one."""
+    proc, record = _run_refresh_step(tmp_path, monkeypatch, list_rc=0, list_out=None)
+    assert proc.returncode != 0, f"{proc.stdout}\n{proc.stderr}"
+    assert "returned nothing" in proc.stdout, proc.stdout
+    assert "gh pr create" not in record, record
+    remote = subprocess.run(
+        ["git", "ls-remote", "origin"], cwd=tmp_path / "repo",
+        capture_output=True, text=True,
+    ).stdout
+    assert "chore/ci-timing-refresh" not in remote, (
+        f"the pushed branch must be removed on this path too:\n{remote}"
+    )
+
+
+def test_refresh_step_fails_loudly_when_the_count_is_not_a_number(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`gh` can exit 0 and print a NON-NUMBER — `null`, or a jq/progress line.
+    `[ "null" = "0" ]` is false, so without an explicit numeric check the value
+    falls to the `else` and is reported as "already open" with exit 0: the same
+    fail-open, one line below the guard that was added for the empty case."""
+    proc, record = _run_refresh_step(tmp_path, monkeypatch, list_rc=0, list_out="null")
+    assert proc.returncode != 0, f"a non-numeric count must fail the step\n{proc.stdout}"
+    assert "NON-NUMERIC" in proc.stdout, proc.stdout
+    assert "already open" not in proc.stdout, (
+        "a non-numeric value must never be reported as 'a PR is already open'"
+    )
+    assert "gh pr create" not in record, record
+    remote = subprocess.run(
+        ["git", "ls-remote", "origin"], cwd=tmp_path / "repo",
+        capture_output=True, text=True,
+    ).stdout
+    assert "chore/ci-timing-refresh" not in remote, (
+        f"the pushed branch must be removed on this path too:\n{remote}"
+    )
+
+
+def test_refresh_step_fails_loudly_when_the_push_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The push itself can be rejected — a re-run at the same main SHA collides
+    with the branch a previous run left behind, because the name is derived from
+    the SHA. That path must go red, name the push, and NOT delete the branch: the
+    remote branch is the previous run's, and the trap is not installed yet."""
+    repo = _make_refresh_repo(tmp_path)
+    head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=repo,
+                          capture_output=True, text=True, check=True).stdout.strip()
+    branch = f"chore/ci-timing-refresh-{head}"
+    tree = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=repo,
+                          capture_output=True, text=True, check=True).stdout.strip()
+    # A commit that is NOT an ancestor of ours, so the push cannot fast-forward.
+    other = subprocess.run(["git", "commit-tree", tree, "-m", "divergent"], cwd=repo,
+                           capture_output=True, text=True, check=True).stdout.strip()
+    subprocess.run(["git", "push", "-q", "origin", f"{other}:refs/heads/{branch}"],
+                   cwd=repo, check=True, capture_output=True)
+
+    proc, record = _run_refresh_step(tmp_path, monkeypatch, repo=repo)
+    assert proc.returncode != 0, f"a rejected push must fail the step\n{proc.stdout}"
+    assert "::error::" in proc.stdout and "git push" in proc.stdout, proc.stdout
+    assert "gh pr list" not in record, (
+        f"the PR query must not run once the push failed:\n{record}"
+    )
+    remote = subprocess.run(["git", "ls-remote", "origin", f"refs/heads/{branch}"],
+                            cwd=repo, capture_output=True, text=True).stdout
+    assert other in remote, (
+        f"the push-failure path must not delete the pre-existing branch:\n{remote}"
+    )
+
+
+def test_the_non_numeric_diagnostic_cannot_forge_a_workflow_annotation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`gh` stdout is echoed back by the error handler, and the runner parses ANY
+    line starting with `::` as a workflow command. A command substitution keeps
+    embedded newlines, so a multi-line query result would otherwise forge an
+    annotation from inside the handler that reports it."""
+    forged = "null\n::warning::FORGED ANNOTATION\n::error::FORGED TOO"
+    proc, record = _run_refresh_step(tmp_path, monkeypatch, list_rc=0, list_out=forged)
+    assert proc.returncode != 0, f"{proc.stdout}\n{proc.stderr}"
+    annotations = [ln for ln in proc.stdout.splitlines() if ln.startswith("::")]
+    assert len(annotations) == 1, (
+        f"the handler must emit exactly ONE annotation, not one per line of the "
+        f"value it reports:\n{proc.stdout}"
+    )
+    assert "NON-NUMERIC" in annotations[0], annotations[0]
+    assert "FORGED" in annotations[0], (
+        "the value must still be REPORTED (escaped onto one line), not dropped"
+    )
+    assert "gh pr create" not in record, record
+
+
+def test_refresh_step_accepts_the_github_token_spelling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`gh` honours either name, so the preflight must not refuse a job that binds
+    `GITHUB_TOKEN` — and the no-token tests must therefore clear BOTH, or they would
+    silently run with an ambient token and assert nothing."""
+    proc, record = _run_refresh_step(
+        tmp_path, monkeypatch, token=None, github_token="stub-token",
+        list_rc=0, list_out="0",
+    )
+    assert proc.returncode == 0, (
+        f"the preflight must accept GITHUB_TOKEN as well as GH_TOKEN\n{proc.stdout}"
+    )
+    assert "gh pr create" in record, record
+
+
+def test_refresh_step_exits_early_without_a_token_when_nothing_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The no-op week needs no credential. The unchanged early-exit sits BEFORE the
+    token preflight by design, so a missing token must not red a run that has
+    nothing to publish — and no `gh` call may happen on it."""
+    repo = _make_refresh_repo(tmp_path)
+    for name in ("ci-timing.md", "ci-timing.json"):
+        shutil.copyfile(repo / "docs" / name, repo / "generated" / name)
+    shutil.copyfile(repo / "config" / "ci-surfaces.yml",
+                    repo / "generated-map" / "ci-surfaces.yml")
+    proc, record = _run_refresh_step(tmp_path, monkeypatch, repo=repo, token=None)
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    assert "unchanged" in proc.stdout, proc.stdout
+    assert record == "", f"the no-op path must not call gh at all:\n{record}"
+
+
+def test_refresh_step_without_a_token_fails_before_touching_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing token is the production failure mode. It must be caught before the
+    step commits and pushes a branch it cannot open a PR for."""
+    proc, record = _run_refresh_step(tmp_path, monkeypatch, token=None)
+    assert proc.returncode != 0, f"missing token must fail the step\n{proc.stdout}"
+    assert "::error::" in proc.stdout and "GH_TOKEN" in proc.stdout, proc.stdout
+    assert record == "", f"gh must not be called at all without a token:\n{record}"
+    repo = tmp_path / "repo"
+    branches = subprocess.run(["git", "branch", "--list"], cwd=repo,
+                              capture_output=True, text=True).stdout
+    assert "chore/ci-timing-refresh" not in branches, branches
+    remote = subprocess.run(["git", "ls-remote", "origin"], cwd=repo,
+                            capture_output=True, text=True).stdout
+    assert "chore/ci-timing-refresh" not in remote, remote
+
+
+def test_refresh_step_opens_the_pr_when_none_is_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The path that has NEVER executed in production: no open PR → create one."""
+    proc, record = _run_refresh_step(tmp_path, monkeypatch, list_rc=0, list_out="0")
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    assert "gh pr list" in record, record
+    assert "gh pr create" in record, (
+        f"an empty open-PR list must reach the create call:\n{record}"
+    )
+    assert "--base main" in record, record
+    # Pin the QUERY SHAPE, not just that a query happened: dropping `--state open`
+    # would count closed PRs and produce a permanent bogus "already open" skip —
+    # the same silent no-op this issue is about.
+    list_argv = [ln for ln in record.splitlines() if ln.startswith("gh pr list")]
+    assert len(list_argv) == 1, record
+    assert "--state open" in list_argv[0] and "--json number" in list_argv[0], (
+        f"the open-PR query shape changed:\n{list_argv[0]}"
+    )
+    # A successful create must KEEP the branch — it is what the PR points at.
+    remote = subprocess.run(
+        ["git", "ls-remote", "origin"], cwd=tmp_path / "repo",
+        capture_output=True, text=True,
+    ).stdout
+    assert "chore/ci-timing-refresh" in remote, (
+        f"the branch must survive a successful create:\n{remote}"
+    )
+
+
+def test_refresh_step_skips_when_a_pr_is_already_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The legitimate skip: a REAL count of 1 must still short-circuit."""
+    proc, record = _run_refresh_step(tmp_path, monkeypatch, list_rc=0, list_out="1")
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    assert "already open" in proc.stdout, proc.stdout
+    assert "gh pr create" not in record, record
+    # The existing PR points at this branch, so the skip must NOT delete it.
+    remote = subprocess.run(
+        ["git", "ls-remote", "origin"], cwd=tmp_path / "repo",
+        capture_output=True, text=True,
+    ).stdout
+    assert "chore/ci-timing-refresh" in remote, (
+        f"the branch behind an existing PR must not be deleted:\n{remote}"
+    )
+
+
+def test_refresh_step_keeps_a_pre_existing_branch_when_the_query_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed PR query says NOTHING about whether a PR exists — so it cannot be
+    the evidence for deleting a branch this run did not create. A branch that was
+    already on origin may be the head of an open PR, and `--delete` on it would
+    orphan (or close) that PR. Only a branch THIS run pushed is an orphan by
+    construction, so the cleanup is gated on that."""
+    repo = _make_refresh_repo(tmp_path)
+    head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=repo,
+                          capture_output=True, text=True, check=True).stdout.strip()
+    branch = f"chore/ci-timing-refresh-{head}"
+    # Put the branch this run is about to create ALREADY on origin, at the exact
+    # commit the step pushes from — so its push fast-forwards and SUCCEEDS, and the
+    # only thing that then fails is the PR query.
+    subprocess.run(["git", "push", "-q", "origin", f"HEAD:refs/heads/{branch}"],
+                   cwd=repo, check=True, capture_output=True)
+
+    proc, _ = _run_refresh_step(
+        tmp_path, monkeypatch, repo=repo, list_rc=1, list_out=None,
+    )
+    assert proc.returncode != 0, f"a failed query must fail the step\n{proc.stdout}"
+    remote = subprocess.run(
+        ["git", "ls-remote", "origin", f"refs/heads/{branch}"],
+        cwd=repo, capture_output=True, text=True,
+    ).stdout
+    assert remote.strip(), (
+        f"a failed query deleted a branch this run did not create — it may back an "
+        f"open PR:\n{remote}"
+    )
+
+
+def test_refresh_step_fails_loudly_when_pr_create_is_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The create call can fail for TWO independent documented reasons: the job
+    lacks `pull-requests: write`, OR the repository setting "Allow GitHub Actions
+    to create and approve pull requests" is disabled
+    (`can_approve_pull_request_reviews=false` — measured live on this repo while
+    fixing #3092, so it is the LIVE blocker here). The diagnostic must name both;
+    naming only the scope misdiagnoses the real failure."""
+    proc, record = _run_refresh_step(
+        tmp_path, monkeypatch, list_rc=0, list_out="0", create_rc=1,
+    )
+    assert proc.returncode != 0, f"{proc.stdout}\n{proc.stderr}"
+    assert "::error::" in proc.stdout, proc.stdout
+    assert "pull-requests: write" in proc.stdout, proc.stdout
+    assert "can_approve_pull_request_reviews" in proc.stdout, (
+        "the create-failure diagnostic must also name the repository setting that "
+        "refuses bot-created PRs even when the scope IS granted"
+    )
+    # ⛔ BEHAVIOURAL GUARD for the backtick trap. The diagnostic names the command
+    # in backticks; inside a DOUBLE-QUOTED shell string an UNESCAPED backtick is
+    # command substitution and would RE-RUN the create inside the error handler.
+    # Counting the stub's invocations catches it regardless of how the message is
+    # spelled.
+    assert record.count("gh pr create") == 1, (
+        "the create must be attempted exactly once — a second invocation means the "
+        "error message's backticks were left unescaped and bash substituted them:\n"
+        f"{record}"
+    )
+    assert record.count("gh pr list") == 1, (
+        f"the error path must not re-query the PR list:\n{record}"
+    )
+    # ⛔ NO ORPHAN BRANCH. The branch is pushed BEFORE the create, and
+    # `delete_branch_on_merge` only removes branches that HAD a PR — so without an
+    # explicit delete a failed create strands one branch on origin forever, which
+    # is how the two existing orphans accumulated. This is the LIVE failure cause
+    # (the repo setting is disabled), so it must not leak state.
+    remote = subprocess.run(
+        ["git", "ls-remote", "origin"], cwd=tmp_path / "repo",
+        capture_output=True, text=True,
+    ).stdout
+    assert "chore/ci-timing-refresh" not in remote, (
+        f"a failed create left an orphan branch on origin:\n{remote}"
+    )
+    assert "orphan branch" in proc.stdout, (
+        f"the step must say it cleaned up (or could not):\n{proc.stdout}"
+    )
+
+
+def test_the_pre_fix_shape_swallowed_the_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mutation check on the regression above: replay the PRE-FIX construct with
+    the same unauthenticated `gh` and show it exits 0 — proving the new test would
+    have failed before the fix, i.e. the old shape really was fail-open."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _install_gh_pr_stub(bin_dir, tmp_path / "record.txt", list_rc=1, list_out=None)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    monkeypatch.setenv("GH_TOKEN", "stub-token")
+    branch = "chore/ci-timing-refresh-deadbeef"
+    pre_fix = "\n".join([
+        f'BRANCH="{branch}"',
+        "if [ \"$(gh pr list --head \"$BRANCH\" --state open --json number --jq 'length')\" = \"0\" ]; then",
+        '  echo "creating"',
+        "else",
+        '  echo "refresh PR already open for $BRANCH — skipping"',
+        "fi",
+    ])
+    proc = subprocess.run(["bash", "-e", "-c", pre_fix], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stdout
+    assert "already open" in proc.stdout, proc.stdout

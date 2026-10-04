@@ -35,6 +35,7 @@ from tortoise.mcp_auth import (_current_org_id, _current_org_limits,
 # ``hosted_api`` import — that import is ~1.7 s and builds the whole hosted
 # FastAPI app — and a patch of the canonical constant reaches this surface.
 from tortoise import mcp_auth as _mcp_auth
+from tortoise import embed_metering as _embed_metering  # #4488 encode measurement
 
 _log = logging.getLogger(__name__)
 
@@ -1059,12 +1060,32 @@ def _quota_gated(fn, resource: str = "points", abuse_weight=None):
     """
     def _gated(*args, **kwargs):
         _enforce_quota(resource)
-        result = fn(*args, **kwargs)
         try:
             from tortoise.mcp_auth import _current_org_id
             org_id = _current_org_id.get()
         except Exception:  # noqa: BLE001, RUF100 — no org context; metering is skipped
             org_id = None
+        # #4488: own a FRESH embedding-encode tally for this tool call, so the
+        # encodes it performs are attributed even though no HTTP middleware wraps
+        # this lane. Fresh (never inherited) → it cannot double-count the hosted
+        # capture lane's tally, and an exception still flushes what was encoded.
+        # Resolved before the write so the tally knows its org from the start.
+        #
+        # ⛔ ARMED ONLY WHEN THERE IS AN ORG. On the stdio transport
+        # ``_current_org_id`` is legitimately None (_enforce_quota says so:
+        # "stdio/operator — no org context"), and every sibling writer exempts
+        # ``not org_id`` — ``record_embedding_usage`` included. Arming a tally
+        # with no org would make the write's encodes non-empty and
+        # unattributable, so ``flush_tally`` would fire an UNMETERED_INCREMENT
+        # incident on EVERY stdio write that encodes — a permanent false alarm
+        # about attribution on a lane that has no tenant BY DESIGN. Guarding
+        # here matches the write-op metering below (`if org_id:`) and the
+        # writer's own exemption contract.
+        if org_id:
+            with _embed_metering.meted(org_id):
+                result = fn(*args, **kwargs)
+        else:
+            result = fn(*args, **kwargs)
         # Metering (#681): best-effort, after successful write
         if org_id:
             try:
@@ -4537,9 +4558,18 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         filtered out of the HTTP tool listing so tenants can't discover them.
         When tool_group is set, only that group's tools are listed — role-
         scoped servers keep the agent's tool-selection surface under ~20.
+
+        #3877: the group is read from the SAME single source `tools_by_group()`
+        reads — the group the registry APPLIED to the entry
+        (`ToolDefinition.group`, assigned once by `_apply_groups`). Re-deriving it
+        here from `GROUP_BY_NAME` with no default dropped every name the map does
+        not list, so those tools were unreachable on EVERY group-scoped server
+        while the registry had already assigned them "memory". One lookup, so the
+        declared group and the served group cannot disagree.
         """
         async def list_tools(self, tools):
             group = _tool_group.get()
+            _by_name = get_tool_by_name()
             # Skip the control-plane read when it can't change the outcome: in
             # a curation-group-scoped app (other than "onboarding") the group
             # filter below already excludes the onboarding tools.
@@ -4552,7 +4582,8 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
             def _visible(t):
                 if t.name not in HTTP_ALLOWED:
                     return False
-                tgroup = GROUP_BY_NAME.get(t.name)
+                _entry = _by_name.get(t.name)
+                tgroup = getattr(_entry, "group", None)
                 # explicit curation-group request — serve that group's tools
                 if group and tgroup != group:
                     return False
@@ -5228,7 +5259,7 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
 # handlers dict covers the whole registry: the seven onboarding tools and
 # tortoise_session_capture used to be logged "no handler — skipped" (they
 # were defined after this block's old mid-module position) — #2210.
-from tortoise.tool_registry import TOOL_REGISTRY, GROUP_BY_NAME, FastMCPAdapter  # noqa: E402, I001
+from tortoise.tool_registry import TOOL_REGISTRY, FastMCPAdapter  # noqa: E402
 
 _adapter = FastMCPAdapter(mcp)
 _adapter.register_all(TOOL_REGISTRY, {
