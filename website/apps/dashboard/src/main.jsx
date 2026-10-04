@@ -8014,11 +8014,13 @@ function claimIntentInFlight() {
                                     claims the install signal, not the harness;
                                     'install-pending' — recording on, nothing
                                     observed for this harness — prints the SAME
-                                    "not installed yet" string Settings renders
+                                    "not yet observed" string Settings renders
                                     for the identical state, instead of promising
                                     a capture the server never saw (#3782: live,
                                     probe AND receipt were null while Settings
-                                    said "not installed yet"). The capability
+                                    said the same — #5450: the wording states
+                                    what was OBSERVED, never a non-installation
+                                    conclusion drawn from its absence). The capability
                                     flag still decides whether ANY sentence may
                                     print ('none' for no install path, recording
                                     off, or NO HARNESS PICKER offered). #3575 was

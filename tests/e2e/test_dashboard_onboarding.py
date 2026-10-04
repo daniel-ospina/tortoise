@@ -1203,7 +1203,7 @@ def _connected_projection(*, receipt: str | None = None, probe: str | None = Non
     whose capture receipt was observed; `probe` names the harness whose install
     PROBE was observed (install confirmed server-side, capture not fired yet).
     With NEITHER, the projection is the #3782 live state — recording on with
-    nothing observed for the harness — which must read "not installed yet",
+    nothing observed for the harness — which must read "not yet observed",
     never a future promise. The projection must be WRAPPED by `_wire`
     (`{"onboarding": …}`) — the app reads `st.onboarding`.
 
@@ -1253,7 +1253,7 @@ def test_connected_screen_states_capture_in_future_tense_after_an_install_probe(
     available, NO receipt, but an install PROBE was observed server-side. The
     probe is exactly what makes the future tense honest — the screen states what
     WILL happen, must NOT print the present-tense sentence, and must NOT claim
-    the honest "not installed yet" state (the install was observed)."""
+    the honest "not yet observed" state (the install was observed)."""
     _seed_cookie(page, "u-b3-no-receipt")
     _wire(page, role="owner", onboarding_projection=_connected_projection(probe="claude"))
     _walk_to_connect(page)
@@ -1271,15 +1271,18 @@ def test_connected_screen_states_capture_in_future_tense_after_an_install_probe(
         "once this machine opts in (export TORTOISE_CAPTURE=1)")
     assert "Tortoise is capturing your agent's sessions." not in done.inner_text(), \
         "no receipt means the present-tense claim is false"
-    assert "not installed yet" not in done.inner_text(), \
-        "#3782: an observed install probe means the install IS installed — not installed yet is false"
+    # #5450: asserted against the CURRENT honest wording, not the retired
+    # "not installed yet" — a negative assertion on a string that no longer
+    # exists anywhere would pass vacuously and stop catching this at all.
+    assert "not yet observed" not in done.inner_text(), \
+        "#3782/#5450: an observed install probe means the server DID observe the install — the nothing-observed label is false"
 
 
-def test_connected_screen_without_probe_or_receipt_reports_not_installed(page: Page) -> None:
+def test_connected_screen_without_probe_or_receipt_reports_nothing_observed(page: Page) -> None:
     """#3782: the live defect. `harness-connected` (a real server-observed
     connection) with recording ON but NEITHER an install probe NOR a capture
     receipt must not promise a capture the server never observed. The screen
-    states the honest "not installed yet" — the identical string Settings
+    states the honest "not yet observed" — the identical string Settings
     renders for the same state — and neither the present- nor the future-tense
     sentence."""
     _seed_cookie(page, "u-b3-no-probe-no-receipt")
@@ -1289,7 +1292,7 @@ def test_connected_screen_without_probe_or_receipt_reports_not_installed(page: P
     expect(page.locator(".welcome-title")).to_have_text("You're all set", timeout=10_000)
     done = page.locator("div.done")
     expect(done).to_contain_text("Connected", timeout=10_000)
-    expect(done).to_contain_text("not installed yet")
+    expect(done).to_contain_text("not yet observed")
     text = done.inner_text()
     assert "Tortoise is capturing your agent's sessions." not in text, \
         "#3782: no receipt — the present-tense claim is false"
