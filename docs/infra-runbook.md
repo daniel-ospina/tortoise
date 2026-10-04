@@ -815,13 +815,20 @@ fly machine restart <id> -a tortoise-y4mjjq
 - **Rolling deploys still replace the only machine** — there is a boot-length
   window with no healthy instance. `canary`/`bluegreen` cannot fix this while a
   volume is attached; only §6.3 can.
-- **`/health` still spawns a DB probe per call** (`asyncio.to_thread`; the probe
-  is bounded at 1.5 s and abandons its worker thread on timeout —
-  `monitoring.probe_db`, via the `executor.shutdown(wait=False)` path). Under a black-holed DB, threads can accumulate
-  slowly. This no longer affects routing (the routing check is TCP), but it still
-  affects the human/operator view and any external probe that hits `/health`.
-  App-layer, tracked outside this runbook; a `wait_for` wrapper would bound the
-  request even if the probe regresses.
+- **`/health` no longer spawns a DB probe per call** — superseded by the
+  background health refresher (#2850 hosted, #2988 selfhost). The handler reads
+  ONE in-memory value from the single-flight coordinator
+  (`_HEALTH_PROBE.snapshot()`), submits nothing to any pool, and never waits on
+  a worker, so a black-holed DB cannot park a thread on the request path nor
+  delay the response. The `asyncio.to_thread` / `monitoring.probe_db` /
+  `executor.shutdown(wait=False)` shape this bullet used to describe is gone.
+  The probe now runs on the refresher, **off** the request path, which is also
+  what lets it carry the projection cold-start allowance without making the
+  deploy gate slow (#3243).
+  **Still true, and still the residual:** `/health/ready` DOES probe
+  synchronously, and its worker can stay parked past the answer it gave because
+  the client read timeout (10 s) exceeds the outer bound (6.0 s) — tracked as
+  #3320, not fixed here.
 - **Nobody has replayed #2850 in staging.** The fix rests on the in-machine
   evidence and the code path, not on a reproduced failure (the issue's
   indicator list requires this).
