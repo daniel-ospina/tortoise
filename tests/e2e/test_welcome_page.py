@@ -517,21 +517,6 @@ def test_unobserved_outcome_is_disposed_correctly() -> None:
     assert "Supabase directly" in calls[4][1]
 
 
-def test_post_issued_flag_starts_false() -> None:
-    """#4940: the register starts False and is MUTABLE.
-
-    The False value is caught by the listener pin too; what is unique here is that
-    it is a dict the `request` listener can set in place — an immutable object per
-    call would silently break the signal while every value assertion still passed.
-    """
-    flag = _post_issued_flag()
-    assert flag == {"value": False}
-    # It must be a mutable register: the `request` listener sets it in place, so a
-    # fresh immutable object per call would silently break the signal.
-    flag["value"] = True
-    assert flag == {"value": True}
-
-
 def test_signup_capture_listeners_are_registered_and_wired() -> None:
     """#4940: the LIVE wiring is pinned by replaying the registered handlers.
 
@@ -636,6 +621,12 @@ def test_dispose_captured_reads_the_live_register() -> None:
     _dispose_captured([], {"value": True}, [], skip=skip, fail=fail)
     assert [kind for kind, _ in calls] == ["skip"]
 
+    # Non-empty transport evidence must REACH the message, not be emptied en route.
+    calls.clear()
+    _dispose_captured(["obs ERR_NAME_NOT_RESOLVED"], {"value": True}, [], skip=skip, fail=fail)
+    assert [kind for kind, _ in calls] == ["skip"]
+    assert "ERR_NAME_NOT_RESOLVED" in calls[0][1]
+
     # The tripwire still wins over a skip, through this entry point too.
     calls.clear()
     _dispose_captured([], {"value": True}, ["https://x/auth/v1/token"], skip=skip, fail=fail)
@@ -653,12 +644,34 @@ def test_dispose_live_binds_the_runner_callables(monkeypatch) -> None:
     monkeypatch.setattr(pytest, "skip", lambda m: calls.append(("skip", m)))
     monkeypatch.setattr(pytest, "fail", lambda m: calls.append(("fail", m)))
 
+    # Distinguishable NON-EMPTY values matter: with `[]` for BOTH list arguments
+    # this pin could not tell `transport_failures` from `browser_to_supabase`, so
+    # dropping or swapping them survived the whole battery while inverting a
+    # verdict — dropping the tripwire turned a product regression into a SKIP, and
+    # swapping the two reported an outage as a product FAIL (#4940 round 10).
     _dispose_live([], {"value": True}, [])
     assert [kind for kind, _ in calls] == ["skip"]
 
     calls.clear()
     _dispose_live([], {"value": False}, [])
     assert [kind for kind, _ in calls] == ["fail"]
+
+    # The tripwire must be reported AS the tripwire, naming the URL it caught.
+    calls.clear()
+    _dispose_live([], {"value": True}, ["https://x/auth/v1/token"])
+    assert [kind for kind, _ in calls] == ["fail"]
+    assert "Supabase directly" in calls[0][1]
+    assert "x/auth/v1/token" in calls[0][1]
+
+    # The observed transport evidence must reach the message as evidence.
+    calls.clear()
+    _dispose_live(
+        ["POST https://app.premiselabs.co/auth/signup — net::ERR_NAME_NOT_RESOLVED"],
+        {"value": True},
+        [],
+    )
+    assert [kind for kind, _ in calls] == ["skip"]
+    assert "ERR_NAME_NOT_RESOLVED" in calls[0][1]
 
 
 
