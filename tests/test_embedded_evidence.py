@@ -815,9 +815,303 @@ class TestBothJunitReadersTolerateATruncatedFile:
                 pass
 
         monkeypatch.setattr(ee.subprocess, "Popen", lambda *a, **k: TimeoutProc())
-        rec = ee._run_once(["tests/a.py"], tmp_path, tmp_path, 1, "m", 1)
+        rec = ee._run_once(["tests/a.py"], tmp_path, tmp_path, 1, "m", 1, 1e9,
+                           "measured")
         assert rec["bucket"] == "timeout-red"
         assert rec["junit_parse_error"]
+
+
+class TestTheLoadCeilingIsPerRun:
+    """A run that BEGINS above the declared ceiling is refused — for EVERY run.
+
+    The gate used to be sampled and checked ONCE, by the caller, before run 1, so
+    runs 2..N could begin above the ceiling and still be counted in the verdict. The
+    #3882 closing record is the live instance: it declares `load.ceiling` 60.0 while
+    run 1 ENDS at 68.0, run 2 BEGINS at 68.0, and run 2 is the only red. Every run's
+    `load.before` was already recorded and never asserted.
+
+    The gate lives in `_run_once` for two reasons: the sampled value IS the recorded
+    `load.before`, so the value gated and the value reported cannot disagree; and no
+    call site — the measurement loop, or the pairing baseline — can omit it.
+    """
+
+    @staticmethod
+    def _never_started(*a, **k):
+        raise AssertionError("the child must NOT start once the run is inadmissible")
+
+    def test_a_run_beginning_above_the_ceiling_is_refused_before_the_child_starts(
+        self, tmp_path: Path, monkeypatch
+    ):
+        monkeypatch.setattr(ee, "_child_env", lambda rr: {})
+        monkeypatch.setattr(ee, "_snapshot_redis_logs", lambda rr: [])
+        # The live value from the #3882 record, to within a decimal.
+        monkeypatch.setattr(ee, "load1", lambda: 68.0)
+        monkeypatch.setattr(ee.subprocess, "Popen", self._never_started)
+
+        with pytest.raises(RuntimeError) as exc:
+            ee._run_once(["tests/a.py"], tmp_path, tmp_path, 2, "m", 60, 60.0,
+                         "measured")
+        # The RUN INDEX must be in the message. "before run 1" would be a
+        # per-measurement rule — the defect this replaces — and would also be a lie
+        # about which run was refused. The SEQUENCE is named too: the pairing
+        # baseline is also run 1, so a bare index cannot say which run it was.
+        assert "exceeds ceiling 60.0 before run 2" in str(exc.value)
+        assert "(measured)" in str(exc.value)
+
+    def test_a_run_below_the_ceiling_still_proceeds(
+        self, tmp_path: Path, monkeypatch
+    ):
+        # The positive control. A gate that refused EVERY run would satisfy the test
+        # above, so it proves nothing on its own: the same predicate must ADMIT a run
+        # that is inside the ceiling.
+        monkeypatch.setattr(ee, "_child_env", lambda rr: {})
+        monkeypatch.setattr(ee, "_snapshot_redis_logs", lambda rr: [])
+        monkeypatch.setattr(ee, "load1", lambda: 59.0)
+
+        class Proc:
+            returncode = 0
+
+            def communicate(self, timeout=None):
+                return ("", None)
+
+            def kill(self):
+                pass
+
+        monkeypatch.setattr(ee.subprocess, "Popen", lambda *a, **k: Proc())
+        rec = ee._run_once(["tests/a.py"], tmp_path, tmp_path, 1, "m", 60, 60.0,
+                           "measured")
+        # The admitted run reports the very load it was gated on.
+        assert rec["load"]["before"] == 59.0
+
+    def test_an_idle_host_at_zero_load_is_admitted_by_the_producer(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """The producer's lower bound is `before < 0.0`, so `0.0` is ADMITTED.
+
+        An idle host reports exactly 0.0, and the CONSUMER pin asserts `>= 0.0`
+        for the same reason. Without this test the producer half of that pair is
+        unheld: mutating the producer to `before <= 0.0` — which refuses a
+        legitimate idle-host sample as "load is unmeasurable (0.0)" — left the
+        whole suite green, so the two bounds could drift apart one-directionally
+        with nothing failing.
+        """
+        monkeypatch.setattr(ee, "_child_env", lambda rr: {})
+        monkeypatch.setattr(ee, "_snapshot_redis_logs", lambda rr: [])
+        monkeypatch.setattr(ee, "load1", lambda: 0.0)
+
+        class Proc:
+            returncode = 0
+
+            def communicate(self, timeout=None):
+                return ("", None)
+
+            def kill(self):
+                pass
+
+        monkeypatch.setattr(ee.subprocess, "Popen", lambda *a, **k: Proc())
+        rec = ee._run_once(["tests/a.py"], tmp_path, tmp_path, 1, "m", 60, 60.0,
+                           "measured")
+        assert rec["load"]["before"] == 0.0
+
+    def test_the_gate_is_the_recorded_value_not_a_second_sample(
+        self, tmp_path: Path, monkeypatch
+    ):
+        # Two different samples could disagree — the gate could pass while the
+        # RECORDED `load.before` exceeds the ceiling, which is the same defect in a
+        # narrower window. One sample per run makes that unrepresentable, and this
+        # pins it: a second `load1()` call inside the run would be visible here.
+        monkeypatch.setattr(ee, "_child_env", lambda rr: {})
+        monkeypatch.setattr(ee, "_snapshot_redis_logs", lambda rr: [])
+        calls: list[float] = []
+        # DISTINCT samples, not two copies of one. With `[50.0, 50.0]` every
+        # assertion here AND in the positive control was satisfied by a mutation that
+        # recorded the `after` sample as `load.before` — the test could not fail for
+        # the defect it names.
+        values = iter([55.0, 5.0])   # before, then after
+
+        def _load1() -> float:
+            v = next(values)
+            calls.append(v)
+            return v
+
+        monkeypatch.setattr(ee, "load1", _load1)
+
+        class Proc:
+            returncode = 0
+
+            def communicate(self, timeout=None):
+                return ("", None)
+
+            def kill(self):
+                pass
+
+        monkeypatch.setattr(ee.subprocess, "Popen", lambda *a, **k: Proc())
+        rec = ee._run_once(["tests/a.py"], tmp_path, tmp_path, 1, "m", 60, 60.0,
+                           "measured")
+        assert calls == [55.0, 5.0], "exactly one before + one after sample per run"
+        # The GATED value is the RECORDED value — the whole reason there is one sample.
+        assert rec["load"]["before"] == 55.0
+        assert rec["load"]["after"] == 5.0
+
+    @pytest.mark.parametrize("sample", [ee.LOAD_UNMEASURED, float("nan")])
+    def test_an_unmeasurable_sample_is_refused_not_admitted(
+        self, tmp_path: Path, monkeypatch, sample
+    ):
+        # `load1()` returns the `LOAD_UNMEASURED` sentinel (-1.0) when the host cannot
+        # be read, and `-1.0 > ceiling` is False — so a bare `before > ceiling`
+        # comparison ADMITS the run. The verdict does not rescue it either:
+        # `load.band` is derived from the run's own `after` sample, so a `before` that
+        # failed to read while `after` succeeded still lands the run in a real band
+        # and the record can close on a run whose admissibility was never established.
+        monkeypatch.setattr(ee, "_child_env", lambda rr: {})
+        monkeypatch.setattr(ee, "_snapshot_redis_logs", lambda rr: [])
+        monkeypatch.setattr(ee, "load1", lambda: sample)
+        monkeypatch.setattr(ee.subprocess, "Popen", self._never_started)
+
+        with pytest.raises(RuntimeError) as exc:
+            ee._run_once(["tests/a.py"], tmp_path, tmp_path, 1, "m", 60, 60.0,
+                         "pairing baseline")
+        assert "unmeasurable" in str(exc.value)
+        # The SEQUENCE is named: the baseline is run 1 of its own sequence, so a bare
+        # run index cannot say which run was refused.
+        assert "pairing baseline" in str(exc.value)
+
+    def test_a_run_exactly_at_the_ceiling_is_admitted(
+        self, tmp_path: Path, monkeypatch
+    ):
+        # The rule is "EXCEEDS" — `before > ceiling`, not `>=`. A regression that
+        # tightened it to `>=` would silently refuse a run sitting exactly on the
+        # declared ceiling, and nothing else fires at the boundary: the refusal test
+        # uses 68.0 and the positive control 59.0, both against a ceiling of 60.0.
+        monkeypatch.setattr(ee, "_child_env", lambda rr: {})
+        monkeypatch.setattr(ee, "_snapshot_redis_logs", lambda rr: [])
+        monkeypatch.setattr(ee, "load1", lambda: 60.0)
+
+        class Proc:
+            returncode = 0
+
+            def communicate(self, timeout=None):
+                return ("", None)
+
+            def kill(self):
+                pass
+
+        monkeypatch.setattr(ee.subprocess, "Popen", lambda *a, **k: Proc())
+        rec = ee._run_once(["tests/a.py"], tmp_path, tmp_path, 1, "m", 60, 60.0,
+                           "measured")
+        assert rec["load"]["before"] == 60.0
+
+
+class TestTheDeclaredCeilingMustBeUsable:
+    """D14: `--load-ceiling` must be numeric and `> 0`; else a usage error, exit 2.
+
+    argparse rejects a non-numeric string, but `0`, a negative, `nan` and `inf` all
+    arrive as floats, and they fail in two DIFFERENT directions: `nan`/`inf` fail OPEN
+    (`before > nan` and `before > inf` are False for EVERY sample, so no run is ever
+    refused), while `0`/negative fail SHUT (every real run is refused).
+    """
+
+    @pytest.mark.parametrize("bad", [0.0, -1.0, float("nan"), float("inf")])
+    def test_an_unusable_ceiling_is_a_usage_error(self, bad):
+        with pytest.raises(ee.UsageError):
+            ee._validated_ceiling(bad)
+
+    def test_a_usable_ceiling_passes_through(self):
+        # The positive control: a predicate that refused every ceiling would satisfy
+        # the test above and prove nothing.
+        assert ee._validated_ceiling(60.0) == 60.0
+
+    def test_build_record_calls_the_ceiling_validator_before_acquiring_anything(
+        self, monkeypatch
+    ):
+        # Two distinct claims, both pinned here. (a) The helper-level tests above
+        # cannot see whether `_build_record` still CALLS the helper: replacing that
+        # call with `ceiling = args.load_ceiling` (the pre-fix line) leaves every one
+        # of them green while an unusable ceiling again yields a gate that refuses
+        # nothing. (b) "Before acquiring anything" is asserted, not merely named:
+        # `mkdtemp` is a sentinel that fails the test if the validation has not
+        # already run, so moving the call below the run-root creation reddens it.
+        monkeypatch.setattr(
+            ee.tempfile,
+            "mkdtemp",
+            lambda *a, **k: pytest.fail(
+                "the run root was acquired before the ceiling was validated"
+            ),
+        )
+        args = TestRecordConstructionReadsTheCanonicalConstants._args(load_ceiling=0.0)
+        with pytest.raises(ee.UsageError):
+            ee._build_record(args)
+
+    def test_the_ceiling_is_validated_before_the_ref_worktree_exists(self, monkeypatch):
+        # Ordering, not just occurrence. A refusal raised after `_worktree_at` created
+        # the `--ref` worktree but before the `try/finally` that removes it leaks that
+        # worktree into `git worktree list`, which `tools/collision_preflight.py`
+        # scans untruncated — so a typo'd ceiling would poison a dispatch surface.
+        # A ref that is NOT HEAD, so the scenario is real — and `_git` patched, because
+        # CI checks out a SHALLOW clone where `HEAD~1` does not resolve: a test that
+        # shells out to real history passes locally and fails in CI. Returns a
+        # plausible 40-hex so the code path is exercised, not short-circuited.
+        monkeypatch.setattr(ee, "_git", lambda *a, cwd=None: "0" * 40)
+        args = TestRecordConstructionReadsTheCanonicalConstants._args(
+            load_ceiling=0.0, ref="HEAD~1"
+        )
+        monkeypatch.setattr(
+            ee,
+            "_worktree_at",
+            lambda *a, **k: pytest.fail(
+                "the worktree was created before the ceiling was validated"
+            ),
+        )
+        with pytest.raises(ee.UsageError):
+            ee._build_record(args)
+
+    def test_a_refusal_after_the_worktree_exists_still_removes_it(
+        self, monkeypatch, tmp_path
+    ):
+        # The measured-root `--record-out` refusal CANNOT be hoisted the way the
+        # ceiling check was: by definition it has to see the tree the `--ref` created,
+        # so the only thing that can protect it is the `finally`. Before the fix it sat
+        # between `_worktree_at` and the `try`, so a raise there skipped the `finally`
+        # and leaked the detached worktree into `git worktree list` — the surface
+        # `tools/collision_preflight.py` scans untruncated.
+        # `_git` is patched because CI checks out a SHALLOW clone: a real
+        # `rev-parse HEAD~1` does not resolve there, so a test that reaches for actual
+        # history passes locally and fails in CI. The ref is still a non-HEAD name, so
+        # the scenario below is the real one if these patches were removed.
+        monkeypatch.setattr(ee, "_git", lambda *a, cwd=None: "0" * 40)
+        args = TestRecordConstructionReadsTheCanonicalConstants._args(
+            load_ceiling=60.0, ref="HEAD~1", record_out="/tmp/unused/record.json"
+        )
+        monkeypatch.setattr(ee, "_worktree_at", lambda *a, **k: (tmp_path, True))
+        # Patch `subprocess.run` ONLY for the cleanup command: the manifest
+        # collect-only leg calls the same function and needs its real result object.
+        real_run = ee.subprocess.run
+        removed: list[list[str]] = []
+
+        def _run(cmd, **k):
+            if list(cmd)[:3] == ["git", "worktree", "remove"]:
+                removed.append(list(cmd))
+                return None
+            return real_run(cmd, **k)
+
+        monkeypatch.setattr(ee.subprocess, "run", _run)
+
+        def _refuse(out, root):
+            # The FIRST call is against `REPO_ROOT` and must pass; only the second —
+            # against the just-created worktree — refuses.
+            if root == tmp_path:
+                raise ee.UsageError("the record is inside the measured tree")
+
+        monkeypatch.setattr(ee, "_refuse_in_tree_record_out", _refuse)
+
+        with pytest.raises(ee.UsageError):
+            ee._build_record(args)
+        assert removed, (
+            "the worktree must be removed even when the refusal is the measured-root "
+            "one, which cannot be validated before the worktree exists"
+        )
+        assert removed[0][:3] == ["git", "worktree", "remove"]
+        assert str(tmp_path) in removed[0]
 
 
 class TestRunOnceWiresTheIndependentFileList:
@@ -851,7 +1145,7 @@ class TestRunOnceWiresTheIndependentFileList:
         monkeypatch.setattr(ee.subprocess, "Popen", lambda *a, **k: Proc())
         return ee._run_once(
             ["tests/selection_x.py", "tests/selection_y.py"],
-            tmp_path, tmp_path, 1, "m", 60,
+            tmp_path, tmp_path, 1, "m", 60, 1e9, "measured",
         )
 
     def test_a_red_that_ran_the_selection_is_certified_from_its_own_junit(
@@ -968,7 +1262,10 @@ class TestRecordConstructionReadsTheCanonicalConstants:
         monkeypatch.setattr(
             ee,
             "_run_once",
-            lambda files, measured_root, run_root, run_id, marker, timeout: runs[run_id - 1],
+            lambda files, measured_root, run_root, run_id, marker, timeout, ceiling,
+            label: (
+                runs[run_id - 1]
+            ),
         )
         monkeypatch.setattr(ee, "load1", lambda: 1.0)
         monkeypatch.setattr(ee, "_git", lambda *a, cwd=None: "0" * 40)
@@ -1027,6 +1324,303 @@ class TestRecordConstructionReadsTheCanonicalConstants:
         assert rec["load"]["overlap"] is True
         _, reasons = ee.closes_issue(rec)
         assert "load-bands-do-not-overlap" not in reasons
+
+    def test_a_run_that_began_above_the_declared_ceiling_must_not_close(self, monkeypatch):
+        """The ceiling is a PRODUCER gate, but a PERSISTED record is re-evaluated
+        HERE — and `load.ceiling` is persisted for exactly this comparison.
+
+        Before this conjunct the field was WRITE-ONLY: no reader anywhere cast a
+        run's `load.before` against `rec["load"]["ceiling"]`, so a record carrying
+        a run that began above its own declared ceiling still closed. That is the
+        issue's own defect ("the contravention is recorded and never asserted")
+        surviving one layer down, on the surface designed to re-read a record.
+
+        The live instance is the #3882 record: run 2 BEGINS at 67.998 against a
+        declared `ceiling` of 60.0, and nothing reported it.
+        """
+        files = list(ee.FAMILY_REPRODUCERS)
+        runs = [
+            self._run(files, 1, "unexpected-divergence"),
+            self._run(files, 2, "unexpected-divergence"),
+        ]
+        runs[0]["load"]["before"] = 30.0   # admissible
+        runs[1]["load"]["before"] = 68.0   # ABOVE the declared ceiling
+        rec = self._record(monkeypatch, runs)
+        rec["load"]["ceiling"] = 60.0      # the persisted record's declaration
+        ok, reasons = ee.closes_issue(rec)
+        assert ok is False
+        assert "load-above-ceiling" in reasons
+
+    def test_a_run_exactly_at_the_ceiling_is_admitted_by_the_consumer(self, monkeypatch):
+        # The boundary is `> ceiling`, not `>=`: a run AT the ceiling is
+        # admissible, matching `_run_once`'s producer gate. A consumer stricter
+        # than the producer would refuse records the tool itself produces.
+        files = list(ee.FAMILY_REPRODUCERS)
+        runs = [
+            self._run(files, 1, "unexpected-divergence"),
+            self._run(files, 2, "unexpected-divergence"),
+        ]
+        for r in runs:
+            r["load"]["before"] = 60.0
+        rec = self._record(monkeypatch, runs)
+        rec["load"]["ceiling"] = 60.0
+        _, reasons = ee.closes_issue(rec)
+        assert "load-above-ceiling" not in reasons
+
+    def test_an_unusable_declared_ceiling_is_a_refusal_not_a_licence(self, monkeypatch):
+        # `_validated_ceiling` rejects 0/negative/non-finite at the producer, so a
+        # record carrying one was NOT produced by this version. An absent or
+        # unusable ceiling cannot establish admissibility, so it refuses: D14's
+        # posture is fail-closed, and `None > x` would otherwise raise.
+        files = list(ee.FAMILY_REPRODUCERS)
+        runs = [
+            self._run(files, 1, "unexpected-divergence"),
+            self._run(files, 2, "unexpected-divergence"),
+        ]
+        for bad in (None, 0, -1.0, float("nan"), float("inf"), "60"):
+            rec = self._record(monkeypatch, runs)
+            rec["load"]["ceiling"] = bad
+            _, reasons = ee.closes_issue(rec)
+            assert "load-ceiling-unusable" in reasons, bad
+
+    def test_the_attested_baseline_is_in_the_ceiling_population(self, monkeypatch):
+        # Same reason as `pin-not-airtight`: the baseline is a RUN, so a baseline
+        # that began above the ceiling is a contravention even if every measured
+        # run was admissible.
+        files = list(ee.FAMILY_REPRODUCERS)
+        runs = [
+            self._run(files, 1, "unexpected-divergence"),
+            self._run(files, 2, "unexpected-divergence"),
+        ]
+        rec = self._record(monkeypatch, runs)
+        rec["load"]["ceiling"] = 60.0
+        baseline = dict(runs[0])
+        baseline["load"] = dict(baseline["load"], before=68.0)
+        rec["red"]["baseline_run"] = baseline
+        assert all(r["load"]["before"] <= 60.0 for r in rec["runs"])
+        _, reasons = ee.closes_issue(rec)
+        assert "load-above-ceiling" in reasons
+
+    def test_the_unmeasured_sentinel_is_refused_by_the_consumer_too(self, monkeypatch):
+        """`LOAD_UNMEASURED` (`-1.0`) must be refused HERE as well as at the producer.
+
+        The producer refuses a `before` that is non-finite or negative, because
+        `-1.0 > ceiling` is `False` and the bare comparison fails OPEN. A consumer
+        that compared naively would re-create that exact fail-open one layer down
+        — on the surface whose whole job is to re-read a record.
+        """
+        files = list(ee.FAMILY_REPRODUCERS)
+        runs = [
+            self._run(files, 1, "unexpected-divergence"),
+            self._run(files, 2, "unexpected-divergence"),
+        ]
+        runs[0]["load"]["before"] = ee.LOAD_UNMEASURED
+        rec = self._record(monkeypatch, runs)
+        rec["load"]["ceiling"] = 60.0
+        assert ee.LOAD_UNMEASURED < 0, "the sentinel must be negative to fail open"
+        _, reasons = ee.closes_issue(rec)
+        assert "load-sample-unusable" in reasons
+
+    def test_the_unmeasured_sentinel_on_the_baseline_is_refused(self, monkeypatch):
+        files = list(ee.FAMILY_REPRODUCERS)
+        runs = [
+            self._run(files, 1, "unexpected-divergence"),
+            self._run(files, 2, "unexpected-divergence"),
+        ]
+        rec = self._record(monkeypatch, runs)
+        rec["load"]["ceiling"] = 60.0
+        baseline = dict(runs[0])
+        baseline["load"] = dict(baseline["load"], before=ee.LOAD_UNMEASURED)
+        rec["red"]["baseline_run"] = baseline
+        _, reasons = ee.closes_issue(rec)
+        assert "load-sample-unusable" in reasons
+
+    def test_an_unreadable_sample_is_a_reason_not_a_traceback(self, monkeypatch):
+        """`closes_issue` is a VERDICT over UNTRUSTED persisted JSON.
+
+        Before this guard the new reads raised: a missing key gave `KeyError`, a
+        null gave `TypeError`, a string gave `ValueError`, and a 401-digit int
+        literal gave `OverflowError`. A traceback is not a fail-closed refusal —
+        it is a crash where the function previously returned a verdict.
+        """
+        files = list(ee.FAMILY_REPRODUCERS)
+        cases = [
+            "MISSING",                   # no "before" key at all
+            {"before": None},           # null
+            {"before": "abc"},          # string
+            {"before": float("nan")},
+            {"before": float("inf")},
+            {"before": -1.0},
+            {"before": 10 ** 400},      # int literal too large for float()
+        ]
+        for shape in cases:
+            runs = [
+                self._run(files, 1, "unexpected-divergence"),
+                self._run(files, 2, "unexpected-divergence"),
+            ]
+            load = dict(runs[0]["load"])
+            if shape == "MISSING":
+                load.pop("before")
+            else:
+                load.update(shape)
+            runs[0]["load"] = load
+            rec = self._record(monkeypatch, runs)
+            rec["load"]["ceiling"] = 60.0
+            _, reasons = ee.closes_issue(rec)          # must NOT raise
+            assert "load-sample-unusable" in reasons, shape
+
+    def test_an_unreadable_ceiling_is_a_reason_not_a_traceback(self, monkeypatch):
+        files = list(ee.FAMILY_REPRODUCERS)
+        runs = [
+            self._run(files, 1, "unexpected-divergence"),
+            self._run(files, 2, "unexpected-divergence"),
+        ]
+        # 10**400 is a legal JSON integer literal and too large for float().
+        for bad in (None, 0, -1.0, float("nan"), float("inf"), "60", True, 10 ** 400):
+            rec = self._record(monkeypatch, runs)
+            rec["load"]["ceiling"] = bad
+            _, reasons = ee.closes_issue(rec)          # must NOT raise
+            assert "load-ceiling-unusable" in reasons, bad
+
+    def test_a_zero_load_sample_is_admitted_by_the_consumer(self, monkeypatch):
+        # The producer admits `before == 0.0` — its rule is `not isfinite or
+        # before < 0.0` — and an idle host really does report 0.0. So the
+        # consumer's lower bound must be `>= 0.0`, not `> 0.0`.
+        #
+        # This pin did not exist: mutating the consumer to `b > 0.0` passed the
+        # entire suite. The CEILING boundary (`before == ceiling`) already had
+        # such a test, for exactly the same reason — a consumer stricter than the
+        # producer refuses records the tool itself produces — but the SAMPLE
+        # boundary did not, which left half the rule unpinned.
+        files = list(ee.FAMILY_REPRODUCERS)
+        runs = [
+            self._run(files, 1, "unexpected-divergence"),
+            self._run(files, 2, "unexpected-divergence"),
+        ]
+        for r in runs:
+            r["load"]["before"] = 0.0
+        rec = self._record(monkeypatch, runs)
+        rec["load"]["ceiling"] = 60.0
+        _, reasons = ee.closes_issue(rec)
+        assert "load-sample-unusable" not in reasons
+        assert "load-above-ceiling" not in reasons
+
+    def test_every_call_site_receives_the_validated_ceiling(self, monkeypatch):
+        """The WIRING half of #7054's Indicator (2).
+
+        The gate cannot be OMITTED (a missing arg is a `TypeError`), but the VALUE
+        each call site passes was unpinned: substituting `float("inf")` at either
+        the measurement loop or the pairing baseline disables the entire per-run
+        gate while the record still declares `"ceiling": 60.0` — a record claiming
+        a gate that never ran.
+
+        BOTH call sites must be in the asserted population, which is the point of
+        this test and not an incidental detail. The first version passed
+        `pairing_ref=None`, so the `if args.pairing_ref:` branch never ran, the
+        pairing `_run_once` call site was never reached, and the "at EITHER call
+        site" claim above was FALSE for the baseline half: substituting
+        `float("inf")` at the pairing call site alone left this test green.
+        Asserting on the LABELS — not only on the ceiling values — is what makes
+        that half impossible to drop silently again.
+        """
+        files = list(ee.FAMILY_REPRODUCERS)
+        runs = [
+            self._run(files, 1, "unexpected-divergence"),
+            self._run(files, 2, "unexpected-divergence"),
+        ]
+        baseline = self._run(files, 1, "unexpected-divergence")
+        seen: list[tuple[float, str]] = []
+
+        def _capture(_files, _measured_root, _run_root, run_id, _marker, _timeout,
+                     ceiling, label):
+            seen.append((ceiling, label))
+            return runs[run_id - 1] if label == "measured" else baseline
+
+        monkeypatch.setattr(ee, "_run_once", _capture)
+        # The pairing branch needs a ref, a strict-ancestor answer and a worktree;
+        # stub all three so the branch RUNS without touching real git. `added=False`
+        # keeps the `finally` from invoking a real `git worktree remove`.
+        monkeypatch.setattr(
+            ee, "_worktree_at", lambda ref, run_root, name: (run_root / name, False))
+        monkeypatch.setattr(ee, "_strict_ancestor", lambda *a, **k: True)
+        monkeypatch.setattr(
+            ee, "_manifest_receipt",
+            lambda files, marker, out_dir: {
+                "path": "stub", "digest": "sha256:0", "count": len(files),
+                "unique_count": len(files), "marker": marker,
+            },
+        )
+        monkeypatch.setattr(ee, "load1", lambda: 1.0)
+        monkeypatch.setattr(ee, "_git", lambda *a, cwd=None: "0" * 40)
+        monkeypatch.setattr(ee, "_porcelain_digest", lambda *a, **k: ("sha256:0", False))
+        monkeypatch.setattr(ee, "_tool_version", lambda: "blob0")
+        rec = ee._build_record(self._args(load_ceiling=60.0, pairing_ref="main"))
+        labels = {label for _ceiling, label in seen}
+        assert labels == {"measured", "pairing baseline"}, (
+            f"a call site was never exercised: {sorted(labels)}")
+        assert {ceiling for ceiling, _label in seen} == {60.0}, (
+            f"a call site passed a different ceiling: {seen}")
+        assert rec["load"]["ceiling"] == 60.0
+
+    def test_an_unusable_sample_does_not_also_claim_to_be_above_the_ceiling(
+        self, monkeypatch
+    ):
+        # The two reasons must be DISJOINT. `-1.0` is the `LOAD_UNMEASURED` sentinel
+        # and `-1.0 <= 60.0` is True, so it is not "above the ceiling" at all.
+        # Re-asserting the sample's usability inside `load-above-ceiling` (the first
+        # version did) recorded BOTH reasons, so `verdict.violations` — persisted, and
+        # printed as the human diagnostic — asserted a contravention that did not
+        # happen, while hiding that it was the SAMPLE check doing the work.
+        files = list(ee.FAMILY_REPRODUCERS)
+        runs = [
+            self._run(files, 1, "unexpected-divergence"),
+            self._run(files, 2, "unexpected-divergence"),
+        ]
+        runs[1]["load"]["before"] = ee.LOAD_UNMEASURED
+        rec = self._record(monkeypatch, runs)
+        rec["load"]["ceiling"] = 60.0
+        _, reasons = ee.closes_issue(rec)
+        assert "load-sample-unusable" in reasons
+        assert "load-above-ceiling" not in reasons
+
+    def test_an_unusable_ceiling_does_not_also_claim_a_contravention(
+        self, monkeypatch
+    ):
+        # The CEILING half of the same rule. `_above_ceiling` used to test only
+        # `_ceiling is not None`, so a ceiling of 0 — which `_validated_ceiling`
+        # itself declares not to be a threshold — still produced
+        # `load-above-ceiling` for every positive sample, attributing a
+        # contravention to a threshold that does not exist.
+        files = list(ee.FAMILY_REPRODUCERS)
+        runs = [
+            self._run(files, 1, "unexpected-divergence"),
+            self._run(files, 2, "unexpected-divergence"),
+        ]
+        rec = self._record(monkeypatch, runs)
+        rec["load"]["ceiling"] = 0.0
+        _, reasons = ee.closes_issue(rec)
+        assert "load-ceiling-unusable" in reasons
+        assert "load-above-ceiling" not in reasons
+
+    def test_the_two_load_reasons_are_disjoint_per_sample_not_per_record(
+        self, monkeypatch
+    ):
+        # Per-SAMPLE disjointness is the real rule: one unusable run and one run
+        # above the ceiling are two TRUE statements about two DIFFERENT runs, so
+        # both labels belong in the list. Pinned so a future "make the two reasons
+        # disjoint" edit cannot silently drop one of them.
+        files = list(ee.FAMILY_REPRODUCERS)
+        runs = [
+            self._run(files, 1, "unexpected-divergence"),
+            self._run(files, 2, "unexpected-divergence"),
+        ]
+        runs[0]["load"]["before"] = ee.LOAD_UNMEASURED
+        runs[1]["load"]["before"] = 68.0
+        rec = self._record(monkeypatch, runs)
+        rec["load"]["ceiling"] = 60.0
+        _, reasons = ee.closes_issue(rec)
+        assert "load-sample-unusable" in reasons
+        assert "load-above-ceiling" in reasons
 
     def test_record_rejects_a_red_that_observed_a_different_file_list(self, monkeypatch):
         files = list(ee.FAMILY_REPRODUCERS)
@@ -1890,7 +2484,7 @@ class TestConjunctFalsifiability:
             },
         )
 
-        def _run_once(files, root, run_root, run_id, marker, timeout):
+        def _run_once(files, root, run_root, run_id, marker, timeout, ceiling, label):
             if Path(root) == pair_path:
                 assert baseline is not None, "pairing ref declared without a baseline run"
                 return baseline
@@ -2363,7 +2957,7 @@ class TestConjunctFalsifiability:
         all-green fixed commit at the same HEAD as the reviewing checkout, a clean
         tree, and a declared shipping surface — must now reach a CLOSING verdict.
         This is the end-to-end PASS that the hardcoded `at_fixed_commit` /
-        `surface` fields made impossible, and it exercises all thirteen conjuncts
+        `surface` fields made impossible, and it exercises every conjunct
         at once.
         """
         files = list(ee.FAMILY_REPRODUCERS)
@@ -2385,3 +2979,147 @@ class TestConjunctFalsifiability:
         assert reasons == []
         assert ee.exit_code(rec) == 0
         assert rec["verdict"]["status"] == "PAIRED-RED-DEMONSTRATED"
+
+    def test_absence_fails_a_conjunct_and_never_satisfies_one(self, monkeypatch, tmp_path):
+        """#7084: a missing field must be a REFUSAL, not a certification.
+
+        Two absences certified a record for recording nothing, and neither was
+        visible while the function raised instead of returning:
+
+          * `_get(pin,"head_sha") == _get(pin,"commit")` is `None == None` -> True
+            when BOTH keys are missing, so R2/D24 ("certificate bound to the
+            reviewed head SHA") passed on a record binding NO sha at all.
+          * `not _get(run,"tree_moved")` is `not None` -> True for a run that
+            never recorded a tree state, so D11 ("pin not airtight") — the
+            conjunct whose entire purpose is detecting a moved tree — passed on
+            an absent one.
+
+        Both removals below must therefore turn the SAME record from closing into
+        refused, naming the conjunct. The fixture is asserted to close first, so
+        this cannot pass vacuously if the producer changes shape.
+        """
+        import copy
+
+        files = list(ee.FAMILY_REPRODUCERS)
+        green = [self._run(files, 1, "green"), self._run(files, 2, "green")]
+        same = "a" * 40
+        rec = self._produce(
+            monkeypatch, tmp_path,
+            runs=green,
+            pairing_ref="pairref",
+            baseline=self._run(files, 1, "unexpected-divergence"),
+            record_role="closing",
+            checkout_head=same,
+            measured_commit=same,
+            surface="tortoise_search",
+            surface_assertion="tests/test_x.py::test_consumer_surface",
+        )
+        ok, reasons = ee.closes_issue(rec)
+        assert ok is True, f"fixture no longer produces a closing record: {reasons}"
+
+        # (a) the head binding must be PRESENT before it is compared.
+        no_sha = copy.deepcopy(rec)
+        assert "head_sha" in no_sha["pin"] and "commit" in no_sha["pin"], "shape changed"
+        del no_sha["pin"]["head_sha"]
+        del no_sha["pin"]["commit"]
+        ok_sha, why_sha = ee.closes_issue(no_sha)
+        assert ok_sha is False, "a record binding no head SHA was CERTIFIED"
+        assert "certificate-not-bound-to-review-head" in why_sha
+
+        # (b) an unrecorded tree state must not read as "did not move".
+        no_tree = copy.deepcopy(rec)
+        assert "tree_moved" in no_tree["runs"][0], "shape changed"
+        del no_tree["runs"][0]["tree_moved"]
+        ok_tree, why_tree = ee.closes_issue(no_tree)
+        assert ok_tree is False, "a record with no run tree state was CERTIFIED"
+        assert "pin-not-airtight" in why_tree
+
+    def test_a_record_missing_keys_or_carrying_nulls_returns_a_reason_never_a_traceback(self):
+        """#7084: the acceptance claim is "returns a reason, not a traceback".
+
+        A snapshot of `closes_issue`'s verification surface is untrusted JSON, so
+        a missing key, a null, or a non-dict where a dict is expected must produce
+        a named reason. Before this fix each shape below raised — KeyError from the
+        bare subscript, or TypeError from `ok &= None` once an accessor returned
+        None. `exit_code` is hardened on the same terms, because it is the
+        re-evaluation surface for a PERSISTED record.
+
+        Deliberately NOT claimed here: a record whose scalar fields are the wrong
+        TYPE. Wrong-TYPE fields are covered by
+        `test_a_truthy_non_bool_at_a_boolean_field_refuses_instead_of_certifying`
+        where that test reaches them, and by nothing otherwise.
+        """
+        shapes = [
+            {},
+            {"runs": None},
+            {"runs": [{}]},
+            {"runs": []},
+            {"pin": {}},
+            {"runs": [], "selection": {}, "pin": {}, "red": {}, "load": {}},
+            {"runs": [{"bucket": "green", "executed": 1}], "selection": {}, "pin": {}, "red": {}},
+            {"runs": "not-a-list", "selection": "not-a-dict", "pin": 7, "red": []},
+        ]
+        for shape in shapes:
+            ok, reasons = ee.closes_issue(shape)          # must not raise
+            assert ok is False, f"CERTIFIED a malformed record: {shape!r}"
+            assert reasons, f"refused without naming a reason: {shape!r}"
+            assert ee.exit_code(shape) in (1, 2, 3)       # must not raise either
+
+    def test_a_truthy_non_bool_at_a_boolean_field_refuses_instead_of_certifying(
+        self, monkeypatch, tmp_path
+    ):
+        """#7084: a boolean field must be a BOOL, and the fix must not have
+        introduced a fail-open while removing a crash.
+
+        `red.same_file_list` and `load.overlap` were handed to `conj` RAW, so a
+        truthy non-bool (`"x"`, `2.5`, `-1.0`) made `ok &= "x"` raise TypeError.
+        That refused the record — loudly, which is the right outcome, if a poor
+        mechanism. Wrapping them in `bool(...)` to stop `ok &= None` would have
+        converted that refusal into a CERTIFICATION, i.e. the fix for #7084 would
+        have silently certified a record the old code rejected. They are pinned
+        with `is True` instead.
+
+        Only the malformed side is asserted here; the valid side is covered by
+        `test_producer_can_emit_a_closing_record`.
+        """
+        import copy
+
+        files = list(ee.FAMILY_REPRODUCERS)
+        green = [self._run(files, 1, "green"), self._run(files, 2, "green")]
+        same = "a" * 40
+        rec = self._produce(
+            monkeypatch, tmp_path,
+            runs=green,
+            pairing_ref="pairref",
+            baseline=self._run(files, 1, "unexpected-divergence"),
+            record_role="closing",
+            checkout_head=same,
+            measured_commit=same,
+            surface="tortoise_search",
+            surface_assertion="tests/test_x.py::test_consumer_surface",
+        )
+        ok, reasons = ee.closes_issue(rec)
+        assert ok is True, f"fixture no longer produces a closing record: {reasons}"
+
+        def _with(root, path, value):
+            clone = copy.deepcopy(root)
+            node = clone
+            for key in path[:-1]:
+                node = node[key]
+            node[path[-1]] = value
+            return clone
+
+        # The fields this fixture's record actually evaluates. Its `no-rate-change`
+        # OR short-circuits on the rate_change branch, so the mutation-branch field
+        # `red.at_fixed_commit.mutation_red_returned` is NOT reachable from here.
+        for path, reason in (
+            (("pin", "worktree_clean"), "pin-not-airtight"),
+            (("red", "same_file_list"), "red-file-list-differs"),
+            (("load", "overlap"), "load-bands-do-not-overlap"),
+        ):
+            for bad in ("x", 2.5, -1.0):
+                ok_bad, why_bad = ee.closes_issue(_with(rec, path, bad))
+                assert ok_bad is False, (
+                    f"CERTIFIED {'.'.join(path)}={bad!r} — a truthy non-bool must refuse"
+                )
+                assert reason in why_bad, f"{reason} not named for {bad!r}: {why_bad}"

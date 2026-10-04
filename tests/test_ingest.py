@@ -741,7 +741,7 @@ def test_4938_document_subjects_survive_journal_rebuild(tmp_path):
     rebuild_db = str(tmp_path / "rebuilt.db")
     proj = FalkorProjection(rebuild_db)
     try:
-        proj.rebuild_all(str(log.parent))
+        proj.rebuild_all(str(log.parent), confirm_destructive=True)
         rebuilt_subjects = proj.g.query(
             "MATCH (s:Subject) RETURN count(s)").result_set[0][0]
         rebuilt_about = proj.g.query(

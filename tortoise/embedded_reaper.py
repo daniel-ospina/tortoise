@@ -1554,6 +1554,11 @@ class _ScanAwareList(list):
     """
 
     complete: bool = False
+    # #6984: candidates the sweep observed to have exited ON THEIR OWN — alive
+    # at discovery, dead at kill time. Fail-safe default 0: a construction path
+    # that forgets to set it reports no natural exits, so the gate's accounting
+    # identity is NOT silently weakened (a lost pid still leaves a shortfall).
+    exited: int = 0
 
 
 def _always_match(name: str) -> bool:
@@ -2043,6 +2048,10 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
     acted = []
     killed = 0
     stale_removed = 0  # #1383: stale removals budgeted separately from kills
+    # #6984: natural exits OBSERVED by this sweep — a `candidate` whose pid was
+    # alive at discovery and is dead at kill time. See the dead-pid branch
+    # below for why this is measured here rather than derived as a complement.
+    exited = 0
     # #1642 perf: pre-probe the CLIENT LIST before-counts of every candidate
     # in PARALLEL (raw unix-socket probes are thread-safe and read-only).
     # The old per-record serial double-check made a sweep over hundreds of
@@ -2170,6 +2179,22 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
 
         # Liveness-first: never kill a dead PID's leftovers via connect.
         if not record.get("pid") or not _pid_alive(record["pid"]):
+            # #6984: every record reaching here is a `candidate` (stale_socket
+            # and non-candidates already `continue`d above), so a TRUTHY pid
+            # that is now dead is a server that exited on its own between
+            # discovery and this kill attempt. It is in the pre-sweep probe's
+            # `before`, is not in `left` (gone) and is not in `reaped` (never
+            # acted) — the exact shortfall the CI orphan gate's accounting
+            # identity read as a broken sweep. Count it as an OBSERVED natural
+            # exit. It is NOT derived as `before - reaped - left`: that
+            # complement makes `reaped + exited + left >= before` a tautology
+            # (it holds for EVERY report), which would silently retire the
+            # guard while appearing to keep it. Measured here, a candidate the
+            # sweep genuinely loses (seen alive, then neither reaped nor
+            # observed dead nor alive at `left`) still leaves a shortfall.
+            # A `None` pid is not a server and is never counted.
+            if record.get("pid"):
+                exited += 1
             logger.warning("dead pid, skipping: %s",
                            record.get("socket_path"))
             continue
@@ -2288,7 +2313,9 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
         killed += 1
         if kill_pacing > 0:
             time.sleep(kill_pacing)  # avoid synchronized shutdown bursts (#1005)
-    return acted
+    out = _ScanAwareList(acted)
+    out.exited = exited
+    return out
 
 
 def _remove_stale_socket_dir(record: dict, dry_run: bool) -> dict | None:
@@ -3063,6 +3090,9 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
                  kill_pacing=kill_pacing, only_safe=only_safe,
                  sigterm_timeout=sigterm_timeout, jobs=jobs,
                  deadline=deadline)
+    # #6984: carry the natural exits `reap()` observed through to the sweep
+    # summary (read before the wrap below, which copies elements only).
+    exited = getattr(acted, "exited", 0)
     # #1383: quarantine convergence (partial-rmtree/respawn leftovers)
     try:
         quarantine = _sweep_quarantine_dirs(dry_run=dry_run)
@@ -3088,6 +3118,7 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
             logger.warning("index-pid sweep failed: %s", exc)
     out = _ScanAwareList(acted)
     out.complete = discovery_complete
+    out.exited = exited
     return out
 
 
@@ -3096,10 +3127,16 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
 # builder, as the single source of truth: `tests/conftest.py` imports both
 # instead of redeclaring, and the orphan-bound harness reads this assignment
 # from this file's source. Order is the order the report is built in.
-_HYGIENE_REPORT_FIELDS = ("reaped", "cleared", "left", "before")
+#
+# #6984: `exited` is the sweep's OBSERVED natural-exit count (a `candidate`
+# alive at discovery and dead at kill time). The gate's accounting identity is
+# `reaped + exited + left >= before`; before #6984 the identity omitted
+# `exited`, so it read a server that shut itself down as a broken sweep and
+# refused green runs (before=28, reaped=16, left=11, pytest rc 0).
+_HYGIENE_REPORT_FIELDS = ("reaped", "exited", "cleared", "left", "before")
 
 
-def _hygiene_report(reaped, cleared, left, before) -> dict:
+def _hygiene_report(reaped, cleared, left, before, exited) -> dict:
     """Build the session-end hygiene report the CI orphan gate consumes (#4740).
 
     ``cleared`` is the sweep's OWN outcome (see :func:`sweep_until_cleared`),
@@ -3107,12 +3144,20 @@ def _hygiene_report(reaped, cleared, left, before) -> dict:
     diagnostic flag that does not decide the gate's verdict at any measured
     count: at every count it reports whether the sweep's time budget sufficed
     — a function of runner load — not the residue.
+    ``exited`` is the sweep's OBSERVED natural-exit count (#6984): a
+    ``candidate`` alive at discovery and dead at kill time. It makes the
+    gate's accounting identity ``reaped + exited + left >= before`` account
+    for a server that shuts itself down, instead of reading it as a broken
+    sweep. Derived as a complement it would be a tautology; it is measured at
+    the dead-pid branch in :func:`reap` precisely so the identity stays
+    falsifiable.
     Keeping the construction out of ``_sweep`` also leaves no local report
     literal there for a dead branch or a subscript store to bypass (the
     round-5 pin's hole).
     """
     values = {
         "reaped": reaped,
+        "exited": exited,
         "cleared": cleared,
         "left": left,
         "before": before,
@@ -3122,7 +3167,7 @@ def _hygiene_report(reaped, cleared, left, before) -> dict:
 
 def sweep_until_cleared(run_one, deadline, clock=time.monotonic):
     """Drive discover->reap iterations until the backlog clears or the
-    deadline passes; return ``(total_acted, cleared)``.
+    deadline passes; return ``(total_acted, cleared, exited)``.
 
     ``cleared`` is the sweep's own budget/stop-condition claim, carried into
     the report for diagnosis — not a field the CI orphan gate decides its
@@ -3142,13 +3187,23 @@ def sweep_until_cleared(run_one, deadline, clock=time.monotonic):
     first record hit the deadline) as a CLEARED backlog, so the gate greened
     a residue whose entire backlog had never been examined. A spent deadline
     is not proof the backlog is clear.
+
+    ``exited`` (#6984) is the natural exits the iterations OBSERVED — a
+    ``candidate`` alive at discovery and dead at kill time — summed across
+    iterations. An ``acted`` list that carries no ``exited`` attribute (a
+    plain list from a monkeypatched ``run_one``) contributes 0.
     """
     total = 0
     cleared = False
+    exited = 0
     acted = []
     while True:
         acted = run_one()
         total += len(acted)
+        # #6984: accumulate the natural exits each iteration observed. The
+        # attribute defaults to 0 on a plain list (`_as_scan_aware` wraps a
+        # monkeypatched seam), so an un-instrumented `run_one` reports none.
+        exited += getattr(acted, "exited", 0)
         if not acted:
             # The one stop that can mean "cleared" — but only if the budget
             # remained: an empty list returned BECAUSE the deadline had
@@ -3161,7 +3216,7 @@ def sweep_until_cleared(run_one, deadline, clock=time.monotonic):
             break
     # A partial discovery scan is never "cleared", whatever it acted on.
     cleared = cleared and bool(getattr(acted, "complete", False))
-    return total, cleared
+    return total, cleared, exited
 
 
 def live_embedded_server_count() -> int | None:
@@ -3186,12 +3241,15 @@ def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic) -> di
     this function directly). `probe` is called twice: the first reading is
     `before`, the second is `left`; `cleared` is threaded verbatim from
     `sweep_until_cleared`, because `cleared` is a diagnostic flag that does
-    not decide the gate's verdict at any measured count.
+    not decide the gate's verdict at any measured count; `exited` (#6984) is
+    threaded from the same call — the natural exits the sweep observed — and
+    is what keeps the gate's identity from reading a self-shutdown as a
+    broken sweep.
     """
     before = probe()
-    reaped, cleared = sweep_until_cleared(run_one, deadline, clock)
+    reaped, cleared, exited = sweep_until_cleared(run_one, deadline, clock)
     left = probe()
-    return _hygiene_report(reaped, cleared, left, before)
+    return _hygiene_report(reaped, cleared, left, before, exited)
 
 
 def _zero_client_state_read() -> dict:

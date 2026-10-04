@@ -51,13 +51,21 @@
 #     downgraded only by a watchdog kill (cases 18, 20).
 #   * the #1371 rc-unknown red path (the empty-rc case 22) and the fail-loud
 #     argument validation (cases 23-25).
-#   * the accounting identity `reaped + left >= before` → PASS at the boundary
+#   * the accounting identity `reaped + exited + left >= before` → PASS at the
+#     boundary
 #     (case 26), RED when violated even though COUNT <= left (case 27), and
 #     only a kill downgrades it (case 28); skipped on `before: null` (case 29)
 #     and `before: 0` (case 30) — while a report OMITTING `before` is unusable
 #     → RED (case 31), so the control cannot be disabled by a shape change —
 #     and it is enforced on the `cleared: false` path at COUNT == 0 (case 46),
 #     where it is the remaining self-consistency control.
+#   * #6984 — `exited` (the natural exits the sweep OBSERVED) is the identity's
+#     fourth term: the reported CI false red (before=28, reaped=16, left=11,
+#     pytest rc 0) PASSES because `exited=1` accounts for the self-shutdown
+#     (case 53); a report that OMITS `exited` is unusable → RED (case 54), so
+#     the term cannot be dropped back out; and the term is load-bearing, not
+#     ignored — the same numbers RED with `exited=0` and PASS with `exited=1`
+#     (case 55).
 #   * the deadline-aborted sweep report (`reaped: 0, cleared: false`, with the
 #     identity trivially satisfied and COUNT == left) → PASSES with the budget
 #     warning (case 35), while the healthy residue shape (`cleared: true`)
@@ -133,12 +141,12 @@
 # A case that merely restates a default would not catch its own removal.
 #
 # Every emitted line that interpolates a report measurement field ($COUNT,
-# $left, $before, $reaped, $others, $foreign, $cleared) — plus $kind on the
+# $left, $before, $reaped, $exited, $others, $foreign, $cleared) — plus $kind on the
 # missing/unreadable arm — is pinned VERBATIM at the case that reaches it: the
 # two pass lines, both deferred lines, every red message, and the
 # argument-validation echoes. A single field, separator, or word swapped in any
 # of them REDs instead of printing a wrong measurement. Cases: 1, 2, 3, 4, 5, 7,
-# 8, 11-18, 23, 26-29, 32, 35-38, 40, 41, 43-45, 48, 49, 50, 51, 52.
+# 8, 11-18, 23, 26-29, 32, 35-38, 40, 41, 43-45, 48, 49, 50, 51, 52, 53, 55.
 #
 # The assertion count is PINNED (see the summary): a lost case must not be
 # indistinguishable from a passing one.
@@ -172,25 +180,27 @@ WORK="$(mktemp -d)"
 trap 'find "$WORK" -depth -mindepth 1 -delete 2>/dev/null; rmdir "$WORK" 2>/dev/null' EXIT
 
 # ── report fixtures ─────────────────────────────────────────────────────────
-printf '{"sweep":{"reaped":9,"cleared":true,"left":14,"before":20}}' > "$WORK/report14.json"
-printf '{"sweep":{"reaped":2,"cleared":true,"left":7,"before":9}}' > "$WORK/report7.json"
-printf '{"sweep":{"reaped":9,"cleared":false,"left":14,"before":23}}' > "$WORK/budget.json"
-printf '{"sweep":{"reaped":0,"cleared":false,"left":5,"before":40}}' > "$WORK/identity_bad_unproven.json"
-printf '{"sweep":{"reaped":0,"cleared":true,"left":0,"before":5}}' > "$WORK/identity_boundary5.json"
-printf '{"sweep":{"reaped":0,"cleared":true,"left":0,"before":1}}' > "$WORK/identity_boundary1.json"
-printf '{"sweep":{"reaped":5,"cleared":false,"left":0,"before":5}}' > "$WORK/cleared_false_left_zero.json"
-printf '{"sweep":{"reaped":12,"cleared":true,"left":14,"before":26}}' > "$WORK/identity_ok.json"
-printf '{"sweep":{"reaped":1,"cleared":true,"left":2,"before":10}}' > "$WORK/identity_bad.json"
-printf '{"sweep":{"reaped":1,"cleared":true,"left":2,"before":null}}' > "$WORK/before_null.json"
-printf '{"sweep":{"reaped":0,"cleared":true,"left":2,"before":0}}' > "$WORK/before_zero.json"
-printf '{"sweep":{"reaped":9,"cleared":true,"left":14}}' > "$WORK/nobefore.json"
-printf '{"sweep":{"reaped":1,"cleared":true,"left":99999999999999999999999999,"before":10}}' > "$WORK/overflow_left.json"
-printf '{"sweep":{"reaped":0,"cleared":false,"left":100,"before":100}}' > "$WORK/aborted.json"
-printf '{"sweep":{"reaped":9,"cleared":false,"left":5,"before":14}}' > "$WORK/false4740.json"
-printf '{"sweep":{"reaped":9,"cleared":false,"left":159,"before":168}}' > "$WORK/issue4989.json"
-printf '{"sweep":{"reaped":9,"cleared":true,"left":100,"before":109}}' > "$WORK/healthy100.json"
-printf '{"token":"t","other_suites":["1234-abcdef12"],"foreign_pids":[],"sweep":{"reaped":1,"cleared":true,"left":2,"before":40}}' > "$WORK/deferred.json"
-printf '{"token":"t","other_suites":["1234-abcdef12"],"foreign_pids":["111","222"],"sweep":{"reaped":1,"cleared":true,"left":5,"before":40}}' > "$WORK/deferred5.json"
+printf '{"sweep":{"reaped":9,"exited":0,"cleared":true,"left":14,"before":20}}' > "$WORK/report14.json"
+printf '{"sweep":{"reaped":2,"exited":0,"cleared":true,"left":7,"before":9}}' > "$WORK/report7.json"
+printf '{"sweep":{"reaped":9,"exited":0,"cleared":false,"left":14,"before":23}}' > "$WORK/budget.json"
+printf '{"sweep":{"reaped":0,"exited":0,"cleared":false,"left":5,"before":40}}' > "$WORK/identity_bad_unproven.json"
+printf '{"sweep":{"reaped":0,"exited":0,"cleared":true,"left":0,"before":5}}' > "$WORK/identity_boundary5.json"
+printf '{"sweep":{"reaped":0,"exited":0,"cleared":true,"left":0,"before":1}}' > "$WORK/identity_boundary1.json"
+printf '{"sweep":{"reaped":5,"exited":0,"cleared":false,"left":0,"before":5}}' > "$WORK/cleared_false_left_zero.json"
+printf '{"sweep":{"reaped":12,"exited":0,"cleared":true,"left":14,"before":26}}' > "$WORK/identity_ok.json"
+printf '{"sweep":{"reaped":1,"exited":0,"cleared":true,"left":2,"before":10}}' > "$WORK/identity_bad.json"
+printf '{"sweep":{"reaped":16,"exited":1,"cleared":true,"left":11,"before":28}}' > "$WORK/natural_exit.json"
+printf '{"sweep":{"reaped":1,"exited":0,"cleared":true,"left":2,"before":null}}' > "$WORK/before_null.json"
+printf '{"sweep":{"reaped":0,"exited":0,"cleared":true,"left":2,"before":0}}' > "$WORK/before_zero.json"
+printf '{"sweep":{"reaped":9,"exited":0,"cleared":true,"left":14}}' > "$WORK/nobefore.json"
+printf '{"sweep":{"reaped":9,"cleared":true,"left":14,"before":20}}' > "$WORK/noexited.json"
+printf '{"sweep":{"reaped":1,"exited":0,"cleared":true,"left":99999999999999999999999999,"before":10}}' > "$WORK/overflow_left.json"
+printf '{"sweep":{"reaped":0,"exited":0,"cleared":false,"left":100,"before":100}}' > "$WORK/aborted.json"
+printf '{"sweep":{"reaped":9,"exited":0,"cleared":false,"left":5,"before":14}}' > "$WORK/false4740.json"
+printf '{"sweep":{"reaped":9,"exited":0,"cleared":false,"left":159,"before":168}}' > "$WORK/issue4989.json"
+printf '{"sweep":{"reaped":9,"exited":0,"cleared":true,"left":100,"before":109}}' > "$WORK/healthy100.json"
+printf '{"token":"t","other_suites":["1234-abcdef12"],"foreign_pids":[],"sweep":{"reaped":1,"exited":0,"cleared":true,"left":2,"before":40}}' > "$WORK/deferred.json"
+printf '{"token":"t","other_suites":["1234-abcdef12"],"foreign_pids":["111","222"],"sweep":{"reaped":1,"exited":0,"cleared":true,"left":5,"before":40}}' > "$WORK/deferred5.json"
 printf '{"sweep":{"error":"probe exploded"}}' > "$WORK/error.json"
 printf '{"sweep":{"skipped":"reaper-lock-held"}}' > "$WORK/skipped.json"
 printf '{"sweep":{"skipped":"no-pytest"}}' > "$WORK/nopytest.json"
@@ -460,21 +470,21 @@ OUT=$(bash "$GATE" --count 1 --rc 2>&1) || bad_rc=$?
 assert_eq "$bad_rc" "2" "exits 2"
 assert_contains "$OUT" "requires a value" "names the missing value"
 
-echo "26. the accounting identity reaped + left >= before holds → PASS"
-# reaped=12, left=14, before=26 — the identity holds at exact equality.
+echo "26. the accounting identity reaped + exited + left >= before holds → PASS"
+# reaped=12, exited=0, left=14, before=26 — the identity holds at exact equality.
 run_gate 14 0 identity_ok.json
-assert_eq "$RC" "0" "exits 0 when reaped + left == before"
+assert_eq "$RC" "0" "exits 0 when reaped + exited + left == before"
 assert_contains "$OUT" "orphaned redislite servers after suite: 14 (sweep before=26 left=14 reaped=12, cleared=true) — within the sweep's own measurement" \
   "the COUNT==left pass line is VERBATIM for the identity fixture"
 
-echo "27. an identity violation (reaped + left < before) REDs"
+echo "27. an identity violation (reaped + exited + left < before) REDs"
 # The sweep reaped servers its own report no longer accounts for: the SWEEP's
 # measurement, not the count, is broken. COUNT (2) <= left (2) here, so only
 # the identity can produce the red.
 run_gate 2 0 identity_bad.json
 assert_eq "$RC" "1" "exits 1 even though COUNT <= left"
 assert_contains "$OUT" "does not account for" "names the broken accounting"
-assert_contains "$OUT" "::error::redislite orphan gate: the sweep does not account for the servers it started with — before=10, reaped=1, left=2 (reaped + left < before); the sweep's own measurement is broken — pytest rc 0 (issue #1005 / epic #1647 E2E-7)" \
+assert_contains "$OUT" "::error::redislite orphan gate: the sweep does not account for the servers it started with — before=10, reaped=1, exited=0, left=2 (reaped + exited + left < before); the sweep's own measurement is broken — pytest rc 0 (issue #1005 / epic #1647 E2E-7)" \
   "the accounting-identity red is VERBATIM at rc=0"
 assert_not_contains "$OUT" "within the sweep's own measurement" \
   "does NOT fall through to the pass line (fail-open pin)"
@@ -551,7 +561,7 @@ assert_not_contains "$OUT" "::warning::" "cleared=true emits no budget warning"
 echo "37. a DEFERRED sweep warns, skips the mixed-population identity, and PASSES"
 # other_suites non-empty: left counts other suites' servers, so it is not an
 # authoritative bound. Here the foreign suite exited mid-sweep, so
-# reaped + left (3) < before (40) — the identity would false-red a healthy
+# reaped + exited + left (3) < before (40) — the identity would false-red a healthy
 # deferral, which is exactly why it is skipped under a deferral.
 run_gate 2 0 deferred.json
 assert_eq "$RC" "0" "exits 0 — left is not an authoritative bound under a deferral"
@@ -595,7 +605,7 @@ for node in tree.body:
         break
 PY
 )"
-assert_eq "$FIELDS" "reaped cleared left before" \
+assert_eq "$FIELDS" "reaped exited cleared left before" \
   "reads the report field set from the reaper's own source"
 MISSING=""
 for _field in $FIELDS; do
@@ -728,7 +738,7 @@ assert_not_contains "$OUT" "#1371" "no kill-aware branch remains on this arm"
 
 echo "46. the accounting identity is enforced under cleared=false at COUNT==0"
 # A budget-exhausted sweep is not exempt from its own accounting:
-# `reaped + left < before` means the sweep's own measurement is broken even
+# `reaped + exited + left < before` means the sweep's own measurement is broken even
 # when nothing is live. This is the remaining self-consistency control on the
 # cleared=false path, so a report that violates it must RED — the warning is
 # emitted first, but it is a diagnostic and does not rescue the red.
@@ -740,7 +750,7 @@ assert_contains "$OUT" "::warning::" "the budget warning is still emitted (diagn
 # -> `left=$COUNT` swap on the identity red prints `left=0` for a report that
 # measured `left=5` and cannot satisfy this pin (case 27 cannot catch that swap:
 # there COUNT == left == 2, so both readings print identically).
-assert_contains "$OUT" "::error::redislite orphan gate: the sweep does not account for the servers it started with — before=40, reaped=0, left=5 (reaped + left < before); the sweep's own measurement is broken — pytest rc 0 (issue #1005 / epic #1647 E2E-7)" \
+assert_contains "$OUT" "::error::redislite orphan gate: the sweep does not account for the servers it started with — before=40, reaped=0, exited=0, left=5 (reaped + exited + left < before); the sweep's own measurement is broken — pytest rc 0 (issue #1005 / epic #1647 E2E-7)" \
   "the accounting-identity red is VERBATIM with left=5 != COUNT=0"
 
 echo "47. the accounting identity guard's lower boundaries RED (cleared=true)"
@@ -818,13 +828,44 @@ assert_contains "$OUT" "::warning::" "the budget warning is still emitted (diagn
 assert_contains "$OUT" "does not account for the servers it started with" "names the broken accounting at COUNT=13"
 run_gate 2 0 identity_bad_unproven.json
 assert_eq "$RC" "1" "exits 1 at COUNT=2 <= left=5, so only the identity can red"
-assert_contains "$OUT" "::error::redislite orphan gate: the sweep does not account for the servers it started with — before=40, reaped=0, left=5 (reaped + left < before); the sweep's own measurement is broken — pytest rc 0 (issue #1005 / epic #1647 E2E-7)" \
+assert_contains "$OUT" "::error::redislite orphan gate: the sweep does not account for the servers it started with — before=40, reaped=0, exited=0, left=5 (reaped + exited + left < before); the sweep's own measurement is broken — pytest rc 0 (issue #1005 / epic #1647 E2E-7)" \
   "the identity red is VERBATIM at COUNT=2 (COUNT <= left isolates it)"
 
-echo
+echo "53. #6984: a natural exit accounts for the shortfall — the reported false red is gone"
+# The CI reproduction: before=28, reaped=16, left=11, pytest rc 0. Pre-#6984 the
+# identity read 16 + 11 < 28 and refused a reviewed, green PR. The one server
+# that shut itself down is now reported as `exited=1`, so 16 + 1 + 11 == 28.
+run_gate 11 0 natural_exit.json
+assert_eq "$RC" "0" "exits 0 — the observed natural exit satisfies the identity"
+assert_contains "$OUT" "orphaned redislite servers after suite: 11 (sweep before=28 left=11 reaped=16, cleared=true) — within the sweep's own measurement" \
+  "the pass line is VERBATIM at the reported fields"
+assert_not_contains "$OUT" "does not account for" \
+  "the self-shutdown is no longer read as a broken sweep"
+
+echo "54. a report OMITTING exited is unusable → RED (the term cannot be dropped back out)"
+# `exited` is REQUIRED like `before`: a producer that stopped emitting it would
+# silently restore the pre-#6984 false red, so the shape is fail-closed.
+run_gate 14 0 noexited.json
+assert_eq "$RC" "1" "exits 1 when the report omits exited"
+assert_contains "$OUT" "unreadable" "names the unusable report shape"
+assert_not_contains "$OUT" "within the sweep's own measurement" \
+  "a missing exited cannot reach the pass line"
+
+echo "55. exited is LOAD-BEARING, not ignored: the same numbers flip on it"
+# reaped=1, left=2, before=4. With exited=0 the identity is short by one and
+# REDs; with exited=1 it holds. A gate that ignored the field would fail one of
+# the two runs, so this pair proves the term decides the verdict.
+printf '{"sweep":{"reaped":1,"exited":0,"cleared":true,"left":2,"before":4}}' > "$WORK/identity_exit_needed.json"
+printf '{"sweep":{"reaped":1,"exited":1,"cleared":true,"left":2,"before":4}}' > "$WORK/identity_exit_holds.json"
+run_gate 2 0 identity_exit_needed.json
+assert_eq "$RC" "1" "exits 1 when exited=0 leaves the identity short"
+assert_contains "$OUT" "does not account for" "names the broken accounting"
+run_gate 2 0 identity_exit_holds.json
+assert_eq "$RC" "0" "exits 0 when exited=1 accounts for the one server"
+
 # A LOST case must not be indistinguishable from success: deleting a case
 # leaves FAIL=0 and merely a LOWER count, so the count is pinned too.
-expected_assertions=215
+expected_assertions=224
 if [ "$PASS" -eq "$expected_assertions" ]; then
   PASS=$((PASS + 1))
   echo "  ✅ assertion count pinned at $expected_assertions (a lost case is not a green run)"

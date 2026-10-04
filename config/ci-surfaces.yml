@@ -283,6 +283,13 @@ surfaces:
   - test_client_ip_middleware.py
   - test_commit_endpoint.py
   - test_commit_schema.py
+  # #2642/#2636 (epic #2632): the connector CRUD surface. Load-bearing here for
+  # the same reason as test_hosted_api.py below — every assertion drives an
+  # `@app.*` route in tortoise/hosted_api.py plus the org-scoped filters in
+  # tortoise/supabase_control.py, and `hosted_api.py` selects `api`. Without
+  # this entry the cross-tenant IDOR pins (and the #2642 boundary tests) never
+  # run on a diff-based lane at all.
+  - test_connector_scope.py
   # #1370: dual-registered with `core` — the same test file covers the hosted
   # commit seam (tortoise/hosted_api.py), so a hosted-only change must run it too.
   - test_subject_binding_1370.py
@@ -424,6 +431,7 @@ surfaces:
   - test_oauth_token_fault.py  # #2863: /oauth/token fault-injection suite (fake CP + local HTTPServer seam)
   - test_oauth_redemption_state.py  # #3027: durable redemption state machine + reconciler (fake CP, no live DB)
   - test_3036_oauth_retention.py  # #3036: oauth_* retention/GC sweep (fake CP, no live DB)
+  - test_3026_oauth_boundaries.py  # #3026: the five OAuth endpoints' transient-failure boundary (fake CP via #2863's harness; asserts no bare 500 detail reaches a consumer)
   - test_pricing_tiers.py
   - test_probe_reset_inflight_4608.py  # #4608: a probe reset/rebuild must not close a handle an in-flight probe still queries (hosted_api + selfhost)
   - test_provisioning_edge_function.py
@@ -699,6 +707,7 @@ surfaces:
   - test_6131_operator_mutation_vocabulary.py
   - test_comove_dispatch_3627.py
   - test_heavy_import_guard.py
+  - test_hook_stderr_5919.py
   # #4971: the `(op_type, src, dst)` idempotency guard hoisted into
   # `commit_ops.apply_payload_operators` — the helper is core engine code, and
   # the re-key regression drives the real embedded capture commit, so this is
@@ -1017,6 +1026,7 @@ surfaces:
   - test_onboarding_truth_surface.py  # #3670/#3671/#3681: dual-registered (api+core) — pins tortoise/hosted_api.py
   - test_restore_container_recovery.py
   - test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan
+  - test_destructive_wipe_guard.py
   - test_session_attribution.py
   - test_ci_selection.py
   # #6884: pins the `uri_requiring` declaration (re-derived BEHAVIOURALLY — it
@@ -1263,6 +1273,12 @@ surfaces:
   - test_hard_reject.py
   - test_helpers.py
   - test_hnsw_vector_index.py
+  # #6976: the id predicate must stay BOUND across a query expansion on
+  # FalkorDB 6.0.0, which DROPS it (returning foreign rows) when a later plain
+  # MATCH re-binds the variable. Hermetic: asserts the SHAPE of the emitted
+  # Cypher via a stub graph, no DB (the pinned engine binds the shape, so the
+  # defect is not behaviourally reproducible here).
+  - test_id_predicate_barrier_6976.py
   - test_idempotency.py
   - test_index_cli.py
   - test_index_directory.py
@@ -1376,6 +1392,17 @@ surfaces:
   - test_pack_state.py
   - test_pipeline_cli.py
   - test_postmerge_verdict.py
+  # #6139: guards `tools/pr_lead_time.py` — the PR lead-time decomposition.
+  # Registered under `core` so the suite is classified and runs when the TEST
+  # file itself changes. NOTE this entry does NOT protect a change to the TOOL:
+  # `tools/` sits in NON_PYTHON_PREFIXES, so a tools-only diff comes back as
+  # `changed=[]` and select() takes the docs-only early return — which bypasses
+  # the `if not matched: matched.add("core")` fallback entirely, so not one of
+  # these guards would run on the very change that can break them. The coverage
+  # comes instead from the TOOL_CARVEOUTS entry in tools/ci_selection.py (the
+  # #3261/#2718 pattern), which fails such a change closed to the FULL matrix.
+  # Pinned by test_ci_selection.test_pr_lead_time_tool_change_fails_closed_to_full.
+  - test_pr_lead_time.py
   - test_pre_migration_safety.py
   - test_probe_json_mode.py
   - test_probe_reset_inflight_4608.py  # #4608: a probe reset/rebuild must not close a handle an in-flight probe still queries (dual-registered with api)
@@ -1439,6 +1466,16 @@ surfaces:
   - test_4999_vector_mechanism.py
   - test_precision_leak_4028.py  # #4028: vector-leg relevance floor (hermetic units) + embedded surface tests (embedded_only)
   - test_2952_degraded_read.py   # #2952 (B)+(C): embedder warm-up + declared single-leg reads (docker-lane)
+  # #4199: the dense leg's material is judged against the READ's own kind
+  # scope, not the whole label. Registered here because this file pins the
+  # unpatterned engine module `tortoise/search_engine.py`
+  # (`run_vector_query` / `declared_degraded_read`), which matches no
+  # SOURCE_PATTERNS entry and so falls to the `core` fallback — same
+  # rationale as `test_turn_embedding_write_path_4194.py` above. Runs in
+  # BOTH the docker and the embedded carve-out lane (the mechanism key
+  # differs, the contract does not), so it is deliberately NOT carve_out:
+  # registering it there would exclude it from every docker leg.
+  - test_4199_dense_scope_coverage.py
   - test_search_promoted_fields.py
   - test_search_sessions_temporal.py
   - test_secret_store.py   # #2318: managed backup-key store + rotation (embedded)
@@ -1531,6 +1568,7 @@ surfaces:
   # change to the module selects `core` — this entry is what makes the guard
   # run on that change rather than only on a tests/ change.
   - test_definite_description_backfill_5059.py
+  - test_uri_username_consumed_3081.py
   - test_wipe_server.py
   - test_wiring_phase01.py
   - test_workflow_secret_interpolation.py
@@ -1808,6 +1846,8 @@ surfaces:
   - test_website_static.py
   - test_website_docs_consistency.py  # #3332: checks each public page against its canonical source (status vocab, EP mechanism, ontology link)
   sdk:
+  - test_5359_unchecked_window_writers.py
+  - test_7108_operator_scope_predicate.py
   # #3849: the ask_lane-only selection leg. `tortoise/ask_lane.py` maps to
   # `sdk`, so these two must be dual-registered here or they stop running on
   # an ask_lane-only PR (a SOURCE_PATTERNS match REPLACES the core fallback).
@@ -1868,6 +1908,11 @@ surfaces:
   - test_assembly_sdk.py  # #2165 Task 6: ask_lane.run_ask_lane()/run_ask_assembled() connected-assembly branch + byte goldens (docker-lane)
   - test_retrieval.py
   - test_3844_annotation_injection.py  # #3844: annotation-prefix newline forging; dual core+sdk because tortoise/retrieval.py is SOURCE_PATTERNS["sdk"] — a core-only entry would never run on a retrieval.py-only change
+  # #4509: the S3 link-before-create prior lookup excludes the capture's own
+  # turn echoes BEFORE the callee's [:limit] cut — the retrieval-layer opt-in
+  # `exclude_turn_echo_session` seam (tortoise/retrieval.py predicate +
+  # tortoise/sdk.py pre-truncation filter). Hermetic (embedded store).
+  - test_prior_bound_4509.py
   - test_sdk.py
   - test_sdk_dedup.py
   - test_search_engine_recency.py
@@ -1905,6 +1950,7 @@ surfaces:
   - bench/test_roundrobin.py
   - bench/test_smoke_embedded.py
   - test_2952_degraded_read.py  # #2952: embeddings.py selects the eval surface — dual-registered so the (B) warm-up is covered there too
+  - test_4199_dense_scope_coverage.py  # #4199: dual with `core` — this file's outcome records are gated on `tortoise/embeddings.py`'s embedder singleton (a healthy embedder over an un-embedded scope is the defect), and that module selects the eval surface
   - test_capture_cost_measurement.py  # #3359: the report reprices from the eval-owned PRICING_MAP (tools/longmem_eval/costing.py), so a pricing-map change must run it — dual-registered with `api`/`core`
   - test_analytics_write_path_resolution.py  # #3677: tools/capture_cost_report.py is an eval-surfaced source (the eval half of the cost measurement), so a read-path change there must run the guard that pins its resolved destination — dual-registered with `api`/`core`
   - test_analytics_fallback_alert.py  # #3820: triple-registered with `api`/`core` for the same reason as the #3677 file above — the outcome counter it pins lives in `tortoise/monitoring.py`, which the eval lane's cost measurement also reads
@@ -2391,6 +2437,7 @@ durations:
   test_invites_http.py: 13.6
   test_relationships_bounded.py: 17.6
   test_extractor_v2.py: 17.2
+  test_prior_bound_4509.py: 22.0
   test_fly_machines_guard.py: 13.1
   test_fly_machine_env.py: 28.2
   test_ask_sdk.py: 3.9
@@ -2434,6 +2481,30 @@ durations:
   eval/retrieval/test_oracle.py: 5.7
   longmem_eval/test_context_assembly_leakage.py: 5.2
   test_ep_directional.py: 5.7
+  # #2944: new file. NOT gate-required. Measured at 4a453a352 (the base merge):
+  # the fast pool is 729 files and duration coverage is 663/729 = 90.95% WITH
+  # this row vs 662/729 = 90.81% WITHOUT it — both clear the 0.90 floor, so the
+  # gated `--integrity` step (`tools/ci_selection.py`,
+  # `duration_coverage_issues`) returns [] either way. Those counts move as
+  # main lands test files, so the claim to re-check is only that removing this
+  # row does not push coverage below 0.90. (An earlier revision claimed the row
+  # was REQUIRED by a 544/605 = 89.92% floor breach. That was TRUE when written:
+  # this branch's own merge 006acbec2 sat at 544/605 = 89.92%, one file under
+  # the floor, and the row took it to 545/605 = 90.08% (4b2e5e225). Main's #3400
+  # durations refresh then grew the map to 720 weights / 729 fast files, so the
+  # row is no longer gate-required — the earlier claim was SUPERSEDED by that
+  # refresh, not wrong.)
+  #
+  # The value is a LOCAL measurement (31 tests; the file held 30 when the row
+  # was added, 66.7s at fleet load) and no CI
+  # leg has collected it, so the row carries `# unmeasured` per the convention
+  # above. It is carried (rather than left to the flat 2.0s default) for LPT
+  # packing accuracy: the durations map has 720 entries, median 1.5s
+  # (fast-pool subset 663, median 1.3s), so 66.7s is ~44x the median. Refresh
+  # from the first post-merge main junit run that includes it — the BARE marker
+  # form is deliberate, because the refresh writer (`tools/ci_timing.py`,
+  # `re.fullmatch(r"[ \t]*#\s*unmeasured", tail)`) can only clear a bare marker.
+  test_destructive_wipe_guard.py: 66.7  # unmeasured
   test_extractor_reliability.py: 5.5
   test_acl_graph_users.py: 9.8
   test_battery_exposure_liveness.py: 5.9

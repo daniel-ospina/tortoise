@@ -85,7 +85,6 @@ def _bare_projection(graph) -> FalkorProjection:
     proj = object.__new__(FalkorProjection)
     proj._is_embedded = False
     proj._graph_name = "test_1359"
-    proj._skip_guard = False
     proj.g = graph
     proj._falkordb_version = (4, 18, 3)
     proj._vector_index_api = None
@@ -286,7 +285,6 @@ class TestEnsureIndexesVectorApi:
         proj = object.__new__(FalkorProjection)
         proj._is_embedded = True
         proj._graph_name = "test_1359"
-        proj._skip_guard = False
         proj.g = graph
         proj._falkordb_version = (4, 18, 3)
         proj._vector_index_api = None

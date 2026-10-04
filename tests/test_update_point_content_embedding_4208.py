@@ -117,7 +117,7 @@ def test_the_revised_vector_is_the_revise_replays_value(sup):
     live = _vector(sdk, pid)
 
     with mock.patch(_EMBED_PATCH, _embed_a):
-        sdk._get_proj().rebuild_all(str(events))
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     assert _vector(sdk, pid) == live, "live and rebuild disagree after a content edit"
 
@@ -252,7 +252,7 @@ def test_a_caller_vector_with_a_content_edit_is_a_consistency_divergence(sup):
 
     # The divergence is REAL: a rebuild re-encodes and moves the vector.
     with mock.patch(_EMBED_PATCH, _embed_a):
-        sdk._get_proj().rebuild_all(str(events))
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert _vector(sdk, pid) != caller_vec, (
         "the rebuild must re-encode, or this is not a divergence"
     )
@@ -298,7 +298,7 @@ def test_a_derived_edit_clears_a_stale_verbatim_marker(sup):
     )
 
     with mock.patch(_EMBED_PATCH, _embed_a):
-        sdk._get_proj().rebuild_all(str(events))
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert _props().get("embedding_verbatim") is None, (
         "live and rebuild disagree on the marker"
     )
