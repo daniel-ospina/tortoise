@@ -618,10 +618,13 @@ def test_searchresult_to_dict_additive(sdk):
 
 # ── #6976: the id predicate must survive a following clause ──────────────
 #
-# Measured on the canonical instance (FalkorDB 6.0.0): `MATCH (n:Point) WHERE
-# n.id IN $ids` followed by another MATCH / OPTIONAL MATCH / CALL is planned as
-# a WHOLE-GRAPH read — the rows come back carrying OTHER points' ids (30 rows,
-# 30 distinct foreign ids in a minimal probe). Every reader here builds its
+# Measured on the canonical instance (FalkorDB 6.0.0; re-measured on 6.0.1 /
+# graph module 60001): `MATCH (n:Point) WHERE n.id IN $ids` followed by a MATCH
+# that re-binds `n` OR carries a RELATIONSHIP pattern is planned as a WHOLE-GRAPH
+# read — the rows come back carrying OTHER points' ids (or a NULL `n`) and a
+# point with live relationships reads as having none. Measured NOT to drop:
+# OPTIONAL MATCH, CALL, a node-only MATCH, and `-[r*1..3]-` (see the trigger
+# notes in `unbarred`). Every reader here builds its
 # result dict from the REQUESTED ids, so those rows were silently discarded and
 # a point with live relationships read as having none — `expand_relationships`
 # returned `[]` for a point that had two
@@ -634,14 +637,26 @@ def test_searchresult_to_dict_additive(sdk):
 #   * ``test_no_query_loses_its_id_predicate`` FAILS without the ``WITH``. It is
 #     the regression guard — for every site, once the CALL-body import is
 #     excluded (a `WITH` inside `CALL { … }` is not a barrier; see the test).
-#   * the two behavioural tests below PASS either way: ``get_relationships``
-#     pre-seeds its result dict from the requested ids and DROPS any row whose
-#     pid is unknown, so the leak is invisible to those assertions *by
-#     construction*. Do not "enlarge the fixture" hoping they will catch it.
+#   * the behavioural tests CANNOT fire on the unit lane: its 4.20.4 engine
+#     binds this shape, so do not "enlarge the fixture" hoping they will catch
+#     it. Precisely: ``test_id_predicate_does_not_leak_other_points`` is blind by
+#     construction (``get_relationships`` pre-seeds its dict from the requested
+#     ids and drops rows whose pid is unknown), but
+#     ``test_point_with_relationships_does_not_read_as_empty`` is NOT blind —
+#     ``assert out[a["id"]]`` would fail on an engine that drops the predicate.
+#     It passes because this lane's engine binds, not because it cannot see it.
 #   * the unit lane cannot reproduce the defect at all — the 4.20.4 test engine
 #     BINDS this shape while the 6.0.0 canonical instance drops it (see the
 #     module comment in tortoise/search_engine.py), which is exactly why the
 #     static guard is the rail.
+#
+# REPRODUCIBILITY (measured on 6.0.1, graph module 60001 @
+# 127.0.0.1:16379): the drop IS live here. The VERBATIM pre-fix
+# `get_relationships` query on a two-triple graph returns 4 distinct ids for a
+# 1-id request; the identical string with `WITH n` returns 1. On 4.20.4
+# (`:6379`, module 42004) the unbarred query binds — which is why the unit lane
+# cannot see the defect and this static rail is the guard. Treat an offender as
+# a LIVE leak, not as a convention.
 
 
 def test_point_with_relationships_does_not_read_as_empty(sdk):
@@ -688,15 +703,31 @@ def test_no_query_loses_its_id_predicate():
     bad shape in prose will be flagged; that is a false positive to fix at the
     prose, not a hole.
 
-    Two deliberate boundaries:
-      * a `WITH` INSIDE a `CALL { … }` body is that subquery's ARGUMENT IMPORT,
-        not a barrier for the outer predicate. That falls out of the window
-        itself — the window ends at the `CALL` keyword — and a pinned case
-        holds it down.
-      * the predicate regex is property-GENERAL (`<var>.<prop> IN|= $<param>`),
-        case-insensitive, and tolerant of parentheses and backtick quoting —
-        because the engine drops the predicate for ANY property, not only `id`
-        (measured on 6.0.0 for `.pointKind` and `.status` as well).
+    Boundaries and LIMITATIONS, stated as measured rather than as guarantees:
+      * the window ends at `WITH` or `UNION`. A `WITH` INSIDE a `CALL { … }`
+        body therefore truncates the window — incidentally, not because the
+        subquery's argument import is being modelled — and a `UNION` leg counts
+        as a separate query (reading the second leg's `(m)` as a re-binding of
+        the first leg's variable was a false positive at navigation.py:62).
+      * the trigger is a DELIBERATE OVER-APPROXIMATION (see `rel_pattern`): a hit
+        may be a false positive, and the fix is to ADD the barrier, never to
+        weaken the trigger.
+      * KNOWN LIMITATION — this is a coverage-increasing REGRESSION GUARD, not a
+        soundness proof. Four review cycles each found predicate/relationship
+        SYNTAX that this scanner cannot recognise, so it reports SAFE while
+        6.0.1 LEAKS (each measured; each had ZERO live sites in the tree, but
+        re-scan before assuming a shape is absent): `(n.id) IN $ids`,
+        `n['id'] IN $ids`, `$want = n.id`, `n.id /* c */ IN $ids`, and the
+        whitespace relationship form `MATCH (o) - - (p)`. A green rail is
+        COVERAGE, not absence — the sound alternative (demand a barrier after
+        ANY `WHERE`, no predicate parsing at all) was measured at 63 tree sites
+        and is therefore not adoptable. A query-executor-level assertion is the
+        structural fix for this class; this rail does not claim to be it.
+      * the predicate regex is property-GENERAL (`<var>.<prop> <op> …`),
+        case-insensitive, tolerant of backtick quoting and of a parenthesised
+        RIGHT-hand side — because the engine drops the predicate for ANY
+        property, not only `id` (measured on 6.0.0 for `.pointKind` and
+        `.status` as well).
     """
     import ast
     import pathlib
@@ -704,12 +735,72 @@ def test_no_query_loses_its_id_predicate():
 
     root = pathlib.Path(__file__).resolve().parent.parent / "tortoise"
     pred = re.compile(
-        r"(?:WHERE|AND|OR)\s*\(?\s*`?([A-Za-z_][A-Za-z0-9_]*)`?\s*\.\s*`?"
-        r"[A-Za-z_][A-Za-z0-9_]*`?\s*(?:IN|=)\s*[\$'\"\[]",
+        r"(?:WHERE|AND|OR)\s*\(?\s*(?:NOT\s*)?\(?\s*`?([A-Za-z_][A-Za-z0-9_]*)`?\s*\.\s*`?"
+        r"[A-Za-z_][A-Za-z0-9_]*`?\s*(?:"
+        # ANY right-hand side. `\x00` (a runtime fragment) is allowed: excluding
+        # it made an f-string RHS a silent miss — `f"…WHERE n.id IN {ids_} …"`.
+        # `\x01` cannot appear here: the scan splits on it before matching.
+        r"(?:<>|!=|>=|<=|CONTAINS|STARTS\s+WITH|ENDS\s+WITH|IN|LIKE|[=><])\s*(?=[^\s)\]\x01])"
+        # `IS [NOT] NULL` has no right-hand side and was a silent miss too
+        # (measured leaking on 6.0.1; 11 live sites, none in the leaking shape).
+        r"|IS\s+(?:NOT\s+)?NULL"
+        r")",
         re.IGNORECASE,
     )
+
+    # A RELATIONSHIP pattern in a following clause drops the predicate even when
+    # that clause never mentions the variable: measured on 6.0.1,
+    # `… WHERE n.id IN $ids MATCH (o)-[r]-(p) RETURN n` returns rows whose n.id
+    # is None for a 1-id request, while `MATCH (o:Point)` (node-only) binds.
+    #
+    # THIS TRIGGER IS A DELIBERATE OVER-APPROXIMATION, and a hit here can be a
+    # FALSE POSITIVE. Measured to BIND (so not really leakers): a node-only
+    # MATCH, a node-only MATCH intervening before the relationship MATCH, and
+    # `-[r*1..3]-` — while `-[r*1]`/`-[r*1..1]` DO drop, so the syntax is not a
+    # sound proxy for the plan. Three review cycles of modelling the planner each
+    # produced a NEW hole of this class (`_rebinds`-only missed this shape; a
+    # bracket requirement missed `--`), which is the signal to stop modelling it:
+    # resolve a hit by ADDING THE BARRIER, never by weakening this trigger. `--`
+    # is included because the bracket-less undirected form leaks too.
+    rel_pattern = re.compile(r"-\s*\[|<-|->|--")
+
+    def _rebinds(var: str, text: str) -> bool:
+        """Does ``text`` re-bind ``var`` as a NODE PATTERN endpoint?
+
+        Necessary but NOT sufficient: a following clause that drops the variable
+        need not mention it at all (a relationship pattern does it — see
+        `rel_pattern`). Do not read a False from here as "safe".
+        """
+        return (
+            re.search(
+                # The `(?<![A-Za-z0-9_])` lookbehind is LOAD-BEARING: without it
+                # `RETURN count(m)` matches `(m)` as if it were a node pattern and
+                # the rail reports a live leak that does not exist (found while
+                # widening the operator set — hosted_api.py:14998 and
+                # projection/entities.py:2887 were both this false positive).
+                r"(?<![A-Za-z0-9_])\(\s*`?" + re.escape(var) + r"`?\s*(?::|\s*[,)\]\s])",
+                text,
+                re.IGNORECASE,
+            )
+            is not None
+        )
     clause = re.compile(r"\b(OPTIONAL\s+MATCH|MATCH|CALL)\b", re.IGNORECASE)
     with_any = re.compile(r"\bWITH\b", re.IGNORECASE)
+    # A `UNION` starts a NEW query branch, so the predicate's branch ends there.
+    # navigation.py:62's `WHERE NOT m.id IN $visited … UNION MATCH (…)<-[r]-(m)`
+    # is two independent legs; reading the second leg's `(m)` as a re-binding of
+    # the first leg's variable was a FALSE POSITIVE of the widened walk.
+    branch_end = re.compile(r"\b(WITH|UNION)\b", re.IGNORECASE)
+    # ANY clause keyword ends a clause body. The re-bind test must not look past
+    # the MATCH it is judging into a later clause — projection/entities.py:2887
+    # is safe (`MATCH (s:Source {url:$url})` does not re-bind the predicate's
+    # `old`) but a `WITH old, …, size([(old)-[x]-(y) | x])` further down made an
+    # unbounded scan call it a live leak.
+    body_end = re.compile(
+        r"\b(OPTIONAL\s+MATCH|MATCH|CALL|WITH|WHERE|RETURN|DELETE|DETACH|SET|"
+        r"REMOVE|CREATE|MERGE|UNWIND|ORDER\s+BY|SKIP|LIMIT|UNION|FOREACH)\b",
+        re.IGNORECASE,
+    )
 
     def _strings(node):
         """The query text a node contributes, or None if it contributes none.
@@ -734,13 +825,34 @@ def test_no_query_loses_its_id_predicate():
             left, right = _strings(node.left), _strings(node.right)
             if left is not None or right is not None:
                 return (left or " \x00 ") + (right or " \x00 ")
+        if isinstance(node, ast.Call):
+            # ``"…".join([frag, frag])`` IS one query — the elements are joined
+            # at runtime, so a predicate in one and a MATCH in another belong to
+            # the same statement (review P2: an earlier AST rewrite lost this).
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "join"
+                and len(node.args) == 1
+                and isinstance(node.args[0], (ast.List, ast.Tuple))
+            ):
+                parts = [
+                    p
+                    for p in (_strings(e) for e in node.args[0].elts)
+                    if p is not None
+                ]
+                return " \x00 ".join(parts) if parts else None
+            return " \x00 "  # a fragment only known at runtime
         if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            # SIBLINGS, not one query: a list of query strings is not joined by
+            # the AST, so splicing them would FABRICATE an offender that exists
+            # in no query (review P3). \x01 is a hard boundary the scan splits
+            # on — a predicate cannot see across it.
             parts = [p for p in (_strings(e) for e in node.elts) if p is not None]
-            return " \x00 ".join(parts) if parts else None
+            return " \x01 ".join(parts) if parts else None
         if isinstance(node, ast.Dict):
             parts = [p for p in (_strings(v) for v in node.values) if p is not None]
-            return " \x00 ".join(parts) if parts else None
-        if isinstance(node, (ast.Name, ast.Call, ast.Attribute, ast.Subscript)):
+            return " \x01 ".join(parts) if parts else None
+        if isinstance(node, (ast.Name, ast.Attribute, ast.Subscript)):
             return " \x00 "  # a fragment only known at runtime
         return None
 
@@ -751,19 +863,44 @@ def test_no_query_loses_its_id_predicate():
             text = _strings(node)
             if text is None:
                 continue
-            for m in pred.finditer(text):
-                after = text[m.end():]
-                nxt = clause.search(after)
-                if not nxt:
-                    continue
-                # Everything between the predicate and the NEXT clause is the
-                # window. A `WITH` inside a `CALL { … }` body is that
-                # subquery's ARGUMENT IMPORT, not a barrier for the outer
-                # predicate — and it is already outside this window, because
-                # the window stops at the `CALL` keyword itself.
-                if with_any.search(after[: nxt.start()]):
-                    continue
-                found.add(f"{node.lineno} ({m.group(1)})")
+            # \x01 separates SIBLING string literals (a list/dict of templates),
+            # which are not one query; \x00 is a runtime fragment inside one
+            # query. Splitting on the hard boundary is what stops a predicate in
+            # one template matching a MATCH in the next (review P3).
+            for segment in text.split("\x01"):
+                for m in pred.finditer(segment):
+                    var = m.group(1)
+                    after = segment[m.end():]
+                    # Walk EVERY following clause, not just the first — a
+                    # re-binding clause that comes SECOND still leaks. Measured
+                    # (6.0.1): `MATCH (n:Thing) WHERE n.id IN $ids MATCH
+                    # (o:Thing) MATCH (n)-[r:LINK]-(p:Thing)` returns 4 distinct
+                    # ids for a 1-id request, while a first-clause-only walk
+                    # reported it SAFE.
+                    barrier = branch_end.search(after)
+                    window = after[: barrier.start()] if barrier else after
+                    for cm in clause.finditer(window):
+                        keyword = cm.group(1).upper()
+                        # OPTIONAL MATCH and CALL were MEASURED to bind on the
+                        # canonical instance, so they are not triggers (the
+                        # review's P3). NB tortoise/search_engine.py's own comment
+                        # claims they do trigger — the measurement is the
+                        # authority; the branch's barriers in front of them are
+                        # belt-and-braces (and go unprotected by this rail).
+                        if keyword.startswith("OPTIONAL") or keyword == "CALL":
+                            continue
+                        # The judge is THAT CLAUSE'S BODY ONLY: scanning further
+                        # re-flags a safe query whose LATER clause uses the
+                        # variable, e.g. projection/entities.py:2887
+                        # `MATCH (s:Source {url:$url})` followed by
+                        # `WITH old, …, size([(old)-[x]-(y) | x])`.
+                        body = window[cm.end():]
+                        following = body_end.search(body)
+                        if following:
+                            body = body[: following.start()]
+                        if _rebinds(var, body) or rel_pattern.search(body):
+                            found.add(f"{node.lineno} ({var})")
+                            break
         return sorted(found)
 
     # The five shapes a line-based scan got wrong (review P2). Pinned here so
@@ -781,7 +918,61 @@ def test_no_query_loses_its_id_predicate():
     mixed = 'Q = ("MATCH (n:Point) WHERE n.id IN $ids " + extra + " MATCH (n)-[r]-(o) RETURN n")'
     assert unbarred(mixed) == ["1 (n)"], mixed
     call_body = 'Q = ("MATCH (n:Point) WHERE n.id IN $ids " "CALL { WITH n MATCH (n)-[r]-(o) } RETURN n")'
-    assert unbarred(call_body) == ["1 (n)"], call_body
+    # CALL never triggers the drop (measured), so the OLD expectation of an
+    # offender here encoded the over-approximation the review flagged. Pinned as
+    # SAFE now — if the engine's behaviour changes, this line fails loudly.
+    assert unbarred(call_body) == [], call_body
+    # A function call that merely LOOKS like a node pattern is not a re-binding:
+    # pinned because the first cut of the widened rail reported `RETURN count(m)`
+    # as a live leak at hosted_api.py:14998 (a false positive that would have sent
+    # a lane hunting a non-existent #6976 site).
+    fn_call = 'Q = ("MATCH (m:Membership) WHERE m.org_id <> \'\' " "MATCH (t:Team {id:m.org_id}) RETURN count(m)")'
+    assert unbarred(fn_call) == [], fn_call
+    # OPTIONAL MATCH never triggers it either.
+    optional = 'Q = ("MATCH (n:Point) WHERE n.id IN $ids " "OPTIONAL MATCH (n)-[r]-(o) RETURN n")'
+    assert unbarred(optional) == [], optional
+    # A following MATCH that never MENTIONS the variable is not automatically
+    # safe: with a RELATIONSHIP pattern the engine drops the predicate and NULLs
+    # the variable (measured 6.0.1, 4 rows / n.id None for a 1-id request). The
+    # `_rebinds`-only trigger declared this shape SAFE and pinned the leak as
+    # safe — the same hole class as the first-clause-only walk.
+    other_var = 'Q = ("MATCH (n:Point) WHERE n.id IN $ids " "MATCH (o)-[r]-(p) RETURN n")'
+    assert unbarred(other_var) == ["1 (n)"], other_var
+    # …whereas a NODE-ONLY following MATCH binds (measured), and is the shape of
+    # two real sites (hosted_api.py:14998, projection/entities.py:2887) — flagging
+    # those would be a false positive that sent a lane chasing a non-leak.
+    node_only = 'Q = ("MATCH (n:Point) WHERE n.id IN $ids " "MATCH (o:Point) RETURN n")'
+    assert unbarred(node_only) == [], node_only
+    # The bracket-less undirected form leaks too, and a bracket-requiring trigger
+    # missed it (third-cycle P1): measured 6 rows, n.id None for a 1-id request.
+    bare_dash = 'Q = ("MATCH (n:Point) WHERE n.id IN $ids " "MATCH (o)--(p) RETURN n")'
+    assert unbarred(bare_dash) == ["1 (n)"], bare_dash
+    # `NOT(` with no space, and `IS [NOT] NULL` (no right-hand side): both were
+    # invisible to `pred` and both leak on 6.0.1.
+    not_nospace = 'Q = ("MATCH (n:Point) WHERE NOT(n.id IN $v) " "MATCH (n)-[r]-(o) RETURN n")'
+    assert unbarred(not_nospace) == ["1 (n)"], not_nospace
+    is_null = 'Q = ("MATCH (n:Point) WHERE n.status IS NULL " "MATCH (n)-[r]-(o) RETURN n")'
+    assert unbarred(is_null) == ["1 (n)"], is_null
+    # …unless a LATER clause re-binds it — the first-clause-only walk called this
+    # SAFE while it leaks 4 distinct ids for a 1-id request on 6.0.1.
+    second_clause = 'Q = ("MATCH (n:Thing) WHERE n.id IN $ids " "MATCH (o:Thing) MATCH (n)-[r:LINK]-(p:Thing) RETURN n.id")'
+    assert unbarred(second_clause) == ["1 (n)"], second_clause
+    # A NEGATED predicate is the same drop and was invisible (4 live sites:
+    # sdk.py:20567, hosted_api.py:8042, navigation.py:63,65).
+    negated = 'Q = ("MATCH (n:Point) WHERE NOT n.id IN $v " "MATCH (n)-[r]-(o) RETURN n")'
+    assert unbarred(negated) == ["1 (n)"], negated
+    # An f-string RHS is a runtime fragment (\x00), not a reason to miss it.
+    fstring = 'Q = f"MATCH (n:Point) WHERE n.id IN {ids_} MATCH (n)-[r]-(o) RETURN n"'
+    assert unbarred(fstring) == ["1 (n)"], fstring
+    # The widened operator set (review P2): every one of these was MEASURED
+    # leaking on the canonical engine and every one was invisible before.
+    for op in ("<>", "!=", ">=", ">", "<", "CONTAINS", "STARTS WITH"):
+        q = f'Q = ("MATCH (n:Point) WHERE n.id {op} $v " "MATCH (n)-[r]-(o) RETURN n")'
+        assert unbarred(q) == ["1 (n)"], (op, q)
+    # …and non-parameter right-hand sides, also measured leaking.
+    for rhs in ("true", "42", "toLower($v)", "['p0']", "'p0'"):
+        q = f'Q = ("MATCH (n:Point) WHERE n.id = {rhs} " "MATCH (n)-[r]-(o) RETURN n")'
+        assert unbarred(q) == ["1 (n)"], (rhs, q)
     # Coverage the AST rewrite initially LOST against the line-scan it replaced
     # (review P2): a query assembled from string fragments in a list/tuple/dict.
     joined = 'Q = "\\n".join(["MATCH (n:Point) WHERE n.id IN $ids ", "MATCH (n)-[r]-(o) RETURN n"])'
@@ -809,22 +1000,47 @@ def test_no_query_loses_its_id_predicate():
 
     offenders: list[str] = []
     scanned = 0
-    for path in sorted(root.rglob("*.py")):
+    unparseable: list[str] = []
+    paths = sorted(root.rglob("*.py"))
+    for path in paths:
         try:
             hits = unbarred(path.read_text(encoding="utf-8", errors="replace"))
         except SyntaxError:
-            continue  # a syntax error is py_compile's to report, not this rail's
+            # Counted, not skipped: a file the scan cannot read is COVERAGE THIS
+            # RAIL DOES NOT HAVE, and silently excluding it let the count stay
+            # green while the file went unscanned (review P3).
+            unparseable.append(path.name)
+            continue
         scanned += 1
         offenders.extend(f"{path.name}:{hit}" for hit in hits)
-    # A scan that reads nothing passes vacuously — a package rename, a test
-    # relocation or a packaging change would disarm the only rail for this
-    # defect while staying green (review P3). Measured: 190 files.
-    assert scanned > 100, (
+    # A scan that reads nothing passes vacuously. The floor is measured, not
+    # nominal: 190 files under tortoise/ at the time of writing, so a rename or
+    # relocation that drops the package out from under the scan reds this instead
+    # of silently disarming the only rail for this defect (review P3). Neither
+    # this floor nor the margin below can catch a SINGLE small subpackage
+    # disappearing (the largest is 6 files against 9 files of headroom); they
+    # catch a collapse of 10+ files. Stated plainly rather than overclaimed.
+    assert scanned >= 180, (
         f"the shape scan read only {scanned} files under {root} — it is not "
         "looking at the package, so its silence means nothing"
     )
+    # The subpackages hold 24 of the 190 files; <15 means 10+ subpackage files
+    # went missing or the scan stopped descending. Deliberately coarse: naming the
+    # directories would break on every legitimate package reshuffle.
+    non_root = sum(1 for p in paths if p.parent != root)
+    assert non_root >= 15, (
+        f"the shape scan reached only {non_root} files outside {root} — "
+        "subpackage coverage has collapsed (#6976)"
+    )
+    assert not unparseable, (
+        "the shape scan could not parse " + ", ".join(unparseable)
+        + " — those files are unscanned, so this rail's silence does not cover "
+        "them (#6976)"
+    )
     assert not offenders, (
-        "these queries lose their id predicate when a following clause expands "
-        "the match (#6976) — add a load-bearing `WITH <var>` between the "
-        "predicate and the next clause: " + ", ".join(offenders)
+        "these queries filter a variable and then re-bind it in a following "
+        "clause with no load-bearing `WITH <var>` in between. On the canonical "
+        "6.0.1 instance the predicate IS dropped and the query returns OTHER "
+        "points' rows (#6976) — add the `WITH <var>` between the predicate and "
+        "the next clause: " + ", ".join(offenders)
     )
