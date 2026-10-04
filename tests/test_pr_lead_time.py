@@ -92,6 +92,98 @@ def test_queue_entry_ignores_an_unparseable_span():
     assert plt.queue_entry([{"name": "Mergify Merge Queue", "started_at": _iso(T0)}]) is None
 
 
+# --- eligibility: the live-path boundary (readiness vs residence) -------------
+#
+# `eligible_at` exists because the queue split cannot express the split on a path
+# with NO queue: with no queue entry the whole of (b) reads as "pre-entry" and
+# residence is invisible. Measured 2026-10-04 on the live path: eligible -> merged
+# medians 0.8 min against created -> eligible medians 2.02 h, so (b) is
+# overwhelmingly READINESS. These pin the fail-open direction (an unrecognised
+# conclusion must never read as an eligible head) and the never-a-zero rule.
+
+def _check(name: str, conclusion: str | None, start: datetime | None = None,
+           end: datetime | None = None, cid: int = 1,
+           slug: str = "github-actions") -> dict:
+    return {"name": name, "conclusion": conclusion,
+            "started_at": _iso(start or T0),
+            "completed_at": _iso(end) if end else None,
+            "id": cid, "app": {"slug": slug}}
+
+
+def test_eligibility_is_none_when_a_newest_attempt_is_red():
+    """The #6807 polarity: a red — or an UNRECOGNISED conclusion — must never be
+    read as an eligible head (the 'unknown input read as GREEN' fail-open)."""
+    runs = [_check("test (a)", "success", end=T0 + timedelta(minutes=29)),
+            _check("test (b)", "failure", end=T0 + timedelta(minutes=31))]
+    assert plt.eligible_at(runs) is None
+    assert plt.eligible_at([_check("test (a)", "something-new")]) is None
+    assert plt.eligible_at([_check("test (a)", None)]) is None
+
+
+def test_eligibility_is_none_when_no_check_surface_was_observed():
+    """Never a zero: no check surface is UNOBSERVABLE, not instantaneously ready."""
+    assert plt.eligible_at([]) is None
+    assert plt.eligible_at([_mergify(T0, T0 + timedelta(minutes=5))]) is None
+
+
+def test_eligibility_is_the_latest_completion_of_the_newest_attempts():
+    runs = [_check("test (a)", "success", end=T0 + timedelta(minutes=29)),
+            _check("test (b)", "success", end=T0 + timedelta(minutes=31)),
+            _check("test (c)", "skipped", end=T0 + timedelta(minutes=20))]
+    assert plt.eligible_at(runs) == T0 + timedelta(minutes=31)
+
+
+def test_eligibility_takes_the_newest_attempt_not_the_first():
+    """A re-run that fixed a red makes the head eligible, and the older SUCCESS
+    must not win the clock either — the newest attempt per key decides both."""
+    red = _check("test (a)", "failure", end=T0 + timedelta(minutes=10), cid=1)
+    green = _check("test (a)", "success", end=T0 + timedelta(minutes=40), cid=2)
+    assert plt.eligible_at([red, green]) == T0 + timedelta(minutes=40)
+    assert plt.eligible_at([green, red]) == T0 + timedelta(minutes=40)
+
+
+def test_eligibility_treats_cancelled_and_stale_as_non_red():
+    """The rail's allow-list, and it matters: a cancelled shard is common (an
+    environmental kill), so the opposite reading would make most heads
+    permanently ineligible and the split would report nothing."""
+    runs = [_check("test (d)", "cancelled", end=T0 + timedelta(minutes=5)),
+            _check("test (e)", "stale", end=T0 + timedelta(minutes=6))]
+    assert plt.eligible_at(runs) == T0 + timedelta(minutes=6)
+
+
+def test_eligibility_is_none_without_a_completion_clock():
+    """A conclusion without a completion time cannot date the boundary."""
+    runs = [{"name": "test (a)", "conclusion": "success", "started_at": _iso(T0),
+             "completed_at": None, "id": 1, "app": {"slug": "github-actions"}}]
+    assert plt.eligible_at(runs) is None
+
+
+def test_split_b_at_eligibility_sums_to_the_leg():
+    gate = T0
+    merged = T0 + timedelta(hours=4)
+    s = plt.split_b_at_eligibility(gate, merged, T0 + timedelta(hours=3, minutes=59))
+    assert s["pre_eligible_seconds"] + s["post_eligible_seconds"] == 4 * 3600
+    assert s["post_eligible_seconds"] == 60.0
+
+
+def test_split_b_charges_nothing_when_eligibility_is_unobservable():
+    """Both halves None — never 0.0, which would read as 'no residence'."""
+    s = plt.split_b_at_eligibility(T0, T0 + timedelta(hours=2), None)
+    assert s == {"eligible_at": None, "pre_eligible_seconds": None,
+                 "post_eligible_seconds": None}
+
+
+def test_split_b_clamps_eligibility_into_the_leg():
+    """A check can complete before the cheap entry gate finishes, and a clock can
+    land a second after the merge: eligibility is clamped, so neither half can be
+    negative (the class that aborted a whole run on PR #5137, a = -10762 s)."""
+    gate, merged = T0 + timedelta(hours=1), T0 + timedelta(hours=2)
+    early = plt.split_b_at_eligibility(gate, merged, T0)
+    assert early["pre_eligible_seconds"] == 0.0
+    late = plt.split_b_at_eligibility(gate, merged, T0 + timedelta(hours=5))
+    assert late["post_eligible_seconds"] == 0.0
+
+
 # --- gate clamp into the PR's own life --------------------------------------
 
 def test_gate_before_creation_is_clamped_to_created():
