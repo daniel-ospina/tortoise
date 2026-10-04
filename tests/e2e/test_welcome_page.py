@@ -40,6 +40,37 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page, expect
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
+
+def _unobserved_signup_message(transport_failures: list[str]) -> str:
+    """Name the condition actually observed, instead of asserting a product cause (#4940).
+
+    `page.on("response")` only fires when a request gets an ANSWER. A `POST
+    /auth/signup` that dies at the transport layer (DNS, TLS, connection refused,
+    aborted socket) fires nothing, so `signup["status"]` stays `None` for two
+    very different situations:
+
+    - the BFF never answered — recorded by the `requestfailed` listener, so
+      `transport_failures` is non-empty;
+    - the form never submitted the request — nothing failed at the transport
+      layer, so `transport_failures` is empty.
+
+    The pre-#4940 message asserted the second cause for both. Run 35780459764
+    (2026-09-22T20:27:57Z, `main`) failed on that message while the page had
+    loaded, every locator had filled and clicked, and the test had simply waited
+    out its whole 30s budget against a host the availability watchdog was
+    independently reporting DOWN in the same window.
+    """
+    if transport_failures:
+        return (
+            "no POST to the BFF /auth/signup got a response — the request failed at the "
+            "TRANSPORT layer, so this is a reachability failure, not a signup failure: "
+            + "; ".join(transport_failures)
+        )
+    return (
+        "no POST to the BFF /auth/signup was observed — the form did not "
+        "submit, or it is still posting straight to Supabase"
+    )
+
 # Canonical host for the auth surface is tortoise.premiselabs.co (host
 # consolidation 2026-08-17: premiselabs.co 301s /welcome → the tortoise host).
 WELCOME_URL = os.environ.get("WELCOME_URL", "https://tortoise.premiselabs.co/welcome")
@@ -229,6 +260,26 @@ LIVE_SIGNUP = pytest.mark.skipif(
 )
 
 
+def test_unobserved_signup_message_names_the_transport_condition() -> None:
+    """#4940: the message must not assert a product cause when nothing answered.
+
+    No browser needed — this pins the branch selection the live smoke relies on.
+    """
+    transport = _unobserved_signup_message(
+        ["POST https://app.premiselabs.co/auth/signup — net::ERR_NAME_NOT_RESOLVED"]
+    )
+    assert "TRANSPORT" in transport
+    assert "net::ERR_NAME_NOT_RESOLVED" in transport
+    # The two fabricated product causes must NOT appear when a transport failure
+    # is what actually explains the absence.
+    assert "did not submit" not in transport
+    assert "Supabase" not in transport
+
+    product = _unobserved_signup_message([])
+    assert "did not submit" in product
+    assert "TRANSPORT" not in product
+
+
 @LIVE_SIGNUP
 def test_live_signup_no_429_confirmation_required(page: Page) -> None:
     """#801 live no-429 monitor (on-merge + scheduled smoke).
@@ -256,6 +307,11 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
     Teardown deletes the created auth user via the Admin API (best-effort;
     the FK cascade removes the placeholder org_memberships row)."""
     signup = {"status": None, "body": ""}
+    # #4940: a request that never gets an ANSWER fires no `response` event, so the
+    # response-only capture below cannot tell "the BFF did not answer" from "the
+    # form never submitted". Record transport-level failures separately so the
+    # assertion can name the condition it actually observed.
+    transport_failures: list[str] = []
     # Tripwire for the BFF contract (#4054): these Supabase endpoints must never
     # be reached FROM THE BROWSER. Before the move the page called them
     # directly; now it must not — for the BFF session the browser holds only the
@@ -279,7 +335,15 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
         elif "v1/signup/email" in resp.url or "grant_type=password" in resp.url:
             browser_to_supabase.append(resp.url)
 
+    def _on_requestfailed(req):
+        # #4940: only a request that failed BEFORE any response reached the page
+        # arrives here. `req.failure` carries the transport reason (e.g.
+        # "net::ERR_NAME_NOT_RESOLVED" / "net::ERR_CONNECTION_REFUSED").
+        if req.method == "POST" and req.url.endswith("/auth/signup"):
+            transport_failures.append(f"{req.method} {req.url} — {req.failure}")
+
     page.on("response", _on_response)
+    page.on("requestfailed", _on_requestfailed)
     # #1566: the account is created pre-confirmed, so the SIGNUP flow
     # redirects to the APP ROOT (signup.html WELCOME_URL =
     # https://app.premiselabs.co) — block that ROOT DOCUMENT so the app's
@@ -325,10 +389,7 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
         deadline = time.time() + 30
         while signup["status"] is None and time.time() < deadline:
             page.wait_for_timeout(250)
-        assert signup["status"] is not None, (
-            "no POST to the BFF /auth/signup was observed — the form did not "
-            "submit, or it is still posting straight to Supabase"
-        )
+        assert signup["status"] is not None, _unobserved_signup_message(transport_failures)
         assert signup["status"] == 200, (
             f"live signup returned {signup['status']} — rate-limited or error: "
             f"{signup['body']!r}"
