@@ -1472,7 +1472,7 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
         } else if (res.detail === "no TORTOISE_API_KEY configured") {
           // Already warned at load; the probe is best-effort install telemetry.
         } else {
-          warn(`install probe failed (${res.detail ?? res.status}) — capture status may stay "not installed yet"`);
+          warn(`install probe failed (${res.detail ?? res.status}) — capture status may stay "not yet observed"`);
         }
       })
       .catch((err) => {

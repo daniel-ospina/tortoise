@@ -11,7 +11,7 @@ import {
   harnessAttributionForHarness,
   lastErrorForHarness,
 } from './captureStatus.js'
-import { HARNESS_ATTRIBUTION, HARNESS_CAPTURE_SUPPORT } from './harnesses.js'
+import { HARNESS_ATTRIBUTION, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT } from './harnesses.js'
 
 test('canonical 4-state vocabulary is off → install-pending → waiting → active', () => {
   assert.deepEqual(CAPTURE_STATES, ['off', 'install-pending', 'waiting', 'active'])
@@ -93,7 +93,8 @@ test('#3428: the capture claim is present-tense ONLY on an observed receipt', ()
 // capture. The deployed screen printed "Tortoise will capture your agent's
 // sessions." for a projection where BOTH `install_probe_claude` and
 // `session_capture_receipt_claude` were null, while the SAME deployment's
-// Settings page said Claude Code was "not installed yet".
+// Settings page said Claude Code was "not installed yet" (the wording #5450
+// corrected — the server had observed nothing, which is not "not installed").
 // `captureStatusForHarness` already computed the truthful `install-pending`;
 // `captureClaimForHarness` collapsed it (and `waiting`) into `'future'`, so
 // "nothing observed" and "install detected, capture pending" printed the
@@ -114,7 +115,7 @@ test('#3782: an UNOBSERVED harness resolves to install-pending, not a future pro
     'present',
     'an observed receipt yields the present-tense sentence')
   // (2) the EXACT live state from #3782: recording on, probe null, receipt null
-  //     → the honest pending state Settings renders as "not installed yet"
+  //     → the honest pending state Settings renders as "not yet observed"
   assert.equal(
     captureClaimForHarness({ session_recording: true, install_probe_claude: null, session_capture_receipt_claude: null }, 'claude'),
     'install-pending',
@@ -346,8 +347,16 @@ test('#3700: the per-harness attribution is disclosed on the row, not baked into
     'the raw accessor keeps returning the bare message')
   assert.equal(captureErrorForHarness(st, 'claude'), null)
 
-  // (5) an undeclared harness keeps the honest no-signal label.
-  assert.equal(captureStatusLabelForHarness(st, 'cursor'), 'not installed yet')
+  // (5) an undeclared harness keeps the honest no-signal label. #5450: the
+  // label states what the server OBSERVED (nothing), never the conclusion
+  // "not installed" drawn from that absence — the browser cannot stat the
+  // user's filesystem, so non-installation is a fact the server cannot have.
+  assert.equal(captureStatusLabelForHarness(st, 'cursor'), 'not yet observed')
+  // The guard: #5450 is a COPY defect, so it is pinned on the wording itself —
+  // any future re-wording that re-asserts non-installation fails HERE.
+  assert.ok(!/not[\s-]*install/i.test(HARNESS_CAPTURE_STATUS_LABEL['install-pending']),
+    '#5450: the install-pending label must not assert non-installation from the '
+    + 'ABSENCE of observation (the server observed nothing)')
   assert.equal(captureStatusLabelForHarness(null, 'claude'), 'off')
   assert.equal(captureStatusLabelForHarness({ session_recording: false }, 'claude'), 'off')
 })
