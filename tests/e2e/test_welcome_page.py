@@ -29,7 +29,6 @@ Env:   WELCOME_URL overrides the target (default https://tortoise.premiselabs.co
 
 from __future__ import annotations
 
-import inspect
 import json
 import os
 import re
@@ -125,6 +124,81 @@ def _post_issued_flag() -> dict:
     regression into a SKIP and the suite exits GREEN (#4940 review round 6).
     """
     return {"value": False}
+
+
+def _register_signup_capture(
+    page,
+    *,
+    signup: dict,
+    transport_failures: list[str],
+    post_issued: dict,
+    browser_to_supabase: list[str],
+) -> None:
+    """Register the smoke's three capture listeners. The `page` is INJECTED.
+
+    Injecting `page` is what makes the live wiring executable browser-free: a
+    recording double captures the registered handlers, and they can then be
+    replayed with fake request/response objects. Without this, the pins covered
+    only the pure helpers BENEATH the closures — so a dead `_on_response` body, a
+    widened request filter, or a dropped verifier argument all survived, and three
+    of those turn a product regression into a GREEN skip (#4940 review round 7,
+    which measured exactly that against the previous revision).
+    """
+
+    def _on_response(resp):
+        # #4054/#4171: the auth pages moved onto the app origin and the BFF
+        # became a TRUE backend. The form POSTs SAME-ORIGIN to /auth/signup, and
+        # functions/auth/signup.ts performs BOTH upstream calls SERVER-side
+        # (`POST ${API_ORIGIN}/v1/signup/email`, then `signInWithPassword`). A
+        # Worker's outbound fetch never surfaces in `page.on("response")`, so
+        # the pre-BFF listeners that matched `v1/signup/email` and
+        # `token?grant_type=password` matched NOTHING and left both statuses
+        # None — the monitor failed on "no /v1/signup/email response observed"
+        # even when signup was perfectly healthy. The observable boundary is now
+        # the BFF call itself.
+        _note_signup_response(resp, signup, browser_to_supabase)
+
+    def _on_request(req):
+        # #4940: record that the BFF POST was ACTUALLY ISSUED.
+        if _is_bff_signup_request(req.method, req.url):
+            post_issued["value"] = True
+
+    def _on_requestfailed(req):
+        # #4940: a request that did not produce a usable response arrives here;
+        # the transport reason is in `req.failure` (e.g.
+        # "net::ERR_NAME_NOT_RESOLVED" / "net::ERR_CONNECTION_REFUSED").
+        entry = _signup_transport_failure(req.method, req.url, req.failure)
+        if entry is not None:
+            transport_failures.append(entry)
+
+    page.on("response", _on_response)
+    page.on("request", _on_request)
+    page.on("requestfailed", _on_requestfailed)
+
+
+def _dispose_captured(
+    signup: dict,
+    transport_failures: list[str],
+    post_issued: dict,
+    browser_to_supabase: list[str],
+    *,
+    skip,
+    fail,
+) -> None:
+    """Dispose of a captured-nothing signup POST, taking the live STATE by reference.
+
+    The call site passes state rather than `post_issued["value"]` so the read of
+    the live register is inside a pinned function: spelled out at the call site,
+    hardcoding it `True` survived every pin while turning a "form never submitted"
+    PRODUCT regression into a skip (#4940 review round 7).
+    """
+    _handle_unobserved(
+        transport_failures,
+        post_issued["value"],
+        browser_to_supabase,
+        skip=skip,
+        fail=fail,
+    )
 
 
 def _note_signup_response(resp, signup: dict, browser_to_supabase: list[str]) -> None:
@@ -435,69 +509,117 @@ def test_post_issued_flag_starts_false() -> None:
     assert flag == {"value": True}
 
 
-def test_note_signup_response_records_the_contract_response() -> None:
-    """#4940: the CAPTURE must record, pinned behaviourally with a fake response.
+def test_signup_capture_listeners_are_registered_and_wired() -> None:
+    """#4940: the LIVE wiring is pinned by replaying the registered handlers.
 
-    Round 5 measured the hole: with the response body replaced by `pass`, every
-    other pin stayed green while a real non-200 was never recorded — `status`
-    stayed None, the case became UNAVAILABLE, the smoke SKIPPED, and a 429
-    regression exited GREEN with the no-429 contract unverified. Round 6 showed a
-    source-text scan for this is the wrong instrument, so it is a real assertion.
+    Round 7 measured the hole this closes. The pins covered only the pure helpers
+    BENEATH the closures, so deleting a listener body, widening its filter, or
+    dropping the verifier's argument all survived — and three of those turn a real
+    product regression into a GREEN skip on a production monitor. A recording
+    `page` executes the registration; replaying each handler with a fake
+    request/response executes the wiring. Nothing here is a source-text scan.
+
+    Scope, stated so it is not over-read: this pins the callbacks' behaviour, not
+    that playwright itself delivers events to them.
     """
 
+    class _Page:
+        def __init__(self) -> None:
+            self.handlers: dict = {}
+
+        def on(self, event: str, fn) -> None:
+            self.handlers[event] = fn
+
+    class _Req:
+        def __init__(self, method: str, url: str, failure: str | None = None) -> None:
+            self.method = method
+            self.url = url
+            self.failure = failure
+
     class _Resp:
-        def __init__(self, url: str, status: int) -> None:
-            self.request = type("R", (), {"method": "POST"})()
+        def __init__(self, method: str, url: str, status: int) -> None:
+            self.request = _Req(method, url)
             self.url = url
             self.status = status
 
         def text(self) -> str:
             return "rate limited"
 
+    signup_url = "https://app.premiselabs.co/auth/signup"
+    page = _Page()
     signup: dict = {"status": None, "body": ""}
+    failures: list[str] = []
+    post_issued = _post_issued_flag()
     tripwire: list[str] = []
 
-    _note_signup_response(_Resp("https://app.premiselabs.co/auth/signup", 429), signup, tripwire)
+    _register_signup_capture(
+        page,
+        signup=signup,
+        transport_failures=failures,
+        post_issued=post_issued,
+        browser_to_supabase=tripwire,
+    )
+    assert set(page.handlers) == {"response", "request", "requestfailed"}
+
+    # The contract response must be RECORDED. A dead body made a real 429 exit
+    # GREEN with the no-429 contract unverified (rounds 5 and 7).
+    page.handlers["response"](_Resp("POST", signup_url, 429))
     assert signup["status"] == 429
     assert signup["body"] == "rate limited"
     assert tripwire == []
-
-    # A non-signup response must NOT overwrite the contract verdict: with the
-    # filter widened to `if True:`, the first document/asset response would be
-    # asserted against instead (round 4 measured that mutation green).
-    _note_signup_response(_Resp("https://app.premiselabs.co/assets/x.js", 200), signup, tripwire)
+    # ...and a non-signup response must NOT overwrite it (a widened filter would
+    # take the verdict from the first document/asset response).
+    page.handlers["response"](_Resp("POST", "https://app.premiselabs.co/assets/x.js", 200))
     assert signup["status"] == 429
-
-    # The #4054 tripwire still records a browser->Supabase reach.
-    _note_signup_response(
-        _Resp("https://x.supabase.co/auth/v1/token?grant_type=password", 200), signup, tripwire
+    # ...and the #4054 tripwire still records a browser->Supabase reach.
+    page.handlers["response"](
+        _Resp("POST", "https://x.supabase.co/auth/v1/token?grant_type=password", 200)
     )
     assert tripwire == ["https://x.supabase.co/auth/v1/token?grant_type=password"]
 
+    # `post_issued` must be set by the SIGNUP POST only: widened, the page's own
+    # navigations set it and a "form never submitted" PRODUCT regression is
+    # reported UNAVAILABLE and skipped (rounds 6 and 7).
+    page.handlers["request"](_Req("GET", "https://app.premiselabs.co/signup"))
+    assert post_issued["value"] is False
+    page.handlers["request"](_Req("POST", signup_url))
+    assert post_issued["value"] is True
 
-def test_live_signup_registers_all_capture_listeners() -> None:
-    """#4940: a deleted, dead, or wrong-wired listener must redden something.
+    # The transport verifier must record the REASON, which is the evidence #4940
+    # requires the message to state.
+    page.handlers["requestfailed"](
+        _Req("GET", "https://app.premiselabs.co/assets/x.js", "net::ERR_ABORTED")
+    )
+    assert failures == []
+    page.handlers["requestfailed"](_Req("POST", signup_url, "net::ERR_NAME_NOT_RESOLVED"))
+    assert failures == [f"POST {signup_url} — net::ERR_NAME_NOT_RESOLVED"]
 
-    Scope, stated so this is not over-read. Pinned here: all three listeners are
-    REGISTERED, each body filters through the pinned predicate, the captured
-    assignments and the verdict INPUTS are the real values, and the tripwire guard
-    precedes the skip/fail. NOT pinned: that playwright calls them — no
-    browser-free test can, and claiming otherwise would be the vacuous-guard
-    defect this issue is itself about.
+
+def test_dispose_captured_reads_the_live_register() -> None:
+    """#4940: the call site must pass STATE, and the read must be the live value.
+
+    With `post_issued["value"]` spelled out at the call site, hardcoding it `True`
+    survived every pin while turning a "form never submitted" PRODUCT regression
+    into a skip — a GREEN exit (round 7). `_dispose_captured` owns that read.
     """
-    src = inspect.getsource(test_live_signup_no_429_confirmation_required)
-    assert 'page.on("requestfailed", _on_requestfailed)' in src
-    assert 'page.on("request", _on_request)' in src
-    # The response listener carries the CONTRACT verdict, and it is checked here
-    # because this change made its absence non-obvious: without it no response is
-    # captured, no `requestfailed` fires, and the `request` listener alone makes
-    # the case UNAVAILABLE (skip) — a broken capture would exit GREEN.
-    assert 'page.on("response", _on_response)' in src
-    # The CAPTURE and the DISPATCH are pinned BEHAVIOURALLY (below, and in
-    # test_unobserved_outcome_is_disposed_correctly). Round 6 measured source-text
-    # scans to be the wrong instrument here: a reformat false-RED them while
-    # `or True` stayed green. Only the REGISTRATION is left, which is the one part
-    # no browser-free test can execute.
+    calls: list[tuple[str, str]] = []
+    skip = lambda m: calls.append(("skip", m))  # noqa: E731
+    fail = lambda m: calls.append(("fail", m))  # noqa: E731
+
+    _dispose_captured({"status": None}, [], {"value": False}, [], skip=skip, fail=fail)
+    assert [kind for kind, _ in calls] == ["fail"]
+
+    calls.clear()
+    _dispose_captured({"status": None}, [], {"value": True}, [], skip=skip, fail=fail)
+    assert [kind for kind, _ in calls] == ["skip"]
+
+    # The tripwire still wins over a skip, through this entry point too.
+    calls.clear()
+    _dispose_captured(
+        {"status": None}, [], {"value": True}, ["https://x/auth/v1/token"], skip=skip, fail=fail
+    )
+    assert [kind for kind, _ in calls] == ["fail"]
+
 
 
 def test_unobserved_outcome_splits_verdicts() -> None:
@@ -594,35 +716,13 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
     # HttpOnly handle.
     browser_to_supabase: list[str] = []
 
-    def _on_response(resp):
-        # #4054/#4171: the auth pages moved onto the app origin and the BFF
-        # became a TRUE backend. The form POSTs SAME-ORIGIN to /auth/signup, and
-        # functions/auth/signup.ts performs BOTH upstream calls SERVER-side
-        # (`POST ${API_ORIGIN}/v1/signup/email`, then `signInWithPassword`). A
-        # Worker's outbound fetch never surfaces in `page.on("response")`, so
-        # the pre-BFF listeners that matched `v1/signup/email` and
-        # `token?grant_type=password` matched NOTHING and left both statuses
-        # None — the monitor failed on "no /v1/signup/email response observed"
-        # even when signup was perfectly healthy. The observable boundary is now
-        # the BFF call itself.
-        _note_signup_response(resp, signup, browser_to_supabase)
-
-    def _on_request(req):
-        # #4940: record that the BFF POST was ACTUALLY ISSUED.
-        if _is_bff_signup_request(req.method, req.url):
-            post_issued["value"] = True
-
-    def _on_requestfailed(req):
-        # #4940: a request that did not produce a usable response arrives here;
-        # the transport reason is in `req.failure` (e.g.
-        # "net::ERR_NAME_NOT_RESOLVED" / "net::ERR_CONNECTION_REFUSED").
-        entry = _signup_transport_failure(req.method, req.url, req.failure)
-        if entry is not None:
-            transport_failures.append(entry)
-
-    page.on("response", _on_response)
-    page.on("request", _on_request)
-    page.on("requestfailed", _on_requestfailed)
+    _register_signup_capture(
+        page,
+        signup=signup,
+        transport_failures=transport_failures,
+        post_issued=post_issued,
+        browser_to_supabase=browser_to_supabase,
+    )
     # #1566: the account is created pre-confirmed, so the SIGNUP flow
     # redirects to the APP ROOT (signup.html WELCOME_URL =
     # https://app.premiselabs.co) — block that ROOT DOCUMENT so the app's
@@ -673,9 +773,10 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
             # precedence over a skip, and the evidence that reaches the message all
             # live in `_handle_unobserved`, pinned behaviourally below rather than
             # trusted.
-            _handle_unobserved(
+            _dispose_captured(
+                signup,
                 transport_failures,
-                post_issued["value"],
+                post_issued,
                 browser_to_supabase,
                 skip=pytest.skip,
                 fail=pytest.fail,
