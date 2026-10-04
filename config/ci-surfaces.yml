@@ -1277,6 +1277,12 @@ surfaces:
   - test_hard_reject.py
   - test_helpers.py
   - test_hnsw_vector_index.py
+  # #6976: the id predicate must stay BOUND across a query expansion on
+  # FalkorDB 6.0.0, which DROPS it (returning foreign rows) when a later plain
+  # MATCH re-binds the variable. Hermetic: asserts the SHAPE of the emitted
+  # Cypher via a stub graph, no DB (the pinned engine binds the shape, so the
+  # defect is not behaviourally reproducible here).
+  - test_id_predicate_barrier_6976.py
   - test_idempotency.py
   - test_index_cli.py
   - test_index_directory.py
@@ -1390,6 +1396,17 @@ surfaces:
   - test_pack_state.py
   - test_pipeline_cli.py
   - test_postmerge_verdict.py
+  # #6139: guards `tools/pr_lead_time.py` — the PR lead-time decomposition.
+  # Registered under `core` so the suite is classified and runs when the TEST
+  # file itself changes. NOTE this entry does NOT protect a change to the TOOL:
+  # `tools/` sits in NON_PYTHON_PREFIXES, so a tools-only diff comes back as
+  # `changed=[]` and select() takes the docs-only early return — which bypasses
+  # the `if not matched: matched.add("core")` fallback entirely, so not one of
+  # these guards would run on the very change that can break them. The coverage
+  # comes instead from the TOOL_CARVEOUTS entry in tools/ci_selection.py (the
+  # #3261/#2718 pattern), which fails such a change closed to the FULL matrix.
+  # Pinned by test_ci_selection.test_pr_lead_time_tool_change_fails_closed_to_full.
+  - test_pr_lead_time.py
   - test_pre_migration_safety.py
   - test_probe_json_mode.py
   - test_probe_reset_inflight_4608.py  # #4608: a probe reset/rebuild must not close a handle an in-flight probe still queries (dual-registered with api)

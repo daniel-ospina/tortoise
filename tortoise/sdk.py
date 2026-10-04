@@ -24218,6 +24218,9 @@ class TortoiseSDK:
         # non-Subject targets are out of contract.
         r = proj.g.query(
             "MATCH (s:Subject) WHERE s.id = $sid OR s.name = $sid "
+            # #6976: load-bearing `WITH s` — without it FalkorDB 6.0.0 drops the
+            # id/name predicate at the re-binding MATCH below (foreign rows).
+            "WITH s "
             "MATCH (s)<-[:ownedBy]-(e) RETURN properties(e) LIMIT 100",
             params={"sid": subject_id},
         )
@@ -24415,11 +24418,13 @@ class TortoiseSDK:
         # Scan) then traverse outward; roles filters the source Subject p.
         members = proj.g.query(
             "MATCH (s:Subject) WHERE s.id = $sid OR s.name = $sid "
+            "WITH s "
             "MATCH (p:Subject)-[:memberOf]->(s) RETURN properties(p)",
             params={"sid": subject_id},
         )
         roles = proj.g.query(
             "MATCH (p:Subject) WHERE p.id = $sid OR p.name = $sid "
+            "WITH p "
             "MATCH (p)-[:holdsRole]->(r:Subject) RETURN properties(r)",
             params={"sid": subject_id},
         )

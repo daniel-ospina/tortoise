@@ -974,6 +974,24 @@ TOOL_CARVEOUTS = (
     # -> FULL matrix (fail closed). Pinned by
     # test_ci_selection.test_ci_timing_tool_change_fails_closed_to_full.
     "tools/ci_timing.py",
+    # #6139: the PR lead-time decomposition owns tests/test_pr_lead_time.py,
+    # whose guards pin its residence rule (a zero-length `Mergify Merge Queue`
+    # run is a queue EVALUATION, not residence — measured 6.6x on PR #6106), its
+    # gate clamp into the PR's own life (a gate earlier than created_at made
+    # seconds_a negative and aborted the WHOLE run on PR #5137), and its
+    # exit-code contract (an unobserved read is UNKNOWN, never 0). Same
+    # silent-drop class as the carve-outs above: the flat "tools/" prefix in
+    # NON_PYTHON_PREFIXES swallows `tools/pr_lead_time.py`, so a tool-only edit
+    # comes back as `changed=[]`, select() takes the docs-only early return —
+    # which bypasses the `if not matched: matched.add("core")` fallback
+    # entirely — and NOT ONE of those guards runs on the very change that can
+    # break them. An earlier attempt relied on the ci-surfaces.yml `core`
+    # registration alone and was wrong for exactly this reason (the registration
+    # covers the TEST file's own edits, not the tool's). No SOURCE_PATTERNS
+    # entry matches this path, so it lands in the unknown-path branch -> FULL
+    # matrix (fail closed).
+    # Pinned by test_ci_selection.test_pr_lead_time_tool_change_fails_closed_to_full.
+    "tools/pr_lead_time.py",
 )
 
 

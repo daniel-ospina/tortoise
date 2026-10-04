@@ -1214,37 +1214,71 @@ def _red_file_list_matches(red_runs: list[dict], files: list[str]) -> bool:
 # ---------------------------------------------------------------------------
 # Closing rule (D9) — the subset that the RED half can evaluate honestly.
 # ---------------------------------------------------------------------------
+def _get(root: object, *path: str) -> object:
+    """Traverse ``root`` by ``path``; return None if any step is absent or not a dict.
+
+    #7084: ``closes_issue`` and ``exit_code`` re-read a PERSISTED record, i.e.
+    untrusted JSON, and a bare subscript makes a structurally malformed record
+    raise KeyError/TypeError. A traceback is not a fail-closed refusal — the
+    function must RETURN a reason.
+
+    Callers must pick a polarity that fails closed on absence: `_get(...) is True`
+    for a BOOLEAN term, and `_get(...) is False` for a negated one. `not _get(...)`
+    is the trap — it is True for a MISSING key, so it certifies a record precisely
+    because it recorded nothing. Avoid blanket `bool(...)` on a boolean field: it
+    converts a refusal into a certification for a truthy non-bool.
+    """
+    value: object = root
+    for key in path:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
 def closes_issue(rec: dict) -> tuple[bool, list[str]]:
     reasons: list[str] = []
 
     def conj(name: str, value: bool) -> bool:
-        if not value:
+        # #7084: coerce. A safe accessor returns None, and `ok &= None` raises
+        # TypeError — turning KeyError into TypeError is not a fix.
+        verdict = bool(value)
+        if not verdict:
             reasons.append(name)
-        return value
+        return verdict
+
+    _runs = _get(rec, "runs") or []
+    _selection = _get(rec, "selection") or {}
+    _pin = _get(rec, "pin") or {}
+    _red = _get(rec, "red") or {}
 
     ok = True
-    ok &= conj("runs-empty", bool(rec["runs"]))
+    ok &= conj("runs-empty", bool(_runs))
     ok &= conj("non-green-bucket",
-               all(r["bucket"] in BUCKETS_PASSING for r in rec["runs"]))
-    ok &= conj("no-test-executed", all(r["executed"] >= 1 for r in rec["runs"]))
-    ok &= conj("selection-not-family", rec["selection"]["name"] == "family")
+               all(_get(r, "bucket") in BUCKETS_PASSING for r in _runs))
+    ok &= conj("no-test-executed", all((_get(r, "executed") or 0) >= 1 for r in _runs))
+    ok &= conj("selection-not-family", _get(_selection, "name") == "family")
     ok &= conj("reproducer-absent",
                any(MANDATORY_REPRODUCER.endswith(f) or MANDATORY_REPRODUCER in f
-                   for f in rec["selection"]["files"]))
+                   for f in (_get(_selection, "files") or [])))
     # D11: the attested baseline is a RUN too, so its own tree state is part of the
     # pin — `runs` alone left the pairing worktree's move unexamined.
     ok &= conj("pin-not-airtight",
-               rec["pin"]["worktree_clean"]
-               and all(not r["tree_moved"]
-                       for r in [*rec["runs"], *(
-                           [rec["red"]["baseline_run"]]
-                           if rec["red"].get("baseline_run") else [])]))
+               _get(_pin, "worktree_clean") is True
+               and all(_get(r, "tree_moved") is False
+                       for r in [*_runs, *(
+                           [_get(_red, "baseline_run")]
+                           if _get(_red, "baseline_run") else [])]))
     ok &= conj("cause-unattributed",
-               rec["red"]["cause"] in CAUSE_CLASSES and rec["red"]["cause"] != "unattributed")
+               _get(_red, "cause") in CAUSE_CLASSES and _get(_red, "cause") != "unattributed")
     ok &= conj("cause-not-expected",
-               rec["red"]["cause"] in rec["selection"]["expected_causes"])
-    ok &= conj("red-file-list-differs", rec["red"]["same_file_list"])
-    ok &= conj("load-bands-do-not-overlap", rec["load"]["overlap"])
+               _get(_red, "cause") in (_get(_selection, "expected_causes") or []))
+    # #7084: within closes_issue, BOOLEAN fields use `is True`/`is False`,
+    # never `bool(...)`. Raw was
+    # the pre-patch form and a truthy non-bool made `ok &= "x"` refuse (loudly).
+    # `bool(...)` turns that refusal into a certification.
+    ok &= conj("red-file-list-differs", _get(_red, "same_file_list") is True)
+    ok &= conj("load-bands-do-not-overlap", _get(rec, "load", "overlap") is True)
     # The ceiling is enforced as a PRODUCER gate in `_run_once`, but this function
     # is also the RE-EVALUATION surface for a persisted record, and `load.ceiling`
     # was persisted for exactly this comparison. Without the conjunct below the
@@ -1274,12 +1308,6 @@ def closes_issue(rec: dict) -> tuple[bool, list[str]]:
     # 401-digit int literal all reach here, and a traceback is not a fail-closed
     # refusal — the function must return a reason.
     #
-    # SCOPE, stated so this comment does not overclaim: this makes the LOAD reads
-    # total, not the whole function. The other conjuncts above still subscript
-    # `rec` directly (e.g. `rec["load"]["overlap"]`, `rec["red"]`, `rec["runs"]`),
-    # so a structurally malformed record still raises there. That is PRE-EXISTING
-    # and deliberately unchanged here: making the entire function total is a
-    # bigger change than this PR's subject and is tracked separately.
     def _load_number(value: object) -> float | None:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return None
@@ -1293,12 +1321,12 @@ def closes_issue(rec: dict) -> tuple[bool, list[str]]:
         load = run.get("load") if isinstance(run, dict) else None
         return _load_number(load.get("before")) if isinstance(load, dict) else None
 
-    _load = rec.get("load") if isinstance(rec.get("load"), dict) else {}
+    _load = _get(rec, "load")
+    _load = _load if isinstance(_load, dict) else {}
     _ceiling = _load_number(_load.get("ceiling"))
     _ceiling_usable = _ceiling is not None and _ceiling > 0
-    _red = rec.get("red") if isinstance(rec.get("red"), dict) else {}
-    _baseline = _red.get("baseline_run")
-    _load_runs = [*rec["runs"], *([_baseline] if _baseline else [])]
+    _baseline = _get(_red, "baseline_run")
+    _load_runs = [*_runs, *([_baseline] if _baseline else [])]
     _befores = [_run_number(r) for r in _load_runs]
     ok &= conj("load-ceiling-unusable", _ceiling_usable)
     # A run whose load could not be read is inadmissible, exactly as at the
@@ -1330,23 +1358,28 @@ def closes_issue(rec: dict) -> tuple[bool, list[str]]:
     # falsifiable claim is `rate_change` (a red was demonstrated and did not appear
     # at the measured commit); `attempted` still records that a red was demonstrated
     # at all, so it can be False in a produced record.
+    _at_fixed = _get(_red, "at_fixed_commit") or {}
     ok &= conj("no-rate-change",
-               (rec["red"]["at_fixed_commit"]["rate_change"]
-                and not rec["red"]["at_fixed_commit"]["appeared"])
-               or (bool(rec["red"]["at_fixed_commit"]["mutation"])
-                   and str(rec["red"]["at_fixed_commit"]["mutation_operator"]).startswith("statement-deletion:")
-                   and rec["red"]["at_fixed_commit"]["mutation_target_is_fix_branch"]
-                   and not rec["red"]["at_fixed_commit"]["appeared"]
-                   and rec["red"]["at_fixed_commit"]["mutation_red_returned"]))
-    ok &= conj("record-role-not-closing", rec["record_role"] == "closing")
+               (_get(_at_fixed, "rate_change") is True
+                and _get(_at_fixed, "appeared") is False)
+               or (bool(_get(_at_fixed, "mutation"))
+                   and str(_get(_at_fixed, "mutation_operator") or "").startswith("statement-deletion:")
+                   and _get(_at_fixed, "mutation_target_is_fix_branch") is True
+                   and _get(_at_fixed, "appeared") is False
+                   and _get(_at_fixed, "mutation_red_returned") is True))
+    ok &= conj("record-role-not-closing", _get(rec, "record_role") == "closing")
     # R1 (D23): certification binds to the shipping surface.
     ok &= conj("certification-not-on-shipping-surface",
-               rec["red"]["at_fixed_commit"]["surface"] in SHIPPING_SURFACES
-               and bool(rec["red"]["at_fixed_commit"]["surface_assertion"]))
-    # R2 (D24): certificate bound to the reviewed head SHA.
+               _get(_at_fixed, "surface") in SHIPPING_SURFACES
+               and bool(_get(_at_fixed, "surface_assertion")))
+    # R2 (D24): certificate bound to the reviewed head SHA. Presence is asserted
+    # BEFORE equality: `_get(...) == _get(...)` is `None == None` -> True when both
+    # keys are absent, which would certify a record that binds no SHA at all.
+    _head_sha = _get(_pin, "head_sha")
     ok &= conj("certificate-not-bound-to-review-head",
-               rec["pin"]["head_sha"] == rec["pin"]["commit"]
-               and not rec["pin"]["post_review_dirty"])
+               isinstance(_head_sha, str) and bool(_head_sha)
+               and _head_sha == _get(_pin, "commit")
+               and _get(_pin, "post_review_dirty") is False)
     return ok, reasons
 
 
@@ -1359,13 +1392,13 @@ def exit_code(rec: dict) -> int:
     # in `runs`. D14/threat row 10 requires a non-overlapping load band to be exit 1
     # ("a red measured at load 80 and a green at load 3"); without the baseline in
     # this test a closing-shaped record that failed only on load returned a clean 3.
-    red_runs = list(rec["runs"])
-    baseline = rec.get("red", {}).get("baseline_run")
+    red_runs = list(_get(rec, "runs") or [])
+    baseline = _get(rec, "red", "baseline_run")
     if baseline:
         red_runs.append(baseline)
-    if any(r["bucket"] in BUCKETS_RED for r in red_runs):
+    if any(_get(r, "bucket") in BUCKETS_RED for r in red_runs):
         return 1
-    if rec["verdict"].get("environment_error"):
+    if _get(rec, "verdict", "environment_error") is True:
         return 2
     return 3
 
