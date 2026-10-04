@@ -248,6 +248,18 @@ class TestGithubConnectFlip:
             return "gho_raw_access_token_123"
 
         monkeypatch.setattr(ha, "_exchange_github_token", _fake_exchange)
+        # #4387: stub the callback's best-effort `GET /user` leg. Unstubbed it
+        # reaches api.github.com, the hermetic egress guard blocks it, and the
+        # indexer's retry loop then burns the transport wait bound — so the
+        # request answers 504 before it ever reaches the control-plane write
+        # this test exists to pin. The sibling test above stubs the same seam
+        # for the same reason: the login is not what this contract asserts.
+        from tortoise.indexer.github_indexer import GitHubIndexer
+
+        async def _fake_login(self):
+            return "acme-user"
+
+        monkeypatch.setattr(GitHubIndexer, "current_login", _fake_login)
         monkeypatch.setattr(sc, "get_control_plane", lambda: ErrorControlPlane())
         # raise_server_exceptions=False: the RuntimeError the seam raises is a
         # real 500 in production — assert it as an HTTP response.

@@ -324,6 +324,170 @@ def test_sessions_import_window_is_a_noop_at_or_below_the_limit(tmp_path, monkey
     assert "truncat" not in capsys.readouterr().err.lower()
 
 
+def test_sessions_import_defers_on_extraction_disabled(tmp_path, monkeypatch, capsys):
+    """#4258: a store-only 2xx from the team's `capture_extract` OFF setting must
+    NOT write a local "imported" receipt — the SAME DEFERRED contract #4188
+    established for the keyless mode. A receipt would make every later
+    re-import skip the POST (`receipt.exists()` → 0), so the session could never
+    gain memory points after extraction is turned back on — even though the
+    server left it retry-eligible (capture_ok=False, lane "disabled"; "none"
+    is the keyless sibling).
+
+    The control (a keyed `llm:*` 2xx) DOES write the receipt, so the assertion
+    discriminates rather than merely observing an empty dir.
+    """
+    from tortoise.__main__ import _cmd_sessions_import
+
+    monkeypatch.setenv("TORTOISE_API_KEY", "tt_test")
+    # #3615: capture is gated on EXPLICIT consent — a credential is not
+    # consent. This test exercises the real import path, so opt in.
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+    monkeypatch.setenv("TORTOISE_IMPORT_RECEIPT_DIR", str(tmp_path / "receipts"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+
+    def _run(path, mode):
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "session_id": "s-" + mode,
+                    "extraction_mode": mode,
+                    "warnings": [],
+                }).encode()
+
+        args = SimpleNamespace(file=str(path), harness="pi", session_id=None)
+        with mock.patch("urllib.request.urlopen", lambda req, timeout=None: _Resp()):
+            return _cmd_sessions_import(args)
+
+    # store-only (extraction turned OFF): deferred → NO local receipt
+    assert _run(_pi_turns_file(tmp_path, 3), "extraction-disabled") == 0
+    assert list((tmp_path / "receipts").glob("*.json")) == [], (
+        "a deferred (store-only) import must not write a receipt — it would "
+        "make every later re-import a no-op")
+    err = capsys.readouterr().err.lower()
+    assert "deferred" in err and "turned off" in err
+
+    # control: a keyed extraction 2xx DOES write the receipt
+    assert _run(_pi_turns_file(tmp_path, 2), "llm:mock") == 0
+    assert len(list((tmp_path / "receipts").glob("*.json"))) == 1, (
+        "the keyed control must write a receipt — otherwise the empty dir "
+        "above proves nothing")
+
+
+def test_sessions_import_deferred_remedy_names_both_levers(tmp_path, monkeypatch, capsys):
+    """#4258 + #3892: when the receipt is BOTH keyless AND extraction-disabled,
+    the deferred remedy must name both levers. Naming only the missing key
+    would send the user to configure a provider that still would not extract
+    while the team's `capture_extract` setting is OFF — the same wrong-lever
+    defect the review flagged (a remedy that cannot fix the state it names).
+    """
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.sdk import _CAPTURE_EXTRACTION_DISABLED_WARNING
+
+    monkeypatch.setenv("TORTOISE_API_KEY", "tt_test")
+    # #3615: capture is gated on EXPLICIT consent — a credential is not
+    # consent. This test exercises the real import path, so opt in.
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+    monkeypatch.setenv("TORTOISE_IMPORT_RECEIPT_DIR", str(tmp_path / "receipts"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            # the no-provider branch wins the MODE, but the server still adds
+            # the extraction-disabled warning additively (#4258).
+            return json.dumps({
+                "session_id": "s-both",
+                "extraction_mode": "no-provider",
+                "warnings": ["no LLM provider key",
+                             _CAPTURE_EXTRACTION_DISABLED_WARNING],
+            }).encode()
+
+    args = SimpleNamespace(file=str(_pi_turns_file(tmp_path, 3)),
+                           harness="pi", session_id=None)
+    with mock.patch("urllib.request.urlopen", lambda req, timeout=None: _Resp()):
+        assert _cmd_sessions_import(args) == 0
+    assert list((tmp_path / "receipts").glob("*.json")) == [], (
+        "a deferred import writes no receipt")
+    err = capsys.readouterr().err.lower()
+    assert "no llm provider key" in err and "turned off" in err, err
+    assert "key is configured and extraction is turned back on" in err, (
+        "the remedy must name BOTH levers, not just the missing key: " + err)
+
+
+def test_sessions_import_defers_on_upgrade_refused_replay(tmp_path, monkeypatch, capsys):
+    """#4258/#4188: on the non-convergent M2 lane the server REPLAYS a FAILED
+    store-only prior — mode ``replayed`` + an upgrade-refused warning — which is
+    STILL "no extraction ever ran". The CLI must treat that as DEFERRED (no
+    local receipt), or every later re-import skips the POST on a stale receipt
+    and the session can never gain memory points, making the warning's own
+    remedy unreachable. Covers BOTH the keyless (pre-existing) and the
+    setting-disabled (#4258) warning shapes.
+    """
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.sdk import (
+        _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING,
+        _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING,
+    )
+
+    monkeypatch.setenv("TORTOISE_API_KEY", "tt_test")
+    # #3615: capture is gated on EXPLICIT consent — a credential is not
+    # consent. This test exercises the real import path, so opt in.
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+    monkeypatch.setenv("TORTOISE_IMPORT_RECEIPT_DIR", str(tmp_path / "receipts"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+
+    def _run(warning):
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "session_id": "s-replay",
+                    "extraction_mode": "replayed",
+                    "warnings": [
+                        "session already captured (same session_id) — no "
+                        "new extraction",
+                        warning,
+                    ],
+                }).encode()
+
+        args = SimpleNamespace(file=str(_pi_turns_file(tmp_path, 3)),
+                               harness="pi", session_id=None)
+        with mock.patch("urllib.request.urlopen",
+                        lambda req, timeout=None: _Resp()):
+            assert _cmd_sessions_import(args) == 0
+        capsys.readouterr()
+
+    # the setting-disabled variant (new in #4258) …
+    _run(_CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING)
+    assert list((tmp_path / "receipts").glob("*.json")) == [], (
+        "a replayed store-only receipt must not write a local receipt")
+    # … and the keyless variant (the pre-existing shape of the same hole).
+    _run(_CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING)
+    assert list((tmp_path / "receipts").glob("*.json")) == []
+
+
 # ── #4714: a RETRYABLE import refusal must land in the DURABLE SPOOL ────────
 #
 # The server's capture guard REFUSES rather than enqueues, and it advertises
@@ -507,6 +671,55 @@ def test_a_504_whose_session_never_appears_still_spools(
     assert rc == 1
     assert not list((tmp_path / "receipts").glob("*.json"))
     assert read_spool_meta(spool, "sid-never") is not None
+
+
+def test_a_retryable_import_spools_a_marked_over_cap_turn(
+        tmp_path, monkeypatch):
+    """#4897 review round 15, P3: the `sessions import` spool leg is PINNED.
+
+    `_spool_if_retryable` clips each parsed turn through the SDK's ONE definition
+    (`_clip_capture_turn_content`). Reverting it to a bare `t["content"][:5000]`
+    left the suite green: a retryable refusal then parked a silently cut turn in
+    the durable spool — the path that exists precisely so a lost session can be
+    replayed later, and the cut would be invisible to every reader of the spool.
+
+    MUTATION THAT REDS THIS: replace the clip in `_spool_if_retryable` with
+    `t["content"][:5000]` — the marker assertion fails.
+    """
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import read_spool_meta, read_spool_turns
+    from tortoise.sdk import (
+        _CAPTURE_TRUNCATION_SENTINEL,
+        _CAPTURE_TURN_CAP,
+        _capture_truncation_marker,
+    )
+
+    spool = _import_env(tmp_path, monkeypatch)
+    over = _CAPTURE_TURN_CAP + 1234
+    long = "a" * over
+    p = tmp_path / "session-long.jsonl"
+    p.write_text(json.dumps({
+        "type": "response_item",
+        "payload": {"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": long}]},
+    }) + "\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _post_refused_get_serves("sid-mark", [], get_404=True))
+
+    rc = _cmd_sessions_import(SimpleNamespace(
+        file=str(p), harness="codex", session_id="sid-mark"))
+
+    assert rc == 1
+    assert read_spool_meta(spool, "sid-mark") is not None, (
+        "a retryable refusal must park the turns durably")
+    turns = read_spool_turns(spool, "sid-mark")
+    assert len(turns) == 1, turns
+    assert _CAPTURE_TRUNCATION_SENTINEL in turns[0]["content"], (
+        f"the spool stored a silently cut turn: {turns[0]['content'][-60:]!r}")
+    assert _capture_truncation_marker(over) in turns[0]["content"], (
+        "the marker must carry the turn's TRUE length, not the window width")
+    assert len(turns[0]["content"]) == _CAPTURE_TURN_CAP
 
 
 def test_an_unreachable_api_that_still_committed_writes_the_receipt(

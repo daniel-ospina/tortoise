@@ -51,16 +51,16 @@ Requires the embedding model locally (`pip install 'tortoise-graph[embeddings]'`
 
 ```bash
 TORTOISE_DB_URI="$FALKORDB_CLOUD_URI" \
-  python3 graph-scripts/backfill_embeddings.py --dry-run        # counts first
+  uv run python graph-scripts/backfill_embeddings.py --dry-run        # counts first
 TORTOISE_DB_URI="$FALKORDB_CLOUD_URI" \
-  python3 graph-scripts/backfill_embeddings.py --batch-size 500 # then backfill
+  uv run python graph-scripts/backfill_embeddings.py --batch-size 500 # then backfill
 ```
 
 Repair pre-#244 plain-list Event embeddings if present:
 
 ```bash
 TORTOISE_DB_URI="$FALKORDB_CLOUD_URI" \
-  python3 graph-scripts/backfill_embeddings.py --repair-embeddings
+  uv run python graph-scripts/backfill_embeddings.py --repair-embeddings
 ```
 
 ## 4. Verify search actually uses the vector strategy

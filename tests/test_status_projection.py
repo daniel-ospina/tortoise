@@ -188,7 +188,7 @@ class TestProjectionFold:
             journaled = [ev for ev in
                          EventLog(str(events / "events.jsonl")).read_all()
                          if ev.get("type") == "ObjectSuperseded"]
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             rows = sdk._get_proj().g.query(
                 "MATCH (o:Object {name:$n}) RETURN o.status, "
                 "o.supersededBy, o.supersededAt",
@@ -232,7 +232,7 @@ class TestProjectionFold:
                 "RETURN o.supersededBy").result_set[0][0]
             assert live == long_name, len(live)
 
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             status, replayed = sdk._get_proj().g.query(
                 "MATCH (o:Object {name:'replay-src'}) "
                 "RETURN o.status, o.supersededBy").result_set[0]
@@ -286,7 +286,7 @@ class TestProjectionFold:
                 "RETURN o.supersededBy").result_set[0][0]
             assert live == legacy_prefix, len(live)
 
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             _status, replayed = sdk._get_proj().g.query(
                 "MATCH (o:Object {name:'legacy-src'}) "
                 "RETURN o.status, o.supersededBy").result_set[0]
@@ -344,7 +344,7 @@ class TestProjectionFold:
                                             "ObjectSuperseded")]
             assert jtypes.index("ObjectSuperseded") < jtypes.index(
                 "ObjectRegistered"), jtypes
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             rows = sdk._get_proj().g.query(
                 "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
                 params={"n": "strategy-A"}).result_set
@@ -386,7 +386,7 @@ class TestProjectionFold:
                  "supersedes_by": "strategy-D", "evidence": ""},
                 id=oid,
             )
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             rows = sdk._get_proj().g.query(
                 "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
                 params={"n": "strategy-C"}).result_set
@@ -460,7 +460,7 @@ class TestProjectionFold:
             assert ev["supersedes_by"] == successor, ev
             assert ev["id"] != legacy_reg_id, \
                 "the synthesized id must differ from the legacy registration id"
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             rows = proj.g.query(
                 "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
                 params={"n": name}).result_set
@@ -811,5 +811,40 @@ class TestReadSide:
                 include_superseded=True)
                 if o.get("entity_type") == "object"]
             assert "old-strategy" in with_all, "include_superseded must bring it back"
+        finally:
+            sdk.close()
+
+    def test_recall_state_filter_covers_the_whole_object_vocabulary(self):
+        """#3301: recall_state round-trips the ENTIRE canonical OBJECT
+        vocabulary, not just 'superseded'. The default half is enforced
+        end-to-end (the four search legs exclude the canonical set at the query
+        layer and the read-surface filter consumes the same constant); the
+        include_superseded half pins the terminal-inclusive wiring that the
+        widening alone regressed."""
+        from tortoise.commit_ops import OBJECT_TERMINAL_STATUSES
+        sdk = _fresh_sdk()
+        try:
+            sdk.create_entity("object", "obj-live", objectKind="core:strategy")
+            for st in sorted(OBJECT_TERMINAL_STATUSES):
+                name = f"obj-{st}"
+                sdk.create_entity("object", name, objectKind="core:strategy")
+                sdk._get_proj().g.query(
+                    "MATCH (o:Object {name:$n}) SET o.status=$st",
+                    params={"n": name, "st": st})
+            terminal_names = {f"obj-{s}" for s in OBJECT_TERMINAL_STATUSES}
+            default = {o["content"] for o in sdk.recall_state(
+                kind="core:strategy", limit=20, object_centric=True)
+                if o.get("entity_type") == "object"}
+            assert "obj-live" in default
+            assert not (default & terminal_names), (
+                "terminal Objects leaked into the default view: "
+                f"{default & terminal_names}")
+            with_all = {o["content"] for o in sdk.recall_state(
+                kind="core:strategy", limit=20, object_centric=True,
+                include_superseded=True)
+                if o.get("entity_type") == "object"}
+            assert terminal_names <= with_all, (
+                "include_superseded must re-admit every canonical status; "
+                f"missing {terminal_names - with_all}")
         finally:
             sdk.close()

@@ -338,3 +338,59 @@ def test_probe_failure_does_not_raise(monkeypatch, tmp_path, capsys):
     assert "E2E-7 survivor probe failed" in out
     assert "NOT a leak signal" in out
     assert "E2E-7: 1 owned journalled" not in out
+
+
+def test_reimporting_conftest_cannot_change_the_session_identity():
+    """#6323: the re-import this module performs must not strand the session.
+
+    pytest loads this conftest as the TOP-LEVEL ``conftest``, so
+    ``import tests.conftest`` is a SECOND module whose body re-executes
+    mid-session. Before #6323 that body re-rolled ``TORTOISE_TEST_SESSION``,
+    which re-pointed the journal and made the session read its OWN pre-import
+    journal as a live PEER — so ``wipe_server(scope=None)`` spared graphs the
+    session itself had minted.
+
+    The guard sits here, beside the call site, so it runs wherever the trigger
+    runs.
+
+    The re-execution is made GENUINE on purpose. In this file `import
+    tests.conftest` is normally a CACHED NO-OP — ``_start_teardown`` (below)
+    already imported it, so the body does not run again and the assertion below
+    would hold trivially, passing even against the pre-#6323 unconditional
+    re-roll. Popping the module first forces the body to re-execute, and the
+    identity check on the module object makes that condition LOUD rather than
+    silent: if a future change makes the import cached again, this fails
+    instead of quietly becoming a tautology.
+
+    Scope of the guarantee: this pins "re-executing the body does not move the
+    nonce". It does NOT pin the companion direction — that a fix must not
+    become the REJECTED ``setdefault`` design (a pre-set value would freeze the
+    nonce, so concurrent sessions would share one journal filename). That
+    decision is documented at ``tests/conftest.py:118-126`` and asserted by no
+    test: ``test_redirect_seam.py`` compares the env against the import-time
+    value, which a ``setdefault`` reversion would also satisfy. Guarding it
+    would mean re-executing the body with the marker removed, which mints a new
+    nonce and perturbs the live session — a worse trade than an unguarded, and
+    so far unobserved, reversion.
+    """
+    import os
+    import sys
+
+    before = os.environ.get("TORTOISE_TEST_SESSION")
+    assert before, "conftest must export TORTOISE_TEST_SESSION before tests run"
+
+    prior_module = sys.modules.get("tests.conftest")
+    sys.modules.pop("tests.conftest", None)
+    import tests.conftest  # noqa: F401 — a GENUINE second execution of the body
+
+    assert sys.modules["tests.conftest"] is not prior_module, (
+        "importing tests.conftest did not re-execute its body (the module was "
+        "still cached), so this guard proved nothing — see the docstring"
+    )
+
+    after = os.environ.get("TORTOISE_TEST_SESSION")
+    assert after == before, (
+        "re-executing conftest's body changed TORTOISE_TEST_SESSION "
+        f"({before!r} -> {after!r}) — the session's own journal is now "
+        "stranded as a live peer (#6323)"
+    )

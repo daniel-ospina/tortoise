@@ -27,31 +27,42 @@ an extractor/indexer, update the catalog reference.
 """
 from __future__ import annotations  # noqa: I001
 
+import decimal
 import hashlib
 import json as _json
 import logging
+import math
+import numbers
 import os
 import re
 import stat
+from collections.abc import Callable
 from contextvars import ContextVar
 from time import monotonic as _monotonic
-from typing import Any
+from typing import Any, ClassVar
 
 from .domain_loader import known_kinds, register_kind
 from .cross_lens import DEFAULT_THRESHOLD
+# #3301: the canonical OBJECT terminal vocabulary — the SAME set the four
+# search legs exclude by default. Imported here so recall_state's Object
+# filter never re-literals it (a copy is how the read surface drifts from
+# search).
+from .commit_ops import OBJECT_TERMINAL_STATUSES as _OBJECT_TERMINAL_STATUSES
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
+from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
 from .embedded_lifecycle import atexit_fast_close  # #1371: the fast-close seam
 from .retrieval import (DEFAULT_POOL_SIZE, _safe_session_tag,
-                        resolve_pool_size)
+                        is_turn_echo_row, resolve_pool_size)
 from . import monitoring
 from . import file_indexer  # noqa: F401 — binds the classifier/identity module (§4.4); sourceKind registration is registry-owned (source_credibility.SOURCE_KIND_DEFAULTS)
 from .projection import FalkorProjection
 from .projection import _ANNOTATOR_PROPS as _ANNOTATOR_PROP_NAMES
 from .projection import is_missing_graph_error  # #2163: absent-graph family == success
+from .graph_ops import counts_capture_ops, phased  # #3359: per-capture graph-op accounting
 from .quota import MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS
 from .canonical import derive_batch_id
 # #4911: the ONE credential scrubber for stored turn text. Stdlib-only module
@@ -219,6 +230,26 @@ def _capture_redaction_warning(count: int) -> str:
         f"except for those spans"
     )
 
+
+def _journal_write_failure_warning(count: int) -> str:
+    """#4240 review F1: the additive warning a capture carries when a journal
+    append failed on a CONFIGURED journal.
+
+    One canonical string, shared with ``hosted_api._capture_session_impl``
+    (byte-parity: both lanes must describe the same event identically — the
+    hosted lane builds its OWN receipt and never calls ``capture_session``, so
+    without this the disclosure would exist only on the SDK lane), naming that
+    THIS capture's records never reached the journal and a later rebuild will
+    therefore lose them. Deliberately independent of the capture's ``ok`` flag:
+    the graph write persisted, and marking it failed would trip the #2335
+    TRUE-retry gate over a write that was in fact persisted.
+    """
+    return (
+        f"journal append failed {count}x — this capture is live-only and will "
+        f"not survive a rebuild (#4240)"
+    )
+
+
 #: #3892: a keyless session re-captured WITH a key while the deployment is on
 #: the NON-convergent M2 lane. The re-attempt is refused (re-running M2 could
 #: mint duplicate claims), so the re-capture replays — said OUT LOUD, because
@@ -232,6 +263,57 @@ _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING = (
     "(re-running it could mint duplicate claims) — unset it and re-capture, "
     "or capture the session under a convergent lane, to extract"
 )
+
+#: #4258 (owner ruling on #3892, comment 5723832861 — user-configurable,
+#: default ON; reaffirmed by 5737715963): the truthful
+#: ``extraction_mode`` for a capture whose org turned extraction OFF
+#: (onboarding_state.capture_extract = false). A member of the SAME
+#: ``extraction_mode`` vocabulary as ``_CAPTURE_NO_PROVIDER_MODE`` — a
+#: distinct name because the reason differs (the USER chose it; a provider may
+#: well be configured), so it must be folded into neither "no-provider"
+#: (false) nor "llm" (would claim an extraction that did not run).
+_CAPTURE_EXTRACTION_DISABLED_MODE = "extraction-disabled"
+
+#: #4258: the canonical additive warning for the extraction-disabled capture.
+#: Mirrors ``_CAPTURE_NO_PROVIDER_WARNING``'s "STORED … searchable" shape so
+#: the "stored, not extracted" state reads the same in every surface's words,
+#: and names the remedy (turn it back on, re-capture).
+_CAPTURE_EXTRACTION_DISABLED_WARNING = (
+    "extraction into memory is turned OFF for this team "
+    "('capture_extract'); the session's turns were STORED and remain "
+    "searchable, but LLM extraction into memory points was skipped — turn "
+    "extraction back on (dashboard: Memory sources > Extract sessions into "
+    "memory) and re-capture the session to extract"
+)
+
+#: #4258: the sibling of ``_CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING`` for a
+#: prior stored with extraction TURNED OFF (session lane ``"disabled"``) that
+#: is re-captured while the deployment sits on the non-convergent M2 lane. It
+#: exists because the keyless warning would be a FALSE diagnosis here — a
+#: provider key IS configured, the user's own setting was the reason nothing
+#: was extracted. Names every lever that actually applies.
+_CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING = (
+    "this session's turns were stored with extraction turned OFF "
+    "('capture_extract') and no extraction has ever run for it; extraction "
+    "was NOT re-attempted because TORTOISE_SESSION_EXTRACTOR=m2 selects a "
+    "non-convergent lane (re-running it could mint duplicate claims) — unset "
+    "it, turn extraction back on, and re-capture the session to extract"
+)
+
+#: #4258: the Session `capture_extractor` lane recorded when the team's
+#: extraction setting (not a missing key) is why nothing was extracted. A
+#: DISTINCT value from "none" (the keyless lane) on purpose: the M2-replay
+#: disclosure treats `capture_extractor == "none"` as proof of a keyless prior,
+#: so overloading it would emit the keyless warning ("stored WITHOUT a provider
+#: key") for a team whose key IS configured. Shared by BOTH capture lanes so the
+#: retry gate cannot diverge (a value one lane writes, the other must read).
+_CAPTURE_EXTRACTOR_LANE_DISABLED = "disabled"
+
+#: #4258: the lanes a FAILED prior capture may be re-attempted from. All three
+#: minted no claims of their own and their turn ids are deterministic, so the
+#: re-attempt converges. Shared (hosted + SDK) — see the lane constant above.
+_CAPTURE_EXTRACTOR_LANES_RETRYABLE = (
+    "v2", "none", _CAPTURE_EXTRACTOR_LANE_DISABLED)
 
 
 def _session_llm_provider() -> str | None:
@@ -579,7 +661,7 @@ def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
     """Build the LLM-extraction transcript + pre-write estimate for a
     conversation (#822). One ``Speaker: text`` line per turn (the
     extractor._utterances segmenter format; non-name roles fall back to
-    ``Speaker``), content from the SAME 5000-char window the turn Points store
+    ``Speaker``), content from the SAME stored window the turn Points hold
     (#721 parity — a phrase past the cut has no home in any stored turn),
     newlines flattened so multi-line turns are still extracted, sentences
     capped per turn at MAX_EXTRACTIONS_PER_TURN (the #329 flood gate — the
@@ -591,13 +673,38 @@ def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
     never created operators). The ×2 is a true ceiling only because the session
     extractor clamps operators ≤ points (LLMExtractor.run dedupe+cap, #1194) —
     a permissive relation model can no longer write more operator nodes than
-    points, which would have bypassed this estimate and the 402 gate it feeds."""
+    points, which would have bypassed this estimate and the 402 gate it feeds.
+
+    ⛔ CALLER CONTRACT — pass the WINDOWED conversation (``_capture_turn_window``),
+    never the raw one. This function FLATTENS but does NOT re-clip, and that is
+    load-bearing (#4897): the clip and the marker's TRUE length are decided ONCE,
+    on the PRE-redaction text, so re-applying the cap here would re-derive the
+    length from text a #4911 replacement has already changed — the marker would
+    report the scrubbed size instead of what the user said. The stored window is
+    exactly what the LLM must see, so the two cannot drift.
+    ``_session_extraction_estimate`` windows its own input for the callers that
+    hand it a raw one.
+
+    The sentence predicate lives in :func:`_extractable_sentences` — one home,
+    shared with the v2 lane's marker-only-turn blanking (#4897), so the two
+    lanes cannot disagree about which turns have anything to say.
+    """
     lines: list[str] = []
     n_sentences = 0
     for turn in conversation:
-        raw_role = turn.get("role")
-        role = raw_role if isinstance(raw_role, str) else (
-            "unknown" if raw_role is None else str(raw_role))
+        # The ONE role-normalization funnel (#5445): a second, inline copy here
+        # was redundant, and removing it fixed NOTHING on its own — the deleted
+        # form was semantically identical to `_normalize_turn_role` for every
+        # input (#5445 review round 12). What actually protects this sink is the
+        # SCRUB: the caller hands in a role that already passed `redact_secrets`
+        # at `_redact_turn_contents`, the one chokepoint. Do not read this funnel
+        # as the protection — deleting the scrub while keeping the normalization
+        # would reopen the sink.
+        #
+        # On the capture path the conversation handed in is already role-scrubbed
+        # (``_materialize_session_source`` passes ``_redact_turn_contents``'s
+        # output), so this consumes the redacted role rather than re-scrubbing.
+        role = _normalize_turn_role(turn.get("role"))
         speaker = role.title()
         if not re.match(r"^[A-Z][\w .'-]{0,40}$", speaker):
             # non-word roles (123, dict str, weird casing) still extract under
@@ -609,8 +716,58 @@ def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
         # home (_extractable_sentences) — the same one the shared extraction
         # view blanks on, so the m2 lane and the default v2 lane cannot
         # disagree about which turns contribute a unit.
-        capped = _extractable_sentences(
-            content[:_CAPTURE_TURN_CAP])[:MAX_EXTRACTIONS_PER_TURN]
+        #
+        # ⛔ A TURN WITH NO EXTRACTABLE CONTENT OF ITS OWN YIELDS NO CLAIMS (#4897 review
+        # round 14, P1; predicate corrected in review round 15). The appended marker reserves
+        # ``37 + len(str(total))`` characters of the cap, so a turn whose real text sits in
+        # that band is stored as ``" " * keep + marker`` — its whole readable body IS the
+        # marker. ``_SENT`` parses ``…[truncated: original length 5971 chars]`` as a sentence,
+        # so the v1 extractor minted a Point whose entire content was this module's own marker
+        # (reproduced in review). That is not "the marker reaches the model" — which the CALLER
+        # CONTRACT below requires for a turn that HAS content — it is a turn with nothing to say
+        # creating a claim. Skipping it leaves the marker riding through untouched for every
+        # turn that does have content.
+        #
+        # ⛔ THE TEST IS EXTRACTABILITY, NOT WHITESPACE (#4897 review round 15, P1). Round 14
+        # skipped on a blank marker-free body, which let a clipped turn whose real body is
+        # non-whitespace but holds no >=3-char SENTENCE through: ``body`` is built from the
+        # WHOLE content (marker included), so ``_SENT`` then joined the 1-char body to the
+        # marker and turned the MARKER into the sentence — minting a synthetic claim again.
+        # Measured on a mixed 3-turn conversation with the m2 extractor: the whitespace-only
+        # test extracted 3 points where pre-#4897 extracted 1, the two extra being the two
+        # markers. Judging the MARKER-FREE body with ``_extractable_sentences`` — the SAME
+        # >=3-char predicate the sentence filter below applies, and #6246's ONE home for it —
+        # is what makes the skip agree with what the turn can contribute.
+        # ⛔ AND THE MARKER IS ATTACHED, NOT APPENDED (#4897 review round 16, P1). Testing the
+        # marker-free body is NECESSARY BUT NOT SUFFICIENT. The round-15 form still built the
+        # line from the WHOLE content, and `_SENT` takes a run of NON-terminators plus AT MOST
+        # one terminator — so for a clipped turn whose retained body happens to END with a
+        # sentence terminator (keep = cap - len(marker), i.e. "character `keep` is a '.'",
+        # ~1 in 80 in prose) the marker sits AFTER that terminator and `_SENT` carves it into a
+        # SECOND match. `_utterances` then yields it as its own utterance and `LLMExtractor.run`
+        # mints one Point per utterance 1:1 — a Point whose entire content is this module's own
+        # marker. Measured on the MIXED test conversation (a real turn plus two clipped ones):
+        # this branch extracted 3 points where `origin/main` extracted 2, the extra being the
+        # marker. On the single fixture `"a" * 4958 + "." + " " * 500` the same defect measured
+        # 2 against 1 — a different count because it is a different conversation, and attributing
+        # the 3/2 to the fixture was itself a defect (round 17, P3). Appending the marker to the
+        # last sentence does NOT fix it (the terminator is between them); it is placed INSIDE the
+        # final sentence, immediately before that sentence's own terminator, so marker and sentence
+        # are ONE `_SENT` match. The node still stores the marker verbatim as written; this is the
+        # TRANSCRIPT view, and relocating it within the turn is what lets it reach the model
+        # WITHOUT becoming a claim of its own.
+        _body, marker = _split_truncation_marker(content)
+        sents = _extractable_sentences(content)
+        if not sents:
+            continue
+        # Cap BEFORE attaching: `MAX_EXTRACTIONS_PER_TURN` keeps the FIRST 200 sentences and
+        # the marker belongs to the LAST of them, so attaching first let a flood turn drop the
+        # marker from the transcript while the stored node still carried it.
+        capped = sents[:MAX_EXTRACTIONS_PER_TURN]
+        if marker:
+            last = capped[-1]
+            capped[-1] = (f"{last[:-1]} {marker}{last[-1]}" if last[-1] in ".!?"
+                          else f"{last} {marker}")
         n_sentences += len(capped)
         if capped:
             lines.append(f"{speaker}: {' '.join(capped)}")
@@ -626,59 +783,394 @@ def _normalize_turn_role(raw) -> str:
     return "unknown" if raw is None else str(raw)
 
 
-#: The stored-window cap (#1532 D1). Named once because three consumers now
+#: The stored-window cap (#1532 D1). Named once because four consumers now
 #: depend on the SAME number: the stored turn text, the session Source
-#: transcript (_session_llm_transcript flattens the same window), and the
-#: #4911 scrubber's per-turn bound — a divergence between them would either
-#: scan text that is never persisted or persist text that was never scanned.
+#: transcript (_session_llm_transcript flattens the same window), the
+#: #4911 scrubber's per-turn bound, and the Pi client's ``TURN_MAX_CHARS`` —
+#: a TypeScript literal that CANNOT import this module (it is shipped
+#: standalone) and is therefore pinned to this constant by
+#: ``tests/test_pi_capture_hooks.py`` so a divergence reds a test instead of
+#: storing a different window per lane. A divergence between any of them would
+#: either scan text that is never persisted or persist text that was never
+#: scanned.
 _CAPTURE_TURN_CAP = 5000
+
+#: Sentinel prefix of the truncation marker appended when a turn is clipped at
+#: the stored-window cap (#4897). A READER of a stored turn detects a cut by
+#: this prefix, and the marker also carries the turn's TRUE length, so a
+#: consumer can tell "the user said this much" from "we cut it here". This is
+#: the Python half of a two-language contract; the identical literal lives in
+#: ``tortoise/pi-hooks/tortoise-capture.ts`` (``TRUNCATION_SENTINEL``) and the
+#: two are pinned together by ``tests/test_pi_capture_hooks.py``.
+#:
+#: ⛔ WHY THE MARKER IS IN THE TEXT, NOT A NODE PROPERTY. Both shapes are
+#: available (the #4897 issue offers ``truncated: true`` + ``full_length: n``
+#: OR an appended marker), and the text marker is chosen for two reasons:
+#: (1) FIDELITY — a node property is invisible to the extraction input
+#: (`_session_llm_transcript`), so the LLM would still receive a silently-cut
+#: sentence; the marker reaches the store AND the model, which is what keeps
+#: the stored-source parity invariant (#721) true rather than merely intact;
+#: (2) MACHINERY — a property must be threaded through the turn write Cypher,
+#: the read whitelist, `get_session_detail` and the client confirmation, each a
+#: fresh drift surface, whereas the marker rides the ``content`` property that
+#: already round-trips. The true length is therefore carried in the text only.
+#:
+#: ⛔ NO RETROACTIVE MARKING. Turns already stored at the old silent cut stay
+#: unmarked and are indistinguishable from a complete maximal turn; a marker can
+#: only be written where the cut is DECIDED, and the original length is already
+#: gone by the time such a node is read. That is a deliberate no-migration
+#: boundary (#4897 is the marking half, #4894 the storage redesign), not a
+#: promise this marker will later cover the backlog.
+_CAPTURE_TRUNCATION_SENTINEL = "…[truncated:"
+
+
+def _capture_truncation_marker(total: int) -> str:
+    """The marker appended INSIDE the window when a turn is cut (#4897).
+
+    ``total`` is the ORIGINAL character count (before the cut) — the fact the
+    cut itself destroys — so a reader can always tell how much conversation
+    the stored turn no longer holds. The marker's length is a function of
+    ``total`` ALONE (``37 + len(str(total))``), which is what lets
+    :func:`_clip_capture_turn_content` reserve exactly its width without
+    iterating to a fixpoint.
+    """
+    return f" {_CAPTURE_TRUNCATION_SENTINEL} original length {total} chars]"
+
+
+#: Code points treated as BLANK by :func:`_clip_capture_turn_content` — the set
+#: that decides "a whitespace-only retention is not marked" (#4897 review round
+#: 15, P3). Spelled out explicitly rather than left to ``str.strip()`` because
+#: this is the Python half of a TWO-LANGUAGE contract: JS
+#: ``String.prototype.trim`` strips U+FEFF but NOT U+001C-U+001F / U+0085, while
+#: Python's ``str.strip()`` does the reverse — so the two clippers disagreed on
+#: exactly those five code points and the "byte-identical stored turns" claim
+#: was false for them. This is the UNION of the two sets, so no input either side
+#: called blank becomes non-blank on the other. The identical literal lives in
+#: ``tortoise/pi-hooks/tortoise-capture.ts`` (``BLANK_CHARS``); it is pinned
+#: together with :data:`_CAPTURE_NONBLANK_RE` by the cross-language parity case
+#: in ``tests/test_pi_capture_hooks.py`` and by
+#: ``tests/test_capture_session.py::test_the_clippers_blank_set_is_explicit``.
+_CAPTURE_BLANK_CHARS = (
+    "\u0009\u000a\u000b\u000c\u000d"          # tab, LF, VT, FF, CR
+    "\u001c\u001d\u001e\u001f"                # file/group/record/unit separator
+    "\u0020\u0085\u00a0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+#: ``content`` is blank iff this finds nothing — one negated class rather than a
+#: per-character loop so the test stays C-fast on a multi-MB caller body.
+_CAPTURE_NONBLANK_RE = re.compile(f"[^{_CAPTURE_BLANK_CHARS}]")
+
+
+#: The FULL truncation marker, anchored at the tail (``_split_truncation_marker``
+#: also accepts the bare-sentinel fallback that ``cap`` too small to carry the
+#: message falls back to). Kept strict so a marker is only recognised when it is
+#: the one this module wrote — never a user's lookalike prose.
+_TRUNCATION_MARKER_FULL_RE = re.compile(
+    re.escape(_CAPTURE_TRUNCATION_SENTINEL) + r" original length \d+ chars\]")
+
+
+def _capture_gate_window(windowed: list[dict]) -> list[dict]:
+    """Return ``windowed`` with synthetic truncation markers stripped (#4897).
+
+    ⛔ WHY THE GATE NEEDS ITS OWN VIEW (#4897; rationale corrected in review
+    round 14): the strip is NOT redundant with the clipper's blank-retention
+    branch, but for a narrower reason than the original text gave. The original
+    example — ``" " * 6001`` — is now handled by the clipper itself, which returns
+    a blank window with NO marker, so it never reaches the gate as non-blank.
+    What the strip actually decides is a clipped turn whose body holds no
+    >=3-char SENTENCE (``"X" + " " * 6000`` clips to a lone ``X``; ``"  .  " *
+    2000`` to single dots) or a caller-supplied lookalike with trailing
+    whitespace. In those the marker's own text is the only sentence the
+    transcript would hold, so without the strip a turn with nothing extractable
+    reads as content and gets admitted — measured: exactly four probe inputs
+    change verdict when the strip is removed. The gate must judge the REAL text.
+
+    Only the gate uses this. The extractors keep the marker: it is the evidence
+    of what was cut, and they sit downstream of the gate, so a conversation the
+    gate admits is unaffected.
+
+    A caller who supplies a turn whose whole content is itself a marker
+    lookalike is stripped to a body that is BLANK once stripped — the marker's
+    own leading space is all that precedes the sentinel — and the gate refuses.
+    Correct (such a turn has no extractable content) and fail-closed, which is
+    the safe direction.
+
+    ⛔ TRAILING WHITESPACE IS TOLERATED BEFORE THE MARKER SPLIT (#4897 review
+    round 13, P3). ``_split_truncation_marker`` recognises a marker only as the
+    exact tail, so a caller-supplied ``marker + " "`` escaped the strip and was
+    admitted as a non-blank turn holding only marker text — the claim above was
+    one character wide. Right-stripping first closes it in the FAIL-CLOSED
+    direction (a lookalike is stripped more readily, never less); real clipped
+    text is unaffected because the module writes its marker with nothing after
+    it, and dropping trailing whitespace from a blankness signal cannot turn a
+    non-blank conversation blank.
+    """
+    out: list[dict] = []
+    for turn in windowed:
+        content = turn.get("content") if isinstance(turn, dict) else None
+        if not isinstance(content, str):
+            out.append(turn)
+            continue
+        body, _marker = _split_truncation_marker(content.rstrip())
+        out.append({**turn, "content": body} if body != content else turn)
+    return out
+
+
+def _split_truncation_marker(content: str) -> tuple[str, str]:
+    """Split a turn's TRAILING truncation marker off its body (#4897).
+
+    Returns ``(body, marker)`` with ``body + marker == content``. ``marker`` is
+    the string :func:`_clip_capture_turn_content` appended — the full
+    ``…[truncated: original length N chars]``, or the bare-sentinel fallback —
+    or ``""`` when the turn was not cut.
+
+    ⛔ ``marker`` IS ONE CHARACTER SHORTER THAN THE APPENDED TEXT (#4897 review
+    round 14, P3; width corrected in round 15): the appended text is
+    `` …[truncated: …]`` with a LEADING SPACE, and ``rfind`` starts at the
+    sentinel, so that space stays in ``body``. The appended text is
+    ``37 + len(str(total))`` characters and ``marker`` is ``36 + len(str(total))``
+    — 41/40 only for a 4-digit total, and 42/41 for the ``"  .  " * 2000``
+    fixture whose total is 10000. ``body + marker == content`` still holds (it is
+    the whole reason the space is not lost), but the leading space is handed to
+    :func:`security.redact_secrets` along with the body — the marker text proper
+    is not. Callers that need the marker-free text must ``.strip()`` the body;
+    both blank gates do.
+
+    ⛔ WHY SPLIT AT ALL: the marker must NEVER be part of the text handed to
+    :func:`security.redact_secrets`. The ``private_key`` rule's fail-closed
+    branch matches to ``\\Z``, so a dangling PEM header consumes everything after
+    it — the marker included — and a cut turn is then stored UNMARKED (the
+    round-2 P2: 5,000-char window, 4,823-char stored body, no sentinel). Keeping
+    the marker out of the scan makes its survival STRUCTURAL for EVERY rule
+    instead of a property each rule must separately be proved not to violate,
+    and it preserves a prior cut's TRUE ``total`` verbatim when the body is
+    re-scanned — an expanding #4911 replacement can push the body past ``cap``,
+    and re-clipping that would re-derive a FALSE total from the scrubbed length
+    (the round-1 P1 this whole file is about).
+    """
+    idx = content.rfind(_CAPTURE_TRUNCATION_SENTINEL)
+    if idx < 0:
+        return content, ""
+    tail = content[idx:]
+    if tail == _CAPTURE_TRUNCATION_SENTINEL \
+            or _TRUNCATION_MARKER_FULL_RE.fullmatch(tail):
+        return content[:idx], tail
+    return content, ""
+
+
+def _clip_capture_turn_content(
+    content: str, cap: int = _CAPTURE_TURN_CAP) -> str:
+    """``content`` unchanged when it fits ``cap``; otherwise cut AND marked.
+
+    This is the ONE place a capture turn is shortened (#4897). Every writer of
+    stored turn text routes through :func:`_capture_turn_window`, so no cut is
+    silent: the result is always ``<= cap`` characters and, whenever the input
+    was longer, ends with :func:`_capture_truncation_marker` carrying the true
+    original length.
+
+    ⛔ THE CAP IS TESTED ON THE TOTAL ``len(content)``, marker included. A
+    turn carrying a caller's marker-shaped tail (a sentinel plus an unbounded
+    ``original length \\d+`` run — ``_TRUNCATION_MARKER_FULL_RE`` admits any
+    width) is longer than ``cap`` and is CLIPPED like any other over-cap turn,
+    with a fresh marker derived from the length actually seen. Testing a
+    marker-free ``body`` instead would leave a 100,137-char turn (101 chars plus
+    a 100,036-char "marker") unbounded in the store — the round-5 P2.
+
+    ⛔ THE MARKER IS RESERVED INSIDE THE CAP — the whole point. The Pi client
+    caps before it POSTs, so the server can receive an already-clipped turn; a
+    marker appended AFTER a full-width cut would be lost the moment that body is
+    re-windowed. ``keep = cap - len(marker)`` makes the result exactly ``cap``
+    characters, so ``result[:cap] == result`` and a second application to the
+    SAME pre-redaction text is a true no-op. A clipped turn therefore reaches
+    storage with its marker intact.
+
+    Only an ACTUAL cut marks: a turn exactly at ``cap`` is complete and is
+    returned verbatim, so the marker means "there is more", never "we reached
+    the boundary".
+
+    ⛔ APPLY THIS TO THE PRE-REDACTION TEXT, EXACTLY ONCE, AND NEVER AGAIN. A
+    second application to a body the #4911 scrubber has already changed would
+    recompute ``total`` from the SCRUBBED length — the false-marker defect of
+    #4897's P1 — and a redaction replacement longer than the span it replaces can
+    push a complete turn past ``cap``, so re-applying here would mark a complete
+    turn. :func:`_capture_turn_window` is the only caller, and it is applied when
+    a turn is taken from the RAW conversation (the capture entry points,
+    ``_materialize_session_source``, ``_extract_session_llm``,
+    ``_extract_session_v2``) — never to a redacted body.
+    """
+    if len(content) <= cap:
+        return content
+    # ⛔ A WHITESPACE-ONLY RETENTION IS NOT MARKED (#4897 review round 12). The
+    # marker means "there is more", and for a blank body that statement is
+    # misleading: the retaining window holds nothing, so the marker is the ONLY
+    # text the turn carries. That mattered — the gate reads a marker-STRIPPED
+    # view, so an all-blank conversation is refused, but a MIXED one
+    # (a real turn plus a blank over-cap turn) still STORED a marker-only turn,
+    # and the v1 extractor then turned that marker into a Point whose entire
+    # content was synthetic (reproduced in review). Returning the blank
+    # retention silently is the same value the store would hold minus the
+    # misleading sentence, and it keeps the window idempotent.
+    #
+    # ⛔ THE PREDICATE MUST TEST THE SLICE IT RETURNS (#4897 review round 13,
+    # P1). Round 12 tested ``content[:keep]`` — the width left after reserving
+    # the marker — while RETURNING ``content[:cap]``. Real content in the
+    # reserved band ``[keep, cap)`` therefore made the premise ("the retention
+    # is blank") FALSE while the turn came back UNMARKED: a 5,971-char turn of
+    # 4,960 spaces + "REALCONTENT" + 1,000 further chars was stored as 5,000
+    # chars with no sentinel, silently dropping the rest — reintroducing exactly
+    # the mid-word cut #4897 exists to end. Testing ``content[:cap]`` — the
+    # slice actually returned — makes the cut marked whenever ANY retained
+    # character is non-whitespace, so the band is never dropped silently.
+    #
+    # ⛔ AND THE SLICE IS NOT ENOUGH (#4897 review round 14, P1): testing
+    # ``content[:cap]`` still missed real text PAST the cap when everything
+    # retained was whitespace — ``" " * 5000 + "REALCONTENT"`` returned
+    # ``" " * 5000`` unmarked and silently dropped the word. The test is
+    # therefore on the WHOLE content: if the turn holds no non-whitespace
+    # ANYWHERE there is nothing to mark and nothing was lost; if it holds any,
+    # it is marked and ``keep`` is reserved for the marker.
+    #
+    # The residual: a turn whose only non-whitespace lives IN the band is marked
+    # and spends the band on the marker — the reserved width
+    # (``37 + len(str(total))``) and the content compete for the same characters.
+    # That turn is stored marker-only, which is why `_session_llm_transcript`
+    # skips a turn whose marker-free body holds no sentence rather than minting
+    # the marker into a Point.
+    #
+    # ⛔ THE PREDICATE IS ``_CAPTURE_NONBLANK_RE``, NOT ``str.strip()`` (#4897
+    # review round 15, P3). Blankness is a TWO-LANGUAGE contract with
+    # ``tortoise-capture.ts``, and ``str.strip()`` and JS ``trim()`` disagree on
+    # five code points (Python strips U+001C-U+001F and U+0085 where JS does not;
+    # JS strips U+FEFF where Python does not). ``_CAPTURE_BLANK_CHARS`` is the
+    # UNION of both sets and the TS side already uses it, so the Python side must
+    # use the SAME class or the two clippers store different turns for the same
+    # input — the parity the client/server contract promises.
+    if not _CAPTURE_NONBLANK_RE.search(content):
+        return content[:cap]
+    marker = _capture_truncation_marker(len(content))
+    keep = cap - len(marker)
+    if keep < 0:
+        # ``cap`` too small to carry the full marker — never the production
+        # 5000, and unreachable from any caller in the tree. Falls back to the
+        # bare sentinel; note the final ``[:cap]`` can still truncate THAT when
+        # ``cap < len(_CAPTURE_TRUNCATION_SENTINEL)`` (cap=5 → "…[tru"), so the
+        # cut is not guaranteed visible in that corner. Kept as a defensive
+        # branch: reverting to a silent ``content[:cap]`` is no better.
+        marker = _CAPTURE_TRUNCATION_SENTINEL
+        keep = max(cap - len(marker), 0)
+    return (content[:keep] + marker)[:cap]
+
+
+def _extractable_sentences(content: str) -> list[str]:
+    """The >=3-char sentences *content* contributes, from its MARKER-FREE body.
+
+    The ONE home of "does this turn have anything to say" (#6246, #4897). It is
+    the exact predicate ``_session_llm_transcript`` has always applied inline
+    (and the transcript is the lane that already REFUSED a turn it yields
+    nothing for), so extracting it here lets the shared extraction view apply
+    the SAME test before the default v2 lane sees the turns and the two lanes
+    cannot drift apart about emptiness. A clipped turn whose real body holds no
+    >=3-char sentence has nothing to contribute — the marker's own text is all
+    that is left — so the marker is split OFF first and every extraction lane
+    treats it as empty. Judging the marker-free body with the SAME predicate the
+    transcript's sentence filter applies is what makes "empty" mean the same
+    thing here as it does there.
+    """
+    from tortoise.extractor import _SENT
+    body_only, _marker = _split_truncation_marker(content)
+    real = " ".join(body_only.split())
+    return [s.group(0).strip() for s in _SENT.finditer(real)
+            if len(s.group(0).strip()) >= 3]
+
+
+def _blank_unextractable_marked_turns(
+        conversation: list[dict],
+) -> list[dict]:
+    """Blank CUT turns that have nothing to say, for the v2 lane (#4897).
+
+    The v2 lane hands the raw turn text to ``extractor_v2``, whose edu builder
+    keeps any turn with truthy content. So a clipped turn whose real body is a
+    lone ``X`` reached the model as ``"X …[truncated: …]"`` — a turn with
+    nothing to say whose only sentence is this module's own marker, the exact
+    shape the m2/transcript lane learned to SKIP in review rounds 14-16. The
+    default lane was left as the unguarded sibling; this makes the two agree.
+
+    ⛔ NARROW BY CONSTRUCTION: only a turn that CARRIES a marker is eligible, so
+    an unmarked short turn (``"ok"``) is untouched — this does not change how
+    the v2 lane treats ordinary short turns. The list LENGTH is preserved (the
+    turn is blanked, never removed) because
+    ``extractor_v2._edus_from_conversation`` derives each edu's turn index from
+    its position and ``_resolve_source_turn`` anchors quotes to those indices —
+    shortening the list would renumber every later turn.
+    """
+    out: list[dict] = []
+    for turn in conversation:
+        content = str(turn.get("content") or "")
+        _body, marker = _split_truncation_marker(content)
+        if marker and not _extractable_sentences(content):
+            out.append({**turn, "content": ""})
+        else:
+            out.append(turn)
+    return out
 
 
 def _capture_turn_window(
     conversation: list[dict], cap: int = _CAPTURE_TURN_CAP) -> list[dict]:
-    """Truncate each turn's content to the stored-window cap (#1532 D1).
+    """Clip each turn's content to the stored-window cap, MARKED (#1532 D1).
 
     Returns a NEW list; the windowed conversation feeds BOTH the turn-store
     loop and the extraction call so the LLM never sees a phrase with no home
     in any stored turn (stored-source parity, #721). Content coercion matches
-    the store loop: None -> '', truthy non-strings -> str() (isinstance-first,
-    #721). Idempotent when the caller already truncated."""
+    the store loop: None -> '', non-strings -> str() (isinstance-first,
+    #721). The ROLE is coerced with ``_normalize_turn_role`` and capped the same
+    way (#5445/#5775), so the scanned and the persisted role are the same bytes
+    and a non-string role cannot skip the bound. Idempotent when the caller
+    already truncated — and since #4897 a clip leaves a marker inside the cap,
+    so a re-applied window preserves the marker rather than letting it fall off
+    the end.
+    """
     out: list[dict] = []
     for turn in conversation:
         t = dict(turn)
         raw = t.get("content")
         content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
-        t["content"] = content[:cap]
+        t["content"] = _clip_capture_turn_content(content, cap)
+        # ⛔ The ROLE is capped here too (#5445 review round 12). It is persisted as
+        # text by the same frame AND scrubbed by ``_redact_turn_contents``, so a
+        # client-controlled role was the one scan on this path the cap did not
+        # reach: ``redact_secrets`` ran over the WHOLE role (measured ~2.7 s for a
+        # 500,000-char role, and ``cap`` changed nothing), and the module's own
+        # "``cap`` bounds the text scanned per turn" claim was false for it. Capping
+        # at the window keeps the scanned and the persisted role the SAME bytes.
+        #
+        # ⛔ COERCE BEFORE THE CAP (#5775). The guard here was
+        # ``isinstance(t.get("role"), str)``, so a NON-STRING role skipped the cap
+        # ENTIRELY while the downstream ``_redact_turn_contents`` still normalized
+        # it with ``str()`` and scanned the whole thing. It is reachable from
+        # untrusted input: the hosted model types ``conversation: list[dict]`` with
+        # no inner validation, so ``role`` can be any JSON type. A one-element list
+        # of a 1,000,000-char string stringifies to 1,000,004 chars and cost a
+        # measured ~0.7-3.8 s of scanning PER REQUEST, against ~0.002 s for a
+        # same-length STRING role (which the cap did cut). ``_normalize_turn_role``
+        # is the SAME normalization every consumer already applies to this value
+        # (None -> "unknown", any non-str -> ``str()``), so coercing before the cap
+        # changes no downstream output and makes the bound total.
+        t["role"] = _normalize_turn_role(t.get("role"))[:cap]
         out.append(t)
     return out
-
-
-def _extractable_sentences(content: str) -> list[str]:
-    """The >=3-char sentences *content* contributes, from its flattened body.
-
-    The ONE home of "does this turn have anything to say" (#6246). It is the
-    exact predicate ``_session_llm_transcript`` has always applied inline (and
-    the transcript is the lane that already REFUSED a turn it yields nothing
-    for). Extracting it here lets the shared extraction view apply the SAME
-    test before the default v2 lane sees the turns, so the two lanes cannot
-    drift apart about emptiness.
-    """
-    from tortoise.extractor import _SENT
-
-    body = " ".join(content.split())
-    return [s.group(0).strip() for s in _SENT.finditer(body)
-            if len(s.group(0).strip()) >= 3]
 
 
 def _capture_extraction_window(
     conversation: list[dict], cap: int = _CAPTURE_TURN_CAP) -> list[dict]:
     """The SHARED extraction view of a capture conversation (#6246).
 
-    ``_capture_turn_window`` is the STORED view: it clips silently and the
-    clipped text is what the turn Points hold. Both extraction lanes consume
-    THIS view instead, and it blanks a turn that was CLIPPED and still has no
-    extractable sentence of its own — so a cut whose readable body has nothing
-    to say contributes no unit to EITHER lane.
+    ``_capture_turn_window`` is the STORED view: it clips (marking the cut,
+    #4897) and the clipped text is what the turn Points hold. Both extraction
+    lanes consume THIS view instead, and it blanks a turn that was CLIPPED and
+    still has no extractable sentence of its own — so a cut whose readable body
+    has nothing to say contributes no unit to EITHER lane.
 
     The invariant ("a turn with no extractable content of its own yields no
     claims", #4897) previously lived only inside ``_session_llm_transcript``,
@@ -714,42 +1206,104 @@ def _redact_turn_contents(
     """The ONE place capture text is scrubbed of credentials (#4911).
 
     Returns a copy of ``conversation`` whose turns carry a scrubbed
-    ``content``, plus the per-kind counts. Every capture consumer derives its
-    text from this — the stored turn text (``_capture_turn_texts``), the session
+    ``content`` AND a scrubbed ``role``, plus the per-kind counts. Every capture
+    consumer derives its text from this — the stored turn text
+    (``_capture_turn_texts``), the session
     ``:Source`` metadata (``_materialize_session_source``) and the extraction
     transcript (``_extract_session_llm`` / ``_extract_session_v2``) — so the
     control sits at the single point where a message becomes persisted or
     model-visible text, instead of being duplicated per call site.
 
-    ⛔ PER TURN, BEFORE any transcript assembly, and both halves are
-    load-bearing. ``_session_llm_transcript`` sentence-splits and flattens
-    newlines, so scrubbing the ASSEMBLED transcript is too late: the segmenter
-    splits a JWT on its dots and rejoins the fragments with spaces, which no
-    contiguous pattern matches, so the credential landed in ``Source.summary``
-    verbatim while the receipt reported a redaction (reproduced in review).
-    Per-turn also keeps each scan inside one turn's window rather than the
-    concatenated transcript of up to 500 turns (#5296).
+    ⛔ NO PRODUCTION CALLER CLIPS HERE (#4897 round 5). The stored window is
+    decided ONCE, on the RAW text, by :func:`_capture_turn_window` /
+    :func:`_clip_capture_turn_content`, the sole clippers; every capture caller
+    passes NO ``cap``. This function's job on that path is redaction only: split
+    a trailing truncation marker off, scrub the body, re-attach the marker
+    VERBATIM.
 
-    A turn's ``content`` is coerced exactly as the window/stored-text path coerces
-    it (``None`` → ``""``, a non-str → ``str()``) BEFORE scanning, so a
-    structurally-odd payload cannot slip a credential past the scrubber and then
-    be stringified by a downstream consumer (the session ``:Source`` does exactly
-    that with ``str()``). A turn with no match is returned as the SAME object, so
-    nothing else about a stored shape moves.
+    ⛔ ``cap`` IS RETAINED FOR THE EXPLICIT RAW-CALLER API. Main's #5445/#5472
+    tests pin ``_redact_turn_contents(conv, cap=...)`` — a ``cap`` that does not
+    bound the RETURNED turn is a leak, not a knob — so the parameter stays, and
+    when it is passed it is applied to the RAW, marker-free body BEFORE the scan
+    (never to redacted text, so it can never re-derive the marker's ``total``
+    from a scrubbed length: the round-1 P1). No production caller passes it, so
+    the single-clipper invariant holds on every capture lane.
 
-    ``cap`` bounds the text scanned per turn. The turn store already caps, so
-    callers there pass nothing; the session-``:Source``/extractor consumers get
-    the RAW conversation and MUST pass the same window the persisted text uses
-    (``_capture_turn_window``'s 5,000), because a client-controlled turn of a few
-    MB otherwise costs seconds of scanning (measured: 2 MB → ~6.9 s at
-    ~3 s/MB), and because the value beyond that window is never persisted
-    anyway. The bound is a CPU-cost and window-parity bound, NOT loop
-    protection: in the hosted lane every capture-path caller of this is now off
-    the event loop (#4911 cycle 1).
+    Five rounds of patches tried to make this one function clip AND redact
+    unconditionally, and each traded in the same tension: a clip decision had to
+    tell a marker THIS module wrote from marker-shaped text a caller supplied,
+    and that discrimination is not decidable in-band. ``len(body) > cap`` is true
+    for an attacker's raw over-cap body AND for a legitimately-clipped body that
+    redaction markup pushed over ``cap``, so every patch chose one and broke the
+    other (round 3 let a marker-shaped tail exempt the body; round 4 re-clipped
+    a caller's marker). Making the clip OPT-IN (``cap is not None``) removes the
+    tension on the production path — no production caller can hit it — while the
+    explicit ``cap=`` path keeps main's tested bound, and re-application is exact
+    for the independent reason in (2) below — the scan input is marker-free.
 
-    Idempotent: no rule's ANCHOR GROUP can be satisfied inside a
-    ``[REDACTED:<kind>]`` marker, so re-running over already-redacted text
-    changes nothing and adds no counts — which is what lets the turn store, the
+    ⛔ The sibling ``role`` is scrubbed HERE too (#5445). It is caller-controlled
+    (the hosted model takes ``conversation: list[dict]`` with no role validation)
+    and the capture path persists it as TEXT through three sinks — the
+    ``f"[{role}] {content}"`` stored turn, ``:Point.speaker`` and the session
+    ``:Source`` transcript (``_session_llm_transcript`` uses the role as the
+    speaker label). A credential placed in ``role`` therefore reached the graph
+    while the receipt reported zero. The role is scrubbed, not replaced with a
+    placeholder, because there is no canonical role enum in the capture contract
+    — the codebase and its own tests use ``developer``, ``toolResult``,
+    ``robot`` and ``agent`` — so a whitelist would silently rewrite legitimate
+    labels, i.e. over-redact ordinary text. The role scrub runs through this same
+    chokepoint (one ``redact_secrets`` owner, per the #4911 control-site rule)
+    and its counts join the same total.
+
+    ⛔ CALLER CONTRACT — pass the WINDOWED conversation, never a raw over-cap
+    one. Every sink that can receive a raw conversation windows it FIRST, on
+    that raw text: ``_materialize_session_source`` (the session ``:Source``
+    sink), ``_extract_session_llm`` and ``_extract_session_v2`` (the
+    extractors), and the capture entry points (``capture_session`` / hosted
+    ``_capture_session_impl``). ``_capture_turn_texts_with_redactions`` is
+    redaction-only over a conversation its caller windowed. The generic
+    ``commit_session`` lane (``_commit_session_v1`` / ``_commit_session_v2``)
+    deliberately does NOT window: no stored-turn window exists there and the
+    extractor renders each turn verbatim.
+
+    ``cap`` bounds the text scanned per turn on the EXPLICIT-caller path (above).
+    The session-``:Source``/extractor consumers pass none because they window
+    first — the capture-lane extractors are handed
+    ``_capture_extraction_window``'s already-clipped view, so a ``cap`` there
+    would be a no-op — and the commit consumers pass none for the reason in
+    ``_capture_turn_texts_with_redactions``. The bound is a CPU-cost and
+    window-parity bound, NOT loop protection: in the hosted lane every
+    capture-path caller of this is off the event loop (#4911 cycle 1).
+
+    ⛔ THE WINDOW IS APPLIED ONCE, TO RAW TEXT, AND NEVER AGAIN. That
+    single-application rule is what keeps the cap from being re-derived from
+    text a #4911 replacement has already changed — a redacted body is never fed
+    back through :func:`_capture_turn_window`. The window bounds the text SCANNED
+    here at ``_CAPTURE_TURN_CAP`` per turn, which is also what keeps a
+    client-controlled turn of a few MB from costing seconds of scanning
+    (measured: ~3 s/MB of scanned text) and keeps the scan the same window the
+    persisted text uses; it is a CPU-cost and window-parity bound, not loop
+    protection (in the hosted lane every capture-path caller is off the event
+    loop, #4911 cycle 1).
+
+    ⛔ THE RETURNED TEXT MAY EXCEED THE CAP BY THE REDACTION MARKUP, on purpose
+    (#4897). The window is applied to the PRE-redaction text, which is what the
+    marker records; a #4911 replacement that is LONGER than the span it replaces
+    (``aws_access_key_id`` 20 → 28) then grows the body past the cap.
+    Re-clipping that grown body would either overwrite the true total with the
+    scrubbed size or drop original text to pay for the redaction markup, so the
+    body is returned as-is and the caller must NOT re-apply the cap. The overage
+    is redaction markup, bounded by the credentials present in the window, not
+    un-scanned conversation — and it stays under 2x: MEASURED max-density
+    packing of the most-expanding rule (the slack ``xapp-`` form — 12 chars in,
+    22 out, space-separated) is 1.768x, giving 8,840 chars for a body of exactly
+    5,000 and 8,810 for the 6,000-char fixture in
+    ``test_capped_reapplication_preserves_the_true_total`` once windowed with its
+    marker re-attached.
+
+    Idempotent in BOTH senses that matter. (1) No rule's ANCHOR GROUP can be
+    satisfied inside a ``[REDACTED:<kind>]`` marker, so re-running the scrub
+    adds no counts and changes no span — which is what lets the turn store, the
     Source and the extractor each apply it without multi-counting the same
     span. The reason is the ANCHOR, not the marker's character classes: the
     ``private_key`` body matches everything (including ``[``/``:``/``]``), and
@@ -757,30 +1311,98 @@ def _redact_turn_contents(
     separator or whitespace that keyword's anchor group requires. (An earlier
     revision of this docstring gave the character-class reason, which is
     false; ``security.redact_secrets`` carries the corrected proof.)
+
+    (2) The truncation marker is split OFF before the scan and re-attached
+    VERBATIM, so re-applying to a body an expanding redaction has already pushed
+    past the cap does NOT re-derive the marker's ``total`` from the scrubbed
+    length (the #4897 P1). Re-application is therefore exact even though the
+    returned body may exceed the cap by the redaction markup — a blanket
+    "idempotent" claim that ignored this is exactly what would invite the P1
+    back (a 6,927-char turn became ``original length 5,008`` on the second pass).
     """
     out: list[dict] = []
     totals: dict[str, int] = {}
     for turn in conversation:
         raw = turn.get("content")
         content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
+        # #5472: emptiness is judged on the PRE-cut content. Judging it after
+        # the cut made ``cap=0`` (which cuts any non-empty string to "") take
+        # the genuinely-empty branch below and append the ORIGINAL, untruncated
+        # turn — a cap that does not cap.
+        had_content = bool(content)
         cut = False
-        if cap is not None and len(content) > cap:
-            content = content[:cap]
+        # #4897: split the truncation marker (if any) OFF the text that gets
+        # SCANNED — a fail-closed redaction (``private_key``'s ``\Z`` branch)
+        # would otherwise consume the marker and store a cut turn unmarked. The
+        # split is UNCONDITIONAL and marker-agnostic: no decision here depends on
+        # the marker, because this function no longer makes one (round 5).
+        body, marker = _split_truncation_marker(content)
+        # #4897 round-3 P1: the clip is decided on the MARKER-FREE BODY, never
+        # on the marker's presence. A marker is caller-supplied, so trusting it
+        # as proof of "already clipped" exempted the body from the cap and let
+        # any client store an unbounded turn by appending a marker-shaped tail.
+        # Clipping on ``len(body)`` bounds every caller — raw or windowed — while
+        # leaving a body THIS module already clipped (and its true ``total``)
+        # alone: the marker is reserved INSIDE the cap, so that body fits and is
+        # not touched. A marker on a body PAST the cap cannot vouch for the
+        # body, so the body is clipped and a fresh marker — derived from the
+        # body's own length — replaces the caller's claim; ``_split_truncation_
+        # marker`` pulls that fresh marker back out so the scan input stays
+        # marker-free (the round-2 P2). Clip WITH the marker: a capped scan that
+        # returned a silently-shortened string is the same defect one layer
+        # down. This branch fires only when the caller passed an explicit
+        # ``cap`` — production callers pass none (the window already clipped).
+        if cap is not None and len(body) > cap:
+            body, marker = _split_truncation_marker(
+                _clip_capture_turn_content(body, cap))
             cut = True
-        if not content:
-            out.append(turn)
+        # #5445: the role is caller-controlled and persisted as text by three
+        # sinks, so it is coerced and scrubbed through this same chokepoint. The
+        # cap applies to it as well — ``_capture_turn_window`` already truncated a
+        # string role, and re-applying here keeps the bound true for callers that
+        # pass a raw conversation with an explicit ``cap``.
+        role = _normalize_turn_role(turn.get("role"))
+        if cap is not None and len(role) > cap:
+            role = role[:cap]
+        scrubbed_role, role_counts = redact_secrets(role)
+        # #5472 emptiness is judged on the PRE-cut content (``had_content``,
+        # above): a ``cap`` that cuts the turn to nothing must still emit the
+        # CUT turn, not forward the original. A marker-only turn is not empty —
+        # its marker is why it is stored at all — and ``had_content`` already
+        # says so, so no separate body/marker test is needed here.
+        if not had_content:
+            # Genuinely-empty content: nothing in the body to scan. The role is
+            # still caller-controlled, so it is scrubbed here too; the turn is
+            # copied only when that changed.
+            for kind, n in role_counts.items():
+                totals[kind] = totals.get(kind, 0) + n
+            if role_counts:
+                out.append({**turn, "role": scrubbed_role})
+            else:
+                out.append(turn)
             continue
-        scrubbed, counts = redact_secrets(content)
+            continue
+        scrubbed, counts = redact_secrets(body)
+        if role_counts:
+            counts = {**counts}
+            for kind, n in role_counts.items():
+                counts[kind] = counts.get(kind, 0) + n
         for kind, n in counts.items():
             totals[kind] = totals.get(kind, 0) + n
-        # ⛔ TWO and only two reasons to emit a new object, and the second one is
-        # a leak fix: ``cap`` must truncate the RETURNED text, not merely the
-        # text that was scanned. Emitting the original whenever the prefix had
-        # no match forwarded the whole un-scanned tail to the caller — which at
-        # the ``_commit_session_v2`` call site meant a credential past the cap
-        # was rendered into the extractor prompt and sent to the provider.
+        # ⛔ Two reasons to emit a new object: a rule matched, or the opt-in
+        # ``cap=`` path CUT the turn. On the production path (``cap is None``)
+        # there is no clip branch and no ``cut``, so a no-match turn is returned
+        # as the SAME object and nothing else about a stored shape moves.
+        # #4897: re-attach the marker AFTER the scrub — no rule could have
+        # consumed it, because it was never in the scanned text. ``marker`` is
+        # the pre-scan string itself, so a prior cut's true ``total`` survives
+        # a re-application exactly.
         if counts or cut:
-            out.append({**turn, "content": scrubbed})
+            if role_counts:
+                out.append({**turn, "content": scrubbed + marker,
+                            "role": scrubbed_role})
+            else:
+                out.append({**turn, "content": scrubbed + marker})
         else:
             out.append(turn)
     return out, totals
@@ -799,7 +1421,12 @@ def _redact_summary_strings(obj, _depth: int = 0):
     never mutated.
 
     ⛔ KEYS are scrubbed too: ``json.dumps`` renders keys into the prompt, so an
-    unscrubbed key is the same leak in a different position. (If two keys
+    unscrubbed key is the same leak in a different position. Every key is passed
+    through this function recursively, so a ``str`` key is redacted and a tuple
+    key's ``str`` elements are redacted with it (a key that is neither a ``str``
+    nor a container of them — e.g. ``bytes`` — is passed through, but such a key
+    is not JSON-renderable: ``json.dumps`` raises ``TypeError`` before emitting
+    any key, so it cannot carry a credential into the prompt). (If two keys
     redact to the same marker the later one wins — a duplicate key is not a
     summary shape, and the alternative is a leak.)
 
@@ -807,16 +1434,26 @@ def _redact_summary_strings(obj, _depth: int = 0):
     ``commit_session``, where a cyclic or very deep ``summary=`` previously
     reached ``construct_graph``, whose ``json.dumps`` raised ``ValueError`` and
     was swallowed (degraded, no crash). Unbounded recursion turned that into an
-    unhandled ``RecursionError`` on a public method. Past the guard the object
-    is returned as-is — the deepest shapes are not commit summaries, and the
-    caller's own credential is the only thing that could be hiding there.
+    unhandled ``RecursionError`` on a public method.
+
+    ⛔ ...and it must FAIL CLOSED (#5446). The original guard returned the
+    subtree VERBATIM past depth 64, so a credential nested deeper than 64 levels
+    was rendered into the commit prompt (``json.dumps``) and POSTed unbounded.
+    Past the bound a ``str`` leaf is still scrubbed (cheap at any depth) and a
+    container is replaced by a visible marker. The trade-off is deliberate:
+    a pathological deep summary is not a commit shape, so beyond the bound the
+    subtree is COLLAPSED (legible, ``[REDACTED:depth]``) rather than silently
+    omitted or returned raw. The recursion never passes depth 65, so the
+    no-crash property the guard exists for still holds.
     """
     if _depth > 64:
-        return obj
+        if isinstance(obj, str):
+            return redact_secrets(obj)[0]
+        return "[REDACTED:depth]"
     if isinstance(obj, str):
         return redact_secrets(obj)[0]
     if isinstance(obj, dict):
-        return {(k if not isinstance(k, str) else _redact_summary_strings(k)):
+        return {_redact_summary_strings(k):
                 _redact_summary_strings(v, _depth + 1) for k, v in obj.items()}
     if isinstance(obj, list):
         return [_redact_summary_strings(v, _depth + 1) for v in obj]
@@ -831,66 +1468,101 @@ def _capture_turn_texts_with_redactions(
     """``_capture_turn_texts`` PLUS the per-kind redaction counts of the window.
 
     Split out (rather than returning a tuple from ``_capture_turn_texts``) so
-    the five read-only callers keep the plain-list contract. The writer is the
-    only caller that needs the counts — it records them on the Session, and it
-    is the count of record because it scans the same window (and therefore the
-    same spans) the ``:Source`` sink and the extractor do.
+    the five read-only callers keep the plain-list contract. The capture writer
+    records the counts on the Session, and its count is the count of record
+    because it scans the same window (and therefore the same spans) the
+    ``:Source`` sink and the extractor do.
 
-    The scrubber runs on the FULL content of each turn in the list it is given,
-    and the ``[:5000]`` cut is applied to the RESULT. That order matters for a
-    credential that straddles the cut, but it ONLY helps when the caller hands
-    over the uncapped window: both write lanes pre-cap with
-    ``_capture_turn_window``, so on those paths the cut has already happened and
-    what survives the cut is scrubbed as-is (a shape still meeting its body floor
-    is redacted; a fragment below the floor is not). Known residual, recorded in
+    ⛔ REDACTION-ONLY — this sink does NOT clip, and it REQUIRES a windowed
+    conversation (its parameter is named ``windowed`` for that reason). The
+    window is applied ONCE, on the RAW text, by the caller
+    (``_capture_turn_window``): ``capture_session`` / hosted
+    ``_capture_session_impl`` window at their entry, and
+    ``session_confirm.expected_turns`` windows before calling here. This function
+    then scrubs that window and must NOT re-clip the result: a #4897 marker
+    carries a length a #4911 replacement cannot be allowed to rewrite, and
+    re-clipping redacted text would re-derive the total from the scrubbed length
+    (the round-1 P1; see ``_redact_turn_contents``). A credential that straddles
+    the cut is therefore only partially there to match, and a shape still
+    meeting its body floor is redacted while a fragment below the floor is not.
+    Known residual, recorded in
     ``docs/scoping/2026-09-25-4911-capture-secret-redaction.md``: a credential cut
-    mid-body by the 5,000-char window can leave a PREFIX — never the whole value,
-    and never a marker — in the stored turn, and it is not counted. The
-    confirmation path avoids the mismatch this order would otherwise create by
-    windowing first (see ``session_confirm.expected_turns``).
+    mid-body by the window can leave a PREFIX — never the whole value, and never
+    a marker — in the stored turn, and it is not counted.
 
-    ⛔ The extraction consumers (``_extract_session_llm``,
-    ``_extract_session_v2``, ``_commit_session_v1``, ``_commit_session_v2``)
-    deliberately pass NO ``cap``: the extractor renders each turn verbatim into
-    its prompt (``extractor_v2._edus_from_conversation`` does not window), so a
-    cap there would both leave the tail un-scanned and silently truncate the
-    extraction input — a fidelity loss with nothing to show for it (#4897's
-    lesson). They therefore pay a full linear scan of client-controlled text
-    (measured ~3 s/MB); the hosted lane keeps that off the event loop, and the
-    SDK-side call is bounded only by what the caller passes.
+    ⛔ The extraction consumers pass NO ``cap``, for two different reasons.
+    ``_commit_session_v1`` / ``_commit_session_v2`` receive the RAW conversation
+    and the extractor renders each turn verbatim into its prompt
+    (``extractor_v2._edus_from_conversation`` does not window), so a cap there
+    would both leave the tail un-scanned and silently truncate the extraction
+    input — a fidelity loss with nothing to show for it (#4897's lesson); those
+    two therefore pay a full linear scan of client-controlled text (measured
+    ~3 s/MB). ``_extract_session_llm`` / ``_extract_session_v2`` DO window
+    first — their input is the stored turn window (#721 parity), handed to them
+    as ``_capture_extraction_window``'s already-clipped view — so their scan is
+    bounded by that window and a ``cap`` would be a no-op. The hosted lane keeps
+    the scan off the event loop, and the SDK-side call is bounded only by what
+    the caller passes.
     """
     redacted, counts = _redact_turn_contents(windowed)
     texts: list[str] = []
     for turn in redacted:
         role = _normalize_turn_role(turn.get("role"))
+        # ⛔ NEUTRALIZE THE FRAMING DELIMITERS IN THE ROLE (#5445 review). The
+        # frame is ``[<role>] <body>`` and ``<role>`` is caller-controlled, so a
+        # role containing ``]`` ends the frame early. That is not hypothetical:
+        # the #5445 role scrub WRITES one — a role holding a credential becomes
+        # ``[REDACTED:github_token]``, and the stored text is
+        # ``[[REDACTED:github_token]] please review…``. The reader's inverse
+        # (``_CAPTURE_ROLE_PREFIX``, ``^\[([^\]]*)\]\s*``) then parses the
+        # speaker as ``[REDACTED:github_token`` — dropping the closing bracket —
+        # and hands the BODY a stray ``] ``, so ``:Point.speaker`` and the turn
+        # the read path serves are both corrupted on the exact path this cluster
+        # fixes. Brackets are rewritten in the ROLE only; the body is untouched.
+        role = role.replace("[", "(").replace("]", ")")
         raw = turn.get("content")
         content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
-        texts.append(f"[{role}] {content[:_CAPTURE_TURN_CAP]}")
+        # #4897: NO re-clip here. The cap was applied to the PRE-redaction text
+        # by the caller's ``_capture_turn_window``, and its marker records that
+        # text's true length. Re-applying the cap to the SCRUBBED result would
+        # re-derive the length from text the #4911 replacement changed — writing
+        # a FALSE marker whose "original length" is the post-redaction size
+        # (6927 → 5008, reproduced in review) — so the stored body may exceed
+        # the cap by the redaction markup, which is a replacement, not
+        # conversation. A complete turn therefore stays unmarked.
+        texts.append(f"[{role}] {content}")
     return texts, counts
 
 
 def _capture_turn_texts(windowed: list[dict]) -> list[str]:
     """The exact stored turn text (``[role] <content>``) for each windowed turn.
 
-    One definition shared by the turn-store write and the turn-embedding batch
-    (#4194) — the vector is computed over the string the node stores (the
-    embedder applies its own 512-word cap; model/dimension/normalisation are
-    shared with the read path, the cap is write-side), so a dense (vector) hit
-    can never resolve to a turn whose stored content differs from what was
-    encoded. Coercion is the loop's own (isinstance-first: None -> "", truthy
-    non-strings -> ``str()``, #721); the ``[:5000]`` is the idempotent
-    re-application of ``_capture_turn_window``'s cap (#1532 D1).
+    The stored-text definition (#4194) — the vector is computed over the string
+    the node stores (the embedder applies its own 512-word cap;
+    model/dimension/normalisation are shared with the read path, the cap is
+    write-side), so a dense (vector) hit can never resolve to a turn whose
+    stored content differs from what was encoded. The write path reaches
+    ``_capture_turn_texts_with_redactions`` through ``_write_session_and_turns``;
+    this function delegates to it and returns its first element. Coercion is the
+    loop's own (isinstance-first: None -> "", non-strings -> ``str()``, #721).
+    The cap and its marker are applied ONCE, to the pre-redaction text
+    (``_capture_turn_window``), and this function must NOT re-apply them to the
+    scrubbed result (#4897 — see ``_capture_turn_texts_with_redactions``);
+    callers pass the windowed conversation.
 
-    #4911: THIS is where a stored turn's credentials are scrubbed — one place,
-    applied by every writer of every lane, because this function IS the stored
-    text. The control cannot live inside ``_write_capture_turns`` instead: both
-    callers compute ``turn_embs`` from ``_capture_turn_texts(windowed)`` BEFORE
-    calling the writer, so redacting only at the write would store
+    #4911: the scrub lives in ``_capture_turn_texts_with_redactions`` (via
+    ``_redact_turn_contents``) — the ONE stored-text definition every writer
+    reaches through ``_write_session_and_turns``; this function is its read-only
+    projection. The control cannot live inside ``_write_capture_turns`` instead:
+    the writer computes ``turn_embs`` from that same stored-text result, before
+    ``_write_capture_turns`` stores the row, so redacting only at the write would
+    store
     ``[REDACTED:…]`` while the vector described the raw secret — violating the
     #4194 invariant the docstring above states ("the vector can never describe
-    different text than the node holds"). Redacting here keeps the encoded
-    text, the stored text and the ``content_hash`` the same string by
-    construction. A second, deliberate consequence: the #4675 confirmation
+    different text than the node holds"). Redacting in the stored-text
+    definition keeps the encoded text, the stored text and the ``content_hash``
+    the same string by construction. A second, deliberate consequence: the #4675
+    confirmation
     path (``tortoise/session_confirm.expected_turns``) calls THIS function to
     build what it expects the server to have stored, so the client's
     expectation and the server's stored row cannot drift for the same
@@ -909,7 +1581,14 @@ def _capture_turn_texts(windowed: list[dict]) -> list[str]:
 #: anything comparing a stored turn against a served one must go through the
 #: inverse — comparing the raw string never matches (#4675). One definition so
 #: the writer's format and the reader's split cannot drift.
-_CAPTURE_ROLE_PREFIX = re.compile(r"^\[([^\]]+)\]\s*")
+_CAPTURE_ROLE_PREFIX = re.compile(r"^\[([^\]]*)\]\s*")
+#: ⛔ ``*``, not ``+`` (review round 12). A role can be EMPTY: ``_normalize_turn_role``
+#: passes ``""`` through, the writer emits the frame ``"[] <body>"``, and a ``+``
+#: quantifier refuses to match it — so the inverse returned the WHOLE string as the
+#: body (``("unknown", "[] hello world")``) and the served turn was corrupted with a
+#: stray ``[] `` prefix. That is the same corruption class round 11 closed for a role
+#: containing a bracket, on the one remaining way a role can break the frame. An empty
+#: role is recovered verbatim as ``""``, so writer and reader stay consistent.
 
 
 def _capture_turn_role_text(stored: str) -> tuple[str, str]:
@@ -1019,7 +1698,8 @@ def _capture_turn_embeddings(
 # then a `CONTAINS` edge `MERGE`. For a 500-turn capture that is ~1000
 # blocking calls — the ~4.75s single-loop freeze #3086 measures.
 #
-# This is the ONE implementation both lanes call. The batch is a single
+# This is the ONE turn store — reached by the primitive both lanes call. The
+# batch is a single
 # `UNWIND $turns` statement, i.e. ONE transaction per capture: a runtime error
 # anywhere in `$turns` rolls the WHOLE batch back, so a failed batch leaves no
 # turn written without its CONTAINS edge (never a partially-wired session).
@@ -1028,7 +1708,8 @@ def _capture_turn_embeddings(
 # (`{session_id}_t{i}`), so a retried batch MERGEs the same rows and converges.
 # (Precondition, stated in the docstring: the Session must already exist — the
 # statement MATCHes it, so a missing Session leaves the batch's nodes
-# unwired. Both callers MERGE it immediately before.)
+# unwired. Its caller, ``_write_session_and_turns``, MERGEs it immediately
+# before.)
 _TURN_WRITE_CYPHER = (
     "UNWIND $turns AS turn "
     # `MERGE (t:Point {id:...})` binds the node FIRST: a full-path
@@ -1088,6 +1769,27 @@ _TURN_WRITE_CYPHER = (
 )
 
 
+def _capture_turn_id(session_id: str, index: int, turn_offset: int = 0) -> str:
+    """The deterministic per-turn Point id: ``{session_id}_t{index + offset}``.
+
+    #3551: the ONE definition of the turn-id derivation for the capture lanes
+    (``_write_session_and_turns`` / ``_write_capture_turns`` and the entity-link
+    pass). ``turn_offset`` shifts the whole window, so an APPEND onto an existing
+    turn list mints the next contiguous ids instead of re-MERGing index 0 — the
+    offset-aware derivation the shared primitive owns. At the capture lanes'
+    offset 0 the output is byte-identical to the pre-refactor literal
+    (``f"{session_id}_t{i}"``).
+
+    The CLIENT's constructor (``session_confirm.turn_point_id``) is deliberately
+    its own copy: ``tests/test_session_confirm.py`` re-parses this module, drops
+    this function's docstring, and asserts the unparsed BODY still formats
+    ``{session_id}_t<index>`` — so the module's prose cannot satisfy the pin. It
+    is pinned by a test rather than an import (a version-bound parity — a
+    client on an older table cannot be made to import this module).
+    """
+    return f"{session_id}_t{index + turn_offset}"
+
+
 def _capture_turn_ids(proj, session_id: str) -> list[str]:
     """Every turn-Point id currently ``CONTAINS``-wired to ``session_id``.
 
@@ -1107,8 +1809,22 @@ def _capture_turn_ids(proj, session_id: str) -> list[str]:
     ).result_set
     # str-only: a non-string id would make the suffix slice raise, and no
     # writer ever stores one (the same str-only posture the replay folds take).
+    # ``isdecimal()`` — NOT ``isdigit()`` — is the right guard for the class it
+    # was introduced for: ``'²'.isdigit()`` is True while ``int('²')`` raises,
+    # so an ``isdigit()`` guard admitted an id the sweep then could not index
+    # (#3551 review). It is NOT by itself sufficient for ``int()``: ``int()``
+    # refuses a decimal string longer than its conversion limit (4300 digits by
+    # default), so ``isdecimal()`` being True does not imply parseable. The
+    # sweep therefore does not ASSUME a total parse — it wraps its own and
+    # RETAINS an id it cannot place (the guard EXCLUDES the ``²``-class; this
+    # layer retains an id the guard ADMITTED), so no id returned here can make
+    # the sweep raise. (``int()`` also parses
+    # suffixes ``isdecimal()`` rejects, e.g.
+    # ``'-1'``/``' 3'``/``'3_0'``; those are not ids this writer mints —
+    # ``_capture_turn_id`` formats an ``int`` — so they are left untouched
+    # rather than swept, never deleted where we cannot place them.)
     return [r[0] for r in (rows or [])
-            if isinstance(r[0], str) and r[0][len(prefix):].isdigit()]
+            if isinstance(r[0], str) and r[0][len(prefix):].isdecimal()]
 
 
 def _write_capture_turns(
@@ -1121,34 +1837,48 @@ def _write_capture_turns(
     turn_embs: list[list[float] | None],
     session_existed: bool = True,
     texts_and_counts: tuple[list[str], dict[str, int]] | None = None,
+    turn_offset: int = 0,
 ) -> int:
     """Write a capture's episodic turn stream — ONE batched statement (#3086).
 
-    Called from BOTH capture lanes: ``TortoiseSDK.capture_session`` (sync, no
-    loop to free) and hosted ``_capture_session_impl`` (off the event loop, on
+    The ONE turn store, called by ``_write_session_and_turns`` — which BOTH
+    capture lanes call: ``TortoiseSDK.capture_session`` (sync, no loop to free)
+    and hosted ``_capture_session_impl`` (off the event loop, on
     ``_CAPTURE_EXECUTOR``). It replaces the per-turn loop the two lanes each
     kept, so the turn store can no longer fork.
 
     ``turn_embs`` must be the batch from ``_capture_turn_embeddings`` over
-    ``_capture_turn_texts(windowed)``. The writer recomputes the stored text
-    from that same helper, so the vector can never describe different text
-    than the node holds (#4194); a length mismatch (unreachable from both
-    callers) drops the whole batch's vectors with an error log rather than
-    misaligning them.
+    ``_capture_turn_texts(windowed)``. The stored text is the caller-supplied
+    pair (``texts_and_counts``) on the live path; when it is ``None`` this
+    function re-derives it with
+    ``_capture_turn_texts_with_redactions(windowed)`` (the retained branch below,
+    currently unreached) — either way the vector is derived from the same text,
+    so it can never describe different text than the node holds (#4194); a
+    length mismatch (unreachable from the caller) drops the whole batch's
+    vectors with an error log rather than misaligning them.
 
     ``texts_and_counts`` lets a caller that has ALREADY computed
     ``_capture_turn_texts_with_redactions(windowed)`` hand the result in rather
-    than pay for a second scrub of the same client-controlled text. The hosted
-    lane passes it because its embeddings and its entity-linking pass both need
-    the same stored texts: the scrub is ~3 s/MB, so re-deriving it per consumer
-    cost seconds of CPU per legal-maximum capture (#4911 cycle 1). Defaults to
-    ``None`` — recompute — so the sync SDK lane and every test are unchanged,
-    and the count is always taken from the same window either way.
+    than pay for a second scrub of the same client-controlled text (the scrub is
+    ~3 s/MB, so a second consumer of the same texts costs seconds of CPU per
+    legal-maximum capture — #4911 cycle 1). Its ONE caller is
+    ``_write_session_and_turns``, which derives the pair from this same window
+    and always forwards it, so the ``None`` branch is retained for direct
+    callers and is currently unreached. Either way the count is read from this
+    same window, so a donation cannot make the two disagree.
 
-    The Session MUST already exist (both callers MERGE it immediately before)
-    — the statement both node- and edge-writes, and a missing Session would
-    leave nodes unwired. ``proj`` is the caller's projection (the SDK lane
-    passes ``self._get_proj()``); ``sdk`` supplies the journal seam.
+    ``turn_offset`` (#3551) shifts the id window: row ``i`` MERGEs
+    ``_capture_turn_id(session_id, i, turn_offset)``. At the capture lanes'
+    offset 0 the output is byte-identical to the pre-refactor
+    ``f"{session_id}_t{i}"``; a non-zero offset is an APPEND, and the
+    stale-turn sweep is bounded to ids at or beyond ``turn_offset +
+    len(window)`` so it can never delete the prefix it is appending to.
+
+    The Session MUST already exist (``_write_session_and_turns`` MERGEs it
+    immediately before) — the statement both node- and edge-writes, and a
+    missing Session would leave nodes unwired. ``proj`` is the caller's
+    projection (the SDK lane passes ``self._get_proj()``); ``sdk`` supplies the
+    journal seam.
 
     A SHORTER re-capture DELETES the turns the previous capture left beyond
     the new window (#1920): the merge alone keeps them on the graph AND
@@ -1166,15 +1896,16 @@ def _write_capture_turns(
 
     #4911: RETURNS the number of credential-shaped spans redacted from this
     window, and writes the same number to the Session as ``capture_redactions``
-    in the batched statement (both lanes call this writer, so the count is
+    in the batched statement (both lanes reach this writer, so the count is
     recorded per session at the ONE chokepoint). The text itself was already
-    scrubbed upstream in ``_capture_turn_texts`` — see that function for why
-    the redaction cannot live here — and the count is taken from the SAME
+    scrubbed upstream in ``_capture_turn_texts_with_redactions`` (via
+    ``_redact_turn_contents``) — ``_capture_turn_texts`` carries why the control
+    cannot live here — and the count is taken from the SAME
     window, so it covers the spans the session ``:Source`` sink and the
     extractor scrub over the same stored window. When the Source is handed the
     raw conversation these are different OBJECTS holding the same first
     ``_CAPTURE_TURN_CAP`` characters of each turn, which is all either of them
-    persists. Both callers surface it on their capture receipt.
+    persists. Both lanes surface it on their capture receipt.
     """
     if texts_and_counts is None:
         turn_texts, redaction_counts = _capture_turn_texts_with_redactions(windowed)
@@ -1184,8 +1915,9 @@ def _write_capture_turns(
     if not turn_texts:
         return redacted_total
     if len(turn_embs) != len(turn_texts):
-        # Unreachable from both callers (each derives `turn_embs` from this
-        # same helper over this same `windowed`) and deliberately NOT a raise:
+        # Unreachable from the caller (it derives `turn_embs` from the same
+        # `_capture_turn_texts_with_redactions(windowed)` result it passes as
+        # `texts_and_counts`) and deliberately NOT a raise:
         # this helper runs after the caller's Session MERGE, so raising would
         # 500 a capture whose Session is already committed. Drop the whole
         # batch's vectors rather than misaligning them — the turns are still
@@ -1198,19 +1930,21 @@ def _write_capture_turns(
         turn_embs = [None] * len(turn_texts)
     turn_rows: list[dict] = []
     turn_hashes: list[str] = []
-    for i, turn in enumerate(windowed):
+    for i, _turn in enumerate(windowed):
         text = turn_texts[i]
         text_hash = _content_hash(text)
         turn_hashes.append(text_hash)
         turn_rows.append({
-            "id": f"{session_id}_t{i}",
+            "id": _capture_turn_id(session_id, i, turn_offset),
             "c": text,
             "k": "event",
-            # `_normalize_turn_role` is the isinstance-first pattern (#721):
-            # None -> "unknown", truthy non-strings -> str() — a raw
-            # non-string stored as `speaker` contradicts the ontology row and
-            # a dict role could fail the write mid-batch.
-            "speaker": _normalize_turn_role(turn.get("role")),
+            # #5445: derived from the SCRUBBED stored text, not from the raw
+            # ``turn["role"]`` — the role is caller-controlled and the `role`
+            # sink must inherit `_redact_turn_contents`'s scrub. Going through
+            # the reader's own inverse (`_capture_turn_role_text`) also makes
+            # the stored `speaker` agree with what `get_session_detail` serves
+            # for the same row (#4675 parity).
+            "speaker": _capture_turn_role_text(text)[0],
             "s": "draft",
             "ch": text_hash,
             "emb": turn_embs[i],
@@ -1235,8 +1969,39 @@ def _write_capture_turns(
     stale: list[str] = []
     if session_existed:
         keep = {row["id"] for row in turn_rows}
-        stale = [tid for tid in _capture_turn_ids(proj, session_id)
-                 if tid not in keep]
+        # #3551: offset-aware. Only ids at or beyond the window this write just
+        # MERGEd are stale; a non-zero ``turn_offset`` is an APPEND, and every
+        # id BELOW it belongs to a prior window that must never be swept. At
+        # the capture lanes' offset 0 the ``_first_live`` bound is a NO-OP for
+        # every id this writer MINTS (a decimal index below the window is in
+        # ``keep`` by construction), so for those ids the sweep is #1920's
+        # "everything not kept". It is NOT #1920 exactly, on two counts:
+        # (i) ``_capture_turn_ids`` now guards with ``isdecimal()``, so a
+        # turn-shaped id whose suffix is not a decimal integer (``<sid>_t²``)
+        # — which #1920's ``isdigit()`` guard admitted and swept — is
+        # deliberately left in place (see that function's docstring, and
+        # ``test_non_int_parseable_suffix_does_not_break_capture``, which pins
+        # the residue); and (ii) the ``_first_live`` bound retains a
+        # non-canonical DECIMAL suffix (``<sid>_t01``) whose value is
+        # numerically below the window, which #1920's sweep would have deleted.
+        # (ii) is the bound, not the guard: it is present even with
+        # ``isdigit()`` restored.
+        _prefix = f"{session_id}_t"
+        _first_live = turn_offset + len(turn_rows)
+        # The parse is DEFENDED, not assumed total: ``_capture_turn_ids``'s
+        # ``isdecimal()`` guard cannot imply ``int()``-parseable (the 4300-digit
+        # conversion limit), so an id we cannot place is RETAINED — never
+        # deleted where we cannot place it — and the sweep can never raise.
+        stale = []
+        for _tid in _capture_turn_ids(proj, session_id):
+            if _tid in keep:
+                continue
+            try:
+                _index = int(_tid[len(_prefix):])
+            except ValueError:
+                continue
+            if _index >= _first_live:
+                stale.append(_tid)
         if stale:
             proj.g.query(
                 "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
@@ -1249,9 +2014,10 @@ def _write_capture_turns(
     # the CONTAINS link is a capture-write structural fact (ONTOLOGY §4.5),
     # restored by the projection's edge fold without inventing a node
     # property the live write never sets. Gated on a configured journal: on a
-    # lane with no `event_log_path` (`_make_sdk`/`_data_sdk` pass none) the
-    # JSONL half is a no-op and the `:GraphEvent` half is not a rebuild
-    # source — `ensure_event_schema` + `next_seq` + `append_event` per turn
+    # lane with no `event_log_path` (a hosted SDK when
+    # `TORTOISE_EVENT_LOG_BASE_DIR` is unset; #4240) the JSONL half is a
+    # no-op and the `:GraphEvent` half is not a rebuild source —
+    # `ensure_event_schema` + `next_seq` + `append_event` per turn
     # there buys no durability on the very lane #3086 measures.
     if sdk._get_event_log() is None:
         return redacted_total
@@ -1271,8 +2037,8 @@ def _write_capture_turns(
         # fold tombstones (the wrong meaning for a removal).
         sdk._emit_event("PointRetracted", {"id": tid})
         sdk._journal_entity_mutation("Point", tid, "delete")
-    for i, turn in enumerate(windowed):
-        turn_id = f"{session_id}_t{i}"
+    for i, _turn in enumerate(windowed):
+        turn_id = _capture_turn_id(session_id, i, turn_offset)
         created_at, status, stored_emb = stored.get(turn_id, (None, None, None))
         # #5004: the turn's vector WAS stored live (`turn_embs[i]` is the `emb`
         # column of `_TURN_WRITE_CYPHER`), so it must be journalled too — this
@@ -1291,7 +2057,8 @@ def _write_capture_turns(
             "id": turn_id,
             "content": turn_texts[i],
             "pointKind": "event",
-            "speaker": _normalize_turn_role(turn.get("role")),
+            # #5445: the redacted role (see the turn_rows write above).
+            "speaker": _capture_turn_role_text(turn_texts[i])[0],
             "is_episodic": True,
             "status": status if status is not None else "draft",
             "createdAt": created_at if created_at is not None else now,
@@ -1331,6 +2098,143 @@ def _write_capture_turns(
         "SessionRecorded", id=session_id,
         capture_redactions=redacted_total)
     return redacted_total
+
+
+def _write_session_and_turns(
+    proj,
+    sdk,
+    session_id: str,
+    turns: list[dict],
+    *,
+    now: str,
+    harness: str | None = None,
+    actor_user_id: str | None = None,
+    machine_id: str | None = None,
+    model: str | None = None,
+    turn_offset: int = 0,
+    embed_fn: Callable[[list[str]], list[list[float] | None]] | None = None,
+    turn_embs: list[list[float] | None] | None = None,
+    texts_and_counts: tuple[list[str], dict[str, int]] | None = None,
+    session_existed: bool = True,
+    on_session_merged: Callable[[dict], None] | None = None,
+) -> dict:
+    """The ONE shared Session + turn store writer (#3551).
+
+    Called from BOTH capture lanes: ``TortoiseSDK.capture_session`` (sync, no
+    loop to free) and hosted ``_capture_session_impl`` (off the event loop, on
+    ``_CAPTURE_EXECUTOR``). It owns everything the two lanes used to keep
+    BYTE-IDENTICAL COPIES of and could therefore drift on:
+
+      * the ``:Session`` MERGE field list (``created_at``/``turn_count``/
+        ``is_episodic`` + the conditional ``harness``/``actor_user_id``/
+        ``machine_id``/``model`` clauses);
+      * the per-turn MERGE field list, the turn-point Cypher text, the
+        ``CONTAINS`` wiring and the stale-turn sweep — all delegated to
+        ``_write_capture_turns``, which holds the ONE ``UNWIND $turns``
+        statement (#3086);
+      * offset-aware turn-id derivation (``_capture_turn_id``), so a caller
+        that appends a window does not re-MERGE index 0;
+      * the optional ``embed_fn`` call — ``None`` is a NO-OP default, so the
+        deferred embedding work flips a switch instead of structurally editing
+        a multi-caller function.
+
+    STAYS IN EACH CALLER (this is the boundary the lane comments cite —
+    admission/reservation, quota preflight, replay-skip/``retry_failed_capture``,
+    the abandoned-capture marker, receipt writing, extraction invocation and all
+    HTTP/error mapping):
+
+      * ``harness`` is RESOLVED by the caller. Hosted passes
+        ``_observed_capture_harness`` (first-writer-wins against the stored
+        value); the SDK passes the caller-supplied argument. This function
+        writes whatever it is given, set-only-when-present — it never erases a
+        stored value with ``None``.
+      * ``machine_id`` / ``model`` are CLIENT-CLAIMED and HOSTED-ONLY today
+        (#2599). The SDK lane deliberately passes neither: ``derive_machine_id``
+        is machine-local, so stamping it at SDK/audit time would misattribute
+        the machine that actually captured the session. That absence is
+        RECORDED (``tests/test_write_session_and_turns_3551.py``), not a gap to
+        close here.
+      * ``session_existed`` is the caller's own pre-MERGE probe (it also drives
+        the caller's replay/retry gate); it is forwarded to the turn writer so
+        the fresh-capture hot path keeps its exact query count.
+      * ``on_session_merged`` lets a journaling caller emit its
+        ``SessionRecorded`` record BETWEEN the MERGE and the turn write — the
+        order the SDK lane's live/replay parity depends on. ``None`` is a no-op
+        (hosted journals nothing here).
+
+    ⛔ ``machine_id`` and ``model`` MUST keep the set-if-absent ``coalesce``
+    semantics. A plain ``SET s.machine_id=$mid`` would let a re-capture from a
+    SECOND machine overwrite the first machine's id — the subtle regression this
+    extraction exists to prevent.
+
+    Returns the write facts the callers READ — the stored turn texts (hosted
+    reuses them for its entity-link pass instead of re-scrubbing) and the total
+    redaction count — plus the rest of the post-write state (the offset-aware
+    turn ids, the per-kind redaction counts, the ``Session`` record and the
+    MERGE params), which nothing reads today. The journal emit rides the
+    ``on_session_merged`` callback, not the returned ``session_record``.
+    """
+    turn_count = len(turns)
+    # The canonical :Session field list. Order is load-bearing only in that it
+    # is the byte-identical text the pre-refactor lanes emitted; the conditional
+    # clauses mirror the #1727 harness rule and the #2600 actor rule.
+    merge_sets = ["s.created_at=coalesce(s.created_at, $now)",
+                  "s.turn_count=$tc", "s.is_episodic=true"]
+    merge_params: dict[str, Any] = {"sid": session_id, "now": now,
+                                    "tc": turn_count}
+    session_record: dict[str, Any] = {
+        "id": session_id, "created_at": now,
+        "turn_count": turn_count, "is_episodic": True,
+    }
+    if harness:
+        merge_sets.append("s.harness=$harness")
+        merge_params["harness"] = harness
+        session_record["harness"] = harness
+    if actor_user_id:
+        merge_sets.append("s.actor_user_id=coalesce(s.actor_user_id, $uid)")
+        merge_params["uid"] = actor_user_id
+        session_record["actor_user_id"] = actor_user_id
+    if machine_id:
+        merge_sets.append("s.machine_id=coalesce(s.machine_id, $mid)")
+        merge_params["mid"] = machine_id
+    if model:
+        merge_sets.append("s.model=coalesce(s.model, $model)")
+        merge_params["model"] = model
+    proj.g.query(
+        f"MERGE (s:Session {{id:$sid}}) SET {', '.join(merge_sets)}",
+        params=merge_params,
+    )
+    if on_session_merged is not None:
+        on_session_merged(session_record)
+
+    # The stored text is the WRITER'S OWN definition (#4911's scrubber runs
+    # there), and the vector is derived from it, so the two cannot describe
+    # different strings (#4194). ``texts_and_counts`` is an OPTIONAL donation for
+    # a caller that has already computed the pair. NO caller passes it today —
+    # the sync SDK lane and the hosted lane both take the recompute branch below
+    # — so that branch is the live path for every caller.
+    if texts_and_counts is None:
+        turn_texts, redaction_counts = _capture_turn_texts_with_redactions(turns)
+    else:
+        turn_texts, redaction_counts = texts_and_counts
+    if embed_fn is not None:
+        turn_embs = embed_fn(turn_texts)
+    elif turn_embs is None:
+        turn_embs = [None] * len(turn_texts)
+    redacted_total = _write_capture_turns(
+        proj, sdk, session_id, turns, now=now, turn_embs=turn_embs,
+        session_existed=session_existed, turn_offset=turn_offset,
+        texts_and_counts=(turn_texts, redaction_counts))
+    return {
+        "turn_count": turn_count,
+        "turn_ids": [_capture_turn_id(session_id, i, turn_offset)
+                     for i in range(turn_count)],
+        "turn_texts": turn_texts,
+        "redaction_counts": redaction_counts,
+        "redacted_total": redacted_total,
+        "session_record": session_record,
+        "merge_params": merge_params,
+    }
 
 
 # #1352: minimal stopword set for the cheap session-Source topic derivation —
@@ -1418,7 +2322,13 @@ def _session_extraction_estimate(conversation: list[dict], *,
     import os
     mode = (extractor or os.environ.get("TORTOISE_EXTRACTOR", "v2")).lower()
     factor = 3 if mode == "v2" else 2
-    _transcript, est = _session_llm_transcript(conversation)  # est = sents*2
+    # #4897: window first. ``_session_llm_transcript`` no longer clips (the clip
+    # and its true total are decided once, on pre-redaction text), so the
+    # estimate must be taken over the same window the extractor will see —
+    # otherwise a raw caller would count sentences the extractor never receives.
+    # A no-op on the already-windowed input production passes.
+    _transcript, est = _session_llm_transcript(  # est = sents*2
+        _capture_turn_window(conversation))
     return est // 2 * factor
 
 
@@ -1658,6 +2568,260 @@ _RESERVED_ACTOR_PROPS = frozenset(
     {"actor_user_id", "owner", "initiated_by", "agent_id"})
 
 
+#: #4647: FalkorDB stores an integer as INT64 and a number as a double. A
+#: Python `int` is UNBOUNDED and `decimal.Decimal` is arbitrary-precision, so a
+#: value outside those domains is SILENTLY ALTERED by the store — `SET n.v = $v`
+#: reports success and stores a different number:
+#:
+#:     wrote 2**70        -> stored 9223372036854775807   (clamped)
+#:     wrote -(2**70)     -> stored -9223372036854775808  (clamped)
+#:     wrote 2**63        -> stored 9223372036854775807   (clamped: max + 1)
+#:     wrote Decimal('0.12345678901234567890')
+#:                        -> stored 0.123456789012346    (rounded)
+#:
+#: Reproduced against a live FalkorDB (#4647). The store cannot hold the value,
+#: so some information is lost either way; refusing the write is the honest
+#: failure mode, matching this function's existing fail-closed rejects below and
+#: the repo's own `SPAN_OFFSET_MAX = 2**63 - 1` precedent (commit_schema.py).
+#: A caller needing a wider identifier has a correct representation available —
+#: a string — and should choose it deliberately rather than have it inferred.
+_INT64_MIN = -(2 ** 63)
+_INT64_MAX = 2 ** 63 - 1
+
+#: Depth cap for the container recursion: a self-referential container would
+#: otherwise raise ``RecursionError`` instead of a bounded fail-closed error
+#: (code-review cycle 2, P3). 32 is the repo's own persistable depth
+#: (``projection/entities.py::_PERSISTABLE_MAX_DEPTH``); the shallower cap (12)
+#: refused structures the store holds EXACTLY — a false refusal, because the
+#: guard must sit AT the store's limit, never below it. At the limit it still
+#: fails closed (code-review cycle 5, P2).
+_MAX_RECURSION_DEPTH = 32
+
+try:  # numpy is a declared dependency, but not on every import path.
+    import numpy as _np
+
+    _HAS_NUMPY = True
+except Exception:  # pragma: no cover - environment dependent
+    _np = None
+    _HAS_NUMPY = False
+
+
+def _numeric_alteration_reason(
+    key: str, value: object, _depth: int = 0
+) -> str | None:
+    """#4647: why the store would ALTER this value, or None if it would not.
+
+    The test is EXACTNESS, not a digit count. A digit-count proxy is wrong in
+    both directions (code-review P1): it refused ``Decimal('1000000000000001')``
+    and ``Decimal(0.1)``, which a double holds exactly, while admitting
+    ``Decimal('0.1')``, which it silently rounds. The predicate is therefore
+    \"does this value round-trip through the store's own number type\" — plus
+    finiteness, which also catches the exponent axis (``Decimal('1E+400')`` ->
+    ``inf``, ``Decimal('1e-400')`` -> ``0.0``) and the non-finite Decimals.
+
+    ``numbers.Integral`` (not ``int``) so a ``numpy`` scalar is caught too —
+    numpy integers are NOT Python ``int`` subclasses. ``bool`` is excluded
+    explicitly: it is an ``int`` subclass and is always representable.
+    """
+    if _depth > _MAX_RECURSION_DEPTH:
+        # REFUSE at the cap, never ``return None``: a fail-closed guard that
+        # fails OPEN is worse than no cap, because a value nested past the cap
+        # is admitted and the store then clamps its leaf — the exact #4647
+        # defect, and a regression introduced by adding the cap at all
+        # (code-review cycle 3, P2).
+        return (
+            f"{key!r}: value is nested deeper than the guard inspects "
+            f"({_MAX_RECURSION_DEPTH} levels), so its contents cannot be "
+            "checked for a number the store would silently alter. Flatten it "
+            "or store the deep part as a string."
+        )
+    if _HAS_NUMPY and isinstance(value, (_np.timedelta64, _np.datetime64)):
+        # numpy temporal scalars register as ``numbers.Integral`` (timedelta64),
+        # or fall through every branch (datetime64), but neither has a Cypher
+        # number literal: the driver inlines ``str(value)``, which is
+        # ``'1 years'`` / ``'1970-01-02'``. Catching only the units whose
+        # ``int()`` raises left the calendar/sub-microsecond units admitted —
+        # ``str()`` is not a number for ANY unit (code-review cycle 7, P2).
+        return (
+            f"{key!r}: {type(value).__name__} has no Cypher number literal "
+            "(``str()`` renders a date/duration, not a number), so the store "
+            "cannot hold it. Store it as a string or an epoch integer."
+        )
+    if isinstance(value, bool):
+        # ``bool`` is an ``int`` subclass, but 0/1 are in range either way — this
+        # is documentation, not a load-bearing branch (cycle-2 P3).
+        return None
+    if isinstance(value, numbers.Integral):
+        # ``int()`` can raise on a numpy scalar that registers as Integral but
+        # has no integer conversion — ``np.timedelta64`` does exactly this
+        # (``TypeError: ... not 'datetime.timedelta'``), which escaped as a
+        # bare key-less TypeError from a helper documented to raise ValueError
+        # (code-review cycle 6, P2). Fail closed with the key instead.
+        try:
+            ivalue = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return (
+                f"{key!r}: {type(value).__name__} has no faithful INT64 "
+                "representation. Store it as a string if the full value is "
+                "needed."
+            )
+        if not (_INT64_MIN <= ivalue <= _INT64_MAX):
+            # ``bit_length`` rather than ``str(value)``: ``str`` on a very large
+            # int raises the 4300-digit limit error BEFORE the message is built,
+            # losing the key, the range and the remedy (code-review P3).
+            return (
+                f"{key!r}: integer with {ivalue.bit_length()} bits is outside "
+                f"the range FalkorDB can store ({_INT64_MIN}..{_INT64_MAX}) and "
+                "would be SILENTLY clamped to a different number. Store it as "
+                "a string if the full value is needed."
+            )
+        return None
+    if isinstance(value, decimal.Decimal):
+        if not value.is_finite():
+            return (
+                f"{key!r}: Decimal {value} is not a finite number, so the "
+                "store cannot represent it faithfully. Store it as a string "
+                "if the full value is needed."
+            )
+        # The driver sends ``str(value)``, and Cypher parses a bare integer
+        # literal as INT64 — a DIFFERENT domain from the double. An integral
+        # Decimal must therefore be range-checked, not round-tripped through a
+        # double (code-review cycle 2, P1): ``Decimal(2**70)`` is exactly
+        # representable as a double yet the store CLAMPS it, while
+        # ``Decimal('9223372036854775807')`` is NOT exactly a double yet the
+        # store holds it exactly. Checking one domain for both was wrong in
+        # both directions.
+        _text = str(value)
+        if "e" not in _text.lower() and "." not in _text:
+            _ivalue = int(value)
+            if not (_INT64_MIN <= _ivalue <= _INT64_MAX):
+                return (
+                    f"{key!r}: integer with {_ivalue.bit_length()} bits is "
+                    "outside the range FalkorDB can store "
+                    f"({_INT64_MIN}..{_INT64_MAX}) and would be SILENTLY "
+                    "clamped to a different number. Store it as a string if "
+                    "the full value is needed."
+                )
+            return None
+        _as_float = float(value)
+        if not math.isfinite(_as_float) or decimal.Decimal(_as_float) != value:
+            return (
+                f"{key!r}: Decimal {value} is not exactly representable as a "
+                "double, so FalkorDB would store a DIFFERENT number. Store it "
+                "as a string if the full precision is needed."
+            )
+        return None
+    if isinstance(value, numbers.Rational):
+        # ``fractions.Fraction`` and friends. An INTEGRAL Fraction is a bare
+        # INT64 literal to the store (cycle-3 P2: ``Fraction(2**70)`` was
+        # admitted and then clamped). A NON-integral Fraction has no Cypher
+        # number literal at all — the driver inlines ``str(value)``, which for
+        # ``Fraction(1, 2)`` is ``'1/2'``, and the store rejects that with an
+        # opaque ``Invalid input '/'`` rather than holding it. The cycle-5
+        # branch compared ``Fraction(float(value))`` and so ADMITTED it, i.e.
+        # the predicate contradicted the transport (code-review cycle 6, P2).
+        # Model the serialization honestly and refuse every non-integral ratio.
+        # ``bit_length()`` (never ``{value}``) because rendering a huge
+        # numerator hits CPython's 4300-digit int->str limit and would make the
+        # MESSAGE itself raise (cycle-4 P2).
+        if value.denominator == 1:
+            return _numeric_alteration_reason(key, int(value), _depth)
+        return (
+            f"{key!r}: a ratio with a {value.numerator.bit_length()}-bit "
+            f"numerator and a {value.denominator.bit_length()}-bit denominator "
+            "has no Cypher number literal (``str()`` renders '1/2'), so the "
+            "store cannot hold it. Store it as a string (or a float)."
+        )
+    if isinstance(value, numbers.Real):
+        # Plain ``float`` and the numpy floating scalars (float16/32/64,
+        # longdouble). The driver sends ``str(value)`` and Cypher parses that
+        # as a DOUBLE, so the predicate must compare the number the store will
+        # PARSE against the caller's value — not the caller's value against
+        # itself. ``np.float32(0.1)`` renders as ``'0.1'`` (numpy's
+        # shortest-repr) and parses to the double ``0.1``, a DIFFERENT number
+        # from the float32 value; a bare ``float``/finiteness test admitted it
+        # and the store altered it (code-review cycle 5, P1). ``np.float64``
+        # and plain ``float`` round-trip through their repr exactly.
+        # ``numbers.Real`` is after ``numbers.Rational`` on purpose: a
+        # ``Fraction`` is both, and the Rational branch is the exact one.
+        try:
+            _as_float = float(value)
+        except (OverflowError, ValueError):
+            _as_float = math.inf
+        if not math.isfinite(_as_float):
+            return (
+                f"{key!r}: {value!r} is not a finite number, so the store "
+                "cannot represent it faithfully. Store it as a string if the "
+                "full value is needed."
+            )
+        try:
+            _parsed = float(str(value))
+        except (OverflowError, ValueError):
+            _parsed = math.inf
+        # Compare at FULL precision: a numpy scalar's own ``!=`` narrows to its
+        # dtype, and ``float(value)`` is exact for float16/32/64 but NOT for
+        # longdouble — either misses the alteration. Widening the stored double
+        # back to longdouble and comparing there is exact for every numpy float.
+        if _HAS_NUMPY and isinstance(value, _np.floating):
+            _exact_ok = bool(_np.longdouble(_parsed) == value)
+        else:
+            _exact_ok = _parsed == float(value)
+        if not math.isfinite(_parsed) or not _exact_ok:
+            return (
+                f"{key!r}: {value!r} is not exactly representable as a double, "
+                "so FalkorDB would store a DIFFERENT number. Store it as a "
+                "string if the full precision is needed."
+            )
+        return None
+    if isinstance(value, (list, tuple, set, frozenset)):
+        # Fast path (code-review cycle 5, P2 perf): a flat sequence of plain
+        # Python floats is the embedding case — every element is exactly a
+        # double, so the only possible refusal is non-finite, which can be
+        # checked without a Python-level recursive call per element (~60-75x
+        # an ordinary props write; 1.4 ms for a 1536-dim embedding).
+        if value and all(type(item) is float for item in value):
+            for item in value:
+                if not math.isfinite(item):
+                    return (
+                        f"{key!r}: {item!r} is not a finite number, so the "
+                        "store cannot represent it faithfully. Store it as a "
+                        "string if the full value is needed."
+                    )
+            return None
+        for item in value:
+            reason = _numeric_alteration_reason(key, item, _depth + 1)
+            if reason:
+                return reason
+        return None
+    if isinstance(value, dict):
+        for item in value.values():
+            reason = _numeric_alteration_reason(key, item, _depth + 1)
+            if reason:
+                return reason
+        return None
+    if _HAS_NUMPY and isinstance(value, _np.ndarray):
+        # list/tuple/dict alone missed array-likes (cycle-2 P2):
+        # `np.array([2**70])` was admitted and stored as [9223372036854775807].
+        # Iterate the ELEMENTS, not ``.tolist()`` (code-review cycle 5, P1):
+        # ``tolist()`` widens a float32/float16 array to Python floats, so the
+        # serialized form the store actually parses (``str()`` of the ORIGINAL
+        # numpy scalar, e.g. ``'0.1'``) was never checked and a float32 array
+        # was admitted then altered.
+        for item in value.ravel():
+            reason = _numeric_alteration_reason(key, item, _depth + 1)
+            if reason:
+                return reason
+        return None
+    return None
+
+
+def _reject_unrepresentable_number(key: str, value: object) -> None:
+    """#4647: fail closed on a value the store cannot hold without altering it."""
+    reason = _numeric_alteration_reason(key, value)
+    if reason:
+        raise ValueError(reason)
+
+
 def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
     """#329: reject server-managed fields on tenant write surfaces.
 
@@ -1673,6 +2837,11 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
     ``initiated_by``, ``agent_id``) are STRIP-AND-IGNORE — never a 4xx,
     server owns the actor. Popped with a warning after the ``dict(props)``
     copy so the caller's dict is never mutated.
+
+    #4647: after the reserved-key strip, every remaining value is checked
+    against the store's numeric domain (INT64 int / double number) and a value
+    the store would silently alter is REJECTED with a key-naming ValueError —
+    this runs before the ``sourcePath``/``id`` rejects below.
     """
     props = dict(props)
     # #2600: reserved actor keys are STRIP-AND-IGNORE (never a 4xx — the
@@ -1686,6 +2855,10 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
             _logger.warning(
                 "ignoring client-supplied %r on tenant props", _reserved)
             props.pop(_reserved)
+    # #4647: a value the store cannot hold without altering it must fail here,
+    # not be silently clamped/rounded by FalkorDB on the way in.
+    for _key, _value in props.items():
+        _reject_unrepresentable_number(_key, _value)
     for key in ("sourcePath", "source_path"):
         if key in props:
             raise ValueError(
@@ -1701,8 +2874,10 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
             "'contains_session' is a server-managed capture field and cannot "
             "be set via props."
         )
-    # #1486 (code-review P1): is_episodic is the points-quota discriminator
-    # (quota.py counts only `is_episodic IS NULL OR = false` points). A tenant
+    # #1486 (code-review P1): is_episodic is the POINT-arm discriminator of the
+    # points quota — quota.py counts `is_episodic IS NULL OR = false` points, and
+    # since #1911 it ALSO counts Object/Subject nodes unconditionally, so the
+    # resource is no longer Points alone (#1975). For Points, a tenant
     # setting it true via props would exclude their points from the quota —
     # unlimited points past the paid-tier cap. Server-managed: internal
     # capture/extractor callers set it via the explicit `is_episodic` kwarg on
@@ -1892,20 +3067,116 @@ def _iso_date10(value: object) -> str:
 # (label[:3] + '-' + sha256[:26], e.g. ``sub-<hex26>`` / ``obj-<hex26>``).
 # These are IDs, not names — a guard that only recognizes bare ULIDs treats
 # them as names and runs the stub-creating keyword fallback.
-_ENTITY_ID_RE = re.compile(r"^[a-z]{2,3}-[0-9a-f]{26}$")
+#
+# #3586: the digest spelling is deliberately NOT pinned to ``{26}``/lowercase.
+# An opaque id's spelling is a property of the MINTER, not of the value, so a
+# spelling the regex does not anticipate is not thereby a name: epic #2835
+# Stage 3 mints new opaque ids, and a minted spelling this regex rejected was
+# silently treated as a NAME and minted as a Subject whose name AND id are the
+# identifier (`_mint_subject_stub`, projection/edges.py). The predicate is
+# therefore LENIENT about casing and digest length — ``prefix`` + a 16..64 hex
+# digest covers every id spelling the SDK mints or can plausibly mint — and it
+# is used ONLY for the negative case at the about* seam (may an UNRESOLVED
+# value be treated as a name?), never to decide that a value IS an id: that is
+# provenance, decided by resolution (`_wire_about_value`). Over-refusal there
+# is fail-closed (one warning, no node); the reverse mints junk a caller cannot
+# distinguish from data.
+#
+# ``_is_canonical_entity_id`` is the STRICT, HARD-REJECTION predicate. The two
+# are NOT interchangeable, and widening this one is not free: its consumer
+# (`_check_refs`) fails the WHOLE bundle closed on a hit, so a digest it newly
+# rejects is a previously-valid ref that stops ingesting. Keep it pinned to the
+# shapes the minting surfaces actually emit — a bare ULID, or
+# ``label[:3]-<sha256[:26]>`` (`_entity_name_id`). A spelling no minter can
+# produce (``pr-<hex16>``) cannot shadow a real node, so rejecting it buys no
+# safety and breaks a live ingest.
+_ENTITY_ID_RE = re.compile(r"^[a-z]{2,8}-[0-9a-f]{16,64}$", re.IGNORECASE)
+_CANONICAL_ENTITY_ID_RE = re.compile(r"^[a-z]{2,3}-[0-9a-f]{26}$")
 
 
 def _is_entity_id(s: str) -> bool:
-    """Return True if *s* is an entity id: the prefixed _entity_name_id format
-    OR a bare ULID. Used by the about* wiring guards (create_entity event
-    branch) so ID-valued aboutSubject/aboutObject/aboutPoint/aboutDocument
-    props never hit the name-resolution fallback.
+    """Return True if *s* is shaped like an entity handle (an opaque id), not
+    a name: a bare ULID (canonical or Crockford) OR ``prefix-<hex digest>``.
 
-    Boundary: a NAME shaped exactly like ``[a-z]{2,3}-<26 lowercase hex>``
-    (e.g. ``ab-0123456789abcdef0123456789``) is classified as an id and skips
-    name resolution — vanishingly rare for human names and consistent with
-    the pre-existing bare-ULID/Crockford behavior."""
+    NOT a provenance test (#3586): a minted id and a legacy
+    ``obj-<sha26(name)>`` alias are shape-identical, so shape alone cannot say
+    which node — if any — a value addresses. Callers that need that answer MUST
+    resolve the value first (``_wire_about_value`` does) and use this predicate
+    only for the negative case: may an UNRESOLVED value be resolve-or-minted as
+    a name? See ``_ENTITY_ID_RE`` for why the spelling range is lenient.
+
+    Boundary: a NAME shaped like ``[a-z]{2,8}-<16..64 hex>`` (e.g.
+    ``ab-0123456789abcdef``) is classified as an id — vanishingly rare for
+    human names, and now REPORTED rather than silently dropped by the about*
+    seam."""
     return bool(_is_ulid(s) or _ENTITY_ID_RE.match(s))
+
+
+def _is_canonical_entity_id(s: str) -> bool:
+    """Return True if *s* is shaped like an id the minting surfaces EMIT — a
+    bare ULID or ``label[:3]-<sha256[:26]>`` (``_entity_name_id``) — and so
+    could address (and shadow) a real node.
+
+    The HARD-REJECTION predicate (``_check_refs`` fails the whole bundle closed
+    on a hit). Do NOT widen it to anticipate a future id format: that trades a
+    live, previously-accepted ingest for protection against a spelling no
+    minter produces and which therefore cannot shadow anything. The lenient
+    about*-seam predicate is ``_is_entity_id``."""
+    return bool(_is_ulid(s) or _CANONICAL_ENTITY_ID_RE.match(s))
+
+
+def _wire_about_value(proj, source_id: str, value, rel: str) -> bool:
+    """Wire ONE ``about*`` prop of a freshly-written Event; True iff an edge
+    was created.
+
+    **Provenance first (#3586).** ``create_about_edge`` resolves the value
+    against the id/eventId index WITHIN the label *rel* implies — the surfaces
+    a HANDLE comes from — so a value that resolves to a node of that label is
+    an id, whatever its spelling, and a value that resolves only to a
+    DIFFERENT label is refused here and falls through to the name path below
+    (it must not steal the rel from its intended target). Its result previously
+    went unread and a shape test decided instead, which took the wrong branch in
+    both directions:
+
+    * a resolvable value whose spelling the shape test did not recognize (a
+      minted id under a new format) fell through to the name fallback, which
+      found no node NAMED after the id and minted a stub — so the edge landed
+      on a junk Subject, not on the entity the caller named;
+    * an unresolvable id-shaped value fell through to that same fallback, whose
+      ``_mint_subject_stub`` made the identifier BOTH a name and an id;
+    * an unresolvable recognized-id was a silent no-op — no edge, no node, no
+      signal — which is how a cached legacy alias vanishes.
+
+    So: only a value that resolves to nothing can be a name, and only a value
+    that is not handle-shaped may then be resolve-or-minted as one. An
+    unresolvable handle is a stale/unknown reference and is REPORTED, never
+    minted — the #1917 precedent (a long id that does not resolve is never
+    stubbed; warn and skip, projection/edges.py) applied to the about* seam.
+
+    epic #2835 Stage 3: while legacy ``obj-<sha26(name)>`` aliases remain
+    resolvable they are shape-identical to minted ids, so the alias→id lookup is
+    the REQUIRED resolution branch here — extend the ``create_about_edge`` hop
+    below, never this shape predicate.
+    """
+    from .projection.edges import STRUCTURAL_REL_LABELS
+    # The rel names its target label; scope the resolution to it so a value that
+    # collides with ANOTHER label's id/eventId cannot win (review of #3586 —
+    # `aboutSubject="acme"` landing on the Event whose eventId is "acme" and
+    # dropping the intended Subject).
+    target_label = STRUCTURAL_REL_LABELS.get(rel)
+    if proj.create_about_edge(source_id, value, rel, target_label=target_label):
+        return True
+    if not isinstance(value, str):
+        return False
+    if _is_entity_id(value):
+        _logger.warning(
+            "create_entity: %s %r is handle-shaped but does not resolve to a "
+            "%s node — edge not created and no stub minted (an identifier "
+            "must not become a name, #3586)", rel, value,
+            target_label or "node")
+        return False
+    proj._create_about_edges(source_id, value)
+    return True
 
 
 def _content_hash(text: str) -> str:
@@ -2015,7 +3286,7 @@ def _emit_capture_observation(*, session_id: str, lane: str, mode: str,
     double-residual vs the effective escalation ceiling) is DIAGNOSABLE from
     the logs when the self-surfacing failure fires. Emitted at the shared
     resp/effective-mode assembly. NOTE the mode COVERAGE is v2/m2/replayed/
-    error/no-provider — an "empty" line can never fire here: the empty/blank conversation
+    error/no-provider/extraction-disabled — an "empty" line can never fire here: the empty/blank conversation
     gate RETURNS before the Session MERGE + shared emit point on both lanes
     (no Session is written, so there is no capture to observe; the empty
     population is not a GO candidate). Same for the 402/turn-cap raise paths
@@ -2133,6 +3404,7 @@ def _capture_ep_target_ids(extracted: list[dict], proj) -> list[str]:
     return [r[0] for r in rows]
 
 
+@phased("belief")
 def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
                              warn=None) -> None:
     """W5 Phase C (#2104, indicator 3): EP-on-ingest for one capture.
@@ -2796,6 +4068,195 @@ HOLDS_ROLE_UNAVAILABLE = (
 )
 
 
+def _derive_graph_name(*, namespace: str | None,
+                       graph_name: str | None,
+                       uri_graph: str | None = None) -> str:
+    """The SDK's ONE namespace/graph_name → DB graph-name derivation.
+
+    Extracted from ``_get_proj`` (#4240 review F2) so a caller that must name
+    the graph OUTSIDE a projection derives it identically instead of
+    re-implementing the branches. The hosted lane's per-graph journal path is
+    exactly such a caller: a second derivation there would key the journal to a
+    graph the SDK never opens (a rebuild would replay the wrong file), and the
+    branches are not obvious — ``namespace="test-foo"`` opens
+    ``test_foo_tortoise``, NOT ``org_test-foo``.
+
+    Precedence is unchanged from ``_get_proj`` (in order): registry control
+    plane → explicit ``graph_name`` verbatim → namespace (test_*/
+    tortoise_test* → ``{ns}_tortoise``, hyphenated test-* → normalized to
+    ``test_<ns>_tortoise``, otherwise ``org_{ns}``) → the URI's own graph,
+    else ``tortoise``.
+    """
+    if namespace == "registry":
+        # Control-plane SDK: shared registry main graph.
+        return "registry_tortoise"
+    if graph_name is not None:
+        # C5 #2114 (D-C5-1): explicit graph-name override (a custom
+        # org_{tid}_{gid} graph). Never a namespace derivation — the name is
+        # used verbatim.
+        return graph_name
+    if namespace:
+        if namespace.startswith(("test_", "tortoise_test")):
+            # Test namespace: isolate on a test-prefixed graph so the
+            # _assert_test_graph guard still passes (#221). Matches the
+            # historical {ns}_tortoise naming.
+            return f"{namespace}_tortoise"
+        if namespace.startswith("test-"):
+            # Epic #1647 (T7, cycle-5 P1-5): the hyphenated test-* family
+            # (test-tiers, test-invites, test-hosted, test-e1, test-org-722,
+            # ...) is a TEST namespace too — normalize '-' → '_' so it maps to
+            # the guard-passing test_<ns>_tortoise graph (test-tiers →
+            # test_tiers_tortoise). Without the branch it falls into org_<ns>
+            # (org_test-tiers) — a NON-test graph that is invisible to
+            # `grep -v 'namespace="test_'` and fails _assert_test_graph on
+            # bulk wipe.
+            return f"{namespace.replace('-', '_')}_tortoise"
+        # Org SDK: isolated org graph (matches provision's org_{org_id}
+        # namespace creation, #7886).
+        return f"org_{namespace}"
+    # No namespace: honor the URI's own graph (the conftest session graph for
+    # tests). Fixes #7886 regression that hardcoded 'tortoise' and clobbered
+    # the test graph.
+    return uri_graph or "tortoise"
+
+
+class InvertedSupersedeWindow(ValueError):
+    """#5363 — a supersede refused because its successor's window start
+    precedes the predecessor's ``validFrom`` (#4021's inverted-window guard).
+
+    Subclasses ``ValueError`` because that is the contract ``supersede_point``
+    has always published (callers and tests catch ``ValueError``), but it is a
+    NAMED type so a transport boundary can tell this DETERMINISTIC payload
+    refusal from a transient graph failure WITHOUT parsing the message — which
+    the MCP layer rewrites (``_scrub_error``) and two tests pin.
+
+    The conflicting values ride as attributes so the boundary that renders the
+    client-facing error does not have to re-derive them from the prose.
+    """
+
+    def __init__(self, message, *, old_id, new_id, successor_start,
+                 predecessor_valid_from):
+        super().__init__(message)
+        self.old_id = old_id
+        self.new_id = new_id
+        self.successor_start = successor_start
+        self.predecessor_valid_from = predecessor_valid_from
+
+
+def _refuse_inverted_point_window(g, props: dict, *,
+                                  point_id: str | None = None) -> None:
+    """#5359: refuse an INVERTED validity window at a Point write boundary.
+
+    ``create_point`` / ``update_point`` accept ``validFrom``/``validTo`` as
+    caller props, and ``mining._temporal_wire`` stamps ``validFrom`` on a draft
+    decision point. None of those writers read the OPPOSITE bound, so a caller
+    (or the miner's session date, read against a stored end) could persist
+    ``validTo < validFrom`` directly — bypassing the refusal #4021 added inside
+    ``supersede_point``. ``restore_point_at``'s ``_covers`` then covers NO
+    instant and the point vanishes from every temporal query while every read
+    reports honest absence.
+
+    The PREDICATE is delegated, never re-implemented:
+    ``commit_schema.validate_validity_window`` is the ONE HOME for the measure
+    (``_created_sort_key``) and the presence gate (``is not None``) — the same
+    predicate ``_covers`` assumes. This function owns only what the declaration
+    explicitly does NOT (its own scope note): resolving the pair a PARTIAL
+    write will actually persist. ``point_id is None`` is a fresh create, where
+    both bounds are the caller's; otherwise the caller's bound is merged with
+    the STORED opposite bound.
+
+    EVERY matching node is examined, not just the first: point ids are not
+    unique (the duplicate fan-out is a tested shape) and these writers MATCH
+    every node carrying the id, so a first-row-only read could pass the guard
+    and still leave an inverted window on a sibling — the verdict would then
+    depend on server row order. Same fan-out discipline as
+    ``TortoiseSDK._assert_window_start_not_inverted`` (#5358).
+
+    Absent bounds are legal (a lone ``validFrom`` is an open-ended window), and
+    a bound ``_created_sort_key`` cannot order is deliberately not refused
+    (#5360). A key PRESENT with value ``None`` is a CLEAR, not an absence:
+    ``SET n += $props`` removes the property, so the effective bound is
+    ``None`` and the window is open-ended — hence the key-presence test rather
+    than a truthiness test.
+    """
+    if "validFrom" not in props and "validTo" not in props:
+        return
+    from tortoise.commit_schema import validate_validity_window
+    if point_id is None:
+        validate_validity_window(props.get("validFrom"), props.get("validTo"))
+        return
+    rows = g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.validFrom, n.validTo",
+        params={"id": point_id},
+    ).result_set
+    if not rows:
+        return
+    for stored_vf, stored_vt in rows:
+        # ``get(key, default)`` uses the default only when the key is ABSENT,
+        # so a key present with value None still clears the bound (matching
+        # `SET n += $props`), while an absent key keeps the stored one.
+        effective_vf = props.get("validFrom", stored_vf)
+        effective_vt = props.get("validTo", stored_vt)
+        validate_validity_window(effective_vf, effective_vt)
+
+
+#: Sentinel returned by ``_supersede_window_start_source`` when no READABLE
+#: stored start exists, so the writer's own clock (``now``) decides the end.
+_WRITER_CLOCK = object()
+
+
+def _supersede_window_start_source(stored_vf, successor_created_at):
+    """The stored successor window START ``_supersede_window_end`` will use, or
+    ``_WRITER_CLOCK`` when it falls through to the writer's ``now``.
+
+    THE ONE HOME for this predicate (#3985, #5360): the writer
+    (``_supersede_window_end``) and the hosted pre-write mirror
+    (``hosted_api._prevalidate_supersede_window``) BOTH resolve through it, so
+    the PREDICATE cannot drift. (The two sites still derive its INPUTS
+    independently — the mirror reads before the write, the writer after — a
+    separately-positioned read, the #7000 class.) The mirror's whole question —
+    "does the resolution land on the writer's clock?" — is ``is _WRITER_CLOCK``. A duplicated predicate
+    drifted once already (the mirror kept a truthiness test after #3985 made a
+    falsey stored start resolvable) and deferred a resolution the writer takes:
+    the successor was minted and the boundary then refused it, the #5363
+    orphan.
+
+    The predicate is PRESENT (not truthy) AND ORDERABLE:
+
+    * PRESENT, not truthy (#3985): the read path gates on ``vf is not None``
+      (``_covers``), so a numeric ``0`` is a REAL window start there — the
+      epoch-0 instant. A truthiness test skipped it and fell back to
+      ``successor_created_at``, which lands INSIDE the read path's
+      ``[epoch 0, inf)`` window -> the predecessor and the successor then both
+      cover -> a 2-candidate ``ambiguous`` answer. The ``is not None`` conjunct
+      is kept as the explicit PRESENCE marker: inert while
+      ``_created_sort_key(None)`` stays unorderable, load-bearing if it ever
+      changes.
+    * ORDERABLE (#5360): a stored start that is present but unorderable
+      ("not-a-date", "TBD") names no instant, and persisting it would leave the
+      window unbounded — ``_created_sort_key("not-a-date")`` is ``(1, text)``,
+      so the #4021 inversion guard's ``end >= start`` conjunct is trivially
+      satisfied while ``_covers`` cannot exclude the window either
+      (``(1, x) < (0, y)`` is False). Falling through to
+      ``successor_created_at`` is the SAME treatment a falsey-AND-UNORDERABLE
+      stored start gets, and matches this module's own policy for the identical
+      shape on the predecessor side ("SKIPPED, not refused"): ``create_point``
+      accepts any caller ``validFrom``, so refusing would make a legacy point
+      impossible to supersede until its window was repaired.
+
+    ``successor_created_at`` is itself a normal caller prop (``create_point``'s
+    comments record api.py, ingest.py and the source-inheritance path all pass
+    one), so an unparseable ``createdAt`` is reachable through the public API
+    and gets the same ORDERABLE test — it falls to ``now``, which is always ISO.
+    """
+    from .search_engine import _created_sort_key  # lazy — no cycle; deferred to keep sdk light
+    if stored_vf is not None and _created_sort_key(stored_vf)[0] == 0:
+        return stored_vf
+    if successor_created_at and _created_sort_key(successor_created_at)[0] == 0:
+        return successor_created_at
+    return _WRITER_CLOCK
+
+
 def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
                           stored_vf, successor_created_at, now):
     """Resolve the predecessor's window END and refuse an inverted window (#4021).
@@ -2808,18 +4269,38 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
     the predecessor became unreachable from every read surface with no error
     anywhere — a silent, permanent loss of the old fact.
 
-    Resolution order is unchanged and is the ONE home for it::
+    Resolution order is the same FOUR SOURCES in the same order — the
+    ``stored_vf`` predicate was WIDENED from truthy to presence (#3985) with
+    its orderability conjunct kept (#5360), so the step list is not unchanged::
 
         str(valid_from) [a STRING must name an instant; a numeric is exempt]
-                        → stored_vf (TRUTHY and ORDERABLE)
-                        → successor_created_at (ORDERABLE) → now
+                        -> stored_vf (PRESENT and ORDERABLE — #5360 + #3985)
+                        -> successor_created_at (TRUTHY and ORDERABLE - #5360)
+                        -> now
 
-    ``stored_vf`` is taken only when it is ORDERABLE (#5360), not merely
-    truthy: a present-but-unparseable stored start carries no instant, and
-    persisting it as the end leaves the window unbounded — see the branch
-    comment below.
+    ``stored_vf`` is taken when it is PRESENT and ORDERABLE. PRESENT, not
+    truthy: ``_covers`` gates on ``is not None``, so a numeric ``0`` is a real
+    window start there — the epoch-0 instant (#3985). ORDERABLE, because a
+    present-but-unparseable start carries no instant and persisting it would
+    leave the window unbounded (#5360). ``successor_created_at`` is taken only
+    when it is truthy and ORDERABLE (#5360); otherwise the resolver falls to
+    ``now``.
 
-    Returns the value AS PERSISTED.  The ``stored_vf`` branch stays RAW (no
+    #3985 changed exactly ONE case: a stored start that is FALSEY but
+    orderable (``0``). The old truthiness test skipped it and fell back to
+    ``successor_created_at``, which lands INSIDE the read path's
+    ``[epoch 0, ∞)`` window: the predecessor and the successor then both cover
+    ⇒ a 2-candidate ``ambiguous`` answer instead of the successor.
+
+    Presence is NOT enough on its own: ``is not None`` alone would also absorb
+    the falsey-but-UNPARSEABLE ``""``, stamping the predecessor's end ``""`` —
+    which ``_covers`` reads as an OPEN end, so the predecessor would cover
+    every later instant and the successor would never become the answer. The
+    orderability conjunct is what keeps that out; the residual is tracked as
+    #6140. A truthy-but-unparseable stored start (``"TBD"``) also falls
+    through, to ``successor_created_at``.
+
+    Returns the value AS PERSISTED.  The ``stored_vf`` branches stay RAW (no
     ``str()``): a numeric stored value must keep keying as ``(0, float)``
     (``_created_sort_key`` documents numeric epochs as supported and seeded
     corpora carry them) — passing it through ``str()`` makes it unparseable
@@ -2870,11 +4351,21 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
     ``successor_created_at`` rather than being persisted. A NUMERIC kwarg is
     deliberately exempt there.
 
+    #3985's residual, stated so the next reader does not "tidy" it: the
+    falsey-but-unparseable ``""`` start still falls through to
+    ``successor_created_at``, so write != read for it.  Making it agree means
+    deciding whether ``""`` should be an OPEN end or an absent one, which is
+    a semantic choice of the same CLASS as #3982's (that one ruled on
+    date-only parsing; this is a different question) and an owner decision —
+    not a predicate alignment.  It is tracked as **#6140**.  What #3985 does
+    fix is the case where the two paths CAN be made to agree without one: a
+    start both paths can order.
+
     The ``valid_from``-vs-successor agreement guard is NOT here: it is
     reachable only when a kwarg is passed, and it stays inline at its
     reviewed call site.
     """
-    from .search_engine import _created_sort_key  # lazy — import cycle
+    from .search_engine import _created_sort_key  # lazy — no cycle; deferred to keep sdk light
     if valid_from is not None and not (
         # #5360 — a STRING kwarg that names no instant must not be persisted as
         # the end either. A NUMERIC kwarg is deliberately EXEMPT from this and
@@ -2889,51 +4380,18 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
         and _created_sort_key(valid_from)[0] != 0
     ):
         succ_vf = str(valid_from)
-    elif stored_vf and _created_sort_key(stored_vf)[0] == 0:
-        # #5360 — ORDERABLE, not merely truthy. A stored start that is present
-        # but unorderable ("not-a-date", "TBD") names no instant, and this
-        # branch used to persist it RAW as the predecessor's window END. The
-        # resulting window has no orderable boundary:
-        # ``_created_sort_key("not-a-date")`` is ``(1, text)``, so the #4021
-        # inversion guard's ``end >= start`` conjunct is trivially satisfied
-        # (that guard skips an unorderable successor — see below), while
-        # ``_covers`` cannot exclude the window either, because
-        # ``(1, x) < (0, y)`` is False. The predecessor then appears to cover
-        # EVERY later instant — the exact overlap class #3980 exists to
-        # prevent, on the one path #3980 does not guard.
-        #
-        # Falling through to ``successor_created_at`` is the SAME treatment a
-        # FALSEY stored start already gets (#3985), and normalising rather
-        # than refusing is this function's own documented policy for the
-        # identical shape on the predecessor side, where a present-but-
-        # unparseable start is "SKIPPED, not refused" — because
-        # ``create_point`` accepts any caller ``validFrom``, so refusing would
-        # make a legacy/imported point impossible to supersede until its
-        # window was repaired, foreclosing the very write a caller would use
-        # to move past it. The successor side is the same shape: refuse there
-        # and such a point could never be superseded at all.
-        #
-        # The test for ORDERABILITY lives HERE and NOT as a normalisation of
-        # the resolved value below, because such a normalisation would reverse
-        # a deliberate, pinned decision: a numeric ``valid_from`` kwarg is
-        # persisted as ``str(valid_from)``, which keys ``(1, text)`` (no
-        # ``-``/``T``), and
+    else:
+        _resolved = _supersede_window_start_source(
+            stored_vf, successor_created_at)
+        # ORDERABILITY is decided IN ``_supersede_window_start_source``, and NOT
+        # as a normalisation of the resolved value below, because such a
+        # normalisation would reverse a deliberate, pinned decision: a numeric
+        # ``valid_from`` kwarg is persisted as ``str(valid_from)``, which keys
+        # ``(1, text)`` (no ``-``/``T``), and
         # ``test_window_end_numeric_kwarg_resolved_before_measure`` (B3) pins
         # that the guard measures that RESOLVED value — so the numeric case is
         # NOT an inversion.
-        succ_vf = stored_vf
-    elif successor_created_at and _created_sort_key(successor_created_at)[0] == 0:
-        # #5360, the THIRD route (found in the third review cycle): ``createdAt``
-        # is a normal CALLER prop — ``create_point``'s own comment records that
-        # api.py, ingest.py and the source-inheritance path all pass one, and
-        # ``_create_map`` lets a caller override the ``"$now"`` default — so an
-        # unparseable ``createdAt`` is reachable through the public API, and
-        # this fallback used to persist it RAW as the predecessor's END. Same
-        # unbounded window as the other two routes. Requiring orderability here
-        # sends it to ``now`` instead, which is always ISO.
-        succ_vf = successor_created_at
-    else:
-        succ_vf = now  # monotone fallback — never a gap
+        succ_vf = now if _resolved is _WRITER_CLOCK else _resolved
     if old_vfs:
         k_succ = _created_sort_key(succ_vf)
         # A NUMERIC KWARG can still resolve unparseable here and is
@@ -2962,7 +4420,7 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
                     # mcp_server._scrub_error, whose `(host=|at |to )[\w.-]+`
                     # rule rewrites any word ending in at/to followed by a
                     # space — a scrubbed hint reaches the caller as `***`.
-                    raise ValueError(
+                    raise InvertedSupersedeWindow(
                         f"supersede_point: refusing supersede {old_id!r} - "
                         f"{new_id!r} - the successor's window start "
                         f"{succ_vf!r} precedes the predecessor's validFrom "
@@ -2970,7 +4428,10 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
                         f"window (validTo < validFrom), which no query "
                         f"instant resolves. Give the successor a validFrom "
                         f"on-or-after {old_vf!r}, or use `retract_point()` "
-                        f"(window-agnostic) for withdrawal of the predecessor"
+                        f"(window-agnostic) for withdrawal of the predecessor",
+                        old_id=old_id, new_id=new_id,
+                        successor_start=succ_vf,
+                        predecessor_valid_from=old_vf,
                     )
     return succ_vf
 
@@ -3046,6 +4507,12 @@ class TortoiseSDK:
         self._graph_name = graph_name
         self._event_log_path = event_log_path
         self._event_log = None  # lazy-init EventLog (#548)
+        # #4240 review F1: count journal appends that failed on a CONFIGURED
+        # journal. A configured journal that cannot record makes the derived
+        # graph live-only, so a failure is a real degradation — it is counted
+        # (monitoring.record_journal_write_failure) and disclosed on the next
+        # capture receipt instead of being only a log line.
+        self._journal_write_failures = 0
         # Epic #900 §5.3 (cycle-21): cross-process embedded overlap probe —
         # fail-fast when another PROCESS holds this embedded store (redislite
         # pid-registry + liveness probe). Same-process threads reuse the daemon
@@ -3166,40 +4633,9 @@ class TortoiseSDK:
                 from urllib.parse import urlparse
                 uri_graph = urlparse(self._db_uri).path.lstrip('/') or "tortoise"
 
-            if self._namespace == "registry":
-                # Control-plane SDK: shared registry main graph.
-                graph_name = "registry_tortoise"
-            elif self._graph_name is not None:
-                # C5 #2114 (D-C5-1): explicit graph-name override (a custom
-                # org_{tid}_{gid} graph). Never a namespace derivation — the
-                # name is used verbatim.
-                graph_name = self._graph_name
-            elif self._namespace:
-                if self._namespace.startswith(("test_", "tortoise_test")):
-                    # Test namespace: isolate on a test-prefixed graph so the
-                    # _assert_test_graph guard still passes (#221). Matches the
-                    # historical {ns}_tortoise naming.
-                    graph_name = f"{self._namespace}_tortoise"
-                elif self._namespace.startswith("test-"):
-                    # Epic #1647 (T7, cycle-5 P1-5): the hyphenated test-*
-                    # family (test-tiers, test-invites, test-hosted, test-e1,
-                    # test-org-722, ...) is a TEST namespace too — normalize
-                    # '-' → '_' so it maps to the guard-passing
-                    # test_<ns>_tortoise graph (test-tiers →
-                    # test_tiers_tortoise). Without the branch it falls
-                    # into org_<ns> (org_test-tiers) — a NON-test graph that
-                    # is invisible to `grep -v 'namespace="test_'` and fails
-                    # _assert_test_graph on bulk wipe.
-                    graph_name = f"{self._namespace.replace('-', '_')}_tortoise"
-                else:
-                    # Org SDK: isolated org graph (matches provision's
-                    # org_{org_id} namespace creation, #7886).
-                    graph_name = f"org_{self._namespace}"
-            else:
-                # No namespace: honor the URI's own graph (the conftest
-                # session graph for tests). Fixes #7886 regression that
-                # hardcoded 'tortoise' and clobbered the test graph.
-                graph_name = uri_graph or "tortoise"
+            graph_name = _derive_graph_name(
+                namespace=self._namespace, graph_name=self._graph_name,
+                uri_graph=uri_graph)
             if self._db_uri is not None:
                 # Multi-tenant isolation (#7886): pass the namespaced graph
                 # name so tenants never share the URI's default graph.
@@ -3657,8 +5093,35 @@ class TortoiseSDK:
             # not crash the caller or pretend the write failed. Rebuild parity
             # is best-effort here: rebuild_all's graph snapshot catches any
             # point missing from the log on the next rebuild (#548).
-            _logger.warning(
-                "failed to append %s event to SDK log %s: %s",
+            #
+            # #4240 review F1: on a CONFIGURED journal that posture is the
+            # silent-live-only hazard the journal exists to close, so the
+            # failure must not be a bare WARNING. Never raise (the write
+            # succeeded, and raising would hand the caller a failure for it),
+            # but count it (`monitoring.record_journal_write_failure`, carried
+            # by ``monitoring.metrics()``) and return it to the caller through
+            # ``capture_session``'s receipt warning below.
+            # Residual (deliberate, recorded on #5612): a journal that starts
+            # failing AFTER the entrypoint's boot-time writability probe — the
+            # probe catches a NON-ROOT mode-bit failure and EROFS/ENOSPC on any
+            # uid, but NOT a mode-bit failure under root (the image has no USER,
+            # so on Fly the process is uid 0; F1 cycle 2) — is still fail-soft.
+            # The foreseeable trigger is ENOSPC once the journal has grown below
+            # the volume's free space. The record is lost
+            # from the journal, `rebuild_all` reconstructs only what the
+            # journal holds (so a later rebuild cannot restore that write), and
+            # the ONLY signals are this ERROR log, the failure counter and the
+            # capture-receipt warning. It is not fatal by design: the graph
+            # mutation stands, and failing the request would lose a write that
+            # actually persisted.
+            self._journal_write_failures += 1
+            try:  # noqa: SIM105 — counting must never mask the original error
+                monitoring.record_journal_write_failure()
+            except Exception:  # noqa: BLE001, RUF100
+                pass
+            _logger.error(
+                "failed to append %s event to SDK log %s: %s — the write is "
+                "LIVE-ONLY and will not survive a rebuild (#4240)",
                 type_, self._event_log_path, exc,
             )
 
@@ -3705,6 +5168,16 @@ class TortoiseSDK:
         if "span_start" in props or "span_end" in props:
             from tortoise.commit_schema import validate_span
             validate_span(props.get("span_start"), props.get("span_end"))
+        # #5359: the validity window is a CLOSED interval. A caller-supplied
+        # inverted pair (`validTo < validFrom`) used to persist verbatim, cover
+        # NO instant, and make the point unreachable from every temporal query
+        # (`restore_point_at`) while every read reported honest absence —
+        # bypassing the refusal #4021 put inside `supersede_point`. Delegate
+        # the predicate to the ONE HOME (`commit_schema.
+        # validate_validity_window`, shared with `invalidate_point`'s #5358
+        # guard and the read path's `_covers`) instead of re-implementing it.
+        # No `point_id`: a fresh CREATE has no stored opposite bound to merge.
+        _refuse_inverted_point_window(self._get_proj().g, props)
         # #3263: provenance is INFERRED from the write context, never demanded.
         # A write that carries a session context has a derivable Source — the
         # same `session:<id>` ref the capture path wires explicitly (#1350).
@@ -4454,6 +5927,7 @@ class TortoiseSDK:
             return {"session_id": session_id, "ok": False, "error": str(e),
                     "payload": payload, "guards": guards, "delta": delta}
 
+    @counts_capture_ops
     def capture_session(
         self,
         conversation: list[dict[str, str]],
@@ -4537,6 +6011,13 @@ class TortoiseSDK:
         proj = self._get_proj()
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
+        # #5632: snapshot the LIFETIME journal-failure counter at the START of
+        # THIS capture. The receipt below must disclose only appends that
+        # failed DURING it — a failure from an earlier, unrelated write on this
+        # SDK used to make every later capture falsely report itself
+        # live-only, forever. The counter itself stays lifetime (monitoring
+        # reads it; no other consumer changes).
+        _journal_failures_before = self._journal_write_failures
 
         if len(conversation) > max_turns:
             # #2335 WI-1c: the self-host turn-cap refusal is a structured
@@ -4563,7 +6044,7 @@ class TortoiseSDK:
         # — nothing lands. (#3892 deleted the no-extractor ValueError that
         # used to precede this gate; the turn-cap refusal above still comes
         # first, and this gate still precedes every write.)
-        transcript, _est = _session_llm_transcript(windowed)
+        transcript, _est = _session_llm_transcript(_capture_gate_window(windowed))
         if not transcript.strip():
             return {
                 "session_id": session_id,
@@ -4607,24 +6088,16 @@ class TortoiseSDK:
         # Review PR #1827 (parity with hosted_api.py): created_at uses
         # coalesce so an idempotent re-POST preserves the ORIGINAL capture
         # time.
-        _merge_sets = ["s.created_at=coalesce(s.created_at, $now)",
-                       "s.turn_count=$tc", "s.is_episodic=true"]
-        _merge_params = {"sid": session_id, "now": now,
-                         "tc": len(conversation)}
-        if harness:
-            _merge_sets.append("s.harness=$harness")
-            _merge_params["harness"] = harness
-        # #2600 (SDK-mirror parity): actor stamp — same conditional coalesce
-        # clause as the hosted MERGE, reading the ContextVar (set by the
-        # mcp_auth middleware / hosted _data_sdk). Embedded/local captures
-        # have no auth → var unset → sets unchanged → byte-identical legacy
-        # shape. First-writer-wins on idempotent re-POST; backfills legacy-
-        # None on true retry. Keep the two MERGE clauses in sync.
+        # #3551: the :Session MERGE field list is owned by the shared
+        # primitive below, not by this lane. This lane still RESOLVES its own
+        # inputs: ``harness`` is the caller-supplied argument (NOT hosted
+        # parity #3681 — selfhost/embedded has no server credential lane to
+        # resolve it from), and the actor comes from the ContextVar (set by
+        # the mcp_auth middleware / hosted ``_data_sdk``). Embedded/local
+        # captures have no auth → var unset → the primitive writes no actor
+        # clause → byte-identical legacy shape. First-writer-wins on
+        # idempotent re-POST; backfills legacy-None on true retry.
         _mirror_actor = _current_actor_user_id.get()
-        if _mirror_actor:
-            _merge_sets.append(
-                "s.actor_user_id=coalesce(s.actor_user_id, $uid)")
-            _merge_params["uid"] = _mirror_actor
         # W5 Phase F (#2104, indicator 8 — SDK mirror replay parity): probe
         # session_existed BEFORE the Session MERGE, mirroring the hosted
         # #1727 replay skip — a re-capture of an EXISTING session_id skips
@@ -4666,8 +6139,9 @@ class TortoiseSDK:
         # False) is RE-ATTEMPTED — extraction runs again (retry is TRUE).
         # None (legacy sessions, pre-#2335) replays — backward compat with
         # the #1727 invariant (a legacy session is presumed captured).
-        # Review (PR #2473): TRUE retry is gated to a CONVERGENT lane (v2, or
-        # the keyless "none" lane, #3892). v2 point ids are content-addressed
+        # Review (PR #2473): TRUE retry is gated to a CONVERGENT lane (v2, the
+        # keyless "none" lane, #3892, or the setting-disabled "disabled" lane,
+        # #4258). v2 point ids are content-addressed
         # (pt_<sha>) and
         # its dedup resolves against the GRAPH (content_hash MATCH), so a
         # re-attempt folds the failed attempt's partial claims onto the same
@@ -4676,16 +6150,17 @@ class TortoiseSDK:
         # partial emissions live even on raise — a failed M2 attempt leaves
         # LIVE ULID claims; re-running M2 would mint DUPLICATES (the exact
         # #1727 hole the replay skip closed). Retry fires only when the prior
-        # attempt ran a CONVERGENT lane (v2, or the keyless "none" lane —
-        # #3892) AND this request runs v2 (env != m2) — otherwise replay.
+        # attempt ran a CONVERGENT lane (v2, the keyless "none" lane —
+        # #3892 — or the setting-disabled "disabled" lane, #4258) AND this
+        # request runs v2 (env != m2) — otherwise replay.
         prior_capture_ok = session_row[1]
         prior_capture_extractor = session_row[2]
         # #3892: a keyless capture records lane "none" (no lane ran), and a
         # FAILED prior attempt is re-attempted (#2335 TRUE retry) — that is
         # how a session captured without a key gets its memory points once a
-        # key appears. "none" is retry-eligible for the same reason "v2" is
-        # (it minted no claims of its own, and its turn ids are deterministic,
-        # so the re-attempt converges).
+        # key appears. "none" is retry-eligible for the same reason "v2" and
+        # "disabled" (#4258) are: none of them minted claims of its own, and
+        # their turn ids are deterministic, so the re-attempt converges.
         # The m2 exclusion is UNCHANGED and deliberate: M2 dedups per-capture
         # only, so re-running it can mint duplicate claims (the #1727/#2473
         # hole). An earlier revision of this change admitted a "none" prior
@@ -4702,72 +6177,43 @@ class TortoiseSDK:
         # a claim-free M2 retry provable; see issue #3996.
         retry_failed_capture = (
             session_existed and prior_capture_ok is False
-            and prior_capture_extractor in ("v2", "none")
+            and prior_capture_extractor in _CAPTURE_EXTRACTOR_LANES_RETRYABLE
             and os.environ.get("TORTOISE_SESSION_EXTRACTOR") != "m2")
-        proj.g.query(
-            f"MERGE (s:Session {{id:$sid}}) SET {', '.join(_merge_sets)}",
-            params=_merge_params,
-        )
-        # #3664: journal the :Session node. The MERGE above is a raw graph
-        # write — with no Session in the journal a rebuild lost the node
-        # itself, which in turn made any EntityLinked edge FROM it
-        # unreplayable (a session stayed an unattached island after rebuild
-        # even when the Object side replayed). Idempotent fold: MERGE by id +
-        # coalesce-preserve created_at/actor_user_id, mirroring the live SET
-        # clauses. Emitted on every capture (the Session MERGE is itself
-        # unconditional) so the journaled turn_count tracks the live value on
-        # the #1727 longer-replay-payload path.
-        _session_record = {
-            "id": session_id, "created_at": now,
-            "turn_count": len(conversation), "is_episodic": True,
-        }
-        if harness:
-            _session_record["harness"] = harness
-        if _mirror_actor:
-            _session_record["actor_user_id"] = _mirror_actor
-        self._emit_event("SessionRecorded", **_session_record)
-
-        # #3086: the episodic turn stream is written by the ONE shared writer
-        # (`_write_capture_turns`), also called by hosted POST /v1/sessions —
-        # so this lane and that one can no longer drift (the #1532/#2813
-        # duplicated-loop class). Node shape, per-row idempotency
-        # (`{session_id}_t{i}`), the stale-vector guard and the rebuild journal
-        # all live in that definition. NOTE the THIRD, still-separate copy:
-        # tools/ask_spotcheck.py::seed_capture_turn_store mirrors the same
-        # store shape to seed the ask fixtures — the ONE copy every ask seeder
-        # writes through since #3914. It omits Source/extraction, but since W7A
-        # it EMBEDS every turn BY DEFAULT through the shared store seam
-        # (`_capture_turn_embeddings` + `required_embedding_dim`,
-        # #4194/#4304) and retains `embed=False` for #4197's un-backfilled
-        # backlog; that shape must stay identical, or the fixtures teach a
-        # shape capture no longer produces (#3910). #3551 tracks collapsing it
-        # onto the shared primitive too.
+        # #3551: ONE call writes both the :Session MERGE and the turn store —
+        # the field list, the turn-id derivation, the batched Cypher and the
+        # ``CONTAINS`` wiring all live in ``_write_session_and_turns`` (shared
+        # with hosted POST /v1/sessions), so the two lanes can no longer drift
+        # (the #1532/#2813 duplicated-store class).
         #
-        # #4194: embed the window BEFORE the write — the stored text of each
-        # turn, exactly as the writer stores it — in ONE local-model call.
-        # Batched so the added work on this already-hot synchronous path (#3086
-        # measures ~4.75 s for a 500-turn capture) is one model call rather
-        # than one per turn. The vector is the same one `create_point` stores,
-        # from the same embedder the read path encodes a query with. Every
-        # turn is re-encoded on every capture, so a model rotation self-heals
-        # on re-capture (no model fingerprint is stored on the node, so a
-        # "skip unchanged" optimisation would silently keep old-space vectors).
-        # The writer reads the node's pre-write content_hash to decide
-        # preserve-vs-clear, so no external probe can fail. Fail-soft: `None`
-        # per turn when no embedder is available — the turn is still stored
-        # and the read path declares its vector leg impaired.
-        _turn_texts = _capture_turn_texts(windowed)
-        _turn_embs = _capture_turn_embeddings(
-            _turn_texts, proj.required_embedding_dim)
-        # One batched `UNWIND $turns` transaction instead of the per-turn loop
-        # (two FalkorDB round-trips per turn on the event loop).
-        # #4911: the writer RETURNS the number of credential-shaped spans it
-        # redacted from this window (and records it on the Session as
-        # `capture_redactions`). Surfaced on the receipt below so the control is
-        # visible to the caller, not merely applied.
-        _capture_redactions = _write_capture_turns(
-            proj, self, session_id, windowed, now=now, turn_embs=_turn_embs,
-            session_existed=session_existed)
+        # #3664: the journal's ``SessionRecorded`` for the raw :Session MERGE
+        # must land BETWEEN the MERGE and the turn write (a rebuild otherwise
+        # loses the node, making any EntityLinked edge FROM it unreplayable), so
+        # it rides the ``on_session_merged`` hook rather than following the
+        # whole write. The idempotent fold MERGEs by id and coalesce-preserves
+        # created_at/actor_user_id, mirroring the live SET clauses; it is
+        # emitted on every capture (the MERGE is itself unconditional) so the
+        # journaled ``turn_count`` tracks the live value on the #1727
+        # longer-replay-payload path.
+        #
+        # #4194: ``embed_fn`` is the ONE local-encoder batch, computed over the
+        # writer's OWN stored text (the primitive derives it and passes it in),
+        # so the vector can never describe different text than the node holds.
+        # Fail-soft: ``None`` per turn when no embedder is available — the turn
+        # is still stored and the read path declares its vector leg impaired.
+        # #4911: the writer RETURNS the credential-redaction count for this
+        # window (recorded on the Session as ``capture_redactions``); it is
+        # surfaced on the receipt below so the control is visible, not merely
+        # applied.
+        _capture_write = _write_session_and_turns(
+            proj, self, session_id, windowed, now=now,
+            harness=harness, actor_user_id=_mirror_actor,
+            session_existed=session_existed,
+            embed_fn=lambda texts: _capture_turn_embeddings(
+                texts, proj.required_embedding_dim),
+            on_session_merged=lambda record: self._emit_event(
+                "SessionRecorded", **record),
+        )
+        _capture_redactions = _capture_write["redacted_total"]
 
         # M2 LLM extraction over the whole conversation (#822) — replaces the
         # regex decision/claim loop (removed as a product path). Shared with
@@ -4830,6 +6276,14 @@ class TortoiseSDK:
                 # constant so the hosted lane discloses the SAME state.
                 _replay_warnings.append(
                     _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING)
+            elif (prior_capture_ok is False
+                  and prior_capture_extractor == _CAPTURE_EXTRACTOR_LANE_DISABLED):
+                # #4258: the prior was an EXTRACTION-DISABLED store (the hosted
+                # lane writes this lane value) — a provider key may be
+                # configured, so the KEYLESS warning above would be a false
+                # diagnosis. Disclose the real reason + every real lever.
+                _replay_warnings.append(
+                    _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING)
             meta = {
                 "provider": None, "route": None, "failover_used": False,
                 "errors": [], "warnings": _replay_warnings, "mode": "replayed",
@@ -5115,7 +6569,7 @@ class TortoiseSDK:
             link_texts = _capture_turn_texts(windowed)
             link_result = link_session_entities(
                 proj, session_id, link_texts,
-                turn_ids=[f"{session_id}_t{i}"
+                turn_ids=[_capture_turn_id(session_id, i)
                           for i in range(len(link_texts))],
                 sdk=self)
             if link_result["attempted"]:
@@ -5259,6 +6713,22 @@ class TortoiseSDK:
         if _capture_redactions:
             extraction_warnings.append(
                 _capture_redaction_warning(_capture_redactions))
+        # #4240 review F1: a journal append that failed during this capture is
+        # disclosed on the receipt. ``ok`` stays True — the graph write
+        # succeeded, and flipping it would mark the capture failed, which the
+        # #2335 TRUE-retry gate would then RE-RUN (duplicating extraction) over
+        # a write that was in fact persisted. Additive and present only when
+        # non-zero, so an ordinary capture's warning list is unchanged. The same
+        # failure also increments ``tortoise_journal_write_failures_total``
+        # (monitoring) and logs at ERROR — a receipt alone is only seen by the
+        # caller of a capture that happened to fail. #5632: the count is THIS
+        # capture's DELTA (``_journal_failures_before``), not the lifetime
+        # counter — an earlier failed write is not this capture's residue.
+        _capture_journal_failures = (
+            self._journal_write_failures - _journal_failures_before)
+        if _capture_journal_failures > 0:
+            extraction_warnings.append(
+                _journal_write_failure_warning(_capture_journal_failures))
         resp = {
             "session_id": session_id,
             "turns": len(conversation),
@@ -5344,7 +6814,8 @@ class TortoiseSDK:
         resp["surfaced"] = surfaced_marker(
             extracted, verified_ids=verified_ids)
         # #2335 WI-1d: the observation leg — one structured line per capture
-        # at the shared assembly (mode covers v2/m2/replayed/error — empty returns pre-emit).
+        # at the shared assembly (mode covers v2/m2/replayed/error/no-provider/
+        # extraction-disabled — empty returns pre-emit).
         try:
             _emit_capture_observation(
                 session_id=session_id, lane="sdk",
@@ -5353,6 +6824,7 @@ class TortoiseSDK:
             _logger.warning("capture_observation emit failed: %s", e)
         return resp
 
+    @phased("extract")
     def _extract_session_llm(
         self,
         conversation: list[dict[str, str]],
@@ -5391,6 +6863,16 @@ class TortoiseSDK:
             raise ValueError(
                 "_extract_session_llm requires an LLM provider key or "
                 "TORTOISE_SESSION_LLM_MOCK=1 — no extractor available (#822)")
+        # #4897 round-2 P3: WINDOW the input first. The transcript contract
+        # above requires the WINDOWED conversation, and this is the one capture
+        # path that can receive a RAW one (``capture_session`` already passes
+        # ``windowed``, so this is a no-op there). Without it a direct caller
+        # would feed the extractor AND the blank-gate an unclipped multi-MB
+        # body — the unbounded cost the contract exists to prevent, and exactly
+        # what ``_session_extraction_estimate`` already compensates for by
+        # windowing its own input. It also restores the pre-#4897 behaviour for
+        # a raw caller, when ``_session_llm_transcript`` clipped internally.
+        conversation = _capture_turn_window(conversation)
         # #4911: the model must not receive the credential either. Two reasons,
         # and the second is the one that matters: (1) it would transmit the
         # secret to a third-party provider, and (2) a model that ECHOES the
@@ -5399,8 +6881,20 @@ class TortoiseSDK:
         # redaction while storing the credential verbatim in a non-episodic
         # Point. Live at the time of writing: see issue #5294.
         conversation, _ = _redact_turn_contents(conversation)
-        transcript, _est = _session_llm_transcript(conversation)
-        if not transcript.strip():
+        # ⛔ The same marker-stripped view as the two entry gates (#4897 review round 12). This
+        # defence-in-depth guard judged the MARKED window, so a blank past-cap turn read as
+        # non-blank here while the entry gates refused it: the guard was reachable on this path
+        # (defence-in-depth only — both outer gates run first) and turned a blank conversation
+        # into a Point whose whole content was the synthetic marker.
+        #
+        # ⛔ The GATE and the EXTRACTOR cannot share one transcript here: the gate needs the
+        # marker STRIPPED (that is the fix), while the extractor must KEEP it — the marker is the
+        # evidence of what was cut, and `test_extract_session_llm_windows_a_raw_over_cap_conversation`
+        # binds exactly that. The entry gates do not have this problem because they gate on the
+        # stripped window and hand the MARKED `windowed` onward; here the transcript is both the
+        # gate signal AND the extractor's input, so it is built twice. Both builds are O(turn
+        # window) and this path is already the one the docstrings keep off the event loop.
+        if not _session_llm_transcript(_capture_gate_window(conversation))[0].strip():
             # P1 #1529 (D2): the internal defense-in-depth empty guard must be
             # self-consistent — mode="empty" WITH an error entry, so a caller
             # mapping empty→ok=False can never compute ok=True on this path.
@@ -5413,6 +6907,7 @@ class TortoiseSDK:
                 "errors": ["no extractable content — empty or blank conversation"],
                 "warnings": [], "mode": "empty", "stats": {},
             }
+        transcript, _est = _session_llm_transcript(conversation)
 
         from tortoise.api import EventAPI
         from tortoise.projection import fold, split
@@ -5596,6 +7091,7 @@ class TortoiseSDK:
                 zip(_CAPTURE_PASSTHROUGH_ORDER, rows[0], strict=True)
                 if v is not None}
 
+    @phased("extract")
     def _extract_session_v2(
         self,
         conversation: list[dict[str, str]],
@@ -5675,6 +7171,16 @@ class TortoiseSDK:
                      else _model_adapter("deepseek/deepseek-v4-flash",
                                          max_tokens=None, temperature=0.0))
 
+        # #4897 round 5: WINDOW FIRST, on the raw text — the same contract
+        # ``_extract_session_llm`` carries. Production passes the capture loop's
+        # ``windowed`` conversation, so this is a no-op there; a direct raw
+        # caller is bounded to the stored window the extractor and the turn
+        # store share (#721 parity). The cap is decided here, on pre-redaction
+        # text; ``_redact_turn_contents`` never clips.
+        conversation = _capture_turn_window(conversation)
+        # #4897: the v2 lane's turn view must not admit a cut turn whose only
+        # content is the marker — the transcript lane already skips those.
+        conversation = _blank_unextractable_marked_turns(conversation)
         out = extract_session_v2(model, _redact_turn_contents(conversation)[0],
                                  sdk=self,
                                  session_id=session_id, master=master)
@@ -5698,8 +7204,8 @@ class TortoiseSDK:
         # `event_log_path` (a journal-less SDK's `_emit_event` is a no-op).
         # The claim → Object edges below are routed through the shared
         # journaled writer, so they survive rebuild_all when such a journal is
-        # configured — without one they stay live-only (the hosted lane's
-        # `_make_sdk`/`_data_sdk` set no `event_log_path`). The SESSION-level
+        # configured — without one they stay live-only (a hosted SDK built with
+        # `TORTOISE_EVENT_LOG_BASE_DIR` unset has no journal; #4240). The SESSION-level
         # attachment is owned by the
         # conversation-reference link pass (session_link.link_session_entities,
         # WorkItem Objects) — deliberately NOT the extractor's per-claim
@@ -6328,14 +7834,20 @@ class TortoiseSDK:
         # stored turns do — and PER TURN, before the transcript is assembled:
         # ``_session_llm_transcript`` sentence-splits and flattens, so scrubbing
         # the assembled string cannot see a credential the segmenter split (a
-        # JWT becomes three space-separated fragments). ``cap`` bounds the scan
-        # to the window the persisted text uses — this sink receives the RAW
-        # conversation, so the bound is what keeps its cost proportional to what
-        # is actually persisted. (The hosted caller runs this OFF the event
-        # loop, on ``_CAPTURE_EXECUTOR``; the bound is window parity and CPU
-        # cost, not loop protection — #4911 cycle 1.)
+        # JWT becomes three space-separated fragments).
+        # ⛔ #4897 round 5: WINDOW FIRST, ON THE RAW TEXT, EXACTLY ONCE. This
+        # sink is called with the RAW conversation (``capture_session`` and
+        # hosted ``_capture_session_impl``), so it is one of the raw entry
+        # points the cap now relies on: ``_capture_turn_window`` is the SOLE
+        # clipper, and ``_redact_turn_contents`` is redaction-only. Applying
+        # the window before the scrub is what makes the marker record the true
+        # pre-redaction length, and it bounds the scan to the window the
+        # persisted text uses — the bound is window parity and CPU cost, not
+        # loop protection (the hosted caller runs this OFF the event loop, on
+        # ``_CAPTURE_EXECUTOR``; #4911 cycle 1). A redacted body is never fed
+        # back through the window.
         redacted, _ = _redact_turn_contents(
-            conversation or [], cap=_CAPTURE_TURN_CAP)
+            _capture_turn_window(conversation or []))
         transcript, _ = _session_llm_transcript(redacted)
         summary, topics = _session_source_metadata(transcript)
         content_hash = (
@@ -6471,6 +7983,14 @@ class TortoiseSDK:
         if "span_start" in props or "span_end" in props:
             from tortoise.commit_schema import validate_span
             validate_span(props.get("span_start"), props.get("span_end"))
+        # #5359: refuse an inverted validity window BEFORE the write. An update
+        # may move only ONE edge, so the caller's bound is merged with the
+        # STORED opposite bound first (the declaration's own scope note,
+        # `commit_schema.validate_validity_window`) — without that merge,
+        # `update_point(id, validTo=EARLY)` on a future-`validFrom` point would
+        # be checked as (None, EARLY) and pass, persisting the inversion. The
+        # predicate itself is the ONE HOME, never a second copy.
+        _refuse_inverted_point_window(proj.g, props, point_id=id)
         # #1904 (bug-hunt 2026-08-28 P1-3): a content edit MUST recompute
         # content_hash in the same round trip — every dedup surface matches
         # on the stored hash (create_point dedup, ingest, _content_exists),
@@ -6518,6 +8038,51 @@ class TortoiseSDK:
         if props.get("embedding") is not None:
             props["embedding_verbatim"] = True
         elif "embedding" in props:
+            props["embedding_verbatim"] = None
+
+        # #4208: a content edit must recompute the DERIVED vector in the SAME
+        # write, exactly as it already recomputes the derived `content_hash`
+        # (#1904). Before this, `update_point(content=B)` left the node holding
+        # content B with `vec(A)` — the dense leg then ranked it by text no
+        # longer on the node, and live != rebuild, because the replay's
+        # `_revise_point` DOES re-encode. Same rule as the hash, and the same
+        # rule #19 set for the revise fold: recompute from the new content, or
+        # WIPE it when the embedder is unavailable (`None`) — never preserve a
+        # vector the new content did not produce (a vector for different text
+        # is worse than none). #4194/#4280: route through `encode_for_store`
+        # (the store-width-declaring seam) so the stored width matches the
+        # Point HNSW index this store created; the seam is still
+        # `compute_embedding` (module global), so installed doubles intercept.
+        #
+        # A CALLER-supplied vector is deliberately NOT recomputed: the caller
+        # owns that write, the verbatim marker above already describes it, and
+        # the record/replay treatment of a caller vector on a revise is the
+        # separate declared gap #5046. Gated on the KEY, so this fires only
+        # when the caller supplied none.
+        _derived_embedding = False
+        _new_content = props.get("content")
+        if ("content" in props and "embedding" not in props
+                and _new_content is not None):
+            # `_new_content is not None` mirrors `_revise_point`'s own boundary
+            # — a `None` new_content is "no content edit" there, so it must not
+            # derive (or wipe) a vector either.
+            try:
+                from .embeddings import encode_for_store
+                props["embedding"] = (
+                    encode_for_store(_new_content, proj.required_embedding_dim)
+                    if _new_content else None)
+            except Exception:
+                props["embedding"] = None
+            _derived_embedding = True
+            # #5238 review P3: the vector just derived is NOT caller-owned, so
+            # a node that previously held a CALLER-supplied vector (and still
+            # carries `embedding_verbatim=true`) must have that marker cleared —
+            # exactly as the `embedding=None` path above does. Left set, the
+            # node advertises a SERVER-derived vector as caller-owned: the
+            # marker selects raw-vs-`vecf32` storage on every later re-emit and
+            # flips the consistency comparison to an exact-float compare, while
+            # a rebuild drops it (`_revise_point` re-encodes and never reads
+            # the marker) — live != rebuild, the round-6 false-verbatim class.
             props["embedding_verbatim"] = None
 
         # #49 Phase 2: context is REMOVED — raise TypeError if passed
@@ -6619,7 +8184,17 @@ class TortoiseSDK:
         # #548: emit PointRevised event for rebuild parity
         # #1904: content_hash is derived from content — keep it out of the
         # event record (mirrors create_point's snapshot strip at emit).
-        emit_props = {k: v for k, v in props.items() if k != "content_hash"}
+        # #4208: the vector this path just DERIVED from the content is stripped
+        # for the same reason — it is not owned by this record. The replay's
+        # `_revise_point` re-encodes from `new_content`, so a journalled copy
+        # would be dead weight, and #5004's presence-is-ownership rule would
+        # read the key as a producer claim the replay does not honour (the
+        # #5046 shape). A CALLER-supplied vector stays in the record, as before.
+        emit_props = {
+            k: v for k, v in props.items()
+            if k != "content_hash"
+            and not (_derived_embedding and k == "embedding")
+        }
         self._emit_event("PointRevised", id=id,
                          new_content=props.get("content"), **emit_props)
         return result
@@ -6790,8 +8365,10 @@ class TortoiseSDK:
         own: the every-matching-node scan (point ids are not unique) and the
         ``retract_point`` refusal message. The other live Point writers that
         persist a window — ``create_point`` / ``update_point`` (caller props)
-        and ``mining._temporal_wire`` — are wired by their own issue (#5359),
-        and ``supersede_point`` by #4021.
+        and ``mining._temporal_wire`` — are wired to the same declaration by
+        #5359 through ``_refuse_inverted_point_window``, which merges a caller's
+        partial bound with the stored opposite bound before delegating, and
+        ``supersede_point`` by #4021.
         """
         proj = self._get_proj()
         vf_rows = proj.g.query(
@@ -7099,19 +8676,18 @@ class TortoiseSDK:
         # `(1, <text>)` and IS covered by it, so `""` only hides the successor
         # from parseable queries, which land in the predecessor's window end
         # instead. The resolution
-        # branch below takes a stored start only when it is TRUTHY **and**
-        # ORDERABLE (#5360), so `0` falls through because it is falsey (it IS
-        # orderable, keying `(0, 0.0)`, which is why truthiness cannot be
-        # dropped from the description) and `""` falls through because it is
-        # falsey too. The guard
-        # follows
+        # branch below delegates to ``_supersede_window_start_source`` — PRESENT
+        # (not truthy) AND ORDERABLE: #3985 for the falsey-but-orderable `0`,
+        # #5360 for the truthy-but-unparseable stored start and the unparseable `createdAt`.
+        # The guard follows
         # `_covers`: with a kwarg present it refuses rather than allow an
         # unchecked window end against a start the read path treats as real
-        # (a `validFrom=0` successor's `[epoch0, ∞)` window overlaps any
+        # (a `validFrom=0` successor's `[epoch0, inf)` window overlaps any
         # predecessor end the kwarg writes at or after epoch 0, and gaps
-        # before it). The no-kwarg falsey case keeps
-        # the pre-existing truthiness fallback — its read/write divergence is
-        # real and tracked in #3985, not silently redefined here.
+        # before it). The no-kwarg FALSEY-AND-UNORDERABLE case (`""`) keeps the
+        # pre-existing fallback - its read/write divergence is real and tracked
+        # in #6140; #3985 fixed the falsey-but-ORDERABLE case (`0`), which the
+        # branch above now takes.
         vf_rows = proj.g.query(
             "MATCH (n:Point {id:$id}) RETURN n.validFrom, n.createdAt",
             params={"id": new_id},
@@ -7879,6 +9455,17 @@ class TortoiseSDK:
         linked_by is the temporal edge (NAND via an operator, or CORRECTS via
         supersede_point) to the NEXT point in the chain, and related holds
         the linked point ids.
+
+        An undated point (absent ``validFrom`` ⇒ open/unbounded start, §4.7)
+        sorts FIRST — before every dated entry — never as the newest belief
+        (#3654).
+
+        NOTE: ``limit`` currently truncates on an ASCENDING window
+        (``ORDER BY p.validFrom LIMIT``), so it selects the OLDEST rows and a
+        small ``limit`` will NOT return the current belief. That is a
+        pre-existing defect tracked separately (#7293), not a property this
+        ordering guarantees — the order below is not a promise of a
+        newest-end window.
         """
         if limit < 1:
             raise ValueError(f"limit must be >= 1, got {limit}")
@@ -7910,7 +9497,11 @@ class TortoiseSDK:
                 if r[0] not in known:
                     entries.append(list(r))
             # Globally ordered by validFrom (superseded priors appended).
-            entries.sort(key=lambda e: (e[2] is None, e[2] or ""))
+            # `not is None` puts an absent validFrom (open start, §4.7) FIRST
+            # — undated is the oldest, never the newest (#3654): the old
+            # `is None` key sorted them last, and the `[-limit:]` tail then
+            # presented an undated point as the current belief.
+            entries.sort(key=lambda e: (e[2] is not None, e[2] or ""))
         out = []
         ids = [e[0] for e in entries]
         for pid, content, vf, status, outdated in entries[-limit:]:
@@ -8533,6 +10124,18 @@ class TortoiseSDK:
             raise ValueError(f"Point {id!r} is not an operator")
         for name, val in (("bias", bias), ("precision", precision),
                           ("consistency", consistency), ("directness", directness)):
+            # #4647: the guard runs BEFORE the range check because
+            # ``0 <= Decimal('NaN') <= 1`` raises ``decimal.InvalidOperation``
+            # (an ArithmeticError, not the documented ValueError), so the
+            # range check would raise an unnamed wrong-class error for the
+            # exact values this guard exists to name (cycle-8 P2). It also
+            # runs before ``_emit_event`` below: the range check admits an
+            # inexact Decimal/Fraction/np.float32, and the emit would then
+            # record the caller's raw value. This closes the INEXACT subset;
+            # an exact-but-non-JSON-native value (``Decimal('0.5')``) is still
+            # emitted raw and its journal write still fails — a pre-existing
+            # serializer gap tracked in #7174, not this PR.
+            _reject_unrepresentable_number(name, val)
             if not 0 <= val <= 1:
                 raise ValueError(f"{name} must be 0-1, got {val}")
         # #432 Task 3: durable OperatorAnnotated event (append-before-mutation).
@@ -8599,6 +10202,10 @@ class TortoiseSDK:
         Idempotent: second call updates existing mitigation (reason + strength),
         does not create a duplicate.
         """
+        # #4647: guard before the range check — ``0 <= Decimal('NaN') <= 1``
+        # raises ``decimal.InvalidOperation``, so the check would raise an
+        # unnamed wrong-class error ahead of this guard (cycle-8 P2).
+        _reject_unrepresentable_number("strength", strength)
         if not 0 <= strength <= 1:
             raise ValueError(f"strength must be 0-1, got {strength}")
         point = self.get_point(id)
@@ -8650,6 +10257,12 @@ class TortoiseSDK:
         mid = ulid()
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+        # #4647: this new-mitigation CREATE writes `strength` straight into
+        # `mitigation_strength` (raw parameter), bypassing _sanitize_props —
+        # the idempotent branch above routes through update_point and IS
+        # guarded. EP weights read this value, so an inexact Decimal here
+        # silently corrupts the operator weight. Guard before the write.
+        _reject_unrepresentable_number("strength", strength)
         proj.g.query(
             "CREATE (m:Point {id:$id, content:$c, pointKind:'statement', "
             "mitigation_strength:$s, is_operator:false, createdAt:$now, updatedAt:$now})",
@@ -8690,6 +10303,42 @@ class TortoiseSDK:
 
     # ── Query ─────────────────────────────────────────────────────
 
+    def _operator_scope_clauses(self, kind: str | None) -> list[str]:
+        """Operator-scope clause for a Point read path (#7108).
+
+        Returns the CANONICAL non-operator predicate —
+        ``(n.is_operator IS NULL OR n.is_operator = false) AND n.op_type IS NULL``,
+        the same one ``summarize_structure`` and ``list_pointkinds`` already use
+        (#2205/#943) — UNLESS the caller explicitly asked for an operator kind, in
+        which case the exclusion is yielded and no clause is added.
+
+        Each half is load-bearing, and both were missing from this path.
+
+        (1) THE BARE FORM LIES. ``query``/``paginated_query`` used a bare
+        ``n.is_operator = false``, which #2205 documented as making per-kind stats
+        lie on imported graphs: Points may carry NO ``is_operator`` property at all
+        (only operators set it), so ``= false`` drops them; and legacy operators
+        carry ``op_type`` without it, so they leak into non-operator results.
+        Measured on the live graph 2026-10-03: 1 Point has ``is_operator IS NULL``
+        and is silently dropped by the bare form.
+
+        (2) THE EXCLUSION CANNOT BE UNCONDITIONAL. Every node with
+        ``pointKind = 'operator'`` also has ``is_operator = true``, so pairing the
+        non-operator predicate with that kind filter is an EMPTY INTERSECTION by
+        construction, on every graph. Measured 2026-10-03: 3,520 operator nodes,
+        20 of them carrying ``pointKind = 'operator'``, and
+        ``sdk.query(kind='operator')`` returning 0. A WRONG-EMPTY is
+        indistinguishable from a true-empty to the caller — the failure read-path
+        invariant #6146 forbids — and it is worst in the one instrument every lane
+        is mandated to read: it manufactures a false ``my write never landed``
+        conclusion, whose rational response is to write the finding AGAIN.
+
+        Both read paths build this clause here so they cannot drift apart.
+        """
+        if kind and "operator" in self._expand_kind(kind):
+            return []
+        return ["(n.is_operator IS NULL OR n.is_operator = false) AND n.op_type IS NULL"]
+
     def query(self, kind: str | None = None,
               *, include_retracted: bool = False,
               **filters) -> list[dict]:
@@ -8709,7 +10358,7 @@ class TortoiseSDK:
         tombstones.
         """
         proj = self._get_proj()
-        clauses = ["n.is_operator = false"]
+        clauses = self._operator_scope_clauses(kind)
         params: dict[str, Any] = {}
         # #1391: terminal-status exclusion — skipped when the caller explicitly
         # filters by status (their filter controls visibility). include_retracted
@@ -8736,7 +10385,7 @@ class TortoiseSDK:
             validate_filter_key(key)
             clauses.append(f"n.`{key}` = ${key}")
             params[key] = val
-        where = " AND ".join(clauses)
+        where = " AND ".join(clauses) if clauses else "true"
         rows = proj.g.query(
             f"MATCH (n:Point) WHERE {where} RETURN properties(n)",
             params=params,
@@ -8764,7 +10413,7 @@ class TortoiseSDK:
         if limit < 1:
             raise ValueError(f"limit must be >= 1, got {limit}")
         proj = self._get_proj()
-        clauses = ["n.is_operator = false"]
+        clauses = self._operator_scope_clauses(kind)
         params: dict[str, Any] = {}
         # #1391: terminal-status exclusion — skipped when the caller explicitly
         # filters by status (their filter controls visibility). include_retracted
@@ -8791,7 +10440,7 @@ class TortoiseSDK:
             validate_filter_key(key)
             clauses.append(f"n.`{key}` = ${key}")
             params[key] = val
-        where = " AND ".join(clauses)
+        where = " AND ".join(clauses) if clauses else "true"
         total = proj.g.query(
             f"MATCH (n:Point) WHERE {where} RETURN count(n)",
             params=params,
@@ -8887,8 +10536,10 @@ class TortoiseSDK:
         Runs the audit checks (missing sourceKind point-level legacy + Source-
         level canonical, missing sourceDate, superseded points without a
         CORRECTS edge, live IMPL/NAND edges into superseded points, naive-IMPL
-        heuristic, low-confidence operators without mitigation, and legacy
-        ``mitigates`` edges). Returns per-check counts (uncapped) + capped
+        heuristic, low-confidence operators without mitigation, legacy
+        ``mitigates`` edges, and inverted validity windows — a persisted
+        ``validTo`` earlier than ``validFrom``, which no instant satisfies).
+        Returns per-check counts (uncapped) + capped
         samples + summary + exit_code (0 clean, 1 issues found — the
         check-consistency precedent).
 
@@ -9344,7 +10995,15 @@ class TortoiseSDK:
         """Check 3 (ref-table half) — duplicate refs across the whole bundle
         and node-id-shadowing rejection: a ref shaped like a real node id —
         a bare ULID OR a prefixed entity id (e.g. ``sub-<hex26>``, #1553) —
-        would make refs.get(x, x) silently address an existing node."""
+        would make refs.get(x, x) silently address an existing node.
+
+        #3586: rejection fails the WHOLE bundle closed, so this check uses the
+        STRICT canonical predicate (``_is_canonical_entity_id``): only a shape
+        a minting surface can actually emit is rejected. The lenient about*-
+        seam predicate (``_is_entity_id``) is deliberately broader, and sharing
+        it here hard-rejected previously-valid refs whose digest is not a
+        canonical id (``pr-<hex16>``) — an id no minter produces, and which
+        therefore cannot shadow anything."""
         seen: dict[str, str] = {}
         for section in ("sources", "points", "entities"):
             for i, item in enumerate(bundle.get(section) or []):
@@ -9353,7 +11012,7 @@ class TortoiseSDK:
                 ref = item.get("ref")
                 if not ref:
                     continue
-                if _is_entity_id(str(ref)):
+                if _is_canonical_entity_id(str(ref)):
                     violations.append({
                         "section": section, "index": i,
                         "message": f"ingest: {section}[{i}] ref {ref!r} is "
@@ -9655,26 +11314,35 @@ class TortoiseSDK:
         ANY candidate is terminal — over-rejecting an ambiguous duplicate pair
         is the safe direction.
 
-        Residual gap (pre-existing, tracked in #3142): the terminal filter is
-        ``status IN $terminal AND coalesce(outdated,false) = false``, so a
-        point superseded through ``supersede_point`` (which stamps BOTH
-        ``status='superseded'`` and ``outdated=true``) is not matched — the
-        guard never fired for canonically-superseded points even with the
-        hash present, and Phase-2 ``_check_endpoint_race`` is what catches
-        them. Aligning the filter with that check (``status IN $terminal OR
-        outdated = true``) is follow-up #3142, deliberately out of this
-        fix's scope."""
+        #3142: the terminal filter is ``live._terminal_expression`` — the shared
+        Cypher builder for the predicate the direct-edge leg of
+        ``_check_endpoints`` and Phase-2 ``_check_endpoint_race`` both express
+        in Python as ``status in TERMINAL_EXCLUDED_STATUSES or outdated``
+        (that composition is ``live.is_terminal_status``). The builder emits the
+        expanded OR-chain under a NULL guard —
+        ``((n.status IS NOT NULL AND (n.status = '…' OR …)) OR
+        coalesce(n.outdated,false) = true)`` — i.e. the POSITIVE direction of
+        the vocabulary ``_terminal_excluded`` filters on. It assumes
+        ``outdated`` is a boolean; every in-repo writer emits the literal
+        ``true`` (see #7075 for the hand-edited/legacy-graph case). Before #3142 this site carried its own
+        forked ``status IN $terminal AND coalesce(outdated,false) = false``,
+        which is the AND of the two halves and so matched NEITHER: a point
+        superseded through ``supersede_point`` (which stamps BOTH
+        ``status='superseded'`` and ``outdated=true``) satisfied only the
+        first conjunct, and an ``invalidate_point`` node (status untouched,
+        ``outdated=true``) satisfied neither — so the guard returned None for
+        both, Phase-1 passed the bundle, and Phase-2 ``_check_endpoint_race``
+        raised mid-write on a partially-mutated graph, leaving an orphan.
+        Composing the predicate here rather than re-listing it is the point:
+        the fork is what let the three sites disagree (#2062/#2971/#2422)."""
         proj = self._get_proj()
-        terminal = sorted(self._INGEST_TERMINAL_STATUSES)
         base_clauses, base_params = self._dedup_match_clauses(point_kind=kind)
-        status_clauses = ("n.status IN $terminal",
-                          "coalesce(n.outdated, false) = false")
+        status_clauses = (_terminal_expression("n"),)
         rows = proj.g.query(
             "MATCH (n:Point {content_hash:$ch}) WHERE "
             f"{' AND '.join([*base_clauses, *status_clauses])} "
             "RETURN n.id LIMIT 1",
-            params={**base_params, "ch": _content_hash(content),
-                    "terminal": terminal},
+            params={**base_params, "ch": _content_hash(content)},
         ).result_set
         if not rows:
             # #2971 A10 CONTENT+KIND FALLBACK SCAN, gated on the WRITER's own
@@ -9707,8 +11375,7 @@ class TortoiseSDK:
                 rows = proj.g.query(
                     "MATCH (n:Point) WHERE "
                     f"{' AND '.join(fallback_clauses)} RETURN n.id LIMIT 1",
-                    params={**fallback_params, "content": content,
-                            "terminal": terminal},
+                    params={**fallback_params, "content": content},
                 ).result_set
         return rows[0][0] if rows else None
 
@@ -10870,6 +12537,12 @@ class TortoiseSDK:
                 f"create_direct_edge: direction must be 'bidirectional' or "
                 f"'unidirectional', got {direction!r}"
             )
+
+        # #4647: confidence/weight are narrowed through ``float()`` below, so an
+        # inexact Decimal or an out-of-domain int is silently altered here just
+        # as on the props surface. Guard the CALLER's values before the coercion.
+        _reject_unrepresentable_number("confidence", confidence)
+        _reject_unrepresentable_number("weight", weight)
 
         proj = self._get_proj()
         # Endpoint validation: exist, plain Points, non-terminal.
@@ -13509,6 +15182,17 @@ class TortoiseSDK:
                 "graph-scripts/2199_baseline_source_rename.py against the graph "
                 "before writing new baselines."
             )
+        # #4647 (code-review P1): this writer reaches the store directly — the
+        # `proj.g.query` below takes `alpha`/`beta` as raw Cypher parameters — so
+        # it bypasses `_sanitize_props` entirely and must apply the
+        # numeric-domain guard itself, exactly as `create_source` does. Without
+        # it a caller silently corrupts the Beta prior this method exists to set:
+        # `alpha=2**70` is CLAMPED to INT64 max and `alpha=Decimal('0.1')` is
+        # stored as a different number, and those parameters feed EP confidence.
+        # The guard runs BEFORE `self._evidence` is updated so a refused write
+        # cannot leave the in-memory prior divergent from the graph.
+        _reject_unrepresentable_number("alpha", alpha)
+        _reject_unrepresentable_number("beta", beta)
         self._evidence[claim_id] = (alpha, beta)
         # Persist to graph so baselines survive SDK restarts
         proj = self._get_proj()
@@ -14591,6 +16275,13 @@ class TortoiseSDK:
                             }),
                             "message_count": frontmatter.get("message_count", 0),
                         }
+                        # #4647: this writer hands $props straight to the store
+                        # (raw Cypher parameters), so it bypasses
+                        # _sanitize_props and must apply the numeric-domain
+                        # guard itself — a frontmatter int is an arbitrary-
+                        # precision Python int the store would SILENTLY clamp.
+                        for _k, _v in update_props.items():
+                            _reject_unrepresentable_number(_k, _v)
                         # #330: unchanged content whose enrichment produced nothing
                         # new counts as skipped, not updated (counter honesty).
                         # Compare the FULL payload that would be written (keywords,
@@ -14664,6 +16355,10 @@ class TortoiseSDK:
                             "classificationLevel": "internal",
                             "format": "markdown",
                         }
+                        # #4647: same direct-$props writer as the update branch
+                        # above — guard before the write.
+                        for _k, _v in props.items():
+                            _reject_unrepresentable_number(_k, _v)
                         # #244: compute the session embedding (name + summary +
                         # keywords + topics) and store as vecf32 — None when the
                         # model is unavailable (indexing never depends on it).
@@ -14713,6 +16408,13 @@ class TortoiseSDK:
                     "classificationLevel": "internal",
                     "file_hash": file_hash,
                 }
+                # #4647: the DEFAULT ingest branch (and the path the MCP
+                # ``tortoise_ingest_corpus`` tool takes) hands $props straight
+                # to the store; frontmatter values are arbitrary-precision
+                # Python ints from ``yaml.safe_load``, so they must be guarded
+                # here too — the AgentSession branches above already are.
+                for _k, _v in props.items():
+                    _reject_unrepresentable_number(_k, _v)
 
                 if not exists_rows:
                     # New document
@@ -15350,10 +17052,20 @@ class TortoiseSDK:
         relationship_filter: str | None = None,
         traversal_path: str | None = None,
         exclude_status: list[str] | None = None,
+        # #4509: the OPT-IN pre-truncation turn-echo exclusion. A caller that
+        # names the capture session it is extracting for (the S3
+        # link-before-create prior lookup) drops that session's own turn
+        # echoes from the candidate set BEFORE ``limit`` — same seam as
+        # ``exclude_status``. Default None = byte-identical to pre-#4509.
+        exclude_turn_echo_session: str | None = None,
         include_terminal: bool = False,
         _elevated_timeout_ms: int | None = None,
         pool_size: int | None = None,
         leg_trace: list[dict] | None = None,
+        # B6 (#3892): the read-path status sink — one of the four recorded terms
+        # (tortoise.read_status). Caller-owned and opt-in, exactly like
+        # ``leg_trace``; default None = not computed, byte-identical behavior.
+        read_status_out: dict | None = None,
         recency_field: str | None = None,
         recency_boost: float = 0.0,
         keep_numeric: bool = False,
@@ -15381,9 +17093,15 @@ class TortoiseSDK:
         entity_type: 'point' (default), 'event', 'subject', 'document', 'object', 'operator', or 'source'.
         Full-scan mode: omit query, set kind → all Points of that kind.
         Best-match mode: provide query → RRF fusion of FTS + vector + structural.
-        include_terminal (#1391): default False — terminal-status Points
-        (retracted, superseded, outdated, archived) are excluded from the
-        BASE retrieval; pass True to surface them (audit/history queries).
+        include_terminal (#1391, #3301): default False — terminal-status
+        nodes are excluded from the BASE retrieval. For Points that is
+        ``live.TERMINAL_EXCLUDED_STATUSES`` (retracted, superseded, outdated,
+        archived, deprecated); for Objects it is the canonical OBJECT
+        vocabulary (superseded, deprecated, archived, retracted — no
+        ``outdated`` flag, which no Object writer sets). Pass
+        True to surface them (audit/history queries); a prior/resolution leg
+        that must still SEE a terminal node (link-before-create, anchor
+        resolution) opts in here too.
 
         pool_size: EXACT per-strategy retrieval depth override (benchmark/tests).
         Precedence: pool_size > TORTOISE_POOL_FLOOR env > the baked floor
@@ -15414,6 +17132,25 @@ class TortoiseSDK:
             silently shrink the result count — epic #898 recall_state). Default None =
             no filtering (existing behavior unchanged; retracted is already excluded at
             the retrieval layer, #689). Points with no status property are kept.
+        exclude_turn_echo_session (#4509): the OPT-IN turn-echo exclusion — the
+            capture session whose OWN transcript echoes (``{session_id}_t{i}`` turn
+            Points; ``retrieval.is_turn_echo_row``) must NOT be treated as memory
+            priors. Applied to the fused Point candidate set at the SAME
+            pre-truncation point as ``exclude_status``, so ``limit`` applies to the
+            already-filtered set — a session whose echoes consume every slot can
+            otherwise hide a real prior ranked below them (the defect #4509
+            fixes; a caller-side drop after the cut cannot be made sound). The
+            exclusion reaches only candidates already in the fused pool — the
+            UNION of the legs (uncapped), not one leg's window — so the residual
+            bound is that union, roughly ``DEFAULT_POOL_SIZE`` per live leg: about
+            120 with the vector leg unavailable, about twice that in hybrid. It is
+            NOT ``MAX_SESSION_TURNS`` (500); raise ``pool_size`` (or
+            ``TORTOISE_POOL_FLOOR``) to widen it.
+            Applies wherever the resolved graph label is ``Point`` — so the point
+            and operator legs, not only ``entity_type == "point"``;
+            default None = no exclusion, byte-identical to pre-#4509 output. Do NOT
+            pass the retrieval-pool session when you WANT the session's transcript
+            (audit/history reads) — this is a memory-prior seam.
         _elevated_timeout_ms: PRIVATE — benchmark-only (#316). Threads an elevated
             collective-cap override into degradation_chain to measure uncensored
             true-completion latency. Default None = production 500ms cap. Never
@@ -15427,6 +17164,18 @@ class TortoiseSDK:
             ``fallback`` entry is appended last on every early-return branch
             (snapshot TF-IDF path, legacy fallback_tfidf path, non-point
             return []). Default None = no trace, byte-identical behavior.
+        read_status_out (B6 #3892): the read-path status contract — when
+            provided, the dict receives ``{"status": <term>}`` with ONE of the
+            four recorded terms (``tortoise.status_vocabulary``, consumed by
+            ``tortoise.read_status``): ``available`` (reached, hits), ``empty``
+            (reached, nothing matched), ``degraded`` (the memory layer is
+            impaired — the store is configured but could not be reached, or it
+            answered while a leg did not run, e.g. the embedder is absent so
+            the dense leg was skipped, the #2573/#2898 class), or
+            ``unconfigured`` (NO store/endpoint was declared — returned as a
+            status, NEVER as an empty result and never as an exception).
+            Caller-owned opt-in sink, the same pattern as ``leg_trace``;
+            default None = not computed, no probe, byte-identical behavior.
         structural_kind (R4 #1543): keyword-only, default None — the kind
             passed to the STRUCTURAL strategy only (kind-scan), WITHOUT
             triggering the post-retrieval kind filter. Deliberately distinct
@@ -15462,7 +17211,10 @@ class TortoiseSDK:
             tokens (slots reserved) PLUS additive aliases harvested from the
             retrieved pool's top-5 hits' ``search_keys`` (never replacing
             original tokens; bounded raise to 12 + 8 terms). Default False =
-            single pass, byte-identical. Ask lane passes True.
+            single pass, byte-identical. The ask lane resolves the lever from
+            ``TORTOISE_ASK_SEARCH_KEYS_PRF`` — itself default OFF until the
+            delta is measured (#4593), so this parameter default and the ask
+            lane agree.
         entity_key_expansion (C2 #2518, #2513): entity/fact-augmented key
             expansion — the multi-session evidence-surface lever. The query's
             own entities are resolved THROUGH THE INDEX (bounded FTS over the
@@ -15520,6 +17272,14 @@ class TortoiseSDK:
             enrich_items as w4_enrich_items,
             w4_enrichment_enabled,
         )
+        # B6 (#3892): the recorded vocabulary's ONE home is
+        # ``tortoise/status_vocabulary.py``; ``tortoise/read_status.py`` is the
+        # read-path consumer of it and this method consumes that — it mints no
+        # terms of its own.
+        from .read_status import (
+            STATUS_DEGRADED as _STATUS_DEGRADED,
+            classify_leg_trace as _classify_leg_trace,
+        )
 
         if entity_type not in ("point", "event", "subject", "document", "object", "operator", "source"):
             raise ValueError(f"entity_type must be 'point', 'event', 'subject', 'document', 'object', 'operator', or 'source', got {entity_type!r}")
@@ -15535,8 +17295,72 @@ class TortoiseSDK:
         if order_by not in ("relevance", "confidence", "graph"):
             raise ValueError(f"order_by must be 'relevance', 'confidence', or 'graph', got {order_by!r}")
 
-        proj = self._get_proj()
+        # B6 (#3892): the status sink and the trace used to classify it. When
+        # no status is requested this is exactly today's ``leg_trace`` (None
+        # unless the caller passed one) — byte-identical behavior. When a
+        # status IS requested the classification gets its OWN per-call trace,
+        # so one leg's entries can never answer for another (recall_state
+        # classifies its Point and Object legs separately) while the caller's
+        # ``leg_trace`` still receives every entry it used to.
+        status_trace: list[dict] | None = leg_trace
+        if read_status_out is not None:
+            status_trace = []
+            _caller_trace = leg_trace
+        else:
+            _caller_trace = None
+
+        def _with_read_status(rows: list[dict]) -> list[dict]:
+            """Attach the recorded read status when the caller asked for it.
+
+            With a sink, EVERY call happens after the projection was obtained
+            AND the bounded reachability probe answered — a probe failure or a
+            `_get_proj()` failure returns before any of these paths. So the
+            store is known to be DECLARED and to have ANSWERED, and
+            ``configured=True`` / ``reached=True`` are facts, not defaults.
+            """
+            if read_status_out is not None:
+                read_status_out["status"] = _classify_leg_trace(
+                    status_trace or (), hit_count=len(rows),
+                    configured=True,
+                    reached=True)
+                if _caller_trace is not None and _caller_trace is not status_trace:
+                    _caller_trace.extend(status_trace or ())
+            return rows
+
+        try:
+            proj = self._get_proj()
+        except Exception:
+            if read_status_out is not None:
+                # A store that will not OPEN is `degraded` (off by OUTAGE):
+                # `_auto_health_recover()` raises when a declared server is
+                # unreachable or a declared embedded file cannot be read. This
+                # SDK always resolves a store TARGET — a server URI, or the
+                # canonical embedded path via `resolve_db_path()` and
+                # `FalkorProjection`'s no-arg fallback — so there is no
+                # "never declared" state here to report as `unconfigured`
+                # (off by policy, a set-up gap the engine does not have).
+                # Never an empty result, and never a raise.
+                read_status_out["status"] = _STATUS_DEGRADED
+                return []
+            raise
         graph = proj.g
+        if read_status_out is not None:
+            # The store is configured; prove it ANSWERS before claiming
+            # anything about its contents. BOUNDED like every other read query
+            # — an unbounded probe would let a wedged store stall the read it
+            # annotates.
+            try:
+                graph.query("RETURN 1", timeout=int(_elevated_timeout_ms or 500))
+            except Exception as e:  # noqa: BLE001, RUF100
+                # The store IS configured (the projection object was obtained
+                # just above) but did not answer: off by OUTAGE — `degraded`,
+                # never `unconfigured` (which is reserved for a store that was
+                # never declared) and never an empty result.
+                _logger.warning(
+                    "read path cannot reach the configured store (%s) — "
+                    "degraded", e)
+                read_status_out["status"] = _STATUS_DEGRADED
+                return []
         # D10 (ONTOLOGY v3.15 §4.4): a document IS a :Source — there is no
         # :Document graph label, so post-retrieval Cypher must never address
         # one. Mirrors tortoise/search_engine.py's legs (the caller-facing
@@ -15586,11 +17410,11 @@ class TortoiseSDK:
                     query_vec = model.encode([_dense_query])[0].tolist()
                 except Exception:  # noqa: BLE001, RUF100
                     _vec_reason = "encode_failed"
-        if _vec_reason is not None and leg_trace is not None:
+        if _vec_reason is not None and status_trace is not None:
             # Recorded at the source (the strategy is never submitted) —
             # BEFORE degradation_chain merges its own entries, so the
             # vector entry always precedes the fts/structural merge.
-            leg_trace.append(_trace_entry(
+            status_trace.append(_trace_entry(
                 "vector", ran=False, degraded=True,
                 reason=_vec_reason, count=0))
 
@@ -15644,7 +17468,7 @@ class TortoiseSDK:
             # lets run_vector_query skip the failing signature attempt.
             vector_index_api=getattr(proj, "_vector_index_api", None),
             excluded_statuses=() if include_terminal else None,
-            leg_trace=leg_trace,
+            leg_trace=status_trace,
             # A1 (#2070): the ask-lane numeric-token policy threads into the
             # sparse leg's OR-union (default False = search lane unchanged).
             keep_numeric=keep_numeric,
@@ -15652,6 +17476,14 @@ class TortoiseSDK:
             # Only request the floored-leg report when a floor is active, so a
             # floor-off call keeps `trace_active` False (pre-#4028 shape).
             floored_legs=(_floored_legs if _vector_floor is not None else None),
+            # #4199: the read's OWN kind scope. Only ever supplied when a
+            # trace is being recorded (it decides a DECLARATION, never which
+            # rows are returned), so a leg_trace=None production caller pays
+            # neither the extra scope count nor any behavior change.
+            scope_kinds=(
+                tuple(expanded_kinds)
+                if leg_trace is not None and query_vec is not None
+                and expanded_kinds else None),
         )
 
         if not raw_results:
@@ -15664,7 +17496,12 @@ class TortoiseSDK:
                     leg_trace.append(_trace_entry(
                         "fallback", ran=False, degraded=False,
                         reason="relevance_floor_empty", count=0))
-                return []
+                # A REACHED store that answered with nothing relevant is still
+                # an ANSWER — it must report a term like every other
+                # data-returning path here. The hosted route indexes
+                # ``status_out["status"]`` unguarded, so a missing term is a
+                # 500, not a null.
+                return _with_read_status([])
             # All strategies failed — fallback to in-memory TF-IDF (Point only).
             if query and entity_type == "point":
                 # #1375: serve from the cached lean corpus snapshot when
@@ -15686,12 +17523,17 @@ class TortoiseSDK:
                         query, _snap, limit=limit, kind=kind,
                         exclude_status=exclude_status,
                         include_terminal=include_terminal,
+                        # #4509: parity with the primary path's pre-truncation
+                        # turn-echo exclusion — a degraded read must not leak a
+                        # capture's own transcript echoes as S3 priors.
+                        exclude_turn_echo_session=exclude_turn_echo_session,
                     )
-                    if leg_trace is not None:
-                        leg_trace.append(_trace_entry(
+                    if status_trace is not None:
+                        status_trace.append(_trace_entry(
                             "fallback", ran=True, degraded=True,
                             reason="tfidf_snapshot", count=len(snap_hits)))
-                    return _decorate_fallback_hits(snap_hits, graph)
+                    return _with_read_status(
+                        _decorate_fallback_hits(snap_hits, graph))
                 points = self.query(kind=kind,
                                     include_retracted=include_terminal)
                 if exclude_status and points:
@@ -15701,17 +17543,27 @@ class TortoiseSDK:
                     # dicts carrying the status property.
                     points = [p for p in points
                               if (p.get("status") or "") not in set(exclude_status)]
+                if exclude_turn_echo_session and points:
+                    # #4509 parity (same reasoning as the snapshot tier above):
+                    # drop the session's own echoes BEFORE ``fallback_tfidf``
+                    # truncates to ``limit``.
+                    points = [p for p in points if not is_turn_echo_row(
+                        exclude_turn_echo_session,
+                        {"id": p.get("id"),
+                         "point_kind": p.get("pointKind"),
+                         "content": p.get("content")})]
                 legacy_hits = fallback_tfidf(query, points, limit=limit)
-                if leg_trace is not None:
-                    leg_trace.append(_trace_entry(
+                if status_trace is not None:
+                    status_trace.append(_trace_entry(
                         "fallback", ran=True, degraded=True,
                         reason="tfidf_legacy", count=len(legacy_hits)))
-                return _decorate_fallback_hits(legacy_hits, graph)
-            if leg_trace is not None:
-                leg_trace.append(_trace_entry(
+                return _with_read_status(
+                    _decorate_fallback_hits(legacy_hits, graph))
+            if status_trace is not None:
+                status_trace.append(_trace_entry(
                     "fallback", ran=True, degraded=True,
                     reason="no_fallback_applicable", count=0))
-            return []
+            return _with_read_status([])
 
         # R4 (#1543): 1-2 hop IMPL/NAND expansion on TEXT hits (graph as
         # recall amplifier — graphiti episode-mentions pattern). Folds into
@@ -15755,7 +17607,7 @@ class TortoiseSDK:
                 query, raw_results["fts"],
                 str_limit=str_limit,
                 excluded_statuses=() if include_terminal else None,
-                leg_trace=leg_trace,
+                leg_trace=status_trace,
                 # P1-fix (#2070): the second pass respects the caller's A1
                 # keep_numeric — an operator who opted OUT of numeric tokens
                 # must not have them silently re-introduced by the PRF pass
@@ -15785,7 +17637,7 @@ class TortoiseSDK:
                 query, raw_results["fts"],
                 str_limit=str_limit,
                 excluded_statuses=() if include_terminal else None,
-                leg_trace=leg_trace,
+                leg_trace=status_trace,
                 # the anchor + alias tokenization honors the caller's A1
                 # numeric policy (same posture as the A4 P1-fix).
                 keep_numeric=keep_numeric,
@@ -15954,6 +17806,39 @@ class TortoiseSDK:
                     result_ids = [pid for pid in result_ids if pid not in status_excluded_ids]
             except Exception:
                 _logger.warning("exclude_status filter failed — pass-through", exc_info=True)
+
+        # 5d-bis (#4509). Apply the OPT-IN turn-echo exclusion at the SAME
+        #     pre-truncation seam as exclude_status (#898): a caller that names
+        #     its capture session drops that session's own transcript echoes
+        #     from the fused Point candidate set BEFORE ``result_ids[:limit]``,
+        #     so ``limit`` counts already-filtered candidates. Doing this
+        #     AFTER the cut (the previous caller-side drop) could not be made
+        #     sound — up to ``MAX_SESSION_TURNS`` (500) echoes could outnumber
+        #     any caller-side refill window and starve a real prior ranked
+        #     below them, ADDing a duplicate memory Point instead of folding.
+        #     Opt-in by construction: the branch is not entered when the
+        #     parameter is None, so every existing caller is byte-identical.
+        if (exclude_turn_echo_session and result_ids
+                and graph_label == "Point"):
+            try:
+                echo_rows = graph.query(
+                    "MATCH (n:Point) WHERE n.id IN $ids "
+                    "RETURN n.id, n.pointKind, n.content",
+                    params={"ids": result_ids},
+                ).result_set
+                echo_ids = {
+                    row[0] for row in echo_rows
+                    if is_turn_echo_row(exclude_turn_echo_session, {
+                        "id": row[0],
+                        "point_kind": row[1] if len(row) > 1 else None,
+                        "content": row[2] if len(row) > 2 else None,
+                    })
+                }
+                if echo_ids:
+                    result_ids = [pid for pid in result_ids if pid not in echo_ids]
+            except Exception:
+                _logger.warning(
+                    "turn-echo exclusion failed — pass-through", exc_info=True)
 
         # Truncate AFTER filtering
         result_ids = result_ids[:limit]
@@ -16298,7 +18183,7 @@ class TortoiseSDK:
             if entity_type == "point" and w4_enrich \
                     and w4_enrichment_enabled():
                 ranked = w4_enrich_items(proj, ranked)
-            return ranked
+            return _with_read_status(ranked)
         if order_by == "confidence":
             # #25/#2206/#2286: sort by the PERSISTED EP belief mean α/(α+β)
             # that ep.confidence_mean carries. GraphRanker reads the
@@ -16323,7 +18208,7 @@ class TortoiseSDK:
         if entity_type == "point" and w4_enrich \
                 and w4_enrichment_enabled():
             out = w4_enrich_items(proj, out)
-        return out
+        return _with_read_status(out)
 
     # ── A4 (#2070): search_keys PRF expansion (ask lane) ──────────────────
 
@@ -16488,7 +18373,12 @@ class TortoiseSDK:
             anchor_rows = run_fts_query(
                 proj.g, query, entity_type="object",
                 limit=_ENTITY_ANCHOR_CANDIDATES,
-                keep_numeric=keep_numeric)
+                keep_numeric=keep_numeric,
+                # #3301: anchor RESOLUTION only — these ids/names are never
+                # surfaced to a caller, so terminal Objects must stay
+                # resolvable as anchors (the assembly-resolver principle);
+                # only the surfaced search legs hide them by default.
+                excluded_statuses=())
         except Exception:
             _logger.warning(
                 "C2 anchor resolution failed — keeping the original fts "
@@ -16649,6 +18539,14 @@ class TortoiseSDK:
           {found: false, nearest: {...}, chain: [...]} — honest absence:
             the date lies outside every window (before the earliest / after
             the latest); ``nearest`` is the closest window for context.
+            When a chain window is INVERTED (``validTo`` before
+            ``validFrom``, so it covers no instant at all) the reply also
+            carries ``malformed: true`` and ``malformed_ids``, and the
+            affected ``nearest`` entry carries ``malformed: true``. Without
+            that flag a corrupt window is indistinguishable from a point
+            that honestly has no window at this date (#5361). Detection is
+            scoped to THIS branch: a covering window cannot be inverted, so
+            the signal is only needed where absence is being reported.
 
         Legacy undated points: no ``validFrom`` ⇒ open start; a superseded
         point without ``validTo`` ⇒ open end (covers everything before the
@@ -16737,6 +18635,27 @@ class TortoiseSDK:
 
         # Honest absence: no window covers. Report the nearest window.
         out["found"] = False
+
+        # #5361: an inverted window (validTo before validFrom) covers NO
+        # instant, so `_covers` can never match it and this reply is otherwise
+        # byte-identical to a point that honestly has no window at this date.
+        # The read path is where the ambiguity costs most: a caller reads
+        # corruption as "nothing was true then". Flag it, using the same
+        # primitive `_covers` orders with.
+        def _inverted(vf, vt) -> bool:
+            if vf is None or vt is None:
+                return False          # open end — a legal interval
+            kf, kt = _created_sort_key(vf), _created_sort_key(vt)
+            if kf[0] != 0 or kt[0] != 0:
+                return False          # unparseable — #5360's concern
+            return kt < kf
+
+        malformed = [e for e in chain
+                     if _inverted(e["valid_from"], e["valid_to"])]
+        if malformed:
+            out["malformed"] = True
+            out["malformed_ids"] = [e["id"] for e in malformed]
+
         nearest = None
         best = None
         for e in chain:
@@ -16758,7 +18677,9 @@ class TortoiseSDK:
         if nearest is not None:
             out["nearest"] = {"id": nearest["id"],
                                "valid_from": nearest["valid_from"],
-                               "valid_to": nearest["valid_to"]}
+                               "valid_to": nearest["valid_to"],
+                               "malformed": _inverted(nearest["valid_from"],
+                                                      nearest["valid_to"])}
         return out
 
     # ── Recall (epic #898) — UC1 STATE ──────────────────────────────
@@ -16784,6 +18705,10 @@ class TortoiseSDK:
         object_centric: bool = True,
         state_ranker=None,
         leg_trace: list[dict] | None = None,
+        # B6 (#3892): the read-path status sink — the coalesced status of the
+        # composite (Points + Objects) read. Same opt-in caller-owned pattern
+        # as ``leg_trace``; default None = not computed, byte-identical.
+        read_status_out: dict | None = None,
     ) -> list[dict]:
         """UC1 "state" recall (epic #898 Wave A) — what is true and
         high-confidence right now.
@@ -16828,8 +18753,27 @@ class TortoiseSDK:
             :func:`tortoise.search_engine.declared_degraded_read` (declare the
             single-leg read) or :func:`tortoise.search_engine.require_hybrid_read`
             (fail loud) — see also :meth:`retrieval_legs`.
+        read_status_out (B6 #3892): the read-path status contract — when
+            provided, the dict receives ``{"status": <term>}`` with ONE of the
+            four recorded terms (``tortoise.status_vocabulary``, consumed by
+            ``tortoise.read_status``) for the WHOLE composite read:
+            ``available`` / ``empty`` / ``degraded`` / ``unconfigured``. The
+            Point and Object legs each classify their own read and the two are
+            coalesced so that a leg that reached the store makes the composite
+            ``degraded`` (incomplete) rather than ``unconfigured`` — a store's
+            configuration is one global fact, so the reached leg proves it was
+            declared; ``unconfigured`` wins only when NO leg reached the
+            store. A read that returned rows can therefore never report
+            ``unconfigured`` alongside them. Caller-owned opt-in sink; default
+            None = not computed, byte-identical behavior.
         """
         from .ranking import StateRanker
+        from .read_status import (
+            STATUS_AVAILABLE,
+            STATUS_DEGRADED,
+            STATUS_EMPTY,
+            combine_read_statuses,
+        )
 
         if limit < 1 or limit > 10000:
             raise ValueError(f"limit must be 1-10000, got {limit}")
@@ -16841,7 +18785,16 @@ class TortoiseSDK:
         if not 0.0 <= centrality_weight <= 1.0:
             raise ValueError(f"centrality_weight must be 0-1, got {centrality_weight}")
 
-        proj = self._get_proj()
+        try:
+            proj = self._get_proj()
+        except Exception:
+            if read_status_out is not None:
+                # A store that will not OPEN is `degraded` (off by outage);
+                # `unconfigured` (off by policy) is not reachable from this
+                # SDK, which always resolves a store target. Never a raise.
+                read_status_out["status"] = STATUS_DEGRADED
+                return []
+            raise
         ranker = state_ranker or StateRanker(
             proj,
             relevance_exp=relevance_exp,
@@ -16859,6 +18812,13 @@ class TortoiseSDK:
         # superseded/deprecated are excluded here unless include_superseded.
         exclude_status = None if include_superseded else sorted(
             self.STATE_EXCLUDED_STATUS - {"retracted"})
+        # B6 (#3892): per-leg status sinks, combined into one after both reads.
+        # None when no status was requested, so the calls stay byte-identical.
+        _point_status: dict | None = None
+        _object_status: dict | None = None
+        if read_status_out is not None:
+            _point_status = {}
+            _object_status = {}
         point_results = self.tortoise_fts_query(
             query, kind=kind, entity_type="point", limit=pool,
             exclude_status=exclude_status,
@@ -16870,11 +18830,14 @@ class TortoiseSDK:
             w4_enrich=False,
             # #2985: observational only — the call is byte-identical when
             # leg_trace is None (the product default).
-            leg_trace=leg_trace)
+            leg_trace=leg_trace,
+            read_status_out=_point_status)
         object_results = (
             self.tortoise_fts_query(
                 query, kind=kind, entity_type="object", limit=pool,
-                leg_trace=leg_trace)
+                include_terminal=include_superseded,
+                leg_trace=leg_trace,
+                read_status_out=_object_status)
             if object_centric else []
         )
         # #1350: Object status filter (decision 2a — completed/in_progress
@@ -16882,9 +18845,12 @@ class TortoiseSDK:
         # from the state view unless include_superseded brings them back).
         objects = [dict(r, entity_type="object") for r in object_results]
         if not include_superseded:
+            # #3301: ONE canonical OBJECT vocabulary — the same set
+            # ``search_engine._status_vocab_for("Object")`` feeds the four
+            # search legs. Never re-literal it here.
             objects = [o for o in objects
-                       if (o.get("status") or "") not in
-                       ("superseded", "deprecated", "archived", "retracted")]
+                       if (o.get("status") or "")
+                       not in _OBJECT_TERMINAL_STATUSES]
 
         # UC1 state view: hide mitigation bookkeeping points (they are
         # surfaced ATTACHED to results as context, not standalone claims —
@@ -16955,6 +18921,26 @@ class TortoiseSDK:
                 out = [by_id.get(i["id"], i) for i in out]
         except Exception as e:  # noqa: BLE001, RUF100 — fail-open
             _logger.warning("W4 enrichment failed (recall_state): %s", e)
+        if read_status_out is not None:
+            # B6 (#3892): the composite is derived AFTER the pipeline, from the
+            # rows the caller actually RECEIVES. The filters, the rerank and
+            # the `min_confidence` floor can drop every candidate the legs
+            # returned, and `available` ("reached AND returned content") must
+            # never describe an empty result — the same rule
+            # `tortoise_fts_query` applies to its final row list.
+            _composite = combine_read_statuses(
+                (_point_status or {}).get("status"),
+                (_object_status or {}).get("status"))
+            if _composite is None:
+                # Defect guard, not a state: every leg's return path writes
+                # its own term (see ``_with_read_status``), so a None
+                # composite means one path escaped that contract. Never emit
+                # ``null`` under the four-term vocabulary — describe the read
+                # the caller RECEIVES instead.
+                _composite = STATUS_AVAILABLE if out else STATUS_EMPTY
+            if _composite == STATUS_AVAILABLE and not out:
+                _composite = STATUS_EMPTY
+            read_status_out["status"] = _composite
         return out
 
     def retrieval_legs(
@@ -18929,7 +20915,8 @@ class TortoiseSDK:
 
     def _create_entity(self, label: str, id_val: str, props: dict, event_type: str,
                        *, _skip_sanitize: bool = False,
-                       is_episodic: bool | None = None) -> dict:
+                       is_episodic: bool | None = None,
+                       _return_apply_result: bool = False) -> dict | tuple[dict, object]:
         """Generic entity creation. Applies to graph via projection
         (FalkorDB); SDK-created Events additionally journal EventRecorded
         via ``_emit_event`` (#2061); SDK-created Objects journal
@@ -18946,6 +20933,15 @@ class TortoiseSDK:
         fail-closed on the sanctioned key (the sanitizer's own docstring carves
         out ``api.add_document(source_path=)``; create_source(source_path=) is
         the mirror route).
+
+        ``_return_apply_result=True`` (#5024 P2-2): return
+        ``(entity, apply_result)`` instead of ``entity``, so the Source MERGE's
+        ``QueryResult`` reaches its ONE consumer (``create_source``) ON THIS
+        CALL'S RETURN VALUE. It must never ride a projection-level slot: a slot
+        is shared by every call on the SDK, so two threads sharing one SDK on
+        DIFFERENT urls — which take different per-url locks and can therefore
+        interleave — could swap each other's captured pre-write state and lose
+        a real version transition.
         """
         # #329: id + sourcePath/source_path are server-managed — reject.
         # is_episodic is ALSO server-managed (#1486, quota discriminator) —
@@ -19092,11 +21088,6 @@ class TortoiseSDK:
             event["createdAt"] = now_iso()
         # Apply through projection (writes to FalkorDB)
         apply_result = proj.apply(event)
-        if label == "Source":
-            # epic #900 T3: thread the conditional-MERGE QueryResult so
-            # create_source can attribute the counter-authority outcome
-            # (nodes_created) from the single statement (pin b).
-            proj._source_merge_result = apply_result
         if label == "Event":
             # #2061: journal EventRecorded so SDK-created Events survive
             # rebuild_all (fold parity for Event-input operators).
@@ -19191,7 +21182,13 @@ class TortoiseSDK:
             proj.create_owned_by(canonical_id, props["ownedBy"])
         if props.get("managedBy"):
             proj.create_managed_by(canonical_id, props["managedBy"])
-        return self._get_entity(canonical_id)
+        entity = self._get_entity(canonical_id)
+        if _return_apply_result:
+            # #5024 P2-2: the conditional-MERGE QueryResult travels on THIS
+            # call's return value to `create_source` (the only consumer),
+            # never a projection-level slot shared across threads.
+            return entity, apply_result
+        return entity
 
     def _get_entity(self, id_val: str) -> dict:
         # NOTE (issue #327): Session/APIKey/Org/Tag nodes are intentionally
@@ -19227,7 +21224,9 @@ class TortoiseSDK:
             ``EventLog.append``'s ``json.dumps`` raise, and ``_emit_event``
             swallows that to a warning, silently losing the mutation; and a key
             the write did NOT apply is absent, so replay can never overwrite a
-            prop the write did not touch.
+            prop the write did not touch. (#4647: an INEXACT Decimal/numpy value
+            is refused by the write-surface guard before it can reach here, so
+            only exactly-representable members of that class occur.)
             ``None`` for a delete — the recorded shape carries *"nothing for a
             delete"* (#3299).
 
@@ -19472,7 +21471,9 @@ class TortoiseSDK:
                 #     it from the creation record;
                 #   * a coerced value (Decimal/numpy -> native) is journalled as
                 #     the stored primitive, so the append cannot silently drop
-                #     the record;
+                #     the record (#4647: only an exactly-representable
+                #     Decimal/numpy reaches this point — the write guard refuses
+                #     the rest);
                 #   * keys the write did NOT apply are absent, so replay never
                 #     overwrites the typed VectorF32 the upsert created
                 #     (`properties(n)` returns a vector as a plain list;
@@ -19697,22 +21698,13 @@ class TortoiseSDK:
                 is_episodic=is_episodic)
             proj = self._get_proj()
             if about_subject:
-                proj.create_about_edge(eid, about_subject, "aboutSubject")
-                # Only name-resolve if it looks like a plain name, not an ID
-                if isinstance(about_subject, str) and not _is_entity_id(about_subject):
-                    proj._create_about_edges(eid, about_subject)
+                _wire_about_value(proj, eid, about_subject, "aboutSubject")
             if about_object:
-                proj.create_about_edge(eid, about_object, "aboutObject")
-                if isinstance(about_object, str) and not _is_entity_id(about_object):
-                    proj._create_about_edges(eid, about_object)
+                _wire_about_value(proj, eid, about_object, "aboutObject")
             if about_point:
-                proj.create_about_edge(eid, about_point, "aboutPoint")
-                if isinstance(about_point, str) and not _is_entity_id(about_point):
-                    proj._create_about_edges(eid, about_point)
+                _wire_about_value(proj, eid, about_point, "aboutPoint")
             if about_document:
-                proj.create_about_edge(eid, about_document, "aboutDocument")
-                if isinstance(about_document, str) and not _is_entity_id(about_document):
-                    proj._create_about_edges(eid, about_document)
+                _wire_about_value(proj, eid, about_document, "aboutDocument")
         elif t == "document":
             documentKind = props.pop("documentKind", None)
             if not documentKind:
@@ -21181,6 +23173,13 @@ class TortoiseSDK:
             "classificationLevel": "internal",
             "format": "markdown",
         }
+        # #4647: this writer reaches the store directly (the MERGE below takes
+        # $props as raw parameters) AND journals the SAME dict verbatim, so an
+        # out-of-domain value would be clamped in the graph while the journal
+        # recorded the original — a live!=replay divergence. Guard before any
+        # write or emit.
+        for _k, _v in props.items():
+            _reject_unrepresentable_number(_k, _v)
         # embedding — short-circuited to None under extract_metadata=False
         # (I15 pin) or NO_NETWORK; CASE-guarded $embedding is the ONLY node-
         # write surface (never rides $props).
@@ -22120,6 +24119,11 @@ class TortoiseSDK:
                 # rule exists to prevent. Pin:
                 # tests/test_sdk_group3.py::TestConnectIssueObjectsAboutObject
                 # ::test_long_object_name_stored_verbatim_by_both_writers.
+                # #4647: oid/issue_number come from metadata (frontmatter /
+                # LLM output) as arbitrary-precision Python ints; this raw
+                # MERGE bypasses _sanitize_props, so guard before the write.
+                _reject_unrepresentable_number("oid", oid)
+                _reject_unrepresentable_number("issue_number", issue_number)
                 proj.g.query(
                     "MERGE (o:Object {id:$oid}) SET o.name=$name, o.objectKind=$okind, "
                     "o.repo=$repo, o.issue_number=$issue_number, o.url=$url",
@@ -22196,14 +24200,32 @@ class TortoiseSDK:
           - the Source MERGE is CONDITIONAL (single statement, pin b): the ON
             MATCH version/updatedAt/contentHash/title/``_searchText`` bump
             fires ONLY when the stored contentHash differs (a stub Source with
-            NULL contentHash is completed). The MERGE outcome (via
-            ``proj._source_merge_result`` nodes_created) is the counter
-            authority for the index path.
+            NULL contentHash is completed). The write's own QueryResult
+            carries ``previousProps`` (the pre-write node) and is returned ON
+            THIS CALL to ``create_source`` (#5024 P2-2) — never a shared
+            projection slot. The index path's counter authority is a
+            POST-MERGE re-read of ``s.__runId``/``s.version`` in
+            ``_index_source_merge``, not a MERGE stats counter.
           - JOURNALING CONTRACT (a) (cycle-18): the write path emits a
             SourceCreated JSONL line on EVERY write (emit-on-every-write — a
             create-only cadence would revert updated Sources to create-time
             state post-rebuild); replay re-MERGEs by url and the hash-diff-gated
             bump lands at the live converged value.
+            **#5024 (T6) supersedes the cadence, not the reason.** Emit-on-
+            every-write was the right shape for a journal that had no record
+            for a version transition, and it cost the two things §9.6 buys:
+            a no-op re-check appended a line (the log grew on re-checks), and
+            because the record said nothing about the transition, `updatedAt`
+            and `ingestedAt` were re-read from the clock AT REPLAY TIME and
+            diverged from the live node (measured `...57.016262` vs
+            `...57.079810`). The cadence is now per-OUTCOME — `SourceCreated`
+            (create / stub completion), `SourceVersioned` (a real hash
+            transition, carrying `previousContentHash`),
+            or NOTHING (a re-check that found what we already hold). The
+            invariants the old contract protected are unchanged; see
+            `docs/durability-posture.md` → *`:Source` — recorded vs
+            recomputable, field by field* (R2) and
+            `docs/architecture/STORAGE-ARCHITECTURE.md` §9.6.
         """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         if not url or not url.strip():
@@ -22273,23 +24295,291 @@ class TortoiseSDK:
             # the ev dict to _upsert_source (popped by apply) and is stripped
             # from the journaled payload below.
             ev["_merge_run_id"] = _merge_run_id
-        proj = self._get_proj()
-        proj._source_merge_result = None
-        result = self._create_entity("Source", url, ev, "SourceCreated",
-                                     _skip_sanitize=True)
-        # Journaling contract (a): emit-on-every-write SourceCreated. Best-
-        # effort (no-op when no event_log_path configured) — never crashes the
-        # write (mirrors _emit_event's discipline). The internal run token
-        # never rides the journaled payload.
+        # #4647 (code-review P1): this writer bypasses `_sanitize_props`, so the
+        # numeric-domain guard every other props surface gets must run here too.
+        # It runs over the ASSEMBLED event dict rather than over `props`:
+        # guarding `props` alone left the explicit keyword arguments reaching the
+        # store unguarded, so `create_source(url, "web", sourceDate=2**70)` was
+        # still silently clamped — the exact defect #4647 exists to fix, still
+        # live on a public tenant write surface (and reachable through `ingest`,
+        # which splats `**item` into this method). Running it here, after every
+        # `ev` assignment, makes the cover structural: a field added to `ev`
+        # later cannot bypass a guard that runs after all of them.
+        for _key, _value in ev.items():
+            _reject_unrepresentable_number(_key, _value)
+        # ── #5024 (T6): ONE clock for the transition ────────────────
+        # `_upsert_source`'s ON MATCH sets `updatedAt = coalesce($updatedAt,
+        # $now)` where `$now` is `_now_iso()` called INSIDE the fold. Reading
+        # the clock TWICE (once here for the record, once in the fold for the
+        # live node) is precisely how `updatedAt` diverged live vs replayed
+        # before this change. So the instant is minted ONCE, rides the payload
+        # as `updatedAt`, the fold's `coalesce` picks it up, and the record
+        # carries the SAME string — live and replay cannot disagree.
+        ev["updatedAt"] = _now_iso()
+        # #5024 P2-2: the pre-state rides THIS CALL's own return value, not a
+        # projection-level slot. A slot is shared by every call on the SDK, so
+        # two threads sharing one SDK on DIFFERENT urls (different per-url
+        # locks, so they can interleave) could swap each other's
+        # `previousProps` and lose a real transition.
+        result, _written = self._create_entity(
+            "Source", url, ev, "SourceCreated",
+            _skip_sanitize=True, _return_apply_result=True)
+        # ── #5024 P1-A: the pre-write state the RECORD DECISION needs ──────
+        # Taken from the WRITE'S OWN statement (`_upsert_source` captures it
+        # with `OPTIONAL MATCH`/`WITH` before its `MERGE` and returns it as
+        # `previousProps`), so it is the state the write actually found. A
+        # separate pre-read here was a DIFFERENT read from the one the write's
+        # `ON MATCH` hash gate evaluated: a competing writer in that window
+        # made the decision compare the incoming hash against a value the
+        # node no longer had, and the branch below suppressed a real
+        # transition (fail-OPEN toward suppression). `None` now means only
+        # "the statement found no node" — never a swallowed read failure — so
+        # the create arm is entered on real evidence. This also removes the
+        # unconditional extra round trip (plus its internal `resolve_source_key`)
+        # that P2-B flagged on the no-journal path.
+        _stored_before = None
+        if _written is not None and getattr(_written, "result_set", None):
+            _stored_before = _written.result_set[0][0]
+        # ── #5024 (T6): journal the write by WHAT IT CHANGED ────────────────
+        # Pre-#5024 this emitted a plain `SourceCreated` on EVERY call, so a
+        # re-check that found the same bytes still appended a journal line
+        # (measured: 12 -> 13 lines on a no-op re-check). §9.6 bounds a version
+        # at "three timestamps and a hash", so the re-check must be REPEAT-SAFE:
+        #
+        #   node did not exist, or a stub is being completed  -> SourceCreated
+        #   a non-empty hash DIFFERS from the stored one       -> SourceVersioned
+        #   nothing about the write would change the node      -> emit NOTHING
+        #
+        # The last arm is NOT "same hash": a hash-identical call may still
+        # carry a new `summary`/`topics`, and those ride the payload into
+        # `_persist_extra_props` on replay — suppressing THAT record would
+        # trade log growth for a live!=replay divergence. So the no-op test is
+        # over the payload's OWN keys, and anything it cannot prove unchanged
+        # is RECORDED (fail-safe polarity: an unnecessary record is cheaper
+        # than a lost change).
         try:
             payload = {k: v for k, v in ev.items() if k != "_merge_run_id"}
-            self._emit_event("SourceCreated", id=url, **payload)
+            _new_hash = payload.get("contentHash")
+            _old_hash = (_stored_before or {}).get("contentHash")
+            if _stored_before is None or (not _old_hash and _new_hash):
+                # CREATE (no node), or a JOINT-E2E stub completion (#1032).
+                #
+                # The `_new_hash` guard is load-bearing, not decoration. A
+                # hashless create stores `contentHash = coalesce($hash,'') = ''`,
+                # so `not _old_hash` stays TRUE on that node forever — and an
+                # incoming payload that ALSO carries no hash took this arm
+                # unconditionally, pre-empting the no-op test below. Measured:
+                # 5 identical `create_source(url, "document")` calls appended 5
+                # records and changed nothing (version stayed 1). Production-
+                # reachable: `hosted_api.py` re-ingests with
+                # `contentHash=anchor` (None when no provenance ref carries a
+                # hash) and with `contentHash=src.contentHash or ""`.
+                #
+                # A stub COMPLETED by a real hash still records (that is the
+                # #1032 contract, pinned by
+                # `test_a_stub_completion_still_emits_a_create`); a hashless
+                # re-check now falls through to the no-op test, which suppresses
+                # it only if the write really does leave the node unchanged.
+                self._emit_event("SourceCreated", id=url, **payload)
+            elif _new_hash and _new_hash != _old_hash:
+                # The version transition. `previousContentHash` is the whole
+                # point: it is what makes the PRIOR version addressable after
+                # the node has moved on (`ONTOLOGY` §4.6 *Versioning*). The
+                # transition instant is NOT a separate key — the payload's own
+                # `updatedAt` (minted above, one clock) IS it, and the fold
+                # reads exactly that. The record deliberately carries no
+                # recomputed ordinal: the replay reproduces `version` through
+                # the SAME hash-diff gate the live write used, so recording it
+                # as well would be a second derivation that can disagree.
+                self._emit_event(
+                    "SourceVersioned", id=url,
+                    previousContentHash=_old_hash, **payload,
+                )
+            elif self._source_payload_is_noop(payload, _stored_before):
+                # Genuine re-check: the caller re-sent what we already hold.
+                # Nothing is journalled, and nothing changed live either.
+                pass
+            else:
+                # Same hash, but the payload carries something new (a retitled
+                # summary, a new topic list). Record it so the extras survive a
+                # rebuild — the pre-#5024 behaviour.
+                self._emit_event("SourceCreated", id=url, **payload)
         except Exception:  # noqa: BLE001, RUF100
-            _logger.warning("SourceCreated journal emission failed for %s — continuing", url)
+            _logger.warning("source journal emission failed for %s — continuing", url)
         # Write events invalidate the inheritance gate + reliability cache
         self._invalidate_inheritance_gate_for_source(url)
         self._clear_reliability_cache(url)
         return result
+
+    # #5024 (T6): payload keys the node stores under another spelling. A key
+    # that is absent here and absent from the node is compared by name; a key
+    # this map cannot place is treated as "cannot prove unchanged" and the
+    # write is RECORDED (see `_source_payload_is_noop`).
+    _SOURCE_PAYLOAD_ALIASES: ClassVar[dict[str, str]] = {
+        "source_path": "sourcePath",
+    }
+    # Keys that are written ON CREATE only, or that the producer regenerates on
+    # every call — they cannot make an existing node differ, so they never
+    # disqualify a no-op.
+    _SOURCE_NOOP_IGNORED_KEYS: frozenset = frozenset({
+        "ingestedAt", "_merge_run_id", "id",
+        # #5024: minted by the producer on EVERY call (the one clock the write
+        # and the record share). It is not a fact the caller asserted, so it
+        # can never make an otherwise-identical re-check "different" — and
+        # leaving it in the comparison suppressed repeat-safety entirely
+        # (measured: the no-op still emitted a `SourceCreated`).
+        "updatedAt",
+    })
+
+    @staticmethod
+    def _same_journal_value(a, b) -> bool:
+        """#5024: TYPE-AWARE equality for the repeat-safety test.
+
+        Plain `==` is fail-OPEN here, because Python folds the type away:
+        `True == 1 == 1.0`, while FalkorDB stores a bool and an int as distinct
+        values. Measured before this guard::
+
+            sdk.create_source(url, "document", contentHash="h-0", flag=True)
+            sdk.create_source(url, "document", contentHash="h-0", flag=1)
+
+          -> 0 records appended, live `flag = 1` (int), rebuilt `flag = True`.
+
+        A live write with no record is exactly the fail-open this function's
+        polarity forbids (the repo has already been bitten by the same
+        `isinstance(True, int)` trap — see `BELIEF_BOOL_PROPS` in
+        `projection/entities.py`). Containers are compared recursively for the
+        same reason: `[1] == [1.0]` is True and the two serialise differently.
+
+        NaN compares unequal to itself, so a NaN payload is always recorded —
+        fail-safe, and consistent with the #5004 embedding guards.
+
+        DELIBERATE over-recording (declared, not a bug): a payload `tuple`
+        against a stored `list` (the reader returns a list, so an identical
+        re-check spelled `topics=("a","b")` records once) and a value the graph
+        cannot persist at all (`dict`/`bytes`/`set`). Both cost one extra
+        record and neither changes the node — the safe direction for a test
+        whose failure mode is a LOST write.
+        """
+        if type(a) is not type(b):
+            return False
+        if isinstance(a, (list, tuple)):
+            return len(a) == len(b) and all(
+                TortoiseSDK._same_journal_value(x, y)
+                for x, y in zip(a, b, strict=True))
+        if isinstance(a, dict):
+            return a.keys() == b.keys() and all(
+                TortoiseSDK._same_journal_value(a[k], b[k]) for k in a)
+        return a == b
+
+    def _source_payload_is_noop(self, payload: dict,
+                                stored: dict | None) -> bool:
+        """#5024 (T6): would this write leave an EXISTING `:Source` unchanged?
+
+        The repeat-safety test behind acceptance 1: a re-check that finds the
+        same bytes must journal nothing, or the log grows on every re-check
+        (§9.6 bounds a version at "three timestamps and a hash").
+
+        Deliberately NOT "the hash is equal": a hash-identical call may still
+        carry a new `summary`/`topics`, and those ride the payload into
+        `_persist_extra_props` on replay. Suppressing THAT record would trade
+        log growth for a live != replay divergence, which is the defect class
+        this lane exists to remove. So the test is over the payload's OWN keys,
+        and its polarity is FAIL-SAFE TOWARD RECORDING: anything it cannot
+        prove unchanged returns False (an unnecessary record is cheaper than a
+        lost change).
+        """
+        if not stored:
+            return False
+        from .projection.entities import _is_persistable_prop_value
+        proj = self._get_proj()
+        # ── #5024 P1-B: MIRROR THE WRITER, do not re-derive it ─────────────
+        # The earlier cut compared the raw payload against the stored node and
+        # ignored only `ingestedAt`/`updatedAt`, so it disagreed with
+        # `_upsert_source` on three classes of key and appended a record on
+        # EVERY identical re-check (measured `2 -> 3 -> 4`): a URL variant
+        # (`url` is resolved to the node's canonical spelling), a same-hash
+        # retitle (the writer GATES `title`/`_searchText`/`updatedAt` behind
+        # the hash diff, false in this arm), and a key the writer drops
+        # (`content` is retired, `meta={...}` is not persistable).
+        #
+        # This arm is reached only when the incoming hash is falsy OR equal to
+        # the stored one — but NOT only when the writer's gate is closed: a
+        # falsy non-None hash (`""` — `hosted_api` passes `contentHash=... or
+        # ""`) still opens `$hash IS NOT NULL AND s.contentHash <> $hash`, so
+        # `contentHash` MUST stay compared below. When the gate IS open the
+        # comparison returns "changed" on the hash alone, so the hash-gated
+        # fields can be skipped without ever suppressing the change.
+        _fixed_unchanged = self._SOURCE_NOOP_IGNORED_KEYS | {
+            # Hash-gated: `_upsert_source` only writes these on the hash-diff
+            # branch, which the `contentHash` comparison already detects.
+            "title", "_searchText",
+            # ON CREATE only (`sourceKind`/`externalId`/`ingestedAt` have no
+            # ON MATCH assignment) or never a node property at all
+            # (`previousContentHash`). `version` also rides the hash-diff CASE,
+            # covered by the `contentHash` comparison.
+            "version", "sourceKind", "externalId", "ingestedAt",
+            "previousContentHash",
+            # ⛔ These two are NOT "create-only": `_upsert_source`'s ON MATCH
+            # mutates BOTH — it APPENDS the raw spelling to `urlAliases` and
+            # does `coalesce(s.canonicalUrl, $cu)`. `urlAliases` is covered by
+            # the `url` branch below, which mirrors the writer's append exactly
+            # (including a same-url write onto a node that carries no aliases).
+            # `canonicalUrl` is writer-derived from the resolved key and never
+            # rides a payload (`_persist_extra_props` drops it — it is in
+            # `_SOURCE_HANDLED`), so no payload key can express it; the
+            # resolver's own adopt-on-touch backfill is a pre-existing,
+            # separately-unrecorded mutation (`source_identity.py`).
+            "canonicalUrl", "urlAliases",
+        }
+        # The fixed-clause keys that DO change on a non-hash-diff write or that
+        # carry the hash-diff itself (`coalesce($x, s.x)` / the `contentHash`
+        # CASE). They are in `_SOURCE_HANDLED` (so `_persist_extra_props`
+        # skips them) but MUST be compared here: an existing item's
+        # `format`/`source_path` update lands live, and `contentHash` is the
+        # gate every other fixed field rides.
+        _fixed_compared = {"format", "source_path", "contentHash"}
+        # The writer's OWN passthrough predicate (`_persist_extra_props`): a
+        # payload key outside this skip-set, with a persistable non-None value,
+        # is what actually lands on the node.
+        _dropped = (proj._META_KEYS | proj._SOURCE_HANDLED
+                    | proj._DOC_RETIRED_KEYS)
+        stored_aliases = stored.get("urlAliases") or []
+        for k, v in payload.items():
+            if k in _fixed_unchanged or v is None:
+                continue
+            if k == "url":
+                # The MERGE key. The writer resolves the inbound spelling to
+                # the ONE canonical node and never rewrites `s.url`; its
+                # ON MATCH appends the RAW spelling to `urlAliases` whenever
+                # that spelling is not already there. So this write changes the
+                # node iff the raw is absent from the aliases — whether or not
+                # it equals `s.url` (P3-1: a node that carries no aliases gains
+                # one even on a same-url write). The earlier test ALSO required
+                # `v != stored["url"]`, which missed exactly that
+                # legacy/partially-adopted node and suppressed a real alias
+                # addition with no record.
+                if v not in stored_aliases:
+                    return False
+                continue
+            if k not in _fixed_compared and (
+                    k in _dropped or not _is_persistable_prop_value(v)):
+                continue
+            prop = self._SOURCE_PAYLOAD_ALIASES.get(k, k)
+            if prop not in stored:
+                # The key is not on the node at all. `_persist_extra_props`
+                # skips ONLY `None`, so an empty string or list IS written and
+                # the node CHANGES. An earlier cut treated `""`/`[]`/`{}` as
+                # "no representation" and returned no-op for them — measured:
+                # a same-hash write with a new `""` extra appended NO record
+                # while the live node gained `{'bar': ''}`, so the rebuild lost
+                # it. That is fail-OPEN toward suppression, the opposite of
+                # this test's declared polarity.
+                return False
+            # Type-AWARE: `True == 1` in Python but not in the graph — see
+            # `_same_journal_value`. A plain `!=` here was the round-2 fail-open.
+            if not self._same_journal_value(stored[prop], v):
+                return False
+        return True
 
     def set_source_tier(self, url: str, tier: str) -> dict:
         """Set (or change) a Source's credibility tier — non-destructive.
@@ -22640,6 +24930,8 @@ class TortoiseSDK:
         url = self._resolve_source_url(url)
         import json as _json
         proj = self._get_proj()
+        # #4647: derived, but still a raw parameter to the store — guard it.
+        _reject_unrepresentable_number("reliability", reliability)
         proj.g.query(
             "MATCH (s:Source {url:$url}) "
             "SET s.reliability = $r, s.reliabilityComponents = $c, "
@@ -22795,6 +25087,9 @@ class TortoiseSDK:
         # non-Subject targets are out of contract.
         r = proj.g.query(
             "MATCH (s:Subject) WHERE s.id = $sid OR s.name = $sid "
+            # #6976: load-bearing `WITH s` — without it FalkorDB 6.0.0 drops the
+            # id/name predicate at the re-binding MATCH below (foreign rows).
+            "WITH s "
             "MATCH (s)<-[:ownedBy]-(e) RETURN properties(e) LIMIT 100",
             params={"sid": subject_id},
         )
@@ -22992,11 +25287,13 @@ class TortoiseSDK:
         # Scan) then traverse outward; roles filters the source Subject p.
         members = proj.g.query(
             "MATCH (s:Subject) WHERE s.id = $sid OR s.name = $sid "
+            "WITH s "
             "MATCH (p:Subject)-[:memberOf]->(s) RETURN properties(p)",
             params={"sid": subject_id},
         )
         roles = proj.g.query(
             "MATCH (p:Subject) WHERE p.id = $sid OR p.name = $sid "
+            "WITH p "
             "MATCH (p)-[:holdsRole]->(r:Subject) RETURN properties(r)",
             params={"sid": subject_id},
         )
@@ -23028,6 +25325,10 @@ class TortoiseSDK:
             updates["contentHash"] = hashlib.sha256(content.encode()).hexdigest()
         if external_id is not None:
             updates["externalId"] = external_id
+        # #4647: raw $updates SET — guard the caller-supplied value before the
+        # write (an oversized external_id would be silently clamped).
+        for _k, _v in updates.items():
+            _reject_unrepresentable_number(_k, _v)
         # Increment version
         r = proj.g.query(
             "MATCH (s:Source {url:$url}) "
@@ -23120,6 +25421,15 @@ class TortoiseSDK:
                 "mean_grounding_delta are both required (Gate B must not "
                 "open without measured evidence)"
             )
+        # #4647: guard the caller-supplied numerics BEFORE the range checks /
+        # gate checks — ``0.0 <= Decimal('NaN') <= 1.0`` raises
+        # ``decimal.InvalidOperation``, so the range check would raise ahead of
+        # this guard (cycle-8 P2). `props`' write guard below stays as the
+        # belt for fields added after these checks.
+        for _k, _v in (("precision", precision),
+                       ("mean_grounding_delta", mean_grounding_delta),
+                       ("sample_size", sample_size)):
+            _reject_unrepresentable_number(_k, _v)
         if not 0.0 <= precision <= 1.0:
             raise ValueError(f"precision must be in [0, 1], got {precision}")
         # Gate B criterion enforcement (review round 1): the docstring
@@ -23156,6 +25466,10 @@ class TortoiseSDK:
         props["mean_grounding_delta"] = mean_grounding_delta
         if notes is not None:
             props["notes"] = notes
+        # #4647: raw $props MERGE — guard the caller-supplied numerics
+        # (precision/sample_size/mean_grounding_delta) before the write.
+        for _k, _v in props.items():
+            _reject_unrepresentable_number(_k, _v)
         proj.g.query(
             "MERGE (m:Meta {key:$key}) SET m += $props RETURN m",
             params={"key": self._CALIBRATION_MARKER_KEY, "props": props},

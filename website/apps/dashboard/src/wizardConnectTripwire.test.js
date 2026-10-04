@@ -787,11 +787,16 @@ test('#3428/#2937: the not-connected remedy is derived per role, leaf and cap st
 })
 
 test('#3428/#2937: the build-fork done body names no harness and asserts nothing about filing', () => {
-  // review cycle 2 (P1-2): the build fork's step 2 is the SDK call
-  // (`POST /v1/points`), which files NO onboarding step — so the self-fork body
-  // ("hasn't filed anything … head back to Claude Code") is false the moment
-  // the user runs the wizard's own curl, and names a harness this branch never
-  // offered. The build leaf must say neither.
+  // review cycle 2 (P1-2): the self-fork body ("hasn't filed anything … head
+  // back to Claude Code") is false the moment the user runs the wizard's own
+  // curl, and names a harness this branch never offered. The build leaf must
+  // say neither.
+  //
+  // #5378: the older rationale said the build fork's step-2 `POST /v1/points`
+  // "files NO onboarding step". That went stale on 2026-09-22 — #3670 makes
+  // that route file `harness-connected` on an agent credential — so this guard
+  // pins the leaf's SHAPE (no harness, no filing assertion), never the false
+  // claim that the REST route files nothing.
   const src = stripBlockAndWholeLineComments(mainJsx)
   const i = src.indexOf('{wizardStep === 3 && (')
   assert.ok(i > -1, 'the done step renders')
@@ -802,7 +807,8 @@ test('#3428/#2937: the build-fork done body names no harness and asserts nothing
   assert.match(done, /\{isBuildFork \? \(/,
     'the done step branches on the build fork (the self-fork body is false there)')
   assert.match(done, /we can't tell it's connected yet/,
-    'the build body acknowledges that the REST write cannot be observed')
+    'the build body states the honest not-yet-observed case without claiming ' +
+    'what marks a project connected (#3670: the REST route does, on an agent key)')
   assert.match(done, /Keep calling the SDK from your app\./,
     'the build connected redirect names the SDK, not a harness')
   // review cycle 3 (P1-E + P1-F): the not-connected body may not point at a
@@ -1128,12 +1134,14 @@ test('#3428/#2937: the not-connected body states only the observed fact and the 
 })
 
 test('#3428/#2937 (cycle 8 item 9): the not-connected bodies pin their substantive clauses', () => {
-  // review cycle 8 item 9: the build body's disambiguation ("marks a project
-  // connected when a write arrives through its agent tools, not through the
-  // /v1/points REST call") and the self body's clauses were covered only by an
-  // e2e file that is NOT wired into CI, so nothing CI-running pinned the text
-  // that carries the claim. These are the substantive clauses — the ones whose
-  // removal would change the meaning, not the wording.
+  // review cycle 8 item 9: the build body's statement of the write paths that
+  // mark a project connected (the agent tools and the /v1/points REST call —
+  // #3670) and the self body's clauses had, at the time, no CI-running pin;
+  // `tests/e2e/test_dashboard_onboarding.py` covered them, and #4221 has since
+  // wired that file into the `dashboard-e2e` job (ci.yml runs it today). The
+  // "NOT wired into CI" note this comment used to carry was itself stale. These
+  // are the substantive clauses — the ones whose removal would change the
+  // meaning, not the wording.
   const src = stripBlockAndWholeLineComments(mainJsx)
   const i = src.indexOf('{wizardStep === 3 && (')
   assert.ok(i > -1, 'the done step renders')
@@ -1145,8 +1153,13 @@ test('#3428/#2937 (cycle 8 item 9): the not-connected bodies pin their substanti
   assert.ok(buildStart > -1, 'the build not-connected body is located')
   const buildBody = done.slice(buildStart, done.indexOf('</p>', buildStart))
   assert.match(buildBody,
-    /marks a project connected when a write arrives through its agent tools, not\s+through the <code>\/v1\/points<\/code> REST call/,
-    'the build body names the observable that actually marks a project connected')
+    /marks a project connected when a write arrives through its agent tools or\s+the <code>\/v1\/points<\/code> REST call/,
+    'the build body names the write paths that actually mark a project connected — ' +
+    'both the agent tools and the agent-credentialed REST call (#3670)')
+  assert.doesNotMatch(buildBody,
+    /not\s+through the <code>\/v1\/points<\/code> REST call/,
+    'the REST route DOES mark the connection on an agent credential (#3670) — ' +
+    'the false negation must not return')
   assert.match(done,
     /We haven't seen your agent's first write through its Tortoise tools yet — so we can't\s+tell it's connected/,
     'the self body states the missing observation, qualified to the agent-tools write path')
