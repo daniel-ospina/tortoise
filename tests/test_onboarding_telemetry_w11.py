@@ -199,6 +199,61 @@ class TestExactOnce:
         assert len(emitted) == first, "a replay emitted a funnel event"
 
 
+# ── #4458: the one sanctioned REMOVAL path re-emits ──────────────────
+
+class TestRepairReEmission:
+    """`decide-completed` is the ONLY W11 edge with a sanctioned REMOVAL path
+    — #3912's audited false-completion repair (`remove_decide_completed_edge`,
+    reached only from the operator-only
+    graph-scripts/repair_false_onboarding_completion.py). The invariant is
+    therefore exact-once per EDGE CREATION, not per org forever: once the
+    repair has removed the edge, the next GENUINE decide write recreates it and
+    the org re-emits `onboarding_decide_complete`.
+
+    That is a documented contract, not an accident —
+    ``tortoise/analytics.py::onboarding_decide_complete`` names the exception —
+    and this class pins it, because a funnel read keyed on "one
+    onboarding_decide_complete per org" over-counts a repaired cohort unless it
+    dedupes this event per org.
+
+    The repair's own graph mutation (the edge DELETE, the write-ahead removal
+    stamp, the orphan-node prune) is covered by
+    tests/test_onboarding_false_completion_repair.py. The store here models its
+    one relevant effect — the edge being gone — with the same MERGE semantics
+    the real store has.
+    """
+
+    def test_repair_then_genuine_decide_re_emits(self, client, edges, emitted):
+        """The CORE of #4458: repair → genuine re-decide → a SECOND event.
+
+        Gating emission on a fact that SURVIVES the removal (an
+        ever-completed stamp) turns this RED — which is exactly why it is not
+        made here: the edge IS the fact, and #4458's option 2 would reverse the
+        #2006 design decision rather than fix a defect."""
+        assert _checkpoint(client, "decide-completed").status_code == 200
+        assert len(_events(emitted, "onboarding_decide_complete")) == 1
+
+        # A replay WITHOUT a repair must still emit nothing: this test pins the
+        # departure from exact-once-per-org, not a weakened gate.
+        assert _checkpoint(client, "decide-completed").status_code == 200
+        assert len(_events(emitted, "onboarding_decide_complete")) == 1
+
+        # The #3912 repair's effect: the edge is gone.
+        edges.edges.discard((ORG, "decide-completed"))
+
+        assert _checkpoint(client, "decide-completed").status_code == 200
+        evs = _events(emitted, "onboarding_decide_complete")
+        assert len(evs) == 2, (
+            "#4458: after the #3912 repair the next genuine decide write "
+            "recreates the edge and must RE-EMIT (the invariant is exact-once "
+            f"per EDGE CREATION, not per org): {evs}")
+        # Identical identity on both events is precisely why a per-org funnel
+        # read double-counts a repaired cohort.
+        assert [e["properties"] for e in evs] == [
+            {"org_id": ORG, "source": "checkpoint"}] * 2
+        assert {e["distinct_id"] for e in evs} == {USER}
+
+
 # ── the property the issue names: cross-writer dedup ──────────────────
 
 class TestMultiWriter:
