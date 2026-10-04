@@ -2284,14 +2284,12 @@ slow_files:
 #
 # WHICH FILES, AND WHY THIS CUT. Selected in descending `durations` weight —
 # the packer's own metric, so the removal keeps the fast halves balanced by
-# construction — until the modelled halves fit 16.0 min, which lands all four
-# docker legs at 17.3–18.3 min MEASURED (the modelled-to-measured gap is RC12
-# below). 43 files, 1,604.2s of measured weight. Four exclusions, all
-# load-bearing:
-#   * test_capture_install.py and test_session_verify.py are NOT moved. Both
-#     are reachable only through the `core` fallback surface, so a
-#     `slow_files` home leaves their source's diff selecting neither the
-#     fast nor the slow leg, and
+# construction. 43 files, 1,604.2s of committed `durations` weight. Four
+# exclusions, all load-bearing:
+#   * test_capture_install.py and test_session_verify.py are NOT moved. The
+#     self-guard predicate counts FAST-leg selection, and a `slow_files` home
+#     takes the file out of every fast surface — so their source's diff
+#     selects neither the fast nor the slow leg, and
 #     `test_every_named_guard_runs_for_its_own_source` reds on the #7076
 #     class. They stay in the fast pool.
 #   * the `onboarding` surface is EXCLUDED. A `website/*` or docs-only PR
@@ -2301,7 +2299,7 @@ slow_files:
 #     #2147/#2148/#3332 cost gates). Putting an onboarding-owned file here
 #     would make every docs/website PR pay both slow legs; that is a real cost
 #     regression on a very common PR shape, not a bookkeeping detail.
-#   * the `tier1` files are EXCLUDED: `_duration_issues` fails closed on
+#   * the `tier1` files are EXCLUDED: `slow_file_issues` fails closed on
 #     "slow file X is also in tier1 (fast gate leak)", because a file in both
 #     lists is selected by BOTH the smoke gate and the slow leg. Two of the
 #     heavier fast-pool rows (test_quota, test_writer_inventory) sit in tier1
@@ -2312,17 +2310,19 @@ slow_files:
 # Everything below is otherwise lane-agnostic (verified: no `uv`, no
 # TORTOISE_ASK_LLM_REGRESSION — the fast job sets it and the slow legs do not).
 #
-# THE RESIDUAL, NAMED. The split is packed on the `durations` MAP while the
-# selection above was made on it too, so a few rows whose map weight is stale
-# (marked `# unmeasured`, e.g. test_unjournaled_mutation_class 100.0 / measured
-# 3.6s, test_probe_reset_inflight_4608 36.0 / measured 0.0s) move the pack off
-# the measured optimum. This is RC12 (the durations map is mis-ranked) — the
-# fix is a durations refresh, which `ci-timing.yml` owns and #6174/#5719 are
-# already in flight on. It is NOT half-fixed here.
+# THE RESIDUAL, NAMED. These legs are packed on the `durations` map, and the
+# map's slow-pool rows are themselves only as fresh as the last sweep
+# (`tools/ci_timing.py --refresh-durations`, run by `ci-timing.yml`), so a stale
+# row mis-ranks the pack. The watchdog's headroom (2.16x the heavier leg) is
+# what absorbs a ranking error; the fix is the refresh, which #6174/#5719 are in
+# flight on. It is NOT half-fixed here.
 #
 # The file lists in `.github/workflows/python-ci.yml` `test-slow` are the two
-# LPT-packed halves of `slow_files - carve_out`; that job's own drift-guard step
-# fails closed if the union stops matching this list.
+# LPT legs of `slow_files - carve_out` on this same `durations` map, and that
+# job's own drift-guard step fails closed if the union stops matching this list.
+# Both legs are budgeted from that weight (a 35m watchdog under a 40m cap for
+# 16.21m legs), pinned by
+# tests/test_ci_selection.py::test_slow_leg_bounds_clear_the_committed_work.
 - eval/harness/test_harness_benchmark.py
 - eval/retrieval/test_gate_1349.py
 - eval/retrieval/test_run.py

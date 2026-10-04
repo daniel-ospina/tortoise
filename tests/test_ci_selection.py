@@ -2955,6 +2955,46 @@ def test_every_bounded_pytest_job_caps_above_its_watchdog():
         f"watchdog may legitimately reach it (#6135/#3239)")
 
 
+def test_slow_leg_bounds_clear_the_committed_work():
+    """#6137/#3239: each committed `test-slow` leg must run under a watchdog
+    that clears THAT leg's committed work by the house headroom.
+
+    The slow legs are the only bounded pytest job whose budget is a LITERAL
+    while its work moves with `slow_files`, so a changed leg set can outgrow
+    the budget silently. #6137 moved 43 files in — the committed weight went
+    from 4.70m to 16.21m per leg — and left the #3239 literal at 10m, so BOTH
+    legs were killed mid-suite on every full-selection run and took the
+    required `python-ci-gate` red with them (PR #6234 run 37229875496: both
+    legs exited 124 with the 10m WATCHDOG banner and 739/1257 tests passed).
+    `test_every_bounded_pytest_job_caps_above_its_watchdog` could not see it:
+    a 10m watchdog under a 20m cap is a consistent PAIR whatever the work.
+
+    The floor is re-derived from the committed `durations` map, so the budget
+    cannot rot past its work again without reddening here."""
+    from tools.ci_selection import WATCHDOG_HEADROOM
+    job = _load_python_ci()["jobs"]["test-slow"]
+    durations = load_manifest()["durations"]
+    watchdog = _literal_pytest_watchdog(job)
+    assert watchdog is not None, (
+        "test-slow's pytest step must carry a LITERAL watchdog — the per-leg "
+        "budget is what this test derives a floor for")
+    cap = job["timeout-minutes"]
+    assert watchdog < cap, (
+        f"the in-step watchdog ({watchdog}m) must stay BELOW the outer cap "
+        f"({cap}m) so a killed leg still prints its counts (#798)")
+    for row in job["strategy"]["matrix"]["include"]:
+        files = row["files"].split()
+        assert files, f"test-slow leg {row['half']!r} is empty"
+        committed = sum(durations.get(f + ".py", 0.0) for f in files) / 60.0
+        assert watchdog >= WATCHDOG_HEADROOM * committed, (
+            f"test-slow leg {row['half']!r}: the in-step watchdog "
+            f"({watchdog}m) no longer clears its committed estimate "
+            f"({committed:.2f}m) by WATCHDOG_HEADROOM ({WATCHDOG_HEADROOM}x) — "
+            f"the leg is killed mid-suite and the gate reds before pytest can "
+            f"report. Re-derive the budget (and the outer cap above it) from "
+            f"the committed `durations` map.")
+
+
 def test_carve_out_shard_bounds_clear_the_committed_work_without_dwarfing_it():
     """#3239: each shard's watchdog must clear THAT SHARD's committed work with
     the house headroom, and the job's cap must not dwarf the work it backstops.

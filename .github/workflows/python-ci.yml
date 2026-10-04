@@ -1271,59 +1271,58 @@ jobs:
           #      hand-maintained artifact. The old a/b lists were balanced when
           #      written (#4711) and were never rechecked.
           #
-          # #6137 repacked both rows onto the MEASURED junit seconds of the
-          # source run (36430905427) rather than the `durations` map. The map's
-          # slow-pool rows are largely stale (RC12), and packing on them left
-          # the measured legs 21.3 / 15.7 min while the map read a balanced
-          # 16.3 / 16.3 — i.e. it would have made the SLOW leg the new critical
-          # path, which is the defect this relocation exists to remove. The
-          # measured pack is 962s / 962s (1.00:1); the two rows are the two
-          # LPT legs of `slow_files - carve_out`.
+          # #6137 re-cut the two rows. They are the LPT legs of
+          # `slow_files - carve_out` on the committed `durations` map — 34 and
+          # 35 files at 16.202 / 16.205 min, re-derivable with
+          # `split_fast_gate(sorted(slow_files - carve_out), durations, 2)`.
+          # The in-step watchdog below is sized from the heavier leg
+          # (`test_slow_leg_bounds_clear_the_committed_work` pins it), because
+          # a leg that outruns its watchdog is killed mid-suite and reports a
+          # red — the trap the #3239 budget was written for when these legs
+          # carried 4.70 min rather than 16.2.
           #
           # That drift is why these lists should be COMPUTED, not committed —
           # `push_legs()` already LPT-packs the fast halves from `durations`.
           # Until then, a rebalance must be redone whenever a file in this list
-          # grows, and nothing currently reds to say so. Deriving the slow legs
-          # is #6135's open design decision and is not pre-empted here.
+          # grows; `test_slow_leg_bounds_clear_the_committed_work` reds when the
+          # watchdog no longer clears the committed weight. Deriving the slow
+          # legs is #6135's open design decision and is not pre-empted here.
           - half: a
             files: >-
-              eval/harness/test_harness_benchmark eval/retrieval/test_gate_1349
-              eval/retrieval/test_run eval/why_suite/test_why_suite_benchmark
-              eval/write_path/test_write_path_runner test_4314_inert_hooks
-              test_abuse_integration test_battery_setup
-              test_capture_loop_responsiveness test_ci_selection test_cli_context
-              test_dr_endpoints test_embedded_evidence test_ep_selector
-              test_epic903_scheduler test_event_provenance test_graph_diagnostics
-              test_graph_write_loop_responsiveness test_graphcopy_boolean_index_3154
-              test_hosted_api test_hosted_volunteer_context test_index_cli
-              test_index_directory test_indexes test_ingest test_ingest_mode
-              test_ingest_validation test_markers test_oauth_mcp
-              test_pack_shipping_wheel test_probe_reset_inflight_4608
-              test_search_engine_gaps test_selfhost_health_probe_executor
-              test_unjournaled_mutation_class test_write_verb
+              eval/retrieval/test_gate_1349 eval/retrieval/test_run
+              eval/why_suite/test_why_suite_benchmark eval/write_path/test_write_path_benchmark
+              eval/write_path/test_write_path_runner test_4314_inert_hooks test_backfill_sources
+              test_billing test_capture_session test_ci_selection test_cli_context
+              test_consistency_divergence_5011 test_embedded_evidence test_enumeration_surfaces
+              test_ep_sources test_epic903_fixtures test_epic903_scheduler
+              test_epic903_warmstart test_extractor_v2 test_graph_write_loop_responsiveness
+              test_hosted_volunteer_context test_index_directory test_ingest_mode
+              test_ingest_validation test_journal_embedding_5004 test_markers
+              test_mcp_route_challenge test_oauth_mcp test_operator_idempotency_4971
+              test_pack_shipping_wheel test_probe_reset_inflight_4608 test_sdk test_sdk_group3
+              test_selfhost_health_probe_executor
           - half: b
             files: >-
-              eval/write_path/test_write_path_benchmark test_about_edges
-              test_backfill_sources test_battery_r1_seed test_billing
-              test_capture_session test_client_surface test_commit_endpoint
-              test_consistency_divergence_5011 test_control_plane test_dream
-              test_enumeration_surfaces test_ep_sources test_epic903_fixtures
-              test_epic903_modes test_epic903_warmstart test_extractor_v2
-              test_import_endpoint test_ingest_bundle test_ingest_v2_consolidation
-              test_journal_embedding_5004 test_mcp_http test_mcp_route_challenge
-              test_monitoring test_operator_idempotency_4971 test_platform_seams
-              test_projection test_relationships_bounded test_sdk test_sdk_group3
-              test_sdk_surface test_skip_guard
-              test_source_inheritance_own test_surface_manifest
+              eval/harness/test_harness_benchmark test_about_edges test_abuse_integration
+              test_battery_r1_seed test_battery_setup test_capture_loop_responsiveness
+              test_client_surface test_commit_endpoint test_control_plane test_dr_endpoints
+              test_dream test_ep_selector test_epic903_modes test_event_provenance
+              test_graph_diagnostics test_graphcopy_boolean_index_3154 test_hosted_api
+              test_import_endpoint test_index_cli test_indexes test_ingest test_ingest_bundle
+              test_ingest_v2_consolidation test_mcp_http test_monitoring test_platform_seams
+              test_projection test_relationships_bounded test_sdk_surface
+              test_search_engine_gaps test_skip_guard test_source_inheritance_own
+              test_surface_manifest test_unjournaled_mutation_class test_write_verb
     name: test-slow (${{ matrix.half }})
     # #3239: OUTER cap, strictly above the in-step watchdog below — that kill
     # is the one that PRINTS the pass/fail counts (#798); a runner-level cap
-    # that fires first cancels the step and loses them. Measured 2026-09-30
-    # over the 60 newest completed runs: pytest-step max 4.70m (leg a) /
-    # 3.50m (leg b), job max 7.98m. 20m clears the observed work 2.5x; the
-    # inherited 90m cleared it 11x and let a hung leg hold the per-PR
-    # concurrency slot for the whole cap (#3239).
-    timeout-minutes: 20
+    # that fires first cancels the step and loses them. #6137 moved 43 files
+    # into these legs, taking the committed weight from 4.70m to 16.21m, so
+    # the #3239 literal budget no longer clears the work: the watchdog goes to
+    # 35m (2.16x the 16.21m heavier leg) and this cap to 40m (2.47x). The cap
+    # still clears the watchdog, so a hung leg prints its counts before the
+    # runner cancels the step.
+    timeout-minutes: 40
     # Epic #1647 Task 9 Step 5: the slow legs run against the provisioned
     # passworded falkordb service (same block as the fast job — both probe
     # families: 6379 passworded + 16379 passwordless legacy).
@@ -1541,10 +1540,14 @@ jobs:
           # -r flags, and a trailing -rfE would suppress the skip summary the
           # guard depends on; pinned by
           # tests/test_ci_selection.py::test_test_slow_job_carries_junitxml_manifest_guard).
-          # #3239: 10m = 2x the measured pytest step (max 4.70m leg a /
-          # 3.50m leg b) — tools/ci_selection.WATCHDOG_HEADROOM, the factor
-          # #6135 already validated for the fast shards.
-          timeout -s INT -k 10 10m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
+          # #3239: the watchdog is tools/ci_selection.WATCHDOG_HEADROOM times
+          # the leg's committed weight — the same factor #6135 validated for
+          # the fast shards. #6137 moved 43 files in, so the heavier leg now
+          # carries 16.21m and the literal is 35m (2.16x); it was 10m when the
+          # legs carried 4.70m. Re-deriving the budget when the leg set moves is
+          # the whole point of `test_slow_leg_bounds_clear_the_committed_work`,
+          # which reds here if this literal stops clearing the committed work.
+          timeout -s INT -k 10 35m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
           rc=$?
           echo "$rc" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
           kill $HB_PID 2>/dev/null || true
@@ -1576,7 +1579,7 @@ jobs:
             passed=$(grep -c ' PASSED' /tmp/pytest.log)
             failed=$(grep -c ' FAILED' /tmp/pytest.log)
             errored=$(grep -c ' ERROR' /tmp/pytest.log)
-            echo "==================== WATCHDOG: pytest killed after 10m ($passed passed, $failed failed, $errored errored so far) — last test lines above ===================="
+            echo "==================== WATCHDOG: pytest killed after 35m ($passed passed, $failed failed, $errored errored so far) — last test lines above ===================="
           fi
           echo "==================== pytest exit code: $rc ===================="
           exit $rc
