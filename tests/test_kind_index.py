@@ -397,7 +397,7 @@ class TestIndexMemoIsBoundedAndThreadSafe:
         the loser's ``replace`` hit an already-renamed source and raised
         ``FileNotFoundError`` out of ``build`` (measured when the memo-hit
         persist lost ``_INDEX_LOCK``'s incidental serialization). Each writer
-        now gets its own mkstemp path (#5339 review)."""
+        now gets its own O_EXCL uuid4 temp path (#5339 review)."""
         import threading
 
         idx = KindIndex.build(spec, encoder=StubEncoder(), persist=False)
@@ -447,8 +447,7 @@ class TestIndexMemoIsBoundedAndThreadSafe:
 
     def test_persist_leaves_no_temp_when_the_save_raises(self, spec, tmp_path,
                                                         monkeypatch):
-        """#5339 review: the finally-unlink is the reason the mode step sits in
-        the same try — a raising save must leave no ``.tmp.npz`` behind and
+        """#5339 review: a raising save must leave no ``.tmp.npz`` behind and
         must not create the destination."""
         import numpy as np
 
@@ -462,3 +461,24 @@ class TestIndexMemoIsBoundedAndThreadSafe:
             idx.persist(cache_dir=tmp_path)
         assert not list(tmp_path.glob(".*.tmp.npz")), "a stray temp leaked"
         assert not (tmp_path / f"{cache_key_for(spec)}.npz").exists()
+
+    def test_persist_never_mutates_the_process_umask(self, spec, tmp_path,
+                                                    monkeypatch):
+        """#5339 review (P1): the umask is process-global, so an
+        ``os.umask(0)``/restore dance either races across the capture pool or
+        leaks umask 0 on an interrupt. ``persist()`` must derive the mode from
+        the kernel (``os.open(..., 0o666)``), never READ the umask — this pins
+        the deletion, which the mode assertions alone cannot (the old dance and
+        the kernel give the same modes)."""
+        import os
+
+        idx = KindIndex.build(spec, encoder=StubEncoder(), persist=False)
+        calls: list[object] = []
+
+        def recorder(mask=None):
+            calls.append(mask)
+            return 0o022
+
+        monkeypatch.setattr(os, "umask", recorder)
+        idx.persist(cache_dir=tmp_path)
+        assert calls == [], f"persist() mutated the process umask: {calls}"

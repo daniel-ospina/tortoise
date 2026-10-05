@@ -277,9 +277,12 @@ class KindIndex:
         tmp_name = path.parent / (
             f".{path.stem}.{os.getpid()}.{uuid.uuid4().hex}.tmp.npz")
         fd = os.open(tmp_name, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o666)
-        os.close(fd)
         tmp = Path(tmp_name)
         try:
+            # close cannot be retried on EINTR (PEP 475), and a close failure
+            # must still reach the unlink below.
+            with contextlib.suppress(OSError):
+                os.close(fd)
             np.savez(
                 tmp,
                 kind_names=np.asarray(self.kind_names, dtype=str),
