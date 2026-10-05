@@ -3926,6 +3926,12 @@ class FalkorProjection(
         # "what does the catalog say right now" (a READ-path measurement). They
         # can disagree in the fail-open lane and that is correct.
         self._vector_indexed_labels: set[str] | None = None
+        # #5434: the rows `_schema_is_current()` read, published so the
+        # vector-index inventory can reuse them instead of issuing a second
+        # `CALL db.indexes()`. Initialised HERE and read via `getattr` at the
+        # fast path, because a projection built with `object.__new__` (tests,
+        # mocks) never runs this and must not AttributeError.
+        self._index_catalogue_rows: list | None = None
         # Ops safety residual (#428): auto health check on open + transparent
         # corruption recovery. Embedded DBs rebuild from their adjacent JSONL
         # event log when lost/corrupt; production (FLY_APP_NAME) and server
@@ -8400,8 +8406,12 @@ class FalkorProjection(
             # that lost only its vector index still gets it back.
             # #5434: hand over the catalogue rows `_schema_is_current` just
             # read, so the inventory below does not re-probe (one probe per
-            # repeat sweep).
-            self._ensure_vector_index_api(self._index_catalogue_rows)
+            # repeat sweep). `getattr` because a projection built with
+            # `object.__new__` (tests, mocks) has no `__init__` and therefore no
+            # attribute — and `None` there simply falls back to a fresh read,
+            # which is always safe.
+            self._ensure_vector_index_api(
+                getattr(self, "_index_catalogue_rows", None))
             return
 
         # ── Range indexes (always safe, pre-4.x compatible) ──
@@ -8781,12 +8791,22 @@ class FalkorProjection(
         # correct). A dimension change is still the documented
         # drop-and-recreate operation, not a constant edit.
         from ..embeddings import EMBEDDING_DIM
+        # #5434: did this call WRITE an index? If it did, `catalogue_rows` -
+        # read BEFORE the write - no longer describes the engine, and reusing it
+        # would report a false gap. The Point VECTOR index is NOT part of
+        # `_schema_is_current`'s required set, so a store with every range/FTS
+        # index but no vector index answers "schema is current" and takes the
+        # fast path, which then CREATES the index here. That is exactly the
+        # case the reviewer reproduced: the warning named `Point` as unindexed
+        # immediately after creating its index.
+        _wrote_index = False
         try:
             self.g.query(
                 "CALL db.idx.vector.createNodeIndex('Point', 'embedding', "
                 f"{EMBEDDING_DIM}, 'HNSW')"
             )
             self._vector_index_api = 'procedure'
+            _wrote_index = True
         except Exception as e:
             msg = str(e).lower()
             if "already" in msg:
@@ -8805,6 +8825,7 @@ class FalkorProjection(
                         "similarityFunction: 'cosine'}"
                     )
                     self._vector_index_api = 'cypher'
+                    _wrote_index = True
                 except Exception as e2:
                     msg2 = str(e2).lower()
                     if "already" in msg2:
@@ -8818,12 +8839,16 @@ class FalkorProjection(
         # attempt above, so a fresh graph reports post-creation state rather
         # than a false "everything is missing" gap. Read-only and fail-open.
         #
-        # #5434: `catalogue_rows` is supplied ONLY by the fast path, where the
-        # catalogue was read moments ago and nothing in between can have written
-        # an index — so this measurement costs no extra probe. On the full sweep
-        # it is None and the read below is deliberate: the sweep just created
-        # indexes, so a reused pre-creation read would report a false gap.
-        self._record_vector_index_inventory(catalogue_rows)
+        # #5434: `catalogue_rows` may only be reused when this call did NOT
+        # write — otherwise the rows it holds were read BEFORE the write and
+        # describe a catalogue that no longer exists (the false-gap bug). When
+        # the index was created, or when there were no rows supplied (the full
+        # sweep), the inventory re-reads. The steady-state repeat sweep takes
+        # the "already" branch, writes nothing, and reuses — which is what keeps
+        # `tests/test_indexes.py::test_repeat_sweep_runs_no_already_satisfied_ddl`
+        # at exactly one catalogue probe.
+        self._record_vector_index_inventory(
+            None if _wrote_index else catalogue_rows)
 
     @property
     def required_embedding_dim(self) -> int | None:
