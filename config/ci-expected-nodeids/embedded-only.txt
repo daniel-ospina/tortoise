@@ -100,6 +100,10 @@ tests/test_lme_m6_evidence.py::test_session_id_written_by_sdk_capture_path
 tests/test_onboard_prompt_ref.py::test_init_missing_falkordblite_prints_install_guidance
 tests/test_onboarding_false_completion_repair.py::tests.test_onboarding_false_completion_repair
 tests/test_onboarding_seed_endpoint.py::tests.test_onboarding_seed_endpoint
+# #6133: the four `test_onboarding_state_split_*` markers below are FORWARD-LOOKING.
+# They replace the single `test_onboarding_state_split.py` marker, so they cannot appear
+# in the 35518962357 provenance run named above (the split postdates that run). Remove
+# this note once a d14 run has regenerated this file.
 tests/test_onboarding_state_split_checkpoint.py::tests.test_onboarding_state_split_checkpoint
 tests/test_onboarding_state_split_init.py::tests.test_onboarding_state_split_init
 tests/test_onboarding_state_split_patch.py::tests.test_onboarding_state_split_patch
