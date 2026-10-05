@@ -14714,7 +14714,18 @@ async def list_sessions(request: Request, org: dict = Depends(get_current_org_se
             "MATCH (s:Session) "
             + ("WHERE s.actor_user_id = $uid " if actor_filter else "")
             + "OPTIONAL MATCH (s)-[:CONTAINS]->(p:Point) "
-            "WHERE p.pointKind IN ['decision', 'statement'] "
+            # #3555: the NON-TURN filter, matching get_session_detail (the count
+            # at its `extracted_count` and its points list, both added under #822).
+            # The pair that used to stand here -- `pointKind IN ['decision',
+            # 'statement']` -- dropped every extraction-produced point the
+            # extractor types as `unclassified` (its documented vocabulary:
+            # extractor_v2 emits '"pointKind": "statement"|"unclassified"'), so a
+            # session could report `extracted: 0` on the list while the SAME
+            # session's detail reported the point -- two endpoints disagreeing on
+            # one figure. `IS NULL` is deliberate: an untyped point is still an
+            # extraction-produced point, and `NULL <> 'event'` is NULL (not true)
+            # in Cypher, so without it untyped points would stay uncounted.
+            "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "
             "RETURN s.id, s.created_at, s.turn_count, count(p), "
             "s.actor_user_id, s.harness, "
             "s.machine_id, s.model "

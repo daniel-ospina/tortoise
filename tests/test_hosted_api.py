@@ -2983,6 +2983,62 @@ class TestSessionCapture:
             "issues/new?template=bug_report.yml"), b["report_url"]
 
 
+    def test_list_sessions_extracted_counts_non_turn_points_regardless_of_kind(self, client):
+        """#3555: the LIST's `extracted` must count extraction-produced points
+        whatever their `pointKind`, and must agree with the DETAIL endpoint.
+
+        Measured defect: `list_sessions` filtered on `pointKind IN ['decision',
+        'statement']` while `get_session_detail` (both its count and its points
+        list, added under #822) used the non-turn filter. The extractor types
+        pack-domain content `unclassified` -- its documented vocabulary is
+        '"pointKind": "statement"|"unclassified"' -- so the SAME session
+        reported a different `extracted` on the list than on the detail.
+
+        The graph is built directly (not through POST /v1/sessions) because the
+        subject here is the READ predicate; the numbers discriminate all three
+        candidate predicates: 2 = correct, 1 = the old hardcoded pair, 3 =
+        'count every contained point'. Both directions matter, because the
+        session's CONTAINS edge also carries the TURN points
+        (`pointKind='event'`), so 'count everything' would report turns as
+        extractions.
+        """
+        import tortoise.hosted_api as ha_mod
+        proj = ha_mod._make_sdk(namespace=TEST_ORG_ID)._get_proj()
+        sid = "sess-3555-nonturn"
+        proj.g.query(
+            "MERGE (s:Session {id:$sid}) "
+            "SET s.created_at='2026-10-05T00:00:00Z', s.turn_count=0 "
+            # 1. an extraction-produced point the OLD pair dropped:
+            "MERGE (p:Point {id:$sid + '-x1'}) "
+            "SET p.pointKind='unclassified', p.content='pack-domain', p.createdAt=1 "
+            "MERGE (s)-[:CONTAINS]->(p) "
+            # 2. a point of a kind the old pair already counted (regression):
+            "MERGE (d:Point {id:$sid + '-x2'}) "
+            "SET d.pointKind='decision', d.content='ship it', d.createdAt=2 "
+            "MERGE (s)-[:CONTAINS]->(d) "
+            # 3. a TURN, which must stay excluded:
+            "MERGE (t:Point {id:$sid + '-t9'}) "
+            "SET t.pointKind='event', t.content='[user] hi', t.createdAt=3 "
+            "MERGE (s)-[:CONTAINS]->(t)",
+            params={"sid": sid})
+        try:
+            listed = client.get("/v1/sessions").json()["sessions"]
+            row = next((x for x in listed if x["id"] == sid), None)
+            assert row is not None, f"the session must be listed: {[x['id'] for x in listed][:5]!r}"
+            assert row["extracted"] == 2, (
+                "the list must count non-turn points whatever their kind "
+                "('unclassified' was dropped by the hardcoded pair) and must "
+                f"NOT count the turn: {row!r}")
+            detail = client.get(f"/v1/sessions/{sid}").json()
+            assert detail["extracted"] == row["extracted"] == 2, (
+                "list and detail must agree on one session's extracted figure: "
+                f"list={row['extracted']!r} detail={detail['extracted']!r}")
+        finally:
+            proj.g.query("MATCH (s:Session {id:$sid}) DETACH DELETE s", params={"sid": sid})
+            proj.g.query("MATCH (p:Point) WHERE p.id STARTS WITH $sid DETACH DELETE p",
+                         params={"sid": sid})
+
+
 class TestSessionCaptureWriteVerb:
     """W5 (#2104): POST /v1/sessions speaks the frozen memory_write_v1 write
     verb (S12/DM-2) — protocol_version REQUIRED, provenance REQUIRED,
