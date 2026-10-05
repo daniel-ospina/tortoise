@@ -395,18 +395,22 @@ def test_nodeid_parsing_is_not_fooled_by_skip_summary_lines() -> None:
 
 
 def test_probe_reproduces_the_shipped_failure() -> None:
-    """The probe must flag the module that actually stranded #6390.
+    """The probe must flag the module class that actually stranded #6390.
 
-    `test_onboarding_state_split.py` is the file whose zero-collection killed
-    #6390's `test (a)` leg. If the probe ever stops seeing it, the census has
-    gone blind and this file is worthless.
+    #6133 split `test_onboarding_state_split.py` — the file whose zero-collection
+    killed #6390's `test (a)` leg — into four URI-requiring modules, so the probe
+    is now checked against all four that replaced it. If the probe stops seeing
+    them, the census has gone blind and this file is worthless.
     """
     flagged = _collect_nothing_uri_less()
-    assert "tests/test_onboarding_state_split.py" in flagged, (
-        "the URI-less collect probe no longer flags test_onboarding_state_split.py "
-        "— the module that produced #6390's unattributable rc=5. The probe is "
-        "measuring the wrong leg (check TORTOISE_DB_URI is really EMPTY, present "
-        "not absent, and the marker still matches the CI collect step)."
+    survivors = [n for n in flagged if "test_onboarding_state_split_" in n]
+    assert len(survivors) == 4, (
+        "the URI-less collect probe no longer flags the four "
+        "test_onboarding_state_split_* modules that replaced the module which "
+        "produced #6390's unattributable rc=5 (flagged: "
+        f"{survivors}). The probe is measuring the wrong leg (check "
+        "TORTOISE_DB_URI is really EMPTY, present not absent, and the marker "
+        "still matches the CI collect step)."
     )
 
 

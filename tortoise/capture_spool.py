@@ -152,6 +152,13 @@ class Snapshot:
     machine_id: str
     model: str | None = None
     harness: str = "claude"
+    # #3516 §B: which producer captured this session — 'hook' (the in-process
+    # hook/CLI leg) or 'store_sync' (the store-sync backstop). It is the ONLY
+    # discriminator that makes the hook-liveness check falsifiable: without it
+    # the two lanes POST identical rows and a dead hook greens. None (absent)
+    # is honest — a backfill/import producer has no lane, and the server stores
+    # absence, never a fabricated lane.
+    capture_lane: str | None = None
 
 
 @dataclass
@@ -729,8 +736,18 @@ def write_spool_entry(
     stored = read_spool_turns(root, snapshot.session_id) if prior else []
     new_digest = content_digest(snapshot.turns)
 
-    # Dedup: an identical snapshot is a no-op (no rewrite, no re-upload).
-    if prior and len(stored) == len(snapshot.turns) and prior.get("content_digest") == new_digest:
+    # Dedup: an identical snapshot is a no-op (no rewrite, no re-upload) —
+    # UNLESS it carries a lane the entry has never had. The lane is metadata,
+    # not content: a hook re-snapshot of byte-identical turns would otherwise
+    # early-return here and the entry would stay lane-less forever, so a
+    # genuinely live hook would read as "not confirmed" (#3516 §B review F6).
+    lane_upgrade = bool(snapshot.capture_lane) and not (prior or {}).get("capture_lane")
+    if (
+        prior
+        and len(stored) == len(snapshot.turns)
+        and prior.get("content_digest") == new_digest
+        and not lane_upgrade
+    ):
         return {"written": False, "bytes": _entry_bytes(root, snapshot.session_id), "discards": discards}
 
     extends = (
@@ -775,14 +792,36 @@ def write_spool_entry(
         "attempts": _attempts(prior or {}),
         "next_attempt_at_ms": _carried_window(prior or {}),
     }
+    # Set-only-when-present, FIRST-WRITER-WINS, and — unlike `model` below,
+    # which is never carried forward — carried forward across snapshots. The
+    # `prior` lane wins when both are set, so a later snapshot can only FILL IN
+    # an absent lane, never RELABEL one: a `store_sync` snapshot can never
+    # DOWNGRADE a stored `hook`. That is the pinned contract
+    # (docs/plans/2026-08-25-1714-memory-capture-onboarding.md: "the delivery
+    # lane is monotone"), and it is the same first-writer-wins rule the SERVER
+    # applies (`sdk._write_session_and_turns` coalesce) — the spool must not be
+    # the odd leg out, because its lane is what gets delivered. The resolution
+    # is TRUTHY (`or`), matching the TypeScript leg byte-for-byte.
+    _lane = (prior or {}).get("capture_lane") or snapshot.capture_lane
+    if _lane:
+        meta["capture_lane"] = _lane
     if snapshot.model:
         meta["model"] = snapshot.model
     # A re-snapshot whose content is byte-identical to what was already filed
     # keeps the filing marker (the prior branch was unreachable above when the
     # digests matched and the lengths matched — retained for a window shift that
     # lands on identical content).
-    if prior and prior.get("content_digest") == new_digest and prior.get("filed_key"):
+    # `lane_upgrade` is BELT-AND-BRACES: `_flush_one`'s skip requires
+    # `filed_lane == capture_lane`, so a lane-less filing whose lane later
+    # appears already fails that clause and re-posts without this guard. Keep it
+    # so the marker itself never claims a lane it did not deliver, and note the
+    # mechanism lives in the skip clause, not here. (#3516 §B review)
+    if (prior and prior.get("content_digest") == new_digest
+            and prior.get("filed_key") and not lane_upgrade):
         meta["filed_key"] = prior["filed_key"]
+        prior_lane_delivered = prior.get("filed_lane")
+        if prior_lane_delivered:
+            meta["filed_lane"] = prior_lane_delivered
         meta["filed_at"] = prior.get("filed_at")
 
     meta_text = json.dumps(meta, ensure_ascii=False, indent=2) + "\n"
@@ -1032,10 +1071,13 @@ def _clear_breadcrumb_for(harness: str | None, session_id: str | None) -> None:
     The record is per-HARNESS, so this must be narrow in three directions or it
     destroys evidence about something else (#4714 review):
 
-    * ``kind`` — the shipped hooks write ``install-inert`` to the SAME path, and
-      ``session verify`` reaches INERT only from that record. Unlinking blindly
-      let a drain firing while verify was mid-flight erase it and report an
-      inert install as PROVEN. Only a ``capture-failure`` record is cleared.
+    * ``kind`` — a LEGACY install (or a foreign file) can still sit at the
+      ``capture-failure`` path with ``install-inert`` content, and
+      ``session verify`` reaches INERT only from that record (#5838 moved the
+      LIVE install-inert slot to ``<harness>-install.json``, which this never
+      touches). Unlinking blindly let a drain firing while verify was
+      mid-flight erase it and report an inert install as PROVEN. Only a
+      ``capture-failure`` record is cleared.
     * ``session_id`` — a failure recorded for a DIFFERENT session must survive.
       This is an IDENTITY check; a timestamp check does NOT work, because the
       spool's ``updated_at`` is frozen by the dedup path and so cannot say when
@@ -1052,12 +1094,13 @@ def _clear_breadcrumb_for(harness: str | None, session_id: str | None) -> None:
     try:
         import json
 
-        from tortoise.hook_install import KIND_CAPTURE_FAILURE, local_state_dir
+        from tortoise.hook_install import KIND_CAPTURE_FAILURE, breadcrumb_file
 
         # The WRITER's derivation, not a second one: under an empty or absent
         # override both resolve under ``$HOME``, so a breadcrumb the writer
-        # placed is the one this clears (``local_state_dir`` owns the rule).
-        path = local_state_dir("capture-errors") / f"{harness}.json"
+        # placed is the one this clears (``local_state_dir`` owns the rule, and
+        # ``breadcrumb_file`` owns which of the two slots this kind occupies).
+        path = breadcrumb_file(harness, KIND_CAPTURE_FAILURE)
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -1114,7 +1157,14 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
                       "by a drain",
         })
         return
-    if meta.get("filed_key") and meta.get("filed_key") == meta.get("capture_key"):
+    if (meta.get("filed_key") and meta.get("filed_key") == meta.get("capture_key")
+            and meta.get("filed_lane") == meta.get("capture_lane")):
+        # #3516 §B: `filed_key` is CONTENT-derived, so on its own it says the
+        # content was delivered — not that the LANE was. An entry filed
+        # lane-less and then upgraded must be re-posted, or the lane is
+        # stranded and a working hook reads as not-live. `filed_lane` records
+        # the lane the 2xx actually carried; entries filed before this field
+        # existed have neither lane nor filed_lane, so they compare equal.
         summary.skipped += 1
         return
     window = _backoff_ms(meta)
@@ -1150,8 +1200,15 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         "conversation": turns,
         "machine_id": meta.get("machine_id"),
     }
+    # #3516 §B: forward the producer lane ONLY when the spool entry carries one
+    # (set-only-when-present). A pre-#3516 entry, or a backfill/import entry,
+    # has no lane and must POST without the key rather than inventing one.
+    if meta.get("capture_lane"):
+        payload["capture_lane"] = meta["capture_lane"]
     if meta.get("model"):
         payload["model"] = meta["model"]
+    # The lane actually put on the wire — part of the CAS identity below.
+    posted_lane = payload.get("capture_lane")
     outcome = post(payload)
     summary.outcomes[sid] = outcome
     if outcome.ok:
@@ -1162,24 +1219,60 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         # left the breadcrumb standing (and `session verify` reading a failure
         # that had already been resolved) (#4714 review).
         _clear_breadcrumb_for(meta.get("harness"), sid)
-        # COMPARE-AND-SWAP, on the POSTED CONTENT. A concurrent capture (a
-        # resumed session, or the SessionStart drain racing a live turn) can
-        # grow this entry while the POST is in flight. Stamp `filed_key` only
-        # when what is on disk NOW is exactly what was posted; otherwise the
-        # entry stays unfiled and the next opportunity re-posts the longer
-        # conversation. Comparing meta-to-meta was wrong: a writer killed
-        # between its log append and its meta write leaves the meta digest
-        # stale, so the check passed while a turn went unfiled forever.
-        on_disk_turns = read_spool_turns(root, sid)
-        on_disk = read_spool_meta(root, sid)
-        if (on_disk is not None
-                and content_digest(on_disk_turns) == posted_digest):
-            on_disk["filed_key"] = on_disk.get("capture_key") or capture_key(sid, on_disk_turns)
-            on_disk["filed_at"] = datetime.fromtimestamp(
+        # COMPARE-AND-SWAP, on the POSTED CONTENT **AND LANE**. A concurrent
+        # capture (a resumed session, or the SessionStart drain racing a live
+        # turn) can grow this entry while the POST is in flight. Stamp
+        # `filed_key`/`filed_lane` only when what is on disk NOW is exactly what
+        # was posted; otherwise the entry stays unfiled and the next opportunity
+        # re-posts. Comparing meta-to-meta was wrong: a writer killed between
+        # its log append and its meta write leaves the meta digest stale, so the
+        # check passed while a turn went unfiled forever.
+        #
+        # The read happens IMMEDIATELY before the write, and the WRITE APPLIES
+        # TO THE FRESHLY-READ META — never to a snapshot taken earlier. Writing
+        # an earlier snapshot back would clobber any concurrent edit that landed
+        # in between, including a lane upgrade, which is precisely the edit that
+        # must survive.
+        #
+        # A RESIDUAL window remains: a lane-upgrading snapshot landing between
+        # the read below and the write is still clobbered, and the entry then
+        # reads as FILED LANE-LESS until some later snapshot re-triggers the
+        # upgrade (permanent only if the session never snapshots again). It is
+        # accepted rather than closed — the window is two file reads plus one
+        # `content_digest` (sub-millisecond for a typical session, up to ~150 ms
+        # at the 16 MB `SPOOL_MAX_ENTRY_BYTES` bound), and the racer must be the FIRST
+        # lane-ful snapshot of a previously lane-less entry. Closing it needs
+        # mutual exclusion in the capture hot path (every turn_end) in two
+        # languages, where a stale lock would BLOCK OR LOSE CAPTURES — a worse
+        # failure. If it ever must be closed, the lock-free route is a SIDECAR
+        # marker file for these drain-owned fields, so no read-modify-write
+        # touches `meta.json`.
+        #
+        # The LANE is part of that identity: `capture_key` is content-derived
+        # and the lane is not part of the content, so without it a lane upgrade
+        # landing inside the POST window was cancelled and the lane stranded
+        # (reachable in the shipped topology — claude-hooks/session-start.sh
+        # backgrounds this drain).
+        fresh_turns = read_spool_turns(root, sid)
+        fresh = read_spool_meta(root, sid)
+        if (fresh is not None
+                and content_digest(fresh_turns) == posted_digest
+                and fresh.get("capture_lane") == posted_lane):
+            fresh["filed_key"] = fresh.get("capture_key") or capture_key(sid, fresh_turns)
+            # OMIT the key for a lane-less filing rather than writing `null`: the
+            # TS leg's `readSpoolEntry` is a raw `JSON.parse`, so it would see
+            # `null` where its own writer leaves `undefined`, and its strict
+            # `===` would then bypass the skip and re-POST a Python-filed entry
+            # (a cross-leg amplification in a directory the two legs share).
+            if posted_lane:
+                fresh["filed_lane"] = posted_lane
+            else:
+                fresh.pop("filed_lane", None)
+            fresh["filed_at"] = datetime.fromtimestamp(
                 now_ms / 1000.0, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-            on_disk["attempts"] = 0
-            on_disk["next_attempt_at_ms"] = 0
-            _write_meta(root, on_disk)
+            fresh["attempts"] = 0
+            fresh["next_attempt_at_ms"] = 0
+            _write_meta(root, fresh)
         # else: the posted content WAS filed; the entry keeps the newer turns
         # and stays unfiled, so they are re-posted next time.
         summary.filed += 1

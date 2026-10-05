@@ -5885,27 +5885,28 @@ def test_every_changed_set_diff_disables_rename_detection():
         the eval-drift gate — are filed as follow-ups, not covered here.
     * The non-vacuity floor (`checked >= 3`) is a FLOOR, not a pin of exactly
       three. It is counted from the PARSED commands above — measured today as
-      THREE: ONE on `python-ci.yml`'s "Tiered selection" step (#3442 collapsed its
+      FOUR: ONE on `python-ci.yml`'s "Tiered selection" step (#3442 collapsed its
       two `||`-joined diffs into one canonical merge-base diff), one on `ci.yml`'s
-      "Compute per-surface path gates (#2149)" step, and one on the dead step
-      below. So a comment cannot satisfy it (and a comment mentioning the flag
-      cannot inflate it). The floor now has ZERO headroom: the two LIVE commands
-      fall one short of it, so deleting the dead step alone leaves `checked == 2` and
-      FAILS the floor — the floor must come down to 2 BEFORE that step is removed.
-    * The dead third command — from the "Get changed markdown files" step in
-      `ci.yml` (cited by step name, not line number, because line numbers drift)
-      — is INERT today. That step builds a lint-target list, and the `docs` job
-      checks out at depth 1, so `github.event.pull_request.base.sha` is absent,
-      the diff fails, `|| true` leaves `FILES` empty and the consuming
-      markdownlint/lychee steps are skipped. The `docs` job's own "Conflict-marker
-      check (#2802)" step comment records this. Do not let the floor drift above the
-      PARSED count — today 3, of which only 2 are live, so this inert step is the
-      only thing holding the floor at 3 rather than 2.
+      "Compute per-surface path gates (#2149)" step, and TWO on `ci.yml`'s two
+      "Get changed markdown files" steps (the PR path and the main-health path).
+      So a comment cannot satisfy it (and a comment mentioning the flag cannot
+      inflate it). The floor is 3 so removing one command does not require a
+      floor change; it has to come down to 2 only if a SECOND command is removed,
+      once just two remain.
+    * The PR-path command — the "Get changed markdown files" step in `ci.yml`
+      (cited by step name, not line number, because line numbers drift) — is no
+      longer inert. #2386: it WAS inert because the `docs` job checked out at
+      depth 1, so `github.event.pull_request.base.sha` was absent from the object
+      store, the three-dot diff died with `fatal: Invalid symmetric difference
+      expression`, the tolerance swallowed it, the changed list came out empty
+      and the consuming markdownlint/lychee steps were skipped (job
+      100109903325). The job now checks out at full depth (`fetch-depth: 0`) and
+      the step carries no tolerance on the diff, so the diff resolves against a
+      real base and a bad base fails the step. All FOUR parsed commands are live.
     * The same step's `--no-renames` is still deliberate and the rule applies to
-      it uniformly: it IS a changed-set computation, and feeding markdownlint/lychee
-      the DELETED source path of a `.md`->`.md` rename is tolerated —
-      `npx markdownlint-cli <nonexistent.md>` exits 0, and plain `.md` deletions
-      already put nonexistent paths into this list.
+      it uniformly: it IS a changed-set computation, and `--diff-filter ACMR`
+      keeps the list to paths that exist on disk, so a deleted or renamed-away
+      `.md` source never reaches markdownlint or lychee.
     * Do NOT generalise this rule to `.github/scripts/check-migration-append-only`.
       That script deliberately runs `git diff --find-renames=20% ... --name-status`
       (recorded at `docs/plans/2026-08-13-1095-migration-drift-gate.md:148`).

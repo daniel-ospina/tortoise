@@ -79,6 +79,98 @@ def test_full_but_healthy_is_not_reported_as_corrupt(monkeypatch):
     assert "GRAPH.DELETE" in msg, msg
 
 
+def test_write_refusal_remedy_names_the_safe_path_and_claims_no_flags(monkeypatch):
+    """#2979 — the remedy must be executable, and must make no false claim.
+
+    The message must make no claim about which graph commands the server
+    refuses. Upstream registers `graph.DELETE` as "write deny-script" (no
+    `deny-oom`) while `graph.QUERY` carries `deny-oom`, so a refusal reported
+    during a `GRAPH.QUERY` says nothing about `GRAPH.DELETE` — and #2979's
+    "OutOfMemoryError" is exactly that, the DETACH `safe_graph_delete` sends
+    before `graph.delete()`.
+
+    The executable lever is pinned exactly. The second pin — that no
+    command-refusal claim is made — is BEST-EFFORT only: the stem denylist below
+    cannot catch every wording, and a claim phrased with "refused" would pass
+    it. What protects the property is that the claim is absent and that the
+    comment on `_write_refusal_message` says why it must stay absent.
+    """
+    monkeypatch.delenv("FLY_APP_NAME", raising=False)
+    proj = _projection(probe_error=RuntimeError(_MAXMEMORY_ERROR))
+    proj._memory_pressure = lambda: (512 * 1024 * 1024, 512 * 1024 * 1024)  # type: ignore[method-assign]
+
+    msg = proj._write_refusal_message(RuntimeError(_MAXMEMORY_ERROR))
+    assert msg is not None
+    # 1. The one executable lever.
+    assert "raise / relieve the container's --maxmemory" in msg, msg
+    # 2. The residue-pass lever is NOT named: that pass runs only when an
+    #    operator invokes it, so naming its env lever would be advice that frees
+    #    nothing.
+    assert "TORTOISE_TEST_SWEEP_LEGACY" not in msg, msg
+    # 3. The unsafe shortcut is refused, and the mechanism is still named.
+    assert "GRAPH.DELETE" in msg, msg          # the pre-existing pin, kept
+    assert "Do NOT hand-pick names from GRAPH.LIST" in msg, msg
+    assert "cannot be undone" in msg, msg
+    assert "FLUSHALL" in msg, msg
+    # 4. NO claim about which commands the server refuses. BEST-EFFORT: this
+    #    denylist does not catch every wording a refusal claim could use, and
+    #    "refus"/"cannot" are legitimate elsewhere in the message, so they
+    #    cannot be stems. What protects the property is that the claim is absent
+    #    and the code comment says why it must stay absent.
+    lowered = msg.lower()
+    for stem in ("deny", "reject", "blocked"):
+        assert stem not in lowered, (stem, msg)
+
+
+def test_write_refusal_remedy_does_not_hand_roll_the_ownership_policy(monkeypatch):
+    """#2979 — enumerate no delete-authorizing family: defer to the predicate.
+
+    The ownership policy lives in the code: `_SWEEP_OWNED_PREFIXES`, with
+    `owns_by_ownership_record` as the JOURNAL path's predicate, and
+    `is_legacy_residue` on the journal-blind path. A flat list of graph-name
+    families cannot be exact here, because the two predicates differ and the
+    victim is a name someone cannot attribute — so the message names none.
+
+    The ABSENCE properties below are pinned best-effort, and are labelled as
+    such rather than as stronger properties than they are:
+
+      (a) a WILDCARD BUDGET — exactly the one guard `*`. Bounds glob-spelled
+          enumerations only.
+      (b) a DENYLIST of specific graph-name tokens. It does NOT catch a concrete
+          name outside that list: the real residue entry
+          ``askshape_b6_live_1_33760_21`` passes both (a) and (b).
+
+    The PRESENCE property in (c) is an exact substring pin; (d) is an absence
+    pin like (a) and (b). What protects those properties is review, not these
+    assertions.
+    """
+    monkeypatch.delenv("FLY_APP_NAME", raising=False)
+    proj = _projection(probe_error=RuntimeError(_MAXMEMORY_ERROR))
+    proj._memory_pressure = lambda: (512 * 1024 * 1024, 512 * 1024 * 1024)  # type: ignore[method-assign]
+
+    msg = proj._write_refusal_message(RuntimeError(_MAXMEMORY_ERROR))
+    assert msg is not None
+    # (a) WILDCARD BUDGET: exactly the one guard wildcard. Bounds glob-spelled
+    #     enumerations only — a prose list of concrete names carries no `*`.
+    assert msg.count("*") == 1, msg
+    assert "tortoise_restored*" in msg, msg
+    # (b) DENYLIST of specific graph-name tokens the message must never carry,
+    #     plus the residue-pass lever (that pass runs only when an operator
+    #     invokes it, so naming it is advice that frees nothing). Not a guard against a
+    #     concrete name outside this list — see the docstring.
+    for token in ("NEVER delete", "org_*", "team_*", "registry", "test_",
+                  "v10fix", "tt_gate", "typeprobe", "review_rw_probe",
+                  "TORTOISE_TEST_SWEEP_LEGACY"):
+        assert token not in msg, (token, msg)
+    # (c) the two names `TortoiseSDK.test_guard` blocks are still named.
+    assert "the production graph tortoise" in msg, msg
+    assert "tortoise_restored* snapshot" in msg, msg
+    # (d) the message promises no reclaim: the default pass drops the journal
+    #     INTERSECT `_SWEEP_OWNED_PREFIXES`, so "reclaims what the ownership
+    #     record lists" would be over-inclusive.
+    assert "reclaim" not in msg.lower(), msg
+
+
 def test_memory_pressure_unreadable_still_avoids_rebuild(monkeypatch):
     """An unreadable INFO must not demote the failure back to 'corrupt'."""
     monkeypatch.delenv("FLY_APP_NAME", raising=False)
