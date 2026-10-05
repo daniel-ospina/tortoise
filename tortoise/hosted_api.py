@@ -14251,13 +14251,17 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     # the gate removal; the off-switch lives in _capture_session_impl only).
     from tortoise.commit_idempotency import CommitRecordStore
     from tortoise.commit_schema import (
+        compile_vocab,
         plan_commit,
         validate_payload_dict,
     )
+    from tortoise.pack_state import graph_installed_namespaces
 
     # [1] Layer-1 (400 class = missing required fields; 422 class = shape +
     # semantic violations with field reasons). The derived payload has NO
-    # turns — the legacy turn cap (POST /v1/sessions) does not apply.
+    # turns — the legacy turn cap (POST /v1/sessions) does not apply. The
+    # vocab is the GRAPH's installed-pack gate (#5163), not the process-global
+    # union — resolved below, before validation.
     try:
         raw_bytes = await _read_capped_body(
             request, _COMMIT_SESSION_MAX_BYTES, _COMMIT_SESSION_413_DETAIL)
@@ -14267,7 +14271,31 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     except Exception:
         raise HTTPException(  # noqa: B904
             status_code=400, detail="Request body must be a JSON object")
-    result, payload = validate_payload_dict(raw)
+
+    # #5163: the WRITE GATE must enforce the graph's APPROVAL set, not the
+    # process-global catalog union. Resolve the tenant SDK and the graph's
+    # installed-pack set BEFORE Layer-1 so the 422 is per-graph — the same
+    # decision the extractor prompt already renders (build_master_list reads
+    # the gated tenant_view brief). An unreachable graph RAISES here
+    # (fail-closed): an outage never becomes a silent widen back to the
+    # union. ``None`` = a graph with no :PackInstall records → the catalog
+    # union, exactly as before (#2714 indicator 3).
+    #
+    # #5339 review (P1): ``graph_installed_namespaces`` is a WHOLE-GRAPH read
+    # (the :PackInstall rows plus ``graph_kind_namespaces``' per-property
+    # scans — O(nodes), documented to run per call), and ``compile_vocab`` on a
+    # cold or evicted memo is a filesystem walk + YAML parse of every manifest
+    # (~40 ms). This handler is ``async``, so running either inline parks the
+    # event loop — the #3086/#3060 class this very handler already off-loads
+    # for its SDK open and its point-count check. Resolve the gate AND compile
+    # the vocab in ONE offloaded unit through the graph pool.
+    _require_scope(org, "graphs:write", "commit_session")
+    sdk = await _data_sdk_offloaded(org)
+    _gate_vocab = await _graph_offload(
+        lambda: compile_vocab(
+            installed_namespaces=graph_installed_namespaces(sdk)),
+        op="commit_gate_vocab")
+    result, payload = validate_payload_dict(raw, vocab=_gate_vocab)
     if result.code == "missing_required_fields":
         raise HTTPException(
             status_code=400,
@@ -14290,8 +14318,6 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
             detail={"warnings": blocking, "code": "domain_rule_block"},
         )
 
-    _require_scope(org, "graphs:write", "commit_session")
-    sdk = _data_sdk(org)
     proj = sdk._get_proj()
     store = CommitRecordStore(sdk)
 
