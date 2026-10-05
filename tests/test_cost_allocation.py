@@ -741,53 +741,77 @@ def test_event_retention_loop_awaits_the_cost_refresh():
          and n.test.value is True), None)
     assert while_loop is not None, "_event_retention_loop has no `while True:`"
 
-    def _step_target(call: ast.Call) -> str | None:
-        """The step a ``_guarded_step(label, step)`` call wraps.
+    def _guarded_call(stmt: ast.stmt) -> tuple[str, str] | None:
+        """``(label, step)`` for one guarded body statement, else ``None``.
 
         Off-loop work is scheduled as
-        ``functools.partial(run_on_daemon_worker, fn, name=...)``, so the
-        guarded function is the partial's SECOND positional argument.
+        ``functools.partial(run_on_daemon_worker, fn, name=...)``, so the guarded
+        step is the partial's SECOND positional argument AND the partial's
+        callable must BE ``run_on_daemon_worker``: a coroutine handed to any
+        other runner is never awaited.
         """
-        if len(call.args) < 2:
+        if not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Await)
+                and isinstance(stmt.value.value, ast.Call)):
             return None
-        step = call.args[1]
+        call = stmt.value.value
+        if not (isinstance(call.func, ast.Name)
+                and call.func.id == "_guarded_step" and len(call.args) >= 2):
+            return None
+        label, step = call.args[0], call.args[1]
+        if not (isinstance(label, ast.Constant) and isinstance(label.value, str)):
+            return None
         if isinstance(step, ast.Name):
-            return step.id
+            return label.value, step.id
         if (isinstance(step, ast.Call)
                 and isinstance(step.func, ast.Attribute)
                 and step.func.attr == "partial"
                 and len(step.args) >= 2
+                and isinstance(step.args[0], ast.Name)
+                and step.args[0].id == "run_on_daemon_worker"
                 and isinstance(step.args[1], ast.Name)):
-            return step.args[1].id
+            return label.value, step.args[1].id
         return None
 
-    guarded: set[str] = set()
+    body: list[tuple[str, str]] = []
+    slept = 0
     for stmt in while_loop.body:
-        # Every statement must be an AWAITED call: an un-awaited
-        # `_refresh_cost_allocation()` was the #4493 dead hook.
-        assert (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Await)
-                and isinstance(stmt.value.value, ast.Call)), (
-            "every statement of the periodic body must be an awaited call: "
-            + ast.unparse(stmt))
-        call = stmt.value.value
-        if isinstance(call.func, ast.Attribute) and call.func.attr == "sleep":
-            continue
-        assert (isinstance(call.func, ast.Name)
-                and call.func.id == "_guarded_step"), (
-            "this periodic step is NOT routed through the `_guarded_step` "
-            "guard, so a raise in it would end the loop (#5381): "
-            + ast.unparse(stmt))
-        target = _step_target(call)
-        assert target is not None, (
-            "cannot tell which step this guards: " + ast.unparse(call))
-        guarded.add(target)
+        call = stmt.value.value if (
+            isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Await)
+            and isinstance(stmt.value.value, ast.Call)) else None
+        if (call is not None
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "sleep"
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id == "asyncio"):
+            slept += 1
+            continue  # the interval wait, not a step
+        guarded = _guarded_call(stmt)
+        assert guarded is not None, (
+            "every statement of the periodic body must be an awaited "
+            "`_guarded_step(<label>, <step>)` call, so no step can sit outside "
+            "the guard (#5381): " + ast.unparse(stmt))
+        body.append(guarded)
 
-    expected = {"_sweep_events", "_purge_deleted_orgs",
-                "_sweep_oauth_retention", "_refresh_cost_allocation"}
-    assert guarded == expected, (
-        "the periodic body must guard exactly these steps (#5381); a step "
-        "outside the guard can kill the loop. missing="
-        f"{sorted(expected - guarded)} unexpected={sorted(guarded - expected)}")
+    # Without the interval wait the loop is a 100% CPU busy-spin hammering the
+    # DB every pass — worse than the defect above, and no other assertion here
+    # would notice its removal. Only the STATEMENT is pinned, not the argument:
+    # `sleep(0)` would still spin, and is left unpinned because nothing has
+    # ever produced it in production.
+    assert slept == 1, (
+        "the periodic body must contain exactly one `await asyncio.sleep(...)` "
+        f"statement (found {slept})")
+
+    # ORDERED, and label-paired: a set of names would accept the same four
+    # steps bound to the wrong calls.
+    expected = [("event retention sweep", "_sweep_events"),
+                ("deleted-team purge", "_purge_deleted_orgs"),
+                ("oauth retention", "_sweep_oauth_retention"),
+                ("cost allocation refresh", "_refresh_cost_allocation")]
+    assert body == expected, (
+        "the periodic body must guard exactly these steps, in order, each "
+        "off-loop step scheduled through `run_on_daemon_worker`; a step "
+        f"outside the guard can kill the loop (#5381). got={body} "
+        f"expected={expected}")
 
 
 def test_a_raising_step_cannot_kill_the_retention_loop(monkeypatch, caplog):
@@ -798,7 +822,7 @@ def test_a_raising_step_cannot_kill_the_retention_loop(monkeypatch, caplog):
     process. The invariant is "the loop keeps iterating after a step raises",
     and the only evidence for it is a SUBSEQUENT iteration actually running.
 
-    The sibling test above calls ``_refresh_cost_allocation()`` DIRECTLY and
+    The sibling test below calls ``_refresh_cost_allocation()`` DIRECTLY and
     never executes the loop — a bare no-op step passes it — so the loop's own
     invariant was never asserted by anything.
     """
