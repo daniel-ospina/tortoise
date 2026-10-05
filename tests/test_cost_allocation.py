@@ -1261,6 +1261,6 @@ def test_a_raising_boot_sweep_cannot_kill_the_other_boot_sweeps(
             f"the {raising} boot sweep raised and the {name} sweep never ran — "
             "that call site is not routed through the shared guard (#5381)")
 
-    label = next(l for n, _a, l in _BOOT_SWEEPS if n == raising)
+    label = next(lbl for n, _a, lbl in _BOOT_SWEEPS if n == raising)
     assert any(label in r.getMessage() for r in caplog.records), (
         "the guarded boot failure was swallowed without a log record")
