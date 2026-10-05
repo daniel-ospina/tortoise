@@ -37,6 +37,15 @@ journal that `rebuild_all` replays is a *second*, differently-shaped store:
 `projection_version`) plus the record's own fields. Several folds carry props
 that the payload does not name:
 
+- **The seal annotation (`__TornTailSealed__`, #5917) — an annotation, not a
+  record.** When `EventLog.append` finds the journal ending on a fragment — an
+  unterminated one (a writer killed mid-append) or a terminated line that is
+  not valid JSON — it terminates and/or marks the fragment before writing the
+  new record, so the new record starts on a line of its own while the fragment
+  still reaches the torn-tail classifier. `read_all`
+  never returns it and it shifts no record index; a caller record may not use
+  the type (`append` refuses it).
+
 - **The Point-snapshot folds (`PointAdded`, `PointPromoted`) and the capture
   turn** (#5004) — the `point` snapshot now also carries the embedding, which
   is a *node* property and stays one: `embedding` (the vector as stored, or an

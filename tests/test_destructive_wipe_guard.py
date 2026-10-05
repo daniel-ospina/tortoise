@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 import sys
 from pathlib import Path
 
@@ -454,8 +455,15 @@ def test_rebuild_parses_before_wipe(tmp_path):
                 "point": {"id": "first", "content": "y", "context": "t"}})
     with open(log.path, "a", encoding="utf-8") as fh:
         fh.write("{not valid json\n")          # mid-file corruption
-    log.append({"type": "PointAdded",
-                "point": {"id": "second", "content": "z", "context": "t"}})
+        # Written RAW, not via log.append: `EventLog.append` seals a
+        # terminated-malformed LAST line as a torn fragment before appending
+        # (#5917), which would turn this deliberately mid-file corruption into
+        # a tolerated tear and move the refusal to #3316. This test is about
+        # the parse-before-wipe ordering for a line that is mid-file, so the
+        # second record is written directly to keep it mid-file.
+        fh.write(json.dumps({"type": "PointAdded",
+                             "point": {"id": "second", "content": "z",
+                                       "context": "t"}}) + "\n")
     with pytest.raises(ValueError, match="mid-file corruption"):
         proj.rebuild(log, confirm_destructive=True)
     assert proj.g.wipes() == [], "no wipe may run when the log cannot be read"

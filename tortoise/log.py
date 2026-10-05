@@ -12,7 +12,7 @@ keys) and streaming tail arrive in M1/M4.
 Cursors
 -------
 :meth:`read_after` accepts an opaque cursor token that encodes a 0-based
-line index into the log.  Callers obtain a cursor from :meth:`cursor_at_end`
+record index into the log.  Callers obtain a cursor from :meth:`cursor_at_end`
 (or by encoding the index of the last event they already processed).
 
 Cursor tokens are **not** guaranteed to survive log rotation, compaction, or
@@ -411,12 +411,13 @@ def refuse_torn_tail_revival(revival_records) -> None:
     if not revival:
         return
     raise TornTailResurrectionError(
-        "refusing to replay: the journal's torn trailing record cannot be "
+        "refusing to replay: the journal's torn record cannot be "
         f"proven harmless (type(s): {describe_torn_tail_revival(revival)}); "
         "a truncated record cannot be reconstructed, so replaying without it "
         "could resurrect state its fold would have removed (#3316). "
-        "No record was replayed: the graph was NOT rebuilt. Repair or "
-        "truncate the journal, then retry."
+        "No record was replayed: the graph was NOT rebuilt. Find and repair "
+        "the torn record — an append seals one mid-file, so it is not always "
+        "at the end of the file — then retry."
     )
 
 
@@ -427,15 +428,51 @@ def refuse_torn_tail_revival(revival_records) -> None:
 # so it is a normal line in the file (append-only is preserved: sealing writes
 # bytes, it never truncates or rewrites).
 SEALED_TORN_TYPE = "__TornTailSealed__"
+_SEAL_MARKER_JSON = json.dumps({"type": SEALED_TORN_TYPE})
 
 
-def _is_sealed_marker(text: str) -> bool:
-    """True when *text* is a seal marker line (never a record)."""
+def is_torn_seal_marker(text: str) -> bool:
+    """True when *text* is a COMPLETE seal marker (never a record).
+
+    Exact, not prefix-based: every record ``append`` writes begins ``{"``, so
+    a prefix test here would swallow torn RECORD fragments as annotations and
+    they would never be counted or classified — the fail-open direction #3316
+    forbids. A *torn seal* is matched positionally instead (a seal prefix that
+    directly follows a fragment the reader just kept), which is the only place
+    a prefix is evidence of anything.
+    """
+    return text == _SEAL_MARKER_JSON
+
+
+def _is_seal_prefix(text: str) -> bool:
+    """True when *text* is a marker, complete or TORN (a prefix of it).
+
+    Only ever used for the line FOLLOWING a malformed fragment: the seal is
+    written by the same non-atomic write whose tearing this module already
+    tolerates, so a crash can leave `{"ty` where a complete marker was
+    intended. Without the prefix arm that journal is unreadable FOREVER — the
+    fragment sits mid-file with an unrecognizable successor, and no later
+    ``append`` repairs it, because each seal adds a complete marker one line
+    further down (measured).
+    """
+    return bool(text) and _SEAL_MARKER_JSON.startswith(text)
+
+
+def _decode_line(raw: bytes) -> str | None:
+    """The line's text, or ``None`` when it is not valid UTF-8."""
     try:
-        parsed = json.loads(text)
-    except ValueError:
-        return False
-    return isinstance(parsed, dict) and parsed.get("type") == SEALED_TORN_TYPE
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _classifier_text(raw: bytes) -> str:
+    """What the #3316 classifier sees for a malformed line.
+
+    Undecodable bytes become U+FFFD: a broken byte makes a type unreadable,
+    and an unreadable type is refused rather than assumed harmless.
+    """
+    return raw.decode("utf-8", errors="replace").strip()
 
 
 class EventLog:
@@ -455,26 +492,83 @@ class EventLog:
         rewritten — the seal is another append.
         """
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(event, dict) and event.get("type") == SEALED_TORN_TYPE:
+            # The reserved type is an ANNOTATION: `read_all` skips it, so a
+            # caller record carrying it would be written and never read back —
+            # a silent write/read asymmetry. Refuse it at the only writer.
+            raise ValueError(
+                f"{SEALED_TORN_TYPE} is reserved for the torn-tail seal and "
+                "is never returned by read_all; a record cannot use this type"
+            )
         record = json.dumps(event, ensure_ascii=False) + "\n"
-        seal = ("\n" + json.dumps({"type": SEALED_TORN_TYPE}) + "\n"
-                if self._has_torn_tail() else "")
-        with self.path.open("a", encoding="utf-8") as f:
-            f.write(seal + record)
+        # ONE handle: the tail check and the write share it, so sealing costs
+        # no second open/lseek/read on the write path.
+        with self.path.open("a+b") as f:
+            seal = self._seal_prefix(f)
+            f.seek(0, 2)          # a read must be followed by an explicit seek
+            f.write((seal + record).encode("utf-8"))
 
-    def _has_torn_tail(self) -> bool:
-        """True when the journal's last byte is not the record terminator.
+    def _seal_prefix(self, f) -> str:
+        """What must precede *record* for it to start on a clean line.
 
-        A missing or empty file is not torn (there is no fragment to seal).
+        Three states, and the third is why this reads a LINE rather than the
+        last byte: a seal torn at byte 0 leaves the fragment terminated but
+        UNMARKED, and a last-byte check would then report "clean" forever —
+        every later record would make the fragment mid-file corruption and
+        ``read_all`` would raise permanently (measured).
+
+        * ends mid-record           -> terminate it, then mark it
+        * ends on a record/marker   -> nothing to do
+        * ends on a terminated
+          MALFORMED line            -> mark it (no extra terminator)
         """
         try:
-            with self.path.open("rb") as f:
-                f.seek(0, 2)
-                if f.tell() == 0:
-                    return False
-                f.seek(-1, 2)
-                return f.read(1) != b"\n"
-        except FileNotFoundError:
-            return False
+            size = f.seek(0, 2)
+        except OSError:
+            return ""
+        if not size:
+            return ""
+        # The terminator is decided ONCE, from the file's final byte — never
+        # re-derived per window, which would let a window's own last byte
+        # masquerade as the file's and hand back an interior line (measured: a
+        # last line of exactly the window size made this report "clean" and
+        # the next record merged into the fragment — the very loss this seal
+        # exists to prevent).
+        f.seek(size - 1)
+        terminated = f.read(1) == b"\n"
+        end = size - 1 if terminated else size
+        line_start = 0
+        cursor = end
+        window = 1 << 16
+        while cursor > 0:
+            start = max(0, cursor - window)
+            f.seek(start)
+            chunk = f.read(cursor - start)
+            idx = chunk.rfind(b"\n")
+            if idx >= 0:
+                line_start = start + idx + 1
+                break
+            cursor = start
+        if not terminated:
+            return "\n" + _SEAL_MARKER_JSON + "\n"
+        f.seek(line_start)
+        text = _decode_line(f.read(end - line_start))
+        if text is None:
+            # Undecodable is MALFORMED, never empty: collapsing it to ""
+            # would leave a terminated torn fragment unmarked, and the next
+            # record would make it mid-file corruption for good (measured).
+            return _SEAL_MARKER_JSON + "\n"
+        line = text.strip()
+        if not line or is_torn_seal_marker(line):
+            return ""
+        try:
+            json.loads(line)
+        except ValueError:
+            # A terminated malformed last line: the fragment was cut after
+            # its terminator but before its marker. Mark it — with no leading
+            # newline, or the journal gains a blank line per repair.
+            return _SEAL_MARKER_JSON + "\n"
+        return ""
 
     def read_all(self) -> list[dict]:
         """Read all events in the log.
@@ -493,15 +587,22 @@ class EventLog:
         A malformed MID-FILE line is a separate corruption class (not a torn
         append) and raises an actionable error naming the file and line —
         EXCEPT a fragment sealed by :meth:`append`: that fragment sits
-        mid-file by construction, is annotated by a seal marker on the next
-        line, and is tolerated like any other tear (so a fragment never costs
-        the journal the record appended after it, #5917).
+        mid-file by construction, is annotated by a seal marker on the
+        following line (or by a TORN marker, its prefix), and is tolerated
+        like any other tear, so a fragment never costs the journal the record
+        appended after it (#5917). A seal annotation is never returned as a
+        record and contributes no index.
 
         DECODING is per line: a line that is not valid UTF-8 is a malformed
         line under the same rules (tolerated at the end, refused mid-file).
         ``append`` writes ``ensure_ascii=False``, so a tear inside a
         multi-byte character is ordinary — and it must reach the classifier
         rather than raising ``UnicodeDecodeError`` for the whole file (#5917).
+
+        Bytes are decoded with universal newlines first (``\r\n`` and a bare
+        ``\r`` become ``\n``), which is what ``Path.read_text`` did for the
+        string read this replaced: a foreign journal that separates records
+        with a bare CR keeps reading.
 
         The raw text of every skipped trailing line is kept, UNCAPPED, in
         :attr:`torn_trailing_raw` so a replay engine can tell a harmful tear
@@ -522,6 +623,13 @@ class EventLog:
             return []
         out = []
         data = self.path.read_bytes()
+        # Universal newlines, which `Path.read_text` used to apply here: a
+        # foreign journal that separates records with a bare CR must keep
+        # reading the way it did. Only the BYTES are held between passes (the
+        # decoded strings are made on demand) so a whole-journal read does not
+        # hold two copies of the journal, which matters while the journal is
+        # unbounded (#5612).
+        data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
         if data.endswith(b"\n"):
             # Exactly one terminator: the byte `append` writes. Dropping it
             # keeps the torn-tail rule identical whether or not the last
@@ -531,54 +639,63 @@ class EventLog:
             # b"\n" is the same split for a well-formed file.
             data = data[:-1]
         lines = data.split(b"\n")
-        decoded: list[tuple[str | None, bytes]] = []
-        for raw_bytes in lines:
-            try:
-                decoded.append((raw_bytes.decode("utf-8"), raw_bytes))
-            except UnicodeDecodeError:
-                decoded.append((None, raw_bytes))
-        for idx, (raw, raw_bytes) in enumerate(decoded):
-            last = idx == len(decoded) - 1
+        # Indices of lines the tolerance path consumed as a seal annotation
+        # (annotations are never records, and never counted as fragments).
+        consumed: set[int] = set()
+        for idx, raw_bytes in enumerate(lines):
+            if idx in consumed:
+                continue
+            raw = _decode_line(raw_bytes)
             if raw is None:
                 # An undecodable line is MALFORMED, never an empty one: the
                 # empty-line branch below would drop it WITHOUT counting or
                 # classifying it, which is the fail-OPEN direction #3316
-                # forbids. "replace" is what the classifier sees — a broken
-                # byte makes a type unreadable, and an unreadable type is
-                # refused rather than assumed harmless.
-                self._tolerate_or_raise(
-                    raw_bytes.decode("utf-8", errors="replace").strip(),
-                    idx, last, decoded)
+                # forbids.
+                self._tolerate_or_raise(raw_bytes, idx, lines, consumed)
                 continue
             line = raw.strip()
             if not line:
                 continue
-            if _is_sealed_marker(line):
-                # Annotation, never a record: it exists only to legitimize the
-                # fragment on the line before it (handled there).
+            if is_torn_seal_marker(line):
+                # A COMPLETE marker is an annotation wherever it sits: it
+                # exists only to legitimize the fragment before it (handled
+                # there). A marker PREFIX is not accepted here — `{"` also
+                # begins every record, so a torn record fragment would be
+                # silently dropped instead of classified.
                 continue
             try:
+                # Parsed ONCE. The marker test above is a string test, so this
+                # is the only parse per line (#5612 is why that matters: the
+                # journal is unbounded and read_all is O(file)).
                 out.append(json.loads(line))
-                continue
             except ValueError:
-                pass
-            self._tolerate_or_raise(line, idx, last, decoded)
+                self._tolerate_or_raise(raw_bytes, idx, lines, consumed)
         return out
 
-    def _tolerate_or_raise(self, line: str, idx: int, last: bool,
-                           decoded: list[tuple[str | None, bytes]]) -> None:
+    def _tolerate_or_raise(self, raw_bytes: bytes, idx: int,
+                           lines: list[bytes],
+                           consumed: set[int]) -> None:
         """Tolerate a malformed line at EOF or sealed mid-file, else refuse.
 
         A fragment sealed by `append` is mid-file by construction, so without
         the seal branch the journal would trade a silently lost record for a
-        permanently unreadable one (#5917). Any OTHER mid-file malformed line
-        keeps the #3316 posture: refuse, never skip.
+        permanently unreadable one (#5917). The successor may itself be a TORN
+        seal (`{"ty`), so the successor test accepts a marker prefix — and
+        only there, and only for a line that directly follows a line this
+        method just kept: a `{"` fragment standing on its own is a torn
+        RECORD and must be counted and classified, not skipped. Any OTHER
+        mid-file malformed line keeps the #3316 posture: refuse, never skip.
+
+        The classifier text is derived here, not carried from the caller — a
+        malformed line is rare, so the decode is not worth paying per line.
         """
-        if not last and _is_sealed_marker((decoded[idx + 1][0] or "").strip()):
-            self._keep_torn(line, idx)
+        if idx == len(lines) - 1:
+            self._keep_torn(_classifier_text(raw_bytes), idx)
             return
-        if last:
-            self._keep_torn(line, idx)
+        successor = _decode_line(lines[idx + 1])
+        if successor is not None and _is_seal_prefix(successor.strip()):
+            self._keep_torn(_classifier_text(raw_bytes), idx)
+            consumed.add(idx + 1)
             return
         raise ValueError(
             f"EventLog {self.path}: malformed line {idx + 1} — "
@@ -644,13 +761,17 @@ class EventLog:
 
     @staticmethod
     def _encode_cursor(idx: int) -> str:
-        """Encode a 0-based line index as an opaque cursor token."""
+        """Encode a 0-based RECORD index as an opaque cursor token.
+
+        Records, not physical lines: a seal annotation and a torn fragment
+        contribute no index, so a cursor is stable across a seal.
+        """
         payload = json.dumps({"v": 1, "i": idx}, separators=(",", ":"))
         return base64.urlsafe_b64encode(payload.encode("ascii")).decode("ascii")
 
     @staticmethod
     def _decode_cursor(cursor: str) -> int:
-        """Decode an opaque cursor token to a 0-based line index.
+        """Decode an opaque cursor token to a 0-based record index.
 
         Raises :exc:`ValueError` if the token is malformed or has an
         unsupported version.

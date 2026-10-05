@@ -167,9 +167,26 @@ def restore(backup_dir: str, db_path: str,
         remove_stale_aof(db_path)
         shutil.copy2(db_file, db_path)
 
-    # Count events
-    with open(events_file) as f:
-        count = sum(1 for _ in f)
+    # Count events: records AND torn fragments, which is the number this
+    # surface has always reported (`test_backup_restore_default_copies_a_torn_
+    # tail_backup` pins a torn journal at 2) — minus the seal annotations
+    # `append` writes, which annotate a fragment rather than being one (#5917).
+    # Count events the way the READER sees them: records PLUS the torn
+    # fragments it tolerates (what this surface has always reported —
+    # `test_backup_restore_default_copies_a_torn_tail_backup` pins a torn
+    # journal at 2), and NOT the seal annotations `append` writes, complete or
+    # torn (#5917). Deriving it from the reader is also the only way to keep it
+    # byte-safe: a text-mode read raises UnicodeDecodeError on the multi-byte
+    # tear read_all survives. A journal the reader REFUSES (genuine mid-file
+    # corruption) falls back to a byte-safe line count — the number is
+    # advisory, and refusing here would block a copy-only restore.
+    from tortoise.log import EventLog
+    try:
+        _journal = EventLog(events_file)
+        count = len(_journal.read_all()) + _journal.torn_trailing_count
+    except ValueError:
+        with open(events_file, encoding="utf-8", errors="replace") as f:
+            count = sum(1 for line in f if line.strip())
 
     # Restore into FalkorDB if requested
     if into_falkor:

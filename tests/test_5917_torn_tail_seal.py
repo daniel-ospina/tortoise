@@ -295,6 +295,327 @@ def test_a_mid_file_undecodable_line_still_raises():
     print("PASS test_a_mid_file_undecodable_line_still_raises")
 
 
+def test_a_seal_torn_at_every_prefix_stays_readable():
+    """The seal itself is written by the same non-atomic write it defends.
+
+    A tear inside the marker used to leave the fragment mid-file with an
+    unrecognizable successor, so read_all raised and NO later append could
+    repair it (the seal only adds a marker one line further down). Verified
+    for every marker prefix, since the seal is `\n` + marker + `\n` + record.
+    """
+    marker = json.dumps({"type": SEALED_TORN_TYPE})
+    for cut in range(0, len(marker) + 1):
+        p = _tmp()
+        log = EventLog(p)
+        log.append({"id": "good-0"})
+        _write_torn_tail(p, b'{"type": "PointAdded", "point": {"id": "a"')
+        # a crash landing inside the seal: the fragment's terminator and part
+        # of the marker reached the disk
+        _write_torn_tail(p, b"\n" + marker[:cut].encode())
+        log.append({"id": "next-1"})
+        records = EventLog(p).read_all()
+        assert [r["id"] for r in records] == ["good-0", "next-1"], (cut, records)
+        assert len(records) == 2, (cut, records)
+    print("PASS test_a_seal_torn_at_every_prefix_stays_readable")
+
+
+def test_a_torn_seal_does_not_over_refuse():
+    """The partial marker is an annotation, not a fragment: one tear, one count."""
+    p = _tmp()
+    log = EventLog(p)
+    _write_torn_tail(p, b'{"type": "PointAdded", "point": {"id": "a"')
+    _write_torn_tail(p, b'\n{"ty')
+    log.append({"id": "next-1"})
+    reader = EventLog(p)
+    reader.read_all()
+    assert reader.torn_trailing_count == 1, reader.torn_trailing_raw
+    assert reader.torn_tail_revival_records() == [], (
+        "a PointAdded fragment is harmless; the partial marker must not add a "
+        "second, unclassifiable fragment")
+    print("PASS test_a_torn_seal_does_not_over_refuse")
+
+
+def test_a_bare_cr_still_separates_records():
+    """`Path.read_text` translated universal newlines; the byte read must too."""
+    p = _tmp()
+    Path(p).write_bytes(b'{"id": "a"}\r{"id": "b"}\r')
+    reader = EventLog(p)
+    assert reader.read_all() == [{"id": "a"}, {"id": "b"}]
+    assert reader.torn_trailing_count == 0
+
+    crlf = _tmp()
+    Path(crlf).write_bytes(b'{"id": "a"}\r\n{"id": "b"}\r\n')
+    assert EventLog(crlf).read_all() == [{"id": "a"}, {"id": "b"}]
+    print("PASS test_a_bare_cr_still_separates_records")
+
+
+def test_append_refuses_the_reserved_type():
+    """A record with the annotation's type would be written and never read."""
+    p = _tmp()
+    log = EventLog(p)
+    try:
+        log.append({"type": SEALED_TORN_TYPE, "id": "real-record"})
+    except ValueError as exc:
+        assert "reserved" in str(exc)
+    else:
+        raise AssertionError("append must refuse the reserved marker type")
+    assert not Path(p).exists() or _raw(p) == b""
+    print("PASS test_append_refuses_the_reserved_type")
+
+
+def test_the_cursor_follows_records_across_a_seal():
+    p = _tmp()
+    log = EventLog(p)
+    log.append({"id": "a"})
+    log.append({"id": "b"})
+    cursor = log.cursor_at_end()
+    _write_torn_tail(p, b'{"id": "torn"')
+    log.append({"id": "c"})
+    assert log.read_after(cursor) == [{"id": "c"}]
+    print("PASS test_the_cursor_follows_records_across_a_seal")
+
+
+def test_a_torn_record_fragment_is_not_mistaken_for_a_marker():
+    """Every record starts `{"`, so a prefix marker test would swallow these.
+
+    They are torn RECORDS: unreadable-type tears the #3316 classifier refuses.
+    Skipping them as "annotations" would be the fail-open direction.
+    """
+    marker = json.dumps({"type": SEALED_TORN_TYPE})
+    for prefix_len in range(1, 8):
+        fragment = marker[:prefix_len].encode()
+        p = _tmp()
+        log = EventLog(p)
+        log.append({"id": "good-0"})
+        _write_torn_tail(p, fragment)
+        log.append({"id": "next-1"})       # would previously merge into it
+        reader = EventLog(p)
+        records = reader.read_all()
+        assert {"id": "next-1"} in records, (fragment, records)
+        assert reader.torn_trailing_count == 1, (fragment, reader.torn_trailing_raw)
+        assert reader.torn_tail_revival_records(), (
+            f"a torn record fragment {fragment!r} must be refused, not skipped")
+    print("PASS test_a_torn_record_fragment_is_not_mistaken_for_a_marker")
+
+
+def test_a_mid_file_marker_prefix_fragment_still_raises():
+    """A `{"` fragment mid-file is corruption, not an annotation."""
+    p = _tmp()
+    Path(p).write_bytes(
+        b'{"id": "good-0"}\n'
+        b'{"type": "'                                  # a torn record, no marker
+        b'\n{"id": "good-2"}\n')
+    reader = EventLog(p)
+    try:
+        reader.read_all()
+    except ValueError as exc:
+        assert "mid-file corruption" in str(exc)
+    else:
+        raise AssertionError("a mid-file torn-record fragment must still raise")
+    print("PASS test_a_mid_file_marker_prefix_fragment_still_raises")
+
+
+def test_a_terminated_malformed_tail_is_marked_and_heals():
+    """A seal torn at byte 0: the fragment is terminated but unmarked.
+
+    A last-byte check reports "clean" forever, so no marker is ever written
+    again and the next record makes the fragment mid-file corruption — a
+    permanently unreadable journal (measured).
+    """
+    p = _tmp()
+    log = EventLog(p)
+    log.append({"id": "good-0"})
+    _write_torn_tail(p, b'{"type": "PointAdded", "point": {"id": "a"')
+    _write_torn_tail(p, b"\n")           # only the seal's terminator landed
+    for i in (1, 2, 3):
+        log.append({"id": f"next-{i}"})
+        reader = EventLog(p)
+        records = reader.read_all()
+        assert {"id": f"next-{i}"} in records, (i, records)
+        assert reader.torn_trailing_count == 1, (i, reader.torn_trailing_raw)
+    print("PASS test_a_terminated_malformed_tail_is_marked_and_heals")
+
+
+def test_the_seal_does_not_add_a_blank_line_when_marking_a_terminated_tail():
+    p = _tmp()
+    log = EventLog(p)
+    _write_torn_tail(p, b'{"type": "PointAdded"')
+    _write_torn_tail(p, b"\n")
+    log.append({"id": "next-1"})
+    assert b"\n\n" not in _raw(p), _raw(p)
+    print("PASS test_the_seal_does_not_add_a_blank_line_when_marking_a_terminated_tail")
+
+
+def test_the_seal_is_correct_at_window_boundaries():
+    """A last line at/around the scan window must not be misread as clean.
+
+    Measured failure before this test: a last line of exactly the window size
+    made the seal report "clean", so the next record merged into the fragment
+    and was lost — the #5917 defect, from the seal's own scan.
+    """
+    window = 1 << 16
+    for length in (window - 1, window, window + 1, 2 * window):
+        for shape in ("unterminated", "terminated-malformed", "terminated-valid"):
+            p = _tmp()
+            log = EventLog(p)
+            log.append({"id": "good-0"})
+            if shape == "unterminated":
+                body = b'{"id": "frag", "pad": "' + b"a" * length
+            elif shape == "terminated-malformed":
+                body = b'{"id": "frag", "pad": "' + b"a" * length + b"\n"
+            else:
+                body = (b'{"id": "valid", "pad": "' + b"a" * length + b'"}\n')
+            _write_torn_tail(p, body)
+            log.append({"id": "next-1"})
+            log.append({"id": "next-2"})
+            reader = EventLog(p)
+            records = reader.read_all()
+            ids = [r["id"] for r in records]
+            assert "next-1" in ids and "next-2" in ids, (length, shape, ids)
+            if shape != "terminated-valid":
+                assert reader.torn_trailing_count == 1, (length, shape, reader.torn_trailing_raw[:1])
+            assert b"\n\n" not in _raw(p), (length, shape, "blank line added")
+    print("PASS test_the_seal_is_correct_at_window_boundaries")
+
+
+def test_a_terminated_undecodable_tail_heals():
+    """A terminated line that is not valid UTF-8 is MALFORMED, not empty."""
+    p = _tmp()
+    log = EventLog(p)
+    log.append({"id": "good-0"})
+    _write_torn_tail(p, b'{"id": "torn-1", "text": "\xe2\x80')
+    _write_torn_tail(p, b"\n")          # the seal's terminator landed, the marker did not
+    for i in (1, 2, 3):
+        log.append({"id": f"next-{i}"})
+        reader = EventLog(p)
+        ids = [r["id"] for r in reader.read_all()]
+        assert f"next-{i}" in ids, (i, ids)
+        assert reader.torn_trailing_count == 1, (i, reader.torn_trailing_raw)
+    print("PASS test_a_terminated_undecodable_tail_heals")
+
+
+def test_a_terminated_undecodable_only_file_heals():
+    p = _tmp()
+    Path(p).write_bytes(b"\xe2\x80\n")
+    log = EventLog(p)
+    log.append({"id": "next-1"})
+    reader = EventLog(p)
+    assert [r["id"] for r in reader.read_all()] == ["next-1"]
+    assert reader.torn_trailing_count == 1
+    print("PASS test_a_terminated_undecodable_only_file_heals")
+
+
+def test_a_terminated_malformed_tail_is_adopted_and_classified():
+    """CONTRACT: a terminated-malformed LAST line is a torn fragment.
+
+    The seal can land its terminator without its marker (a crash at byte 0 of
+    the seal), which is byte-identical to an externally written partial record
+    that someone terminated. Both are adopted by the next `append`, and the
+    decision about whether dropping them is safe stays where #3316 puts it: a
+    fragment that cannot be proven harmless REFUSES the replay. Before this
+    change such a line raised ValueError out of read_all at PARSE time, so the
+    refusal moves one layer later (TornTailResurrectionError, a RuntimeError)
+    for this shape only.
+    """
+    p = _tmp()
+    log = EventLog(p)
+    log.append({"id": "good-0"})
+    _write_torn_tail(p, b"{not valid json")
+    _write_torn_tail(p, b"\n")
+    log.append({"id": "next-1"})
+
+    reader = EventLog(p)
+    assert [r["id"] for r in reader.read_all()] == ["good-0", "next-1"]
+    assert reader.torn_trailing_count == 1
+    assert reader.torn_tail_revival_records() == ["{not valid json"]
+    try:
+        refuse_torn_tail_revival(reader.torn_tail_revival_records())
+    except TornTailResurrectionError:
+        pass
+    else:
+        raise AssertionError("an unclassifiable fragment must refuse the replay")
+    print("PASS test_a_terminated_malformed_tail_is_adopted_and_classified")
+
+
+def test_an_adopted_harmless_fragment_is_counted_not_refused():
+    """The allowed direction of that contract, pinned so it is not incidental.
+
+    A terminated prefix of an allowlisted record is a tear by classification:
+    dropping it is the data-LOSS direction the tolerance exists for, and the
+    count is the signal. This is the only shape whose parse-time ValueError
+    moved (a mid-file line at EOF is still a tear either way).
+    """
+    p = _tmp()
+    log = EventLog(p)
+    log.append({"id": "good-0"})
+    _write_torn_tail(p, b'{"type": "PointAdded", "point": {"id": "lost"')
+    _write_torn_tail(p, b"\n")
+    log.append({"id": "next-1"})
+
+    reader = EventLog(p)
+    assert [r["id"] for r in reader.read_all()] == ["good-0", "next-1"]
+    assert reader.torn_trailing_count == 1, "the dropped fragment is reported"
+    assert reader.torn_tail_revival_records() == []
+    print("PASS test_an_adopted_harmless_fragment_is_counted_not_refused")
+
+
+def test_the_backup_count_survives_a_multibyte_tear():
+    """`restore` must not die on the tear read_all now survives."""
+    from tortoise.backup import restore
+
+    root = Path(tempfile.mkdtemp())
+    backup_dir = root / "backup"
+    backup_dir.mkdir()
+    (backup_dir / "events.jsonl").write_bytes(
+        json.dumps({"type": "PointAdded", "point": {"id": "a"}}).encode() + b"\n"
+        + b'{"type": "PointAdded", "point": {"id": "b", "content": "\xe2\x80')
+    work = root / "work"
+    work.mkdir()
+    result = restore(str(backup_dir), str(work / "r.db"),
+                     events_path=str(work / "events.jsonl"))
+    assert result["status"] == "ok", result
+    assert result["events"] == 2, result   # one record + one torn fragment
+    print("PASS test_the_backup_count_survives_a_multibyte_tear")
+
+
+def test_the_backup_count_agrees_with_the_reader():
+    """`restore`'s event count must equal what the reader sees — records plus
+    tolerated torn fragments — and must not count a seal annotation, complete
+    or torn, or die on a multi-byte or CR-separated journal."""
+    from tortoise.backup import restore
+
+    marker = json.dumps({"type": SEALED_TORN_TYPE})
+    cases = {
+        # 1 record + 1 torn fragment -> 2
+        "torn": b'{"type": "PointAdded", "point": {"id": "a"}}\n{"id": "torn"',
+        # records + a crashed seal (fragment, torn marker, marker) -> 3
+        "torn-seal": (b'{"id": "a"}\n{"id": "torn"}\n{"ty\n'
+                      + marker.encode() + b'\n{"id": "b"}\n'),
+        # a multi-byte tear must not raise
+        "multibyte": (b'{"type": "PointAdded", "point": {"id": "a"}}\n'
+                      b'{"id": "b", "text": "\xe2\x80'),
+        # bare-CR separated records -> 3
+        "bare-cr": b'{"id": "a"}\r{"id": "b"}\r{"id": "c"}\r',
+    }
+    for name, payload in cases.items():
+        root = Path(tempfile.mkdtemp())
+        backup_dir = root / "backup"
+        backup_dir.mkdir()
+        (backup_dir / "events.jsonl").write_bytes(payload)
+        work = root / "work"
+        work.mkdir()
+
+        reader = EventLog(backup_dir / "events.jsonl")
+        records = reader.read_all()
+        expected = len(records) + reader.torn_trailing_count
+
+        result = restore(str(backup_dir), str(work / "r.db"),
+                         events_path=str(work / "events.jsonl"))
+        assert result["status"] == "ok", (name, result)
+        assert result["events"] == expected, (name, result, expected, records)
+    print("PASS test_the_backup_count_agrees_with_the_reader")
+
+
 def test_a_sealed_fragment_at_the_end_is_still_counted():
     """A crash after the seal but before the record: the fragment stays visible."""
     p = _tmp()
