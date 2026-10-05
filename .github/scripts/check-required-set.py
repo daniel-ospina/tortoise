@@ -583,29 +583,83 @@ def _render_matrix(template: str, matrix: dict[str, Any]) -> set[str]:
     return acc
 
 
-# #6135: the fast pool's shard COUNT lives here, NOT in the workflow. Absence means
-# the historical S=2 — exactly as `tools/ci_selection.py::fast_shard_count` reads it,
-# because a guard that disagrees with the selector is measuring a different tree.
+# #6135/W37: the shard COUNTS live in `config/ci-surfaces.yml`, NOT in the
+# workflow. The bounds are the a..z positional label space
+# (`ci_selection.MAX_*_SHARDS`).
 CI_SURFACES_REL = "config/ci-surfaces.yml"
-DEFAULT_FAST_SHARDS = 2
-MAX_FAST_SHARDS = 26  # the a..z positional label space (`ci_selection.MAX_FAST_SHARDS`)
+
+# `key -> (default, min, max)`, mirrored from `ci_selection.fast_shard_count` /
+# `carve_shard_count`. The DEFAULTS match the selector; the MALFORMED-VALUE
+# polarity deliberately does NOT. `ci_selection` collapses an unusable value to
+# the default (a producer path must not crash) and names it for `--integrity` to
+# fail on; a guard has no such second reader, so it refuses to measure instead.
+# That difference is the point — see `_declared_shard_count`.
+_DECLARED_SHARDS = {
+    # `fast_shards >= 2` because a shard pool of one is not a pool.
+    "fast_shards": (2, 2, 26),
+    # `carve_shards >= 1` because 1 is MEANINGFUL: it is the unsharded job this
+    # repo ran until W37, and what removing the key must give back.
+    "carve_shards": (1, 1, 26),
+}
+
+# A `${{ fromJSON(…) }}` matrix is the SELECTOR's output, so the guard must
+# resolve it from what declares it. Only shapes this repo actually emits are
+# resolvable, and each is named here explicitly; an unrecognised `matrix.<key>`
+# REFUSES TO MEASURE rather than guessing. The polarity matters: `producible` is
+# SUBTRACTED from the required set to find conditions no workflow can produce, so
+# a FABRICATED name satisfies that subtraction and hides the exact deadlock this
+# guard exists to catch.
+#
+#   * `half` — the fast pool's positional letters: `test (a)`, `test (b)`, …,
+#     `fast_shards` of them.
+#   * `suffix` — the carve-out pool's name TAIL, and it is NOT the positional
+#     shape. The job name is `test-carve-out${{ matrix.suffix }}`, so shard 0
+#     contributes `""` (the UNSHARDED name `test-carve-out` must survive) and
+#     later shards contribute `" (b)"`, `" (c)"` — `ci_selection`'s
+#     `e["suffix"] = "" if i == 0 else f" ({labels[i]})"`. Rendering this key
+#     positionally invents `test-carve-outa`… and drops the three real legs,
+#     which is precisely the fail-open described above.
+_EXPRESSION_MATRIX_SHAPES = {
+    "half": ("fast_shards", "positional"),
+    "suffix": ("carve_shards", "suffix"),
+}
 
 
-def _declared_fast_shards(root: Path) -> int:
-    """The fast-pool shard count, as `config/ci-surfaces.yml` declares it."""
+def _declared_shard_count(root: Path, key: str) -> int:
+    """A shard count as `config/ci-surfaces.yml` declares it."""
+    default, minimum, maximum = _DECLARED_SHARDS[key]
     path = root / CI_SURFACES_REL
     if not path.is_file():
-        return DEFAULT_FAST_SHARDS
-    doc = read_yaml(path)
+        return default
+    try:
+        doc = read_yaml(path)
+    except yaml.YAMLError as exc:
+        # `_read_yaml_cached` deliberately wraps RecursionError/MemoryError/
+        # ValueError/OSError but NOT YAMLError, and every other own-file reader
+        # in this module compensates (`load_mergify`, `gate_legs`,
+        # `_raw_settings_entries`). Without this the exit contract breaks: a
+        # malformed manifest surfaces as a bare traceback, exit 1, no
+        # `::error::` annotation — it reads like a violation but names nothing.
+        raise CannotMeasure(f"{path}: unparsable — cannot measure: {exc}") from exc
     if not isinstance(doc, dict):
         raise CannotMeasure(f"{path}: not a mapping — cannot measure")
-    raw = doc.get("fast_shards", DEFAULT_FAST_SHARDS)
+    raw = doc.get(key, default)
     if isinstance(raw, bool) or not isinstance(raw, int) \
-            or raw < 2 or raw > MAX_FAST_SHARDS:
+            or raw < minimum or raw > maximum:
         raise CannotMeasure(
-            f"{path}: fast_shards must be an integer in 2..{MAX_FAST_SHARDS}, "
+            f"{path}: {key} must be an integer in {minimum}..{maximum}, "
             f"got {raw!r} — cannot measure")
     return raw
+
+
+def _shard_labels(shape: str, count: int) -> list[str]:
+    """The `matrix.<key>` values `ci_selection` emits for `count` shards."""
+    letters = [chr(ord("a") + i) for i in range(count)]
+    if shape == "positional":
+        return letters
+    if shape == "suffix":
+        return [""] + [f" ({label})" for label in letters[1:]]
+    raise CannotMeasure(f"unknown shard label shape {shape!r} — cannot measure")
 
 
 def _render_expression_matrix(template: str, root: Path) -> set[str]:
@@ -622,14 +676,20 @@ def _render_expression_matrix(template: str, root: Path) -> set[str]:
     guard that cannot be kept green is a guard that gets deleted — so the honest
     move is to resolve the declaration, not to refuse.
     """
-    keys = _MATRIX_REF.findall(template)
+    keys = sorted(set(_MATRIX_REF.findall(template)))
     if not keys:
         raise CannotMeasure(
             f"job strategy.matrix is a `${{{{ … }}}}` expression and the job name "
             f"{template!r} references no `matrix.<key>` — cannot derive the legs")
-    count = _declared_fast_shards(root)
-    letters = [chr(ord("a") + i) for i in range(count)]
-    return _render_matrix(template, {key: list(letters) for key in keys})
+    if len(keys) != 1 or keys[0] not in _EXPRESSION_MATRIX_SHAPES:
+        raise CannotMeasure(
+            f"job strategy.matrix is a `${{{{ … }}}}` expression and the job name "
+            f"{template!r} references {keys!r}, for which no shard source is "
+            f"declared — cannot derive its legs without guessing")
+    key = keys[0]
+    manifest_key, shape = _EXPRESSION_MATRIX_SHAPES[key]
+    count = _declared_shard_count(root, manifest_key)
+    return _render_matrix(template, {key: _shard_labels(shape, count)})
 
 
 def producible_on_pull_request(workflows_dir: Path | None = None) -> set[str]:
@@ -977,12 +1037,20 @@ def check_partition(parsed: dict[str, set[str]]) -> list[str]:
         # sole record that it was enforced by injection, which is exactly why an
         # empty bucket was unverifiable. #6272 deliberately named it in
         # `queue_conditions` ("IS the server-side enforcement of the review record")
-        # and the bucket emptied for a LEGITIMATE reason. The protection is
-        # preserved precisely: fire when the mirror declares a context that NEITHER
-        # bucket accounts for — a name that should have been filed here and was
-        # not — or when the mirror cannot be read at all, where nothing is checkable.
-        # An empty bucket alongside a fully-accounted mirror is a claim this guard
-        # CAN verify from two files, so refusing it was asserting a stale premise.
+        # and the bucket emptied for a LEGITIMATE reason, so the old unconditional
+        # form asserted a stale premise and reddened a correct tree.
+        #
+        # ⛔ THIS IS NARROWER THAN THE OLD CHECK — say so rather than claim the
+        # protection survived intact. The old form refused EVERY empty bucket; this
+        # one refuses only an empty bucket the mirror fails to account for (or an
+        # unreadable mirror). The residual is real and is NOT closed offline: a name
+        # dropped from `REQUIRED_SET` AND from `.github/settings.yml` in the same
+        # commit leaves `dq | dm == mirror`, and no offline reader can tell that
+        # from an honest shrink — the live required set is not among these files.
+        # `--live` is what closes it, because it reads the branch protection the
+        # two files are only a MIRROR of; that is the check to reach for before
+        # believing an empty bucket. (Measured during #6169 review: dropping the
+        # last injected name from both files used to be caught here and is not now.)
         mirror = declared_settings_contexts()
         unaccounted = (mirror or set()) - (dq | dm)
         if unaccounted or not mirror:
