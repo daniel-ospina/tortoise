@@ -107,9 +107,16 @@ def guard():
 
 
 @pytest.fixture()
-def tmp_guard_env(guard, monkeypatch):
-    """Point every seam at a throwaway dir; return (dir, helper to write files)."""
-    d = Path(tempfile.mkdtemp(prefix="required-set-"))
+def tmp_guard_env(guard, monkeypatch, tmp_path):
+    """Point every seam at a throwaway dir; return (dir, helper to write files).
+
+    The tree comes from pytest's ``tmp_path`` rather than ``tempfile.mkdtemp``
+    so the framework reclaims it: #4096's class-wide guard reds the suite for
+    any fixture that reaches ``mkdtemp`` without also reaching a reclaim
+    primitive, and a hand-rolled ``mkdtemp`` here leaked one tree per test.
+    """
+    d = tmp_path / "required-set"
+    d.mkdir()
     monkeypatch.setattr(guard, "MERGIFY_PATH", d / ".mergify.yml")
     monkeypatch.setattr(guard, "SETTINGS_PATH", d / "settings.yml")
     monkeypatch.setattr(guard, "WORKFLOWS_DIR", d / "workflows")
