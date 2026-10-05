@@ -1617,9 +1617,10 @@ def _capture_turn_role_text(stored: str) -> tuple[str, str]:
 #: `extracted_points`, `source` — so a column ADDED to the hosted detail
 #: handler reddens it too, the direction the inline columns would otherwise
 #: let drift silently. The `GET /v1/sessions` LIST key set is pinned the same
-#: way (this tuple plus `actor_display`); its `extracted` COUNT is not,
-#: because the list still uses the legacy typed filter and diverges for
-#: untyped extractions (#3555). Ordered as the hosted handlers append their
+#: way (this tuple plus `actor_display`); its `extracted` COUNT is pinned too
+#: — the list counts with the same non-turn predicate as the detail endpoint
+#: and the SDK read, so all three agree (#3555).
+#: Ordered as the hosted handlers append their
 #: columns: existing positions are stable and new columns go at the END, so
 #: a consumer reading positionally never shifts.
 #: (`GET /v1/sessions` additionally serves `actor_display`; the by-id endpoint
@@ -21994,8 +21995,8 @@ class TortoiseSDK:
 
         Both counts use the DETAIL endpoint's non-turn predicate
         (``pointKind IS NULL OR pointKind <> 'event'``) — LLM-extracted claims
-        are untyped, so the legacy ``IN ['decision','statement']`` filter the
-        LIST endpoint still uses would report 0 for them (#3555).
+        are untyped, and the list endpoint's legacy ``IN ['decision',
+        'statement']`` filter reported 0 for them until #3555 unified the two.
 
         Returns ``None`` when no ``:Session`` carries the id.
         """

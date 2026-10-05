@@ -3501,8 +3501,11 @@ class TestSessionList:
                 f"and GET /v1/sessions/{{id}} ({detail[field]!r})")
         # The hosted surfaces and the SDK read one node, so the shared field
         # list is one vocabulary. A zero count would make the parity
-        # assertion vacuous — the mock extractor mints a point on the capture
-        # path, and all three surfaces now count it the same way (#3555).
+        # assertion vacuous — the mock extractor mints a TYPED point
+        # ('statement', a kind the legacy pair counted too), so this test
+        # binds SURFACE PARITY only; the predicate itself is discriminated by
+        # test_list_sessions_extracted_counts_non_turn_points_regardless_of_kind
+        # (#3555).
         assert read["extracted"] >= 1
 
 
