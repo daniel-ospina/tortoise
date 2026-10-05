@@ -29,7 +29,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tortoise.log import (  # noqa: E402, RUF100
-    SEALED_TORN_TYPE,
+    SEAL_SENTINEL,
     EventLog,
     TornTailResurrectionError,
     refuse_torn_tail_revival,
@@ -192,7 +192,7 @@ def test_sealing_only_appends_never_rewrites():
 
     assert after.startswith(with_tear), "sealing truncated or rewrote existing bytes"
     assert with_tear.startswith(before)
-    assert json.dumps({"type": SEALED_TORN_TYPE}) in after.decode()
+    assert SEAL_SENTINEL in after.decode()
     print("PASS test_sealing_only_appends_never_rewrites")
 
 
@@ -204,7 +204,7 @@ def test_the_marker_line_is_never_returned_as_a_record():
     log.append({"id": "next-2"})
     records = EventLog(p).read_all()
     assert records == [{"id": "next-1"}, {"id": "next-2"}]
-    assert all(r.get("type") != SEALED_TORN_TYPE for r in records)
+    assert all(r.get("type") != SEAL_SENTINEL for r in records)
     print("PASS test_the_marker_line_is_never_returned_as_a_record")
 
 
@@ -227,7 +227,7 @@ def test_a_clean_journal_gains_no_marker():
     log = EventLog(p)
     for i in range(3):
         log.append({"id": f"good-{i}"})
-    assert SEALED_TORN_TYPE not in _raw(p).decode()
+    assert SEAL_SENTINEL not in _raw(p).decode()
     reader = EventLog(p)
     assert reader.read_all() == [{"id": f"good-{i}"} for i in range(3)]
     assert reader.torn_trailing_count == 0 and reader.torn_trailing_raw == []
@@ -240,14 +240,14 @@ def test_a_missing_or_empty_journal_is_not_torn():
     assert log.read_all() == []
     assert log.torn_trailing_count == 0
     log.append({"id": "a"})            # first write into a missing file
-    assert SEALED_TORN_TYPE not in _raw(missing).decode()
+    assert SEAL_SENTINEL not in _raw(missing).decode()
 
     empty = _tmp()
     Path(empty).write_bytes(b"")
     empty_log = EventLog(empty)
     assert empty_log.read_all() == []
     empty_log.append({"id": "b"})
-    assert SEALED_TORN_TYPE not in _raw(empty).decode()
+    assert SEAL_SENTINEL not in _raw(empty).decode()
     print("PASS test_a_missing_or_empty_journal_is_not_torn")
 
 
@@ -303,7 +303,7 @@ def test_a_seal_torn_at_every_prefix_stays_readable():
     repair it (the seal only adds a marker one line further down). Verified
     for every marker prefix, since the seal is `\n` + marker + `\n` + record.
     """
-    marker = json.dumps({"type": SEALED_TORN_TYPE})
+    marker = SEAL_SENTINEL.encode()
     for cut in range(0, len(marker) + 1):
         p = _tmp()
         log = EventLog(p)
@@ -311,7 +311,7 @@ def test_a_seal_torn_at_every_prefix_stays_readable():
         _write_torn_tail(p, b'{"type": "PointAdded", "point": {"id": "a"')
         # a crash landing inside the seal: the fragment's terminator and part
         # of the marker reached the disk
-        _write_torn_tail(p, b"\n" + marker[:cut].encode())
+        _write_torn_tail(p, b"\n" + marker[:cut])
         log.append({"id": "next-1"})
         records = EventLog(p).read_all()
         assert [r["id"] for r in records] == ["good-0", "next-1"], (cut, records)
@@ -324,7 +324,7 @@ def test_a_torn_seal_does_not_over_refuse():
     p = _tmp()
     log = EventLog(p)
     _write_torn_tail(p, b'{"type": "PointAdded", "point": {"id": "a"')
-    _write_torn_tail(p, b'\n{"ty')
+    _write_torn_tail(p, b"\n" + SEAL_SENTINEL[:4].encode())
     log.append({"id": "next-1"})
     reader = EventLog(p)
     reader.read_all()
@@ -349,18 +349,26 @@ def test_a_bare_cr_still_separates_records():
     print("PASS test_a_bare_cr_still_separates_records")
 
 
-def test_append_refuses_the_reserved_type():
-    """A record with the annotation's type would be written and never read."""
+def test_the_sentinel_cannot_be_a_record_prefix():
+    """The seal is non-JSON precisely so no record can look like one.
+
+    With a JSON marker, `{` and `{"` are prefixes of BOTH the marker and every
+    record, so a torn record fragment could be swallowed as an annotation and
+    never classified (fail-open). A sentinel no record can begin with removes
+    the ambiguity by construction, and a record that *mentions* the sentinel
+    in a value is still an ordinary record.
+    """
+    import tortoise.log as logmod
+
+    assert not SEAL_SENTINEL.startswith('{'), "the sentinel must not be JSON-shaped"
+    for prefix_len in range(1, len(SEAL_SENTINEL)):
+        assert logmod._is_seal_prefix(SEAL_SENTINEL[:prefix_len])
+
     p = _tmp()
     log = EventLog(p)
-    try:
-        log.append({"type": SEALED_TORN_TYPE, "id": "real-record"})
-    except ValueError as exc:
-        assert "reserved" in str(exc)
-    else:
-        raise AssertionError("append must refuse the reserved marker type")
-    assert not Path(p).exists() or _raw(p) == b""
-    print("PASS test_append_refuses_the_reserved_type")
+    log.append({"type": "PointAdded", "id": "kept", "note": SEAL_SENTINEL})
+    assert [r["id"] for r in EventLog(p).read_all()] == ["kept"]
+    print("PASS test_the_sentinel_cannot_be_a_record_prefix")
 
 
 def test_the_cursor_follows_records_across_a_seal():
@@ -381,9 +389,7 @@ def test_a_torn_record_fragment_is_not_mistaken_for_a_marker():
     They are torn RECORDS: unreadable-type tears the #3316 classifier refuses.
     Skipping them as "annotations" would be the fail-open direction.
     """
-    marker = json.dumps({"type": SEALED_TORN_TYPE})
-    for prefix_len in range(1, 8):
-        fragment = marker[:prefix_len].encode()
+    for fragment in (b"{", b'{"', b'{"t', b'{"type": "', b'{"type": "PointRetracted"'):
         p = _tmp()
         log = EventLog(p)
         log.append({"id": "good-0"})
@@ -584,13 +590,13 @@ def test_the_backup_count_agrees_with_the_reader():
     or torn, or die on a multi-byte or CR-separated journal."""
     from tortoise.backup import restore
 
-    marker = json.dumps({"type": SEALED_TORN_TYPE})
+    marker = SEAL_SENTINEL.encode()
     cases = {
         # 1 record + 1 torn fragment -> 2
         "torn": b'{"type": "PointAdded", "point": {"id": "a"}}\n{"id": "torn"',
         # records + a crashed seal (fragment, torn marker, marker) -> 3
         "torn-seal": (b'{"id": "a"}\n{"id": "torn"}\n{"ty\n'
-                      + marker.encode() + b'\n{"id": "b"}\n'),
+                      + marker + b'\n{"id": "b"}\n'),
         # a multi-byte tear must not raise
         "multibyte": (b'{"type": "PointAdded", "point": {"id": "a"}}\n'
                       b'{"id": "b", "text": "\xe2\x80'),
@@ -614,6 +620,112 @@ def test_the_backup_count_agrees_with_the_reader():
         assert result["status"] == "ok", (name, result)
         assert result["events"] == expected, (name, result, expected, records)
     print("PASS test_the_backup_count_agrees_with_the_reader")
+
+
+def test_adjacent_torn_seals_are_not_counted_as_fragments():
+    """Two torn seals in a row, or a torn seal before a complete one.
+
+    A torn seal that is no longer its fragment's immediate successor is still
+    an annotation: counting it refuses a replay over a harmless tear (measured).
+    """
+    for second in (SEAL_SENTINEL[:6], SEAL_SENTINEL):
+        p = _tmp()
+        log = EventLog(p)
+        log.append({"id": "good-0"})
+        _write_torn_tail(p, b'{"type": "PointAdded", "point": {"id": "a"')
+        first = _raw(p)
+        _write_torn_tail(p, b"\n" + SEAL_SENTINEL.encode() + b"\n")
+        _write_torn_tail(p, b"\n" + second.encode())      # the seal tore again
+        log.append({"id": "next-1"})
+
+        reader = EventLog(p)
+        records = reader.read_all()
+        assert {"id": "next-1"} in records, (second, records)
+        assert reader.torn_trailing_count == 1, (second, reader.torn_trailing_raw)
+        assert reader.torn_tail_revival_records() == [], (
+            second, "a torn seal must not be reported as an unclassifiable fragment")
+        assert first  # the first state existed
+    print("PASS test_adjacent_torn_seals_are_not_counted_as_fragments")
+
+
+def test_an_unterminated_complete_sentinel_is_not_duplicated():
+    """A seal torn AFTER its sentinel, before the sentinel's newline.
+
+    The next append must terminate it, not write a second one (measured: the
+    duplicate was journal noise, and the shape seeds the phantom-fragment
+    case).
+    """
+    p = _tmp()
+    log = EventLog(p)
+    log.append({"id": "good-0"})
+    _write_torn_tail(p, b'{"id": "torn"')
+    # the crash lands inside the seal: terminator + sentinel reached disk, its
+    # newline and the record did not
+    _write_torn_tail(p, b"\n" + SEAL_SENTINEL.encode())
+    log.append({"id": "next-1"})
+
+    body = _raw(p).decode()
+    assert body.count(SEAL_SENTINEL) == 1, body
+    reader = EventLog(p)
+    assert [r["id"] for r in reader.read_all()] == ["good-0", "next-1"], body
+    assert reader.torn_trailing_count == 1, reader.torn_trailing_raw
+    print("PASS test_an_unterminated_complete_sentinel_is_not_duplicated")
+
+
+def test_a_copy_only_restore_of_a_corrupt_journal_still_reports():
+    """`into_falkor=False` must not raise on a journal the reader refuses."""
+    from tortoise.backup import restore
+
+    root = Path(tempfile.mkdtemp())
+    backup_dir = root / "backup"
+    backup_dir.mkdir()
+    (backup_dir / "events.jsonl").write_bytes(
+        b'{"id": "a"}\n{not valid json\n{"id": "b"}\n')
+    work = root / "work"
+    work.mkdir()
+    result = restore(str(backup_dir), str(work / "r.db"),
+                     events_path=str(work / "events.jsonl"))
+    assert result["status"] == "ok", result
+    assert result["events"] == 3, result       # advisory line count
+    print("PASS test_a_copy_only_restore_of_a_corrupt_journal_still_reports")
+
+
+def test_a_cr_separated_tail_is_not_sealed():
+    """`read_all` normalises universal newlines, so the seal scan must too.
+
+    A lone-CR journal whose tail is complete records is CLEAN: annotating it
+    would add a sentinel for a fragment that does not exist (measured).
+    """
+    p = _tmp()
+    Path(p).write_bytes(b'{"id": "a"}\r{"id": "b"}\r')
+    log = EventLog(p)
+    log.append({"id": "NEW"})
+    body = _raw(p)
+    assert SEAL_SENTINEL.encode() not in body, body
+    assert [r["id"] for r in EventLog(p).read_all()] == ["a", "b", "NEW"]
+
+    # CRLF, same shape
+    q = _tmp()
+    Path(q).write_bytes(b'{"id": "a"}\r\n{"id": "b"}\r\n')
+    EventLog(q).append({"id": "NEW"})
+    assert SEAL_SENTINEL.encode() not in _raw(q), _raw(q)
+    assert [r["id"] for r in EventLog(q).read_all()] == ["a", "b", "NEW"]
+    print("PASS test_a_cr_separated_tail_is_not_sealed")
+
+
+def test_a_terminated_malformed_cr_tail_is_sealed_and_readable():
+    """A completed field-separated tear must still be marked, not left to wedge."""
+    for sep in (b"\r", b"\r\n"):
+        p = _tmp()
+        Path(p).write_bytes(b'{"id": "a"}' + sep + b"{not json" + sep)
+        log = EventLog(p)
+        log.append({"id": "NEW"})
+        reader = EventLog(p)
+        records = reader.read_all()
+        assert {"id": "NEW"} in records, (sep, records)
+        assert {r["id"] for r in records} == {"a", "NEW"}, (sep, records)
+        assert reader.torn_trailing_count == 1, (sep, reader.torn_trailing_raw)
+    print("PASS test_a_terminated_malformed_cr_tail_is_sealed_and_readable")
 
 
 def test_a_sealed_fragment_at_the_end_is_still_counted():

@@ -39,12 +39,15 @@ that the payload does not name:
 
 - **The seal annotation (`__TornTailSealed__`, #5917) — an annotation, not a
   record.** When `EventLog.append` finds the journal ending on a fragment — an
-  unterminated one (a writer killed mid-append) or a terminated line that is
-  not valid JSON — it terminates and/or marks the fragment before writing the
-  new record, so the new record starts on a line of its own while the fragment
-  still reaches the torn-tail classifier. `read_all`
-  never returns it and it shifts no record index; a caller record may not use
-  the type (`append` refuses it).
+  unterminated line that is not valid JSON (a writer killed mid-append), or a
+  terminated line that is not valid JSON — it terminates and/or marks the
+  fragment before writing the new record, so the new record starts on a line of
+  its own while the fragment still reaches the torn-tail classifier. `read_all`
+  never returns it and it shifts no record index. It is deliberately **not
+  JSON**: every record begins `{"`, so a sentinel no record can begin with keeps
+  a *torn seal* unambiguous — a torn record fragment is still counted and
+  classified rather than being mistaken for an annotation. The journal's grammar
+  already admits non-JSON lines (a torn fragment is one).
 
 - **The Point-snapshot folds (`PointAdded`, `PointPromoted`) and the capture
   turn** (#5004) — the `point` snapshot now also carries the embedding, which

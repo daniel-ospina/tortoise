@@ -145,7 +145,7 @@ def restore(backup_dir: str, db_path: str,
     # the backup) is the one every other engine names.
     _source_records: list[dict] | None = None
     if into_falkor:
-        from tortoise.log import EventLog, refuse_torn_tail_revival
+        from tortoise.log import SEAL_SENTINEL, EventLog, refuse_torn_tail_revival
         _source_log = EventLog(events_file)
         try:
             _source_records = _source_log.read_all()
@@ -180,13 +180,14 @@ def restore(backup_dir: str, db_path: str,
     # tear read_all survives. A journal the reader REFUSES (genuine mid-file
     # corruption) falls back to a byte-safe line count — the number is
     # advisory, and refusing here would block a copy-only restore.
-    from tortoise.log import EventLog
+    from tortoise.log import SEAL_SENTINEL, EventLog
     try:
         _journal = EventLog(events_file)
         count = len(_journal.read_all()) + _journal.torn_trailing_count
     except ValueError:
         with open(events_file, encoding="utf-8", errors="replace") as f:
-            count = sum(1 for line in f if line.strip())
+            count = sum(1 for line in f
+                        if line.strip() and line.strip() != SEAL_SENTINEL)
 
     # Restore into FalkorDB if requested
     if into_falkor:

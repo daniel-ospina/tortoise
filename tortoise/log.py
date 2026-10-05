@@ -421,41 +421,41 @@ def refuse_torn_tail_revival(revival_records) -> None:
     )
 
 
-# The sealed-fragment marker (#5917). A torn record is terminated and
+# The sealed-fragment sentinel (#5917). A torn record is terminated and
 # annotated with this line by the NEXT ``append``, so the fragment stops
 # merging into the following record and ``read_all`` can still classify it.
-# Underscore-fenced so it can never collide with an event type, and JSON-shaped
-# so it is a normal line in the file (append-only is preserved: sealing writes
-# bytes, it never truncates or rewrites).
-SEALED_TORN_TYPE = "__TornTailSealed__"
-_SEAL_MARKER_JSON = json.dumps({"type": SEALED_TORN_TYPE})
+# DELIBERATELY not JSON: every record ``append`` writes begins ``{"``, so a
+# sentinel that no record can begin with makes a TORN SEAL unambiguous — a
+# `{"` record fragment can never be matched as one, which is what keeps it
+# counted and classified instead of silently skipped (the fail-open direction
+# #3316 forbids). The journal's grammar already admits non-JSON lines (a torn
+# fragment is one), and the other direct line readers
+# (``subject_binding``, ``backup``) already skip an unparseable line.
+# Append-only is preserved: sealing writes bytes, it never rewrites.
+SEAL_SENTINEL = "__TornTailSealed__"
 
 
-def is_torn_seal_marker(text: str) -> bool:
-    """True when *text* is a COMPLETE seal marker (never a record).
-
-    Exact, not prefix-based: every record ``append`` writes begins ``{"``, so
-    a prefix test here would swallow torn RECORD fragments as annotations and
-    they would never be counted or classified — the fail-open direction #3316
-    forbids. A *torn seal* is matched positionally instead (a seal prefix that
-    directly follows a fragment the reader just kept), which is the only place
-    a prefix is evidence of anything.
-    """
-    return text == _SEAL_MARKER_JSON
+def is_seal_annotation(text: str) -> bool:
+    """True when *text* is the seal annotation line (never a record)."""
+    return text == SEAL_SENTINEL
 
 
 def _is_seal_prefix(text: str) -> bool:
-    """True when *text* is a marker, complete or TORN (a prefix of it).
+    """True when *text* is the annotation, complete or TORN (a prefix of it).
 
     Only ever used for the line FOLLOWING a malformed fragment: the seal is
     written by the same non-atomic write whose tearing this module already
-    tolerates, so a crash can leave `{"ty` where a complete marker was
+    tolerates, so a crash can leave `__Torn` where the complete annotation was
     intended. Without the prefix arm that journal is unreadable FOREVER — the
     fragment sits mid-file with an unrecognizable successor, and no later
-    ``append`` repairs it, because each seal adds a complete marker one line
-    further down (measured).
+    ``append`` repairs it, because each seal adds a complete annotation one
+    line further down (measured).
+
+    The sentinel is deliberately NOT JSON (see :data:`SEAL_SENTINEL`), so no
+    prefix of it can be a prefix of a record and this test cannot swallow a
+    torn record fragment.
     """
-    return bool(text) and _SEAL_MARKER_JSON.startswith(text)
+    return bool(text) and SEAL_SENTINEL.startswith(text)
 
 
 def _decode_line(raw: bytes) -> str | None:
@@ -492,14 +492,6 @@ class EventLog:
         rewritten — the seal is another append.
         """
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        if isinstance(event, dict) and event.get("type") == SEALED_TORN_TYPE:
-            # The reserved type is an ANNOTATION: `read_all` skips it, so a
-            # caller record carrying it would be written and never read back —
-            # a silent write/read asymmetry. Refuse it at the only writer.
-            raise ValueError(
-                f"{SEALED_TORN_TYPE} is reserved for the torn-tail seal and "
-                "is never returned by read_all; a record cannot use this type"
-            )
         record = json.dumps(event, ensure_ascii=False) + "\n"
         # ONE handle: the tail check and the write share it, so sealing costs
         # no second open/lseek/read on the write path.
@@ -533,41 +525,62 @@ class EventLog:
         # masquerade as the file's and hand back an interior line (measured: a
         # last line of exactly the window size made this report "clean" and
         # the next record merged into the fragment — the very loss this seal
-        # exists to prevent).
+        # exists to prevent). CR is a terminator too: `read_all` normalises
+        # universal newlines, so this scan must use the same line model or it
+        # would annotate a fragment of a CR-separated journal that is actually
+        # a complete record (measured).
         f.seek(size - 1)
-        terminated = f.read(1) == b"\n"
+        final = f.read(1)
+        terminated = final in (b"\n", b"\r")
         end = size - 1 if terminated else size
-        line_start = 0
-        cursor = end
+        if final == b"\n" and size >= 2:
+            f.seek(size - 2)
+            if f.read(1) == b"\r":
+                end = size - 2          # the \r\n PAIR is the terminator
+        last_line = b""
         window = 1 << 16
-        while cursor > 0:
-            start = max(0, cursor - window)
+        start = max(0, end - window)
+        while True:
             f.seek(start)
-            chunk = f.read(cursor - start)
+            chunk = (f.read(end - start)
+                     .replace(b"\r\n", b"\n").replace(b"\r", b"\n"))
             idx = chunk.rfind(b"\n")
-            if idx >= 0:
-                line_start = start + idx + 1
+            if idx >= 0 or start == 0:
+                last_line = chunk[idx + 1:] if idx >= 0 else chunk
                 break
-            cursor = start
-        if not terminated:
-            return "\n" + _SEAL_MARKER_JSON + "\n"
-        f.seek(line_start)
-        text = _decode_line(f.read(end - line_start))
+            start = max(0, start - window)
+        text = _decode_line(last_line)
         if text is None:
             # Undecodable is MALFORMED, never empty: collapsing it to ""
-            # would leave a terminated torn fragment unmarked, and the next
-            # record would make it mid-file corruption for good (measured).
-            return _SEAL_MARKER_JSON + "\n"
+            # would leave a torn fragment unmarked, and the next record would
+            # make it mid-file corruption for good (measured).
+            return ("\n" + SEAL_SENTINEL + "\n" if not terminated
+                    else SEAL_SENTINEL + "\n")
         line = text.strip()
-        if not line or is_torn_seal_marker(line):
+        if not terminated:
+            # A tail that is ALREADY a complete record, or already the
+            # complete annotation, needs the terminator and NOTHING else.
+            # Annotating a record would be redundant, and a tear of that
+            # annotation would leave a marker prefix after a VALID record — an
+            # unclassifiable fragment that refuses every later replay; adding a
+            # second sentinel for an unterminated sentinel is pure journal
+            # noise. (Both measured.) A TORN sentinel is still repaired below.
+            if is_seal_annotation(line):
+                return "\n"
+            try:
+                json.loads(line)
+            except ValueError:
+                return "\n" + SEAL_SENTINEL + "\n"
+            return "\n"
+        if not line or is_seal_annotation(line):
             return ""
         try:
             json.loads(line)
         except ValueError:
             # A terminated malformed last line: the fragment was cut after
-            # its terminator but before its marker. Mark it — with no leading
-            # newline, or the journal gains a blank line per repair.
-            return _SEAL_MARKER_JSON + "\n"
+            # its terminator but before its annotation. Mark it — with no
+            # leading newline, or the journal gains a blank line per repair.
+            return SEAL_SENTINEL + "\n"
         return ""
 
     def read_all(self) -> list[dict]:
@@ -656,7 +669,7 @@ class EventLog:
             line = raw.strip()
             if not line:
                 continue
-            if is_torn_seal_marker(line):
+            if is_seal_annotation(line):
                 # A COMPLETE marker is an annotation wherever it sits: it
                 # exists only to legitimize the fragment before it (handled
                 # there). A marker PREFIX is not accepted here — `{"` also
@@ -689,6 +702,14 @@ class EventLog:
         The classifier text is derived here, not carried from the caller — a
         malformed line is rare, so the decode is not worth paying per line.
         """
+        if _is_seal_prefix(_classifier_text(raw_bytes)):
+            # A TORN seal that is no longer the immediate successor of its
+            # fragment (two torn seals in a row, or a torn seal before a
+            # complete one) is still an annotation, never a fragment:
+            # counting it would refuse a replay over a harmless tear and
+            # inflate the count. Safe by construction — the sentinel is not
+            # JSON, so no record fragment can be a prefix of it.
+            return
         if idx == len(lines) - 1:
             self._keep_torn(_classifier_text(raw_bytes), idx)
             return
