@@ -1322,15 +1322,12 @@ async def _refresh_cost_allocation() -> None:
 
     The SINGLE production write path for the per-team cost metric
     (``tortoise_team_cost_cents``, which had no production caller at all before
-    this). It is module-level ON PURPOSE: the periodic seam that arms it,
-    ``_event_retention_loop``, is a CLOSURE inside ``_lifespan`` and cannot be
-    called from a test, so a test that asserts the PRODUCTION call site needs
-    this half to be directly invocable.
+    this). It is module-level ON PURPOSE, so a test can invoke the production
+    call site directly.
 
-    Best-effort by construction: ``_event_retention_loop`` has NO per-iteration
-    guard, so a raise here would kill event retention AND the deleted-org purge
-    for the process's lifetime. Every non-cancellation exception is swallowed
-    with a warning.
+    Best-effort by construction: every non-cancellation exception is swallowed
+    with a warning. Since #5381 the retention loop also routes this through
+    ``_guarded_step``, so a raise here cannot end the loop.
     """
     from tortoise.cost_allocation import refresh_and_publish
 
@@ -1352,6 +1349,65 @@ async def _refresh_cost_allocation() -> None:
         raise
     except Exception as exc:  # noqa: BLE001, RUF100 — must never kill the retention loop
         _logger.warning("cost allocation refresh failed: %s", exc)
+
+
+async def _guarded_step(label: str, step) -> None:
+    """#5381: await ONE background step so its failure cannot kill its runner.
+
+    ``step`` is a zero-arg callable returning an awaitable, so the awaitable is
+    built INSIDE the guard — a factory that raises is caught too. Cancellation
+    must still propagate (shutdown cancels these tasks), so ``CancelledError``
+    is re-raised; any other exception is logged and swallowed.
+
+    Shared by ``_run_boot_sweeps`` and ``_event_retention_loop``. Without it the
+    obligation is per-caller: every step added to the loop must remember to
+    swallow its own exceptions, and the one that forgets ends event retention
+    AND the deleted-team purge for the life of the process.
+    """
+    try:
+        await step()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # never fatal to the runner
+        _logger.warning("%s failed: %s", label, exc)
+
+
+async def _event_retention_loop(interval: float) -> None:
+    """#5381: the periodic retention runner, with EVERY step individually guarded.
+
+    Guarded per STEP, not per iteration. A per-iteration guard would let one
+    failing step skip its siblings for that whole hour — a failed event sweep
+    would also skip the deleted-team purge, the OAuth GC and the cost refresh,
+    which is the same silent-loss shape this closes, one scope larger.
+
+    ``interval`` is a parameter rather than a captured closure so the loop is
+    directly drivable by a test: the observable invariant is that a raising step
+    cannot end the ``while True``, and the evidence for it is a SUBSEQUENT
+    iteration actually running.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        # #2850: daemon worker, not the shared default executor — see
+        # _run_boot_sweeps.
+        await _guarded_step(
+            "event retention sweep",
+            functools.partial(run_on_daemon_worker, _sweep_events,
+                              name="tortoise-boot-sweep"))
+        # #302: hard-delete past grace (sync DB work off the loop)
+        await _guarded_step(
+            "deleted-team purge",
+            functools.partial(run_on_daemon_worker, _purge_deleted_orgs,
+                              name="tortoise-boot-sweep"))
+        # #3036: GC dead OAuth rows (sync DB work off the loop)
+        await _guarded_step(
+            "oauth retention",
+            functools.partial(run_on_daemon_worker, _sweep_oauth_retention,
+                              name="tortoise-boot-sweep"))
+        # #4493: allocated fixed/shared SaaS cost per org — the production write
+        # path for tortoise_team_cost_cents. It already swallows internally (see
+        # _refresh_cost_allocation); the guard is what makes that belt-and-braces
+        # rather than the single thing keeping the loop alive.
+        await _guarded_step("cost allocation refresh", _refresh_cost_allocation)
 
 
 async def _run_boot_sweeps() -> None:
@@ -1382,12 +1438,12 @@ async def _run_boot_sweeps() -> None:
     for label, fn in (("event retention", _sweep_events),
                       ("deleted-team purge", _purge_deleted_orgs),
                       ("oauth retention", _sweep_oauth_retention)):
-        try:
-            await run_on_daemon_worker(fn, name="tortoise-boot-sweep")
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # never fatal
-            _logger.warning("boot %s sweep failed: %s", label, exc)
+        # #5381: the same guard the periodic loop uses — one runner, so the
+        # boot and periodic paths cannot drift apart.
+        await _guarded_step(
+            f"boot {label} sweep",
+            functools.partial(run_on_daemon_worker, fn,
+                              name="tortoise-boot-sweep"))
 
 
 #: Task attributes armed across the lifespan that a re-entry or shutdown must
@@ -1839,25 +1895,12 @@ async def _lifespan(app):
             # (#2851/#2922; regression guard tests/test_boot_regressions.py).
             interval = event_retention_interval()
 
-            async def _event_retention_loop() -> None:
-                while True:
-                    await asyncio.sleep(interval)
-                    # #2850: daemon worker, not the shared default executor —
-                    # see _run_boot_sweeps.
-                    await run_on_daemon_worker(_sweep_events,
-                                               name="tortoise-boot-sweep")
-                    # #302: hard-delete past grace (sync DB work off the loop)
-                    await run_on_daemon_worker(_purge_deleted_orgs,
-                                               name="tortoise-boot-sweep")
-                    # #3036: GC dead OAuth rows (sync DB work off the loop)
-                    await run_on_daemon_worker(_sweep_oauth_retention,
-                                               name="tortoise-boot-sweep")
-                    # #4493: allocated fixed/shared SaaS cost per org — the
-                    # production write path for tortoise_team_cost_cents.
-                    # Swallows internally (see _refresh_cost_allocation).
-                    await _refresh_cost_allocation()
-
-            _retention_task = asyncio.get_event_loop().create_task(_event_retention_loop())
+            # #5381: the body is module-level (``_event_retention_loop``) so its
+            # per-step guard is reachable by an executing TEST. As a closure the
+            # only available check was a static AST pin, and an AST pin cannot
+            # observe whether a step's failure ENDS the loop.
+            _retention_task = asyncio.get_event_loop().create_task(
+                _event_retention_loop(interval))
             app.state._event_retention_task = _retention_task
         except Exception as exc:
             # Best-effort by design (a purge failure must never block bind), but
