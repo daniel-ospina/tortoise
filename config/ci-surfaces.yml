@@ -693,6 +693,13 @@ surfaces:
   - test_battery_validation_real.py
   - test_battery_write_channel.py
   core:
+  # #4071: guards that the URI-less embedded test lane cannot resolve a bare
+  # TortoiseSDK() to the owner's canonical store (~/.tortoise/tortoise.db) —
+  # the writer path #4028 left open, so residue regenerated after each purge.
+  # DB-free and hermetic, and it asserts in BOTH lanes (redirect in force
+  # embedded, a genuine no-op under a supported URI), so `core` is the correct
+  # home and it must not be skipped on a conftest-only change.
+  - test_embedded_lane_canonical_store_4071.py
   - test_4041_breadcrumb_reader.py
   # #3982: a date-only temporal value anchors to UTC midnight rather than the
   # reading machine's local midnight (ECMA-262 §21.4.3.2). DB-free — it only
@@ -2424,6 +2431,11 @@ durations:
 # `# unmeasured` (a file no source leg collected, whose value is carried forward
 # and is not a measurement).
   test_fly_secret_drift.py: 8.5
+  # #4071: three hermetic asserts (no DB, no network). The duration-coverage
+  # floor counts it as a fast file, so it needs an entry like every other fast
+  # file; its own testcase call time is sub-second (the file's wall time is
+  # session setup, which the map does not price).
+  test_embedded_lane_canonical_store_4071.py: 0.1
   test_embedded_evidence.py: 17.2
   # #3892 (B6): new file in this pool — it has no CI junit measurement yet (a file that
   # never ran cannot appear in an artifact), so it takes the flat 2.0s default under the

@@ -215,8 +215,49 @@ else:
 # to sweep, and leaving the env unset keeps embedded runs from writing
 # journal files that a later docker session's stale sweep would misread as
 # dead sessions' drop sets (their graphs were never minted on the server).
-from tortoise.config import is_db_uri as _is_db_uri_conftest  # noqa: E402, I001
+from tortoise.config import is_db_uri as _is_db_uri_conftest  # noqa: E402
 from tortoise.embedded_reaper import ACTIVE_SUITES_DIR as _ACTIVE_SUITES_DIR  # noqa: E402
+
+# ── #4071: the embedded lane must not reach the CANONICAL store ───────────
+# (ask #1 of #4028). A bare ``TortoiseSDK()`` resolves through
+# ``tortoise/config.py::resolve_db_path()``, whose fallback is
+# ``DEFAULT_DB_PATH = ~/.tortoise/tortoise.db`` — the OWNER'S REAL STORE. The
+# URI-aware redirect in ``projection/__init__.py`` fires only for
+# ``explicit_path and _uri and TORTOISE_TEST_MODE``, so in the sanctioned
+# URI-less embedded lane nothing repointed it. Measured in #4071: a second
+# copy of the real store taken ~30 min after the first held 6 ADDITIONAL
+# ``guard-remove-test`` Points — a full local embedded run re-contaminates the
+# store and undoes #4028's purge.
+#
+# Declared HERE, at conftest IMPORT time, and NOT in a session fixture. A
+# fixture is structurally TOO LATE: test modules that construct a bare SDK in
+# their MODULE BODY run during COLLECTION, before any session-scoped fixture
+# (`tests/test_issue94_annotate_ep_batch.py`, `tests/test_topic_summarization.py`
+# both do this and both recreated the canonical store under a fixture-based
+# guard). This is the same "must be visible before module bodies run" reason
+# the #1686 TEST_MODE note above gives.
+#
+# ``TORTOISE_DB_PATH`` is precedence 2 in ``resolve_db_path`` (ahead of the
+# canonical default), so this ONE choke point covers every embedded
+# constructor in the lane — including a test file that forgets an explicit
+# path, which per-file edits cannot. It deliberately OVERRIDES any pre-set
+# ``TORTOISE_DB_PATH``: an ambient value pointing at the real store is exactly
+# the hazard.
+#
+# Gated on the SDK's OWN binding rule, not on ``is_db_uri``: ``sdk.py``
+# branches on *any non-empty* ``TORTOISE_DB_URI`` (a path-style URI binds
+# ``_db_uri`` and never calls ``resolve_db_path``), so gating on
+# ``is_db_uri`` would leave a path-style-URI session unguarded while
+# needlessly overriding its ``TORTOISE_DB_PATH``.
+if not os.environ.get("TORTOISE_DB_URI"):
+    from tests._embedded import register_session_tmpdir
+    _EMBEDDED_LANE_GUARD_DIR = tempfile.mkdtemp(
+        prefix="tortoise-embedded-lane-")
+    os.environ["TORTOISE_DB_PATH"] = os.path.join(
+        _EMBEDDED_LANE_GUARD_DIR, "tortoise.db")
+    # #4096 hygiene: the guard tree must go through the session reclaimer, not
+    # sit on disk for the life of the tmp root.
+    register_session_tmpdir(_EMBEDDED_LANE_GUARD_DIR)
 if _is_db_uri_conftest(os.environ.get("TORTOISE_DB_URI")):
     _JOURNAL_PATH = os.path.join(
         _ACTIVE_SUITES_DIR, f"{_SESSION_NONCE}.graphs.jsonl")
