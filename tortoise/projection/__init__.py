@@ -323,6 +323,33 @@ def _reset_falkordb_version_cache() -> None:
     """Test hook: drop all cached version probes."""
     _FALKORDB_VERSION_CACHE.clear()
 
+
+# ── #4997: which (endpoint, graph) have already reported a vector-index gap ──
+#
+# The gap report is a WARNING on every non-embedded store setup — including the
+# hosted per-request path — so an unlatched warning would spam a clean log. The
+# latch key mirrors `_FALKORDB_VERSION_CACHE`'s identity (a graph name alone is
+# unique per ENGINE, not per process, so two stores on different engines can
+# share one), with one difference: when the endpoint is unidentified the key
+# falls back to `id(self)` rather than `None`, so two unidentified-client stores
+# cannot share a bucket and silently withhold a warning from a genuinely
+# different store.
+#
+# ⚠️ The latch suppresses the WARNING only — never the MEASUREMENT.
+# `_vector_indexed_labels` is re-read on every setup, so a store whose index set
+# changes is reported correctly even within one process.
+_VECTOR_INDEX_GAP_WARNED: set[tuple] = set()
+_VECTOR_INDEX_GAP_LOCK = threading.Lock()
+
+
+def _reset_vector_gap_warnings() -> None:
+    """Test hook: drop the warned-graph latch (mirrors
+    `_reset_falkordb_version_cache`, which tests/test_falkordb_compat.py
+    already imports). Without this, a latch entry from one test suppresses the
+    warning in the next one on the same (endpoint, graph)."""
+    with _VECTOR_INDEX_GAP_LOCK:
+        _VECTOR_INDEX_GAP_WARNED.clear()
+
 # P0 guard (#99): bulk graph-wipe classifier. Restored here in #49 Phase 2 —
 # the guard was lost from this (live) module during the v3.0 ontology rewrite
 # (0f9e6a2) and only survived in the legacy standalone projection.py, which
@@ -1916,6 +1943,7 @@ from tortoise.live import (  # noqa: E402
     _live_only,
     _terminal_excluded,
 )
+from tortoise.security import ENTITY_TYPE_LABELS  # noqa: E402  #4997
 
 # #2981 — a FalkorDB/Redis server that has reached `maxmemory` with
 # `noeviction` REFUSES WRITES while the graph is perfectly intact. The reply
@@ -3884,6 +3912,26 @@ class FalkorProjection(
         # design, so hoisting the initialisation is behaviour-preserving for
         # every path that reaches `_ensure_indexes`.
         self._vector_index_api = None
+        # #4997: the store's VECTOR-indexed label set, MEASURED from the
+        # engine catalog (`CALL db.indexes()`) during `_ensure_indexes` below.
+        #
+        # Semantics — the two "empty" cases are deliberately distinct:
+        #   None    -> NOT MEASURED (gate skipped, or the read failed). Unknown.
+        #   set()   -> measured, and NOTHING served is indexed.
+        # A consumer computing the gap must read None as "unknown", never as
+        # "nothing indexed".
+        #
+        # Distinct from `_vector_index_api` above, which answers "did index
+        # CREATION succeed, and by which API" (a WRITE-path fact). This answers
+        # "what does the catalog say right now" (a READ-path measurement). They
+        # can disagree in the fail-open lane and that is correct.
+        self._vector_indexed_labels: set[str] | None = None
+        # #5434: the rows `_schema_is_current()` read, published so the
+        # vector-index inventory can reuse them instead of issuing a second
+        # `CALL db.indexes()`. Initialised HERE and read via `getattr` at the
+        # fast path, because a projection built with `object.__new__` (tests,
+        # mocks) never runs this and must not AttributeError.
+        self._index_catalogue_rows: list | None = None
         # Ops safety residual (#428): auto health check on open + transparent
         # corruption recovery. Embedded DBs rebuild from their adjacent JSONL
         # event log when lost/corrupt; production (FLY_APP_NAME) and server
@@ -7598,7 +7646,7 @@ class FalkorProjection(
         unidentified clients (unit mocks with no endpoint attrs) — those are
         probed fresh every call.
         """
-        conn = getattr(self.db, "connection", None)
+        conn = getattr(getattr(self, "db", None), "connection", None)
         if conn is not None:
             host = getattr(conn, "_host", None) or getattr(conn, "host", None)
             port = getattr(conn, "port", None)
@@ -7608,6 +7656,107 @@ class FalkorProjection(
         if path is not None:
             return ("embedded", str(path))
         return None
+
+    def _record_vector_index_inventory(self, catalogue_rows=None) -> None:
+        """Measure which of the labels the vector leg SERVES carry a VECTOR
+        index on this engine, and report the gap. (#4997)
+
+        Sets ``self._vector_indexed_labels`` to the INTERSECTION of the served
+        label set with the engine's VECTOR-indexed labels, or to ``None`` when
+        the set could not be measured. Never raises and never writes:
+        ``_ensure_indexes`` is reached unguarded from ``FalkorProjection.__init__``
+        as well as from two ``hosted_api`` per-request paths, so a hostile or
+        unavailable catalog must not break store construction.
+
+        ⛔ This does NOT create an index and does NOT assert that the served set
+        and the indexed set SHOULD be equal. Whether Object/Event/Source vectors
+        should be indexed is the owner's open decision V1
+        (docs/architecture/STORAGE-ARCHITECTURE.md §12.1c / §14.3, raised
+        2026-09-24); this method makes the RELATIONSHIP observable without
+        acting on it.
+
+        Row shape (measured on falkordb/falkordb:latest): 9 columns, where
+        ``[0]`` is the label, ``[1]`` the properties and ``[2]`` the ``types``
+        mapping, e.g. ``{'embedding': ['VECTOR']}`` or ``{'content':
+        ['FULLTEXT']}``. Four other readers of these rows exist in-repo
+        (``projection/__init__.py`` embedded-repair, ``hosted_backup.py``,
+        ``tests/test_indexes.py``, ``tests/test_divergence_conformance.py``);
+        this is the only one that must discriminate index TYPE, which is why it
+        reads column 2 — a column none of the others touch.
+        """
+        # Gate (kept here, not only at the call site, so the method is
+        # self-contained and directly testable): embedded redislite has no
+        # index API at all, and a <4.x engine has none either. NOTE the
+        # predicate is identical to the one guarding index creation below —
+        # `_ver is None` PASSES it (an undetermined version is probed directly,
+        # not assumed old).
+        if getattr(self, "_is_embedded", False):
+            return
+        _ver = getattr(self, "_falkordb_version", None)
+        if _ver is not None and _ver[0] < 4:
+            return
+
+        log = logging.getLogger(__name__)
+        try:
+            # Everything that can throw lives inside this guard — including
+            # the latch-key computation, because `_falkordb_version_cache_key`
+            # reads `self.db`, which is absent on a bare projection.
+            endpoint = self._falkordb_version_cache_key() or id(self)
+            key = (endpoint, self._graph_name)
+
+            # #5434: reuse the rows `_schema_is_current` already read when the
+            # caller supplied them (the fast path); otherwise probe HERE (the
+            # full sweep, where the catalogue changed since any earlier read).
+            rows = (catalogue_rows if catalogue_rows is not None
+                    else self.g.query("CALL db.indexes()").result_set)
+            if rows is None:
+                # NOT the same thing as [] — see the attribute's docstring.
+                log.debug(
+                    "#4997: vector-index inventory unavailable (empty response) "
+                    "— _vector_indexed_labels stays None"
+                )
+                self._vector_indexed_labels = None
+                return
+
+            served = set(ENTITY_TYPE_LABELS.values())
+            measured: set[str] = set()
+            for row in rows:
+                try:
+                    if len(row) < 3:
+                        continue
+                    label, types = row[0], row[2]
+                    if not isinstance(types, dict):
+                        continue
+                    for _field, type_list in types.items():
+                        if not isinstance(type_list, (list, tuple, set)):
+                            continue
+                        if any(str(t).upper() == "VECTOR" for t in type_list):
+                            measured.add(label)
+                except Exception:
+                    # A malformed row must not abort the scan — skip it.
+                    continue
+
+            self._vector_indexed_labels = measured & served
+        except Exception as e:  # fail-open: never break store setup
+            log.debug("#4997: vector-index inventory read failed: %s", e)
+            self._vector_indexed_labels = None
+            return
+
+        gap = served - self._vector_indexed_labels
+        if gap:
+            with _VECTOR_INDEX_GAP_LOCK:
+                first_report = key not in _VECTOR_INDEX_GAP_WARNED
+                _VECTOR_INDEX_GAP_WARNED.add(key)
+            if first_report:
+                log.warning(
+                    "#4997: vector search on %s is unindexed for label(s) %s "
+                    "(indexed: %s) — those reads silently full-scan. This is "
+                    "the gap that decision V1 (STORAGE-ARCHITECTURE.md §12.1c) "
+                    "governs; indexing those labels is NOT done here.",
+                    self._graph_name,
+                    sorted(gap),
+                    sorted(self._vector_indexed_labels) or "none",
+                )
 
     def _get_falkordb_version(self):
         """Parse FalkorDB version from db.info() or raw-connection probes,
@@ -7887,8 +8036,20 @@ class FalkorProjection(
         try:
             rows = self.g.query("CALL db.indexes()").result_set
         except Exception:  # a probe that cannot run is not a pass
+            self._index_catalogue_rows = None
             return False
+        # #4997/#5434: Publish the rows just read so a caller that runs LATER in
+        # the same sweep can reuse them instead of issuing a second
+        # `CALL db.indexes()`. The fast path in `_ensure_indexes` reads this
+        # catalogue immediately before `_ensure_vector_index_api()`, and
+        # `tests/test_indexes.py::test_repeat_sweep_runs_no_already_satisfied_ddl`
+        # pins a repeat sweep to EXACTLY ONE catalogue probe, so the
+        # vector-index inventory must not re-probe. Only valid on the "schema is
+        # current" answer — a caller that got False is about to CHANGE the
+        # catalogue, so the full-sweep path deliberately re-reads instead.
+        self._index_catalogue_rows = rows
         if not rows:
+            self._index_catalogue_rows = None
             return False
         present: set[tuple[str, str, str]] = set()
         for row in rows:
@@ -8243,7 +8404,14 @@ class FalkorProjection(
             # report. The existing index is never reconciled here (same as the
             # sweep) and a MISSING one is still created — so a server graph
             # that lost only its vector index still gets it back.
-            self._ensure_vector_index_api()
+            # #5434: hand over the catalogue rows `_schema_is_current` just
+            # read, so the inventory below does not re-probe (one probe per
+            # repeat sweep). `getattr` because a projection built with
+            # `object.__new__` (tests, mocks) has no `__init__` and therefore no
+            # attribute — and `None` there simply falls back to a fresh read,
+            # which is always safe.
+            self._ensure_vector_index_api(
+                getattr(self, "_index_catalogue_rows", None))
             return
 
         # ── Range indexes (always safe, pre-4.x compatible) ──
@@ -8580,7 +8748,7 @@ class FalkorProjection(
                 "Skipping FTS and vector indexes: FalkorDB %s < 4.x",
                 '.'.join(map(str, _ver)))
 
-    def _ensure_vector_index_api(self) -> None:
+    def _ensure_vector_index_api(self, catalogue_rows=None) -> None:
         """Resolve ``_vector_index_api`` — the engine's vector-index API.
 
         #4465: extracted from ``_ensure_indexes`` unchanged so the schema fast
@@ -8598,6 +8766,15 @@ class FalkorProjection(
         bundle — and engines below 4.x skip the whole block, so both leave the
         handle ``None`` (``required_embedding_dim`` documents the three
         ``None`` lanes).
+
+        #4997: on the way out this also MEASURES the engine catalog
+        (``_record_vector_index_inventory``) so the vector-index gap is a fact
+        the store holds. It lives here, at the end of the non-embedded
+        vector-index block, because #4465 gave that block TWO callers in
+        ``_ensure_indexes`` — the schema fast path and the full sweep — and a
+        measurement placed at either call site alone would go unmeasured on the
+        other. The read is read-only and fail-open; it never changes the handle
+        this method resolves.
         """
         _ver = getattr(self, "_falkordb_version", None)
         if _ver is not None and _ver[0] < 4:
@@ -8614,12 +8791,22 @@ class FalkorProjection(
         # correct). A dimension change is still the documented
         # drop-and-recreate operation, not a constant edit.
         from ..embeddings import EMBEDDING_DIM
+        # #5434: did this call WRITE an index? If it did, `catalogue_rows` -
+        # read BEFORE the write - no longer describes the engine, and reusing it
+        # would report a false gap. The Point VECTOR index is NOT part of
+        # `_schema_is_current`'s required set, so a store with every range/FTS
+        # index but no vector index answers "schema is current" and takes the
+        # fast path, which then CREATES the index here. That is exactly the
+        # case the reviewer reproduced: the warning named `Point` as unindexed
+        # immediately after creating its index.
+        _wrote_index = False
         try:
             self.g.query(
                 "CALL db.idx.vector.createNodeIndex('Point', 'embedding', "
                 f"{EMBEDDING_DIM}, 'HNSW')"
             )
             self._vector_index_api = 'procedure'
+            _wrote_index = True
         except Exception as e:
             msg = str(e).lower()
             if "already" in msg:
@@ -8638,6 +8825,7 @@ class FalkorProjection(
                         "similarityFunction: 'cosine'}"
                     )
                     self._vector_index_api = 'cypher'
+                    _wrote_index = True
                 except Exception as e2:
                     msg2 = str(e2).lower()
                     if "already" in msg2:
@@ -8646,6 +8834,21 @@ class FalkorProjection(
                         import logging
                         logging.getLogger(__name__).warning(
                             "Failed to create vector index on Point.embedding: %s", e2)
+
+        # #4997: measure what the catalog ACTUALLY has, AFTER the creation
+        # attempt above, so a fresh graph reports post-creation state rather
+        # than a false "everything is missing" gap. Read-only and fail-open.
+        #
+        # #5434: `catalogue_rows` may only be reused when this call did NOT
+        # write — otherwise the rows it holds were read BEFORE the write and
+        # describe a catalogue that no longer exists (the false-gap bug). When
+        # the index was created, or when there were no rows supplied (the full
+        # sweep), the inventory re-reads. The steady-state repeat sweep takes
+        # the "already" branch, writes nothing, and reuses — which is what keeps
+        # `tests/test_indexes.py::test_repeat_sweep_runs_no_already_satisfied_ddl`
+        # at exactly one catalogue probe.
+        self._record_vector_index_inventory(
+            None if _wrote_index else catalogue_rows)
 
     @property
     def required_embedding_dim(self) -> int | None:
