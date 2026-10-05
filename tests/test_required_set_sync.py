@@ -174,12 +174,21 @@ def test_the_real_enumeration_partitions_every_name(guard):
     assert "python-ci-gate" in merge, (
         "the aggregate must be the one merge condition — it is the check the "
         "queue branch actually reports on")
-    # The live-required name that is enforced by INJECTION, not by a list entry.
-    # Pinned so a later "tidy-up" cannot drop it and restore the six-context lie.
-    assert injected == {"ai-review-gate"}, (
-        "`ai-review-gate` is required on main and must stay enumerated; it is "
-        "enforced at merge by branch-protection injection, so it belongs in "
-        "NEITHER .mergify.yml list")
+    # #6272 moved `ai-review-gate` from drift-detection-by-injection to ENTRY
+    # gating: it is now named in `.mergify.yml`'s `queue_conditions`, so it is an
+    # ordinary `queue` entry and the `injected` bucket is empty. Pinned so a later
+    # "tidy-up" can neither drop it (which would restore the six-context lie) nor
+    # move it back to `injected` without a decision.
+    assert injected == set(), (
+        "no live-required name is injection-only any more (#6272 made "
+        "`ai-review-gate` an ENTRY gate); an `injected` entry here means the "
+        "enumeration and the config have diverged again")
+    assert guard.REQUIRED_SET["ai-review-gate"][0] == "queue", (
+        "`ai-review-gate` is required on main and is gated at queue ENTRY by "
+        "`.mergify.yml` (#6272) — it must stay in the `queue` bucket")
+    assert "ai-review-gate" in queue, (
+        "`ai-review-gate` must be named in `.mergify.yml`'s queue_conditions — "
+        "that line IS the server-side enforcement of the review record (#5433)")
     assert set(guard.REQUIRED_SET) == queue | merge | injected, (
         "the enumeration is the LIVE-required set — every entry must be in one "
         "of the three buckets and every bucket entry in the enumeration")
