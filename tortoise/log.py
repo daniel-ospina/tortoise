@@ -538,25 +538,32 @@ class EventLog:
             if f.read(1) == b"\r":
                 end = size - 2          # the \r\n PAIR is the terminator
         parts: list[bytes] = []
-        window = 1 << 16
+        window = 4096
         start = end
         while start > 0:
-            # Each byte is read and copied ONCE. Reading only the newly
-            # exposed window made the work linear in READ bytes, but
-            # `chunk + last_line` copied the whole accumulator on every step,
-            # which is quadratic in COPIES — measured at 13 s for a 16 MiB
-            # record and 53 s for a 32 MiB torn tail on the next `append`.
+            # Each byte is read and copied ONCE. Two earlier versions of this
+            # loop were quadratic (in read bytes, then in copies) — measured at
+            # 140 MB read for a 4 MiB record and 53 s for a 32 MiB torn tail.
+            # The window now starts SMALL and doubles: a 64 KiB first read
+            # costs `max(64 KiB, last_line)` on EVERY append, which measured
+            # 988x read amplification and ~3.5x CPU over 8000 small appends.
             # Chunks arrive newest-first, so the join is reversed.
             wstart = max(0, start - window)
             f.seek(wstart)
-            chunk = (f.read(start - wstart)
-                     .replace(b"\r\n", b"\n").replace(b"\r", b"\n"))
-            idx = chunk.rfind(b"\n")
+            chunk = f.read(start - wstart)
+            # A separator is a `\n` or a `\r` (read_all normalises universal
+            # newlines, so CR ends a line here too), and the LAST of the two
+            # in raw bytes is the last separator of the normalised text: for
+            # `\r\n` that is the `\n`, and for a lone `\r` it is the `\r`.
+            # Searching RAW bytes means a window that is wholly part of a
+            # line contains no separator and needs no normalisation at all.
+            idx = max(chunk.rfind(b"\n"), chunk.rfind(b"\r"))
             if idx >= 0:
                 parts.append(chunk[idx + 1:])
                 break
             parts.append(chunk)
             start = wstart
+            window = min(window * 2, 1 << 20)
         last_line = b"".join(reversed(parts))
         text = _decode_line(last_line)
         if text is None:

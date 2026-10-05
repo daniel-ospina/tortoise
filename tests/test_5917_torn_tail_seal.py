@@ -777,6 +777,31 @@ def test_the_window_scan_reads_each_byte_once():
     print("PASS test_the_window_scan_reads_each_byte_once")
 
 
+def test_a_small_tail_does_not_cost_a_full_window():
+    """A 64 KiB floor on EVERY append is 988x read amplification (measured).
+
+    The seal inspects the journal's last line before each append, and the
+    ordinary last line is a few hundred bytes. The window starts at 4 KiB and
+    doubles, so the read is bounded by 2x the LINE, independent of the
+    journal's size — the old 64 KiB first window read 65,538 bytes for a
+    44-byte last line however small the record was.
+    """
+    p = _tmp()
+    with open(p, "wb") as f:
+        for i in range(80000):
+            f.write(b'{"id": "r%d"}\n' % i)
+    size = os.path.getsize(p)
+    assert size > (1 << 20), size
+    with open(p, "a+b") as f:
+        counter = _CountingFile(f)
+        seal = EventLog(p)._seal_prefix(counter)
+    assert seal == "", seal
+    assert counter.read_bytes <= 2 * 4096, (
+        f"read {counter.read_bytes} bytes for a {size}-byte journal whose last "
+        f"line is ~15 bytes")
+    print("PASS test_a_small_tail_does_not_cost_a_full_window")
+
+
 def test_the_window_scan_does_not_copy_the_accumulator():
     """Linear in COPIES, not just in read bytes.
 
