@@ -1286,7 +1286,7 @@ jobs:
           # Until then, a rebalance must be redone whenever a file in this list
           # grows; `test_slow_leg_bounds_clear_the_committed_work` reds when the
           # watchdog no longer clears the committed weight. Deriving the slow
-          # legs is #6135's open design decision and is not pre-empted here.
+          # legs is #6137's design decision and is not pre-empted here.
           - half: a
             files: >-
               eval/retrieval/test_gate_1349 eval/retrieval/test_run
@@ -1541,12 +1541,13 @@ jobs:
           # -r flags, and a trailing -rfE would suppress the skip summary the
           # guard depends on; pinned by
           # tests/test_ci_selection.py::test_test_slow_job_carries_junitxml_manifest_guard).
-          # #3239: the watchdog is tools/ci_selection.WATCHDOG_HEADROOM times
-          # the leg's committed weight — the same factor #6135 validated for
-          # the fast shards. #6137 moved 43 files in, so the heavier leg now
-          # carries 16.21m and the literal is 35m (2.16x); it was 10m when the
-          # legs' committed weight was 2.84m (the measured pytest step was
-          # 4.70m, which does not enter the headroom arithmetic). Re-deriving
+          # #3239: the in-step watchdog must CLEAR the leg's committed weight
+          # by tools/ci_selection.WATCHDOG_HEADROOM — the same floor the fast
+          # shards derive their budget from. #6137 moved 43 files in, so the
+          # heavier leg now carries 16.21m and this literal is 35m, i.e. 2.16x
+          # the 2.0x minimum the headroom floor requires (32.4m); it was 10m
+          # when the legs' committed weight was 2.84m (the measured pytest step
+          # was 4.70m, which does not enter the headroom arithmetic). Re-deriving
           # the budget when the leg set moves is
           # the whole point of `test_slow_leg_bounds_clear_the_committed_work`,
           # which reds here if this literal stops clearing the committed work.

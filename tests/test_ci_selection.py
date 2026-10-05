@@ -2970,8 +2970,10 @@ def test_slow_leg_bounds_clear_the_committed_work():
     a 10m watchdog under a 20m cap is a consistent PAIR whatever the work.
 
     The floor is re-derived from the committed `durations` map, so the budget
-    cannot rot past its work again without reddening here."""
-    from tools.ci_selection import WATCHDOG_HEADROOM
+    cannot rot past its work again without reddening here. A leg file with no
+    `durations` row FAILS this test rather than weighing 0.0 — see the guard
+    below for why the default would re-open the very hole."""
+    from tools.ci_selection import WATCHDOG_HEADROOM, _duration_weight
     job = _load_python_ci()["jobs"]["test-slow"]
     durations = load_manifest()["durations"]
     watchdog = _literal_pytest_watchdog(job)
@@ -2985,7 +2987,22 @@ def test_slow_leg_bounds_clear_the_committed_work():
     for row in job["strategy"]["matrix"]["include"]:
         files = row["files"].split()
         assert files, f"test-slow leg {row['half']!r} is empty"
-        committed = sum(durations.get(f + ".py", 0.0) for f in files) / 60.0
+        # FAIL CLOSED on an unmeasured leg file. `durations.get(f, 0.0)` would
+        # weigh it ZERO, so the estimate this guard asserts against could sit
+        # arbitrarily below the leg's real work and the budget could rot past
+        # it exactly as it did in #6137 — and no other gate closes the gap:
+        # `duration_coverage_issues` covers `fast_pool()` only (these files have
+        # left it), `duration_issues` validates keys that EXIST, and the
+        # in-workflow drift guard pins the union of the two rows without
+        # reading the map at all.
+        unmeasured = [f for f in files if f + ".py" not in durations]
+        assert not unmeasured, (
+            f"test-slow leg {row['half']!r} has {len(unmeasured)} file(s) with "
+            f"no `durations` row: {unmeasured[:5]} — an unmeasured file weighs "
+            f"0.0 here, so the leg's estimate is not a lower bound on its work "
+            f"and this guard cannot see the budget rot it exists to catch. "
+            f"Register it in config/ci-surfaces.yml `durations`.")
+        committed = sum(_duration_weight(durations[f + ".py"]) for f in files) / 60.0
         assert watchdog >= WATCHDOG_HEADROOM * committed, (
             f"test-slow leg {row['half']!r}: the in-step watchdog "
             f"({watchdog}m) no longer clears its committed estimate "
@@ -3016,13 +3033,21 @@ def test_carve_out_shard_bounds_clear_the_committed_work_without_dwarfing_it():
     job = _load_python_ci()["jobs"]["test-carve-out"]
     cap = job["timeout-minutes"]
     measured = _MEASURED_PYTEST_MAX_MIN["test-carve-out"]
+    from tools.ci_selection import _duration_weight
     manifest = load_manifest()
     idx = _carve_matrix()
     durations = manifest["durations"]
     for entry in idx["include"]:
         files = entry["files"].split()
         assert files, f"carve shard {entry['suffix']!r} is empty — a dropped leg"
-        committed = sum(durations.get(f + ".py", 0.0) for f in files) / 60.0
+        # An absent row is weighed at the PACK's default (DEFAULT_FAST_WEIGHT),
+        # never 0.0: 0.0 would understate the shard's committed work against the
+        # very watchdog that has to clear it. Three carve-out files carry no row
+        # today, so the default — not a hard failure — is the honest bound here;
+        # the slow legs above fail closed because every one of their files is
+        # measured.
+        committed = sum(_duration_weight(durations.get(f + ".py"))
+                        for f in files) / 60.0
         wd = entry["watchdog_minutes"]
         assert wd >= WATCHDOG_HEADROOM * committed, (
             f"carve shard {entry['suffix']!r} watchdog ({wd}m) no longer clears "

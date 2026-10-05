@@ -2293,13 +2293,17 @@ slow_files:
 #     the `core` diff's `slow_selected` never contains them and the guard runs
 #     on neither leg (`test_every_named_guard_runs_for_its_own_source`, the
 #     #7076 class). They stay in the fast pool.
-#   * the `onboarding` surface is EXCLUDED. A `website/*` or docs-only PR
-#     selects `onboarding` and is pinned to `slow_run is False`
+#   * the `onboarding` surface is EXCLUDED. A `website/*` PR selects
+#     `onboarding` and is pinned to `slow_run is False`
 #     (test_ci_selection.py::test_public_site_surface_change_selects_onboarding_
-#     and_skips_slow, ::test_docs_only_skips_slow_and_carve_out — the
-#     #2147/#2148/#3332 cost gates). Putting an onboarding-owned file here
-#     would make every docs/website PR pay both slow legs; that is a real cost
-#     regression on a very common PR shape, not a bookkeeping detail.
+#     and_skips_slow) — the #2147/#2148/#3332 cost gates. Putting an
+#     onboarding-owned file here would make every `website/*` PR pay both slow
+#     legs; that is a real cost regression on a common PR shape, not a
+#     bookkeeping detail. (A docs-only diff is unaffected either way: it is
+#     filtered to `changed == []` and takes the dedicated early return whose
+#     result pins `slow_run` to False —
+#     ::test_docs_only_skips_slow_and_carve_out — so it can never reach the
+#     `slow_files` lookup at all.)
 #   * the `tier1` files are EXCLUDED: `slow_file_issues` fails closed on
 #     "slow file X is also in tier1 (fast gate leak)", because a file in both
 #     lists is selected by BOTH the smoke gate and the slow leg. Two of the
@@ -2315,8 +2319,9 @@ slow_files:
 # map's slow-pool rows are themselves only as fresh as the last sweep
 # (`tools/ci_timing.py --refresh-durations`, run by `ci-timing.yml`), so a stale
 # row mis-ranks the pack. The watchdog's headroom (2.16x the heavier leg) is
-# what absorbs a ranking error; the fix is the refresh, which #6174/#5719 are in
-# flight on. It is NOT half-fixed here.
+# what absorbs a ranking error; the durable fix is the scheduled refresh
+# (`.github/workflows/ci-timing.yml` → `tools/ci_timing.py --refresh-durations`),
+# which ships on its own and is NOT half-fixed here.
 #
 # The file lists in `.github/workflows/python-ci.yml` `test-slow` are the two
 # LPT legs of `slow_files - carve_out` on this same `durations` map, and that
@@ -3453,16 +3458,18 @@ durations:
   # so it cannot mis-balance the LPT pack.
   test_queue_resweep.py: 2.0  # unmeasured
   test_docs_lint_gate.py: 2.0  # unmeasured (#5476: registered under core)
-  # #6137: register the fast pool's unmeasured files. The relocation
-  # removes 43 measured files from the fast pool, which takes
-  # `duration_coverage_issues` from main's 90.1% (667/740) to 89.5% —
-  # under the 90% floor. Every fast-pool file that has no duration key is
-  # registered here, each measured from the junit of main run 37225357047
-  # (2026-10-04, fast shards a-i): the sum of `testcase/@time` per module.
-  # The module is the longest dotted `classname` prefix that names a real
-  # test file — a class-scoped case's `classname` ends in the CLASS, so a
-  # last-segment split silently misses the whole file and reports it
-  # unmeasured.
+  # #6137: register the fast pool's unmeasured files. Registering them is
+  # what keeps `duration_coverage_issues` at 100% — the 43-file relocation
+  # on its own takes it to 89.5% (624/697 of this head's fast pool), under
+  # the 90% floor, against main's 90.1% (667/740).
+  #
+  # Each value is measured from the junit of main run 37225357047
+  # (2026-10-04, fast shards a-i): the sum of `testcase/@time` over every
+  # case whose `@file` attribute names that module, rounded to 0.1s and
+  # FLOORED at 0.1s — a sub-0.1s module would otherwise register 0 and
+  # weigh nothing. Group by `@file`; never split `@classname`, whose last
+  # segment is the CLASS for a class-scoped case, so a last-segment split
+  # reports the whole file unmeasured.
   eval/write_path/test_write_path_prescreen.py: 0.2
   eval/write_path/test_write_path_semantic_judge.py: 0.2
   test_2500_terminal_ep_backfill.py: 1.7
@@ -3483,7 +3490,7 @@ durations:
   test_7108_operator_scope_predicate.py: 6.4
   test_backfill_ghost_members_guard.py: 0.1
   test_backup_ledger_5062.py: 0.4
-  test_capture_consent.py: 0.3
+  test_capture_consent.py: 0.4
   test_capture_graph_ops.py: 0.8
   test_capture_redaction_sinks_5445.py: 0.1
   test_capture_secret_redaction_4911.py: 9.7
@@ -3498,7 +3505,7 @@ durations:
   test_document_source_gold.py: 0.1
   test_egress_bytes.py: 1.1
   test_entry_point_python_guard.py: 4.6
-  test_extractor_embed_coerce_5060.py: 0.2
+  test_extractor_embed_coerce_5060.py: 0.6
   test_graph_name_ownership.py: 0.1
   test_graph_storage.py: 5.2
   test_heavy_import_guard.py: 9.2
