@@ -327,6 +327,36 @@ def test_session_end_notice_survives_a_marker_written_by_a_stale_hook(
         "written by a stale hook's CLI refusal\n"
 
 
+def test_session_end_notice_is_written_at_mode_0600(tmp_path, transcript):
+    """#3684 — the bash writer pins 0600 with `umask 077`.
+
+    The symlink test plants a link, so it only ever exercises the REFUSE branch
+    and could never observe a write: a regression that dropped the `umask` would
+    leave it — and every other test here — green.
+    """
+    import stat
+
+    log = tmp_path / "calls.log"
+    bindir = _write_mock_tortoise(tmp_path, log)
+    marker = bindir.parent / "home" / ".tortoise" / "capture-consent-notice"
+    meta = json.dumps({"session_id": "s-mode", "transcript_path": str(transcript)})
+
+    r = _run_hook(SESSION_END, meta, bindir,
+                  extra_env={"TORTOISE_API_KEY": "tt_legacy_credential"})
+    assert r.returncode == 0
+    assert marker.is_file(), "the hook wrote the one-time marker"
+    mode = stat.S_IMODE(marker.stat().st_mode)
+    assert mode == 0o600, f"expected 0o600, got {oct(mode)}"
+
+    # still one-time, and the visible line still fires
+    first_mtime = marker.stat().st_mtime_ns
+    r2 = _run_hook(SESSION_END, meta, bindir,
+                   extra_env={"TORTOISE_API_KEY": "tt_legacy_credential"})
+    assert r2.returncode == 0
+    assert marker.stat().st_mtime_ns == first_mtime, "the marker is one-time, not per-run"
+    assert "session capture is OFF" in r2.stderr, r2.stderr
+
+
 def test_session_end_notice_does_not_follow_a_symlink_at_the_marker(
         tmp_path, transcript):
     """#3684 — the BASH writer of the same path, and the reason the Python fix

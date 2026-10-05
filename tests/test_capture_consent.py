@@ -323,6 +323,26 @@ def test_the_first_write_is_atomic_under_concurrency(tmp_path):
         f"exactly one writer must win the first write, got {results.count(True)}")
 
 
+def test_a_hardlink_at_the_stamp_is_refused(tmp_path):
+    """A hardlink planted at the stamp is a REGULAR file, and `O_NOFOLLOW` covers
+    only symlinks — so an `O_TRUNC` open would truncate data OUTSIDE this
+    directory. The `st_nlink == 1` gate is the same refusal `embedded_reaper.py`
+    makes for its own marker file; the notice path needs no gate, because
+    `O_EXCL` already refuses any pre-existing name."""
+    from tortoise.capture_consent import mark_capture_notice_shown, record_capture_declined
+    assert record_capture_declined(tmp_path) is True
+    victim = tmp_path / "important-user-data"
+    victim.write_text("IMPORTANT USER DATA\n", encoding="utf-8")
+    stamp = capture_notice_shown_path(tmp_path)
+    os.link(victim, stamp)
+
+    mark_capture_notice_shown(tmp_path)
+
+    assert victim.read_text(encoding="utf-8") == "IMPORTANT USER DATA\n", \
+        "the hardlinked target was truncated"
+    assert stamp.stat().st_nlink == 2, "the link is left alone"
+
+
 def test_the_refusal_still_writes_nothing_readable_by_a_reader(tmp_path):
     """Regression guard for the fix's blast radius: an ordinary (non-symlink)
     first write still lands, is still delivered once, and a refused write leaves

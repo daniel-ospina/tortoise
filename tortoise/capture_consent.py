@@ -106,10 +106,13 @@ def _open_no_follow(path: Path, flags: int) -> int | None:
     failure must not become a crash.
 
     `O_NOFOLLOW` is folded in through `getattr` so the module still imports on a
-    platform that lacks it (CPython documents it as Unix-only). On such a
-    platform these helpers degrade to the pre-#3684 behaviour — following the
-    link — rather than crashing; the hardening is Unix-scoped in fact, and this
-    is where that is decided.
+    platform that lacks it (CPython documents it as Unix-only), and the two other
+    Unix-only members this module uses — `O_NONBLOCK` and `os.fchmod` — are
+    guarded the same way, so on such a platform these helpers degrade to the
+    pre-#3684 behaviour (following the link, umask mode) rather than raising
+    `AttributeError` out of a helper whose callers only expect `OSError`. That
+    degradation is real and deliberate; the hardening is Unix-scoped in fact, and
+    this is where that is decided.
     """
     try:
         return os.open(path, flags | getattr(os, "O_NOFOLLOW", 0), 0o600)
@@ -141,16 +144,30 @@ def _write_text_no_follow(path: Path, text: str, *, exclusive: bool) -> bool:
     did not (the path already exists, a symlink sits at it, it is not a regular
     file, or the open failed).
     """
-    flags = os.O_WRONLY | os.O_CREAT | os.O_NONBLOCK
+    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NONBLOCK", 0)
     if exclusive:
         flags |= os.O_EXCL
     handle_fd = _open_no_follow(path, flags)
     if handle_fd is None:
         return False
     try:
-        if not stat.S_ISREG(os.fstat(handle_fd).st_mode):
+        handle_stat = os.fstat(handle_fd)
+        if not stat.S_ISREG(handle_stat.st_mode):
             return False
-        os.fchmod(handle_fd, 0o600)
+        if not exclusive and handle_stat.st_nlink != 1:
+            # A HARDLINK planted at the stamp is a REGULAR file that would pass
+            # an O_TRUNC open and truncate data outside this directory.
+            # O_NOFOLLOW does not cover hardlinks; this gate does, and it is the
+            # same refusal `embedded_reaper.py` makes for its marker file. The
+            # notice path needs no gate — O_EXCL already refuses any
+            # pre-existing name.
+            return False
+        # `os.fchmod` is Unix-only (Windows gains it in 3.13), so it is guarded:
+        # on a platform without it the mode falls back to `0o600 & ~umask`, which
+        # is what the pre-#3684 code did — degraded, not a crash.
+        fchmod = getattr(os, "fchmod", None)
+        if fchmod is not None:
+            fchmod(handle_fd, 0o600)
         if not exclusive:
             os.ftruncate(handle_fd, 0)
         data = text.encode("utf-8")
@@ -173,7 +190,7 @@ def _read_text_no_follow(path: Path) -> str | None:
     Returns None when the path is absent, is not a regular file, or is
     unreadable — the same "nothing to say" answer the caller handles.
     """
-    handle_fd = _open_no_follow(path, os.O_RDONLY | os.O_NONBLOCK)
+    handle_fd = _open_no_follow(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
     if handle_fd is None:
         return None
     try:
