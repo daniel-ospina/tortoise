@@ -2001,6 +2001,7 @@ surfaces:
   - test_sdk_now_iso_single_definition.py   # #5375: sdk.py must declare exactly one module-level `_now_iso` (hermetic — ast.parse + the bound global)
   - test_validity_window_contract_5374.py   # #5374: the shared `commit_schema.validate_validity_window` contract + read-path (`_covers`) agreement (docker-lane)
   - test_log.py
+  - test_5917_torn_tail_seal.py   # #5917: a torn tail is sealed by the next append + read byte-safely (the record after a tear used to be lost)
   - test_longmem_reader_aggregation.py
   - test_longmem_reader_pinning.py
   - test_longmem_reader_prompting.py
@@ -3086,6 +3087,7 @@ durations:
   test_lint_config.py: 0.1
   test_lint_tripwire.py: 0.1
   test_log.py: 0.3
+  test_5917_torn_tail_seal.py: 2.0
   test_longmem_costing.py: 0.2
   test_longmem_errors.py: 0.1
   test_longmem_report_usage.py: 0.2

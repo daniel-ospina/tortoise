@@ -420,14 +420,61 @@ def refuse_torn_tail_revival(revival_records) -> None:
     )
 
 
+# The sealed-fragment marker (#5917). A torn record is terminated and
+# annotated with this line by the NEXT ``append``, so the fragment stops
+# merging into the following record and ``read_all`` can still classify it.
+# Underscore-fenced so it can never collide with an event type, and JSON-shaped
+# so it is a normal line in the file (append-only is preserved: sealing writes
+# bytes, it never truncates or rewrites).
+SEALED_TORN_TYPE = "__TornTailSealed__"
+
+
+def _is_sealed_marker(text: str) -> bool:
+    """True when *text* is a seal marker line (never a record)."""
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return False
+    return isinstance(parsed, dict) and parsed.get("type") == SEALED_TORN_TYPE
+
+
 class EventLog:
     def __init__(self, path: str | Path):
         self.path = Path(path)
 
     def append(self, event: dict) -> None:
+        """Append one record, sealing any torn tail first.
+
+        A writer killed mid-append leaves a record with no terminating
+        newline. Appending onto that fragment merges the two, and the merged
+        line is malformed and FINAL — so ``read_all`` skips it as a torn tail
+        and the record this call wrote is silently LOST, with the count
+        blaming a tear (#5917 measured). Sealing avoids that: the fragment is
+        terminated and marked, so it stays classified (#3316) while the new
+        record starts on a line of its own. Nothing is truncated or
+        rewritten — the seal is another append.
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        record = json.dumps(event, ensure_ascii=False) + "\n"
+        seal = ("\n" + json.dumps({"type": SEALED_TORN_TYPE}) + "\n"
+                if self._has_torn_tail() else "")
         with self.path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+            f.write(seal + record)
+
+    def _has_torn_tail(self) -> bool:
+        """True when the journal's last byte is not the record terminator.
+
+        A missing or empty file is not torn (there is no fragment to seal).
+        """
+        try:
+            with self.path.open("rb") as f:
+                f.seek(0, 2)
+                if f.tell() == 0:
+                    return False
+                f.seek(-1, 2)
+                return f.read(1) != b"\n"
+        except FileNotFoundError:
+            return False
 
     def read_all(self) -> list[dict]:
         """Read all events in the log.
@@ -444,7 +491,17 @@ class EventLog:
         :attr:`torn_trailing_raw` through
         :func:`torn_record_may_revive_state` BEFORE any wipe or fold.
         A malformed MID-FILE line is a separate corruption class (not a torn
-        append) and raises an actionable error naming the file and line.
+        append) and raises an actionable error naming the file and line —
+        EXCEPT a fragment sealed by :meth:`append`: that fragment sits
+        mid-file by construction, is annotated by a seal marker on the next
+        line, and is tolerated like any other tear (so a fragment never costs
+        the journal the record appended after it, #5917).
+
+        DECODING is per line: a line that is not valid UTF-8 is a malformed
+        line under the same rules (tolerated at the end, refused mid-file).
+        ``append`` writes ``ensure_ascii=False``, so a tear inside a
+        multi-byte character is ordinary — and it must reach the classifier
+        rather than raising ``UnicodeDecodeError`` for the whole file (#5917).
 
         The raw text of every skipped trailing line is kept, UNCAPPED, in
         :attr:`torn_trailing_raw` so a replay engine can tell a harmful tear
@@ -459,48 +516,92 @@ class EventLog:
         content string, so a valid single-line record would be read as two and
         the first fragment would look like mid-file corruption.
         """
-        import logging
         self.torn_trailing_count = 0
         self.torn_trailing_raw: list[str] = []
         if not self.path.exists():
             return []
         out = []
-        text = self.path.read_text(encoding="utf-8")
-        if text.endswith("\n"):
+        data = self.path.read_bytes()
+        if data.endswith(b"\n"):
             # Exactly one terminator: the byte `append` writes. Dropping it
             # keeps the torn-tail rule identical whether or not the last
             # record's newline survived the crash (a malformed final line is a
             # torn tail either way), WITHOUT the U+2028/U+2029/U+0085 splits
-            # `str.splitlines()` would introduce below.
-            text = text[:-1]
-        lines = text.split("\n")
-        for idx, raw in enumerate(lines):
+            # `str.splitlines()` would introduce below. Splitting the BYTES on
+            # b"\n" is the same split for a well-formed file.
+            data = data[:-1]
+        lines = data.split(b"\n")
+        decoded: list[tuple[str | None, bytes]] = []
+        for raw_bytes in lines:
+            try:
+                decoded.append((raw_bytes.decode("utf-8"), raw_bytes))
+            except UnicodeDecodeError:
+                decoded.append((None, raw_bytes))
+        for idx, (raw, raw_bytes) in enumerate(decoded):
+            last = idx == len(decoded) - 1
+            if raw is None:
+                # An undecodable line is MALFORMED, never an empty one: the
+                # empty-line branch below would drop it WITHOUT counting or
+                # classifying it, which is the fail-OPEN direction #3316
+                # forbids. "replace" is what the classifier sees — a broken
+                # byte makes a type unreadable, and an unreadable type is
+                # refused rather than assumed harmless.
+                self._tolerate_or_raise(
+                    raw_bytes.decode("utf-8", errors="replace").strip(),
+                    idx, last, decoded)
+                continue
             line = raw.strip()
             if not line:
                 continue
+            if _is_sealed_marker(line):
+                # Annotation, never a record: it exists only to legitimize the
+                # fragment on the line before it (handled there).
+                continue
             try:
                 out.append(json.loads(line))
+                continue
             except ValueError:
-                if idx == len(lines) - 1:
-                    self.torn_trailing_count += 1
-                    # The FULL line, UNCAPPED. Classification is conservative
-                    # over EVERY legible type, so a cap would let a
-                    # non-allowlisted type hiding BEYOND it ride an allowlisted
-                    # one before it — fail OPEN, the exact shape the allowlist
-                    # polarity exists to prevent. ``line`` already exists here,
-                    # so retaining it costs no extra allocation.
-                    self.torn_trailing_raw.append(line)
-                    logging.getLogger(__name__).warning(
-                        "EventLog %s: skipping torn trailing line %d "
-                        "(SIGKILL mid-append tolerance, S15) — %d line(s) skipped",
-                        self.path, idx + 1, self.torn_trailing_count)
-                else:
-                    raise ValueError(
-                        f"EventLog {self.path}: malformed line {idx + 1} — "
-                        "mid-file corruption is not a torn append; refusing to "
-                        "skip (line-tolerance covers the trailing line only)"
-                    ) from None
+                pass
+            self._tolerate_or_raise(line, idx, last, decoded)
         return out
+
+    def _tolerate_or_raise(self, line: str, idx: int, last: bool,
+                           decoded: list[tuple[str | None, bytes]]) -> None:
+        """Tolerate a malformed line at EOF or sealed mid-file, else refuse.
+
+        A fragment sealed by `append` is mid-file by construction, so without
+        the seal branch the journal would trade a silently lost record for a
+        permanently unreadable one (#5917). Any OTHER mid-file malformed line
+        keeps the #3316 posture: refuse, never skip.
+        """
+        if not last and _is_sealed_marker((decoded[idx + 1][0] or "").strip()):
+            self._keep_torn(line, idx)
+            return
+        if last:
+            self._keep_torn(line, idx)
+            return
+        raise ValueError(
+            f"EventLog {self.path}: malformed line {idx + 1} — "
+            "mid-file corruption is not a torn append; refusing to "
+            "skip (line-tolerance covers the trailing line only)"
+        ) from None
+
+    def _keep_torn(self, line: str, idx: int) -> None:
+        """Count and retain a tolerated torn fragment (the full line).
+
+        The FULL line, UNCAPPED. Classification is conservative over EVERY
+        legible type, so a cap would let a non-allowlisted type hiding BEYOND
+        it ride an allowlisted one before it — fail OPEN, the exact shape the
+        allowlist polarity exists to prevent. ``line`` already exists at every
+        call site, so retaining it costs no extra allocation.
+        """
+        import logging
+        self.torn_trailing_count += 1
+        self.torn_trailing_raw.append(line)
+        logging.getLogger(__name__).warning(
+            "EventLog %s: skipping torn line %d "
+            "(SIGKILL mid-append tolerance, S15) — %d line(s) skipped",
+            self.path, idx + 1, self.torn_trailing_count)
 
     def torn_tail_revival_records(self) -> list[str]:
         """Skipped trailing records whose loss can REVIVE state (#3316)."""
