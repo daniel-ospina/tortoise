@@ -780,6 +780,8 @@ def test_the_clean_line_reports_clean_medians_not_the_contaminated_ones():
     text = plt.render(res)
     clean_line = next(ln for ln in text.splitlines()
                       if "never force-pushed" in ln)
+    contaminated_line = next(ln for ln in text.splitlines()
+                             if "both boundaries exist" in ln)
     assert "10.0min" in clean_line, clean_line
     assert "30.0min" not in clean_line, clean_line
     # #7414: the MEDIANS above were pinned, the SHARES were not. Substituting the
@@ -807,9 +809,19 @@ def test_the_clean_line_reports_clean_medians_not_the_contaminated_ones():
         "prs": 2, "authoring": 0.0, "dispatch": 63.2, "gate_ci": 36.8,
     }, contaminated
     assert clean["dispatch"] != contaminated["dispatch"], (clean, contaminated)
-    assert f"dispatch {clean['dispatch']:.1f}%" in clean_line, clean_line
-    assert f"dispatch {contaminated['dispatch']:.1f}%" not in clean_line, clean_line
-    # The clean sentence's parenthetical MEDIANS are a second published surface:
-    # pin the clean gate-CI median, or an edit that re-reads med(merged) prints
-    # the contaminated 0.29h and nothing here notices.
-    assert "0.50h" in clean_line, clean_line
+    # The RENDERED sentences are a second published surface, INDEPENDENT of the
+    # dicts above: pinning res[...] does not constrain render(), and render() is
+    # what a reader actually sees. Pin each sentence WHOLE, so every share and
+    # every median it publishes fails here if any one of them is rewired to the
+    # other population's figure — the misattribution this change exists to kill.
+    assert clean_line == (
+        "  sub-split of (a) at FIRST COMMIT + FIRST CI START, over the 1 PRs whose "
+        "head was never force-pushed: authoring 0.0% | dispatch 25.0% | gate CI "
+        "75.0%  (median authoring=0.00h, dispatch=10.0min, gate CI=0.50h)"
+    ), clean_line
+    assert contaminated_line == (
+        "    of the 2 PRs where both boundaries exist, 1 are EXCLUDED from that "
+        "share: a force-pushed head cannot have had CI before it existed, so their "
+        "dispatch charges the PR's earlier life (all-PR share: authoring 0.0% | "
+        "dispatch 63.2% | gate CI 36.8%)"
+    ), contaminated_line
