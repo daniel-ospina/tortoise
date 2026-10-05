@@ -487,7 +487,7 @@ def test_concurrent_setups_do_not_raise_and_latch():
         def run():
             try:
                 proj._ensure_indexes()
-            except BaseException as e:  # noqa: BLE001
+            except BaseException as e:
                 errors.append(e)
 
         threads = [threading.Thread(target=run) for _ in range(8)]
