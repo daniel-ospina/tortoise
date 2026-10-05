@@ -87,11 +87,14 @@ def _journal_instant(ev: dict, key: str = "ts") -> str:
 
     Byte-identical to the ``ev.get(key) or _now_iso()`` it replaces for every
     value that expression accepted AND that `_usable_instant` accepts: a
-    truthy, driver-writable **string**. The differing family is everything
-    `_usable_instant` rejects — any non-string, a string carrying a NUL or lone
-    surrogate, the empty string, and an ARRAY of primitive strings (which
-    FalkorDB would have written, but which is not an instant this schema
-    stores).
+    truthy, driver-writable **string**. The differing family is the TRUTHY
+    values `_usable_instant` rejects — any non-string, a string carrying a NUL
+    or lone surrogate, and an ARRAY of primitive strings (which FalkorDB would
+    have written, but which is not an instant this schema stores). A FALSY
+    value (``""``, ``None``, ``0``) is NOT a difference from the predecessor:
+    the replaced expression fell back to the clock for it too. For those the
+    difference is between this helper and ``_retract`` (see the NOTE below),
+    which is the case this PR turns on.
 
     Also NOT covered here, and measured: a live caller that folds an event dict
     it built itself (``commit_ops``'s ``fold_ev`` for ``ObjectSuperseded``)

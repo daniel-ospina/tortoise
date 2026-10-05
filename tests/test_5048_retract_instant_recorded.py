@@ -317,7 +317,7 @@ def test_a_malformed_instant_does_not_abort_the_rebuild(tmp_path):
     THE FAILURE THIS PINS: `ts` now rides a Cypher parameter, so it needs the
     same `_writable_id` gate the id has (that gate's own docstring cites the
     identical incident: "a corrupt journal line with such an id aborts
-    `rebuild_all` after the wipe"). Ungthated, `{"evil": 1}` raises
+    `rebuild_all` after the wipe"). Ungated, `{"evil": 1}` raises
     `ResponseError: Property values can only be of primitive types`, pass-1b
     has no per-event try/except, and the wipe has ALREADY happened — so the
     run dies leaving the claim LIVE, i.e. the graph serves retracted content
