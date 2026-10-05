@@ -1,11 +1,16 @@
-"""Model backend tests — build_request, parse_response, _headers, __init__.
+"""Model backend tests — build_request, parse_response, _headers, __init__,
+and the #4129 served-model-substitution report.
 
-No network calls.   .venv/bin/python tests/test_models.py
+No network calls (the one transport test drives a mock urlopen).
+.venv/bin/python tests/test_models.py
 """
 from __future__ import annotations
 
+import json
+import logging
 import os
 import sys
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -60,6 +65,135 @@ def test_openai_parse_response():
     data = {"choices": [{"message": {"content": "{\"x\": 1}"}}]}
     assert OpenAICompatModel.parse_response(data) == "{\"x\": 1}"
     print("PASS test_openai_parse_response")
+
+
+# ---------------------------------------------------------------------------
+# #4129 — a provider accepts a RETIRED model id and silently serves another, so
+# the configured model is not the model used. The guard reports it; the tests
+# below pin both the policy and the WIRING (a guard nobody calls is no guard).
+# ---------------------------------------------------------------------------
+
+
+class _Collect(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.messages: list[str] = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+def _capture_substitution_warnings():
+    from tortoise import models as _m
+
+    handler = _Collect()
+    _m._logger.addHandler(handler)
+    previous_level = _m._logger.level
+    _m._logger.setLevel(logging.WARNING)
+    _m._substituted_models.clear()
+    return _m, handler, previous_level
+
+
+def _release_substitution_warnings(_m, handler, previous_level):
+    """Restore BOTH the handler and the level — this file is imported into a
+    shared pytest process, so a level left at WARNING would silence the
+    `tortoise.models` logger for every later test in the same run."""
+    _m._logger.removeHandler(handler)
+    _m._logger.setLevel(previous_level)
+    _m._substituted_models.clear()
+
+
+def test_substitution_capture_helpers_restore_logger_state():
+    """The capture helpers must leave the shared `tortoise.models` logger
+    exactly as they found it. This file is imported into a shared pytest
+    process, so a level left at WARNING would silence that logger for every
+    later test in the same run.
+
+    The baseline is set EXPLICITLY rather than read from the logger: this file
+    also runs standalone (`_run_all` sorts by name, so the transport test above
+    runs first), and a polluted baseline would make this test pass without
+    anything being restored."""
+    from tortoise import models as _m
+
+    original = _m._logger.level
+    baseline = logging.INFO  # distinguishable from the capture's WARNING
+    _m._logger.setLevel(baseline)
+    try:
+        before_handlers = list(_m._logger.handlers)
+        captured, handler, previous = _capture_substitution_warnings()
+        assert previous == baseline, (previous, baseline)
+        assert _m._logger.level == logging.WARNING  # the capture is active
+        _release_substitution_warnings(captured, handler, previous)
+        assert _m._logger.level == baseline, (_m._logger.level, baseline)
+        assert _m._logger.handlers == before_handlers
+    finally:
+        _m._logger.setLevel(original)
+    print("PASS test_substitution_capture_helpers_restore_logger_state")
+
+
+def test_model_substitution_warns_once_and_never_raises():
+    """A divergent served id warns exactly once per pair; every non-divergent
+    shape (agreement, None, empty, non-str) is silent. Never raises — a provider
+    that legitimately normalizes an alias must not fail a capture."""
+    _m, handler, previous_level = _capture_substitution_warnings()
+    try:
+        _m._warn_on_model_substitution("deepseek-chat", "deepseek-flash")
+        assert len(handler.messages) == 1, handler.messages
+        assert "deepseek-flash" in handler.messages[0]
+        assert "deepseek-chat" in handler.messages[0]
+
+        # The SAME pair again is silent: a long capture path calls this per
+        # request, and a per-call warning would be its own defect.
+        _m._warn_on_model_substitution("deepseek-chat", "deepseek-flash")
+        assert len(handler.messages) == 1, handler.messages
+
+        for served in ("deepseek-flash", None, "", 7, {}):
+            _m._warn_on_model_substitution("deepseek-flash", served)
+        assert len(handler.messages) == 1, handler.messages
+
+        # A DIFFERENT pair is a different finding and must still be reported.
+        _m._warn_on_model_substitution("gpt-4o-mini", "gpt-4o")
+        assert len(handler.messages) == 2, handler.messages
+
+        # ``requested`` is documented as a str; a non-hashable value must not
+        # raise before the early return (the once-per-pair set would).
+        _m._warn_on_model_substitution([], "deepseek-flash")
+        _m._warn_on_model_substitution({"a": 1}, "deepseek-flash")
+        assert len(handler.messages) == 2, handler.messages
+    finally:
+        _release_substitution_warnings(_m, handler, previous_level)
+    print("PASS test_model_substitution_warns_once_and_never_raises")
+
+
+def test_complete_reports_a_substituted_model():
+    """Wiring: `complete()` must actually inspect the response's `model`, not
+    merely have a guard available. Drives a mock transport (no network) and
+    asserts the substituted served id is reported."""
+    _m, handler, previous_level = _capture_substitution_warnings()
+    old_key = os.environ.get("OPENAI_API_KEY")
+    os.environ["OPENAI_API_KEY"] = "sk-test-4129"
+    body = json.dumps({
+        "model": "deepseek-flash",
+        "choices": [{"message": {"content": "{}"}}],
+    }).encode()
+    resp = mock.MagicMock()
+    resp.__enter__.return_value = resp
+    resp.read.return_value = body
+    try:
+        with mock.patch.object(_m.urllib.request, "urlopen", return_value=resp):
+            content = OpenAICompatModel(
+                id="deepseek-chat",
+                base_url="https://api.example.com/v1",
+            ).complete(system="s", user="u")
+        assert content == "{}"
+        assert any("deepseek-flash" in s for s in handler.messages), handler.messages
+    finally:
+        _release_substitution_warnings(_m, handler, previous_level)
+        if old_key is None:
+            os.environ.pop("OPENAI_API_KEY", None)
+        else:
+            os.environ["OPENAI_API_KEY"] = old_key
+    print("PASS test_complete_reports_a_substituted_model")
 
 
 def test_openai_headers_no_key():
