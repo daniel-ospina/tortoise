@@ -36,6 +36,7 @@ from tortoise.cypher_guard import (  # #3595 `=~` guard — the ONE seam
     _skip_cypher_quoted,  # noqa: F401  re-export: the scanner's public test surface
     _unsupported_cypher_operator,  # noqa: F401  re-export
     guarded_client,
+    tolerates_altered_numbers,  # #7174/#5011: the replay/apply exemption
 )
 from tortoise.env_truthy import FALSY, env_flag  # #4097: the declared truthy contract
 
@@ -4232,6 +4233,7 @@ class FalkorProjection(
             return {**ev, **ev["point"]}
         return ev
 
+    @tolerates_altered_numbers
     def apply(self, event: dict) -> None:
         # #3947 review: read the capture's structural directive from the RAW
         # envelope, BEFORE `_norm` splices the point payload over it. `_norm`
@@ -4601,6 +4603,7 @@ class FalkorProjection(
             "RDB backup, instead of trusting this rebuild."
         )
 
+    @tolerates_altered_numbers
     def rebuild(self, log, *, confirm_destructive: bool = False) -> None:
         """Wipe the graph and replay one EventLog. DESTRUCTIVE.
 
@@ -4701,6 +4704,7 @@ class FalkorProjection(
             "db_path": _prewipe_db_path_identity(self._path),
         }
 
+    @tolerates_altered_numbers
     def rebuild_all(self, log_dir: str, *,
                     confirm_destructive: bool = False) -> dict:
         """Rebuild from all .jsonl files in a directory. Returns counts.

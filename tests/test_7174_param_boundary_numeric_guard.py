@@ -278,13 +278,14 @@ def test_a_numeric_literal_in_the_statement_text_is_NOT_covered_here():
 
 
 def test_a_read_query_is_refused_too_by_policy():
-    """Falsifier: the refusal is uniform, deliberately NOT write-gated.
+    """Falsifier: the refusal is NOT write-gated — a read is refused as well.
 
-    Only the WRITE side is measured (``SET n.v = $v`` stores the clamped value);
-    the read is refused on the same doctrine, because a read cannot be ASSUMED to
-    compare against the caller's number once the store has altered it. This test
-    pins the policy so a later "optimisation" gating the guard on write clauses
-    has to argue for the read it stops guarding.
+    A read of an out-of-domain value cannot be trusted either (the store alters
+    what it compares against), and gating on write clauses would need Cypher
+    write-detection, which is its own source of false refusals. The ONE
+    exemption is a REPLAY write (#5011) — see the next test. This test pins the
+    read policy so a later "optimisation" that gates on write clauses has to
+    argue for the read it stops guarding.
     """
     g, handle = _guarded()
     with pytest.raises(UnrepresentableNumberError):
@@ -293,6 +294,26 @@ def test_a_read_query_is_refused_too_by_policy():
 
 
 # ── anti-overfix guards: contracts the fix must not break ───────────────────
+
+def test_the_replay_exemption_is_scoped_and_does_not_leak():
+    """Falsifier: the #5011 exemption must be a REPLAY SCOPE, not a global switch.
+
+    #5011 decided that a replayed record carrying a number the store cannot hold
+    is a DIVERGENCE for ``check_consistency`` to report, never a crash; a CALLER
+    write is refused, because the caller can pass a string instead. Value that
+    makes it fail: the SAME params inside and outside
+    ``tolerating_altered_numbers()`` — inside must reach the handle, and outside
+    must raise again (which also proves the scope is reset, not leaked).
+    """
+    from tortoise.cypher_guard import tolerating_altered_numbers
+
+    g, handle = _guarded()
+    with tolerating_altered_numbers():
+        assert g.query(CYPHER, {"v": OUT_OF_DOMAIN}) == "SENTINEL-REACHED-HANDLE"
+    with pytest.raises(UnrepresentableNumberError):
+        g.query(CYPHER, {"v": OUT_OF_DOMAIN})
+    assert len(handle.calls) == 1, "only the replayed write may reach the handle"
+
 
 def test_representable_params_reach_the_handle_unchanged():
     """Anti-overfix guard: no FALSE refusal, and params are forwarded verbatim.
@@ -420,3 +441,112 @@ def test_a_non_mapping_params_payload_is_forwarded_not_guessed():
     assert g.query(CYPHER, [OUT_OF_DOMAIN]) == "SENTINEL-REACHED-HANDLE"
     assert g.query(CYPHER, "not-a-mapping") == "SENTINEL-REACHED-HANDLE"
     assert len(handle.calls) == 2
+
+
+def test_recover_from_log_counts_a_numeric_refusal_apart_from_torn_lines(tmp_path):
+    """Falsifier: a deliberate domain refusal must not be reported as DAMAGE.
+
+    ``recover_from_log`` never raises for a replay failure — it REPORTS it (its
+    docstring is explicit). The pre-#7174 shape of its apply loop caught
+    everything into ``torn``, the crash-damage tolerance, so a record the store
+    would have ALTERED landed there: a deliberate refusal, reported as a torn
+    line, hiding a data-loss event. Value that makes it fail: an event whose
+    props carry the out-of-domain number; ``reason`` must name the refusal and
+    must NOT call it a skip.
+    """
+    from tortoise.consistency import recover_from_log
+    from tortoise.log import EventLog
+
+    log = EventLog(str(tmp_path / "log.jsonl"))
+    for index in range(3):
+        log.append({"type": "PointCreated", "id": f"p{index}", "v": 1.0})
+
+    class _Result:
+        def __init__(self, node):
+            self.result_set = [[node]]
+
+    class _FakeProj:
+        def __init__(self):
+            self.count_calls = 0
+            self.applied = []
+
+        def query(self, cypher):
+            self.count_calls += 1
+            return _Result(0 if self.count_calls == 1 else 3)
+
+        def apply(self, ev):
+            if ev.get("id") == "p1":
+                raise UnrepresentableNumberError(
+                    "'v': integer with 71 bits is outside the range the store "
+                    "can hold"
+                )
+            self.applied.append(ev.get("id"))
+
+    proj = _FakeProj()
+    result = recover_from_log(str(tmp_path), proj)
+    assert result["recovered"] is True, result
+    assert proj.applied == ["p0", "p2"], proj.applied
+    assert "1 refused by the numeric domain" in result["reason"], result["reason"]
+    assert "skipped" not in result["reason"], (
+        "a deliberate refusal must not be reported as a torn/skipped line: "
+        f"{result['reason']!r}"
+    )
+
+
+def test_the_journal_write_path_tolerates_an_unholdable_number():
+    """Falsifier for BOTH halves of the scope: journal path tolerant, seam refuses.
+
+    #5011's own test (``test_an_over_range_int_is_a_divergence_not_a_crash``)
+    seeds through ``FalkorProjection.apply`` and expects the write to LAND — the
+    store clamps and ``check_consistency`` reports a divergence; "a raise here
+    makes the gate un-runnable, durably, on every retry". Value that makes it
+    fail: an out-of-domain prop through ``proj.apply``, which must reach the
+    handle rather than raise — while the SAME value at a live param boundary
+    (``proj.g.query``) is still refused. Removing the exemption from ``apply``
+    reds the first half; a refusal that leaks into the journal path reds it too.
+    """
+    handle = _FakeHandle()
+    proj = object.__new__(FalkorProjection)
+    proj.g = _GuardedGraph(handle, proj)
+    proj._skip_guard = False
+    proj._is_embedded = True
+    proj._graph_name = "test_7174_param_boundary_numeric_guard"
+    proj.apply({
+        "type": "PointAdded",
+        "point": {"id": "p1", "content": "hello", "confidence": OUT_OF_DOMAIN},
+    })
+    assert handle.calls, "the journal write path must reach the handle (#5011)"
+    live, live_handle = _guarded()
+    with pytest.raises(UnrepresentableNumberError):
+        live.query(CYPHER, {"v": OUT_OF_DOMAIN})
+    assert live_handle.calls == [], "a live param write must still be refused"
+
+
+def test_every_whole_journal_replay_engine_is_exempt():
+    """Falsifier: a replay engine that loses the exemption crashes on #5011's case.
+
+    The journal VALUE is not re-authorable at replay time, so every whole-journal
+    replay engine must run under the tolerance: ``FalkorProjection.apply`` (#5011's
+    own seeding path), ``rebuild``, ``rebuild_all``, ``consistency.recover_from_log``
+    and ``backup.restore`` — whose JSONL fallback writes the journaled ``valid_to``
+    verbatim through ``apply_journal_point_restamp``, so an out-of-domain instant
+    aborted the restore before this. This test DECLARES the set (a fifth engine
+    cannot be detected automatically — the list is asserted here and in the
+    decorator's docstring), and it reds the moment one of them loses its
+    exemption: the ``functools.wraps`` attribute is the documented marker.
+    """
+    from tortoise import backup, consistency
+    from tortoise.projection import FalkorProjection
+
+    engines = (
+        FalkorProjection.apply,
+        FalkorProjection.rebuild,
+        FalkorProjection.rebuild_all,
+        consistency.recover_from_log,
+        backup.restore,
+    )
+    for fn in engines:
+        assert getattr(fn, "__wrapped__", None) is not None, (
+            f"{fn.__qualname__} replays a journal and must carry "
+            "@tolerates_altered_numbers (#7174/#5011)"
+        )

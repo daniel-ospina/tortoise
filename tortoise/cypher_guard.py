@@ -49,7 +49,12 @@ domains is SILENTLY ALTERED (``SET n.v = $v`` reports success and stores
 :mod:`tortoise.numeric_domain`; this seam applies it to every param map on every
 guarded handle, so a writer is covered without anyone remembering to add a call
 site. It is a PARAM boundary — what it excludes is listed once, in
-:func:`_guard_numeric_params`.
+:func:`_guard_numeric_params` — and the journal WRITE path is exempt
+(:func:`tolerating_altered_numbers`: ``apply``, ``rebuild``, ``rebuild_all``,
+``recover_from_log``, ``backup.restore``). Applying a journal record whose number
+the store cannot hold is a divergence for ``check_consistency`` to report, never
+a crash (#5011), so every whole-journal replay engine runs with the refusal
+suspended; a caller-driven write at the param boundary is still refused.
 
 **The scan** is a single left-to-right pass that keeps state, so ``=~`` is
 reported only where it is CODE. Inside a quoted literal (``RETURN 'a =~ b'``) it
@@ -59,6 +64,10 @@ those may trip the guard — a false POSITIVE would block a legitimate query,
 which is its own class of harm even though it is loud rather than silent.
 """
 from __future__ import annotations
+
+import contextvars
+import functools
+from contextlib import contextmanager
 
 from tortoise.exceptions import (
     UnrepresentableNumberError,
@@ -196,9 +205,14 @@ def _guard_numeric_params(params) -> None:
     ``_build_params_header`` accepts, so any other shape is the vendor's own
     error and is forwarded rather than refused by a guess.
 
-    Refusal is uniform and deliberately NOT write-gated. A read param is refused
-    too: gating on write clauses would need Cypher write-detection, which is its
-    own source of false refusals.
+    **The journal WRITE path is exempt — see :func:`tolerating_altered_numbers`.**
+    A caller can pass a string instead of the number, so a caller-driven write at
+    the param boundary is refused; a journal RECORD cannot be re-authored at replay
+    time, and #5011 decided that applying one whose number the store cannot hold is
+    a DIVERGENCE for ``check_consistency`` to report, never a crash. ``apply``, the
+    rebuilds and ``recover_from_log`` therefore run with the refusal suspended —
+    including ``apply``'s live callers, a residual stated in full on the
+    decorator's own docstring.
 
     NOT covered here, deliberately: a numeric LITERAL in the statement text
     (``{v: 1180591620717411303424}`` with no ``params``) and a raw vendor client
@@ -207,6 +221,8 @@ def _guard_numeric_params(params) -> None:
     a number already serialized into a STRING param (a JSON payload).
     """
     if not isinstance(params, dict):
+        return
+    if _TOLERATE_ALTERED_NUMBERS.get():
         return
     for key, value in params.items():
         reason = numeric_alteration_reason(key, value)
@@ -218,6 +234,63 @@ def _guard_query(cypher: str, params=None) -> None:
     """Both pre-dispatch refusals in one call: unsupported operator, then domain."""
     _guard_unsupported_cypher(cypher)
     _guard_numeric_params(params)
+
+
+#: #7174/#5011: set while a REPLAY is writing. A journal is a FILE — a record
+#: written by an older revision, or hand-edited, can carry a number the store
+#: cannot hold — and #5011 decided that replaying one must NOT crash the run:
+#: the store clamps it and ``check_consistency`` reports the divergence. A
+#: caller-driven write is refused instead, because the caller has a faithful
+#: representation available (a string) and can choose it. Per-context (never a
+#: module global), so a tolerance in one thread or task cannot leak into another.
+_TOLERATE_ALTERED_NUMBERS: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "tortoise_tolerate_altered_numbers", default=False
+)
+
+
+@contextmanager
+def tolerating_altered_numbers():
+    """Suspend the numeric-domain refusal for a REPLAY write (#5011)."""
+    token = _TOLERATE_ALTERED_NUMBERS.set(True)
+    try:
+        yield
+    finally:
+        _TOLERATE_ALTERED_NUMBERS.reset(token)
+
+
+def tolerates_altered_numbers(fn):
+    """Decorator form of :func:`tolerating_altered_numbers` — the journal WRITE path.
+
+    Applied to ``FalkorProjection.apply`` #5011, ``FalkorProjection.rebuild``,
+    ``FalkorProjection.rebuild_all``, ``consistency.recover_from_log`` and
+    ``backup.restore`` — every whole-journal replay engine in the package.
+
+    **Why ``apply`` is in that set.** #5011 decided that a journal record carrying
+    a number the store cannot hold is a DIVERGENCE for ``check_consistency`` to
+    report, never a crash, and its reachability story is a record applied to the
+    projection (``test_an_over_range_int_is_a_divergence_not_a_crash`` seeds
+    through ``apply``): the store clamps and the check reports it. Refusing there
+    would reverse that decision, so ``apply`` keeps it.
+
+    **The residual, stated rather than hidden.** ``apply`` is ALSO a live-write
+    primitive for the paths that bypass the SDK's sanitize boundary:
+    ``api.EventAPI._emit``, the connectors and the indexers call it directly and
+    carry no ``_reject_unrepresentable_number`` guard, so a caller's out-of-domain
+    value on THOSE paths is clamped rather than refused. (The SDK's entity path is
+    not part of this residual — ``_create_entity`` runs ``_sanitize_props``,
+    which refuses at sdk.py:2607, so the early guard still fires there; only
+    ``sdk.py:20941``'s ``_skip_sanitize`` branch reaches ``apply`` unguarded, and
+    its ``create_source`` caller guards the assembled event itself.) Closing the
+    remaining paths would refuse a live write where #5011 expects the value to
+    land and diverge, so it is a DECISION, not an oversight; evidence on #7174.
+    """
+
+    @functools.wraps(fn)
+    def _replay_entry(*args, **kwargs):
+        with tolerating_altered_numbers():
+            return fn(*args, **kwargs)
+
+    return _replay_entry
 
 
 def _as_text(value):
