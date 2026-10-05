@@ -3954,25 +3954,33 @@ class FalkorProjection(
             used, cap = pressure
             detail = (f"used_memory {_fmt_bytes(used)} of maxmemory "
                       f"{_fmt_bytes(cap)}")
-        # The remedy must be usable on the container that actually wedges.
+        # The remedy must be usable on the container that actually wedges,
+        # WITHOUT pointing the operator at data that is not theirs to delete.
         # The original text prescribed `GRAPH.DELETE test_*`; on a LONG-LIVED
         # dev container that family is EMPTY (#2979: measured 2026-10-04, 0 of
-        # 48 graphs were `test_`-prefixed while `org_*`/`team_*`/`tt_*`
-        # residue filled it), so an operator who follows it deletes nothing and
-        # reaches for `FLUSHALL` — which destroys other sessions' in-flight
-        # state (the harm #2979 names). Hence: work from the LIST, and name the
-        # forbidden shortcut instead of leaving it to be discovered.
+        # 48 graphs were `test_`-prefixed), so an operator who follows it
+        # deletes nothing and reaches for `FLUSHALL`. The tempting repair —
+        # "just delete what GRAPH.LIST shows" — is WORSE: `org_{org_id}` is
+        # the tenant default-graph namespace, `team_*` is foreign state the
+        # test lane's own hygiene forbids touching, this method is evaluated
+        # BEFORE the `is_prod or not self._is_embedded` gate below (so the
+        # advice is emitted on production too), and `GRAPH.DELETE` has no
+        # undo. So the message keeps the proven-safe scoping (this lane's
+        # ephemeral graphs), states the ownership boundary as an explicit
+        # NEVER list, and names both destructive shortcuts as forbidden.
         return (
             "DB refused writes on open: the graph is INTACT but the server "
             f"has reached its memory ceiling ({detail}). This is NOT "
             "corruption — do NOT rebuild. Free memory first: GRAPH.LIST, "
-            "then GRAPH.DELETE the disposable test graphs this lane leaked. "
-            "Do NOT assume they are all test_-prefixed — a long-lived "
-            "container also accumulates org_*/team_* residue (#2979), so "
-            "work from the list, not from a prefix. Do NOT FLUSHALL: it "
-            "destroys other sessions' in-flight state. Or raise / relieve "
-            "the container's --maxmemory. See #2981 for the shared-lane "
-            "form of this."
+            "then GRAPH.DELETE ONLY this lane's ephemeral test graphs. "
+            "NEVER delete org_*/team_*/registry_* names or the shared test "
+            "graph: on a production or shared server those are customer "
+            "data or another lane's in-flight state, and GRAPH.DELETE has "
+            "no undo. Do NOT FLUSHALL for the same reason. Do NOT assume "
+            "the leaked graphs are all test_-prefixed — a long-lived "
+            "container keeps residue from retired naming schemes (#2979) — "
+            "and prefer raising / relieving the container's --maxmemory. "
+            "See #2981 for the shared-lane form of this."
         )
 
     def _backend_failure_message(

@@ -107,10 +107,45 @@ def test_write_refusal_remedy_is_usable_on_a_long_lived_container(monkeypatch):
     # 2. ...but not as a bare prefix, which matches nothing on the container
     #    this issue was filed from.
     assert "GRAPH.DELETE test_*" not in msg, msg
-    assert "Do NOT assume they are all test_-prefixed" in msg, msg
+    assert "Do NOT assume the leaked graphs are all test_-prefixed" in msg, msg
     # 3. The destructive workaround is named AS forbidden — the harm the issue
     #    records is that operators reach for it when the advice frees nothing.
     assert "Do NOT FLUSHALL" in msg, msg
+
+
+def test_write_refusal_remedy_never_points_at_other_lanes_or_tenants(monkeypatch):
+    """#2979 review P2 — the remedy must not license deleting someone else's data.
+
+    The first version of this fix told the operator to work from `GRAPH.LIST`
+    and called `org_*`/`team_*` "residue". That is a WORSE failure than the one
+    it repaired: `org_{org_id}` is the TENANT default-graph namespace, `team_*`
+    is foreign state the test lane's own hygiene forbids touching
+    (`_SERVER_WIPE_PREFIXES` is deliberately a strict subset of
+    `_SWEEP_OWNED_PREFIXES` for exactly this reason), this method is evaluated
+    BEFORE the `is_prod or not self._is_embedded` gate — so the advice is
+    emitted on a production server whose `org_*` graphs are customer data —
+    and `GRAPH.DELETE` has no undo.
+
+    So the ownership boundary must be stated, not implied. Pin all three
+    halves: the safe scope, the explicit NEVER list, and the irreversibility
+    that justifies it.
+    """
+    monkeypatch.delenv("FLY_APP_NAME", raising=False)
+    proj = _projection(probe_error=RuntimeError(_MAXMEMORY_ERROR))
+    proj._memory_pressure = lambda: (512 * 1024 * 1024, 512 * 1024 * 1024)  # type: ignore[method-assign]
+
+    msg = proj._write_refusal_message(RuntimeError(_MAXMEMORY_ERROR))
+    assert msg is not None
+    # (a) the deletion scope is OURS — not "whatever the list shows"
+    assert "ONLY this lane's ephemeral test graphs" in msg, msg
+    # (b) the foreign namespaces are named as forbidden, with the reason
+    assert "NEVER delete org_*/team_*/registry_*" in msg, msg
+    assert "customer data" in msg, msg
+    # (c) irreversibility is stated for BOTH destructive moves
+    assert "no undo" in msg, msg
+    assert "Do NOT FLUSHALL for the same reason" in msg, msg
+    # (d) and the always-safe lever is still offered
+    assert "--maxmemory" in msg, msg
 
 
 def test_memory_pressure_unreadable_still_avoids_rebuild(monkeypatch):
