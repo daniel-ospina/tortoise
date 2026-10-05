@@ -1235,7 +1235,8 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         # reads as FILED LANE-LESS until some later snapshot re-triggers the
         # upgrade (permanent only if the session never snapshots again). It is
         # accepted rather than closed — the window is two file reads plus one
-        # `content_digest` (single-digit ms), and the racer must be the FIRST
+        # `content_digest` (sub-millisecond for a typical session, up to ~150 ms
+        # at the 16 MB `SPOOL_MAX_ENTRY_BYTES` bound), and the racer must be the FIRST
         # lane-ful snapshot of a previously lane-less entry. Closing it needs
         # mutual exclusion in the capture hot path (every turn_end) in two
         # languages, where a stale lock would BLOCK OR LOSE CAPTURES — a worse
