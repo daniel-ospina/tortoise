@@ -550,3 +550,168 @@ def test_a_complete_sweep_records_no_truncation(monkeypatch, capsys):
         assert not plt._TRUNCATIONS, "a complete sweep must record NOTHING"
     finally:
         plt._TRUNCATIONS.clear()
+
+
+# --- leg (a)'s internal clock (#6238) ---------------------------------------
+# (a) was the drain's DOMINANT segment and carried no internal boundary at all,
+# so "authors take a long time to push" and "CI takes a long time to go green"
+# were the same reading. These pin the two boundaries that separate them.
+
+def test_split_a_names_the_three_segments():
+    created = T0
+    gate = T0 + timedelta(hours=5)
+    s = plt.split_a_at_commits(created, gate, T0 + timedelta(hours=1),
+                               T0 + timedelta(hours=2))
+    assert s["authoring_seconds"] == 3600.0
+    assert s["dispatch_seconds"] == 3600.0
+    assert s["gate_ci_seconds"] == 3 * 3600.0
+    assert s["authoring_seconds"] + s["dispatch_seconds"] + s["gate_ci_seconds"] == 5 * 3600
+
+
+def test_split_a_is_all_none_when_either_boundary_is_missing():
+    """Both-or-neither, as in the (b) eligibility split: an unobservable clock
+    must never read as 0.0 authoring or 0.0 CI, because either zero is a claim
+    ("instant") about a duration nobody measured."""
+    gate = T0 + timedelta(hours=2)
+    for s in (plt.split_a_at_commits(T0, gate, None, T0 + timedelta(minutes=10)),
+              plt.split_a_at_commits(T0, gate, T0 + timedelta(minutes=5), None)):
+        assert s == {"first_commit_at": None, "first_gate_ci_start_at": None,
+                     "authoring_seconds": None, "dispatch_seconds": None,
+                     "gate_ci_seconds": None}
+
+
+def test_split_a_clamps_a_commit_that_precedes_the_pr():
+    """The COMMON shape: a branch is pushed and then the PR is opened, so the
+    first commit is older than created_at. Unclamped this is the negative-segment
+    class that aborted a whole run on PR #5137 (a = -10762 s)."""
+    s = plt.split_a_at_commits(T0, T0 + timedelta(hours=2), T0 - timedelta(hours=3),
+                               T0 + timedelta(minutes=30))
+    assert s["authoring_seconds"] == 0.0
+    assert s["dispatch_seconds"] == 1800.0
+    assert s["gate_ci_seconds"] == 5400.0
+    # the TIMESTAMP must be clamped too, not just the duration: a boundary printed
+    # outside [created, gate] contradicts the emitted rule and disagrees with the
+    # segment beside it (found by review on the first cut of this function)
+    assert s["first_commit_at"] == T0.isoformat()
+
+
+def test_split_a_forces_monotone_boundaries():
+    """A check start EARLIER than the first commit (an earlier attempt whose
+    commit was rebased away, or a re-run credited to an older sha) must not make
+    `dispatch_seconds` negative: the second boundary is raised to the first."""
+    s = plt.split_a_at_commits(T0, T0 + timedelta(hours=1),
+                               T0 + timedelta(minutes=40), T0 + timedelta(minutes=10))
+    assert s["dispatch_seconds"] == 0.0
+    assert s["authoring_seconds"] + s["dispatch_seconds"] + s["gate_ci_seconds"] == 3600
+
+
+def test_split_a_clamps_boundaries_past_the_gate():
+    """A start recorded after the gate it produced is clamped, so the CI campaign
+    cannot outlive (a) — the same clamp the queue split makes at queue entry."""
+    s = plt.split_a_at_commits(T0, T0 + timedelta(hours=1),
+                               T0 + timedelta(hours=5), T0 + timedelta(hours=5))
+    assert s["gate_ci_seconds"] == 0.0
+    assert s["authoring_seconds"] + s["dispatch_seconds"] + s["gate_ci_seconds"] == 3600
+    assert s["first_gate_ci_start_at"] == (T0 + timedelta(hours=1)).isoformat()
+
+
+def _clock_gh(start_offset, commit_offset, started=True):
+    """A merged PR whose single commit landed at `commit_offset` and whose gate
+    context began at `start_offset` and completed 30 min later."""
+    run = {"id": 1, "name": GATE_CTX, "app": {"slug": "github-actions"},
+           "status": "completed", "conclusion": "success",
+           "started_at": _iso(T0 + start_offset) if started else None,
+           "completed_at": _iso(T0 + timedelta(minutes=40))}
+    return FakeGh([run], [{"sha": SHA,
+                           "commit": {"author": {"date": _iso(T0 + commit_offset)}}}])
+
+
+def test_measure_wires_the_leg_a_clock_split_at_the_call_site():
+    """The lesson from this file's worst review gap: asserting the pure function
+    is not evidence that measure() CALLS it. This drives measure() and requires
+    the three fields on the row, summing to seconds_a exactly."""
+    r = _measure(_clock_gh(timedelta(minutes=10), timedelta(0)))["prs"][0]
+    assert r["authoring_seconds"] == 0.0            # commit at created_at
+    assert r["dispatch_seconds"] == 600.0           # created -> first CI start
+    assert r["gate_ci_seconds"] == 1800.0           # start -> gate success
+    assert (r["authoring_seconds"] + r["dispatch_seconds"]
+            + r["gate_ci_seconds"]) == r["seconds_a"]
+
+
+def test_measure_does_not_claim_the_split_when_the_ci_start_clock_is_missing():
+    """A check-run with no `started_at` still gates (the gate rule reads
+    `completed_at`), so (a) is measurable while its first boundary is not: the
+    row must report None for all three rather than charge the whole of (a) to CI."""
+    res = _measure(_clock_gh(timedelta(minutes=10), timedelta(0), started=False))
+    r = res["prs"][0]
+    assert r["seconds_a"] is not None and r["gate_ci_seconds"] is None
+    assert r["authoring_seconds"] is None and r["dispatch_seconds"] is None
+    assert res["leg_a_clock_split_pct"]["prs"] == 0
+    assert res["totals"]["leg_a_clock_split_missing_prs"] == 1
+
+
+def test_measure_itself_raises_when_the_leg_a_split_does_not_sum(monkeypatch):
+    """A fresh review of the sibling (b) split found `if False and …` left every
+    test green: the assertion guarding a published number has to be asserted
+    itself. This makes the split off by one second and requires measure() to
+    abort the run."""
+    real = plt.split_a_at_commits
+
+    def off_by_one(created, gate, first_commit, first_ci_start):
+        s = real(created, gate, first_commit, first_ci_start)
+        if s["authoring_seconds"] is not None:
+            s["authoring_seconds"] += 1.0
+        return s
+
+    monkeypatch.setattr(plt, "split_a_at_commits", off_by_one)
+    with pytest.raises(SystemExit) as ei:
+        _measure(_clock_gh(timedelta(minutes=10), timedelta(0)))
+    assert "(a) CLOCK SPLIT VIOLATED" in str(ei.value)
+
+
+class _TwoHeadGh(FakeGh):
+    """Two merged PRs on different heads with independent check-runs: one head
+    whose CI start clock exists and one whose does not."""
+
+    def __init__(self, runs_by_sha):
+        super().__init__([], [])
+        self.by_sha = runs_by_sha
+        self._prs = [_pr(1, merged=T0 + timedelta(hours=1)),
+                     _pr(2, merged=T0 + timedelta(hours=1))]
+        self._prs[1]["head"] = {"sha": "b" * 40}
+
+    def _route(self, url):
+        self.calls += 1
+        self.asked.append(url)
+        if "state=closed" in url:
+            return self._prs if url.endswith("page=1") else []
+        if "/commits?" in url:
+            sha = "b" * 40 if "/pulls/2/" in url else SHA
+            return [{"sha": sha, "commit": {"author": {"date": _iso(T0)}}}]
+        return []
+
+    def obj_paged(self, url, **kw):
+        if "check-runs" in url:
+            self.calls += 1
+            self.asked.append(url)
+            runs = self.by_sha[url.split("/commits/")[1].split("/")[0]]
+            return {"total_count": len(runs), "check_runs": runs}
+        return self._route(url)
+
+
+def test_leg_a_split_pct_divides_by_the_observable_rows_only():
+    """Two rows with the SAME 2400 s of (a); only one has a CI start clock. The
+    shares must be of that row's (a) (25%/75%), not of the 2-row total (which
+    would print 12.5%/37.5% and hide the unobservable half in the denominator)."""
+    started = {"id": 1, "name": GATE_CTX, "app": {"slug": "github-actions"},
+               "status": "completed", "conclusion": "success",
+               "started_at": _iso(T0 + timedelta(minutes=10)),
+               "completed_at": _iso(T0 + timedelta(minutes=40))}
+    unstarted = dict(started, id=2, started_at=None)
+    res = plt.measure(_TwoHeadGh({SHA: [started], "b" * 40: [unstarted]}),
+                      "o/r", [GATE_CTX], 7, T0 + timedelta(days=1))
+    assert len(res["prs"]) == 2
+    assert res["leg_a_clock_split_pct"]["prs"] == 1
+    assert res["totals"]["leg_a_clock_split_missing_prs"] == 1
+    assert res["leg_a_clock_split_pct"]["dispatch"] == 25.0
+    assert res["leg_a_clock_split_pct"]["gate_ci"] == 75.0
