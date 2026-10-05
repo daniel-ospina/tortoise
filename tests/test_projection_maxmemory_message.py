@@ -82,21 +82,18 @@ def test_full_but_healthy_is_not_reported_as_corrupt(monkeypatch):
 def test_write_refusal_remedy_names_the_safe_path_and_claims_no_flags(monkeypatch):
     """#2979 — the remedy must be executable, and must make no false claim.
 
-    An earlier revision of this change asserted that `GRAPH.DELETE` is refused at
-    the ceiling and therefore cannot free memory. That is wrong — upstream
-    registers `graph.DELETE` as "write deny-script" (no `deny-oom`); it is
-    `graph.QUERY` that carries `deny-oom`, and #2979's "drop of 'test_...'
-    failed: server:OutOfMemoryError" is the DETACH inside `GRAPH.QUERY` that
-    `safe_graph_delete` sends BEFORE `graph.delete()`. A test had pinned that
-    false sentence. Flag semantics are not something an operator message should
-    assert at all, so the claim is dropped.
+    The message must make no claim about which graph commands the server
+    refuses. Upstream registers `graph.DELETE` as "write deny-script" (no
+    `deny-oom`) while `graph.QUERY` carries `deny-oom`, so a refusal reported
+    during a `GRAPH.QUERY` says nothing about `GRAPH.DELETE` — and #2979's
+    "OutOfMemoryError" is exactly that, the DETACH `safe_graph_delete` sends
+    before `graph.delete()`.
 
     The executable lever is pinned exactly. The second pin — that no
     command-refusal claim is made — is BEST-EFFORT only: the stem denylist below
-    cannot catch every wording, and a claim phrased with "refused" would pass it
-    (the sentence quoted above is the counterexample). What protects the property
-    is that the claim is absent and that the comment on `_write_refusal_message`
-    says why it must stay absent — not these assertions.
+    cannot catch every wording, and a claim phrased with "refused" would pass
+    it. What protects the property is that the claim is absent and that the
+    comment on `_write_refusal_message` says why it must stay absent.
     """
     monkeypatch.delenv("FLY_APP_NAME", raising=False)
     proj = _projection(probe_error=RuntimeError(_MAXMEMORY_ERROR))
@@ -125,25 +122,27 @@ def test_write_refusal_remedy_names_the_safe_path_and_claims_no_flags(monkeypatc
 
 
 def test_write_refusal_remedy_does_not_hand_roll_the_ownership_policy(monkeypatch):
-    """#2979 review — enumerate no delete-authorizing family: defer to the predicate.
+    """#2979 — enumerate no delete-authorizing family: defer to the predicate.
 
-    The ownership policy lives in the code (`_SWEEP_OWNED_PREFIXES` for the
-    journal path, `is_legacy_residue`/`owns_by_ownership_record` for the
-    journal-blind path). A prose copy of it in the message disagreed with one or
-    the other in every wording tried, because the two predicates differ and the
-    victim is a name someone cannot attribute — so the message names none.
+    The ownership policy lives in the code: `_SWEEP_OWNED_PREFIXES`, with
+    `owns_by_ownership_record` as the JOURNAL path's predicate, and
+    `is_legacy_residue` on the journal-blind path. A prose copy of the policy in
+    the message disagrees with one predicate or the other in every wording,
+    because the two differ and the victim is a name someone cannot attribute —
+    so the message names none.
 
-    These pins are BEST-EFFORT, and are labelled as such rather than as the
-    structural properties earlier revisions claimed:
+    The ABSENCE properties below are pinned best-effort, and are labelled as
+    such rather than as stronger properties than they are:
 
       (a) a WILDCARD BUDGET — exactly the one guard `*`. Bounds glob-spelled
           enumerations only.
-      (b) a DENYLIST of the exact tokens earlier revisions introduced. It does
-          NOT catch a concrete name outside that list: the real residue entry
+      (b) a DENYLIST of specific graph-name tokens. It does NOT catch a concrete
+          name outside that list: the real residue entry
           ``askshape_b6_live_1_33760_21`` passes both (a) and (b).
 
-    What actually protects the property is that the message enumerates nothing,
-    which review enforces — not these assertions.
+    The PRESENCE properties in (c) are exact substring pins. What protects the
+    absence property overall is that the message enumerates nothing, which review
+    enforces — not these assertions.
     """
     monkeypatch.delenv("FLY_APP_NAME", raising=False)
     proj = _projection(probe_error=RuntimeError(_MAXMEMORY_ERROR))
@@ -155,10 +154,10 @@ def test_write_refusal_remedy_does_not_hand_roll_the_ownership_policy(monkeypatc
     #     enumerations only — a prose list of concrete names carries no `*`.
     assert msg.count("*") == 1, msg
     assert "tortoise_restored*" in msg, msg
-    # (b) DENYLIST of the exact tokens earlier revisions introduced, plus the
-    #     residue-pass lever the message must NOT name (the pass has no default
-    #     call site, so naming it is advice that frees nothing). Not a guard
-    #     against concrete names outside this list.
+    # (b) DENYLIST of specific graph-name tokens the message must never carry,
+    #     plus the residue-pass lever (that pass has no default call site, so
+    #     naming it is advice that frees nothing). Not a guard against a
+    #     concrete name outside this list — see the docstring.
     for token in ("NEVER delete", "org_*", "team_*", "registry", "test_",
                   "v10fix", "tt_gate", "typeprobe", "review_rw_probe",
                   "TORTOISE_TEST_SWEEP_LEGACY"):
