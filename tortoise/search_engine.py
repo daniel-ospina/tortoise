@@ -834,8 +834,9 @@ def run_fts_query(
     entity_type: 'point' (default), 'event', 'subject', 'document', 'object',
     'source', or 'operator'. Document FTS searches the _searchText index
     (#125) which concatenates title+summary+topics.
-    Returns n.url for source (canonical key, #448), n.eventId for event,
-    n.id for all other entity types.
+    Returns n.url for source and document (the :Source canonical key, #448 — a
+    document IS a :Source), n.eventId for event, n.id for all other entity
+    types.
 
     R3 (#1542) D4: ``leg_trace`` — when provided, appends a per-leg entry
     at EVERY exit branch (the FTS leg is recorded AT THE SOURCE, never
@@ -884,7 +885,7 @@ def run_fts_query(
                 + "  AND toLower(n.label) CONTAINS toLower($query) "
                 "RETURN n.id, 1.0 AS score "
                 # #3019: every row scores a constant 1.0, so this leg is ONE giant
-                # tie and DB row order would otherwise decide each document's RRF
+                # tie and DB row order would otherwise decide each operator's RRF
                 # rank. The secondary key makes the order a function of the data.
                 "ORDER BY score DESC, n.id ASC "
                 "LIMIT $limit"
@@ -1066,8 +1067,8 @@ def run_vector_query(
     entity_type: 'point' (default), 'event', 'subject', 'document', 'object',
     'source', or 'operator'. The vector index is queried against the label
     matching the entity_type (Event/Subject/Document/Object/...), and results
-    return the entity's id field: url for source (canonical key, #448),
-    eventId for event, id for all other entity types.
+    return the entity's id field: url for source and document (the :Source
+    canonical key, #448), eventId for event, id for all other entity types.
     Operators are Points with is_operator=true — they query the Point label.
     (#172)
 
@@ -1823,10 +1824,12 @@ def rrf_fusion(
             w = recency_weights.get(pid, 0.0)
             if w > 0:
                 scores[pid] = scores[pid] * (1.0 + recency_boost * w)
-    # #2952: deterministic TOTAL order over ties. RRF scores tie constantly on
-    # real corpora — a doc at the same rank in different legs, or a fused leg
-    # whose rows all tie on that leg's own score. A stable sort alone keeps
-    # tie order at the mercy of the order the caller passed ``ranked_lists`` in
+    # #2952: deterministic TOTAL order over ties. RRF is rank-based, so its
+    # scores tie constantly on real corpora (a doc at the same rank in different
+    # legs) — and a leg's OWN ranking, which RRF then consumes, is arbitrary
+    # whenever that leg's rows tie on the leg's own score. A stable sort alone
+    # keeps tie order at the mercy of the order the caller passed
+    # ``ranked_lists`` in
     # — which in the SDK is ``as_completed`` (thread COMPLETION) order, i.e.
     # wall-clock/timing dependent. ``(-score, id)`` makes the fused order a pure
     # function of the leg CONTENTS, so the same (graph, query, params) always

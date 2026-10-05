@@ -17593,11 +17593,11 @@ class TortoiseSDK:
                 weights = _recency_factors([(row[0], row[1]) for row in rows])
                 fused = {pid: s * (1.0 + recency_boost * weights.get(pid, 0.0))
                          for pid, s in fused.items()}
-                # Secondary sort key = the recency factor: at an EQUAL
-                # multiplied score (the fulltext leg gives every tied row the
-                # SAME score, so the multiplier cannot break the tie on its
-                # own), the newer doc still ranks first. Enabled branch only —
-                # default stays byte-identical.
+                # Secondary sort key = the recency factor. It only has to break
+                # ties the multiplier cannot: rows whose raw leg score is 0 (a
+                # clamped signature-B cosine) multiply to 0 whatever their
+                # recency weight, so the newer doc must still rank first.
+                # Enabled branch only — default stays byte-identical.
                 fused = dict(sorted(fused.items(),
                                     key=lambda x: (x[1], weights.get(x[0], 0.0)),
                                     reverse=True))
