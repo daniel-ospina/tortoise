@@ -653,6 +653,48 @@ def test_ac3_max_hops_none_both_impls_and_run_contract():
         assert {a["id"], b["id"], c["id"]} <= closure
 
 
+def test_idempotent_remitigation_dirties_the_operator():
+    """#5566 review (P2) — a re-mitigation must reach downstream confidence.
+
+    `mitigate_operator`'s idempotent UPDATE branch marked only the mitigation
+    dirty (`_mark_dirty([mid])`); its CREATE branch marks the pair
+    (`_mark_dirty([mid, id])`). The mitigation edge runs `(mit)-[:IMPL]->(op)`
+    while `_reverse_bfs_neighbors` matches `(op:Point {is_operator:true})
+    -[:IMPL|NAND]->(p)`, so the mitigation alone reaches no operator and no
+    claim. With the #5566 hop now factor-filtered, a changed strength would
+    never enter a run. In-process the operator's own creation-time `ep_dirty`
+    flag masks it; `ep_dirty` is deliberately NOT journaled (#5166), so a
+    rebuilt/replayed graph has no mask. This test clears every trace of the
+    creation-time marking before the update — the state a fresh process
+    hydrates — and asserts the pass is not a no-op.
+    """
+    with _fresh_sdk() as sdk:
+        src = _make_claim(sdk, "source")
+        claim = _make_claim(sdk, "downstream")
+        sdk.set_point_baseline(src["id"], 10, 1)
+        sdk.set_point_baseline(claim["id"], 1, 1)
+        op = sdk.create_operator("IMPL", src["id"], [claim["id"]])
+        proj = sdk._get_proj()
+        sdk.mitigate_operator(op["id"], "minor caveat", strength=0.1)
+        weak = sdk.compute_confidence()["confidences"][claim["id"]]["mean"]
+        # Clear the creation-time marking: the graph flags AND the in-memory
+        # mirror, i.e. what a rebuilt/replayed process starts from.
+        proj.g.query(
+            "MATCH (n:Point) WHERE n.ep_dirty = true "
+            "SET n.ep_dirty = null, n.ep_dirty_at = null")
+        sdk._dirty_roots.clear()
+        assert sdk.compute_confidence()["diagnostic"] == "no_dirty_roots"
+        # The idempotent UPDATE path: a stronger mitigation on the same operator.
+        sdk.mitigate_operator(op["id"], "major counter-evidence", strength=0.5)
+        assert op["id"] in sdk._dirty_roots, (
+            "the OPERATOR is the dirty root: EP reads the changed strength off "
+            "its factor, and only a seeded operator pulls its inputs in")
+        strong = sdk.compute_confidence()["confidences"][claim["id"]]["mean"]
+        assert strong < weak, (
+            "a stronger re-mitigation must lower the downstream claim's "
+            f"confidence: weak(0.10)={weak:.4f}, strong(0.50)={strong:.4f}")
+
+
 def test_ac3_last_affected_no_stale_writeback():
     """AC3 — _last_affected is reset at run entry and assigned BEFORE the
     early returns: a degenerate-only run never leaves a previous run's set

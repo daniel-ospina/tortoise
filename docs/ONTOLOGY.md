@@ -55,10 +55,10 @@ doc_status: live
 >   predicate is "the read path's … not the resolution branch's truthiness": the resolution
 >   branch now ALSO gates on presence (plus the #5360 orderability conjunct), so that contrast no
 >   longer holds.
->   This entry records only what the code now does. (The two entries below that both carry
->   "v3.18" are a pre-existing duplicated label — filed as **#7214**, not renumbered here.)
+>   This entry records only what the code now does. (The two v3.18 entries further below
+>   are a pre-existing duplicated label — filed as **#7214**, not renumbered here.)
 >
-> **Changelog v3.18 (2026-09-29 — issue #5566 — the EP affected-set traversal is factor-bearing-only):**
+> **Changelog v3.20 (2026-09-29 — issue #5566 — the EP affected-set traversal is factor-bearing-only):**
 > - `TortoiseEP._affected_claims` / `_live_neighbors` admitted a claim through **any**
 >   edge onto an operator, so a structural predicate (`related`, `aboutSubject`,
 >   `memberOf`, …) — or a reverse-only `IMPL` (the mitigation back-link
@@ -69,6 +69,14 @@ doc_status: live
 >   which are exactly the relations `_affected_factors` turns into factors. The §3.9 and
 >   §8 status notes are updated accordingly; `related` is now weight-free in fact, not
 >   only by the #5025 decision.
+> - `mitigate_operator`'s **idempotent** update branch now dirties the operator
+>   (`_mark_dirty([mid, id])`), exactly as its CREATE branch does. With the hop now
+>   factor-filtered, a mitigation-only dirty root no longer reaches the operator's
+>   factor — marking the mitigation alone finds no operator, because
+>   `_reverse_bfs_neighbors` matches `(op)-[:IMPL|NAND]->(p)` while the mitigation edge
+>   runs the other way — so a re-mitigation whose strength changed would leave
+>   downstream confidence unmoved on any graph whose `ep_dirty` flags are not journaled
+>   (#5166).
 >
 > **Changelog v3.18 (2026-09-27 — issue #5025, owner ruling — `related` is the neutral association link and carries no EP):**
 >

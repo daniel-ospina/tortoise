@@ -10237,6 +10237,20 @@ class TortoiseSDK:
                 self.set_point_baseline(
                     mid, alpha, beta,
                     source=BASELINE_SOURCE_SYSTEM_DEFAULT)
+            # The OPERATOR is the dirty root here, not the mitigation: EP reads
+            # the changed strength off the operator's factor, and only a
+            # seeded operator pulls its inputs into the affected set. The
+            # CREATE path below marks exactly this pair ([mid, id]); the
+            # update path must match it. Marking `[mid]` alone reaches
+            # nothing — `_reverse_bfs_neighbors` looks for
+            # `(op:Point {is_operator:true})-[:IMPL|NAND]->(p)`, and the
+            # mitigation edge runs the OTHER way (`(mit)-[:IMPL]->(op)`), so
+            # no operator and no claim are ever found. The in-process flow
+            # hides this behind the operator's own creation-time ep_dirty
+            # flag; `ep_dirty` is deliberately NOT journaled (#5166), so a
+            # rebuilt/replayed graph has no such mask and a re-mitigation
+            # would silently not move confidence. (#5566 review P2.)
+            self._mark_dirty([mid, id])
             return self.get_point(mid)
         # Create new mitigation Point
         mid = ulid()
@@ -14762,11 +14776,14 @@ class TortoiseSDK:
         ``coverage`` is added = affected / remaining-stale-before-pass (the
         claim-hop closure of the PRE-PASS window recorded by dream_window —
         the pre-pass value because stamps written by the pass reorder the
-        ranking; the closure guarantees 0 ≤ coverage ≤ 1 and a converged
-        full-window pass reports 1.0). The dirty-root logic is driven from
-        the window-level ``converged`` flag: a converged pass clears the
-        affected roots; a failed pass clears nothing (W4 retention —
-        non-converged regions reselect via the window union).
+        ranking; a converged full-window pass reports 1.0). The
+        `0 ≤ coverage ≤ 1` bound does NOT hold: `affected` and this closure
+        are not mirrors, so `affected` can exceed the closure and coverage can
+        exceed 1.0 on chains of ≥4 claims — see `_window_closure` and #6597.
+        The dirty-root logic is driven from the window-level ``converged``
+        flag: a converged pass clears the affected roots; a failed pass clears
+        nothing (W4 retention — non-converged regions reselect via the window
+        union).
         """
         result = dreamer.dream_window(budget=budget, max_hops=max_hops,
                                      warm_start=warm_start)
