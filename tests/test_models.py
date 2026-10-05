@@ -15,6 +15,10 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tortoise.models import OpenAICompatModel, OllamaModel  # noqa: E402, I001, RUF100
+from tortoise.model_adapters import (
+    DeepSeekDirectModel,
+    OpenRouterModel,
+)
 
 # ---------------------------------------------------------------------------
 # OpenAICompatModel
@@ -194,6 +198,66 @@ def test_complete_reports_a_substituted_model():
         else:
             os.environ["OPENAI_API_KEY"] = old_key
     print("PASS test_complete_reports_a_substituted_model")
+
+
+def test_openrouter_complete_reports_a_substituted_model():
+    """#4129 wiring, SECOND lane: ``OpenRouterModel`` has its OWN ``complete``
+    body, so the guard on ``OpenAICompatModel.complete`` never ran for it.
+    Drives a mock session (no network) and asserts the substitution is
+    reported — the assertion fails if the wiring is removed, which is the
+    whole point (the guard existing somewhere is not the behaviour)."""
+    _m, handler, previous_level = _capture_substitution_warnings()
+    resp = mock.MagicMock()
+    resp.json.return_value = {
+        "model": "deepseek-flash",
+        "choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}],
+        "usage": {},
+    }
+    adapter = OpenRouterModel("deepseek-chat")
+    try:
+        with mock.patch.object(adapter._session, "post", return_value=resp):
+            content = adapter.complete(system="s", user="u")
+        assert content == "{}"
+        assert any("deepseek-flash" in s for s in handler.messages), handler.messages
+    finally:
+        _release_substitution_warnings(_m, handler, previous_level)
+    print("PASS test_openrouter_complete_reports_a_substituted_model")
+
+
+def test_deepseek_direct_complete_reports_a_substituted_model():
+    """#4129: the direct route's own ``complete`` body bypasses BOTH the
+    OpenAI-compat and the OpenRouter paths, so it must observe the served id
+    itself. A subtest of the fix above would not catch its regression."""
+    _m, handler, previous_level = _capture_substitution_warnings()
+    resp = mock.MagicMock()
+    resp.json.return_value = {
+        "model": "deepseek-flash",
+        "choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}],
+        "usage": {},
+    }
+    adapter = DeepSeekDirectModel("deepseek-chat")
+    try:
+        with mock.patch.object(adapter._session, "post", return_value=resp):
+            content = adapter.complete(system="s", user="u")
+        assert content == "{}"
+        assert any("deepseek-flash" in s for s in handler.messages), handler.messages
+    finally:
+        _release_substitution_warnings(_m, handler, previous_level)
+    print("PASS test_deepseek_direct_complete_reports_a_substituted_model")
+
+
+def test_session_llm_deepseek_default_is_not_the_retired_id():
+    """#4129 acceptance criterion 1 — the repair is protected ONLY by this
+    test. The provider ACCEPTS the retired id and silently serves a different
+    model, so no runtime check downstream of the response can tell that the
+    default went stale again; a "tidy" revert would otherwise pass CI. The
+    expected value was verified against GET /models on 2026-10-05, which
+    serves exactly ["deepseek-flash", "deepseek-v4-pro"]."""
+    from tortoise.sdk import _SESSION_LLM_DEFAULT_MODELS as defaults
+
+    assert defaults["deepseek"] == "deepseek-flash"
+    assert "chat" not in defaults["deepseek"]
+    print("PASS test_session_llm_deepseek_default_is_not_the_retired_id")
 
 
 def test_openai_headers_no_key():
