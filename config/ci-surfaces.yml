@@ -1628,6 +1628,12 @@ surfaces:
   # DESIGN — it is the instrument that keeps the surface measurable until #4282
   # repairs these declarations.
   - test_surface_resolution.py
+  # #3904: the CONSUMED-declaration gate. Drives the REAL handler for every registry
+  # entry with a recording-stub SDK and asserts the declared sdk_method is actually
+  # READ. Same surface as test_surface_resolution.py (the existence gate); no DB —
+  # the stub replaces the SDK seam. It is what repaired tortoise_traverse /
+  # tortoise_operator_action to handler-served (#3904).
+  - test_consumed_sdk_binding_3904.py
   - test_topic_summarization.py
   - test_tortoise_search.py
   - test_trash_quota.py            # #2467 restore respects the max_graphs quota (fake CP)
