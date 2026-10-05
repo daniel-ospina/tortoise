@@ -23,10 +23,6 @@ version: 1
 # reduction that has to land BEFORE any capacity argument, because the wall was
 # `max(9 fast shards, 1 carve-out)` and the carve-out was the pole in every run
 # examined.
-# The value: measured on THIS manifest (694 `durations` rows, after #6133 split
-# the 310.7 s onboarding file), LPT over `durations` puts max(shard) at 16.2 min
-# at S=2, 4.62 min at S=7 and 3.59 min at S=9. The target is <10 min, so S=4
-# (8.1 min) already meets it.
 #
 # Absence means 1 — the unsharded job this repo ran until now — so deleting this
 # key is a complete rollback (unlike `fast_shards`, where absence means 2).
@@ -36,14 +32,16 @@ version: 1
 # level with the fast band instead of 16.9m above it. Raising this trades wall
 # clock for aggregate runner-minutes, exactly like `fast_shards`.
 carve_shards: 3
-# S IS NO LONGER CAPPED BY THE FLOOR. #6133 split
-# `test_onboarding_state_split.py` (310.7 s), which used to SATURATE max(shard).
-# The largest chunk the split left is `test_onboarding_state_split_checkpoint.py`
-# at 123.5 s (2.06 min), so nothing in the pool sits near max(shard) any more and
-# the floor no longer binds: measured on the committed `durations` map, the LPT
-# pack gives max(shard) 625.4 s (10.42 min) at S=7, 547.3 s (9.12 min) at S=8 and
-# 486.5 s (8.11 min) at S=9 — so RAISING S now still buys wall clock, which is the
-# headroom this change creates.
+# S IS NO LONGER CAPPED BY THE FLOOR FROM THIS SIZE. #6133 split
+# `test_onboarding_state_split.py` (310.7 s), which used to SATURATE max(shard),
+# into four chunks (55.8/123.5/91.6/39.8 s, count-apportioned seeds). The pool's
+# largest file is now `eval/retrieval/test_run.py` at 179.8 s — so the split
+# changes NO pack at the S we ship: measured on the committed `durations` map,
+# max(shard) is 625.4 s (10.42 min) at S=7, 547.3 s (9.12 min) at S=8 and
+# 486.5 s (8.11 min) at S=9, byte-identical before and after the split. What the
+# split buys is HEADROOM at larger S: the single-file floor bound from S=14
+# (310.7 s) and now binds only from S=25 (179.8 s), where max(shard) stops
+# falling (179.8 s at S=25 and S=26).
 #
 # S STAYS AT 9 — UNCHANGED FROM main, DELIBERATELY. The merge rail's lane-parity
 # compares job-NAME SETS (tools/ci_selection.py; test_ci_selection.py asserts on
@@ -3316,21 +3314,9 @@ durations:
 on_demand:
   - eval/retrieval/test_integration.py
 
-# ── #6133: WHAT SET THE FAST GATE'S FLOOR (two bounds, neither a share) ──
+# ── #6133: THE BOUND IS DECLARED SLEEP, NOT THE MEAN ──
 #
-# 1. The fast pool is 1940.7s across 620 files; the slow (`slow_files`,
-#    2462.9s / 79) and carve-out (808.4s / 33) legs are SEPARATE jobs, and the
-#    `on_demand` row above (1523.4s) is off every pre-merge leg per #5961 —
-#    the whole map's declared mass is 6283.9s. At N fast shards the floor is
-#    max(the largest single fast file, 1940.7/N), because one file's weight is
-#    not divisible. Before #6133 the largest was
-#    `test_onboarding_state_split.py` at 310.7s, which SATURATED that max for
-#    every N >= 7 (1940.7/7 = 277.2s): the critical path could not fall below
-#    5.18 min however many shards were added. #6133 split it, and the largest
-#    is now 123.5s — so the floor is the mean (1940.7/N) alone and the
-#    saturated-max bound is gone.
-#
-# 2. DECLARED sleep is not gate cost, and ranking by it produces a wrong floor.
+# DECLARED sleep is not gate cost, and ranking by it produces a wrong floor.
 #    #6133 was filed on a census that summed the suite's literal `time.sleep`
 #    arguments to ~16,000s ("4.5h the suite chose to wait"). The suite's
 #    largest such file, tests/test_battery_real_deadline.py, declares 7,200.0s
