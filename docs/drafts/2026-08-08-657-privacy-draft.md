@@ -104,7 +104,7 @@ Premise Labs is **not a registered legal entity**. The data controller is the na
 
 **EU/EEA representative (GDPR Art. 27):** "We are not currently established in the EU/EEA. If we become subject to GDPR Art. 27, we will designate and disclose an EU representative here."
 
-**LFPDPPP (Mexico):** The Mexican Federal Law on the Protection of Personal Data Held by Private Parties (LFPDPPP) applies to personal data of individuals in Mexico. ARCO rights (Access, Rectification, Cancellation, Opposition) are exercised via email <hello@premiselabs.co>. A standalone privacy notice (Aviso de Privacidad) in Spanish is available at [Aviso de Privacidad (Español)](/aviso-privacidad).
+**LFPDPPP (Mexico):** The Mexican Federal Law on the Protection of Personal Data Held by Private Parties (LFPDPPP) applies to personal data of individuals in Mexico. ARCO rights (Access, Rectification, Cancellation, Opposition) are exercised via email <hello@premiselabs.co>. A standalone privacy notice (Aviso de Privacidad) in Spanish is available at [Aviso de Privacidad (Español)](../../website/aviso-privacidad.html).
 
 ## 2. Data processed by the service (outline ②)
 
