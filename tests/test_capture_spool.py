@@ -50,8 +50,9 @@ def _never_touch_real_breadcrumbs(tmp_path, monkeypatch):
     CALL time from the ambient env and UNLINKS it when the recorded ``session_id``
     matches. A per-test pin is one test deep: every other success-path flush in
     this file reaches the same helper with the ambient environment and deletes
-    the real ``~/.tortoise/capture-errors/<harness>.json`` that
-    ``session verify`` reads to report INERT vs PROVEN. The env var redirects
+    the real ``~/.tortoise/capture-errors/<harness>.json`` (the
+    ``capture-failure`` slot; #5838 moved install-inert to its own
+    ``<harness>-install.json``, which this never unlinks). The env var redirects
     BOTH the read and the unlink, so pinning it here makes the whole file
     hermetic rather than one test.
     """
