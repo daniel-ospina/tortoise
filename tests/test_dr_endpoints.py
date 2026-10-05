@@ -1149,7 +1149,7 @@ class TestDrDrill:
         _seed_team("team_x", nodes=2)
         # Produce a real archive for team_x via the sweep pipeline.
         r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
-        assert r.json()["status"] == "backed_up"
+        assert r.json()["status"] == "backed_up", _sweep_diagnosis(r.json())
         manifest = [  # noqa: RUF015
             k for k in mem_storage.list("backups/team_x/") if k.endswith("manifest.json")
         ][0]
