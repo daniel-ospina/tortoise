@@ -538,7 +538,8 @@ def test_field_order_tracks_the_evidence_not_the_raw_retrieval_order(
 
     ❌ MUTATION KILLED: ``_distinct_session_ids(hits)`` in ``run_ask_lane()``
     instead of
-    ``_distinct_session_ids(assembled)`` → ``['<A>', '<B>']``, RED.
+    ``_distinct_session_ids(assembled)`` → the field reports the RAW pool
+    order, which the stub reversed, RED.
     """
     sdk = _new_sdk()
     _seed_captured_session(sdk, SID_A, TURNS_A)
@@ -551,8 +552,9 @@ def test_field_order_tracks_the_evidence_not_the_raw_retrieval_order(
     captured: dict = {}
 
     def _reversed_assemble(pool, **kw):
-        # Same hits, session B first — an order the raw retrieval order does
-        # not produce here, so a field derived from the raw hits must differ.
+        # Same hits in the REVERSE of the order the pool arrived in — a
+        # different order from the raw retrieval order, so a field derived
+        # from the raw hits must differ from one derived from this list.
         captured["pool"] = list(pool)
         return real_assemble(list(reversed(list(pool))), **kw)
 
@@ -561,15 +563,24 @@ def test_field_order_tracks_the_evidence_not_the_raw_retrieval_order(
     result = _ask(sdk, "what is the gym schedule?")
 
     pool_order = retrieval._distinct_session_ids(captured.get("pool") or [])
-    assert pool_order == [SID_A, SID_B], (
-        f"precondition: the pool the reader window was assembled from should "
-        f"carry session A then session B, got {pool_order}")
-    assert result["retrieved_session_ids"] == [SID_B, SID_A], (
+    assert sorted(pool_order) == sorted([SID_A, SID_B]), (
+        f"precondition: both seeded sessions must be in the pool handed to "
+        f"assemble_context, got {pool_order}")
+    # Derived, not pinned: the fused order is the id tie-break (#3019), so
+    # which session leads is a property of the ids, not of this test. What the
+    # test needs is only that the stub genuinely REVERSED the pool — asserted
+    # below, and that is the whole mutation-kill: a field derived from the raw
+    # hits reports `pool_order`, which `expected` is asserted to differ from.
+    expected = list(reversed(pool_order))
+    assert expected != pool_order, (
+        f"precondition: the stub must reverse a genuinely ordered pool, got "
+        f"{pool_order}")
+    assert result["retrieved_session_ids"] == expected, (
         "the field follows the raw retrieval order, not the order the "
         "evidence was assembled from")
     tags = result["evidence"].split("[session ")[1:]
-    assert list(dict.fromkeys(t.split("]")[0] for t in tags)) == \
-        [SID_B, SID_A], result["evidence"]
+    assert list(dict.fromkeys(t.split("]")[0] for t in tags)) == expected, \
+        result["evidence"]
 
 
 # ── 8. The MCP HANDLER surfaces carry the identity (not just the SDK seam) ─

@@ -118,8 +118,14 @@ def _seed_echo(s, session_id: str, i: int, body: str) -> None:
 
 def _seed_echo_wall(s, session_id: str, prior_id: str) -> None:
     """The #4509 fixture: ``_ECHOES`` turn Points for ``session_id`` plus ONE
-    real prior. The echoes contain the query tokens; the prior does too (twice,
-    so it lands inside the fused candidate pool rather than at the very tail)."""
+    real prior. The echoes contain the query tokens; the prior does too, so it
+    is a genuine candidate of the fused pool.
+
+    ``prior_id`` must sort AFTER the echo ids (``<session_id>_t<i>``): the FTS
+    leg ties every matching row on score, so the fused order IS the ``id``
+    tie-break (#3019), and only a late-sorting prior sits outside a window the
+    echoes fill. An earlier revision relied on the prior being seeded after the
+    hot echoes, i.e. on the opaque DB row order this tie-break replaces."""
     for i in range(_HOT):
         _seed_echo(s, session_id, i, f"[user] {QUERY} {QUERY} {QUERY} turn {i}")
     s.create_point("statement", f"{QUERY} {QUERY}", id=prior_id)
@@ -150,13 +156,13 @@ def test_echoes_an_order_of_magnitude_above_the_old_window_still_return_the_prio
     session's echoes, refill. It returns NOTHING here — the exact starvation the
     issue names — while the new opt-in call returns the prior.
     """
-    _seed_echo_wall(sdk, "s1", "pt_real")
+    _seed_echo_wall(sdk, "s1", "zz_pt_real")
 
     # The prior IS a candidate of the fused pool — not merely absent because the
     # pool was too shallow. (Same call shape as the OLD over-fetch, wide pool.)
     deep = _ids(sdk.tortoise_fts_query(
         QUERY, entity_type="point", limit=_POOL, pool_size=_POOL))
-    assert "pt_real" in deep, (
+    assert "zz_pt_real" in deep, (
         "fixture invalid: the prior must be a fused-pool candidate, "
         f"otherwise this test measures pool depth, not #4509 (depth={len(deep)})")
     assert len([i for i in deep if i.startswith("s1_t")]) == _ECHOES
@@ -173,13 +179,13 @@ def test_echoes_an_order_of_magnitude_above_the_old_window_still_return_the_prio
     assert old_result == [], (
         "the OLD algorithm must PROVABLY starve the prior on this fixture; "
         f"it returned {_ids(old_result)}")
-    assert "pt_real" not in _ids(old_fetch), "OLD window leaked the prior"
+    assert "zz_pt_real" not in _ids(old_fetch), "OLD window leaked the prior"
 
     # NEW path: one opt-in argument, and the prior comes back.
     new = _ids(sdk.tortoise_fts_query(
         QUERY, entity_type="point", limit=_OLD_LIMIT, pool_size=_POOL,
         exclude_turn_echo_session="s1"))
-    assert "pt_real" in new, f"prior starved after the fix: {new}"
+    assert "zz_pt_real" in new, f"prior starved after the fix: {new}"
     assert not any(i.startswith("s1_t") for i in new), (
         f"an echo leaked into the prior set: {new}")
     assert len(new) <= _OLD_LIMIT
@@ -310,12 +316,12 @@ def test_production_pool_bound_still_starves_the_prior(sdk):
         f"as {_DOCUMENTED_PROD_POOL}) — the residual bound in "
         "tortoise/extractor_v2.py and tortoise/sdk.py names the old number, so "
         "update those comments (and this literal) together")
-    _seed_echo_wall_production(sdk, "s1", "pt_real", _DOCUMENTED_PROD_POOL + 10)
+    _seed_echo_wall_production(sdk, "s1", "zz_pt_real", _DOCUMENTED_PROD_POOL + 10)
 
     prod = _ids(sdk.tortoise_fts_query(
         QUERY, entity_type="point", limit=_OLD_LIMIT,
         exclude_turn_echo_session="s1"))
-    assert "pt_real" not in prod, (
+    assert "zz_pt_real" not in prod, (
         "this residual pin no longer holds — the prior came back through the "
         "PRODUCTION call shape, so either the fix now covers the worst case or "
         f"DEFAULT_POOL_SIZE changed. Update the bound documented in "
