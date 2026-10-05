@@ -1795,19 +1795,27 @@ def rrf_fusion(
             # (#3019 review). Deliberately left failing loudly rather than
             # defaulting to 1.0: a misaligned list would silently misweight a leg.
             w = weights.get(strategy_names[i], 1.0)
-            # #3019 part 2: a non-finite weight makes EVERY fused score NaN, and
-            # tuple comparison against NaN is False in BOTH directions, so the
-            # ``(-score, id)`` key below silently degrades to insertion order —
-            # losing the determinism #2952 established. ``json.loads`` accepts
-            # bare ``NaN``/``Infinity``, so TORTOISE_FUSION_WEIGHTS can carry one,
-            # and a kwarg caller can pass one. Guarded at the ROOT so every entry
-            # point is covered, not just the env parse.
+            # #3019 part 2: a NaN weight makes every fused score from that leg
+            # NaN, and tuple comparison against NaN is False in BOTH directions,
+            # so the ``(-score, id)`` key below silently degrades to insertion
+            # order for those candidates — losing the determinism #2952
+            # established. An INFINITE weight is different: ``inf == inf`` is
+            # True, so the order stays deterministic. A candidate carried only by
+            # another leg keeps a finite score, so the SCORE damage is per-leg —
+            # but the ORDER damage is global, because a NaN key compares False
+            # against every other key and the finite candidate therefore lands at
+            # its insertion position too. ``json.loads`` accepts bare
+            # ``NaN``/``Infinity``, so
+            # TORTOISE_FUSION_WEIGHTS can carry one, and a kwarg caller can pass
+            # one. Guarded at the ROOT so every entry point is covered, not just
+            # the env parse.
             if not math.isfinite(w):
-                # #3019: `json.loads` accepts bare NaN/Infinity, and a NaN weight
-                # makes EVERY fused score NaN — the `(-score, id)` tie-break then
-                # compares False both ways and degrades to insertion order. Warn
-                # rather than substitute silently: the recorded default is not
-                # equal weighting (PRODUCTION DEFAULT, tortoise/sdk.py).
+                # #3019: `json.loads` accepts bare NaN/Infinity, and a NaN
+                # weight makes every score from that leg NaN — the
+                # `(-score, id)` tie-break then compares False both ways and
+                # degrades to insertion order. Warn rather than substitute
+                # silently: the recorded default is not equal weighting
+                # (PRODUCTION DEFAULT, tortoise/sdk.py).
                 logger.warning(
                     "non-finite RRF weight for %r (%r) — using 1.0",
                     strategy_names[i], w,
