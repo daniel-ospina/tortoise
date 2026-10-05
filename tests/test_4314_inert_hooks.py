@@ -104,9 +104,14 @@ def _wait_for(predicate, timeout: float = 8.0) -> bool:
 
 
 def _breadcrumb(home: Path, harness: str) -> dict:
-    """Wait for a COMPLETE breadcrumb (the writer truncates then writes) and
-    return its parsed body."""
-    path = home / ".tortoise" / "capture-errors" / f"{harness}.json"
+    """Wait for a COMPLETE install-inert breadcrumb and return its parsed body.
+
+    #5838: ``install-inert`` has its OWN slot (``<harness>-install.json``),
+    separate from the ``capture-failure`` slot — this helper is used only for
+    the inert writers, so it reads the install slot.
+    """
+    path = (home / ".tortoise" / "capture-errors"
+            / f"{harness}-install.json")
     assert _wait_for(lambda: path.is_file()
                      and path.read_text(encoding="utf-8").strip() != ""), (
         "an inert install left no breadcrumb — the failure is invisible")
@@ -279,7 +284,10 @@ def _stub_verify_fire(sv, monkeypatch, *, home: Path,
     """
     def _fake_fire(*_a, **_k):
         if kind is not None:
-            path = home / ".tortoise" / "capture-errors" / "claude.json"
+            # #5838: route by kind to the slot the shipped writer uses.
+            suffix = "-install" if kind == "install-inert" else ""
+            path = (home / ".tortoise" / "capture-errors"
+                    / f"claude{suffix}.json")
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps({
                 "harness": "claude", "detail": f"stub {kind}",
@@ -298,13 +306,15 @@ def _stub_verify_fire(sv, monkeypatch, *, home: Path,
 
 
 def test_verify_ignores_a_capture_failure_breadcrumb(tmp_path, monkeypatch):
-    """The SAME ``capture-errors`` file is written by TWO writers, and the
-    install leg must key on the install-inert marker: a ``sessions import``
-    capture failure (an API outage) must read PROVEN, never INERT.
+    """The install leg must key on the install-inert marker.  #5838 moved the
+    LIVE install-inert record to its OWN slot, so a ``sessions import`` capture
+    failure (an API outage) is never even on the install leg's path — and the
+    ``kind`` gate still refuses a capture-failure-SHAPED record dropped in the
+    install slot (a legacy single-slot install, or a foreign file).
 
     Mutation: drop the ``kind == KIND_INSTALL_INERT`` test in ``_install_link``
-    — the capture-failure record is accepted as install-inert evidence and the
-    PROVEN assertion REDs (the exact defect P1-A)."""
+    — the capture-failure-shaped record is accepted as install-inert evidence
+    and the PROVEN assertion REDs (the exact defect P1-A)."""
     from tortoise import session_verify as sv
 
     home = tmp_path / "home"
@@ -315,7 +325,15 @@ def test_verify_ignores_a_capture_failure_breadcrumb(tmp_path, monkeypatch):
 
     crumbs = home / ".tortoise" / "capture-errors"
     crumbs.mkdir(parents=True)
-    _stub_verify_fire(sv, monkeypatch, home=home, kind="capture-failure")
+    # A capture-failure-shaped record at the INSTALL slot is foreign evidence
+    # (the writer puts that kind in the capture slot); the kind gate must
+    # refuse it.  It also survives the before-fire clear, which unlinks only an
+    # install-inert record.
+    (crumbs / "claude-install.json").write_text(json.dumps({
+        "harness": "claude", "detail": "stub capture-failure",
+        "kind": "capture-failure"}), encoding="utf-8")
+
+    _stub_verify_fire(sv, monkeypatch, home=home)
     report = sv.verify_session_capture(
         "claude", api_key="tt_test", api_url="http://127.0.0.1:1",
         home=home, install_dir=root, timeout=1.0,
@@ -343,7 +361,7 @@ def test_verify_clears_a_stale_install_inert_breadcrumb(tmp_path, monkeypatch):
 
     crumbs = home / ".tortoise" / "capture-errors"
     crumbs.mkdir(parents=True)
-    (crumbs / "claude.json").write_text(json.dumps({
+    (crumbs / "claude-install.json").write_text(json.dumps({
         "harness": "claude", "detail": "stale — a previous fire was inert",
         "kind": "install-inert",
         "recorded_at": "2026-09-19T00:00:00Z"}), encoding="utf-8")
@@ -356,7 +374,7 @@ def test_verify_clears_a_stale_install_inert_breadcrumb(tmp_path, monkeypatch):
 
     installed = report["links"]["installed"]
     assert installed["status"] == "PROVEN", installed
-    assert not (crumbs / "claude.json").exists(), (
+    assert not (crumbs / "claude-install.json").exists(), (
         "the stale install-inert record survived the fire")
 
 
@@ -378,7 +396,8 @@ def test_local_capture_error_resolves_from_the_fire_env(tmp_path, monkeypatch):
     monkeypatch.delenv("TORTOISE_IMPORT_RECEIPT_DIR", raising=False)
 
     path = sv._local_capture_error_file("claude", {"HOME": str(fire_home)})
-    assert path == (fire_home / ".tortoise" / "capture-errors" / "claude.json"), path
+    assert path == (fire_home / ".tortoise" / "capture-errors"
+                    / "claude-install.json"), path
     assert str(process_home) not in str(path), path
 
     path.parent.mkdir(parents=True)
