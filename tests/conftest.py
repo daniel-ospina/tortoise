@@ -234,48 +234,6 @@ def _is_sibling_marker(marker: dict, run_uid: str) -> bool:
     return bool(run_uid) and marker.get("run") == run_uid
 
 
-def _session_marker_path(nonce: str) -> str:
-    """Path of THIS process's active-suite marker for `nonce`."""
-    return os.path.join(_ACTIVE_SUITES_DIR, f"{os.getpid()}-{nonce}")
-
-
-def _write_session_marker(nonce: str) -> str | None:
-    """Create/refresh this process's active-suite marker; None if unwritable.
-
-    #6136 P2 — WHY THIS IS CALLED AT IMPORT, NOT ONLY FROM THE SESSION
-    FIXTURE. The created-graph journal is resolved at CONFTEST IMPORT and is
-    appended during TEST-MODULE imports (see the note below), i.e. BEFORE any
-    session fixture runs — but the marker that vouches for that journal was
-    written only in the session fixture. Under `-n`, a sibling worker's
-    session-start `_stale_sweep` could therefore observe a just-started
-    sibling as journal-without-marker, classify it dead, and DROP ITS
-    COLLECTION-TIME GRAPHS — an unattributable, non-reproducible red in the
-    sibling, which is the exact failure class `-n` must not introduce.
-    Writing the marker in the SAME step as the journal makes "a journal
-    exists ⇒ its marker exists" true, which is the invariant `_stale_sweep`
-    reasons from ("a live suite's journal — never touch"). Idempotent: the
-    session fixture rewrites this same path.
-    """
-    try:
-        from tortoise.embedded_reaper import _process_start_time
-        os.makedirs(_ACTIVE_SUITES_DIR, exist_ok=True)
-        path = _session_marker_path(nonce)
-        with open(path, "w") as fh:
-            fh.write(f"pid={os.getpid()}\n")
-            start = _process_start_time(os.getpid())
-            if start is not None:
-                fh.write(f"start={start}\n")
-            # #6136: run identity — omitted (not written empty) when not under
-            # xdist, so active_suite_markers() reads run=None exactly like a
-            # pre-#6136 marker.
-            run_uid = _test_run_uid()
-            if run_uid:
-                fh.write(f"run={run_uid}\n")
-        return path
-    except OSError:
-        return None  # never fail the suite over marker hygiene
-
-
 # ── Epic #1647 Task 2 Step 7: the session created-graph journal ───────────
 # The journal path is resolved at CONFTEST IMPORT (cycle-4 P2-9) — product-
 # side appends (the redirect + the frame-gated from_uri seam) fire during
@@ -336,9 +294,6 @@ if _is_db_uri_conftest(os.environ.get("TORTOISE_DB_URI")):
     os.environ["TORTOISE_TEST_JOURNAL_FILE"] = _JOURNAL_PATH
     import tests._embedded as _embedded_mod
     _embedded_mod._JOURNAL_FILE = _JOURNAL_PATH
-    # #6136 P2: the marker must exist NO LATER than the journal it vouches for,
-    # or a sibling worker's stale sweep reaps our collection-time graphs.
-    _write_session_marker(_SESSION_NONCE)
 
 # ── Epic #1647 Task 10 Step 1a (P4, plan-review P1-9): URI-required ───────
 # Default pytest requires TORTOISE_DB_URI; the carve-out is the sole embedded
