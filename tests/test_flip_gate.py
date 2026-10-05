@@ -67,6 +67,10 @@ def _seed_registry_node(db_path: str) -> None:
 def _run(cmd: list[str], env: dict | None = None) -> subprocess.CompletedProcess:
     full_env = dict(os.environ)
     full_env.pop("TORTOISE_DB_URI", None)
+    # TORTOISE_DB_PATH outranks TORTOISE_DB_URI at resolve_db_path
+    # precedence 2 vs 3 (tortoise/config.py), so clearing only the URI leaves
+    # an ambient DB target and the "no DB env" premise false.
+    full_env.pop("TORTOISE_DB_PATH", None)
     full_env.pop("SUPABASE_URL", None)
     full_env.pop("SUPABASE_SERVICE_ROLE_KEY", None)
     full_env.pop("SUPABASE_SERVICE_KEY", None)
