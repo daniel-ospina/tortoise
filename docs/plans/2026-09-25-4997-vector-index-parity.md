@@ -15,7 +15,7 @@
 
 > **Why the mapping is the GENERAL contract, not a vector-leg one.** `#5407` (filed from this issue's scoping) records **six** places that derive a graph label from an `entity_type`, and `#5404`'s fix direction (b) is *"derive the label from a single declared `entity_type → label` mapping"*. This plan declares that mapping in the module that already owns the vocabulary; the vector leg is its **first consumer**, and `#5407` migrates the other three query legs onto it. The mapping is therefore named for the contract (`ENTITY_TYPE_LABELS` / `entity_label`), not for the leg that happens to consume it first.
 
-### Pattern Research
+## Pattern Research
 
 > **Findings date:** 2026-09-25
 
@@ -95,14 +95,16 @@
 **Acceptance:** `python3 tools/ci_selection.py --integrity` exits 0 once the file exists **and** is listed; the diff to `config/ci-surfaces.yml` adds **only** the one entry for `test_4997_vector_index_parity.py` (assert with `git diff -- config/ci-surfaces.yml`); the entry carries a `#4997` comment; the edit is otherwise **additive only** (lane brief).
 
 **Files:**
+
 - Modify: `config/ci-surfaces.yml` (one commented entry, alphabetically placed, mirroring the `test_4999_vector_mechanism.py` entry at `:1008-1013`)
 - Create: `tests/test_4997_vector_index_parity.py` (placeholder that will grow)
 
 **Step 1** — `python3 tools/ci_selection.py --integrity` → record the baseline (expect exit 0).
 **Step 2** — Create the test file with one trivial test; re-run `--integrity` → **it now reports the file missing** (this is the failure the registration prevents; record the output).
 **Step 3** — Register it. ⚠️ **The tool has no per-file argument** (`tools/ci_selection.py`'s parser defines no positional, and `--register` is a bare `store_true` that sweeps **every** unlisted `tests/*.py`). So:
-  - prefer a **manual, commented append** in alphabetical position (this is what produces the `#4997:` comment the entry above carries — `--register` inserts a bare line with no comment); then
-  - `python3 tools/ci_selection.py --integrity` → exit 0, and `git diff -- config/ci-surfaces.yml` → exactly one added line pair.
+
+- prefer a **manual, commented append** in alphabetical position (this is what produces the `#4997:` comment the entry above carries — `--register` inserts a bare line with no comment); then
+- `python3 tools/ci_selection.py --integrity` → exit 0, and `git diff -- config/ci-surfaces.yml` → exactly one added line pair.
   If `--register --surface core` is used instead (no path argument), note in the commit message that it is all-or-nothing and comment-free, and still assert the diff is one entry.
   **`core` is the measured surface:** `printf 'tortoise/security.py\n' | python3 tools/ci_selection.py --changed-files - --event pull_request` → `{"surfaces": ["core"], "full": false}` (same for `tortoise/search_engine.py`); `tortoise/projection/__init__.py` is in `SHARED_MODULES` (`tools/ci_selection.py:114`) and forces the full matrix regardless.
 **Step 4** — Commit.
@@ -115,6 +117,7 @@
 **Acceptance:** `tortoise/security.py` exposes `ENTITY_TYPE_LABELS` (exhaustive over `VALID_ENTITY_TYPES`, **and with no extra keys**) and `entity_label(et)`; `entity_label(et)` reproduces the pre-#4997 expression for every valid `et`, for an unknown-but-`str`, and **raises `AttributeError` for a non-`str` exactly as today**; `tortoise/security.py` imports nothing from `tortoise.projection` or `tortoise.search_engine`.
 
 **Files:**
+
 - Modify: `tortoise/security.py` (add the declaration next to `VALID_ENTITY_TYPES`, `:114-136`)
 - Test: `tests/test_4997_vector_index_parity.py`
 
@@ -193,6 +196,7 @@ def entity_label(entity_type: str) -> str:
 **Acceptance:** `run_vector_query` emits the label it obtained from `entity_label`; behaviour is unchanged for every valid, unknown-`str`, and non-`str` input; the test goes **RED** when the path re-derives the label even though the emitted strings are identical.
 
 **Files:**
+
 - Modify: `tortoise/search_engine.py` (label derivation `:932-935`; module imports — **the import MUST be `from tortoise.security import entity_label`**, i.e. a module-global binding: the provenance test patches `tortoise.search_engine.entity_label`, which only intercepts a call if it is a module global. `import tortoise.security as security` + `security.entity_label(...)` would make the sentinel test fail on CORRECT code)
 - Test: `tests/test_4997_vector_index_parity.py` — including the two fixtures this task introduces
 
@@ -292,6 +296,7 @@ def test_run_vector_query_unknown_str_uses_the_fallback(recording_graph):
 **Acceptance:** `FalkorProjection._record_vector_index_inventory()` reads `CALL db.indexes()`, records the **intersection of the served labels with** the VECTOR-indexed labels as `self._vector_indexed_labels`, emits **one** WARNING per (endpoint, graph) naming the missing labels **and the open V1 decision**, is **skipped** when `_is_embedded` or when `_ver is not None and _ver[0] < 4`, and is **fail-open** — a raising or `None` read leaves store setup healthy and the attribute `None`. `result_set == []` yields `set()`, **not** `None`.
 
 **Files:**
+
 - Modify: `tortoise/projection/__init__.py` — the method next to `_falkordb_version_cache_key` (`:5800`); the process-level latch + `_reset_vector_gap_warnings()` beside `_FALKORDB_VERSION_CACHE` (`:53`) / `_reset_falkordb_version_cache` (`:211`); **the new import of `ENTITY_TYPE_LABELS` from `tortoise.security`** (follows the existing function-scoped `from tortoise.security import validate_rel_type` at `:5358`); the call from `_ensure_indexes` **inside** the `if not getattr(self, '_is_embedded', False):` block and **at its END** — i.e. AFTER the vector-index creation at `:6346`/`:6363`, never before it (a read placed earlier reports every served label as missing on a fresh graph, and the latch would then suppress the correct warning); `self._vector_indexed_labels = None` in `FalkorProjection.__init__` **before** `_ensure_indexes` (`:2801`)
 - Test: `tests/test_4997_vector_index_parity.py`
 
@@ -323,6 +328,7 @@ def _reset_vector_gap_warnings():
 
 **Step 2** — Run → **FAIL**. **Step 3** — Implement. **The `try/except` is mandatory and load-bearing:** `_ensure_indexes` is reached **unguarded** from `FalkorProjection.__init__` (`:2801`) as well as from `hosted_api.py:17418` and `hosted_api.py:25622` (the latter inside its own outer guard), so an exception here breaks store construction. On failure (including `result_set is None`): DEBUG log, attribute `None`, `return`. On `[]`: attribute `set()`. Parse **column 2 (`types`)**; skip `len(row) < 3` and non-dict `types`. ⚠️ **The latch key must be computed INSIDE the same `try/except`.** `_falkordb_version_cache_key()` dereferences `self.db` (`conn = getattr(self.db, "connection", None)`, `:5810`), and `tests/test_falkordb_compat.py`'s `_bare_projection` (`:83-93`) builds a projection with `object.__new__` that has **no `.db`** — so an unguarded key computation raises `AttributeError` out of `_ensure_indexes` for the four existing tests at `:254,267,278,302` (which do reach the new read: `_is_embedded=False` and `_falkordb_version=(4,18,3)` pass the `:6204` gate, and their fake returns `[]` for `CALL db.indexes()`). **DECIDED (not left to the executor):** (a) is chosen — compute the key **inside** the guard, **and** harden `_falkordb_version_cache_key` with `getattr(self, "db", None)`; `_bare_projection` is left untouched. **The one key shape is `(endpoint, self._graph_name)` where `endpoint := self._falkordb_version_cache_key() or id(self)`** — the endpoint identity the version cache uses, because a graph name alone is unique per *engine*, not per process, and this plan's own reason for never caching the measurement is exactly that. The latch **suppresses the WARNING only** — the attribute is always re-measured.
 **RESOLVED — both open choices are decided here, so no design decision is left to the executor:**
+
 - **Key shape (one definition):** `endpoint := self._falkordb_version_cache_key() or id(self)`, key `= (endpoint, self._graph_name)`. The per-instance fallback (`id(self)`) is used only when the engine endpoint is unidentified, so the residual — two *unidentified-client* stores in one process sharing a latch bucket — cannot silently withhold a warning from a genuinely different store. The latch still suppresses the **WARNING only**; the attribute is always re-measured.
 - **Hardening (chosen): (a)**, compute the key inside the guard, **and** change `_falkordb_version_cache_key`'s `self.db` to `getattr(self, "db", None)` (`:5807`). Verified: with `.db` absent it returns `None` (via `path = getattr(self, "_path", None)`), it does **not** raise. `_bare_projection` is therefore left untouched — those four existing tests keep exercising the real read path (attribute `set()`, since their fake returns `[]`) rather than being short-circuited.
 
