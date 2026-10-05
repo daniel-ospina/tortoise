@@ -551,6 +551,67 @@ jobs:
         # this suite's `node --test` passes no `--experimental-strip-types` flag).
         with:
           node-version: '22'
+      - name: Cache pip download store (#7463)
+        # Measured on run 37379403433, from each job's own step log. The cost is
+        # pip's DOWNLOADS, and `uv sync` is noise beside them:
+        #   test (c): pip ~253 s (torch 554.6 MB + nvidia_cudnn_cu13 553.1 MB +
+        #             nvidia_cublas 423.1 MB + … — an identical 141-wheel,
+        #             3,221 MB set),                      uv sync ~1.6 s
+        #   test (a): pip ~106 s (the SAME 3,221 MB set), uv sync ~2.9 s
+        #   test (b): pip ~101 s,                         uv sync ~3.0 s
+        # The spread is download variance and it lives entirely inside pip, so a
+        # warm pip store is what removes it. That benefit is measured on the
+        # GITHUB-HOSTED lane, which downloads the whole set; the SELF-HOSTED lanes
+        # carry a persistent tool-cache (their log shows all 142 requirements
+        # `already satisfied` and zero downloads), so their entry stays small.
+        #
+        # `~/.cache/uv` is deliberately NOT cached — and NOT because of size (its
+        # entry measured 234 MiB): `uv sync` is 1.5-3 s here, and four of the five
+        # jobs that run this install never invoke uv at all — they run the same
+        # `pip install`. Never `.venv` either: the env dir records worktree paths
+        # and the install step already has to `rm -rf` a stale one.
+        #
+        # `runner.arch` is in the key on purpose: this workflow runs on BOTH x64
+        # (GitHub-hosted) and arm64 (self-hosted) runners and `runner.os` is
+        # `Linux` for both, while pip's store is architecture-specific. One shared
+        # key would let whichever architecture finishes first lock the other out of
+        # saving at all — actions/cache skips the save on an exact-key restore.
+        # The key covers the dependency DECLARATIONS only (`pyproject.toml`, with
+        # `uv.lock` as a conservative proxy). Two inputs that also change the
+        # downloaded set are deliberately NOT covered, so editing them will not move
+        # the key: the per-site install command line (the extras and pins in the
+        # `pip install` below) and the pinned interpreter version. Either is a
+        # redundant re-download, never a wrong artifact — pip re-resolves live and
+        # the store is keyed by download URL.
+        #
+        # Footprint, and the honest limit of the claim: the x64 entry is those
+        # CUDA/torch wheels, measured at 2,984 MiB, and this repo's cache store
+        # measured 193 entries / 9.70 GiB against GitHub's 10 GB cap. GitHub evicts
+        # by last access, and on that ordering this NEW entry sits NEARER the front
+        # of the queue than the multi-GB `buildkit` blobs from deploy-hosted /
+        # publish-selfhost (`cache-to: type=gha,mode=max`) — measured, the deps
+        # entry was last accessed 00:35:28Z against 01:15:26Z and 01:26:02Z for the
+        # two largest blobs. The saving is therefore CONTINGENT: the next buildkit
+        # or publish run can evict it. A cold key is a MISS, not a failure — the
+        # prefix restore then falls back to a colder entry, or a re-download.
+        # `continue-on-error` follows the two cache steps already in this file
+        # (the pytest-lastfailed pair): a save that cannot reserve an existing
+        # key is DROPPED by the service, and a cache-SERVICE error (transport /
+        # 503) must never red a job that has run no tests.
+        # `if:` — GitHub-hosted only. The SELF-HOSTED lanes do no downloads at all
+        # (their logs show 142/141/143 requirements `already satisfied` and zero
+        # `Downloading` lines) and `~/.cache/pip` already persists in their shared
+        # HOME across jobs, so an Actions entry would be redundant there while still
+        # consuming the budget described below. If this expression were wrong the step
+        # would simply be SKIPPED — visible in the run's own step list.
+        if: runner.environment == 'github-hosted'
+        continue-on-error: true
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: deps-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}
+          restore-keys: |
+            deps-v2-${{ runner.os }}-${{ runner.arch }}-
       - name: Install package + test extras
         # embeddings extra required at COLLECTION time: test_gmm_proofs.py,
         # test_embeddings.py, test_cross_lens.py, test_sdk_group3.py import
@@ -1343,6 +1404,23 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'   # pyproject requires-python >= 3.12
+      - name: Cache pip download store (#7463)
+        # The same `pip install -e '.[test,embeddings]'` as the `test` matrix job,
+        # so the same cache and key for this runner's ARCHITECTURE — whichever job
+        # finishes first warms the rest of its own arch.
+        # `continue-on-error` follows the two cache steps already in this file
+        # (the pytest-lastfailed pair): a cache-SERVICE error (transport/503)
+        # must never red a job that has run no tests.
+        # GitHub-hosted only — the self-hosted lanes persist ~/.cache/pip in their
+        # shared HOME and do no downloads, so an entry there is redundant.
+        if: runner.environment == 'github-hosted'
+        continue-on-error: true
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: deps-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}
+          restore-keys: |
+            deps-v2-${{ runner.os }}-${{ runner.arch }}-
       - name: Install package + test extras
         run: pip install -e '.[test,embeddings]' build==1.6.0
         # build pinned (#1929 code-review P2): test_pack_shipping_wheel.py's
@@ -1701,6 +1779,22 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Cache pip download store (#7463)
+        # The same `pip install -e '.[test,embeddings]'` as the `test` matrix job,
+        # so the same cache and key — whichever job finishes first warms the rest.
+        # `continue-on-error` follows the two cache steps already in this file
+        # (the pytest-lastfailed pair): a cache-SERVICE error (transport/503)
+        # must never red a job that has run no tests.
+        # GitHub-hosted only — the self-hosted lanes persist ~/.cache/pip in their
+        # shared HOME and do no downloads, so an entry there is redundant.
+        if: runner.environment == 'github-hosted'
+        continue-on-error: true
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: deps-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}
+          restore-keys: |
+            deps-v2-${{ runner.os }}-${{ runner.arch }}-
       - name: Install package + test extras
         # [test,embeddings] — NOT just [test]: the pre-cache step imports
         # sentence_transformers (embeddings extra), and create_point calls
@@ -2063,6 +2157,22 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Cache pip download store (#7463)
+        # The same `pip install -e '.[test,embeddings]'` as the `test` matrix job,
+        # so the same cache and key — whichever job finishes first warms the rest.
+        # `continue-on-error` follows the two cache steps already in this file
+        # (the pytest-lastfailed pair): a cache-SERVICE error (transport/503)
+        # must never red a job that has run no tests.
+        # GitHub-hosted only — the self-hosted lanes persist ~/.cache/pip in their
+        # shared HOME and do no downloads, so an entry there is redundant.
+        if: runner.environment == 'github-hosted'
+        continue-on-error: true
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: deps-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}
+          restore-keys: |
+            deps-v2-${{ runner.os }}-${{ runner.arch }}-
       - name: Install package + test extras
         run: pip install -e '.[test,embeddings]'
       - name: Clean stale redislite orphans (issue #1005 tempdir pollution)
@@ -2384,6 +2494,22 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Cache pip download store (#7463)
+        # The same `pip install -e '.[test,embeddings]'` as the `test` matrix job,
+        # so the same cache and key — whichever job finishes first warms the rest.
+        # `continue-on-error` follows the two cache steps already in this file
+        # (the pytest-lastfailed pair): a cache-SERVICE error (transport/503)
+        # must never red a job that has run no tests.
+        # GitHub-hosted only — the self-hosted lanes persist ~/.cache/pip in their
+        # shared HOME and do no downloads, so an entry there is redundant.
+        if: runner.environment == 'github-hosted'
+        continue-on-error: true
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: deps-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}
+          restore-keys: |
+            deps-v2-${{ runner.os }}-${{ runner.arch }}-
       - name: Install package + test extras
         run: pip install -e '.[test,embeddings]'
       - name: Run the embedded_only marker selection (URI unset — #4164)
