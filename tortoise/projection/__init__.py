@@ -1796,6 +1796,27 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
 # shape this hardening eliminates.
 
 
+# #7369: compiled ONCE — the gate runs on every write statement, so a
+# per-call recompile would be a hot-path cost for no benefit.
+_WRITE_CLAUSE_RE = re.compile(
+    r"\b(CREATE|MERGE|SET|DELETE|DETACH|REMOVE|FOREACH)\b", re.I
+)
+_GATE_SPREAD_RE = re.compile(r"\+= *\$([A-Za-z_][A-Za-z0-9_]*)")
+_GATE_REPLACE_RE = re.compile(
+    r"SET +[A-Za-z_][A-Za-z0-9_]* *= *\$([A-Za-z_][A-Za-z0-9_]*)")
+_GATE_UNWIND_RE = re.compile(r"UNWIND +\$([A-Za-z_][A-Za-z0-9_]*)", re.I)
+# A MERGE matches its node on the keys in the pattern's property map. A null
+# there is NOT a safe degrade — FalkorDB REFUSES it ("Cannot merge node using
+# null property value"), so nulling such a parameter converts one abort into
+# another instead of preventing it (measured: a PointAdded whose point.id
+# carries a NUL passes the isinstance(str) check, is nulled here, and MERGE
+# then raises). Those parameters belong to the FOLD, which must SKIP the record
+# (as _retract/_apply_revise already do via _writable_id) — so the boundary
+# leaves them untouched and does not manufacture a null key.
+_GATE_MERGE_KEY_RE = re.compile(r"MERGE[^{}]*\{([^{}]*)\}", re.I)
+_GATE_PARAM_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
+
+
 def _journal_safe_params(params, cypher=None):
     """``params`` with every value a Cypher property can actually take (#7369).
 
@@ -1818,9 +1839,26 @@ def _journal_safe_params(params, cypher=None):
     ``_wipe_all_nodes`` and leaves the graph wiped or half-built.
 
     ``None`` rather than a REMOVED key, deliberately: a parameter the Cypher
-    still references must stay BOUND, and for a ``SET n += $map`` an omitted
-    key leaves the PRE-EXISTING value in place — state the journal never
-    justified, which is the outcome this gate exists to prevent.
+    still references must stay BOUND. What ``None`` then DOES depends on the
+    clause, and this is worth being exact about because the two differ — in a
+    map MERGE (``SET n += $map``) an omitted key would leave the PRE-EXISTING
+    value in place, whereas in a DIRECT SET (``SET n.x = $v``) it CLEARS the
+    property. Clearing is the intended degrade: the journal stated no usable
+    value, so the field is absent rather than silently untrusted-but-present.
+    Note this is a behaviour change on the LIVE path too — the statement used
+    to fail atomically and keep every property, and now it succeeds with that
+    one property cleared (e.g. the EP flush, ``ep.py``).
+
+    MERGE KEYS ARE EXCLUDED. A null is not a safe universal degrade: the engine
+    REFUSES a null merge key (``Cannot merge node using null property value``),
+    so nulling one converts an abort into a DIFFERENT abort rather than
+    preventing it. Those parameters are left untouched, and the FOLD is
+    responsible for skipping a record whose identity is unwritable (the
+    creation anchors do this via ``_writable_id``).
+
+    READ-ONLY STATEMENTS ARE SKIPPED. A statement with no write clause cannot
+    put a value into a property, so the walk does not run — which also keeps it
+    off the retrieval hot path.
 
     The statement — not the value — says which parameters are CONTAINERS, and a
     container must be walked as one or a legitimate structure is nulled
@@ -1845,20 +1883,27 @@ def _journal_safe_params(params, cypher=None):
     if not params:
         return params
     statement = cypher or ""
+    # A statement with no write clause cannot put a value into a property, so
+    # there is nothing to gate — and skipping it keeps the walk off the READ
+    # hot path (measured before this short-circuit: a 5,000-id retrieval paid
+    # ~5.6 ms per call for a gate that could not apply). A MISSING statement is
+    # different: it means the shape is unknown, so gate (fail closed) rather
+    # than assume a read.
+    if statement and not _WRITE_CLAUSE_RE.search(statement):
+        return params
     # ``SET n += $p`` and ``SET n = $p`` both hold a MAP OF PROPERTIES. The
     # second pattern anchors on a BARE name (``n``), so ``SET n.x = $v`` — a
     # scalar in a property — does not match and stays a value position.
-    spread = frozenset(
-        re.findall(r"\+= *\$([A-Za-z_][A-Za-z0-9_]*)", statement)
-    ) | frozenset(
-        re.findall(
-            r"SET +[A-Za-z_][A-Za-z0-9_]* *= *\$([A-Za-z_][A-Za-z0-9_]*)",
-            statement,
-        )
+    spread = frozenset(_GATE_SPREAD_RE.findall(statement)) | frozenset(
+        _GATE_REPLACE_RE.findall(statement)
     )
     # ``UNWIND $p AS row`` — a LIST OF ROW MAPS, not properties.
-    rows = frozenset(
-        re.findall(r"UNWIND +\$([A-Za-z_][A-Za-z0-9_]*)", statement, re.I)
+    rows = frozenset(_GATE_UNWIND_RE.findall(statement))
+    # Parameters that are MERGE KEYS: never nulled here (see the note above).
+    merge_keys = frozenset(
+        name
+        for group in _GATE_MERGE_KEY_RE.findall(statement)
+        for name in _GATE_PARAM_RE.findall(group)
     )
     degraded: list = []
 
@@ -1889,6 +1934,10 @@ def _journal_safe_params(params, cypher=None):
     changed = False
     out = None
     for key, value in params.items():
+        if key in merge_keys:
+            # A MERGE key: left EXACTLY as it is. A null here is refused by the
+            # engine, so degrading it would convert one abort into another.
+            continue
         shape = "rows" if key in rows else ("map" if key in spread else None)
         walked = _walk(value, str(key), shape)
         if walked is not value:
@@ -4371,7 +4420,7 @@ class FalkorProjection(
             # #331 (review r2): parity with _apply_one — no id → nothing to
             # index by; skip rather than KeyError in _upsert.
             # #331 (review r4): str-only ids (non-str would break Cypher params).
-            if not isinstance(p.get("id"), str):
+            if not _writable_id(p.get("id")):
                 logger.warning(
                     "FalkorProjection.apply: skipping %s with missing point "
                     "id (event_id=%s)", t, ev.get("event_id"))
@@ -5600,7 +5649,7 @@ class FalkorProjection(
                 # nothing to index by; skip rather than KeyError in
                 # _upsert_point_props.
                 # #331 (review r4): str-only ids.
-                if not isinstance(p.get("id"), str):
+                if not _writable_id(p.get("id")):
                     logger.warning(
                         "rebuild: skipping %s with missing point id "
                         "(event_id=%s)", t, ev.get("event_id"))
@@ -7010,7 +7059,7 @@ class FalkorProjection(
                 # #331 (review r3): parity with apply()/pass 1a — edge
                 # wiring indexes by p["id"]; skip rather than KeyError.
                 # #331 (review r4): str-only ids.
-                if not isinstance(p.get("id"), str):
+                if not _writable_id(p.get("id")):
                     logger.warning(
                         "rebuild: skipping edge wiring for event with "
                         "missing point id (event_id=%s)",

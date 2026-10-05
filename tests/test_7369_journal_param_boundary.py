@@ -275,12 +275,56 @@ def test_legitimate_nested_arrays_survive():
 @pytest.mark.parametrize("verb", ["query", "ro_query", "_query", "profile",
                                   "explain"])
 def test_the_boundary_degrades_before_the_driver_sees_it(verb):
+    """MUTATION-SENSITIVE: unwire the gate from any verb and this fails.
+
+    The corrupt value is deliberately NOT a dict. The first version of this
+    test passed one at the TOP level, and the mirror below accepts a top-level
+    dict (it cannot know whether the statement spreads it), so the mirror waved
+    it through and the test passed with the gate UNWIRED — eight of sixteen
+    passing on an unwired gate, which made this module's claim that unwiring
+    fails every verb false. ``bytes`` is rejected at every position, so the
+    mirror can only accept it if the gate actually ran.
+    """
     driver = _StrictDriver()
     g = _guarded(driver)
     call = getattr(g, verb)
-    out = call("MATCH (n:Point) SET n.v=$v RETURN n",
-               params={"v": {"evil": 1}})
+    out = call("MATCH (n:Point) SET n.v=$v RETURN n", params={"v": b"bytes"})
     assert out == "ok", out
+
+
+def test_a_read_only_statement_is_untouched():
+    """The walk must not run where nothing can be written.
+
+    Retrieval is the hot path: before this short-circuit a 5,000-id read paid
+    the walk for a gate that could not apply to it. Identity-pinning makes a
+    regression that re-walks reads allocate visibly here.
+    """
+    params = {"ids": ["p%d" % i for i in range(50)]}
+    assert _journal_safe_params(
+        params, "MATCH (p:Point) WHERE p.id IN $ids RETURN p",
+    ) is params
+
+
+def test_a_MERGE_key_is_never_nulled_because_the_engine_refuses_a_null_key():
+    """THE P1 FIX. FalkorDB REFUSES a null merge key (``Cannot merge node
+    using null property value``), so degrading an identity parameter does not
+    PREVENT an abort — it swaps in a different one.
+
+    That was measured end-to-end: a ``PointAdded`` whose ``point.id`` carries a
+    NUL passed the old ``isinstance(str)`` check, reached ``MERGE (n:Point
+    {id:$id})``, was nulled here, and raised. So the boundary now leaves a MERGE
+    key alone and the creation anchors SKIP the record instead, using
+    ``_writable_id`` (as ``_retract`` and ``_revise_point`` already did).
+    """
+    assert _journal_safe_params(
+        {"id": "bad\x00id"}, "MERGE (n:Point {id:$id}) RETURN n",
+    ) == {"id": "bad\x00id"}
+
+    # ...while a VALUE parameter in the SAME statement is still gated.
+    assert _journal_safe_params(
+        {"id": "ok", "c": {"evil": 1}},
+        "MERGE (n:Point {id:$id}) SET n.content=$c",
+    ) == {"id": "ok", "c": None}
 
 
 def test_the_boundary_preserves_a_corrupt_sibling_and_only_nulls_the_bad_one():
@@ -377,6 +421,29 @@ def test_a_corrupt_creation_field_no_longer_aborts_the_rebuild(superseded):
         "MATCH (n:Point) RETURN count(n)", params={},
     ).result_set
     assert rows[0][0] >= 1, "the rebuild did not re-materialise any point"
+
+
+def test_a_corrupt_point_id_is_skipped_rather_than_aborting_the_rebuild(superseded):
+    """THE P1 ACCEPTANCE, end to end.
+
+    A NUL in ``point.id`` used to pass the ``isinstance(str)`` guard, reach
+    ``MERGE (n:Point {id:$id})``, be degraded to ``None`` and raise ``Cannot
+    merge node using null property value`` — an abort after the wipe, which is
+    what the boundary alone could NOT fix. The creation anchors now skip the
+    record with ``_writable_id``, so the rebuild COMPLETES and every OTHER
+    point still materialises.
+    """
+    events, sdk, old, _new = superseded
+    assert _poison(events, "PointAdded", "point.id", "bad\x00id") >= 1
+
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point) RETURN count(n)", params={},
+    ).result_set
+    assert rows[0][0] >= 1, (
+        "the rebuild skipped the corrupt-id record AND lost the healthy ones"
+    )
 
 
 def test_two_rebuilds_of_a_poisoned_journal_agree(superseded):
