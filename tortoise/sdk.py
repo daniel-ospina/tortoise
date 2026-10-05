@@ -192,9 +192,18 @@ _SESSION_LLM_PROVIDER_PRIORITY = ("openrouter", "deepseek", "openai", "gemini")
 # provider/model choice is a product decision (deploy-time) — these are
 # cheap-tier defaults matching the analyzer's model choices (analyze.py
 # _LLM_PROVIDERS) and session_indexer's whitelist family.
+#
+# #4129: every id here must be one the provider actually SERVES, because a
+# provider answers 200 to a retired id and silently serves a different model.
+# api.deepseek.com still accepts "deepseek-chat" and serves "deepseek-flash",
+# so naming the retired id did not fail — it silently ran a model nobody
+# configured. Verified against GET /models on 2026-10-05, which serves exactly
+# ["deepseek-flash", "deepseek-v4-pro"]. Re-check with that endpoint before
+# changing an id; models.OpenAICompatModel also warns at call time when the
+# served id diverges from the requested one.
 _SESSION_LLM_DEFAULT_MODELS = {
     "openrouter": "deepseek/deepseek-chat",
-    "deepseek": "deepseek-chat",
+    "deepseek": "deepseek-flash",
     "openai": "gpt-4o-mini",
     "gemini": "gemini-2.0-flash",
 }
