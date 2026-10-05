@@ -16,8 +16,9 @@ cannot quietly reopen the writer path.
 
 NO TEST IN THIS FILE SKIPS A LANE. Every test asserts something real in BOTH
 the embedded (no URI) and the URI lanes. A bare ``return`` in one branch would
-pass without checking anything — the invisible ambient-skip that
-``tests/test_markers.py`` exists to prevent.
+pass without checking anything — the invisible ambient-skip. No scan catches
+that (``tests/test_markers.py`` explicitly declines to look for early-returning
+helpers), so it is avoided by construction instead.
 
 The lane predicate is the SDK's OWN rule, not ``is_db_uri``: ``sdk.py`` binds
 ``_db_uri`` (and leaves ``_db_path`` None) for *any non-empty*

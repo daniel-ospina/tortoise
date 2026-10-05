@@ -244,11 +244,13 @@ from tortoise.embedded_reaper import ACTIVE_SUITES_DIR as _ACTIVE_SUITES_DIR  # 
 # ``TORTOISE_DB_PATH``: an ambient value pointing at the real store is exactly
 # the hazard.
 #
-# Gated on the SDK's OWN binding rule, not on ``is_db_uri``: ``sdk.py``
-# branches on *any non-empty* ``TORTOISE_DB_URI`` (a path-style URI binds
-# ``_db_uri`` and never calls ``resolve_db_path``), so gating on
-# ``is_db_uri`` would leave a path-style-URI session unguarded while
-# needlessly overriding its ``TORTOISE_DB_PATH``.
+# Gated on the SDK's OWN binding rule, not on ``is_db_uri``. ``sdk.py``
+# branches on *any non-empty* ``TORTOISE_DB_URI``: a path-style URI binds
+# ``_db_uri`` and never calls ``resolve_db_path``. Gating on ``is_db_uri``
+# would therefore turn the guard ON for a path-style-URI session, and since
+# ``resolve_db_path`` reads ``TORTOISE_DB_PATH`` at precedence 2 — ABOVE the
+# path-style URI at precedence 3 — the guard would silently OVERRIDE that
+# session's chosen target in every ``resolve_db_path()`` caller.
 if not os.environ.get("TORTOISE_DB_URI"):
     from tests._embedded import register_session_tmpdir
     _EMBEDDED_LANE_GUARD_DIR = tempfile.mkdtemp(
