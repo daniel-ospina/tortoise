@@ -2473,7 +2473,7 @@ durations:
 # `# unmeasured` (a file no source leg collected, whose value is carried forward
 # and is not a measurement).
   test_fly_secret_drift.py: 8.5
-  # #4071: three hermetic asserts (no DB, no network). The duration-coverage
+  # #4071: four hermetic asserts (no DB, no network). The duration-coverage
   # floor counts it as a fast file, so it needs an entry like every other fast
   # file; its own testcase call time is sub-second (the file's wall time is
   # session setup, which the map does not price).
