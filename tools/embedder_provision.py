@@ -101,11 +101,18 @@ def _watchdog_seconds() -> float:
     Set PER SITE in the workflow, because the two bounds it must sit between are
     per site (P1, third review of #7364). A flat default was wrong: it killed a
     legitimately-progressing run at the three `--attempts 5 --backoff 10` sites,
-    whose own declared budget is 10 minutes and whose comment says so — 40s of
+    whose own declared budget is 10 minutes and whose comment says so — 100s of
     backoff alone before the final probe, plus a slow-but-working download. The
     invariant to preserve when editing a site's `timeout-minutes`:
 
         backoff budget  <  TORTOISE_EMBEDDER_WATCHDOG_S  <  timeout-minutes * 60
+
+    where the budget is the WORST-CASE retry sleep, `backoff * n*(n-1)/2` — the
+    attempts sleep `backoff * attempt` for attempt 1..n-1, so they SUM, and
+    `(n-1)*backoff` understates the 10-minute sites by 2.5x (40s vs 100s). That
+    error was in the first version of this comment AND in the test that guards
+    the invariant, which let a 60s watchdog pass at a 100s-budget site (P1,
+    fourth review) — state both bounds from the formula, not from memory.
 
     Sites set 330 (under the 6-minute `test`/pmv cap) and 570 (under the three
     10-minute caps). The fallback below is the tighter one on the principle that
@@ -167,11 +174,16 @@ def _install_termination_stack_dump() -> None:
     OpenMP workers are native threads and do not appear, and 3.12 has no
     `dump_c_stack` (3.14+). An apparently-sparse dump must not be read as
     "nothing was running".
+    faulthandler.enable() is inside the suppression too: with an unusable
+    stderr it raises `RuntimeError: sys.stderr is None`, which would propagate
+    out of here and fail the step WITHOUT provisioning — a diagnostic that
+    fails the gate it was added to diagnose (P2, fourth review).
     """
-    faulthandler.enable()
+    with contextlib.suppress(ValueError, RuntimeError, OSError):
+        faulthandler.enable()
     for _sig in (signal.SIGTERM, signal.SIGINT):
         # An unsupported platform or a non-main thread loses the diagnostic only.
-        with contextlib.suppress(ValueError, OSError):
+        with contextlib.suppress(ValueError, RuntimeError, OSError):
             faulthandler.register(_sig, all_threads=True, chain=True)
     with contextlib.suppress(ValueError, RuntimeError, OSError, OverflowError):
         faulthandler.dump_traceback_later(_watchdog_seconds(), exit=True)
@@ -278,7 +290,7 @@ def main(argv: list[str] | None = None) -> int:
         # & set(sys.argv[1:])`, which argparse's default `allow_abbrev=True`
         # defeats: `--print-m` is a valid, unambiguous spelling that returns the
         # pin early, yet matched no string in that set — so the marker
-        # contaminated machine-read output the lockstep check parses (P1, review
+        # machine-read output a consumer parses (P1, review
         # of #7364). Returning from here cannot be abbreviation-bypassed, and it
         # is also success-only, so `grep` for it never reads a failure as done.
         print(DONE_MARKER, flush=True)

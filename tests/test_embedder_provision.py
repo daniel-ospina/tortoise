@@ -551,13 +551,6 @@ def test_a_cancelled_step_dumps_every_thread_stack(tmp_path):
     Python-level handler cannot reach at all and which
     `test_the_watchdog_dumps_a_native_blocked_thread` covers.
 
-    Load-bearing: revert to `signal.signal` AND remove the watchdog, and this
-    fails on the dump assertion.
-
-    That claim is WRONG and was corrected in the third review: this test was
-    rebuilt against the round-2 `signal.signal` implementation (watchdog
-    removed) and PASSED — a Python-level handler is perfectly capable of dumping
-    a `time.sleep` block, which is why the inert handler survived two reviews.
     What this test actually pins is the narrower, still-real contract: a
     DELIVERED signal produces a dump carrying real frames. The native-blocked
     case, the one that discriminates, is the watchdog test below.
@@ -614,7 +607,7 @@ def test_the_watchdog_dumps_a_native_blocked_thread(tmp_path):
 
 
 def test_the_print_pins_are_byte_exact_and_survive_abbreviation(tmp_path):
-    """--print-model/--print-revision feed the workflow-side lockstep check, so
+    """--print-model/--print-revision emit a machine-read pin, so
     the #7359 completion marker must not contaminate them.
 
     The abbreviation cases are the ones that matter and the ones the FIRST
@@ -639,7 +632,7 @@ def test_the_print_pins_are_byte_exact_and_survive_abbreviation(tmp_path):
         )
         assert got.returncode == 0, f"{flag}: rc={got.returncode} {got.stderr!r}"
         assert got.stdout == expected + "\n", (
-            f"{flag} stdout must be EXACTLY the pin and a newline — the lockstep "
+            f"{flag} stdout must be EXACTLY the pin and a newline — a consumer of "
             f"check parses it; got {got.stdout!r}"
         )
         assert ep.DONE_MARKER not in got.stdout, (
@@ -729,10 +722,12 @@ def test_the_process_never_runs_atexit_teardown(tmp_path):
 def test_every_watchdog_margin_sits_between_the_backoff_budget_and_the_step_cap():
     """A per-site invariant, because a flat default regressed (P1, third review).
 
-    The watchdog is a hard wall-clock kill. Sitting below the step's own
-    backoff budget fails a run that was still legitimately retrying; sitting at
-    or above `timeout-minutes` makes it dead machinery (the runner's own kill
-    wins and no dump is produced). Both bounds are per site, so the check is too.
+    The watchdog is a hard wall-clock kill. Sitting below the site's own
+    worst-case retry sleep fails a run that was still legitimately retrying;
+    sitting at or above `timeout-minutes` makes it dead machinery (the runner's
+    own kill wins and no dump is produced). Both bounds are per site, so the
+    check is too — and both are derived from the formula rather than restated,
+    because restating the budget is exactly what went wrong here.
     """
     root = _SCRIPT.parent.parent
     sites = 0
@@ -743,11 +738,23 @@ def test_every_watchdog_margin_sits_between_the_backoff_budget_and_the_step_cap(
             watchdog = int(
                 re.search(r'TORTOISE_EMBEDDER_WATCHDOG_S: "(\d+)"', block).group(1)
             )
+            # Assert on the CLAMPED runtime value, not the YAML literal: `0`,
+            # `-1` or `1e-9` in the workflow would arm a 1s watchdog while a
+            # literal-vs-literal comparison stayed green (P1-adjacent, fourth
+            # review).
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setenv("TORTOISE_EMBEDDER_WATCHDOG_S", str(watchdog))
+                armed = ep._watchdog_seconds()
             cap = int(re.search(r"timeout-minutes: (\d+)", block).group(1)) * 60
             attempts, backoff = re.search(r"--attempts (\d+) --backoff (\d+)", block).groups()
-            budget = (int(attempts) - 1) * int(backoff)
-            assert budget < watchdog < cap, (
-                f"{name}: watchdog {watchdog}s is outside ({budget}s, {cap}s)"
+            # WORST-CASE retry sleep: attempts sleep `backoff * attempt` for
+            # attempt 1..n-1, so they SUM to backoff * n*(n-1)/2. `(n-1)*backoff`
+            # is wrong by 2.5x at the 10-minute sites and let a 60s watchdog
+            # pass at a 100s-budget site (P1, fourth review).
+            n, b = int(attempts), int(backoff)
+            budget = b * n * (n - 1) // 2
+            assert budget < armed < cap, (
+                f"{name}: watchdog {armed}s is outside ({budget}s, {cap}s)"
             )
             sites += 1
     assert sites == 5, f"expected 5 embedder sites, found {sites}"
