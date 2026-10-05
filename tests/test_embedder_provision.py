@@ -799,11 +799,21 @@ def test_the_watchdog_does_not_kill_a_slow_but_working_run(tmp_path):
 def test_sigterm_terminates_under_a_default_disposition(tmp_path):
     """`chain=True` must re-raise into SIG_DFL, so a cancel still terminates.
 
-    Deterministic BY CONSTRUCTION: the child is started under `trap - TERM`, so
-    its SIGTERM disposition is default regardless of the harness that runs this
-    suite. That is what makes this safe where the round-7/8 pins were not — those
-    asserted termination while inheriting the ambient disposition, so they
-    reddened under `trap '' INT`/`trap '' TERM`.
+    The child's SIGTERM disposition is forced to SIG_DFL EXPLICITLY, in the
+    child, before it execs the script — because nothing else guarantees it.
+    Round 9 used `bash -c 'trap - TERM; exec …'` and claimed that was
+    deterministic; it is not. `trap - SIG` restores the disposition bash
+    INHERITED, so under `trap '' TERM` the child still gets SIG_IGN, the
+    process dumps and survives, and the suite reddens after a 30s stall:
+
+        bash -c 'trap "" TERM; bash -c "trap - TERM; python3 -c \
+          \"import signal; print(signal.getsignal(signal.SIGTERM))\""'
+        → Handlers.SIG_IGN
+
+    That is the round-7/8 flake class reintroduced by a fix for it, and a false
+    determinism claim on top (P1, tenth review). Setting SIG_DFL in the child is
+    immune to the ambient harness because it does not depend on what was
+    inherited.
 
     Load-bearing: `chain=True` -> `False` leaves the process alive and fails.
     """
@@ -814,9 +824,18 @@ def test_sigterm_terminates_under_a_default_disposition(tmp_path):
     env["PYTHONPATH"] = str(fake) + os.pathsep + env.get("PYTHONPATH", "")
     proc = subprocess.Popen(
         [
-            "bash",
+            sys.executable,
             "-c",
-            f"trap - TERM; exec {sys.executable} {_SCRIPT} --attempts 1 --backoff 0",
+            # SIG_DFL, then replace ourselves with the script. `execv` keeps the
+            # PID, so the signal below still reaches the script itself.
+            "import os, signal, sys;"
+            " signal.signal(signal.SIGTERM, signal.SIG_DFL);"
+            " os.execv(sys.executable, [sys.executable, *sys.argv[1:]])",
+            str(_SCRIPT),
+            "--attempts",
+            "1",
+            "--backoff",
+            "0",
         ],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
     )
@@ -826,7 +845,7 @@ def test_sigterm_terminates_under_a_default_disposition(tmp_path):
         assert "FAKE_HANG_ENTERED" in proc.stdout.readline()
         proc.send_signal(signal.SIGTERM)
         assert proc.wait(timeout=30) != 0, (
-            "chain=True must let SIGTERM terminate under a default disposition"
+            "chain=True must let SIGTERM terminate under SIG_DFL"
         )
     finally:
         if proc.poll() is None:
