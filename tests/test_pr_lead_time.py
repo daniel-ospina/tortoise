@@ -615,16 +615,28 @@ def test_split_a_clamps_boundaries_past_the_gate():
     assert s["first_gate_ci_start_at"] == (T0 + timedelta(hours=1)).isoformat()
 
 
-def _clock_gh(start_offset, commit_offset, started=True):
+def _clock_gh(start_offset, commit_offset, started=True, cls=FakeGh):
     """A merged PR whose single commit landed at `commit_offset` and whose gate
     context began at `start_offset` and completed 30 min later."""
     run = {"id": 1, "name": GATE_CTX, "app": {"slug": "github-actions"},
            "status": "completed", "conclusion": "success",
            "started_at": _iso(T0 + start_offset) if started else None,
            "completed_at": _iso(T0 + timedelta(minutes=40))}
-    return FakeGh([run], [{"sha": SHA,
-                           "commit": {"author": {"date": _iso(T0 + commit_offset)}}}])
+    return cls([run], [{"sha": SHA,
+                        "commit": {"author": {"date": _iso(T0 + commit_offset)}}}])
 
+
+class _ForcePushGh(FakeGh):
+    """The same merged PR, but its head was force-pushed — the shape that made a
+    published 52.9% dispatch share a measurement artifact (dispatch median ~7 s
+    without a force-push against 62.36 h with one, measured 2026-10-05)."""
+
+    def _route(self, url):
+        if "/events?" in url:
+            self.calls += 1
+            self.asked.append(url)
+            return [{"event": "head_ref_force_pushed"}]
+        return super()._route(url)
 
 def test_measure_wires_the_leg_a_clock_split_at_the_call_site():
     """The lesson from this file's worst review gap: asserting the pure function
@@ -636,6 +648,26 @@ def test_measure_wires_the_leg_a_clock_split_at_the_call_site():
     assert r["gate_ci_seconds"] == 1800.0           # start -> gate success
     assert (r["authoring_seconds"] + r["dispatch_seconds"]
             + r["gate_ci_seconds"]) == r["seconds_a"]
+    # never force-pushed, so its dispatch boundary is the honest population
+    assert r["dispatch_unreliable"] is False
+    assert r["dispatch_unreliable_reason"] is None
+
+
+def test_force_pushed_rows_are_flagged_and_kept_out_of_the_causal_share():
+    """A share must not be published without the subpopulation that produced it.
+    The contaminated row keeps its split — the arithmetic is untouched, it still
+    partitions (a) — but it is flagged WITH A REASON and excluded from the clean
+    share, because CI cannot have run on a head that did not exist yet."""
+    res = _measure(_clock_gh(timedelta(minutes=10), timedelta(0), cls=_ForcePushGh))
+    r = res["prs"][0]
+    assert r["dispatch_unreliable"] is True
+    assert "force-pushed" in r["dispatch_unreliable_reason"]
+    assert r["authoring_seconds"] == 0.0 and r["dispatch_seconds"] == 600.0
+    assert res["leg_a_clock_split_pct"]["prs"] == 1        # still measured
+    assert res["leg_a_clock_split_pct"]["unreliable_prs"] == 1
+    assert res["leg_a_clock_split_clean_pct"]["prs"] == 0   # but not claimed
+    assert res["leg_a_clock_split_clean_pct"]["dispatch"] is None
+    assert res["totals"]["leg_a_clock_split_unreliable_prs"] == 1
 
 
 def test_measure_does_not_claim_the_split_when_the_ci_start_clock_is_missing():
@@ -671,11 +703,13 @@ def test_measure_itself_raises_when_the_leg_a_split_does_not_sum(monkeypatch):
 
 class _TwoHeadGh(FakeGh):
     """Two merged PRs on different heads with independent check-runs: one head
-    whose CI start clock exists and one whose does not."""
+    whose CI start clock exists and one whose does not. `force_pushed_pr2` makes
+    PR 2 the contaminated shape."""
 
-    def __init__(self, runs_by_sha):
+    def __init__(self, runs_by_sha, force_pushed_pr2=False):
         super().__init__([], [])
         self.by_sha = runs_by_sha
+        self.force_pushed_pr2 = force_pushed_pr2
         self._prs = [_pr(1, merged=T0 + timedelta(hours=1)),
                      _pr(2, merged=T0 + timedelta(hours=1))]
         self._prs[1]["head"] = {"sha": "b" * 40}
@@ -683,6 +717,9 @@ class _TwoHeadGh(FakeGh):
     def _route(self, url):
         self.calls += 1
         self.asked.append(url)
+        if "/events?" in url:
+            return ([{"event": "head_ref_force_pushed"}]
+                    if self.force_pushed_pr2 and "/issues/2/" in url else [])
         if "state=closed" in url:
             return self._prs if url.endswith("page=1") else []
         if "/commits?" in url:
@@ -715,3 +752,33 @@ def test_leg_a_split_pct_divides_by_the_observable_rows_only():
     assert res["totals"]["leg_a_clock_split_missing_prs"] == 1
     assert res["leg_a_clock_split_pct"]["dispatch"] == 25.0
     assert res["leg_a_clock_split_pct"]["gate_ci"] == 75.0
+
+
+def test_the_clean_line_reports_clean_medians_not_the_contaminated_ones():
+    """Found by review on this change's first cut: the rendered sentence was scoped
+    to the CLEAN population while its parenthetical medians were still med(merged)
+    — over force-pushed rows — re-attributing the exact figure (dispatch 7 s clean
+    vs 62.36 h force-pushed) the clean split exists to quarantine. Two rows: PR 1
+    clean with 600 s of dispatch, PR 2 force-pushed with 36000 s."""
+    quick = {"id": 1, "name": GATE_CTX, "app": {"slug": "github-actions"},
+             "status": "completed", "conclusion": "success",
+             "started_at": _iso(T0 + timedelta(minutes=10)),
+             "completed_at": _iso(T0 + timedelta(minutes=40))}
+    slow = dict(quick, id=2, started_at=_iso(T0 + timedelta(minutes=50)),
+                completed_at=_iso(T0 + timedelta(minutes=55)))
+    res = plt.measure(_TwoHeadGh({SHA: [quick], "b" * 40: [slow]},
+                                 force_pushed_pr2=True),
+                      "o/r", [GATE_CTX], 7, T0 + timedelta(days=1))
+    m = res["medians_seconds"]
+    # PR 2's gate must stay inside its life, or the row is `unknown` and has no
+    # split at all — the shape that made this test's first cut vacuous
+    assert res["prs"][1]["dispatch_seconds"] == 3000.0
+    assert m["dispatch"] == 1800.0, "all-row median spans both populations"
+    assert m["dispatch_clean"] == 600.0, "the clean median must be PR 1 alone"
+    assert res["leg_a_clock_split_clean_pct"]["prs"] == 1
+    # the rendered report must carry the CLEAN median in the CLEAN sentence
+    text = plt.render(res)
+    clean_line = next(ln for ln in text.splitlines()
+                      if "never force-pushed" in ln)
+    assert "10.0min" in clean_line, clean_line
+    assert "30.0min" not in clean_line, clean_line
