@@ -677,8 +677,10 @@ def refresh_and_publish(
 
     Returns the snapshot (also stored for :func:`current_snapshot`). Never
     raises for an ordinary allocation/DB problem: a cost refresh must not be
-    able to take down the caller (it runs inside the hosted retention loop,
-    which has no per-iteration guard). It DOES log loudly on the two states
+    able to take down the caller (since #5381 the retention loop it runs inside
+    guards each step, so this is defence in depth rather than the only thing
+    keeping a bad refresh from ending the loop). It DOES log loudly on the two
+    states
     that would otherwise pass silently — an unavailable refresh, and a
     published set that does not reconcile to the declared totals.
     """
@@ -704,8 +706,8 @@ def _reconcile_and_log(snapshot: AllocationSnapshot) -> None:
     previous window, so there is nothing to reconcile against this
     declaration — the check is skipped rather than reported as a false
     mismatch. Never raises: a cost refresh must not be able to take down the
-    caller (it runs inside the hosted retention loop, which has no
-    per-iteration guard).
+    caller (since #5381 the retention loop it runs inside guards each step, so
+    this is defence in depth rather than the only guard).
     """
     published_by_org = allocation_by_org()
     published = sum(published_by_org.values())
