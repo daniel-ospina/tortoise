@@ -2702,14 +2702,12 @@ durations:
   test_boot_regressions.py: 4.2
   test_de2e1_entity_extraction.py: 2.1
   # #3019: measured 2026-10-05 on the embedded carve-out lane — 7.10s for the
-  # file, of which one embedding fixture is 5.16s of setup (a second run measured
-  # 8.31s). Recorded as 7.0, rounded to the map's whole-second convention. What
-  # the floor needs is the entry's PRESENCE, not its value: without it this file
-  # packed at the flat 2.0s default and coverage read 667/742 = 89.9%, under the
-  # 0.90 `DURATION_COVERAGE_MIN` (#3400) — which is the red this fixes. It is a
-  # FAST-POOL LPT split weight, so a low value moves the file later in the split,
-  # not into a failing state.
-  test_determinism_tie_order_3019.py: 7.0
+  # file (a second run 8.31s; one embedding fixture is 5.16s of the setup). The
+  # entry's PRESENCE is what carries the fast-pool coverage floor (#3400): without
+  # it this file packs at the flat default and the floor is missed. Refresh from
+  # the first post-merge CI run that measures it. No pool size or percentage is
+  # restated here on purpose — see the same rule on the `#3400` rows above.
+  test_determinism_tie_order_3019.py: 7.1
   test_epic903_staleness.py: 2.6
   test_epic903_observability.py: 3.1
   test_lme_m6_evidence.py: 2.4
