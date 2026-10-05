@@ -327,6 +327,27 @@ def test_a_MERGE_key_is_never_nulled_because_the_engine_refuses_a_null_key():
     ) == {"id": "ok", "c": None}
 
 
+def test_a_ROW_FIELD_used_as_a_MERGE_key_is_not_nulled_either():
+    """The same manufactured-null-key hole by a different route.
+
+    A MERGE key can be a row FIELD rather than a parameter — ``MERGE (t:Point
+    {id: turn.id})`` over ``UNWIND $turns``. Nulling that field is refused by
+    the engine exactly like a null parameter key (measured on the real turn
+    statement: ``Cannot merge node using null property value``), so the field
+    names appearing as ``<row>.<field>`` inside a MERGE map are excluded from
+    the row walk. A NON-key field in the same row is still gated.
+    """
+    cy = ("UNWIND $turns AS turn MERGE (t:Point {id: turn.id}) "
+          "SET t.content = turn.c")
+    assert _journal_safe_params(
+        {"turns": [{"id": "bad\x00id", "c": "fine"}]}, cy,
+    ) == {"turns": [{"id": "bad\x00id", "c": "fine"}]}
+
+    assert _journal_safe_params(
+        {"turns": [{"id": "good", "c": {"x": 1}}]}, cy,
+    ) == {"turns": [{"id": "good", "c": None}]}
+
+
 def test_the_boundary_preserves_a_corrupt_sibling_and_only_nulls_the_bad_one():
     driver = _StrictDriver()
     g = _guarded(driver)
@@ -444,6 +465,35 @@ def test_a_corrupt_point_id_is_skipped_rather_than_aborting_the_rebuild(supersed
     assert rows[0][0] >= 1, (
         "the rebuild skipped the corrupt-id record AND lost the healthy ones"
     )
+
+
+def test_a_corrupt_PROMOTE_id_is_skipped_rather_than_aborting_the_rebuild(superseded):
+    """The PROMOTE folds are the second identity route into the same abort.
+
+    ``PointPromoted`` / ``OperatorPromoted`` guarded their snapshot with bare
+    truthiness (``p.get("id")``), so a corrupt id reached ``MERGE (n:Point
+    {id:$id})`` — and because the boundary now (correctly) refuses to null a
+    merge key, the engine rejected the parameter and pass-1b died AFTER the
+    wipe. Measured on the pre-fix tree: ``Failed to parse query parameter 'id'
+    value``. All four promote sites now use ``_writable_id``.
+    """
+    events, sdk, old, _new = superseded
+    # Append a promote record carrying a poisoned id — the journal for a
+    # supersede fixture has no promote, and the guard is what is under test.
+    (events / "events.jsonl").write_text(
+        (events / "events.jsonl").read_text()
+        + json.dumps({"type": "PointPromoted", "event_id": "e7369",
+                      "ts": "2026-01-01T00:00:00+00:00",
+                      "point": {"id": "bad\x00id", "content": "x",
+                                "pointKind": "statement"}}) + "\n"
+    )
+
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point) RETURN count(n)", params={},
+    ).result_set
+    assert rows[0][0] >= 1, "the rebuild lost the healthy points"
 
 
 def test_two_rebuilds_of_a_poisoned_journal_agree(superseded):

@@ -1815,6 +1815,13 @@ _GATE_UNWIND_RE = re.compile(r"UNWIND +\$([A-Za-z_][A-Za-z0-9_]*)", re.I)
 # leaves them untouched and does not manufacture a null key.
 _GATE_MERGE_KEY_RE = re.compile(r"MERGE[^{}]*\{([^{}]*)\}", re.I)
 _GATE_PARAM_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
+# A MERGE key can also be a ROW FIELD rather than a parameter — ``MERGE (t:Point
+# {id: turn.id})`` over ``UNWIND $turns``. Nulling that field is the same
+# manufactured null key by a different route (measured: the real turn statement
+# nulls the row's ``id`` and the engine answers "Cannot merge node using null
+# property value"), so the field names appearing as ``<row>.<field>`` inside a
+# MERGE property map are excluded from the row walk too.
+_GATE_ROW_FIELD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\.([A-Za-z_][A-Za-z0-9_]*)")
 
 
 def _journal_safe_params(params, cypher=None):
@@ -1905,6 +1912,12 @@ def _journal_safe_params(params, cypher=None):
         for group in _GATE_MERGE_KEY_RE.findall(statement)
         for name in _GATE_PARAM_RE.findall(group)
     )
+    # Row FIELDS used as merge keys — never nulled inside a row map either.
+    merge_key_fields = frozenset(
+        field
+        for group in _GATE_MERGE_KEY_RE.findall(statement)
+        for field in _GATE_ROW_FIELD_RE.findall(group)
+    )
     degraded: list = []
 
     def _walk(value, path, shape):
@@ -1921,6 +1934,11 @@ def _journal_safe_params(params, cypher=None):
             changed = False
             out = {}
             for k, v in value.items():
+                if k in merge_key_fields:
+                    # A row field this statement MERGEs on: a null is refused
+                    # by the engine, so leave it exactly as it is.
+                    out[k] = v
+                    continue
                 walked = _walk(v, "%s.%s" % (path, k), None)
                 if walked is not v:
                     changed = True
@@ -4465,7 +4483,7 @@ class FalkorProjection(
             # reviewed + promotedAt) — rebuild parity for reviewer-gated
             # promotions (PointRetracted-style lifecycle event).
             p = ev.get("point")
-            if isinstance(p, dict) and p.get("id"):
+            if isinstance(p, dict) and _writable_id(p.get("id")):
                 self._upsert(p)
         elif t == "OperatorPromoted":
             # #785/R16: restore the operator's live status on replay.
@@ -4481,7 +4499,7 @@ class FalkorProjection(
             # operator→claim conversion on rebuild).  Heals the pre-existing
             # R16 emitter shape (promote_point, since #785) too.
             p = ev.get("point")
-            if isinstance(p, dict) and p.get("id"):
+            if isinstance(p, dict) and _writable_id(p.get("id")):
                 self._upsert(_promotion_point_with_operator(p))
             else:
                 oid = ev.get("id") or ev.get("event_id")
@@ -5901,7 +5919,7 @@ class FalkorProjection(
             elif t == "PointPromoted":
                 # #785: rebuild parity — re-apply the promoted snapshot.
                 p = ev.get("point")
-                if isinstance(p, dict) and p.get("id"):
+                if isinstance(p, dict) and _writable_id(p.get("id")):
                     if isinstance(p["id"], str):
                         # #2488: promote stamps updatedAt inline (the CAS
                         # below re-applies the snapshot) — a same-id promote
@@ -5940,7 +5958,7 @@ class FalkorProjection(
                 # the canonical nested-operator shape — for the capture path
                 # this event is the operator's only durable record.
                 p = ev.get("point")
-                if isinstance(p, dict) and p.get("id"):
+                if isinstance(p, dict) and _writable_id(p.get("id")):
                     if ev.get("projection_version", 0) >= 2:
                         p.pop("context", None)
                     op_p = _promotion_point_with_operator(p)
