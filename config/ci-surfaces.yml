@@ -11,10 +11,6 @@ version: 1
 # one-line, reviewable change; the labels are positional letters so an S-adding
 # diff stays a SUPERSET of main's names (a rename would refuse every merge).
 #
-# The value is recomputable from the committed `durations` map:
-# `max(s['est_seconds'] for s in push_legs({**m, 'fast_shards': S})['shards'])`.
-# #6133 deletes the 310.7 s file the floor argument below was once written from,
-# so the numbers there are restated from the map as it now stands.
 
 # W37: the CARVE-OUT pool. `test-carve-out` was the CI critical path as ONE
 # unsharded job — measured 2026-09-30 over 23 PR runs and 3 successful main
@@ -40,8 +36,7 @@ carve_shards: 3
 #
 # NO PACK NUMBER IS RESTATED HERE, DELIBERATELY. Every max(shard) figure this
 # comment used to carry is a function of the committed `durations` map, and that
-# map is refreshed on main while a PR is open — three review rounds in a row found
-# the same figure stale for exactly that reason. Recompute when a number is needed:
+# map is refreshed on main while a PR is open. Recompute when a number is needed:
 # `max(s['est_seconds'] for s in push_legs({**m, 'fast_shards': S})['shards'])`.
 # What is stable without the map: the four chunks sum to the weight of the file
 # they replace, so the pool's total weight is unchanged, and no single fast file
