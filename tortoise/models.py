@@ -13,9 +13,43 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import urllib.request
 from typing import Protocol, runtime_checkable
+
+_logger = logging.getLogger(__name__)
+
+#: #4129: providers ACCEPT a retired model id and silently serve a different
+#: model. api.deepseek.com returns 200 for ``deepseek-chat`` and serves
+#: ``deepseek-flash``, so the configured model was not the model used and no
+#: response field was ever inspected to notice. Warn ONCE per
+#: (requested, served) pair — a long capture path may call this thousands of
+#: times, and a per-call warning would be its own defect. Never raise: a
+#: provider that legitimately normalizes an alias must not fail a capture.
+_substituted_models: set[tuple[str, str]] = set()
+
+
+def _warn_on_model_substitution(requested: str, served: object) -> None:
+    """Warn when the provider served a model other than the one requested."""
+    if (
+        not isinstance(requested, str)
+        or not isinstance(served, str)
+        or not served
+        or served == requested
+    ):
+        return
+    pair = (requested, served)
+    if pair in _substituted_models:
+        return
+    _substituted_models.add(pair)
+    _logger.warning(
+        "model substitution: requested %r but the provider served %r — the "
+        "configured model is NOT the model being used, so cost and quality "
+        "are attributed to a model nobody chose; set a served id",
+        requested,
+        served,
+    )
 
 
 def _emit_usage_sink(model, usage) -> None:
@@ -115,6 +149,9 @@ class OpenAICompatModel:
             f"{self.base_url}/chat/completions", data=body, headers=self._headers())
         with urllib.request.urlopen(req, timeout=self.timeout) as r:
             data = json.loads(r.read())
+        # #4129: observe the SERVED model before anything else consumes the
+        # response — the only place a silent substitution is visible.
+        _warn_on_model_substitution(self.id, data.get("model"))
         # #2185 seam: fire with the response-local usage (provider None here —
         # bound at registration by the harness; no mirrors on this class).
         _emit_usage_sink(self, data.get("usage"))
