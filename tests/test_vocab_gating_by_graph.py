@@ -557,7 +557,7 @@ class TestGraphInstalledNamespaces:
         FAIL-ON: the resolver returns ``frozenset()`` (or an empty set) for an
         empty graph instead of ``None`` — the master then loses every pack kind.
         REACHABLE: this fixture has genuinely zero ``:PackInstall`` rows
-        (asserted, not assumed), and the ungated brief really has 5 namespaces
+        (asserted, not assumed), and the ungated brief really has 6 namespaces
         to lose — so "untouched" is measurable, not vacuous.
         """
         assert _read_install_namespaces(sdk) == [], \

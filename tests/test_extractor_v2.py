@@ -3400,8 +3400,9 @@ def _hand_built_master() -> dict:
                            "mode', 'coffee not tea'). The CHOICE is the fact; "
                            "retain it verbatim.",
         },
-        # FIXED order (agent-ops, dev, marketing, pm, product-strategy) — the
-        # golden pins THIS order; it is independent of the packs' readdir order.
+        # FIXED order (agent-ops, dev, marketing, pm, product-strategy, venture)
+        # — the golden pins THIS order; it is independent of the packs' readdir
+        # order.
         "memory_granularity": {
             "agent-ops": "Durable: the rule text, the situation that created it, "
                           "and the reasoning that supports or undermines it. "

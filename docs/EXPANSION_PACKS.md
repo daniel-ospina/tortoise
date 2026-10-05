@@ -87,8 +87,8 @@ With `TORTOISE_CLASSIFY_LATER=1` the pack vocabulary and the chains leave the S2
 
 **Two engine-side enumerations remain. They are the exceptions to "no domain in the engine", and they are named here rather than left implicit:**
 
-- **`_PACK_TRIGGERS`** (`tortoise/extractor_v2.py`) maps the shipped starter namespaces to story keywords. It is consulted only by the compact prompt mode (`TORTOISE_EXTRACTOR_PROMPT=compact`; the default render is verbose), and selection **fails open** — a namespace with no trigger row is included in every compact prompt. A trigger-less pack is therefore never silently dropped; it is injected whole until a row is added in engine code. Recorded on #1026 (residual from #5165).
-- **`CHAINS`** (`tortoise/extractor_v2.py`) holds the chain topologies for `epicToCode`, `productDelivery`, and `campaignToChannel` — the same three the `dev`, `product-strategy`, and `marketing` manifests declare. A pack chain whose id is in `CHAINS` is skipped by `validate_chain_completeness()`, which treats the engine copy as canonical.
+- **`_PACK_TRIGGERS`** (`tortoise/extractor_v2.py`) maps the shipped catalog namespaces to story keywords. It is consulted only by the compact prompt mode (`TORTOISE_EXTRACTOR_PROMPT=compact`; the default render is verbose), and selection **fails open** — a namespace with no trigger row is included in every compact prompt. A trigger-less pack is therefore never silently dropped; it is injected whole until a row is added in engine code. Recorded on #1026 (residual from #5165).
+- **`CHAINS`** (`tortoise/extractor_v2.py`) holds the chain topologies for `productDelivery`, `epicToCode`, `campaignToChannel`, `ventureFundingFlow`, `venturePortfolioFlow` and `ventureActionLoop` — the first three declared by the `dev`, `product-strategy` and `marketing` manifests, the last three by `venture`. A pack chain whose id is in `CHAINS` is skipped by `validate_chain_completeness()`, which treats the engine copy as canonical.
 
 ## The enforcement ladder (warn | retry)
 

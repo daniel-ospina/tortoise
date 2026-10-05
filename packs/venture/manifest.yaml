@@ -32,8 +32,10 @@
 #   - Declared relations have no runtime write path today (only the core
 #     structural allowlist is writable): #2766. The `semantics:` field carries the
 #     writable-predicate mapping wherever one exists.
-#   - `fundingAgreement ⊂ agreement` is blocked by #2783 (the subclassOf gate
-#     rejects lowercase canonical parents).
+#   - `fundingAgreement` subclasses the core `agreement` kind and is declared so
+#     below. It was previously declared as `Object` because the subclassOf gate
+#     was believed to reject lowercase canonical parents; `agreement` has been an
+#     allowed parent since #2727, so the intent is now expressed directly.
 
 namespace: venture
 name: Venture
@@ -76,11 +78,11 @@ ontology:
     program: Project
     # An action item is a unit of work with an owner and a due date.
     actionItem: WorkItem
-    # Intended parent is core `agreement` (a grant, priced round, SAFE,
-    # convertible note and loan are all agreements). The subclassOf gate rejects
-    # lowercase canonical parents today (#2783), so the generic core entity type
-    # is declared instead. Change to `agreement` when #2783 lands.
-    fundingAgreement: Object
+    # Core `agreement` (a grant, priced round, SAFE, convertible note and loan are
+    # all agreements). Declared directly: `agreement` is a canonical lowercase
+    # object kind, and every member of CANONICAL_OBJECT_KINDS is an allowed
+    # subclassOf parent (`tortoise/pack_registry.py`, relaxed by #2727).
+    fundingAgreement: agreement
 
   hierarchies:
   - path: Investment → Program
@@ -398,9 +400,10 @@ ontology:
 extraction:
   active: true
   # Empty = active for every source type. Narrowing to the meeting source kinds
-  # is deliberately NOT declared: they are not in the pack validator's allowlist
-  # until #2726 (PR #2747) lands, and a pack that declares an unregistered source
-  # type is dropped from the registry.
+  # is NOT declared. Those kinds ARE registered in the pack validator now
+  # (#2726 landed 2026-09-24 in `2d7af8bfc`), so this is a choice rather than a
+  # constraint — a pack that declares an unregistered source type would still be
+  # dropped from the registry.
   sourceTypes: []
   enforcement:
     default: warn

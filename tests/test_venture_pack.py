@@ -44,7 +44,12 @@ from tests._live_utils import LIVE_URI_SKIP_REASON
 from tortoise import extractor_v2 as v2
 from tortoise.commit_ops import apply_supersessions
 from tortoise.extractor_v2 import CHAINS, _PACK_TRIGGERS
-from tortoise.pack_registry import CORE_KINDS, PackRegistry, default_packs_dir
+from tortoise.pack_registry import (
+    CANONICAL_OBJECT_KINDS,
+    CORE_KINDS,
+    PackRegistry,
+    default_packs_dir,
+)
 from tortoise.pack_state import ensure_tenant_packs, get_tenant_packs
 from tortoise.search_engine import fetch_point_epistemic_state
 from tortoise.sdk import TortoiseSDK
@@ -139,22 +144,29 @@ class TestVentureManifest:
     def test_objects_and_events_are_disjoint(self, venture):
         assert not (set(venture.object_kinds) & set(venture.event_kinds))
 
-    def test_subclass_parents_are_core_pascalcase(self, venture):
+    def test_subclass_parents_are_core_kinds(self, venture):
         assert venture.kind_subclasses == {
             "program": "Project",
             "actionItem": "WorkItem",
-            "fundingAgreement": "Object",
+            "fundingAgreement": "agreement",
         }
         for parent in venture.kind_subclasses.values():
             assert parent in CORE_KINDS
-            assert parent[0].isupper()
+            # A PascalCase parent is a core entity type; a lowercase parent is
+            # legal only when it is a CANONICAL object kind - the registry's own
+            # rule (`pack_registry.py`, relaxed by #2727). Asserting bare
+            # PascalCase here is what let `fundingAgreement: Object` look
+            # correct while making the pack's stated intent unreachable.
+            assert parent[0].isupper() or parent in CANONICAL_OBJECT_KINDS
 
-    def test_funding_agreement_does_not_claim_the_blocked_parent(self, venture):
-        # `fundingAgreement ⊂ agreement` is the intended model, but the
-        # subclassOf gate rejects lowercase canonical parents (#2783). Declaring
-        # it would make the whole pack fail validation and be silently dropped,
-        # so the intent is recorded as a comment instead. Flip on #2783.
-        assert venture.kind_subclasses["fundingAgreement"] != "agreement"
+    def test_funding_agreement_claims_the_canonical_parent(self, venture):
+        # POSITIVE on purpose. `fundingAgreement` subclasses the core `agreement`
+        # kind: `agreement` is a canonical lowercase object kind, so the
+        # subclassOf gate accepts it. The previous form asserted the OPPOSITE and
+        # recorded the gate as rejecting lowercase canonical parents, which
+        # stopped being true when #2727 relaxed the parent allowlist.
+        assert venture.kind_subclasses["fundingAgreement"] == "agreement"
+        assert "agreement" in CANONICAL_OBJECT_KINDS
         assert "agreement" in CORE_KINDS
 
     def test_no_cross_pack_references(self, venture):
