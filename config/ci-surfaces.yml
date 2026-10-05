@@ -2424,10 +2424,11 @@ durations:
 # (borrowed from a measured sibling), the row retained from main (a local embedded-lane
 # timing from #4602, kept deliberately), any row marked `# unmeasured` (a file no leg
 # of this sweep's four source runs collected; see the RETAINED paragraph), and a NEW
-# file's first weight taken from a local timing before any sweep has collected it
-# (`test_venture_pack.py`, #3419). The fourth is recorded rather than defaulted on
-# purpose: a `# unmeasured` placeholder moves the coverage ratio while leaving the
-# split blind to the file, which is the rot #3400 exists to catch. This is a list of
+# file's first weight, which carries the flat default until a sweep collects it
+# (`test_venture_pack.py`, #3419). That last one is deliberately NOT "just pick a
+# number": a weight is a SHARD-LAYOUT input, so a number that does not model CI
+# decides which files run together. A local 67.2 was tried there first and did
+# exactly that — see that row. This is a list of
 # CATEGORIES, not of every such row: further local-timing rows predate this note
 # (search `locally measured`), and refreshing them all is #5215's job.
 #
@@ -2690,7 +2691,7 @@ durations:
   test_session_key_http.py: 5.5
   test_write_consolidation.py: 5.3
   test_value_extractor.py: 6.5
-  test_venture_pack.py: 67.2  # local (2026-10-05, this box), NOT this sweep's CI junit — new in #3419, so no source run collected it; the sweeper should replace this from the run's junit. Recorded rather than defaulted because the guard exists to stop the split being count-based (#3400), and a real weight serves that while an unmeasured default only moves the ratio.
+  test_venture_pack.py: 2.0  # unmeasured — new in #3419; no sweep has collected it, so it carries the flat default exactly as an absent key would, which is main's own weight for it. Do NOT substitute a local timing here: a measured-on-this-box 67.2 was recorded first, and it is a SHARD-LAYOUT input, so it moved tests/test_tortoise_search.py into the same shard as tests/test_subject_layer_read_surfaces_4889.py and exposed a pre-existing embedded-lane isolation leak (#3750 family) that main's grouping keeps apart. A weight that does not model CI must not be used to decide what runs together.
   test_pack_state.py: 5.1
   test_skip_guard.py: 16.0
   test_admin_return_to.py: 1.2
