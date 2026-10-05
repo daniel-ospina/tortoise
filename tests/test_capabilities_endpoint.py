@@ -10,7 +10,7 @@ PATCH path still MERGE it; no dashboard path writes it since #3913).
 Runs in the docker lane (TORTOISE_DB_URI) — the gate assertions exercise
 real FalkorDB step-edge writes. URI-less runs (tier-2 embedded legs,
 carve-out) SKIP at module level — mirror of
-test_onboarding_state_split.py's guard.
+the four test_onboarding_state_split_* modules' guard.
 """
 
 from __future__ import annotations

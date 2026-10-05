@@ -82,6 +82,56 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
 
+def _usable_instant(val) -> bool:
+    """True when a journal record states an instant a replay may write.
+
+    #5048: an instant read from a record rides as a Cypher parameter, so it
+    needs the same ``_writable_id`` gate the ``id`` does — ungated, a corrupt
+    line raises ``ResponseError: Property values can only be of primitive
+    types`` from inside a replay that has ALREADY wiped the graph, and pass-1b
+    has no per-event try/except (measured end-to-end: a ``PointRetracted``
+    carrying ``ts={"evil": 1}`` aborted ``rebuild_all`` and left the claim
+    LIVE).
+
+    The extra non-empty test is for the FALSEY half: the ``or _now_iso()``
+    this replaces treated ``""`` as "no instant stated", so an empty string
+    must keep falling back rather than become a written ``updatedAt``.
+    """
+    from tortoise.projection import _writable_id
+    return bool(val) and _writable_id(val)
+
+
+def _journal_instant(ev: dict, key: str = "ts") -> str:
+    """The record's instant when it states a usable one, else the writer's
+    clock.
+
+    Byte-identical to the ``ev.get(key) or _now_iso()`` it replaces for every
+    value that expression accepted AND that `_usable_instant` accepts: a
+    truthy, driver-writable **string**. The differing family is the TRUTHY
+    values `_usable_instant` rejects — any non-string, a string carrying a NUL
+    or lone surrogate, and an ARRAY of primitive strings (which FalkorDB would
+    have written, but which is not an instant this schema stores). A FALSY
+    value (``""``, ``None``, ``0``) is NOT a difference from the predecessor:
+    the replaced expression fell back to the clock for it too. For those the
+    difference is between this helper and ``_retract`` (see the NOTE below),
+    which is the case this PR turns on.
+
+    Also NOT covered here, and measured: a live caller that folds an event dict
+    it built itself (``commit_ops``'s ``fold_ev`` for ``ObjectSuperseded``)
+    passes no ``ts``, so the live write, the record's envelope ``ts`` and this
+    helper each hold a different read. Journal-derived values still ride
+    parameters ungated elsewhere (``valid_to``) — #7369.
+
+    NOTE the policy difference from ``_retract``, which is deliberate and not
+    an oversight: when a record states NO usable instant this helper writes the
+    clock (these arms have always stamped ``updatedAt`` as part of their SET),
+    while ``_retract`` writes no column at all, because it has a ``#330`` twin
+    in ``_apply_one`` and neither may invent a value the journal never stated.
+    """
+    val = ev.get(key)
+    return val if _usable_instant(val) else _now_iso()
+
+
 # ── #2884 D3: the belief-state value gate ─────────────────────────────────
 # The four properties the EP/dream write-backs carry. ONE gate, shared by
 # BOTH replay folds (`_fold_confidence_changed` here and `_apply_one` in
@@ -1392,18 +1442,20 @@ class _EntityHandlers:
 
         The capture path MERGEs the Session with a raw graph write; this
         record is its journal carrier, so the node (and any ``EntityLinked``
-        edge from it) replays. Idempotent MERGE keyed on ``id``; ``created_at``
-        and ``actor_user_id`` are coalesce-preserved (first writer wins,
-        mirroring the live merge), ``turn_count`` tracks the latest journaled
-        capture. Returns 1 when the node exists after the fold, 0 on a
+        edge from it) replays. Idempotent MERGE keyed on ``id``; ``created_at``,
+        ``actor_user_id`` and ``capture_lane`` are coalesce-preserved (first
+        writer wins, mirroring the live merge), ``turn_count`` tracks the latest
+        journaled capture. Returns 1 when the node exists after the fold, 0 on a
         malformed record.
 
         BOTH the id and every journal-derived property value are gated for
         WRITABILITY, not just type (review P1): a NUL / lone-surrogate id and
         a map-valued ``created_at`` / ``turn_count`` / ``harness`` /
-        ``actor_user_id`` payload each raise at parameter parse, and ``rebuild_all`` folds this
-        record INLINE (no try/except) AFTER the wipe. A malformed id is a
-        NO-OP (return 0); a malformed field is OMITTED, never bound.
+        ``actor_user_id`` / ``capture_lane`` payload are each REJECTED by
+        ``_annotator_value_ok`` BEFORE the bind — a malformed id is a NO-OP
+        (return 0), a malformed field is OMITTED, never bound, so neither can
+        reach parameter parse. That matters because ``rebuild_all`` folds this
+        record INLINE (no try/except) AFTER the wipe.
 
         ``entity_links_attempted`` / ``entity_links_created`` are carried by a
         ``SessionRecorded`` the capture emits after the link pass
@@ -1443,6 +1495,17 @@ class _EntityHandlers:
         if created_at is not None and _annotator_value_ok(created_at):
             sets.append("s.created_at=coalesce(s.created_at, $created_at)")
             params["created_at"] = created_at
+        # #3516 §B: the producer lane. Folded with coalesce (first writer wins)
+        # to MATCH the live capture write, which is also first-writer-wins. No
+        # producer journals this field YET: no caller passes `capture_lane` to a
+        # journaling writer (the hosted lane passes no `on_session_merged` at
+        # all; the SDK lane passes one but never a lane), so this is a GUARD for
+        # the first journaling lane (the store-sync CLI), not a parity property
+        # that holds today.
+        lane = ev.get("capture_lane")
+        if lane is not None and _annotator_value_ok(lane):
+            sets.append("s.capture_lane=coalesce(s.capture_lane, $v_capture_lane)")
+            params["v_capture_lane"] = lane
         for prop in ("turn_count", "harness", "entity_links_attempted",
                      "entity_links_created", "capture_ok",
                      "capture_extractor", "capture_redactions"):
@@ -1520,7 +1583,7 @@ class _EntityHandlers:
     def _delete(self, pid: str) -> None:
         self.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": pid})
 
-    def _retract(self, pid: str) -> None:
+    def _retract(self, pid: str, now: str | None = None) -> None:
         """Mark a Point as retracted instead of hard-deleting (#689).
 
         Retracted points are hidden from normal reads (get_point, query,
@@ -1531,11 +1594,42 @@ class _EntityHandlers:
         DETACH DELETE. Points retracted before this change are irrecoverably
         lost (the content existed only in the projection, and the projection
         deleted it). Future retractions leave this tombstone.
+
+        ``now`` (#5048, recorded from #4666) is the record's own ``ts`` — the
+        instant the producer minted and wrote to the node. The fold must
+        REPLAY it, not read its own clock: ``updatedAt`` is RECORDED —
+        docs/durability-posture.md declares that for ``:Source.updatedAt``
+        ("minted once by the producer and carried on the record"), and this is
+        the same field under the same rule, not a Point row the doc already
+        carries. A rebuild that called ``_now_iso()`` here stamped the
+        rebuild's wall-clock onto every retracted point and agreed with
+        neither the live node nor the producer's record.
+
+        ``now`` is gated by ``_usable_instant`` — the SAME gate the id below
+        and the sibling folds' ``updated_at`` use. Without it a corrupt journal
+        line (a dict/list/int ``ts``) rides a Cypher parameter and aborts
+        ``rebuild_all`` AFTER the wipe, leaving the claim LIVE — the pre-fix
+        code never read ``ts`` at all, so this hole only appears with the
+        recorded instant. A record that states no USABLE instant writes NO
+        column, rather than inventing one.
+
+        RESIDUAL, measured and NOT fixed by the no-column choice: it does not
+        make the two ``#330`` engines agree for a ts-less record.
+        ``_apply_one`` keeps the value the ``PointAdded`` snapshot carried,
+        while this arm leaves whatever pass-1a's ``_upsert_point_props`` just
+        wrote — and that is the REPLAY's clock (``n.updatedAt=$now`` with
+        ``now=_now_iso()``). Closing that needs pass-1a to stop re-clocking
+        ``updatedAt``, which is the wider #5048 residual for EVERY
+        never-retracted Point, not this arm's to invent.
         """
+        stamp = ", n.updatedAt = $now" if _usable_instant(now) else ""
+        params: dict = {"id": pid}
+        if stamp:
+            params["now"] = now
         self.g.query(
-            "MATCH (n:Point {id:$id}) SET n.status = 'retracted', n.updatedAt = $now, "
+            f"MATCH (n:Point {{id:$id}}) SET n.status = 'retracted'{stamp}, "
             f"{decay_clause('n')}",
-            params={"id": pid, "now": _now_iso()},
+            params=params,
         )
 
     def _fold_point_restamp(self, ev: dict, *,
@@ -1865,8 +1959,8 @@ class _EntityHandlers:
         # too. updatedAt mirrors the live stamp block (supersede-time now,
         # journaled on the line via the ts fallback).
         valid_to = ev.get("valid_to")
-        expired_at = ev.get("expired_at") or _now_iso()
-        updated_at = ev.get("ts") or _now_iso()
+        expired_at = _journal_instant(ev, "expired_at")
+        updated_at = _journal_instant(ev)
         # ``skip_updated_at`` is the SAME seq-gate ``_fold_point_invalidated``
         # applies. Without it the trailing sweep is the id's LAST writer and
         # writes the journaled supersede ts, while the chronological apply()
@@ -1979,8 +2073,8 @@ class _EntityHandlers:
         # replayed verbatim). validTo/expiredAt fall back like supersede;
         # updatedAt reads the ts key (the emit passes ts=now).
         valid_to = ev.get("valid_to")
-        expired_at = ev.get("expired_at") or _now_iso()
-        updated_at = ev.get("ts") or _now_iso()
+        expired_at = _journal_instant(ev, "expired_at")
+        updated_at = _journal_instant(ev)
         if skip_updated_at:
             # A later same-id PointRevised/PointPromoted already stamped
             # updatedAt (inline, pass-1b) — omit the column so this fold
@@ -2303,7 +2397,7 @@ class _EntityHandlers:
         # stamps ts on the JSONL line) — without this a JSONL wipe+rebuild
         # drifted supersededAt to rebuild time. Live callers (apply_super-
         # sessions' fold_ev carries no ts) fall back to now.
-        superseded_at = ev.get("ts") or _now_iso()
+        superseded_at = _journal_instant(ev)
         # #2242: the exclusion tuple is imported from commit_ops at function
         # level (commit_ops has no module-level tortoise imports → no cycle;
         # single source of truth — the keep-first gate tuple).
