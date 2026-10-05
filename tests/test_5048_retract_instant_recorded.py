@@ -392,9 +392,17 @@ def test_an_empty_string_instant_writes_no_stamp_in_the_graph(tmp_path):
 
     sdk2 = TortoiseSDK(db, event_log_path=str(journal))
     try:
+        # Same sentinel discipline as the other rebuild tests: only a real
+        # replay can move the node off this, so a `rebuild_all` that did
+        # nothing cannot satisfy the assertions below.
+        sdk2._get_proj().g.query(
+            "MATCH (n:Point {id:$i}) SET n.status = 'live', "
+            "n.updatedAt = 'REPLAY-DID-NOT-RUN'", params={"i": pid})
         sdk2._get_proj().rebuild_all(str(events), confirm_destructive=True)
         node = _node(sdk2, pid)
         assert node["status"] == "retracted", node
+        assert node["updatedAt"] != "REPLAY-DID-NOT-RUN", (
+            "the rebuild did not re-materialise the node from the journal")
         assert node["updatedAt"] != "", (
             "an empty-string instant was written as a stamp — the graph arm "
             "is not using the shared `_usable_instant` predicate")

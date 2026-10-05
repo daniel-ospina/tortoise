@@ -826,7 +826,7 @@ def _fold_journal(events: list[dict]) -> dict:
         keys the payload carries, except `content`/`is_operator`/`op_type`,
         which it sets UNCONDITIONALLY — so a snapshot that omits those RESETS
         them, and this arm pins them the same way.
-      PointRetracted  — `_retract` (`_apply_one`'s arm sets same three:
+      PointRetracted  — `_retract` (`_apply_one`'s arm sets the same three:
         status, `VACUITY_BELIEF`, and the #5048 recorded `updatedAt`):
         `status='retracted'` + the `decay_clause` belief decay, which is why
         this arm exists at all rather than deferring to `_apply_one`.

@@ -1561,10 +1561,13 @@ class _EntityHandlers:
 
         ``now`` (#5048, recorded from #4666) is the record's own ``ts`` — the
         instant the producer minted and wrote to the node. The fold must
-        REPLAY it, not read its own clock: ``updatedAt`` is RECORDED
-        (docs/durability-posture.md), so a rebuild that called ``_now_iso()``
-        here stamped the rebuild's wall-clock onto every retracted point and
-        agreed with neither the live node nor the producer's record.
+        REPLAY it, not read its own clock: ``updatedAt`` is RECORDED —
+        docs/durability-posture.md declares that for ``:Source.updatedAt``
+        ("minted once by the producer and carried on the record"), and this is
+        the same field under the same rule, not a Point row the doc already
+        carries. A rebuild that called ``_now_iso()`` here stamped the
+        rebuild's wall-clock onto every retracted point and agreed with
+        neither the live node nor the producer's record.
 
         ``now`` is gated by ``_usable_instant`` — the SAME gate the id below
         and the sibling folds' ``updated_at`` use. Without it a corrupt journal
