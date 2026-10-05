@@ -220,9 +220,9 @@ rows (#4664), so the log comes back EMPTY and `first_seq` is derived as
 makes `events_poll` answer 410 instead of returning `[]` forever to a subscriber
 parked above the fresh counter (the pre-fix behaviour). Carrying `first_seq`
 would only relabel the same truncation. The pre-wipe purge floor is therefore
-LOST, which is why the backup/restore sibling (`hosted_backup._restore_event_meta`,
-#3902) does carry it: there the `:GraphEvent` rows are copied, so the floor is
-there to be carried.
+LOST, which is why the backup/restore sibling
+(`hosted_backup._restore_event_meta`, #3902) does carry it: there the
+`:GraphEvent` rows are copied, so the floor is there to be carried.
 
 **The counter's domain is `0 .. MAX_SEQ`, and the ceiling is `2**53 - 1`, not
 INT64_MAX.** `ensure_event_schema` indexes `:GraphEvent.seq`, and FalkorDB
@@ -238,20 +238,22 @@ that can introduce a value: the pre-wipe validator (untrusted file),
 `event_store.capture_watermark` (live counter) and
 `event_store.reestablish_watermark` (the write).
 
-**Residual — the ALLOCATOR itself has no ceiling.** `next_seq` is unchanged by
-#4653, so a graph that keeps emitting can still walk past `MAX_SEQ` (and would
-wrap negative at INT64_MAX) — reachable only at ~9e15 events. An out-of-domain
-counter is ALSO reachable without emitting anything, via an unbounded dump
-restore (`hosted_backup._restore_event_meta` writes the dump's value verbatim)
-or a hand-written node, and that state is what `capture_watermark` refuses: the
-rebuild aborts before the wipe rather than restoring it. Fail-closed, but not a
-repair; capping allocation is a separate change (**#5379**).
+**Residual — the ALLOCATOR itself has no ceiling.** `next_seq` is unchanged
+by #4653, so a graph that keeps emitting can still walk past `MAX_SEQ` (and
+would wrap negative at INT64_MAX) — reachable only at ~9e15 events. An
+out-of-domain counter is ALSO reachable without emitting anything, via an
+unbounded dump restore (`hosted_backup._restore_event_meta` writes the dump's
+value verbatim) or a hand-written node, and that state is what
+`capture_watermark` refuses: the rebuild aborts before the wipe rather than
+restoring it. Fail-closed, but not a repair; capping allocation is a separate
+change (**#5379**).
 
-**Residual — the same gap, one step out.** With the log EMPTY (today's state,
-#4664) the floor is `last_seq + 1`, so no cursor survives; but the moment a
-replay writes `:GraphEvent` rows again, the floor becomes `min(:GraphEvent.seq)`
-and a subscriber parked ABOVE the top replayed `seq` — served nothing, yet not
-below the floor — reads `[]` with no 410 while a live counter sits far above it.
+**Residual — the same gap, one step out.** With the log EMPTY (today's
+state, #4664) the floor is `last_seq + 1`, so no cursor survives; but the
+moment a replay writes `:GraphEvent` rows again, the floor becomes
+`min(:GraphEvent.seq)` and a subscriber parked ABOVE the top replayed `seq` —
+served nothing, yet not below the floor — reads `[]` with no 410 while a live
+counter sits far above it.
 That starvation is the #4664 truncated-stream residual, not a regression from
 carrying the counter — the pre-fix allocator starved the same cursor — and it is
 why `first_seq` is raised, never lowered.
