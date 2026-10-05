@@ -3954,33 +3954,40 @@ class FalkorProjection(
             used, cap = pressure
             detail = (f"used_memory {_fmt_bytes(used)} of maxmemory "
                       f"{_fmt_bytes(cap)}")
-        # The remedy must be usable on the container that actually wedges,
-        # WITHOUT pointing the operator at data that is not theirs to delete.
-        # The original text prescribed `GRAPH.DELETE test_*`; on a LONG-LIVED
-        # dev container that family is EMPTY (#2979: measured 2026-10-04, 0 of
-        # 48 graphs were `test_`-prefixed), so an operator who follows it
-        # deletes nothing and reaches for `FLUSHALL`. The tempting repair —
-        # "just delete what GRAPH.LIST shows" — is WORSE: `org_{org_id}` is
-        # the tenant default-graph namespace, `team_*` is foreign state the
-        # test lane's own hygiene forbids touching, this method is evaluated
-        # BEFORE the `is_prod or not self._is_embedded` gate below (so the
-        # advice is emitted on production too), and `GRAPH.DELETE` has no
-        # undo. So the message keeps the proven-safe scoping (this lane's
-        # ephemeral graphs), states the ownership boundary as an explicit
-        # NEVER list, and names both destructive shortcuts as forbidden.
+        # A wedged container has exactly one remedy that carries no data risk:
+        # raise/relieve --maxmemory. The other remedy the old text prescribed —
+        # `GRAPH.DELETE test_*` — is the one #2979's own evidence REFUSES to
+        # authorise, and the reason is ATTRIBUTION, not emptiness: a `test_*`
+        # name is not attributable to this lane, and on a shared fleet a
+        # sibling lane's LIVE graph wears that prefix too ("1424 `test_*` graphs
+        # are shared fleet state and I cannot distinguish a live sibling lane's
+        # in-flight graph from a leaked one"), while GRAPH.DELETE has no undo.
+        # This method is also evaluated BEFORE the `is_prod or not
+        # self._is_embedded` gate below, so the advice is emitted on production
+        # too, where the unprefixed names are tenant data. So the message names
+        # the ownership RECORD instead of a prefix — the codebase's own rule is
+        # "a prefix is not ownership; a journal record is" (tests/_embedded.py)
+        # — and it must not blanket-forbid `registry_*`, which would disable
+        # the single largest sanctioned residue family (`registry_test_*` is
+        # the first entry of `_LEGACY_RESIDUE_PREFIXES`).
         return (
             "DB refused writes on open: the graph is INTACT but the server "
             f"has reached its memory ceiling ({detail}). This is NOT "
-            "corruption — do NOT rebuild. Free memory first: GRAPH.LIST, "
-            "then GRAPH.DELETE ONLY this lane's ephemeral test graphs. "
-            "NEVER delete org_*/team_*/registry_* names or the shared test "
-            "graph: on a production or shared server those are customer "
-            "data or another lane's in-flight state, and GRAPH.DELETE has "
-            "no undo. Do NOT FLUSHALL for the same reason. Do NOT assume "
-            "the leaked graphs are all test_-prefixed — a long-lived "
-            "container keeps residue from retired naming schemes (#2979) — "
-            "and prefer raising / relieving the container's --maxmemory. "
-            "See #2981 for the shared-lane form of this."
+            "corruption — do NOT rebuild. Free memory, in this order: "
+            "(1) raise / relieve the container's --maxmemory; (2) drop only "
+            "graphs THIS session created — its ownership journal "
+            "(TORTOISE_TEST_JOURNAL_FILE) lists them, and a prefix is NOT an "
+            "ownership record; (3) for a name whose journal is gone, the "
+            "residue pass is opt-in and deny-safe "
+            "(TORTOISE_TEST_SWEEP_LEGACY=1 — it refuses the production graph "
+            "and tortoise_restored* snapshots). Do NOT delete a graph you "
+            "cannot attribute: a test_* name may be a concurrent lane's LIVE "
+            "graph (#2979). NEVER delete tortoise, tortoise_restored*, "
+            "org_*/team_* names or the shared tortoise_test_matrix — on a "
+            "production or shared server those are customer data or another "
+            "lane's in-flight state. Do NOT FLUSHALL, for the same reason. "
+            "GRAPH.DELETE has no undo. See #2981 for the shared-lane form of "
+            "this."
         )
 
     def _backend_failure_message(
