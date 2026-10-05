@@ -3294,24 +3294,24 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # an already-installed copy is stale by construction. The sibling scripts carry
 # the same marker because the layout declares ONE generation
 # (`contract_version` returns None when they disagree).
+# claude 8→9 and codex/cursor 2→3 are #5838: the two breadcrumb kinds now occupy
+# SEPARATE slots, so an inert install can no longer destroy a live
+# quota/network refusal.  The write path moved in `session-start.sh`,
+# `session-end.sh` and `volunteer-turn.sh` (claude) and in each harness's
+# `session-end.sh`, so an already-installed copy must read as stale to receive
+# it.  codex/cursor were bumped to 3 by BOTH sides (#5919 for the redirection
+# fix, #5838 for the slot) — one generation carries both, which is why the
+# merged number is 3 and not 4.
 # pi 1 is the FIRST generation of the Pi seam's contract (#4680): the seam is a
 # TypeScript extension rather than a shell hook, so it has no `HarnessLayout` —
 # its contract is carried by `hook_install.ARTIFACT_CONTRACTS['pi']`.  Before
 # #4680 the Pi seam carried no marker at all, which is why a two-week-old
 # installed copy read as merely UNVERIFIABLE while capturing the old logic.
-# #5919 moved codex 2→3 and cursor 2→3: each breadcrumb writer's redirection
-# changed (an unwritable target dir no longer leaks the shell's own error onto
-# stderr), so an already-installed copy must read as stale to receive it.
-# The #5919 claude fix gets NO bump of its own: the claude layout shares ONE
-# generation across three scripts and `session-turn.sh` is frozen by a standing
-# hard rule (its stdout contract must not change), so the trio cannot move
-# together.  The claude fix still reaches installed copies via the
-# same-generation byte-diff arm (`modified-script` → `upgrade` restores the
-# shipped bytes).
-# pi 1→2 is #4897: `extractTurns` now marks a turn it clips instead of cutting
-# it silently, so the bytes the seam POSTs changed and every installed
-# generation-1 copy must read as stale.
-_EXPECTED_INSTALL_CONTRACT = {"claude": 8, "codex": 3, "cursor": 3,
+# pi 1→2 is #4897 (landed on main): `extractTurns` now marks a turn it clips
+# instead of cutting it silently, so the bytes the seam POSTs changed and every
+# installed generation-1 copy must read as stale.  The branch predates it, so
+# this number comes from main, not from #5838.
+_EXPECTED_INSTALL_CONTRACT = {"claude": 9, "codex": 3, "cursor": 3,
                              "pi": 2}
 
 
@@ -3330,8 +3330,15 @@ def test_shipped_install_contract_generations(harness):
     BEHAVIOUR once more (session-start.sh now RENDERS the capture breadcrumb to
     stdout, which Claude Code injects into the session context), so claude
     moved 7→8 — again the bump is what carries the new behaviour to an
-    already-installed copy.  Those numbers are a reviewed decision, not a
-    detail, so they are pinned once and explicitly.
+    already-installed copy.  #5838 changed the claude hooks' BEHAVIOUR once
+    more (the two breadcrumb kinds now occupy SEPARATE slots, so an inert
+    install cannot overwrite a live capture-failure refusal), so claude moved
+    8→9; the codex/cursor seams changed their write path the same way, so they
+    moved 2→3 — the same generation #5919 also assigned them, because one
+    generation carries both writes.  `pi` moved 1→2 on main under #4897, which
+    this branch predates, so 2 is main's number and not a #5838 bump.  Those
+    numbers are a reviewed decision, not a detail, so they are pinned once and
+    explicitly.
 
     `pi` (#4680) reaches the same table through the ARTIFACT half of the
     contract: it ships a TypeScript extension and has no `HarnessLayout` —

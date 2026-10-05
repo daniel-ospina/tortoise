@@ -97,15 +97,17 @@ _HOOKS_SOURCE_DIR = Path(__file__).resolve().parent / "claude-hooks"
 #: and a hook that trusted it captured nothing while still exiting 0 (#4314).
 HOOK_SRC_DIR_RELPATH = Path(".tortoise") / "hook-src-dir"
 
-#: The ``kind`` marker on the local ``capture-errors/<harness>.json``
-#: breadcrumb.  Two writers share that ONE path, so the reader must be able to
-#: tell them apart in BOTH directions:
+#: The ``kind`` marker on a local ``capture-errors`` breadcrumb.  The two
+#: writers no longer share ONE path (#5838) — each kind owns its OWN slot, so a
+#: write from one author cannot destroy the other's evidence — but the marker
+#: is still what a reader keys on:
 #:
 #: * the shipped shell hooks write :data:`KIND_INSTALL_INERT` when the installed
 #:   hook resolved no module dir (its install leg is inert);
-#: * ``tortoise.__main__._record_capture_error`` writes
-#:   :data:`KIND_CAPTURE_FAILURE` when a ``sessions import`` capture attempt
-#:   failed (an API outage, a parse failure, zero turns).
+#: * ``tortoise.__main__._record_capture_error`` (and the codex/cursor seams'
+#:   own capture path) writes :data:`KIND_CAPTURE_FAILURE` when a
+#:   ``sessions import`` capture attempt failed (an API outage, a parse
+#:   failure, zero turns).
 #:
 #: The write condition and the read condition are the SAME condition: session
 #: verify accepts a breadcrumb as install-inert evidence ONLY when this marker
@@ -113,14 +115,29 @@ HOOK_SRC_DIR_RELPATH = Path(".tortoise") / "hook-src-dir"
 #: never read as an inert install.  Conversely a reader looking for a capture
 #: failure must exclude the install-inert kind, so an inert install can never
 #: read as a failed capture.
+#:
+#: #5838: the slot each kind lands in is decided by :func:`breadcrumb_name`
+#: (``<harness>.json`` for ``capture-failure``, ``<harness>-install.json`` for
+#: ``install-inert``).  Two writers with different kinds used to overwrite one
+#: file, so an inert install destroyed a live quota/network refusal — and once
+#: the reader landed (#4041) the agent was told the WRONG cause.  Separate
+#: slots keep BOTH facts: a machine can be over quota AND have a moved
+#: checkout, and neither claim may be deleted to keep the reader simple.
 KIND_INSTALL_INERT = "install-inert"
 KIND_CAPTURE_FAILURE = "capture-failure"
+
+#: The filename suffix that separates the ``install-inert`` slot from the
+#: ``capture-failure`` slot (#5838).  It lives on the KIND, not on the writer:
+#: the codex/cursor seams write a ``capture-failure`` from SHELL, and the
+#: Claude ``session-start`` hook writes ``install-inert`` from shell too, so a
+#: writer-keyed rule would put two kinds in one file again.
+_INSTALL_INERT_SUFFIX = "-install"
 
 #: The ``kind`` marker on the local ``hook-runs/<harness>.json`` observation.
 #:
 #: This is a THIRD local writer, and it deliberately lives in its own file
-#: rather than as a third ``kind`` on the two-writer
-#: ``capture-errors/<harness>.json`` path above: that path's readers key on an
+#: rather than as a third ``kind`` on the two ``capture-errors`` slots above:
+#: those slots' readers key on an
 #: exact marker (``session verify`` accepts it as install-inert evidence ONLY
 #: when ``kind == KIND_INSTALL_INERT``), so adding a writer there invites
 #: exactly the read/write divergence #4314 fixed.
@@ -192,6 +209,36 @@ def local_state_dir(leaf: str) -> Path:
     receipt_dir = (Path(override) if override
                    else Path.home() / ".tortoise" / "import-receipts")
     return receipt_dir.parent / leaf
+
+
+def breadcrumb_name(harness: str, kind: str) -> str:
+    """The ``capture-errors`` FILENAME for ``(harness, kind)`` — ONE derivation.
+
+    #5838: the two writers use different ``kind`` values AND different slots,
+    so the slot MUST be decided from the kind and not from the caller.  The
+    filename half is derived here (the directory half is
+    :func:`local_state_dir`), and every reader/writer imports it — including
+    ``session_verify._local_capture_error_file``, which cannot call
+    :func:`local_state_dir` because it resolves its base from the env the hook
+    was FIRED with (#4314).  A second literal for either slot is how the #4373
+    false-PROVEN happened, so there is exactly one.
+
+    ``capture-failure`` keeps the historical ``<harness>.json``, and so does
+    any unrecognised kind (fail closed to the known slot); ``install-inert``
+    takes ``<harness>-install.json``.
+    """
+    suffix = _INSTALL_INERT_SUFFIX if kind == KIND_INSTALL_INERT else ""
+    return f"{harness}{suffix}.json"
+
+
+def breadcrumb_file(harness: str, kind: str) -> Path:
+    """The full ``capture-errors`` slot for ``(harness, kind)`` under ``$HOME``.
+
+    Composes the ONE directory derivation (:func:`local_state_dir`) with the
+    ONE filename derivation (:func:`breadcrumb_name`), so a writer and a
+    reader cannot disagree about which of the two slots a kind occupies.
+    """
+    return local_state_dir("capture-errors") / breadcrumb_name(harness, kind)
 
 
 #: Substrings that identify a hook body as Tortoise's. Deliberately specific

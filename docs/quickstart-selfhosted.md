@@ -216,12 +216,11 @@ Run `tortoise doctor` after upgrades.
 
 Capture is best-effort and a capture that does not land is **spooled locally
 and retried**, so it is never lost. But a silent non-capture used to be
-invisible from inside the agent: the local breadcrumb
-(`~/.tortoise/capture-errors/<harness>.json`) was written and read by nobody
-that could tell the user. The Claude Code `SessionStart` hook now **renders
-that breadcrumb to stdout**, which Claude Code injects into the session
-context — so the agent (and you) are told in the same place the memory digest
-arrives:
+invisible from inside the agent: the local breadcrumbs (written under
+`~/.tortoise/capture-errors/`) were written and read by nobody that could tell
+the user. The Claude Code `SessionStart` hook now **renders those breadcrumbs to
+stdout**, which Claude Code injects into the session context — so the agent
+(and you) are told in the same place the memory digest arrives:
 
 ```
 code:     capture-failure
@@ -245,6 +244,13 @@ The `install-inert` form is rendered by the hook itself in **pure shell**,
 because that record is reached precisely when the interpreter or the module
 directory could not be resolved — a Python-only reader could never report it.
 No breadcrumb file means **no output at all**, and the hook still exits 0.
+
+**The two causes are independent and both are reported (#5838).** Each `kind`
+owns its own slot — `capture-failure` in `<harness>.json`, `install-inert` in
+`<harness>-install.json` — so an inert install no longer overwrites a live
+quota or network refusal. A machine can be over quota *and* have a moved
+checkout, so the payload may carry **two four-line blocks**, one per record;
+the hook reads both slots rather than picking one.
 
 The dashboard is deliberately not the surface for this: the agent session is.
 

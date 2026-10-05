@@ -62,6 +62,17 @@ def _crumb_path(home: Path, harness: str = "claude") -> Path:
     return home / ".tortoise" / "capture-errors" / f"{harness}.json"
 
 
+def _install_crumb_path(home: Path, harness: str = "claude") -> Path:
+    """The ``install-inert`` slot — its OWN file since #5838.
+
+    The two kinds used to share ``<harness>.json``; an inert install then
+    overwrote a live ``capture-failure``.  Every install-inert write/read now
+    targets ``<harness>-install.json``, so a test that reads the wrong slot
+    would not just be wrong — it would assert the very collision #5838 removes.
+    """
+    return home / ".tortoise" / "capture-errors" / f"{harness}-install.json"
+
+
 def _seed_breadcrumb(home: Path, **fields) -> Path:
     path = _crumb_path(home, fields.get("harness", "claude"))
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -166,19 +177,25 @@ def _custom_python3(bindir: Path, *, stdout: str = "", stderr: str = "",
 
 def _run_hook(home: Path, *, path: str, src: Path | None = None,
               hook: Path | None = None,
-              cwd: Path | None = None) -> subprocess.CompletedProcess:
+              cwd: Path | None = None,
+              extra_env: dict[str, str] | None = None
+              ) -> subprocess.CompletedProcess:
     """Drive the REAL shipped hook with a hermetic env.
 
     ``HOME`` is always the caller's tmp dir: the hook writes a breadcrumb and a
     hook-run record, and a test must never let them land in the developer's
     real ``$HOME``.  ``cwd`` is settable for the CWE-427 test: ``python3 -c``
     puts the process cwd on ``sys.path``, so the hook's cwd is an attacker-
-    influenced surface.
+    influenced surface.  ``extra_env`` lets a test supply ``PYTHONPATH`` so the
+    installed-package fallback can import ``tortoise`` even when no module dir
+    resolves (#5838's both-causes case).
     """
     (home / "tmp").mkdir(parents=True, exist_ok=True)
     env = {"HOME": str(home), "PATH": path, "TMPDIR": str(home / "tmp")}
     if src is not None:
         env["TORTOISE_SRC_DIR"] = str(src)
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
         ["/bin/bash", str(hook or SESSION_START)], input="",
         capture_output=True, text=True, env=env, timeout=120,
@@ -343,17 +360,25 @@ def test_a_stale_install_inert_breadcrumb_is_not_rendered_as_live(tmp_path):
     memory is not being filed while the working seam is filing it.  The record
     for the CURRENT run is rendered by the inert branch that writes it.
 
-    Mutation: render any present record in the normal path (drop the
-    ``kind == capture-failure`` gate) — the stale claim appears and this
-    REDs."""
+    #5838: the stale record lives in the install-inert slot
+    (``<harness>-install.json``); the normal path reads only the
+    capture-failure slot, so a resolved install never replays the old claim.
+
+    Mutation: read the install-inert slot on the resolved path (or drop the
+    ``kind == capture-failure`` gate in ``render``) — the stale claim appears
+    and this REDs."""
     home = tmp_path / "home"
     home.mkdir()
     bindir = tmp_path / "bin"
     _mock_tortoise(bindir, tmp_path / "calls.log")
     _python3_shim(bindir)
-    _seed_breadcrumb(home, **_capture_failure(
+    stale = _install_crumb_path(home)
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text(json.dumps(_capture_failure(
         kind="install-inert",
-        detail="the installed Claude session-start hook resolved nothing"))
+        detail="the installed Claude session-start hook resolved nothing")),
+        encoding="utf-8")
+    assert not _crumb_path(home).exists()
 
     proc = _run_hook(home, path=f"{bindir}:/usr/bin:/bin", src=REPO)
 
@@ -592,9 +617,12 @@ def test_install_inert_is_rendered_with_no_python_on_path(tmp_path):
     assert fields.get("next", "").startswith("Recovery:"), proc.stdout
 
     # The record the agent was told about is on disk too, so `session verify`
-    # can read the same evidence.
-    body = json.loads(_crumb_path(home).read_text(encoding="utf-8"))
+    # can read the same evidence — in the install-inert slot, and NOT in the
+    # capture-failure slot (#5838).
+    body = json.loads(_install_crumb_path(home).read_text(encoding="utf-8"))
     assert body["kind"] == "install-inert", body
+    assert not _crumb_path(home).exists(), (
+        "the inert writer touched the capture-failure slot")
 
 
 def test_the_second_inert_branch_also_renders_the_breadcrumb(tmp_path):
@@ -642,12 +670,177 @@ def test_the_second_inert_branch_also_renders_the_breadcrumb(tmp_path):
     # must be pinned too — the stdout alone does not prove the write happened.
     # Mutation: drop this branch's `_record_breadcrumb` call — stdout stays
     # correct and this REDs.
-    body = json.loads(_crumb_path(home).read_text(encoding="utf-8"))
+    body = json.loads(_install_crumb_path(home).read_text(encoding="utf-8"))
     assert body["kind"] == "install-inert", body
     assert body["harness"] == "claude", body
     assert "resolved a tortoise module dir but found no python3" in \
         body["detail"], body
     assert body["recorded_at"], body
+
+
+# ── #5838: the two causes no longer share a slot ────────────────────────
+
+def test_an_inert_write_preserves_a_capture_failure_record(tmp_path):
+    """#5838, the defect itself: an ``install-inert`` write must not touch the
+    ``capture-failure`` record.  The two causes are independent — a machine can
+    be over quota AND have a moved checkout — and before the slot split the
+    inert write replaced the refusal, so the reader reported the WRONG cause.
+
+    Mutation: point ``_record_breadcrumb`` back at ``<harness>.json`` (the
+    single-slot behaviour) — the capture bytes change and this REDs.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    hook = home / ".claude" / "hooks" / "session-start.sh"
+    hook.parent.mkdir(parents=True)
+    shutil.copy(SESSION_START, hook)
+    hook.chmod(0o755)
+    bindir = tmp_path / "bin"
+    _shell_tools_only(bindir)  # branch 1: no interpreter, no module dir
+
+    failure = _seed_breadcrumb(home, **_capture_failure(
+        detail="import failed (HTTP 402): quota exceeded"))
+    before = failure.read_bytes()
+    assert json.loads(before)["kind"] == "capture-failure"
+
+    proc = _run_hook(home, path=str(bindir), hook=hook)
+
+    assert proc.returncode == 0, proc.stderr
+    # The higher-priority cause SURVIVES, byte-for-byte.  Other tests use the
+    # OLD single slot for install-inert, which is exactly the collision.
+    assert failure.read_bytes() == before, (
+        "an install-inert write destroyed the capture-failure record: "
+        f"{failure.read_text(encoding='utf-8')!r}")
+    # ...and the inert evidence exists, in its OWN slot.
+    inert = json.loads(_install_crumb_path(home).read_text(encoding="utf-8"))
+    assert inert["kind"] == "install-inert", inert
+    assert inert["harness"] == "claude", inert
+
+
+def _codes(stdout: str) -> list[str]:
+    """The ``code:`` value of EVERY 4-line block in a payload, in order."""
+    return [line.split(":", 1)[1].strip()
+            for line in stdout.splitlines()
+            if line.startswith("code:")]
+
+
+def test_the_two_readers_resolve_the_two_slots(tmp_path, monkeypatch):
+    """#5838: the two readers read BOTH files — ``capture_breadcrumb`` renders
+    the capture-failure slot and ``session_verify`` (the install leg) resolves
+    the install-inert slot — and the slot is derived from the KIND in exactly
+    one place, so a writer and a reader cannot disagree about which file a
+    cause lives in.
+
+    Mutation: derive either slot from a second literal (e.g. point the install
+    reader back at ``<harness>.json``) — the resolved path changes and this
+    REDs.
+    """
+    from tortoise import capture_breadcrumb, session_verify
+    from tortoise.hook_install import KIND_CAPTURE_FAILURE, KIND_INSTALL_INERT, breadcrumb_name
+
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {"HOME": str(home)}
+
+    assert breadcrumb_name("claude", KIND_CAPTURE_FAILURE) == "claude.json"
+    assert breadcrumb_name("claude", KIND_INSTALL_INERT) == \
+        "claude-install.json"
+
+    capture = _seed_breadcrumb(home, **_capture_failure(
+        detail="import failed (HTTP 402): quota exceeded"))
+    install = capture.parent / breadcrumb_name("claude", KIND_INSTALL_INERT)
+    install.write_text(json.dumps({
+        "harness": "claude", "kind": KIND_INSTALL_INERT,
+        "detail": "resolved no tortoise module dir",
+        "recorded_at": "2026-09-26T00:00:00Z"}), encoding="utf-8")
+
+    # The capture reader renders the refusal from its OWN slot...
+    rendered = capture_breadcrumb.render_file(capture)
+    assert "code:     capture-failure" in rendered, rendered
+    assert "quota exceeded" in rendered, rendered
+    # ...and the install reader resolves the install-inert slot for its own
+    # kind, NOT the capture slot (and can be asked for either).
+    assert session_verify._local_capture_error_file("claude", env) == install
+    assert session_verify._local_capture_error_file(
+        "claude", env, KIND_CAPTURE_FAILURE) == capture
+    found = session_verify._local_capture_error("claude", env)
+    assert found is not None and found["kind"] == KIND_INSTALL_INERT, found
+
+
+def test_the_payload_carries_both_causes_when_both_exist(tmp_path):
+    """#5838: with separate slots the hook reports BOTH facts.  The
+    ``install-inert`` block is pure shell; the ``capture-failure`` block is
+    Python, reachable here because the shim interpreter can import the installed
+    ``tortoise`` via ``PYTHONPATH`` even though no module dir resolved.
+
+    Mutation: read one slot only (drop either render call) — one block is
+    missing and this REDs.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    hook = home / ".claude" / "hooks" / "session-start.sh"
+    hook.parent.mkdir(parents=True)
+    shutil.copy(SESSION_START, hook)
+    hook.chmod(0o755)
+    bindir = tmp_path / "bin"
+    _python3_shim(bindir)  # interpreter present, no module dir -> branch 1
+    _seed_breadcrumb(home, **_capture_failure(
+        detail="import failed (HTTP 402): quota exceeded"))
+
+    proc = _run_hook(home, path=f"{bindir}:/usr/bin:/bin", hook=hook,
+                     extra_env={"PYTHONPATH": str(REPO)})
+
+    assert proc.returncode == 0, proc.stderr
+    assert _codes(proc.stdout) == ["capture-failure", "install-inert"], \
+        proc.stdout
+    # Neither cause may be dropped: the quota detail is the capture block's
+    # reason, the unresolved seam is the install block's.
+    assert "quota exceeded" in proc.stdout, proc.stdout
+    assert "could not resolve a tortoise module dir" in proc.stdout, proc.stdout
+
+
+def test_only_the_capture_cause_is_reported_when_only_it_exists(tmp_path):
+    """#5838, order 1: a live capture-failure with NO install-inert record
+    renders exactly one block, and no inert evidence is invented.
+
+    Mutation: render an install-inert block unconditionally — a second block
+    appears and this REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    bindir = tmp_path / "bin"
+    _mock_tortoise(bindir, tmp_path / "calls.log")
+    _python3_shim(bindir)
+    _seed_breadcrumb(home, **_capture_failure())
+
+    proc = _run_hook(home, path=f"{bindir}:/usr/bin:/bin", src=REPO)
+
+    assert proc.returncode == 0, proc.stderr
+    assert _codes(proc.stdout) == ["capture-failure"], proc.stdout
+    assert not _install_crumb_path(home).exists(), (
+        "the resolved path wrote install-inert evidence it never had")
+
+
+def test_only_the_install_cause_is_reported_when_only_it_exists(tmp_path):
+    """#5838, order 2: an inert seam with NO capture-failure record renders
+    exactly one block, and the capture slot stays untouched.
+
+    Mutation: print a capture block without a record (or write one) — either
+    assertion REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    hook = home / ".claude" / "hooks" / "session-start.sh"
+    hook.parent.mkdir(parents=True)
+    shutil.copy(SESSION_START, hook)
+    hook.chmod(0o755)
+    bindir = tmp_path / "bin"
+    _shell_tools_only(bindir)
+
+    proc = _run_hook(home, path=str(bindir), hook=hook)
+
+    assert proc.returncode == 0, proc.stderr
+    assert _codes(proc.stdout) == ["install-inert"], proc.stdout
+    assert not _crumb_path(home).exists(), (
+        "the inert path wrote to the capture-failure slot")
 
 
 # ── the payload's wording contract ───────────────────────────────────────
