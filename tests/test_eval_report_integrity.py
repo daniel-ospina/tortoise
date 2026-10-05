@@ -74,7 +74,8 @@ def _outcome(qid: str, *, valid: bool = True,
 
 
 def _report(outcomes: list[dict], *, threshold: float = 0.0,
-            failures: list[dict] | None = None) -> dict:
+            failures: list[dict] | None = None,
+            retrieval_only: bool = False) -> dict:
     return build_report(
         outcomes,
         dataset_id="xiaowu0162/longmemeval-cleaned", split="s",
@@ -83,6 +84,7 @@ def _report(outcomes: list[dict], *, threshold: float = 0.0,
         ingest_mode="deterministic", ks=(5,), top_k=5,
         dataset_semantics_audit=_audit(),
         integrity_threshold=threshold, failures=failures,
+        retrieval_only=retrieval_only,
     )
 
 
@@ -452,6 +454,31 @@ def test_report_integrity_ingest_transient_recoverable_rates():
         "failed_at_utc": "2026-08-20T00:00:00Z",
     }], threshold=1.0)["integrity"]
     assert bare["valid"] is False         # bare ingest vetoes at ANY threshold
+
+
+def test_print_summary_retrieval_only_does_not_crash(capsys):
+    """#4803: a `--retrieval-only` run must not die in the summary it prints.
+
+    ``report.py`` records ``"accuracy": None if retrieval_only else {...}``,
+    and ``_print_summary`` read ``report["accuracy"]`` as a dict
+    unconditionally — so every retrieval-only run raised ``TypeError:
+    'NoneType' object is not subscriptable`` in the terminal summary AFTER
+    ``save_report()`` had already written a correct report, and the CLI
+    exited 1 for a run that had worked.
+
+    The defect is on the PRINT path only — the report on disk was correct and
+    the CLI's exit status was not — so this pins the printed summary itself,
+    not the report dict that the other retrieval-only tests assert on.
+    """
+    # A retrieval-only outcome carries no label — the judge never ran.
+    report = _report([_outcome("q1", label=None)], retrieval_only=True)
+    assert report["accuracy"] is None        # the shape the defect tripped on
+    _print_summary(report)                   # must not raise
+    out = capsys.readouterr().out
+    assert "── score ──" in out
+    # The absence is STATED, not omitted: an absent accuracy line is
+    # indistinguishable from a run whose accuracy was fine.
+    assert "accuracy:                n/a (retrieval-only)" in out
 
 
 def test_print_summary_integrity_before_score(capsys):
