@@ -116,6 +116,7 @@ from tortoise.retrieval import (
     DEFAULT_MAX_CHUNKS_PER_SESSION,
     DEFAULT_POOL_SIZE,
     SESSION_TRANSCRIPT_KIND,
+    _has_claim_text,  # #3594 — the seed must mirror the reader's #2978 skip
     _validity_marker,  # noqa: F401 — re-exported for the eval tests
     render_context,
     resolve_pool_size,
@@ -1735,9 +1736,9 @@ def retrieve_for_question(
     # ── C4 (#2517/#2568, #2513): source-session re-injection — from the
     # SEEDED rank-window approximation of the reader-reachable pool head
     # (a RANK trigger, label-free: never a stored/read-time mark, which the
-    # product does not have; the window is conservative, not the reader's
-    # admitted set — see session_reinjection.DEFAULT_REINJECTION_SEED_WINDOW),
-    # fetch the
+    # product does not have; the window follows the reader's ADMISSION
+    # predicate but not its budget caps — see
+    # session_reinjection.DEFAULT_REINJECTION_SEED_WINDOW), fetch the
     # rest of each seeded session's verbatim material — the PRODUCT's
     # episodic TURN points (pointKind 'event', shape-constrained) by
     # default, reached through the Session-[:CONTAINS]->Point edge the
@@ -1763,15 +1764,23 @@ def retrieve_for_question(
         reinjection_on = _sr_env.strip().lower() in _TRUTHY
     reinjection_guard = (session_reinjection_guard
                          if session_reinjection_guard is not None else True)
-    # the seed window is a conservative rank-window approximation of the
-    # reader-reachable pool head, DERIVED from the resolved reader item cap
-    # so a non-default TORTOISE_LME_CONTEXT_ITEMS cannot silently
-    # desynchronise it (the product constant is the fallback). It is NOT the
-    # reader's admitted set: assemble_context SKIPS claim-text-less hits
-    # (#2978) without spending an item slot, so the reader can admit hits
-    # BELOW this rank — a session whose first pool appearance lands in a
-    # skipped-hit gap is reader-reachable yet unseeded (follow-up tracked;
-    # widening it is a measurement-validity change, not a fix).
+    # the seed window is DERIVED from the resolved reader item cap so a
+    # non-default TORTOISE_LME_CONTEXT_ITEMS cannot silently desynchronise
+    # it (the product constant is the fallback), and it is spent the way the
+    # reader spends item slots: `admitted=_has_claim_text` at the call below
+    # makes a claim-text-less hit consume NO slot, mirroring
+    # assemble_context's #2978 skip. Without that predicate the seed was the
+    # raw pool prefix, so a session whose first pool appearance landed in a
+    # skipped-hit gap was reader-reachable yet unseeded (#3594) — a bias on
+    # exactly the signal this arm measures. Residual, and it is TWO-SIDED —
+    # NOT an upper bound: the reader's token and byte caps are
+    # budget-dependent and are NOT modelled here, and a cap-dropped hit
+    # consumes no reader item slot but DOES consume a seed slot, so the
+    # seed can also miss a session the reader admits below a cap-dropped
+    # hit — the same bias #3594 removes, on the rarer cap path. Seeding
+    # from assemble_context's returned list would be exact, but the seed
+    # runs BEFORE the reader assembles (and the reader assembles
+    # context_candidates, not pool), so it is not a local change (#3594).
     _sr_seed_window = (eff_item_cap if eff_item_cap is not None
                        else DEFAULT_REINJECTION_SEED_WINDOW)
     _sr_seed_limit = DEFAULT_REINJECTION_SEED_SESSIONS
@@ -1829,7 +1838,8 @@ def retrieve_for_question(
         _t_sr = time.monotonic()
         try:
             _seeds = _sr.seeded_sessions(
-                pool, window=_sr_seed_window, limit=_sr_seed_limit)
+                pool, window=_sr_seed_window, limit=_sr_seed_limit,
+                admitted=_has_claim_text)
             sr_seeds = [s.session_id for s in _seeds]
             sr_seeded = len(sr_seeds)
             if _seeds:
