@@ -781,6 +781,46 @@ class TestWorkItemFold:
             sdk.close()
 
 
+    def test_connector_fold_does_not_resurrect_any_terminal_status(self):
+        """#3309: the guard must exclude the WHOLE canonical Object terminal
+        vocabulary, not the single hand-typed ``'superseded'`` literal it
+        carried.
+
+        The guard's own comment states its purpose — the Object "must NOT be
+        silently resurrected into recall_state's default view" — and that view
+        excludes all of ``commit_ops.OBJECT_TERMINAL_STATUSES`` (see this
+        class's `..._does_not_clobber_superseded` docstring). Pre-fix only
+        ``superseded`` was skipped, so a ``retracted`` (a REMOVED Object, per
+        #2977) / ``deprecated`` / ``archived`` Object was set back to
+        ``in_progress`` or ``completed`` by a connector lifecycle event: a
+        removed Object made visible again.
+
+        Both families are driven per status — ``github.issue.closed``
+        (completed) then ``github.issue.reopened`` (in_progress); each would
+        have clobbered the terminal status pre-fix.
+        """
+        from tortoise.commit_ops import OBJECT_TERMINAL_STATUSES
+
+        for status in sorted(OBJECT_TERMINAL_STATUSES):
+            sdk = _fresh_sdk()
+            try:
+                name = f"T-{status}"
+                sdk.create_entity("object", name, objectKind="dev:issue")
+                sdk._get_proj().g.query(
+                    "MATCH (o:Object {name:$n}) SET o.status = $s",
+                    params={"n": name, "s": status})
+                for ev_kind in ("github.issue.closed", "github.issue.reopened"):
+                    sdk.create_event("e", ev_kind, object=name)
+                    rows = sdk._get_proj().g.query(
+                        "MATCH (o:Object {name:$n}) RETURN o.status",
+                        params={"n": name}).result_set
+                    assert rows and rows[0][0] == status, (
+                        f"{ev_kind} resurrected a terminal Object: "
+                        f"{status} -> {rows[0][0] if rows else 'MISSING'}")
+            finally:
+                sdk.close()
+
+
 # ── Read side (Steps 8-9) ────────────────────────────────────────────
 
 class TestReadSide:
