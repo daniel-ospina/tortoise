@@ -3954,40 +3954,33 @@ class FalkorProjection(
             used, cap = pressure
             detail = (f"used_memory {_fmt_bytes(used)} of maxmemory "
                       f"{_fmt_bytes(cap)}")
-        # A wedged container has exactly one remedy that carries no data risk:
-        # raise/relieve --maxmemory. The other remedy the old text prescribed —
-        # `GRAPH.DELETE test_*` — is the one #2979's own evidence REFUSES to
-        # authorise, and the reason is ATTRIBUTION, not emptiness: a `test_*`
-        # name is not attributable to this lane, and on a shared fleet a
-        # sibling lane's LIVE graph wears that prefix too ("1424 `test_*` graphs
-        # are shared fleet state and I cannot distinguish a live sibling lane's
-        # in-flight graph from a leaked one"), while GRAPH.DELETE has no undo.
-        # This method is also evaluated BEFORE the `is_prod or not
-        # self._is_embedded` gate below, so the advice is emitted on production
-        # too, where the unprefixed names are tenant data. So the message names
-        # the ownership RECORD instead of a prefix — the codebase's own rule is
-        # "a prefix is not ownership; a journal record is" (tests/_embedded.py)
-        # — and it must not blanket-forbid `registry_*`, which would disable
-        # the single largest sanctioned residue family (`registry_test_*` is
-        # the first entry of `_LEGACY_RESIDUE_PREFIXES`).
+        # The remedy must NOT hand-roll the ownership policy in prose. Three
+        # review rounds each found the message disagreeing with the code's own
+        # predicate — the journal is necessary but not sufficient (`_sweep_drop`
+        # deletes only `_SWEEP_OWNED_PREFIXES` families, so a journal-listed
+        # `registry_control_plane` is PRESERVED), a blanket product-prefix ban
+        # contradicts `_SWEEP_OWNED_PREFIXES` (which owns `team_`/`org_`), and
+        # any prefix list drifts as the vocabulary changes. So the message names
+        # the MECHANISM instead of a list: the suite's own reclaim passes, which
+        # apply both gates (tests/_embedded.py). It also states the ORDER — at
+        # the ceiling FalkorDB flags graph commands `denyoom`, so `GRAPH.DELETE`
+        # is refused too and cannot free the memory it is asked to free (#2979
+        # records exactly this: "drop of 'test_...' failed: server:OutOfMemoryError").
+        # Only the two names `is_legacy_residue` hard-refuses are enumerated,
+        # because they are exact and stable, not prefixes.
         return (
             "DB refused writes on open: the graph is INTACT but the server "
             f"has reached its memory ceiling ({detail}). This is NOT "
-            "corruption — do NOT rebuild. Free memory, in this order: "
-            "(1) raise / relieve the container's --maxmemory; (2) drop only "
-            "graphs THIS session created — its ownership journal "
-            "(TORTOISE_TEST_JOURNAL_FILE) lists them, and a prefix is NOT an "
-            "ownership record; (3) for a name whose journal is gone, the "
-            "residue pass is opt-in and deny-safe "
-            "(TORTOISE_TEST_SWEEP_LEGACY=1 — it refuses the production graph "
-            "and tortoise_restored* snapshots). Do NOT delete a graph you "
-            "cannot attribute: a test_* name may be a concurrent lane's LIVE "
-            "graph (#2979). NEVER delete tortoise, tortoise_restored*, "
-            "org_*/team_* names or the shared tortoise_test_matrix — on a "
-            "production or shared server those are customer data or another "
-            "lane's in-flight state. Do NOT FLUSHALL, for the same reason. "
-            "GRAPH.DELETE has no undo. See #2981 for the shared-lane form of "
-            "this."
+            "corruption — do NOT rebuild. Remedy: raise / relieve the "
+            "container's --maxmemory. GRAPH.DELETE is refused too while the "
+            "server is at the ceiling, so it cannot free the memory itself. "
+            "Once relieved, let the suite's own reclaim passes drop the "
+            "graphs THIS session journaled (they gate on the ownership "
+            "record, so a name is never dropped on a prefix alone); do NOT "
+            "hand-pick names from GRAPH.LIST, never delete the production "
+            "graph tortoise or a tortoise_restored* snapshot, and do NOT "
+            "FLUSHALL — GRAPH.DELETE has no undo. See #2981 for the "
+            "shared-lane form of this."
         )
 
     def _backend_failure_message(

@@ -79,25 +79,15 @@ def test_full_but_healthy_is_not_reported_as_corrupt(monkeypatch):
     assert "GRAPH.DELETE" in msg, msg
 
 
-def test_write_refusal_remedy_points_at_the_ownership_record(monkeypatch):
-    """#2979 — the remedy must name a DISCRIMINATOR, not a prefix.
+def test_write_refusal_remedy_names_the_executable_remedy(monkeypatch):
+    """#2979 — the remedy must be one an operator can actually execute.
 
-    The message prescribed `GRAPH.DELETE test_*`. That is the action #2979's own
-    evidence REFUSES to authorise, and the reason is ATTRIBUTION, not emptiness:
-    "1424 `test_*` graphs are shared fleet state and I cannot distinguish a live
-    sibling lane's in-flight graph from a leaked one". The codebase agrees on
-    principle — "a prefix is not ownership; a journal record is"
-    (tests/_embedded.py) — which is why `_SERVER_WIPE_PREFIXES` is deliberately
-    narrower than the journal-owned set.
-
-    An earlier version of THIS test-verified fix claimed `test_*` was empty on
-    the wedging container, citing a 48-graph sample. That was wrong: the sample
-    container had no `maxmemory` ceiling (it cannot wedge), and #2979's own
-    censuses record 222/383 and 1424/1508 `test_*` graphs. The rationale is
-    corrected here so a later engineer is not told `test_*` is not the leak
-    family. Pin the record, the ordered safe remedies, and the ban.
-
-    Revert-verified: restore "GRAPH.DELETE test_*" and this goes RED.
+    Two rounds of this fix prescribed deletion steps that cannot run at the
+    moment the message fires: FalkorDB flags graph commands `denyoom`, so a
+    server at its ceiling refuses `GRAPH.DELETE` too — #2979 records exactly
+    that ("drop of 'test_...' failed: server:OutOfMemoryError"). A remedy list
+    whose first executable entry is "delete graphs" therefore frees nothing.
+    Pin the ordering and the mechanism.
     """
     monkeypatch.delenv("FLY_APP_NAME", raising=False)
     proj = _projection(probe_error=RuntimeError(_MAXMEMORY_ERROR))
@@ -105,38 +95,38 @@ def test_write_refusal_remedy_points_at_the_ownership_record(monkeypatch):
 
     msg = proj._write_refusal_message(RuntimeError(_MAXMEMORY_ERROR))
     assert msg is not None
-    # 1. The no-data-risk lever is offered FIRST.
+    # 1. The one executable lever, named first.
     assert "raise / relieve the container's --maxmemory" in msg, msg
-    # 2. The discriminator is the ownership RECORD, not a prefix.
-    assert "TORTOISE_TEST_JOURNAL_FILE" in msg, msg
-    assert "a prefix is NOT an ownership record" in msg, msg
-    # 3. The deny-safe opt-in is named for names whose journal is gone.
-    assert "TORTOISE_TEST_SWEEP_LEGACY=1" in msg, msg
-    # 4. The unattributable action is gone, and the shortcut is banned.
-    assert "GRAPH.DELETE test_*" not in msg, msg
-    assert "GRAPH.DELETE" in msg, msg          # the mechanism is still named
-    assert "Do NOT FLUSHALL" in msg, msg
+    # 2. The ordering hazard: deletes are refused at the ceiling too.
+    assert "GRAPH.DELETE is refused too while the server is at the ceiling" in msg, msg
+    # 3. The reclaim mechanism is the suite's own passes, gated on the
+    #    ownership record — not the operator's judgement.
+    assert "the suite's own reclaim passes" in msg, msg
+    assert "they gate on the ownership record" in msg, msg
+    assert "a name is never dropped on a prefix alone" in msg, msg
+    # 4. The two shortcuts are refused, with the mechanism still named.
+    assert "GRAPH.DELETE" in msg, msg          # the existing pin, kept
+    assert "do NOT hand-pick names from GRAPH.LIST" in msg, msg
+    assert "FLUSHALL" in msg, msg
+    assert "GRAPH.DELETE has no undo" in msg, msg
 
 
-def test_write_refusal_remedy_never_points_at_other_lanes_or_tenants(monkeypatch):
-    """#2979 review P2 (both directions) — the boundary must match the code's.
+def test_write_refusal_remedy_does_not_hand_roll_the_ownership_policy(monkeypatch):
+    """#2979 review — enumerate NO families: defer to the code's own predicate.
 
-    A prior round of this fix labelled `org_*`/`team_*` "residue" with no
-    ownership discriminator. That is worse than the defect it repaired:
-    `org_{org_id}` is the TENANT default-graph namespace, `team_*` is foreign
-    state the test lane's own hygiene forbids touching, and this method is
-    evaluated BEFORE the `is_prod or not self._is_embedded` gate — so the
-    advice is emitted on a production server whose `org_*` graphs are customer
-    data.
+    Three review rounds each found this message disagreeing with the code's
+    ownership policy, and every disagreement had the same cause: the message
+    was ENUMERATING deletable/forbidden name families in prose. The code owns
+    that policy in exactly two places — `_SWEEP_OWNED_PREFIXES` (the journal
+    path; it deliberately INCLUDES `team_`/`org_`) and `is_legacy_residue` ->
+    `owns_by_ownership_record` (the journal-blind path; `_SERVER_WIPE_PREFIXES`
+    is a strict subset BECAUSE `GRAPH.LIST` has no attribution). Any list in the
+    message is therefore wrong in one direction or the other, and drifts as the
+    vocabulary changes.
 
-    The repair then over-reached the other way: a blanket `registry_*` ban
-    forbade the SINGLE LARGEST sanctioned residue family (`registry_test_*` is
-    the first entry of `_LEGACY_RESIDUE_PREFIXES`, and 154 of #2979's 383
-    leaked graphs were `registry_test_test_*_control_plane`). A boundary that
-    forbids the sanctioned reclaim is its own defect.
-
-    So pin BOTH directions: the production/tenant names are refused, and the
-    sanctioned residue family is NOT named as forbidden.
+    So this pins the SEAM: the message must NOT carry a family list, and must
+    name only the two EXACT names the code hard-refuses. If a future editor
+    reintroduces a prefix enumeration, this goes RED.
     """
     monkeypatch.delenv("FLY_APP_NAME", raising=False)
     proj = _projection(probe_error=RuntimeError(_MAXMEMORY_ERROR))
@@ -144,23 +134,14 @@ def test_write_refusal_remedy_never_points_at_other_lanes_or_tenants(monkeypatch
 
     msg = proj._write_refusal_message(RuntimeError(_MAXMEMORY_ERROR))
     assert msg is not None
-    # (a) the production graph and its restore snapshots are refused — the two
-    #     names `is_legacy_residue` hard-refuses, in the same predicate whose
-    #     caller performs an irreversible DETACH DELETE + GRAPH.DELETE.
-    assert "NEVER delete tortoise, tortoise_restored*" in msg, msg
-    assert "org_*/team_*" in msg, msg
-    assert "tortoise_test_matrix" in msg, msg          # named concretely
-    assert "customer data" in msg, msg
-    # (b) the reason that actually bites the unprefixed family is stated rather
-    #     than left to the reader (the #2979 attribution finding).
-    assert "may be a concurrent lane's LIVE graph" in msg, msg
-    # (c) irreversibility is stated for both destructive moves.
-    assert "no undo" in msg, msg
-    assert "Do NOT FLUSHALL, for the same reason" in msg, msg
-    # (d) the NEVER list must NOT contain the sanctioned residue family — the
-    #     over-inclusion direction. Read the list out of the message.
-    never_list = msg.split("NEVER delete", 1)[1].split("\u2014", 1)[0]
-    assert "registry" not in never_list, never_list
+    # (a) no hand-rolled family boundary, in either direction.
+    for token in ("NEVER delete", "org_*", "team_*", "registry", "test_*", "tortoise_test"):
+        assert token not in msg, (token, msg)
+    # (b) the two names the code actually hard-refuses are still named, and as
+    #     EXACT names (a starred `tortoise` would also ban the journal-owned
+    #     `tortoise_test*` family — the round-3 under/over-inclusion defect).
+    assert "the production graph tortoise" in msg, msg
+    assert "tortoise_restored* snapshot" in msg, msg
 
 
 def test_memory_pressure_unreadable_still_avoids_rebuild(monkeypatch):
