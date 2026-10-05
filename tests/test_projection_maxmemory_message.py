@@ -82,16 +82,21 @@ def test_full_but_healthy_is_not_reported_as_corrupt(monkeypatch):
 def test_write_refusal_remedy_names_the_safe_path_and_claims_no_flags(monkeypatch):
     """#2979 — the remedy must be executable, and must make no false claim.
 
-    Round 4 caught a P1 in an earlier revision of THIS change: it asserted that
-    `GRAPH.DELETE` is refused at the ceiling and therefore cannot free memory.
-    That is wrong — upstream registers `graph.DELETE` as "write deny-script"
-    (no `deny-oom`); it is `graph.QUERY` that carries `deny-oom`, and #2979's
-    "drop of 'test_...' failed: server:OutOfMemoryError" is the DETACH inside
-    `GRAPH.QUERY` that `safe_graph_delete` sends BEFORE `graph.delete()`. A test
-    had pinned that false sentence. Flag semantics are not something an operator
-    message should assert at all, so the claim is DROPPED, and this test pins
-    both halves: the executable lever is named, and no command-refusal claim is
-    made.
+    An earlier revision of this change asserted that `GRAPH.DELETE` is refused at
+    the ceiling and therefore cannot free memory. That is wrong — upstream
+    registers `graph.DELETE` as "write deny-script" (no `deny-oom`); it is
+    `graph.QUERY` that carries `deny-oom`, and #2979's "drop of 'test_...'
+    failed: server:OutOfMemoryError" is the DETACH inside `GRAPH.QUERY` that
+    `safe_graph_delete` sends BEFORE `graph.delete()`. A test had pinned that
+    false sentence. Flag semantics are not something an operator message should
+    assert at all, so the claim is dropped.
+
+    The executable lever is pinned exactly. The second pin — that no
+    command-refusal claim is made — is BEST-EFFORT only: the stem denylist below
+    cannot catch every wording, and a claim phrased with "refused" would pass it
+    (the sentence quoted above is the counterexample). What protects the property
+    is that the claim is absent and that the comment on `_write_refusal_message`
+    says why it must stay absent — not these assertions.
     """
     monkeypatch.delenv("FLY_APP_NAME", raising=False)
     proj = _projection(probe_error=RuntimeError(_MAXMEMORY_ERROR))
@@ -102,56 +107,43 @@ def test_write_refusal_remedy_names_the_safe_path_and_claims_no_flags(monkeypatc
     # 1. The one executable lever.
     assert "raise / relieve the container's --maxmemory" in msg, msg
     # 2. The residue-pass lever is NOT named: the pass has no default call site,
-    #    so naming its env lever would be advice that frees nothing (rounds 3
-    #    and 5). The message also promises NO reclaim. An earlier revision said
-    #    the journal pass "reclaims what this session's ownership record
-    #    lists", which is over-inclusive — the default pass drops the journal
-    #    INTERSECT `_SWEEP_OWNED_PREFIXES`, so a journal-listed
-    #    `registry_control_plane` is PRESERVED. Round 6 measured that; the
-    #    sentence was DELETED, not reworded (see the code comment above
-    #    `_write_refusal_message`).
+    #    so naming its env lever would be advice that frees nothing.
     assert "TORTOISE_TEST_SWEEP_LEGACY" not in msg, msg
     # 3. The unsafe shortcut is refused, and the mechanism is still named.
     assert "GRAPH.DELETE" in msg, msg          # the pre-existing pin, kept
     assert "Do NOT hand-pick names from GRAPH.LIST" in msg, msg
     assert "cannot be undone" in msg, msg
     assert "FLUSHALL" in msg, msg
-    # 4. NO claim about which commands the server refuses (the round-4 P1).
-    #    This is a DENYLIST, and round 6 measured that it is NOT structural: the
-    #    removed sentence — "GRAPH.DELETE is refused too while the server is at
-    #    the ceiling, so it cannot free the memory itself" (commit fd9cf5b63) —
-    #    contains none of these stems and would pass verbatim. The property
-    #    genuinely cannot be pinned by substring, because "refus" is legitimate
-    #    in this message's own opening line and "cannot" is legitimate in
-    #    "cannot be undone". Best-effort, then; the real protection is that the
-    #    sentence is gone and the comment says why it must not come back.
+    # 4. NO claim about which commands the server refuses. BEST-EFFORT: this
+    #    denylist does not catch every wording a refusal claim could use, and
+    #    "refus"/"cannot" are legitimate elsewhere in the message, so they
+    #    cannot be stems. What protects the property is that the claim is absent
+    #    and the code comment says why it must stay absent.
     lowered = msg.lower()
     for stem in ("deny", "reject", "blocked"):
         assert stem not in lowered, (stem, msg)
 
 
 def test_write_refusal_remedy_does_not_hand_roll_the_ownership_policy(monkeypatch):
-    """#2979 review — enumerate NO families: defer to the code's own predicate.
+    """#2979 review — enumerate no delete-authorizing family: defer to the predicate.
 
-    Four review rounds each found this message disagreeing with the code's
-    ownership policy, and every disagreement had the same cause: the message was
-    ENUMERATING deletable/forbidden name families in prose. The code owns that
-    policy in two places — `_SWEEP_OWNED_PREFIXES` (the journal path; it
-    deliberately INCLUDES `team_`/`org_`) and `is_legacy_residue` ->
-    `owns_by_ownership_record` (the journal-BLIND path; `_SERVER_WIPE_PREFIXES`
-    is a strict subset BECAUSE `GRAPH.LIST` has no attribution). Any list in the
-    message is therefore wrong in one direction or the other, and drifts as the
-    vocabulary changes.
+    The ownership policy lives in the code (`_SWEEP_OWNED_PREFIXES` for the
+    journal path, `is_legacy_residue`/`owns_by_ownership_record` for the
+    journal-blind path). A prose copy of it in the message disagreed with one or
+    the other in every wording tried, because the two predicates differ and the
+    victim is a name someone cannot attribute — so the message names none.
 
-    Round 4 also showed the first version of this pin was weaker than its own
-    docstring: a fixed six-token denylist only catches a reintroduction of THE
-    SAME wording, while the census residencies this repo actually reports
-    (`tt_gate_*`, `v10fix_*`, `typeprobe_*`, `review_rw_probe*`) would pass it.
-    It now also pins the message's WILDCARD BUDGET — exactly ONE `*`, the
-    `tortoise_restored*` guard name. That bounds only the glob spelling: round 6
-    measured that a prose list of concrete names (``tt_gate_1234``,
-    ``askshape_b6_live_1_33760_21``) carries no `*` and passes it, so the token
-    denylist in (b) is the OPERATIVE guard, not the belt to (a)'s braces.
+    These pins are BEST-EFFORT, and are labelled as such rather than as the
+    structural properties earlier revisions claimed:
+
+      (a) a WILDCARD BUDGET — exactly the one guard `*`. Bounds glob-spelled
+          enumerations only.
+      (b) a DENYLIST of the exact tokens earlier revisions introduced. It does
+          NOT catch a concrete name outside that list: the real residue entry
+          ``askshape_b6_live_1_33760_21`` passes both (a) and (b).
+
+    What actually protects the property is that the message enumerates nothing,
+    which review enforces — not these assertions.
     """
     monkeypatch.delenv("FLY_APP_NAME", raising=False)
     proj = _projection(probe_error=RuntimeError(_MAXMEMORY_ERROR))
@@ -159,27 +151,25 @@ def test_write_refusal_remedy_does_not_hand_roll_the_ownership_policy(monkeypatc
 
     msg = proj._write_refusal_message(RuntimeError(_MAXMEMORY_ERROR))
     assert msg is not None
-    # (a) THE WILDCARD BUDGET: exactly the one guard wildcard. Catches an
-    #     enumeration written with a glob character; a prose list of concrete
-    #     names carries no `*` at all and is caught by (b) instead.
+    # (a) WILDCARD BUDGET: exactly the one guard wildcard. Bounds glob-spelled
+    #     enumerations only — a prose list of concrete names carries no `*`.
     assert msg.count("*") == 1, msg
     assert "tortoise_restored*" in msg, msg
-    # (b) the OPERATIVE guard: the exact tokens the rounds introduced, plus
-    #     the residue-pass lever the message must NOT name (rounds 3 and 5: it
-    #     has no default call site, so naming it is advice that frees nothing).
+    # (b) DENYLIST of the exact tokens earlier revisions introduced, plus the
+    #     residue-pass lever the message must NOT name (the pass has no default
+    #     call site, so naming it is advice that frees nothing). Not a guard
+    #     against concrete names outside this list.
     for token in ("NEVER delete", "org_*", "team_*", "registry", "test_",
                   "v10fix", "tt_gate", "typeprobe", "review_rw_probe",
                   "TORTOISE_TEST_SWEEP_LEGACY"):
         assert token not in msg, (token, msg)
-    # (c) the two names `TortoiseSDK.test_guard` blocks are still named, and NO
-    #     claim about what any pass reclaims is made. An earlier revision scoped
-    #     such a claim to the journal pass; round 6 measured that even the
-    #     journal pass does not "reclaim what the ownership record lists" — it
-    #     drops the journal INTERSECT `_SWEEP_OWNED_PREFIXES`, preserving a
-    #     journal-listed `registry_control_plane`. The sentence was DELETED.
+    # (c) the two names `TortoiseSDK.test_guard` blocks are still named, and the
+    #     message promises no reclaim: the default pass drops the journal
+    #     INTERSECT `_SWEEP_OWNED_PREFIXES`, so "reclaims what the ownership
+    #     record lists" would be over-inclusive.
     assert "the production graph tortoise" in msg, msg
     assert "tortoise_restored* snapshot" in msg, msg
-    assert "reclaims" not in msg.lower(), msg
+    assert "reclaim" not in msg.lower(), msg
 
 
 def test_memory_pressure_unreadable_still_avoids_rebuild(monkeypatch):

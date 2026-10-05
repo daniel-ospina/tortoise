@@ -3954,35 +3954,22 @@ class FalkorProjection(
             used, cap = pressure
             detail = (f"used_memory {_fmt_bytes(used)} of maxmemory "
                       f"{_fmt_bytes(cap)}")
-        # The remedy must NOT hand-roll the ownership policy in prose. Five
-        # review rounds each found this message disagreeing with the code's own
-        # predicate, because a name list written in prose is wrong in one
-        # direction or the other. The code has TWO policies and they differ: the
-        # journal pass drops only `_SWEEP_OWNED_PREFIXES` families, so the
-        # journal is necessary but NOT sufficient (a journal-listed
-        # `registry_control_plane` is PRESERVED). The message therefore names no
-        # family AND promises no reclaim: an earlier revision said that pass
-        # "reclaims what this session's ownership record lists", which is
-        # exactly the over-inclusive claim the intersection above forbids. It
-        # names no residue pass either: `_sweep_legacy_strays` is OPT-IN and has
-        # no default call site, so naming its env lever would be advice that
-        # frees nothing.
+        # The remedy must NOT restate the ownership policy in prose: a name
+        # list here is wrong in one direction or the other, and nothing keeps
+        # it in sync with the predicate that owns the rule. So the message
+        # names no delete-authorizing residue family, promises no reclaim, and
+        # offers no pass — `_sweep_legacy_strays` has no default call site, so
+        # naming its env lever would be advice that frees nothing.
         #
-        # The message also makes NO claim about which graph commands the server
-        # refuses at the ceiling. An earlier revision asserted that
-        # `GRAPH.DELETE` is `denyoom` and therefore cannot free the memory; that
-        # was wrong (upstream registers `graph.DELETE` as "write deny-script" and
-        # it is `graph.QUERY` that carries `deny-oom`), and the misreading came
-        # from #2979's log line, which is the DETACH inside `GRAPH.QUERY` that
-        # `safe_graph_delete` sends BEFORE `graph.delete()`. Flag semantics are
-        # not something an operator message should assert, so the assertion is
-        # dropped rather than corrected.
+        # It also makes no claim about which graph commands the server refuses:
+        # upstream's flag semantics are not what #2979's log line suggests (that
+        # line is the DETACH `safe_graph_delete` sends before `graph.delete()`),
+        # and an operator message should not assert them either way.
         #
-        # The two enumerated names are the ones `TortoiseSDK.test_guard` blocks
-        # (tortoise/sdk.py) — one exact (`tortoise`) and one prefix
-        # (`tortoise_restored*`). `is_legacy_residue` refuses a superset (it also
-        # refuses the env-dependent URI default graph); that case is covered by
-        # "do not hand-pick", not by enumeration.
+        # The only names it gives are the ones `TortoiseSDK.test_guard` blocks
+        # (tortoise/sdk.py) — `tortoise` exact and `tortoise_restored*` by
+        # prefix. `is_legacy_residue` refuses a superset; that case is covered
+        # by "do not hand-pick", not by enumeration.
         return (
             "DB refused writes on open: the graph is INTACT but the server "
             f"has reached its memory ceiling ({detail}). This is NOT "
