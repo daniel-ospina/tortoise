@@ -637,8 +637,20 @@ def test_retrieve_rerank_flags_stamped(tmp_path, monkeypatch):
         assert moved > 0, (
             "the forced-reorder scorer moved nothing — this test would be "
             "vacuous; check the rerank pool wiring")
-        # the overlay flag is stamped exactly on the moved hits
-        assert moved == sum(1 for f in flags if f)
+        # #3274: KEPT, and deliberately not deleted. The moved-vs-flags
+        # equality is NOT a tautology on this path even though both values
+        # ORIGINATE in the same `rank != i` branch: they reach this assertion
+        # by DIFFERENT routes — `moved` goes rerank_hits -> stats ->
+        # rerank_pass.update(stats), while the flags go rerank_hits ->
+        # selected -> pool -> ret["hits"] — so a transport/re-wiring bug
+        # breaks it. Demonstrated by mutating retrieve.py's
+        # `rerank_pass["moved"] = len(pool)`: this assertion FAILS (moved=4
+        # vs flags=2), and no other test in the suite asserts
+        # rerank_pass["moved"] at all.
+        assert moved == sum(1 for f in flags if f), (
+            "the pass-level counter and the per-hit stamps reach this point "
+            "by different paths and must still agree"
+        )
         assert any(flags), "the moved hits must carry the overlay flag"
         assert all(h["match_source"] for h in ret["hits"])  # provenance kept
     finally:
@@ -672,8 +684,20 @@ def test_rerank_flags_stamped_on_reorder():
     # only the hit that moved UP is mmr_promoted
     assert by_id["h1"].get("mmr_promoted") is True
     assert "mmr_promoted" not in by_id["h0"]
-    assert stats["moved"] == 2 == sum(
-        1 for h in selected if h.get("reranked"))
+    # #3274: derive the movement from the TWO ORDERINGS (input `hits` vs
+    # output `selected`) rather than from the flag branch that also produced
+    # `stats["moved"]`. Only the `moved == sum(reranked)` leg of the previous
+    # assertion — `stats["moved"] == 2 == sum(1 for h in selected if
+    # h.get("reranked"))` — was self-referential; its `== 2` literal did have
+    # force (it fails for moved=1 or 3). This replaces the self-referential
+    # leg with a check that reads the orderings independently.
+    in_pos = {h["id"]: i for i, h in enumerate(hits)}
+    moved_ids = {h["id"] for pos, h in enumerate(selected)
+                 if in_pos[h["id"]] != pos}
+    assert moved_ids == {"h1", "h0"}, (
+        "both hits changed position, derived from hits-vs-selected; "
+        f"got {sorted(moved_ids)}")
+    assert stats["moved"] == len(moved_ids) == 2
 
 
 # ── Task 3: CLI thread-through + fail-fast ─────────────────────────────────

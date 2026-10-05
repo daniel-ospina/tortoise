@@ -589,6 +589,17 @@ surfaces:
   # operator surface for the config third state); a __main__-only PR would
   # otherwise select `api` and never run it.
   - test_rebuild_config_preservation.py
+  # #5163: the three CALLERS of the #2714 installed-pack gate — the
+  # classify-later kind index, the S1 summary enforcer and the HOSTED COMMIT
+  # DOOR (`tortoise/hosted_api.py`, which this surface owns). A hosted_api.py
+  # change selects `api`, so this registration runs the door's 422 assertion.
+  # `core` is the arm that actually fires for a value_extractor.py /
+  # commit_schema.py / kind_classifier.py / extractor_v2.py change (the default
+  # surface); the `classify` arm is a selection that NAMES that surface (it has
+  # no SOURCE_PATTERNS entry), while `sdk` is also reachable from a source
+  # change via SOURCE_PATTERNS["sdk"] — and `tortoise/sdk.py` itself is a
+  # SHARED_MODULE (full matrix). See tools/ci_selection.py.
+  - test_vocab_gating_callers_5163.py
   battery:
   - test_battery_arms.py
   # (removed a duplicate test_battery_derive_truth_leg.py entry here on the
@@ -1665,6 +1676,11 @@ surfaces:
   # then never run (the #1349/#3332 silent-drop class). Dual-registered with
   # `ep`, which owns `tortoise/dream.py`. See the note in the `ep` block.
   - test_2884_ep_state_journaled.py
+  # #5163: the arm that actually fires — `core` is the default surface for a
+  # `tortoise/value_extractor.py` / `commit_schema.py` / `kind_classifier.py` /
+  # `extractor_v2.py` change (none is in SOURCE_PATTERNS), and this file pins
+  # the CALLERS of the #2714 gate those modules carry. Dual with `api`.
+  - test_vocab_gating_callers_5163.py
   # queue_resweep (#5215 merge-throughput work): guards `tools/queue_resweep.py`,
   # the recoverable hand-pass that re-requests `@mergifyio queue` for PRs whose
   # entry conditions are already met once the base gate opens. The tool lives
@@ -1978,6 +1994,13 @@ surfaces:
   - test_sdk_props_coercion.py
   - test_tortoise_client.py
   - test_version_vector.py
+  # #5163: this file pins the SDK's local v1 enforcer wiring + client-side
+  # Layer-1 pre-check. NOTE: `tortoise/sdk.py` is a SHARED_MODULE, so a sdk.py
+  # change selects the FULL matrix — every surface, `sdk` included — and sdk.py
+  # itself is not in SOURCE_PATTERNS["sdk"]; this arm is additionally selected
+  # directly by the SOURCE_PATTERNS["sdk"] sources (tortoise/models.py,
+  # ids.py, crypto.py, retrieval.py, ...). Dual with `api`/`core`.
+  - test_vocab_gating_callers_5163.py
   classify:
   # Issue #1695 (extractor-v3 classify-later): the kind-classification and
   # chain-enforcement surface. Pure-logic files (stub encoders, golden
@@ -1987,6 +2010,12 @@ surfaces:
   - test_chain_enforcer.py
   - test_kind_index.py
   - test_kind_classifier.py
+  # #5163: this file pins the gated kind index. NOTE: `classify` has NO
+  # SOURCE_PATTERNS entry (tools/ci_selection.py), so a
+  # `tortoise/kind_classifier.py` or `tortoise/extractor_v2.py` change selects
+  # `core`, NOT `classify` — this arm covers a selection that names `classify`
+  # directly. Dual with `api`/`core`/`sdk`.
+  - test_vocab_gating_callers_5163.py
   - test_kind_eval_set.py
   eval:
   # #4097: registered in `core`/`sdk`/`api`/`ep`/`eval`/`onboarding` — the guard
