@@ -73,7 +73,11 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     )
 
 import argparse
+import contextlib
+import faulthandler
+import math
 import os
+import signal
 import time
 
 # Keep in lockstep with tortoise/embeddings.py (EMBEDDING_MODEL /
@@ -86,6 +90,121 @@ REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"  # pinned (VULN-001)
 CACHED_MARKER = "embedding model: cached, no download needed"
 DOWNLOADED_MARKER = "embedding model: downloaded"
 PROBE_FAILED_MARKER = "embedding model: not cached — downloading (with retries)"
+
+
+DONE_MARKER = "embedder provision: complete"
+
+
+def _watchdog_seconds() -> float:
+    """Seconds before the watchdog fires (and dumps every thread's stack).
+
+    Set PER SITE in the workflow, because the two bounds it must sit between are
+    per site (P1, third review of #7364). A flat default was wrong: it killed a
+    legitimately-progressing run at the three `--attempts 5 --backoff 10` sites,
+    whose own declared budget is 10 minutes and whose comment says so — 100s of
+    backoff alone before the final probe, plus a slow-but-working download. The
+    invariant to preserve when editing a site's `timeout-minutes`:
+
+        backoff budget  <  TORTOISE_EMBEDDER_WATCHDOG_S  <  timeout-minutes * 60
+
+    where the budget is the WORST-CASE retry sleep, `backoff * n*(n-1)/2` — the
+    attempts sleep `backoff * attempt` for attempt 1..n-1, so they SUM, and
+    `(n-1)*backoff` understates the 10-minute sites by 2.5x (40s vs 100s). That
+    error was in the first version of this comment AND in the test that guards
+    the invariant, which let a 60s watchdog pass at a 100s-budget site (P1,
+    fourth review) — state both bounds from the formula, not from memory.
+
+    Sites set 330 (under the 6-minute `test`/pmv cap) and 570 (under the three
+    10-minute caps). The fallback below is the tighter one on the principle that
+    firing early yields a dump, whereas firing late yields nothing.
+    """
+    raw = os.environ.get("TORTOISE_EMBEDDER_WATCHDOG_S", "330")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 330.0
+    if not math.isfinite(value):  # float('inf')/float('nan') -> OverflowError in dump_traceback_later
+        return 330.0
+    return min(3600.0, max(1.0, value))
+
+
+def _install_termination_stack_dump() -> None:
+    """#7359: make a stall dump its own stack, by two mechanisms, because one
+    is not enough and the gap between them is the whole point.
+
+    MEASURED, and this corrects an earlier claim in this very file: run
+    37239542471's log shows the step starting at 22:25:59.10, its FIRST output
+    (`Loading weights: 0%`) at 22:31:35.37, the success marker at 22:31:37.13 and
+    the runner's timeout at 22:32:14.79. So ~5m36s is spent BEFORE the marker —
+    torch + `sentence_transformers` import and the model load, with no output at
+    all — and only ~38s after it, of which ~22s is the teardown. The cap is
+    consumed by the LOAD, not by teardown; the teardown is merely what tipped a
+    5m38s run over 6m. (The earlier "the six minutes are spent in teardown"
+    reading was wrong, and it mattered: it is why `exit=True` was put on the
+    watchdog below.)
+
+    A Python-level `signal.signal` handler CANNOT fire while the main thread is
+    blocked in native code. It runs
+    only when the main thread reaches an eval-loop / `PyErr_CheckSignals` point,
+    and a thread blocked inside native code never gets there — worse, replacing
+    the disposition means the process no longer dies on the signal either, so it
+    sits until the runner's SIGKILL. A previous version of this function used
+    `signal.signal` and was therefore inert for exactly the failure class it was
+    written for (P1, second review of #7364); the reviewer reproduced it against
+    a fake blocking in a C `pthread_join`. Both mechanisms below avoid that:
+
+    1. **`faulthandler.register`** — a C-LEVEL handler, so the dump happens
+       inside the signal trampoline regardless of what the main thread is
+       doing. Covers a runner cancel that is delivered here. `chain=True` is
+       required (`chain=False` was measured to swallow BOTH signals, leaving the
+       process alive), but it resolves differently per signal and the difference
+       matters — and the first two versions of this comment both got it wrong by
+       naming a fixed disposition. `chain=True` re-raises into whatever the
+       process INHERITED: SIG_DFL by default, but SIG_IGN when the parent ignored
+       it (`trap '' TERM`, a supervisor that masks it), in which case the handler
+       DUMPS AND THE PROCESS SURVIVES. That holds for BOTH signals — for SIGINT
+       the chain usually lands on Python's deferred `KeyboardInterrupt` handler,
+       which a main thread blocked in C will never run, so it survives too.
+       Surviving is fine: the dump is the deliverable, the runner escalates on a
+       fixed 7500ms/2500ms schedule and SIGKILLs, and `dump_traceback_later`
+       below does not depend on any of this.
+    2. **`faulthandler.dump_traceback_later`** — a WATCHDOG THREAD, needing no
+       signal delivery at all, so it covers a main thread wedged in native code
+       AND a cancel that never reaches this process. This is the one that
+       answers the motivating failure.
+
+    Signal DELIVERY is a separate precondition and is handled in the workflows:
+    `actions/runner` sends the cancel signal to the step's direct child
+    (`killProcessOnCancel: false`; SIGINT at 7500ms, then SIGTERM, then SIGKILL),
+    which for a `run:` block is bash — and bash forks rather than exec'ing, so
+    the five invocations carry `exec` to put this process on the receiving end.
+
+    KNOWN LIMIT: `all_threads=True` lists PYTHON threads only. torch's pool and
+    OpenMP workers are native threads and do not appear, and 3.12 has no
+    `dump_c_stack` (3.14+). An apparently-sparse dump must not be read as
+    "nothing was running".
+    faulthandler.enable() is inside the suppression too: with an unusable
+    stderr it raises `RuntimeError: sys.stderr is None`, which would propagate
+    out of here and fail the step WITHOUT provisioning — a diagnostic that
+    fails the gate it was added to diagnose (P2, fourth review).
+    """
+    with contextlib.suppress(ValueError, RuntimeError, OSError):
+        faulthandler.enable()
+    for _sig in (signal.SIGTERM, signal.SIGINT):
+        # An unsupported platform or a non-main thread loses the diagnostic only.
+        with contextlib.suppress(ValueError, RuntimeError, OSError):
+            faulthandler.register(_sig, all_threads=True, chain=True)
+    with contextlib.suppress(ValueError, RuntimeError, OSError, OverflowError):
+        # exit=False, DELIBERATELY. The watchdog fires whenever provisioning is
+        # slow, and the cited run proves "slow" is not "stuck": 336s elapsed
+        # before its first output, against a 360s cap, so an `exit=True` watchdog at 330s would
+        # have killed — ~8s before the load completed — exactly the run
+        # `os._exit` saves. A diagnostic that can turn a working run red is a
+        # new failure mode, and this one has no need to be one: with `exit=False`
+        # it can only ADD information (a stack from the stall) and the runner's
+        # own `timeout-minutes` still bounds the step. Margin stays below that
+        # cap so the dump lands before the kill.
+        faulthandler.dump_traceback_later(_watchdog_seconds(), exit=False)
 
 
 def _annotation(level: str, message: str) -> None:
@@ -167,6 +286,7 @@ def provision(*, attempts: int, backoff: float) -> tuple[bool, str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _install_termination_stack_dump()
     parser = argparse.ArgumentParser(description="Provision the pinned embedding model, loudly.")
     parser.add_argument("--attempts", type=int, default=3, help="download attempts (>=1)")
     parser.add_argument("--backoff", type=float, default=5.0, help="base backoff seconds")
@@ -183,6 +303,15 @@ def main(argv: list[str] | None = None) -> int:
 
     ok, detail = provision(attempts=max(1, args.attempts), backoff=max(0.0, args.backoff))
     if ok:
+        # Emitted from CONTROL FLOW, not from a `sys.argv` scan. The first
+        # attempt gated this in __main__ on `{"--print-model", "--print-revision"}
+        # & set(sys.argv[1:])`, which argparse's default `allow_abbrev=True`
+        # defeats: `--print-m` is a valid, unambiguous spelling that returns the
+        # pin early, yet matched no string in that set — so the marker leaked
+        # into machine-read output a consumer parses (P1, review
+        # of #7364). Returning from here cannot be abbreviation-bypassed, and it
+        # is also success-only, so `grep` for it never reads a failure as done.
+        print(DONE_MARKER, flush=True)
         return 0
 
     detail = _one_line(detail)
@@ -197,5 +326,46 @@ def main(argv: list[str] | None = None) -> int:
     return 1
 
 
+# #7359: leave via os._exit, NOT sys.exit.
+#
+# MEASURED: run 37239542471 (PR #5339) spent 6.27m in this step, against 0.13m for
+# the same step on main (37240061542, 37229990684). Its log, with timestamps:
+#
+#     22:25:59.10  Run python3 tools/embedder_provision.py --attempts 3 --backoff 5
+#     22:31:35.37  Loading weights:   0%| ...          <- 5m36s of SILENCE
+#     22:31:37.13  embedding model: cached, no download needed
+#     22:32:14.79  ##[error] ... has timed out after 6 minutes.
+#
+# So ~5m36s is spent BEFORE the marker — the torch/sentence_transformers import
+# plus the model load, emitting nothing — and ~38s after it, of which ~22s is
+# teardown. `os._exit` therefore buys 22s, which is enough to put this run at
+# ~5m39s and INSIDE the cap: the teardown is the margin, not the whole stall.
+# (Do not restate this as "the six minutes are teardown"; that is what an earlier
+# version of this comment said, and it is refuted by the timestamps above.)
+#
+# Python runs interpreter shutdown AFTER the last user statement, so the marker
+# being the final line puts whatever remains in teardown: `sentence_transformers`
+# imports torch, whose teardown joins its thread pools and runs C++ destructors.
+# That is normally milliseconds of work, but it is
+# not bounded and it is not this step's business — the step's contract is "is
+# the pinned embedder obtainable", and that answer is already established and
+# printed by the time we get here.
+#
+# `os._exit` skips atexit handlers and interpreter teardown and returns the code
+# we already computed. It is safe on both paths: stdout/stderr are flushed
+# explicitly below (every marker already flushes), the cached path performs no
+# writes needing finalisation, and the download path writes to the HF cache
+# during construction rather than at teardown.
+#
+# This is deliberately NOT `timeout-minutes` being raised: the step takes ~9s
+# when it works, so a longer bound would convert a 6-minute stall into a longer
+# one and hide it (#964's bound was written for a stalled download, which the
+# log's `cached, no download needed` rules out).
 if __name__ == "__main__":
-    sys.exit(main())
+    _rc = main()
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(_rc)
