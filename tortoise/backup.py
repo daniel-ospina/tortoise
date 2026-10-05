@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from tortoise.config import is_db_uri
+from tortoise.cypher_guard import tolerates_altered_numbers
 
 logger = logging.getLogger(__name__)
 
@@ -62,11 +63,19 @@ def backup(db_path: str, events_path: str = "events.jsonl",
     return target
 
 
+@tolerates_altered_numbers
 def restore(backup_dir: str, db_path: str,
             events_path: str = "events.jsonl", into_falkor: bool = False) -> dict:
     """Restore from backup directory. Replays events into a fresh projection.
 
     Returns {events, status}.
+
+    #7174/#5011: this is a whole-journal REPLAY engine (the fourth, beside
+    ``rebuild``/``rebuild_all``/``recover_from_log``), and its JSONL fallback
+    calls ``proj.apply_journal_point_restamp`` — which writes the journaled
+    ``valid_to`` VERBATIM as a param. A record whose number the store cannot hold
+    must DIVERGE for ``check_consistency``, never crash the restore, so the
+    numeric-domain refusal is suspended here like the other three engines.
 
     Event-sourcing contract (#114): when the backup contains a FalkorDB
     snapshot (tortoise.db — BGSAVE RDB), into_falkor mode opens that

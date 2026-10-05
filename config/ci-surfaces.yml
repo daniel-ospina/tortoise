@@ -791,6 +791,12 @@ surfaces:
   # (tortoise/cypher_guard.py: guarded_client -> guarded Graph -> exceptions)
   # plus the projection's own `_GuardedGraph` query entry points.
   - test_cypher_regex_guard_3595.py
+  # #7174: the #4647 numeric domain enforced at the SAME handle seam — the
+  # predicate lives in `tortoise/numeric_domain.py` and `cypher_guard` applies it
+  # to every param map, so the SDK call-site list is no longer the only
+  # mechanism (its excludes-list is stated in `cypher_guard._guard_numeric_params`).
+  # Pure-unit guard: needs no DB or network, exactly like the file above it.
+  - test_7174_param_boundary_numeric_guard.py
   - test_graph_name_ownership.py
   # #5331: the graph byte meter (tortoise/graph_storage.py + the metering/
   # supabase graph-storage lane). Dual-registered with `api`: a change to the new
@@ -2483,6 +2489,7 @@ durations:
   test_shared_state_recovery.py: 0.2
   test_hermetic_egress_guard.py: 2.0  # #4387: no CI junit measurement exists for this file yet (a file that never ran cannot appear in an artifact), so it takes the #3400 flat 2.0s default. Refresh from the first post-merge run that includes it. Do NOT drop the row without re-deriving the 90% floor at that head (#4348 trap) — and NO figure is restated here on purpose; this row's comment asserted one for three review rounds and each base merge re-staled it.
   test_5048_retract_instant_recorded.py: 2.0  # #5048: same #3400 flat default as the row above and for the same reason — the file is new, so no CI junit measurement exists for it yet (a file that never ran cannot appear in an artifact). Refresh from the first post-merge run that includes it. Its registration is load-bearing for the durations half as well as the surface half: an unregistered new test file reds `integrity_problems`, which is how this row was found (#4348 trap — do not drop it without re-deriving the 90% floor at that head).
+  test_7174_param_boundary_numeric_guard.py: 2.0  # #7174: same #3400 flat default as the row above — a new file has no CI junit measurement. MEASURED this turn: WITHOUT this row the durations coverage falls below the 90% floor and `tools/ci_selection.py --integrity` reds; the surface entry alone does not cover it. Refresh from the first post-merge run that includes it.
   test_license_surface_consumer.py: 0.3
   test_installer_preserves_foreign_skill_content.py: 0.6
   test_backup_watcher_health.py: 0.2
