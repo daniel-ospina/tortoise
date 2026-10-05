@@ -1195,6 +1195,8 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         payload["capture_lane"] = meta["capture_lane"]
     if meta.get("model"):
         payload["model"] = meta["model"]
+    # The lane actually put on the wire — part of the CAS identity below.
+    posted_lane = payload.get("capture_lane")
     outcome = post(payload)
     summary.outcomes[sid] = outcome
     if outcome.ok:
@@ -1205,18 +1207,28 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         # left the breadcrumb standing (and `session verify` reading a failure
         # that had already been resolved) (#4714 review).
         _clear_breadcrumb_for(meta.get("harness"), sid)
-        # COMPARE-AND-SWAP, on the POSTED CONTENT. A concurrent capture (a
-        # resumed session, or the SessionStart drain racing a live turn) can
-        # grow this entry while the POST is in flight. Stamp `filed_key` only
-        # when what is on disk NOW is exactly what was posted; otherwise the
-        # entry stays unfiled and the next opportunity re-posts the longer
-        # conversation. Comparing meta-to-meta was wrong: a writer killed
-        # between its log append and its meta write leaves the meta digest
-        # stale, so the check passed while a turn went unfiled forever.
+        # COMPARE-AND-SWAP, on the POSTED CONTENT **AND LANE**. A concurrent
+        # capture (a resumed session, or the SessionStart drain racing a live
+        # turn) can grow this entry while the POST is in flight. Stamp
+        # `filed_key` only when what is on disk NOW is exactly what was posted;
+        # otherwise the entry stays unfiled and the next opportunity re-posts.
+        # Comparing meta-to-meta was wrong: a writer killed between its log
+        # append and its meta write leaves the meta digest stale, so the check
+        # passed while a turn went unfiled forever.
+        #
+        # The LANE is part of that identity (#3516 §B). `capture_key` is
+        # content-derived and the lane is not part of the content, so without
+        # this clause a lane UPGRADE landing inside the POST window was
+        # cancelled: the payload went out lane-less, the on-disk meta got the
+        # lane, and the CAS re-filed it — leaving `filed_key == capture_key`,
+        # so every later drain SKIPPED it and the lane was stranded forever
+        # (a working hook reading as not-live). Reachable in the shipped
+        # topology: claude-hooks/session-start.sh backgrounds the drain.
         on_disk_turns = read_spool_turns(root, sid)
         on_disk = read_spool_meta(root, sid)
         if (on_disk is not None
-                and content_digest(on_disk_turns) == posted_digest):
+                and content_digest(on_disk_turns) == posted_digest
+                and on_disk.get("capture_lane") == posted_lane):
             on_disk["filed_key"] = on_disk.get("capture_key") or capture_key(sid, on_disk_turns)
             on_disk["filed_at"] = datetime.fromtimestamp(
                 now_ms / 1000.0, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")

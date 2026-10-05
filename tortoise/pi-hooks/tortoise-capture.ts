@@ -896,9 +896,11 @@ export function writeSpoolEntry(
   // also the rule the SERVER applies via `sdk._write_session_and_turns`'
   // coalesce — the spool must not be the odd leg out, because its lane is what
   // gets delivered. The resolution is TRUTHY (`||`, not `??`), because BOTH
-  // legs read and write this one directory: with `??` an empty-string lane
-  // would resolve to `""`, the spread below would then omit the key, and the TS
-  // rewrite would erase a lane the Python leg had preserved.
+  // legs read and write this one directory and must state ONE rule. The input
+  // that distinguishes them is a stored EMPTY lane with a truthy new one: `""
+  // || "hook"` fills the lane in, while `??` keeps `""` and the spread below
+  // then OMITS the key. (A stored empty lane is reachable only from a crafted
+  // or corrupt meta — which is why it has its own test.)
   const lane = prior?.capture_lane || snapshot.captureLane;
   // A snapshot carrying a lane the entry has never had is an UPGRADE, not a
   // no-op. `sameContent` is content-addressed and the lane is NOT part of the
@@ -1282,17 +1284,29 @@ export async function flushSpool(
       });
       const res = await postCapture(cfg, payload, doFetch, opts.timeoutMs);
       if (res.ok) {
-        // COMPARE-AND-SWAP, on the POSTED CONTENT. A `turn_end` can append to
-        // this very entry while the POST is in flight (a resumed session; a
-        // cross-process drain). Stamp `filed_key` only when what is on disk NOW
-        // is exactly what was posted; otherwise leave the entry unfiled so the
-        // next opportunity re-posts the longer conversation. Comparing
-        // meta-to-meta was wrong: a writer killed between its log append and its
-        // meta write leaves the meta digest stale, so the check passed while a
-        // turn went unfiled forever.
+        // COMPARE-AND-SWAP, on the POSTED CONTENT **AND LANE**. A `turn_end` can
+        // append to this very entry while the POST is in flight (a resumed
+        // session; a cross-process drain). Stamp `filed_key` only when what is
+        // on disk NOW is exactly what was posted; otherwise leave the entry
+        // unfiled so the next opportunity re-posts. Comparing meta-to-meta was
+        // wrong: a writer killed between its log append and its meta write
+        // leaves the meta digest stale, so the check passed while a turn went
+        // unfiled forever.
+        //
+        // The LANE is part of that identity (#3516 §B). `capture_key` is
+        // content-derived and the lane is not part of the content, so without
+        // this clause a lane UPGRADE landing inside the POST window was
+        // cancelled: the payload went out lane-less, the on-disk meta got the
+        // lane, and the CAS re-filed it — leaving `filed_key === capture_key`,
+        // so every later drain SKIPPED it and the lane was stranded forever.
         const onDisk = readSpoolEntry(dir, meta.session_id);
         const onDiskTurns = readSpoolTurns(dir, meta.session_id);
-        if (onDisk && contentDigest(onDiskTurns) === postedDigest) {
+        const postedLane = payload.capture_lane as string | undefined;
+        if (
+          onDisk &&
+          contentDigest(onDiskTurns) === postedDigest &&
+          onDisk.capture_lane === postedLane
+        ) {
           onDisk.filed_key = onDisk.capture_key ?? captureKey(meta.session_id, onDiskTurns);
           onDisk.filed_at = new Date(nowMs).toISOString();
           onDisk.attempts = 0;

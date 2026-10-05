@@ -6272,7 +6272,8 @@ class TortoiseSDK:
         # loses the node, making any EntityLinked edge FROM it unreplayable), so
         # it rides the ``on_session_merged`` hook rather than following the
         # whole write. The idempotent fold MERGEs by id and coalesce-preserves
-        # created_at/actor_user_id, mirroring the live SET clauses; it is
+        # created_at/actor_user_id/capture_lane, mirroring the live SET clauses;
+        # it is
         # emitted on every capture (the MERGE is itself unconditional) so the
         # journaled ``turn_count`` tracks the live value on the #1727
         # longer-replay-payload path.

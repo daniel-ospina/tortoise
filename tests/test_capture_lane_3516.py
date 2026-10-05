@@ -337,6 +337,75 @@ def test_spool_lane_is_first_writer_wins_so_store_sync_cannot_downgrade_hook(
         "the downgrade reached the wire")
 
 
+def test_a_lane_upgrade_during_the_post_window_is_not_swallowed(tmp_path, monkeypatch):
+    """The drain's compare-and-swap stamped `filed_key` on a CONTENT digest,
+    which excludes the lane. A lane upgrade landing while the POST was in flight
+    was therefore CANCELLED: the payload went out lane-less, the on-disk meta
+    got the lane, and the CAS re-filed it — so `filed_key == capture_key` and
+    every later drain skipped it. The lane was stranded forever and a working
+    hook read as not-live. Reachable in the shipped topology:
+    claude-hooks/session-start.sh backgrounds the drain."""
+    import tortoise.capture_spool as spool
+
+    root = tmp_path / "spool"
+    monkeypatch.setattr(spool, "spool_dir", lambda: root)
+    sid = "3516-cas-lane"
+    turns = [{"role": "user", "content": "same"}]
+    spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid, turns=turns, source="t", machine_id="m"))  # lane-less
+
+    def post_and_upgrade(payload):
+        # The hook re-snapshots the SAME entry while this POST is in flight.
+        spool.write_spool_entry(root, spool.Snapshot(
+            session_id=sid, turns=turns, source="t", machine_id="m",
+            capture_lane="hook"))
+        assert "capture_lane" not in payload, (
+            "this test needs the POST to go out BEFORE the upgrade")
+        return spool.PostOutcome(ok=True, status=200)
+
+    spool.flush_spool(root, post_and_upgrade, only_session_id=sid)
+    meta = spool.read_spool_meta(root, sid)
+    assert meta.get("capture_lane") == "hook"
+    assert not (meta.get("filed_key") and meta.get("filed_key") == meta.get("capture_key")), (
+        "the CAS re-filed a lane-upgraded entry — the lane can never be re-POSTed")
+
+    posted: list[dict] = []
+    spool.flush_spool(
+        root, lambda p: (posted.append(dict(p)),
+                         spool.PostOutcome(ok=True, status=200))[1],
+        only_session_id=sid)
+    assert posted and posted[0].get("capture_lane") == "hook", (
+        "the lane was STRANDED — the drain skipped the upgraded entry forever")
+
+
+def test_an_empty_stored_lane_is_filled_in_by_a_later_snapshot(tmp_path, monkeypatch):
+    """The ONLY input that distinguishes truthy `or` from a nullish form: a
+    stored EMPTY lane with a truthy new one (`"" or "hook"` -> `"hook"`; the
+    nullish form would omit the key). Without this the `or`/`??` choice is
+    unpinned — an empty lane is only reachable from a crafted/corrupt meta,
+    which is exactly what this writes (review F2)."""
+    import tortoise.capture_spool as spool
+
+    root = tmp_path / "spool"
+    monkeypatch.setattr(spool, "spool_dir", lambda: root)
+    sid = "3516-empty-lane"
+    turns = [{"role": "user", "content": "a"}]
+    spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid, turns=turns, source="t", machine_id="m"))
+    meta = spool.read_spool_meta(root, sid)
+    meta["capture_lane"] = ""  # crafted: the public API never writes a falsy lane
+    spool._write_meta(root, meta)
+    assert spool.read_spool_meta(root, sid).get("capture_lane") == ""
+
+    spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid,
+        turns=[{"role": "user", "content": "a"},
+               {"role": "assistant", "content": "b"}],
+        source="t", machine_id="m", capture_lane="hook"))
+    assert spool.read_spool_meta(root, sid).get("capture_lane") == "hook", (
+        "an empty stored lane was not filled in — nullish semantics, not truthy")
+
+
 def test_spool_lane_ful_identical_resnapshot_is_a_no_op(tmp_path, monkeypatch):
     """Pins the `not prior.capture_lane` half of `lane_upgrade`. Without it
     EVERY identical re-snapshot would rewrite the meta and clear `filed_key`,

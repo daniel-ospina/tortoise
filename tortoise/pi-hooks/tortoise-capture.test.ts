@@ -709,6 +709,68 @@ test("a lane upgrade survives the dedup and refiles an ALREADY FILED entry", asy
   assert.equal(server.sessions.get("sess-upgrade")?.capture_lane, "hook");
 });
 
+test("a lane upgrade during the POST window is not swallowed", async () => {
+  // The drain's CAS stamped `filed_key` on a CONTENT digest, which excludes the
+  // lane — so an upgrade landing mid-POST was cancelled and the lane stranded
+  // forever. `capture_key` is content-derived, so the CAS identity needs the
+  // lane too.
+  const spool = tmpSpool();
+  const sid = "sess-cas";
+  const turns = [{ role: "user" as const, content: "same" }];
+  writeSpoolEntry(spool, snapshot(sid, turns)); // lane-less
+  let first = true;
+  const fetchImpl = async () => {
+    if (first) {
+      first = false;
+      // the hook re-snapshots the SAME entry while this POST is in flight
+      writeSpoolEntry(spool, { ...snapshot(sid, turns), captureLane: "hook" });
+    }
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: fetchImpl as never, now: 1 });
+  const meta = readSpoolEntry(spool, sid);
+  assert.equal(meta?.capture_lane, "hook");
+  assert.notEqual(
+    meta?.filed_key,
+    meta?.capture_key,
+    "the CAS re-filed a lane-upgraded entry — the lane can never be re-POSTed",
+  );
+
+  const server = recordingServer();
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 2 });
+  assert.equal(
+    server.sessions.get(sid)?.capture_lane,
+    "hook",
+    "the lane was STRANDED — the drain skipped the upgraded entry forever",
+  );
+});
+
+test("an empty STORED lane is filled in (truthy, not nullish)", () => {
+  // The only input that distinguishes `||` from `??`: a stored EMPTY lane with a
+  // truthy new one. `"" || "hook"` -> "hook"; `??` would omit the key. An empty
+  // lane is reachable only from a crafted/corrupt meta, written here directly.
+  const spool = tmpSpool();
+  const sid = "sess-empty-stored";
+  writeSpoolEntry(spool, snapshot(sid, [{ role: "user", content: "a" }]));
+  const crafted = readSpoolEntry(spool, sid)!;
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  writeFileSync(metaPath, `${JSON.stringify({ ...crafted, capture_lane: "" }, null, 2)}\n`);
+  assert.equal(readSpoolEntry(spool, sid)?.capture_lane, "");
+
+  writeSpoolEntry(spool, {
+    ...snapshot(sid, [
+      { role: "user", content: "a" },
+      { role: "assistant", content: "b" },
+    ]),
+    captureLane: "hook",
+  });
+  assert.equal(
+    readSpoolEntry(spool, sid)?.capture_lane,
+    "hook",
+    "an empty stored lane was not filled in — nullish semantics, not truthy",
+  );
+});
+
 test("a later store_sync snapshot cannot DOWNGRADE a stored hook lane", () => {
   // Pins the pinned monotone contract (the delivery lane is monotone) plus
   // first-writer-wins parity with the server's coalesce: the spool's lane is
