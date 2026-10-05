@@ -792,14 +792,17 @@ def write_spool_entry(
         "attempts": _attempts(prior or {}),
         "next_attempt_at_ms": _carried_window(prior or {}),
     }
-    # Set-only-when-present, and carry a stored lane forward: a lane-less
-    # re-snapshot (backfill/import, or a pre-#3516 producer) must not ERASE the
-    # lane a hook already claimed — absence is stored as ABSENT, never as a
-    # fabricated or null lane (#3516 §B review F3). NOT `model`'s rule below:
-    # `model` is set-only-when-present WITHOUT carry-forward; the lane must
-    # survive a snapshot that simply does not mention it. The resolution is
-    # TRUTHY (`or`), matching the TypeScript leg byte-for-byte.
-    _lane = snapshot.capture_lane or (prior or {}).get("capture_lane")
+    # Set-only-when-present, FIRST-WRITER-WINS, and — unlike `model` below,
+    # which is never carried forward — carried forward across snapshots. The
+    # `prior` lane wins when both are set, so a later snapshot can only FILL IN
+    # an absent lane, never RELABEL one: a `store_sync` snapshot can never
+    # DOWNGRADE a stored `hook`. That is the pinned contract
+    # (docs/plans/2026-08-25-1714-memory-capture-onboarding.md: "the delivery
+    # lane is monotone"), and it is the same first-writer-wins rule the SERVER
+    # applies (`sdk._write_session_and_turns` coalesce) — the spool must not be
+    # the odd leg out, because its lane is what gets delivered. The resolution
+    # is TRUTHY (`or`), matching the TypeScript leg byte-for-byte.
+    _lane = (prior or {}).get("capture_lane") or snapshot.capture_lane
     if _lane:
         meta["capture_lane"] = _lane
     if snapshot.model:

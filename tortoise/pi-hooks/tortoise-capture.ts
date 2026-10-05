@@ -888,14 +888,18 @@ export function writeSpoolEntry(
   }
   const stored = prior ? readSpoolTurns(dir, snapshot.sessionId) : [];
 
-  // #3516 §B: the entry's lane is set-only-when-present and carried forward —
-  // NOT `model`'s rule (that one is not carried forward), because a lane-less
-  // re-snapshot must not ERASE a lane the hook already claimed. This is the
-  // Python writer's EXACT rule (`or`, TRUTHY — not `??`), because BOTH legs
-  // read and write this one directory: with `??` an empty-string lane would
-  // resolve to `""`, the spread below would then omit the key, and the TS
+  // #3516 §B: the entry's lane is set-only-when-present, FIRST-WRITER-WINS, and
+  // carried forward — NOT `model`'s rule (that one is not carried forward).
+  // `prior` wins when both are set, so a later snapshot can only FILL IN an
+  // absent lane, never RELABEL one: a `store_sync` snapshot can never DOWNGRADE
+  // a stored `hook` (the pinned "delivery lane is monotone" contract), which is
+  // also the rule the SERVER applies via `sdk._write_session_and_turns`'
+  // coalesce — the spool must not be the odd leg out, because its lane is what
+  // gets delivered. The resolution is TRUTHY (`||`, not `??`), because BOTH
+  // legs read and write this one directory: with `??` an empty-string lane
+  // would resolve to `""`, the spread below would then omit the key, and the TS
   // rewrite would erase a lane the Python leg had preserved.
-  const lane = snapshot.captureLane || prior?.capture_lane;
+  const lane = prior?.capture_lane || snapshot.captureLane;
   // A snapshot carrying a lane the entry has never had is an UPGRADE, not a
   // no-op. `sameContent` is content-addressed and the lane is NOT part of the
   // content, so without this bypass an entry first written lane-less (a

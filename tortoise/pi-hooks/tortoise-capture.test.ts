@@ -709,6 +709,29 @@ test("a lane upgrade survives the dedup and refiles an ALREADY FILED entry", asy
   assert.equal(server.sessions.get("sess-upgrade")?.capture_lane, "hook");
 });
 
+test("a later store_sync snapshot cannot DOWNGRADE a stored hook lane", () => {
+  // Pins the pinned monotone contract (the delivery lane is monotone) plus
+  // first-writer-wins parity with the server's coalesce: the spool's lane is
+  // what gets DELIVERED, so a later snapshot may only FILL IN an absent lane.
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, {
+    ...snapshot("sess-mono", [{ role: "user", content: "a" }]),
+    captureLane: "hook",
+  });
+  writeSpoolEntry(spool, {
+    ...snapshot("sess-mono", [
+      { role: "user", content: "a" },
+      { role: "assistant", content: "b" },
+    ]),
+    captureLane: "store_sync",
+  });
+  assert.equal(
+    readSpoolEntry(spool, "sess-mono")?.capture_lane,
+    "hook",
+    "a store_sync snapshot downgraded a stored hook lane",
+  );
+});
+
 test("a lane-FUL identical re-snapshot is a no-op (upgrade is not a rewrite rule)", () => {
   // Pins the `!prior?.capture_lane` half of `laneUpgrade`. Without it EVERY
   // identical re-snapshot would rewrite the meta and clear `filed_key`, so the

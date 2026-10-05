@@ -304,6 +304,39 @@ def test_spool_lane_survives_a_lane_less_resnapshot(tmp_path, monkeypatch):
         "an empty-string lane erased the stored lane (nullish vs truthy)")
 
 
+def test_spool_lane_is_first_writer_wins_so_store_sync_cannot_downgrade_hook(
+        tmp_path, monkeypatch):
+    """The pinned contract (docs/plans/2026-08-25-1714-memory-capture-onboarding.md):
+    "the delivery lane is monotone (a `store_sync` write never downgrades
+    `hook`)". The spool's lane is what gets DELIVERED, so `prior` must win when
+    both are set — a later `store_sync` snapshot cannot relabel a stored `hook`.
+    This is the same first-writer-wins rule the server applies via coalesce
+    (review P2)."""
+    import tortoise.capture_spool as spool
+
+    root = tmp_path / "spool"
+    monkeypatch.setattr(spool, "spool_dir", lambda: root)
+    sid = "3516-spool-monotone"
+    spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid, turns=[{"role": "user", "content": "a"}],
+        source="t", machine_id="m", capture_lane="hook"))
+    # A LATER `store_sync` snapshot of the SAME (grown) entry must not downgrade.
+    spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid,
+        turns=[{"role": "user", "content": "a"},
+               {"role": "assistant", "content": "b"}],
+        source="t", machine_id="m", capture_lane="store_sync"))
+    assert spool.read_spool_meta(root, sid).get("capture_lane") == "hook", (
+        "a store_sync snapshot DOWNGRADED a stored hook lane")
+    posts: list[dict] = []
+    spool.flush_spool(
+        root, lambda p: (posts.append(dict(p)),
+                         spool.PostOutcome(ok=True, status=200))[1],
+        only_session_id=sid)
+    assert posts and posts[0].get("capture_lane") == "hook", (
+        "the downgrade reached the wire")
+
+
 def test_spool_lane_ful_identical_resnapshot_is_a_no_op(tmp_path, monkeypatch):
     """Pins the `not prior.capture_lane` half of `lane_upgrade`. Without it
     EVERY identical re-snapshot would rewrite the meta and clear `filed_key`,
