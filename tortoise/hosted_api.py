@@ -1322,15 +1322,12 @@ async def _refresh_cost_allocation() -> None:
 
     The SINGLE production write path for the per-team cost metric
     (``tortoise_team_cost_cents``, which had no production caller at all before
-    this). It is module-level ON PURPOSE: the periodic seam that arms it,
-    ``_event_retention_loop``, is a CLOSURE inside ``_lifespan`` and cannot be
-    called from a test, so a test that asserts the PRODUCTION call site needs
-    this half to be directly invocable.
+    this). It is module-level ON PURPOSE, so a test can invoke the production
+    call site directly.
 
-    Best-effort by construction: ``_event_retention_loop`` has NO per-iteration
-    guard, so a raise here would kill event retention AND the deleted-org purge
-    for the process's lifetime. Every non-cancellation exception is swallowed
-    with a warning.
+    Best-effort by construction: every non-cancellation exception is swallowed
+    with a warning. Since #5381 the retention loop also routes this through
+    ``_guarded_step``, so a raise here cannot end the loop.
     """
     from tortoise.cost_allocation import refresh_and_publish
 
@@ -1352,6 +1349,65 @@ async def _refresh_cost_allocation() -> None:
         raise
     except Exception as exc:  # noqa: BLE001, RUF100 — must never kill the retention loop
         _logger.warning("cost allocation refresh failed: %s", exc)
+
+
+async def _guarded_step(label: str, step) -> None:
+    """#5381: await ONE background step so its failure cannot kill its runner.
+
+    ``step`` is a zero-arg callable returning an awaitable, so the awaitable is
+    built INSIDE the guard — a factory that raises is caught too. Cancellation
+    must still propagate (shutdown cancels these tasks), so ``CancelledError``
+    is re-raised; any other exception is logged and swallowed.
+
+    Shared by ``_run_boot_sweeps`` and ``_event_retention_loop``. Without it the
+    obligation is per-caller: every step added to the loop must remember to
+    swallow its own exceptions, and the one that forgets ends event retention
+    AND the deleted-team purge for the life of the process.
+    """
+    try:
+        await step()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # never fatal to the runner
+        _logger.warning("%s failed: %s", label, exc)
+
+
+async def _event_retention_loop(interval: float) -> None:
+    """#5381: the periodic retention runner, with EVERY step individually guarded.
+
+    Guarded per STEP, not per iteration. A per-iteration guard would let one
+    failing step skip its siblings for that whole hour — a failed event sweep
+    would also skip the deleted-team purge, the OAuth GC and the cost refresh,
+    which is the same silent-loss shape this closes, one scope larger.
+
+    ``interval`` is a parameter rather than a captured closure so the loop is
+    directly drivable by a test: the observable invariant is that a raising step
+    cannot end the ``while True``, and the evidence for it is a SUBSEQUENT
+    iteration actually running.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        # #2850: daemon worker, not the shared default executor — see
+        # _run_boot_sweeps.
+        await _guarded_step(
+            "event retention sweep",
+            functools.partial(run_on_daemon_worker, _sweep_events,
+                              name="tortoise-boot-sweep"))
+        # #302: hard-delete past grace (sync DB work off the loop)
+        await _guarded_step(
+            "deleted-team purge",
+            functools.partial(run_on_daemon_worker, _purge_deleted_orgs,
+                              name="tortoise-boot-sweep"))
+        # #3036: GC dead OAuth rows (sync DB work off the loop)
+        await _guarded_step(
+            "oauth retention",
+            functools.partial(run_on_daemon_worker, _sweep_oauth_retention,
+                              name="tortoise-boot-sweep"))
+        # #4493: allocated fixed/shared SaaS cost per org — the production write
+        # path for tortoise_team_cost_cents. It already swallows internally (see
+        # _refresh_cost_allocation); the guard is what makes that belt-and-braces
+        # rather than the single thing keeping the loop alive.
+        await _guarded_step("cost allocation refresh", _refresh_cost_allocation)
 
 
 async def _run_boot_sweeps() -> None:
@@ -1382,12 +1438,12 @@ async def _run_boot_sweeps() -> None:
     for label, fn in (("event retention", _sweep_events),
                       ("deleted-team purge", _purge_deleted_orgs),
                       ("oauth retention", _sweep_oauth_retention)):
-        try:
-            await run_on_daemon_worker(fn, name="tortoise-boot-sweep")
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # never fatal
-            _logger.warning("boot %s sweep failed: %s", label, exc)
+        # #5381: the same guard the periodic loop uses — one runner, so the
+        # boot and periodic paths cannot drift apart.
+        await _guarded_step(
+            f"boot {label} sweep",
+            functools.partial(run_on_daemon_worker, fn,
+                              name="tortoise-boot-sweep"))
 
 
 #: Task attributes armed across the lifespan that a re-entry or shutdown must
@@ -1839,25 +1895,12 @@ async def _lifespan(app):
             # (#2851/#2922; regression guard tests/test_boot_regressions.py).
             interval = event_retention_interval()
 
-            async def _event_retention_loop() -> None:
-                while True:
-                    await asyncio.sleep(interval)
-                    # #2850: daemon worker, not the shared default executor —
-                    # see _run_boot_sweeps.
-                    await run_on_daemon_worker(_sweep_events,
-                                               name="tortoise-boot-sweep")
-                    # #302: hard-delete past grace (sync DB work off the loop)
-                    await run_on_daemon_worker(_purge_deleted_orgs,
-                                               name="tortoise-boot-sweep")
-                    # #3036: GC dead OAuth rows (sync DB work off the loop)
-                    await run_on_daemon_worker(_sweep_oauth_retention,
-                                               name="tortoise-boot-sweep")
-                    # #4493: allocated fixed/shared SaaS cost per org — the
-                    # production write path for tortoise_team_cost_cents.
-                    # Swallows internally (see _refresh_cost_allocation).
-                    await _refresh_cost_allocation()
-
-            _retention_task = asyncio.get_event_loop().create_task(_event_retention_loop())
+            # #5381: the body is module-level (``_event_retention_loop``) so its
+            # per-step guard is reachable by an executing TEST. As a closure the
+            # only available check was a static AST pin, and an AST pin cannot
+            # observe whether a step's failure ENDS the loop.
+            _retention_task = asyncio.get_event_loop().create_task(
+                _event_retention_loop(interval))
             app.state._event_retention_task = _retention_task
         except Exception as exc:
             # Best-effort by design (a purge failure must never block bind), but
@@ -11365,6 +11408,14 @@ _SESSION_HARNESS_VALUES = frozenset({
     "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
 })
 
+# #3516 §B / #3515 piece 8: which producer captured a session — 'hook' (the
+# in-process hook/CLI leg) or 'store_sync' (the store-sync backstop). This is
+# the ONLY discriminator that makes the hook-liveness check falsifiable: the two
+# lanes POST the same payload except this field, so without it a run with the
+# hook stubbed no-op greens. Distinct from the EXTRACTION lane (`_capture_lane()`
+# returns m2/v2) — same word, different meaning; do not merge the two.
+_SESSION_CAPTURE_LANE_VALUES = frozenset({"hook", "store_sync"})
+
 
 class SessionRequest(BaseModel):
     conversation: list[dict] = Field(..., max_length=1000)
@@ -11390,6 +11441,11 @@ class SessionRequest(BaseModel):
     # session_id is the idempotency key (re-POST same id ⇒ 0 new nodes);
     # source carries the transcript stem (forwarded by _cmd_session_capture).
     harness: str | None = None
+    # #3516 §B: OPTIONAL and set-only-when-present, so a pre-installed hook, an
+    # SDK caller or a backfill producer that POSTs without it never 422s and
+    # never erases a lane the server already stored. `None` is stored as ABSENT,
+    # never as a fabricated lane. Invalid values fail the boundary 422.
+    capture_lane: str | None = None
     source: str | None = None
     # #2599: machine_id and model are CLIENT-CLAIMED informational fields
     # (forgeable, never security-trusted) — complementing the server-resolved
@@ -11408,6 +11464,18 @@ class SessionRequest(BaseModel):
             raise ValueError(
                 f"invalid harness {v!r} — must be one of "
                 f"{sorted(_SESSION_HARNESS_VALUES)}")
+        return v
+
+    # #3516 §B: invalid capture_lane ⇒ 422 at the model boundary (same contract
+    # as harness) — a typo'd lane must be visible, and must never be silently
+    # stored as a lane the hook-liveness check would then misread.
+    @field_validator("capture_lane")
+    @classmethod
+    def _validate_capture_lane(cls, v):
+        if v is not None and v not in _SESSION_CAPTURE_LANE_VALUES:
+            raise ValueError(
+                f"invalid capture_lane {v!r} — must be one of "
+                f"{sorted(_SESSION_CAPTURE_LANE_VALUES)}")
         return v
 
     # #2599: reject non-printable characters in machine_id/model (a newline
@@ -12197,6 +12265,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     _capture_write = await _run_off_loop(
         _CAPTURE_EXECUTOR, _write_session_and_turns, proj, sdk, session_id,
         windowed, now=now, harness=capture_harness,
+        capture_lane=body.capture_lane,
         actor_user_id=_actor_uid, machine_id=body.machine_id,
         model=body.model, session_existed=session_existed,
         embed_fn=lambda texts: _capture_turn_embeddings(
@@ -13986,7 +14055,112 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             # closed.
             _rid = _written.get("id") if isinstance(_written, dict) else None
             resolved_pid = _rid if isinstance(_rid, str) and _rid else pid
-            sdk.supersede_point(pr.existing_id, resolved_pid)
+            # #3366: terminal pre-check, mirroring
+            # ``commit_ops.apply_supersessions`` (the SAME shared
+            # ``is_terminal_status`` vocabulary, on ``(status, outdated)``).
+            # ``_load_commit_graph_state`` loads ``points`` as ``{id: content}``
+            # only — no status — so ``reconcile_payload`` can return
+            # "supersede" for a prior that is ALREADY terminal.
+            # ``supersede_point`` raises inside its own lifecycle guard for
+            # that case, and the writer's catch-all converts the raise to a
+            # fail-closed HTTP 500 that re-raises deterministically for the
+            # same payload: the payload is replay-safe but the transition is
+            # permanently illegal, so the retry can never succeed.
+            #
+            # The query is deliberately the SAME STATEMENT
+            # ``sdk._assert_lifecycle_guard`` runs (#2498) — same MATCH, same
+            # three projected columns, same ``row[0]`` read, and NO ``LIMIT``.
+            # A differently-shaped or first-row-only probe could select a
+            # DIFFERENT node than the write's own guard: point ids are not
+            # unique, row order is server-dependent, and that divergence
+            # either resurrects this bug (guard sees a live sibling, the
+            # write sees a terminal one) or silently drops a legitimate
+            # supersede. Keep the two statements in lockstep.
+            #
+            # An ``is_operator`` prior is deliberately NOT absorbed here: it
+            # is corruption, not a benign replay, so it must still raise.
+            #
+            # The successor created just above is deliberately KEPT on a
+            # skip: that is ``apply_supersessions``' idempotent no-op for the
+            # supersession while preserving the new content. A PRIOR THAT IS
+            # ABSENT (no row) is left to ``supersede_point`` exactly as
+            # before — only the terminal case is a no-op here.
+            #
+            # Scope of the guarantee: this prevents the DETERMINISTIC,
+            # PERMANENTLY-UNCOMMITTABLE 500. ``_prevalidate_supersede_window``
+            # above still runs first, so a terminal prior carrying a genuinely
+            # INVERTED window still 422s — that is a correctable payload
+            # error (the client fixes the window and retries), not a wedge,
+            # and the two are deliberately not conflated.
+            from .live import is_terminal_status as _is_terminal_status
+
+            def _terminal_state(point_id: str) -> tuple | None:
+                """The terminal state of ``point_id``, or ``None``.
+
+                The query is deliberately the SAME STATEMENT
+                ``sdk._assert_lifecycle_guard`` runs (#2498) — same MATCH,
+                same three projected columns in the same order, same
+                ``row[0]`` read, and NO ``LIMIT``. A differently-shaped or
+                first-row-only probe could select a DIFFERENT node than the
+                write's own guard: point ids are not unique and row order is
+                server-dependent, and that divergence would either resurrect
+                this bug or silently drop a legitimate supersede.
+
+                ``None`` means "not terminal, or not a statement point": an
+                ``is_operator`` prior is corruption, not a benign replay, so
+                it must still be left to raise rather than absorbed here.
+                An ABSENT node also returns ``None`` — the guard's own
+                missing-point path is unchanged.
+                """
+                rows = sdk._get_proj().g.query(
+                    "MATCH (n:Point {id:$id}) "
+                    "RETURN n.is_operator, n.status, "
+                    "coalesce(n.outdated, false)",
+                    params={"id": point_id}).result_set
+                if not rows or bool(rows[0][0]):
+                    return None
+                return (rows[0][1], bool(rows[0][2]))
+
+            # #3366: the pre-check's mechanism is documented ONCE, on
+            # ``_terminal_state`` above — including the LOCKSTEP requirement
+            # that its statement stay identical to
+            # ``sdk._assert_lifecycle_guard``'s, and why an ``is_operator``
+            # prior is deliberately not absorbed. Only what is specific to
+            # THIS call site is stated here.
+            #
+            # BOTH endpoints are probed, because ``supersede_point`` guards
+            # both (role="source" AND role="target", sdk.py #2498) and the
+            # successor leg is independently reachable: ``create_point``'s
+            # dedup resolution carries NO terminal filter, so it can re-key
+            # the successor onto an already-dead node and raise on the
+            # TARGET — the identical retry-proof 500 on the other endpoint.
+            _prior_state = _terminal_state(pr.existing_id)
+            _succ_state = _terminal_state(resolved_pid)
+            if _prior_state is not None and _is_terminal_status(*_prior_state):
+                # WARNING (not the helper's silent ``continue``): the shared
+                # helper serves the high-volume capture/eval replay path where
+                # a terminal ref is routine, whereas here the client is told
+                # 200 and otherwise gets NO signal that a supersession it
+                # asked for was dropped. The summary-log WARNING discipline
+                # (see test_hosted_commit_summary_log_reserves_warning_...)
+                # is about not spending WARNING on routine records — a
+                # deliberately-skipped requested write is not routine.
+                _logger.warning(
+                    "hosted supersede skipped: prior point %r is already "
+                    "terminal (%r, outdated=%r) — idempotent no-op (#3366)",
+                    pr.existing_id, _prior_state[0], _prior_state[1])
+            elif _succ_state is not None and _is_terminal_status(*_succ_state):
+                # The successor dedup-landed on an already-dead node — the
+                # content already exists, so there is nothing to supersede
+                # onto. Same idempotent no-op, surfaced distinctly so the
+                # two causes are not conflated in the logs (#3366).
+                _logger.warning(
+                    "hosted supersede skipped: resolved successor %r is "
+                    "already terminal (%r, outdated=%r) — idempotent no-op "
+                    "(#3366)",
+                    resolved_pid, _succ_state[0], _succ_state[1])
+            else:
+                sdk.supersede_point(pr.existing_id, resolved_pid)
         else:
             point_props = {}
             if pr.point.when:

@@ -31,10 +31,12 @@ from typing import NamedTuple, Protocol, runtime_checkable
 
 from tortoise.cypher_guard import (  # #3595 `=~` guard — the ONE seam
     _guard_execute_command,
+    _guard_numeric_params,  # #7174: the store's numeric domain, same seam
     _guard_unsupported_cypher,
     _skip_cypher_quoted,  # noqa: F401  re-export: the scanner's public test surface
     _unsupported_cypher_operator,  # noqa: F401  re-export
     guarded_client,
+    tolerates_altered_numbers,  # #7174/#5011: the replay/apply exemption
 )
 from tortoise.env_truthy import FALSY, env_flag  # #4097: the declared truthy contract
 
@@ -1853,9 +1855,14 @@ class _GuardedGraph:
     (``query``, ``ro_query``, ``_query``, ``profile``, ``explain``,
     ``execute_command``), so it does not depend on the inner handle's class to
     refuse the ``=~`` operator. NOTE the override is NOT uniform: only
-    ``query`` applies the bulk-wipe check (L2) as well — the other five verbs
-    carry the operator guard only (see KNOWN GAPS in the module comment
-    above). ``__getattr__`` below forwards only the remaining non-query
+    ``query`` applies the bulk-wipe check (L2) as well. The five query verbs
+    (``query``, ``ro_query``, ``_query``, ``profile``, ``explain``) carry BOTH
+    pre-dispatch refusals — the #3595 operator guard and, since #7174, the
+    numeric-domain guard on their ``params`` — while ``execute_command`` carries
+    the operator guard only (a raw command has no params map to walk; the
+    vendor inlines params into the statement text instead — see
+    ``cypher_guard._guard_numeric_params``). See KNOWN GAPS in the module
+    comment above. ``__getattr__`` below forwards only the remaining non-query
     attributes (``name``, ``delete``, ``schema``, ...) to the underlying handle.
     """
 
@@ -1872,6 +1879,10 @@ class _GuardedGraph:
         # ``cypher_guard._guard_unsupported_cypher`` — shared with the guarded
         # handles so the two paths cannot drift.
         _guard_unsupported_cypher(cypher)
+        # #7174: the same shared refusal the guarded handles apply — the numeric
+        # domain travels in PARAMS, and this wrapper must stay complete rather
+        # than rely on the inner handle's class (the #3595 precedent above).
+        _guard_numeric_params(params)
         if _is_bulk_wipe(cypher):
             self._proj._assert_test_graph(
                 "REFUSING to run bulk DETACH DELETE on non-test graph"
@@ -1889,12 +1900,14 @@ class _GuardedGraph:
         # holds is guarded too, but keep the projection's own wrapper complete
         # rather than relying on the inner handle's class.
         _guard_unsupported_cypher(cypher)
+        _guard_numeric_params(params)
         return self._g.ro_query(cypher, params=params, timeout=timeout)
 
     def _query(self, cypher: str, params=None, timeout=None, read_only=False):
         # The vendor's `query`/`ro_query` both delegate to `_query`; a caller
         # reaching `_query` directly must not slip past the refusal either.
         _guard_unsupported_cypher(cypher)
+        _guard_numeric_params(params)
         return self._g._query(
             cypher, params=params, timeout=timeout, read_only=read_only
         )
@@ -1903,10 +1916,12 @@ class _GuardedGraph:
         # PROFILE/EXPLAIN put the statement on the wire WITHOUT routing through
         # `_query`, so they carry their own refusal.
         _guard_unsupported_cypher(cypher)
+        _guard_numeric_params(params)
         return self._g.profile(cypher, params=params)
 
     def explain(self, cypher: str, params=None):
         _guard_unsupported_cypher(cypher)
+        _guard_numeric_params(params)
         return self._g.explain(cypher, params=params)
 
     def execute_command(self, *args, **kwargs):
@@ -2414,6 +2429,7 @@ from tortoise.projection.entities import (  # noqa: E402, I001
     _belief_prop_value_ok,
     _EntityHandlers,
     _is_persistable_prop_value,
+    _usable_instant,
 )
 from tortoise.projection.edges import _EdgeHandlers  # noqa: E402
 from tortoise.projection.grounding import _GroundingMixin  # noqa: E402
@@ -2667,19 +2683,34 @@ _NO_POINT_FOLD = _NO_PROJECTION_FOLD | frozenset({
 # A node is owned by its (graph label, id) pair. Both the rebuild survivor
 # anchor (``last_recreate_seq``) and the replay fold (``_fold_entity_mutation``
 # → ``_delete_entity_by_id``) key on that pair, so a delete can never be
-# suppressed by — or match — a node of another kind. For MUTATION and DELETE
-# this table is the only declaration; the label→key mapping for RESOLUTION is a
-# deliberate SUPERSET declared separately at ``_RESOLVE_BRANCHES`` (which adds
-# ("Source", "url") for url-only ingestion stubs) and mirrored again in
-# ``navigation._ROOT_BRANCHES`` — so do NOT read this as the only label→key
-# table in the codebase, only as the authority for mutation/delete. A journal
-# ``label`` is NEVER interpolated into the Cypher label position (it must be a
-# member of ``_CANONICAL_ENTITY_LABELS``, else the fold falls back to the legacy
-# id-wide delete). Mirrored by the live writers ``sdk._delete_entity`` and
-# ``sdk._update_entity``.
+# suppressed by — or match — a node of another kind. This table is the PRIMARY
+# identity key per label. A label's identity is an OR-SET: the label→key mapping
+# for RESOLUTION is the deliberate SUPERSET declared at ``_RESOLVE_BRANCHES``
+# (which adds ("Source", "url") for url-only ingestion stubs) and mirrored again
+# in ``navigation._ROOT_BRANCHES``; the MUTATION/DELETE OR-set is this table PLUS
+# ``_CANONICAL_ENTITY_SECONDARY_ID_PROPS`` — so do NOT read this as the only
+# label→key table in the codebase, only as the primary authority for
+# mutation/delete. A journal ``label`` is NEVER interpolated into the Cypher
+# label position (it must be a member of ``_CANONICAL_ENTITY_LABELS``, else the
+# fold falls back to the legacy id-wide delete). Mirrored by the live writers
+# ``sdk._delete_entity`` and ``sdk._update_entity``.
 _CANONICAL_ENTITY_ID_PROPS: tuple[tuple[str, str], ...] = (
     ("Point", "id"), ("Subject", "id"), ("Object", "id"),
     ("Source", "id"), ("Event", "eventId"),
+)
+#: #4649 — the SECOND identity key a canonical label may be addressed by, so the
+#: write paths agree with the read path on what an entity's identity is. Only
+#: ``Source`` has one: ``url`` is a Source's canonical identity (``#5012``), and
+#: ``_link_source``/``_mint_source_stub`` mint url-only stubs with NO ``id`` —
+#: yet ``_CANONICAL_ENTITY_ID_PROPS`` matches them by ``id``, so every write to
+#: one matched nothing and ``_update_entity``'s ``return self._get_entity(...)``
+#: handed the caller the UNCHANGED node with no error (a silent write loss).
+#: The read path has always resolved them (``_RESOLVE_BRANCHES``'s own comment
+#: names the case). Consumers try the primary key first and fall back to these
+#: ONLY on a miss, so the primary MATCH text — and its #327 index plan — is
+#: unchanged for every id-carrying node.
+_CANONICAL_ENTITY_SECONDARY_ID_PROPS: tuple[tuple[str, str], ...] = (
+    ("Source", "url"),
 )
 _CANONICAL_ENTITY_LABELS: frozenset[str] = frozenset(
     label for label, _ in _CANONICAL_ENTITY_ID_PROPS)
@@ -2687,6 +2718,22 @@ _ENTITY_ID_PROP: dict[str, str] = {
     label: prop for label, prop in _CANONICAL_ENTITY_ID_PROPS}
 _NON_POINT_ENTITY_LABELS: frozenset[str] = (
     _CANONICAL_ENTITY_LABELS - {"Point"})
+_CANONICAL_ENTITY_SECONDARY_BY_LABEL: dict[str, tuple[str, ...]] = {
+    label: tuple(prop for lbl, prop in _CANONICAL_ENTITY_SECONDARY_ID_PROPS
+                 if lbl == label)
+    for label, _ in _CANONICAL_ENTITY_ID_PROPS
+}
+
+
+def secondary_entity_id_props(label: str) -> tuple[str, ...]:
+    """The non-primary identity keys ``label`` may be matched by (#4649).
+
+    Empty for every label whose identity is its single primary key. Used by the
+    live writers (``sdk._update_entity``/``_delete_entity``), the replay folds
+    (``_delete_entity_by_id``/``_fold_entity_mutation``) and the delete preview
+    so producer and fold consume ONE declaration and cannot drift.
+    """
+    return _CANONICAL_ENTITY_SECONDARY_BY_LABEL.get(label, ())
 
 # ── EntityMutated op vocabulary (#3299 / #3312 / #3377) ────────────────────
 # THE one declaration. tortoise/live.py's #2901 lesson applies verbatim: a
@@ -3078,11 +3125,21 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
             # one — a divergence on EVERY retract, and the #330 parity
             # contract this function owns. ``VACUITY_BELIEF`` is the single
             # declaration both arms render, so they cannot re-drift.
-            # (``updatedAt`` is the one prop this fold still does not
-            # stamp; that divergence is a #5048 symptom — recorded from
-            # #4666 — not this one.)
+            # #5048 (recorded from #4666): ``updatedAt`` is now stamped too,
+            # from the RECORD's instant. Before this it was the one prop this
+            # fold did not stamp at all, so the pure fold kept the point's
+            # ORIGINAL stamp while ``rebuild_all`` held this replay's clock
+            # and the live node held the producer's — three values for one
+            # retraction. The gate is ``_usable_instant`` — the SAME predicate
+            # the graph arm (``_retract``) uses, deliberately shared rather
+            # than re-spelled, because ``_writable_id`` alone ACCEPTS the
+            # empty string: with two spellings, a record carrying ``ts=""``
+            # had this fold write ``""`` while the graph arm wrote no column
+            # at all (both are now "no usable instant stated").
             p["status"] = "retracted"
             p.update(VACUITY_BELIEF)
+            if _usable_instant(ev.get("ts")):
+                p["updatedAt"] = ev["ts"]
     elif t == "PointsMerged":
         # #331 (review r2): `or []` also covers an explicit "merge_ids": null
         # in the log — dict.get(key, []) only covers the missing key.
@@ -3315,7 +3372,7 @@ _JOURNAL_CREATING_EVENT_TYPES = frozenset({
 # REMOVE. Replay's ``EntityMutated`` op=delete replays ``_delete_entity_by_id``
 # — #3860 SCOPED it to the record's own canonical ``label``, so a delete record
 # removes that ONE label; only a MISSING/unknown label falls back to the legacy
-# id-wide delete across all six. The live ``_delete_entity`` is the same six and
+# id-wide delete across all five. The live ``_delete_entity`` is the same five and
 # documents "Session/APIKey/Org/Tag nodes are intentionally NOT deleted".
 # ``PointsMerged`` deletes Points only. So a journaled hard delete can NEVER
 # remove a ``:Session`` node, and the staleness rule must not suppress a
@@ -3380,7 +3437,7 @@ def journal_hard_delete_seqs(events) -> dict[str, dict[str, int]]:
     * ``EntityMutated`` op=delete replays ``_delete_entity_by_id``, which
       #3860 scoped to the record's own canonical ``label`` — that label ALONE
       gets the seq. A missing/unknown label falls back to the legacy id-wide
-      delete across ``_HARD_DELETE_LABELS`` (all six get the seq), matching
+      delete across ``_HARD_DELETE_LABELS`` (all five get the seq), matching
       ``_delete_entity_by_id(label=None)``.
     * ``PointsMerged`` replays ``_delete`` — a ``:Point`` only
       (``_POINTS_MERGED_LABELS``), so only ``Point`` gets the seq.
@@ -3996,13 +4053,32 @@ class FalkorProjection(
             used, cap = pressure
             detail = (f"used_memory {_fmt_bytes(used)} of maxmemory "
                       f"{_fmt_bytes(cap)}")
+        # The remedy must NOT restate the ownership policy in prose: a name
+        # list here is wrong in one direction or the other, and nothing keeps
+        # it in sync with the predicate that owns the rule. So the message
+        # names no delete-authorizing residue family, promises no reclaim, and
+        # offers no pass — `_sweep_legacy_strays` runs only when an operator
+        # invokes it, so naming its env lever would be advice that frees nothing.
+        #
+        # It also makes no claim about which graph commands the server refuses:
+        # upstream's flag semantics are not what #2979's log line suggests (that
+        # line is the DETACH `safe_graph_delete` sends before `graph.delete()`),
+        # and an operator message should not assert them either way.
+        #
+        # The only names it gives are the ones `TortoiseSDK.test_guard` blocks
+        # (tortoise/sdk.py) — `tortoise` exact and `tortoise_restored*` by
+        # prefix. `is_legacy_residue` refuses a superset; that case is covered
+        # by "do not hand-pick", not by enumeration.
         return (
             "DB refused writes on open: the graph is INTACT but the server "
             f"has reached its memory ceiling ({detail}). This is NOT "
-            "corruption — do NOT rebuild. Free memory first: delete "
-            "ephemeral test graphs (GRAPH.LIST, then GRAPH.DELETE test_*), "
-            "or raise / relieve the container's --maxmemory. See #2981 for "
-            "the shared-lane form of this."
+            "corruption — do NOT rebuild. Remedy: raise / relieve the "
+            "container's --maxmemory. Do NOT hand-pick names from "
+            "GRAPH.LIST to free memory instead: GRAPH.DELETE cannot be "
+            "undone, and a name you cannot attribute is not yours to delete. "
+            "Never delete the "
+            "production graph tortoise or a tortoise_restored* snapshot, and "
+            "do NOT FLUSHALL. See #2981 for the shared-lane form of this."
         )
 
     def _backend_failure_message(
@@ -4230,6 +4306,7 @@ class FalkorProjection(
             return {**ev, **ev["point"]}
         return ev
 
+    @tolerates_altered_numbers
     def apply(self, event: dict) -> None:
         # #3947 review: read the capture's structural directive from the RAW
         # envelope, BEFORE `_norm` splices the point payload over it. `_norm`
@@ -4301,7 +4378,9 @@ class FalkorProjection(
                 # #331 (review r2): NO event_id fallback — an event id is not
                 # a point id, and the fallback diverged from _apply_one (the
                 # fold is the single source of truth, module contract).
-                self._retract(rid)
+                # #5048: the RECORDED instant, so the rebuilt `updatedAt` is
+                # the producer's, not this replay's clock.
+                self._retract(rid, now=ev.get("ts"))
         elif t == "PointPromoted":
             # #785: re-apply the full promoted snapshot (status live +
             # reviewed + promotedAt) — rebuild parity for reviewer-gated
@@ -4597,6 +4676,7 @@ class FalkorProjection(
             "RDB backup, instead of trusting this rebuild."
         )
 
+    @tolerates_altered_numbers
     def rebuild(self, log, *, confirm_destructive: bool = False) -> None:
         """Wipe the graph and replay one EventLog. DESTRUCTIVE.
 
@@ -4697,6 +4777,7 @@ class FalkorProjection(
             "db_path": _prewipe_db_path_identity(self._path),
         }
 
+    @tolerates_altered_numbers
     def rebuild_all(self, log_dir: str, *,
                     confirm_destructive: bool = False) -> dict:
         """Rebuild from all .jsonl files in a directory. Returns counts.
@@ -5737,7 +5818,9 @@ class FalkorProjection(
                     # tombstone still applies.
                     _retr_anchor = last_ann_drop_seq.get(("Point", rid))
                     if _retr_anchor is None or seq > _retr_anchor:
-                        self._retract(rid)
+                        # #5048: the RECORDED instant — parity with
+                        # `rebuild_all`'s pass-1b and with the live writer.
+                        self._retract(rid, now=ev.get("ts"))
             elif t == "PointPromoted":
                 # #785: rebuild parity — re-apply the promoted snapshot.
                 p = ev.get("point")
@@ -7790,9 +7873,11 @@ class FalkorProjection(
         legacy nodes exist), so matching ``Event {eventId:$id}`` reproduces
         the legacy ``n.id = $id`` lookup for Events exactly.
 
-        Per-call-site OR-sets (issue #327 scope table):
+        Per-call-site OR-sets (issue #327 scope table; ``_update/_delete_entity``
+        widened to include ``url`` by #4649 — the write path must agree with the
+        read path on what a Source's identity is):
         - _get_entity:              id | eventId | url
-        - _update/_delete_entity:   id | eventId
+        - _update/_delete_entity:   id | eventId | url (Source only by url)
         - create_edge source:       id | eventId | url ; target: id | eventId
         - create_about_edge source: id ; target: id | eventId
         - create_owned_by / about stub links: id only
@@ -9028,16 +9113,17 @@ class FalkorProjection(
 
         The replay counterpart of the SDK's live ``_delete_entity`` (#3299).
         The id predicate is the identity as written (``id`` for
-        Point/Subject/Object/Document/Source, ``eventId`` for Event) — never
-        re-derived from a live node (the node is already gone). Returns the
+        Point/Subject/Object, ``id``|``url`` for Source — its OR-set, #4649 —
+        and ``eventId`` for Event) — never re-derived from a live node (the
+        node is already gone). Returns the
         node count deleted (0 = a fold-miss: the entity was already absent).
 
         #3860: identity is (kind, id). When ``label`` is one of the canonical
-        six the delete is SCOPED to that kind — a delete record owns only the
+        five the delete is SCOPED to that kind — a delete record owns only the
         node kind it names, so it can never destroy a foreign-kind node that
         happens to share the id. ``label=None`` (missing/unknown, i.e. a
         malformed or pre-#3299 raw record) keeps the legacy id-wide delete
-        across all six labels, preserving the "a delete must survive replay"
+        across all five labels, preserving the "a delete must survive replay"
         guarantee for every record shape. The label is NEVER interpolated from
         the journal: only members of ``_CANONICAL_ENTITY_ID_PROPS`` reach the
         Cypher label position.
@@ -9048,13 +9134,22 @@ class FalkorProjection(
             branches = _CANONICAL_ENTITY_ID_PROPS
         total = 0
         for label, prop in branches:
-            r = self.g.query(
-                f"MATCH (n:{label} {{{prop}:$id}}) DETACH DELETE n "
-                f"RETURN count(n)",
-                params={"id": id_val},
-            )
-            if r.result_set:
-                total += r.result_set[0][0] or 0
+            deleted = 0
+            # #4649: the identity is an OR-SET — primary key first (the MATCH
+            # text and its #327 index plan are unchanged), the label's
+            # SECONDARY key only when the primary missed. Without this a
+            # url-only :Source (no `id`; minted by `_link_source`) folds to a
+            # MISS and `rebuild_all` resurrects it from the creation record.
+            for match_prop in (prop, *secondary_entity_id_props(label)):
+                r = self.g.query(
+                    f"MATCH (n:{label} {{{match_prop}:$id}}) DETACH DELETE n "
+                    f"RETURN count(n)",
+                    params={"id": id_val},
+                )
+                deleted = (r.result_set[0][0] or 0) if r.result_set else 0
+                if deleted:
+                    break
+            total += deleted
         return total
 
     def _fold_entity_mutation(self, ev: dict) -> int:
@@ -9121,11 +9216,20 @@ class FalkorProjection(
                 _warn_entity_mutation_fold_miss(op, rid, label, ev.get("event_id"))
                 return 0
             prop = _ENTITY_ID_PROP[label]
-            r = self.g.query(
-                f"MATCH (n:{label} {{{prop}:$id}}) SET n += $s RETURN count(n)",
-                params={"id": rid, "s": state},
-            )
-            matched = r.result_set[0][0] if r.result_set else 0
+            matched = 0
+            # #4649: OR-SET — primary key first, the label's secondary key only
+            # on a miss (a url-only :Source has no `id`). Without the fallback
+            # the record folds to a MISS and `rebuild_all` reverts the write
+            # the live producer performed.
+            for match_prop in (prop, *secondary_entity_id_props(label)):
+                r = self.g.query(
+                    f"MATCH (n:{label} {{{match_prop}:$id}}) SET n += $s "
+                    "RETURN count(n)",
+                    params={"id": rid, "s": state},
+                )
+                matched = (r.result_set[0][0] or 0) if r.result_set else 0
+                if matched:
+                    break
             if not matched:
                 _warn_entity_mutation_fold_miss(op, rid, label, ev.get("event_id"))
             return matched or 0

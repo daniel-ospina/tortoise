@@ -252,6 +252,7 @@ test("buildCapturePayload carries harness + session_id (the idempotency key)", (
     source: "2026-01-01_abc",
     machineId: "deadbeef",
     model: "deepseek/deepseek-v4-flash",
+    captureLane: "hook",
   });
   assert.equal(payload.harness, HARNESS);
   assert.equal(payload.session_id, "sess-42");
@@ -262,6 +263,28 @@ test("buildCapturePayload carries harness + session_id (the idempotency key)", (
   // Session property is what the dashboard renders; dropping this line shipped
   // silently because no assertion read it (mutation: delete it — suite green).
   assert.equal(payload.model, "deepseek/deepseek-v4-flash");
+  // #3516 §B: the ENTRY's lane reaches the wire. The in-process hook spools
+  // with 'hook'; dropping this stores no lane and the hook-liveness check
+  // reports a WORKING hook as not-live (mutation: delete it — must go red).
+  assert.equal(payload.capture_lane, "hook");
+});
+
+test("buildCapturePayload forwards the ENTRY's lane, never a hardcoded one", () => {
+  // #3516 §B: the lane describes the spool ENTRY's producer, not the process
+  // doing the draining. flushSpool drains entries written by other legs, so a
+  // hardcoded 'hook' would stamp a lane on a lane-less backfill/import entry —
+  // the false-POSITIVE half of falsifiability.
+  const base = {
+    sessionId: "s",
+    turns: [{ role: "user" as const, content: "x" }],
+    source: "t",
+    machineId: "m",
+  };
+  assert.equal(buildCapturePayload({ ...base, captureLane: "hook" }).capture_lane, "hook");
+  assert.ok(
+    !("capture_lane" in buildCapturePayload(base)),
+    "a lane-less entry was stamped with a lane on the wire",
+  );
 });
 
 test("sourceName is a basename only (never a full path)", () => {
@@ -571,6 +594,10 @@ test("an interrupted session (no session_shutdown) is filed at the next session_
   const spooled = readSpoolEntry(spool, "sess-A");
   assert.ok(spooled, "the interrupted session's turns must be durable in the spool");
   assert.equal(spooled.turns_count, SPOOL_TURNS.length);
+  // #3516 §B: the in-process hook's entry claims its lane AT THE WRITE. Without
+  // this assertion, deleting `captureLane: "hook"` from `spoolSnapshot` leaves
+  // the whole suite green while a WORKING hook files as not-live.
+  assert.equal(spooled.capture_lane, "hook", "the hook's spool entry lost its lane");
   assert.deepEqual(readSpoolTurns(spool, "sess-A"), SPOOL_TURNS);
 
   // Session B (a later Pi run) starts: the replay opportunity.
@@ -606,6 +633,253 @@ test("replaying a spooled session twice produces one session and posts once", as
   assert.equal(second.skipped, 1, "the replay must be a recorded skip, not a second POST");
   assert.equal(server.posts(), 1, "replaying the SAME content must issue ONE POST");
   assert.equal(server.sessions.size, 1, "and the server must hold ONE session");
+});
+
+test("the spooled lane survives a drain and is never fabricated", async () => {
+  // #3516 §B. The Pi hook spools WITH a lane; the drain happens later and may
+  // be run by the PYTHON leg (`tortoise session drain`) over this same
+  // directory. Two falsifiability bugs, in opposite directions:
+  //   (a) the entry's lane is dropped on the drain → a WORKING hook reads as
+  //       not-live (false-NEGATIVE);
+  //   (b) a lane-less import entry drained here is stamped 'hook' → a capture
+  //       that never saw a hook reads as live (false-POSITIVE).
+  const spool = tmpSpool();
+  const server = recordingServer();
+  writeSpoolEntry(spool, {
+    ...snapshot("sess-laned", [{ role: "user", content: "hi" }]),
+    captureLane: "hook",
+  });
+  writeSpoolEntry(spool, snapshot("sess-import", [{ role: "user", content: "yo" }]));
+  // A lane-less re-snapshot must not ERASE a lane already on disk. The turns
+  // must GROW: an identical-content re-snapshot short-circuits on the dedup
+  // guard and never reaches the meta construction, so it would prove nothing.
+  writeSpoolEntry(spool, {
+    ...snapshot("sess-laned", [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "hello" },
+    ]),
+  });
+
+  assert.equal(
+    readSpoolEntry(spool, "sess-laned")?.capture_lane,
+    "hook",
+    "a lane-less re-snapshot erased the lane",
+  );
+
+  const res = await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+  assert.equal(res.filed, 2, "both entries should be filed");
+  assert.equal(server.sessions.get("sess-laned")?.capture_lane, "hook");
+  assert.ok(
+    !("capture_lane" in (server.sessions.get("sess-import") ?? {})),
+    "a lane-less import entry was stamped with a lane on the wire",
+  );
+});
+
+test("a lane upgrade survives the dedup and refiles an ALREADY FILED entry", async () => {
+  // #3516 §B. `sameContent` and `filed_key` are both content-addressed and the
+  // lane is not part of the content, so an entry first captured lane-less can
+  // be covered by a byte-identical hook re-snapshot: without the upgrade rule
+  // the write is a no-op AND the drain skips the entry forever, stranding a
+  // working hook as not-live. Mirrors
+  // tests/test_capture_lane_3516.py::test_spool_lane_upgrade_refiles_an_already_filed_entry.
+  const spool = tmpSpool();
+  const server = recordingServer();
+  const turns = [{ role: "user" as const, content: "same" }];
+
+  writeSpoolEntry(spool, snapshot("sess-upgrade", turns)); // lane-less
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+  assert.ok(
+    readSpoolEntry(spool, "sess-upgrade")?.filed_key,
+    "the first filing left no marker — the test could not prove anything",
+  );
+
+  const res = writeSpoolEntry(spool, {
+    ...snapshot("sess-upgrade", turns),
+    captureLane: "hook",
+  });
+  assert.equal(res.written, true, "the identical-content dedup swallowed the lane upgrade");
+  assert.equal(
+    readSpoolEntry(spool, "sess-upgrade")?.filed_key,
+    undefined,
+    "the filing marker was not invalidated — the entry would be skipped forever",
+  );
+
+  const second = await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 2 });
+  assert.equal(second.filed, 1, "the lane upgrade never reached the wire");
+  assert.equal(server.sessions.get("sess-upgrade")?.capture_lane, "hook");
+});
+
+test("a lane upgrade during the POST window is not swallowed", async () => {
+  // The drain's CAS stamped `filed_key` on a CONTENT digest, which excludes the
+  // lane — so an upgrade landing mid-POST was cancelled and the lane stranded
+  // forever. `capture_key` is content-derived, so the CAS identity needs the
+  // lane too.
+  const spool = tmpSpool();
+  const sid = "sess-cas";
+  const turns = [{ role: "user" as const, content: "same" }];
+  writeSpoolEntry(spool, snapshot(sid, turns)); // lane-less
+  let first = true;
+  const fetchImpl = async () => {
+    if (first) {
+      first = false;
+      // the hook re-snapshots the SAME entry while this POST is in flight
+      writeSpoolEntry(spool, { ...snapshot(sid, turns), captureLane: "hook" });
+    }
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: fetchImpl as never, now: 1 });
+  const meta = readSpoolEntry(spool, sid);
+  assert.equal(meta?.capture_lane, "hook");
+  assert.notEqual(
+    meta?.filed_key,
+    meta?.capture_key,
+    "the CAS re-filed a lane-upgraded entry — the lane can never be re-POSTed",
+  );
+
+  const server = recordingServer();
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 2 });
+  assert.equal(
+    server.sessions.get(sid)?.capture_lane,
+    "hook",
+    "the lane was STRANDED — the drain skipped the upgraded entry forever",
+  );
+});
+
+test("a lane arriving AFTER a lane-less filing is never skipped", async () => {
+  // `filed_key` is content-derived and says nothing about the LANE, so the skip
+  // must also require the recorded `filed_lane` to match — otherwise a lane-less
+  // filing masks a lane that appears later and the lane is stranded.
+  const spool = tmpSpool();
+  const sid = "sess-filed-lane";
+  const turns = [{ role: "user" as const, content: "same" }];
+  writeSpoolEntry(spool, snapshot(sid, turns));
+
+  const server = recordingServer();
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+  const filed = readSpoolEntry(spool, sid)!;
+  assert.equal(filed.filed_key, filed.capture_key);
+  // `JSON.stringify` drops an `undefined` value, so a lane-less filing leaves
+  // the key absent — absent and `undefined` must compare equal in the skip.
+  assert.equal(filed.filed_lane, undefined, "the filing did not record the delivered lane");
+  // The lane appears after the filing (the CAS read→write instant can do this).
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  writeFileSync(metaPath, `${JSON.stringify({ ...filed, capture_lane: "hook" }, null, 2)}\n`);
+
+  const later = recordingServer();
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: later.fetchImpl, now: 2 });
+  assert.equal(
+    later.sessions.get(sid)?.capture_lane,
+    "hook",
+    "a lane arriving after the filing was skipped — it is stranded",
+  );
+  assert.equal(readSpoolEntry(spool, sid)?.filed_lane, "hook");
+});
+
+test("a PYTHON-written null filed_lane still skips (the legs share one spool dir)", async () => {
+  // The two legs read each other's meta. JSON has no `undefined`, so before the
+  // fix the Python leg stored `"filed_lane": null` for a lane-less filing while
+  // this leg omits the key — and this leg's strict `===` read `null !==
+  // undefined`, bypassed the skip, and re-POSTed an entry Python had already
+  // filed (a cross-leg amplification). Python now OMITS the key; this pins the
+  // read-side tolerance that makes a Python-written `null` safe either way.
+  const spool = tmpSpool();
+  const sid = "sess-python-null";
+  const turns = [{ role: "user" as const, content: "same" }];
+  writeSpoolEntry(spool, snapshot(sid, turns));
+
+  const first = recordingServer();
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: first.fetchImpl, now: 1 });
+  const filed = readSpoolEntry(spool, sid)!;
+  assert.equal(filed.filed_key, filed.capture_key, "not filed at all");
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  writeFileSync(metaPath, `${JSON.stringify({ ...filed, filed_lane: null }, null, 2)}\n`);
+  assert.equal(readSpoolEntry(spool, sid)?.filed_lane, null, "fixture must carry null");
+
+  const second = recordingServer();
+  const summary = await flushSpool(TEST_CFG, { dir: spool, fetchImpl: second.fetchImpl, now: 2 });
+  assert.equal(second.sessions.size, 0, "a Python-filed lane-less entry was re-POSTed");
+  assert.equal(summary.skipped, 1);
+});
+
+test("an empty STORED lane is filled in (truthy, not nullish)", () => {
+  // The only input that distinguishes `||` from `??`: a stored EMPTY lane with a
+  // truthy new one. `"" || "hook"` -> "hook"; `??` would omit the key. An empty
+  // lane is reachable only from a crafted/corrupt meta, written here directly.
+  const spool = tmpSpool();
+  const sid = "sess-empty-stored";
+  writeSpoolEntry(spool, snapshot(sid, [{ role: "user", content: "a" }]));
+  const crafted = readSpoolEntry(spool, sid)!;
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  writeFileSync(metaPath, `${JSON.stringify({ ...crafted, capture_lane: "" }, null, 2)}\n`);
+  assert.equal(readSpoolEntry(spool, sid)?.capture_lane, "");
+
+  writeSpoolEntry(spool, {
+    ...snapshot(sid, [
+      { role: "user", content: "a" },
+      { role: "assistant", content: "b" },
+    ]),
+    captureLane: "hook",
+  });
+  assert.equal(
+    readSpoolEntry(spool, sid)?.capture_lane,
+    "hook",
+    "an empty stored lane was not filled in — nullish semantics, not truthy",
+  );
+});
+
+test("a later store_sync snapshot cannot DOWNGRADE a stored hook lane", () => {
+  // Pins the pinned monotone contract (the delivery lane is monotone) plus
+  // first-writer-wins parity with the server's coalesce: the spool's lane is
+  // what gets DELIVERED, so a later snapshot may only FILL IN an absent lane.
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, {
+    ...snapshot("sess-mono", [{ role: "user", content: "a" }]),
+    captureLane: "hook",
+  });
+  writeSpoolEntry(spool, {
+    ...snapshot("sess-mono", [
+      { role: "user", content: "a" },
+      { role: "assistant", content: "b" },
+    ]),
+    captureLane: "store_sync",
+  });
+  assert.equal(
+    readSpoolEntry(spool, "sess-mono")?.capture_lane,
+    "hook",
+    "a store_sync snapshot downgraded a stored hook lane",
+  );
+});
+
+test("a lane-FUL identical re-snapshot is a no-op (upgrade is not a rewrite rule)", () => {
+  // Pins the `!prior?.capture_lane` half of `laneUpgrade`. Without it EVERY
+  // identical re-snapshot would rewrite the meta and clear `filed_key`, so the
+  // same conversation would be re-POSTed at turn cadence — the amplification
+  // the dedup guard exists to prevent.
+  const spool = tmpSpool();
+  const turns = [{ role: "user" as const, content: "same" }];
+  writeSpoolEntry(spool, { ...snapshot("sess-noop", turns), captureLane: "hook" });
+  const res = writeSpoolEntry(spool, { ...snapshot("sess-noop", turns), captureLane: "hook" });
+  assert.equal(res.written, false, "a lane-ful identical re-snapshot must be a no-op");
+  assert.equal(readSpoolEntry(spool, "sess-noop")?.capture_lane, "hook");
+});
+
+test("an empty-string lane carries the stored lane forward (TRUTHY, not nullish)", () => {
+  // Pins the `||` (NOT `??`). `"" ?? prior` resolves to `""`, the spread then
+  // omits the key, and this leg ERASES a lane its Python twin preserves — and
+  // the legs share one spool directory.
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, {
+    ...snapshot("sess-empty", [{ role: "user", content: "hi" }]),
+    captureLane: "hook",
+  });
+  writeSpoolEntry(spool, {
+    ...snapshot("sess-empty", [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "grown" },
+    ]),
+    captureLane: "",
+  });
+  assert.equal(readSpoolEntry(spool, "sess-empty")?.capture_lane, "hook");
 });
 
 test("the capture key is content-addressed: changed turns get a new key, a replay does not", () => {

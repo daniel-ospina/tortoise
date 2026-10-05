@@ -67,6 +67,14 @@ def _seed_registry_node(db_path: str) -> None:
 def _run(cmd: list[str], env: dict | None = None) -> subprocess.CompletedProcess:
     full_env = dict(os.environ)
     full_env.pop("TORTOISE_DB_URI", None)
+    # #4071: the embedded test lane now carries a session-wide
+    # TORTOISE_DB_PATH redirect (a guard keeping tests off the OWNER'S real
+    # store ~/.tortoise/tortoise.db). Popping it here is what makes this
+    # helper's "no DB env" precondition TRUE rather than AMBIENT: before the
+    # guard existed these tests passed only because nothing had set a path,
+    # which is not a property they established. Callers that need a path pass
+    # it explicitly (below), or on the command line via --db-path.
+    full_env.pop("TORTOISE_DB_PATH", None)
     full_env.pop("SUPABASE_URL", None)
     full_env.pop("SUPABASE_SERVICE_ROLE_KEY", None)
     full_env.pop("SUPABASE_SERVICE_KEY", None)
