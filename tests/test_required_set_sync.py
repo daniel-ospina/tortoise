@@ -145,7 +145,7 @@ def test_the_real_gate_observes_exactly_the_legs_its_table_names(guard):
     """`needs:` and the `LEGS` heredoc describe the SAME set in the real workflow."""
     needs, legs = guard.gate_legs()
     assert set(needs) == legs
-    assert len(needs) == len(legs) == 10, (
+    assert len(needs) == len(legs) == 11, (
         "python-ci-gate's claim changed shape — update the enumeration's "
         "coverage accounting for the new leg")
     for leg in ("test", "test-slow", "test-carve-out"):

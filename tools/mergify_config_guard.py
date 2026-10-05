@@ -157,6 +157,13 @@ CLAUSE_IDS = ("i", "ii", "iii", "iv", "v", "vi", "vii", "viii")
 DECLARATION_HOME_CHECKERS = (
     "tools/mergify_config_guard.py",
     "tests/test_mergify_config_guard.py",
+    # #6144: the required-set guard and its test CROSS-CHECK the declaration home
+    # against `.mergify.yml` and live protection. They read it to assert
+    # EQUALITY, never to take behaviour from it, so they are checkers in exactly
+    # the sense this exemption exists for. Registered explicitly, as the design
+    # requires: an unregistered checker is indistinguishable from a reader.
+    ".github/scripts/check-required-set.py",
+    "tests/test_required_set_sync.py",
 )
 
 EXIT_OK, EXIT_DIVERGED, EXIT_UNAVAILABLE = 0, 1, 2
