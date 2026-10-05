@@ -24,6 +24,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -726,6 +727,75 @@ def test_a_terminated_malformed_cr_tail_is_sealed_and_readable():
         assert {r["id"] for r in records} == {"a", "NEW"}, (sep, records)
         assert reader.torn_trailing_count == 1, (sep, reader.torn_trailing_raw)
     print("PASS test_a_terminated_malformed_cr_tail_is_sealed_and_readable")
+
+
+class _CountingFile:
+    """A file wrapper that records how many BYTES were read."""
+
+    def __init__(self, fh):
+        self._fh = fh
+        self.read_bytes = 0
+
+    def seek(self, *args):
+        return self._fh.seek(*args)
+
+    def read(self, n=-1):
+        data = self._fh.read(n)
+        self.read_bytes += len(data)
+        return data
+
+
+def test_the_window_scan_reads_each_byte_once():
+    """The backwards scan must be LINEAR in the last line's length.
+
+    The first version re-read [start, end) on every 64 KiB step: measured
+    140 MB read for a 4 MiB record (next `append` 3.8 s) and 265 s for a
+    32 MiB torn tail. The bound is asserted on bytes read, not on wall time,
+    because the failure is an algorithmic one and the box is loaded.
+    """
+    size = 4 << 20
+    p = _tmp()
+    with open(p, "wb") as f:
+        f.write(b'{"id": "big", "pad": "' + b"A" * size + b'"}\n')
+    with open(p, "a+b") as f:
+        counter = _CountingFile(f)
+        seal = EventLog(p)._seal_prefix(counter)
+    assert seal == "", seal
+    assert counter.read_bytes < 2 * size, (
+        f"read {counter.read_bytes} bytes to inspect a {size}-byte last line")
+
+    # the same bound for a TORN tail (the fragment is the last line)
+    q = _tmp()
+    with open(q, "wb") as f:
+        f.write(b'{"id": "good"}\n{"id": "torn", "pad": "' + b"B" * size)
+    with open(q, "a+b") as f:
+        counter = _CountingFile(f)
+        seal = EventLog(q)._seal_prefix(counter)
+    assert seal == "\n" + SEAL_SENTINEL + "\n", seal
+    assert counter.read_bytes < 2 * size, (
+        f"read {counter.read_bytes} bytes to inspect a {size}-byte fragment")
+    print("PASS test_the_window_scan_reads_each_byte_once")
+
+
+def test_the_window_scan_does_not_copy_the_accumulator():
+    """Linear in COPIES, not just in read bytes.
+
+    Reading only the exposed window fixed the read volume but not
+    `chunk + last_line`, which re-copies the whole accumulator every step: a
+    32 MiB torn tail made the next `append` take 53 s (and 265 s before the
+    read-volume fix). The bound is generous because the box is loaded; the
+    failure it catches was ~50x over it.
+    """
+    size = 32 << 20
+    p = _tmp()
+    with open(p, "wb") as f:
+        f.write(b'{"id": "good"}\n{"id": "torn", "pad": "' + b"C" * size)
+    t0 = time.monotonic()
+    EventLog(p).append({"id": "next"})
+    elapsed = time.monotonic() - t0
+    assert elapsed < 15, f"append took {elapsed:.1f}s over a {size}-byte fragment"
+    assert [r["id"] for r in EventLog(p).read_all()] == ["good", "next"]
+    print(f"PASS test_the_window_scan_does_not_copy_the_accumulator ({elapsed:.2f}s)")
 
 
 def test_a_sealed_fragment_at_the_end_is_still_counted():

@@ -537,18 +537,27 @@ class EventLog:
             f.seek(size - 2)
             if f.read(1) == b"\r":
                 end = size - 2          # the \r\n PAIR is the terminator
-        last_line = b""
+        parts: list[bytes] = []
         window = 1 << 16
-        start = max(0, end - window)
-        while True:
-            f.seek(start)
-            chunk = (f.read(end - start)
+        start = end
+        while start > 0:
+            # Each byte is read and copied ONCE. Reading only the newly
+            # exposed window made the work linear in READ bytes, but
+            # `chunk + last_line` copied the whole accumulator on every step,
+            # which is quadratic in COPIES — measured at 13 s for a 16 MiB
+            # record and 53 s for a 32 MiB torn tail on the next `append`.
+            # Chunks arrive newest-first, so the join is reversed.
+            wstart = max(0, start - window)
+            f.seek(wstart)
+            chunk = (f.read(start - wstart)
                      .replace(b"\r\n", b"\n").replace(b"\r", b"\n"))
             idx = chunk.rfind(b"\n")
-            if idx >= 0 or start == 0:
-                last_line = chunk[idx + 1:] if idx >= 0 else chunk
+            if idx >= 0:
+                parts.append(chunk[idx + 1:])
                 break
-            start = max(0, start - window)
+            parts.append(chunk)
+            start = wstart
+        last_line = b"".join(reversed(parts))
         text = _decode_line(last_line)
         if text is None:
             # Undecodable is MALFORMED, never empty: collapsing it to ""
