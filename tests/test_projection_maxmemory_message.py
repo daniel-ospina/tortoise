@@ -140,9 +140,9 @@ def test_write_refusal_remedy_does_not_hand_roll_the_ownership_policy(monkeypatc
           name outside that list: the real residue entry
           ``askshape_b6_live_1_33760_21`` passes both (a) and (b).
 
-    The PRESENCE properties in (c) are exact substring pins. What protects the
-    absence property overall is that the message enumerates nothing, which review
-    enforces — not these assertions.
+    The PRESENCE property in (c) is an exact substring pin; (d) is an absence
+    pin like (a) and (b). What protects those properties is review, not these
+    assertions.
     """
     monkeypatch.delenv("FLY_APP_NAME", raising=False)
     proj = _projection(probe_error=RuntimeError(_MAXMEMORY_ERROR))
@@ -162,12 +162,12 @@ def test_write_refusal_remedy_does_not_hand_roll_the_ownership_policy(monkeypatc
                   "v10fix", "tt_gate", "typeprobe", "review_rw_probe",
                   "TORTOISE_TEST_SWEEP_LEGACY"):
         assert token not in msg, (token, msg)
-    # (c) the two names `TortoiseSDK.test_guard` blocks are still named, and the
-    #     message promises no reclaim: the default pass drops the journal
-    #     INTERSECT `_SWEEP_OWNED_PREFIXES`, so "reclaims what the ownership
-    #     record lists" would be over-inclusive.
+    # (c) the two names `TortoiseSDK.test_guard` blocks are still named.
     assert "the production graph tortoise" in msg, msg
     assert "tortoise_restored* snapshot" in msg, msg
+    # (d) the message promises no reclaim: the default pass drops the journal
+    #     INTERSECT `_SWEEP_OWNED_PREFIXES`, so "reclaims what the ownership
+    #     record lists" would be over-inclusive.
     assert "reclaim" not in msg.lower(), msg
 
 
