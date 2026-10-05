@@ -13382,8 +13382,9 @@ class TortoiseSDK:
         scope is a node id). The pool is the NEAREST retrievable candidates,
         not an exact-match set: fusion scores are rank-based, so when two or
         more legs return hits every fused id scores > 0 — but a SINGLE-leg run
-        reuses the ``rrf`` field for the raw leg score (0.0 on a fulltext tie,
-        or a signature-B cosine clamped to 0.0 at search_engine.py:659), and
+        reuses the ``rrf`` field for the raw leg score (whatever a fulltext tie
+        scores, or a signature-B cosine clamped to 0.0 in ``run_vector_query``),
+        and
         those ids are dropped by the score guard below. The pool is normally
         non-empty even for a scope that matches nothing. Retrieval failure
         degrades to an EMPTY pool (fail quiet — never crash a read-only
@@ -17592,12 +17593,11 @@ class TortoiseSDK:
                 weights = _recency_factors([(row[0], row[1]) for row in rows])
                 fused = {pid: s * (1.0 + recency_boost * weights.get(pid, 0.0))
                          for pid, s in fused.items()}
-                # Secondary sort key = the recency factor: at EQUAL multiplied
-                # score (including the degenerate all-0.0 case — FalkorDBLite's
-                # fulltext scores identical documents 0.0), the newer doc still
-                # ranks first (the plan's D1 multiplier can't break a 0×1.5=0
-                # tie on its own). Enabled branch only — default stays
-                # byte-identical.
+                # Secondary sort key = the recency factor: at an EQUAL
+                # multiplied score (the fulltext leg gives every tied row the
+                # SAME score, so the multiplier cannot break the tie on its
+                # own), the newer doc still ranks first. Enabled branch only —
+                # default stays byte-identical.
                 fused = dict(sorted(fused.items(),
                                     key=lambda x: (x[1], weights.get(x[0], 0.0)),
                                     reverse=True))

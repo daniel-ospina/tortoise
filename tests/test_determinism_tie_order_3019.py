@@ -282,7 +282,7 @@ def test_every_leg_query_carries_a_secondary_sort_key():
     the PYTHON layer's pass-through, not the Cypher. The genuinely fixable half
     is a QUERY-level ORDER BY for signature B alone, measured to be compatible
     with those mock-graph tests; it is its own unit of work because both
-    signatures share the function, so it is tracked as a follow-up rather than
+    signatures share the function, so it is tracked as **#6214** rather than
     asserted away by this pin.
     """
     src = inspect.getsource(search_engine)

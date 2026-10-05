@@ -1565,25 +1565,28 @@ def run_structural_query(
         label_str = entity_type.capitalize()
         kind_field = {"point": "pointKind", "event": "eventKind", "subject": "subjectKind"}[entity_type]
     if entity_type in ("source", "document"):
-        # #149: Source canonical key is url, not id. #3019: `document` belongs
-        # in this branch for the same D10 reason the label block above gives — a
-        # document IS a :Source, and a :Source is NOT guaranteed to carry `id`.
+        # #149: a :Source's canonical key is url, not id. #3019: `document`
+        # belongs in this branch for the same D10 reason the label block above
+        # gives — a document IS a :Source (`_searchText` is indexed on the
+        # Source label), so the ordering key is the :Source key. This leg was
+        # the inconsistent one: the FTS leg's id_field block and the vector
+        # leg's already map document->url.
         #
-        # MEASURED, not assumed (an earlier version of this comment named the
-        # wrong mechanism): `_upsert_source` sets `s.id` only in its ON CREATE
-        # clause, and `_mint_source_stub` (projection/edges.py — the stub every
-        # provenance link mints) sets url/sourceKind/contentHash/ingestedAt and
-        # NEVER sets `id`. So a stub that a document write later adopts keeps
-        # `id` NULL. Verified on that path: `MATCH (s:Source) RETURN s.url, s.id`
-        # = [['z-doc', None], ['m-doc', None], ['a-doc', None]] after the stub,
-        # and still [..., None, 'note'] after documentKind is written. Ordering
-        # on NULL then resolves NOTHING: the tie fell back to DB row order (the
-        # defect this PR exists to close) AND every returned pid was None.
-        # The FTS leg (921) and the vector leg (1164) already map document->url;
-        # this leg was the one that did not. `object` is a KNOWN RESIDUAL: its
-        # canonical key is `name` and the live write path mints it id-less, so
-        # the `else` below still orders those rows on NULL — see the note at
-        # the FTS leg's id_field block.
+        # The id state on that path, read from the code rather than assumed:
+        # `_mint_source_stub` (projection/edges.py — the stub every provenance
+        # link mints) sets url/sourceKind/contentHash/ingestedAt and never sets
+        # `id`; `_upsert_source` sets `s.id` only in its ON CREATE clause; and a
+        # document write that adopts the stub REPAIRS the id (`_upsert_document`
+        # runs `SET s.id=coalesce(s.id, $id)`, as does the hosted session
+        # commit). So `id` is NULL for the window between minting and adoption,
+        # and ordering on it there resolves NOTHING: the tie fell back to DB row
+        # order — the defect this PR exists to close — and every returned pid
+        # was None. url is the key that is correct in BOTH states.
+        #
+        # `object` is a KNOWN RESIDUAL: its canonical key is `name` and the
+        # live write path mints it id-less, so the `else` below still orders
+        # those rows on NULL — see the same note where the key is first resolved
+        # (the FTS leg's id_field block).
         id_field = "url"
     elif entity_type == "event":
         id_field = "eventId"
@@ -1821,8 +1824,8 @@ def rrf_fusion(
             if w > 0:
                 scores[pid] = scores[pid] * (1.0 + recency_boost * w)
     # #2952: deterministic TOTAL order over ties. RRF scores tie constantly on
-    # real corpora (a doc at the same rank in different legs, or FalkorDBLite's
-    # fulltext scores, which are 0.0 for every doc). A stable sort alone keeps
+    # real corpora — a doc at the same rank in different legs, or a fused leg
+    # whose rows all tie on that leg's own score. A stable sort alone keeps
     # tie order at the mercy of the order the caller passed ``ranked_lists`` in
     # — which in the SDK is ``as_completed`` (thread COMPLETION) order, i.e.
     # wall-clock/timing dependent. ``(-score, id)`` makes the fused order a pure

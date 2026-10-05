@@ -13,7 +13,7 @@ The root cause on this surface is that the fused ranking inherited two
 2. ``rrf_fusion`` then broke score TIES by insertion order (a stable sort of a
    dict built in that same completion order), so tied docs swapped places run
    to run. RRF ties are the norm on real corpora — same rank in different legs,
-   or FalkorDBLite fulltext scores, which are 0.0 for every document.
+   or a fused leg whose rows all tie on that leg's own score.
 
 Together those made the truncated top-k a function of how fast the legs
 responded. The fix gives the fusion a deterministic TOTAL order over ties
