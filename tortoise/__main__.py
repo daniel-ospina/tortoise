@@ -4228,6 +4228,14 @@ def _spool_transcript(args) -> dict:
         machine_id=machine_id,
         model=model,
         harness=harness,
+        # #3516 §B: BOTH callers of this helper are the HOOK/CLI leg —
+        # `session capture` (the SessionEnd hook) and `session spool` (the
+        # per-turn hook) — so they claim the 'hook' lane. Backfill/import takes
+        # `tortoise.session_import`, a different path, and stays lane-less.
+        # Without this stamp a WORKING claude install reads as hook-not-live:
+        # the store-sync half posts the same payload and the lane is the only
+        # discriminator.
+        capture_lane="hook",
     ))
     return {
         "rc": 0,

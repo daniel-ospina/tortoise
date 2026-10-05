@@ -256,16 +256,23 @@ if [ "$CAPTURE_ENABLED" != "1" ]; then
   if [ -n "$LEGACY_KEY" ] || [ -f "$PWD/.tortoise" ] \
       || [ -f "${HOME:-/nonexistent}/.tortoise/credentials.json" ]; then
     NOTICE_MARKER="${HOME:-/nonexistent}/.tortoise/capture-consent-notice"
-    if [ ! -f "$NOTICE_MARKER" ]; then
+    # #3684: `-f` FOLLOWS a symlink and `>` follows it too, so a DANGLING link at
+    # the marker made `-f` false, the guard pass, and the redirect then CREATE the
+    # attacker's target at the umask (reproduced: 0644). `-L` refuses a link
+    # outright whether or not it dangles; `set -C` (noclobber) makes the create
+    # fail rather than truncate if a regular file appeared in between; `umask 077`
+    # pins 0600. `capture_consent.py` writes this same path under O_NOFOLLOW, so
+    # the two writers now agree on both the refusal and the mode.
+    if [ ! -e "$NOTICE_MARKER" ] && [ ! -L "$NOTICE_MARKER" ]; then
       mkdir -p "$(dirname "$NOTICE_MARKER")" 2>/dev/null || true
       # `2>/dev/null` MUST precede `> "$NOTICE_MARKER"`: a failed redirect
       # setup is reported to the shell's CURRENT stderr, so with the stdout
       # redirect first a non-writable ~/.tortoise leaks a raw bash error line
       # on every session close. Ordering stderr first suppresses the setup
       # failure too (`|| true` only rescues the exit status).
-      printf '%s\n' \
+      (umask 077; set -C; printf '%s\n' \
         "Tortoise: session capture is OFF — it now requires explicit consent. Re-enable with TORTOISE_CAPTURE=1 (docs/quickstart-cloud.md)." \
-        2>/dev/null > "$NOTICE_MARKER" || true
+        2>/dev/null > "$NOTICE_MARKER") || true
     fi
     printf '%s\n' \
       "tortoise: session capture is OFF — it now requires explicit consent. Re-enable with TORTOISE_CAPTURE=1 (docs/quickstart-cloud.md)." >&2 || true

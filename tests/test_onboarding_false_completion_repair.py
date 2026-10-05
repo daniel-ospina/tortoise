@@ -9,7 +9,7 @@ path and — above all — that it NEVER touches a TRUE completion.
 
 Runs in the docker lane (TORTOISE_DB_URI): the assertions exercise the real
 keyed-MERGE / DELETE Cypher. URI-less legs SKIP at module level (same
-convention as test_onboarding_state_split.py).
+convention as the four test_onboarding_state_split_* modules).
 """
 from __future__ import annotations
 
