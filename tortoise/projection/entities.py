@@ -31,10 +31,12 @@ def _terminal_object_statuses() -> list:
     parameter (#3309).
 
     ONE source of truth: ``commit_ops.OBJECT_TERMINAL_STATUSES``, which is also
-    what ``recall_state``'s default view filters on. Imported at call time for
-    the same reason the supersede fold does it (#2242) — ``commit_ops`` has no
-    module-level ``tortoise`` imports, so there is no cycle, and a restated
-    literal here is exactly the defect #3309 fixes.
+    what ``recall_state``'s default view filters on. Imported at call time to
+    keep ONE source of truth rather than restating the literal here — the defect
+    #3309 fixes. (Cycle-freedom is a property, not the motive: ``commit_ops``
+    imports only ``tortoise.live``, which never reaches ``projection``, so there
+    is no path back. The supersede fold below does the same import for the same
+    reason.)
 
     Returned as a ``list`` because that is what the engine accepts for an ``IN``
     parameter (a ``frozenset`` reaches it as an unserialisable type).
@@ -2733,8 +2735,10 @@ class _EntityHandlers:
         # superseded via the capture fold) must NOT be silently resurrected
         # into recall_state's default view by a later connector lifecycle
         # event. Aligns with the #1350 clobber doctrine (a re-mention cannot
-        # reset superseded→live). Live Objects (status IS NULL) still fold
-        # normally.
+        # reset superseded→live). Objects NOT in a terminal status still fold
+        # normally — that is `status IS NULL` (a bare stub created by this
+        # MERGE), the canonical `'live'` a writer sets on create, or
+        # `in_progress`/`completed`.
         #
         # #3309: the exclusion set is the CANONICAL Object terminal vocabulary
         # (``commit_ops.OBJECT_TERMINAL_STATUSES`` — superseded, deprecated,
