@@ -233,8 +233,12 @@ def test_r9_admission_table_default_widened_assembled(sdk, monkeypatch):
         f"A-default admits both deep golds ({n_gold_def}/2) — the pool-40 "
         "no longer binds above them, so the A-widened arm is vacuous")
     # non-vacuity: a starved/empty default window must fail, not silently
-    # pass both `not in` assertions above (a known in-pool crowd row)
-    assert "deep-subject milestone" in a_def["evidence"], \
+    # pass the `n_gold_def < 2` guard above (a known in-pool crowd row).
+    # #3291: the token must be CROWD-UNIQUE. "deep-subject milestone" also
+    # appears in the two GOLD rows (tests/_assembly_graph.py:317), so a gold
+    # row ALONE satisfied this control and it did not pin crowd-row admission
+    # at all. "milestone was discussed" occurs only in the crowd rows (:301).
+    assert "milestone was discussed" in a_def["evidence"], \
         "A-default: the pool-40 must still admit in-pool crowd rows"
     assert _n_rows(a_def["evidence"]) >= 20, \
         "A-default: the pool-40 must still admit in-pool crowd rows"

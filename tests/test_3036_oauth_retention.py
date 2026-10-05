@@ -488,9 +488,10 @@ def test_hourly_retention_loop_schedules_the_oauth_sweep():
     body, not merely anywhere in the function — a call placed before the loop
     fires once per process and would keep this test green.
 
-    ``_event_retention_loop`` is a closure inside ``_lifespan``, so it is
-    pinned statically (the established pattern in
-    ``tests/test_boot_regressions.py``) rather than executed.
+    ``_event_retention_loop`` is module-level since #5381, so it CAN be
+    executed (see ``tests/test_cost_allocation.py``); this pin stays because it
+    catches the "scheduled outside the loop body" regression in a few lines,
+    without standing up the loop's four dependencies.
     """
     tree = ast.parse(Path(ha_mod.__file__).read_text(encoding="utf-8"))
     loop = next(

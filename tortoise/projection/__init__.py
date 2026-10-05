@@ -31,10 +31,12 @@ from typing import NamedTuple, Protocol, runtime_checkable
 
 from tortoise.cypher_guard import (  # #3595 `=~` guard — the ONE seam
     _guard_execute_command,
+    _guard_numeric_params,  # #7174: the store's numeric domain, same seam
     _guard_unsupported_cypher,
     _skip_cypher_quoted,  # noqa: F401  re-export: the scanner's public test surface
     _unsupported_cypher_operator,  # noqa: F401  re-export
     guarded_client,
+    tolerates_altered_numbers,  # #7174/#5011: the replay/apply exemption
 )
 from tortoise.env_truthy import FALSY, env_flag  # #4097: the declared truthy contract
 
@@ -1826,9 +1828,14 @@ class _GuardedGraph:
     (``query``, ``ro_query``, ``_query``, ``profile``, ``explain``,
     ``execute_command``), so it does not depend on the inner handle's class to
     refuse the ``=~`` operator. NOTE the override is NOT uniform: only
-    ``query`` applies the bulk-wipe check (L2) as well — the other five verbs
-    carry the operator guard only (see KNOWN GAPS in the module comment
-    above). ``__getattr__`` below forwards only the remaining non-query
+    ``query`` applies the bulk-wipe check (L2) as well. The five query verbs
+    (``query``, ``ro_query``, ``_query``, ``profile``, ``explain``) carry BOTH
+    pre-dispatch refusals — the #3595 operator guard and, since #7174, the
+    numeric-domain guard on their ``params`` — while ``execute_command`` carries
+    the operator guard only (a raw command has no params map to walk; the
+    vendor inlines params into the statement text instead — see
+    ``cypher_guard._guard_numeric_params``). See KNOWN GAPS in the module
+    comment above. ``__getattr__`` below forwards only the remaining non-query
     attributes (``name``, ``delete``, ``schema``, ...) to the underlying handle.
     """
 
@@ -1845,6 +1852,10 @@ class _GuardedGraph:
         # ``cypher_guard._guard_unsupported_cypher`` — shared with the guarded
         # handles so the two paths cannot drift.
         _guard_unsupported_cypher(cypher)
+        # #7174: the same shared refusal the guarded handles apply — the numeric
+        # domain travels in PARAMS, and this wrapper must stay complete rather
+        # than rely on the inner handle's class (the #3595 precedent above).
+        _guard_numeric_params(params)
         if _is_bulk_wipe(cypher):
             self._proj._assert_test_graph(
                 "REFUSING to run bulk DETACH DELETE on non-test graph"
@@ -1862,12 +1873,14 @@ class _GuardedGraph:
         # holds is guarded too, but keep the projection's own wrapper complete
         # rather than relying on the inner handle's class.
         _guard_unsupported_cypher(cypher)
+        _guard_numeric_params(params)
         return self._g.ro_query(cypher, params=params, timeout=timeout)
 
     def _query(self, cypher: str, params=None, timeout=None, read_only=False):
         # The vendor's `query`/`ro_query` both delegate to `_query`; a caller
         # reaching `_query` directly must not slip past the refusal either.
         _guard_unsupported_cypher(cypher)
+        _guard_numeric_params(params)
         return self._g._query(
             cypher, params=params, timeout=timeout, read_only=read_only
         )
@@ -1876,10 +1889,12 @@ class _GuardedGraph:
         # PROFILE/EXPLAIN put the statement on the wire WITHOUT routing through
         # `_query`, so they carry their own refusal.
         _guard_unsupported_cypher(cypher)
+        _guard_numeric_params(params)
         return self._g.profile(cypher, params=params)
 
     def explain(self, cypher: str, params=None):
         _guard_unsupported_cypher(cypher)
+        _guard_numeric_params(params)
         return self._g.explain(cypher, params=params)
 
     def execute_command(self, *args, **kwargs):
@@ -2386,6 +2401,7 @@ from tortoise.projection.entities import (  # noqa: E402, I001
     _belief_prop_value_ok,
     _EntityHandlers,
     _is_persistable_prop_value,
+    _usable_instant,
 )
 from tortoise.projection.edges import _EdgeHandlers  # noqa: E402
 from tortoise.projection.grounding import _GroundingMixin  # noqa: E402
@@ -3050,11 +3066,21 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
             # one — a divergence on EVERY retract, and the #330 parity
             # contract this function owns. ``VACUITY_BELIEF`` is the single
             # declaration both arms render, so they cannot re-drift.
-            # (``updatedAt`` is the one prop this fold still does not
-            # stamp; that divergence is a #5048 symptom — recorded from
-            # #4666 — not this one.)
+            # #5048 (recorded from #4666): ``updatedAt`` is now stamped too,
+            # from the RECORD's instant. Before this it was the one prop this
+            # fold did not stamp at all, so the pure fold kept the point's
+            # ORIGINAL stamp while ``rebuild_all`` held this replay's clock
+            # and the live node held the producer's — three values for one
+            # retraction. The gate is ``_usable_instant`` — the SAME predicate
+            # the graph arm (``_retract``) uses, deliberately shared rather
+            # than re-spelled, because ``_writable_id`` alone ACCEPTS the
+            # empty string: with two spellings, a record carrying ``ts=""``
+            # had this fold write ``""`` while the graph arm wrote no column
+            # at all (both are now "no usable instant stated").
             p["status"] = "retracted"
             p.update(VACUITY_BELIEF)
+            if _usable_instant(ev.get("ts")):
+                p["updatedAt"] = ev["ts"]
     elif t == "PointsMerged":
         # #331 (review r2): `or []` also covers an explicit "merge_ids": null
         # in the log — dict.get(key, []) only covers the missing key.
@@ -3954,13 +3980,32 @@ class FalkorProjection(
             used, cap = pressure
             detail = (f"used_memory {_fmt_bytes(used)} of maxmemory "
                       f"{_fmt_bytes(cap)}")
+        # The remedy must NOT restate the ownership policy in prose: a name
+        # list here is wrong in one direction or the other, and nothing keeps
+        # it in sync with the predicate that owns the rule. So the message
+        # names no delete-authorizing residue family, promises no reclaim, and
+        # offers no pass — `_sweep_legacy_strays` runs only when an operator
+        # invokes it, so naming its env lever would be advice that frees nothing.
+        #
+        # It also makes no claim about which graph commands the server refuses:
+        # upstream's flag semantics are not what #2979's log line suggests (that
+        # line is the DETACH `safe_graph_delete` sends before `graph.delete()`),
+        # and an operator message should not assert them either way.
+        #
+        # The only names it gives are the ones `TortoiseSDK.test_guard` blocks
+        # (tortoise/sdk.py) — `tortoise` exact and `tortoise_restored*` by
+        # prefix. `is_legacy_residue` refuses a superset; that case is covered
+        # by "do not hand-pick", not by enumeration.
         return (
             "DB refused writes on open: the graph is INTACT but the server "
             f"has reached its memory ceiling ({detail}). This is NOT "
-            "corruption — do NOT rebuild. Free memory first: delete "
-            "ephemeral test graphs (GRAPH.LIST, then GRAPH.DELETE test_*), "
-            "or raise / relieve the container's --maxmemory. See #2981 for "
-            "the shared-lane form of this."
+            "corruption — do NOT rebuild. Remedy: raise / relieve the "
+            "container's --maxmemory. Do NOT hand-pick names from "
+            "GRAPH.LIST to free memory instead: GRAPH.DELETE cannot be "
+            "undone, and a name you cannot attribute is not yours to delete. "
+            "Never delete the "
+            "production graph tortoise or a tortoise_restored* snapshot, and "
+            "do NOT FLUSHALL. See #2981 for the shared-lane form of this."
         )
 
     def _backend_failure_message(
@@ -4188,6 +4233,7 @@ class FalkorProjection(
             return {**ev, **ev["point"]}
         return ev
 
+    @tolerates_altered_numbers
     def apply(self, event: dict) -> None:
         # #3947 review: read the capture's structural directive from the RAW
         # envelope, BEFORE `_norm` splices the point payload over it. `_norm`
@@ -4259,7 +4305,9 @@ class FalkorProjection(
                 # #331 (review r2): NO event_id fallback — an event id is not
                 # a point id, and the fallback diverged from _apply_one (the
                 # fold is the single source of truth, module contract).
-                self._retract(rid)
+                # #5048: the RECORDED instant, so the rebuilt `updatedAt` is
+                # the producer's, not this replay's clock.
+                self._retract(rid, now=ev.get("ts"))
         elif t == "PointPromoted":
             # #785: re-apply the full promoted snapshot (status live +
             # reviewed + promotedAt) — rebuild parity for reviewer-gated
@@ -4555,6 +4603,7 @@ class FalkorProjection(
             "RDB backup, instead of trusting this rebuild."
         )
 
+    @tolerates_altered_numbers
     def rebuild(self, log, *, confirm_destructive: bool = False) -> None:
         """Wipe the graph and replay one EventLog. DESTRUCTIVE.
 
@@ -4655,6 +4704,7 @@ class FalkorProjection(
             "db_path": _prewipe_db_path_identity(self._path),
         }
 
+    @tolerates_altered_numbers
     def rebuild_all(self, log_dir: str, *,
                     confirm_destructive: bool = False) -> dict:
         """Rebuild from all .jsonl files in a directory. Returns counts.
@@ -5695,7 +5745,9 @@ class FalkorProjection(
                     # tombstone still applies.
                     _retr_anchor = last_ann_drop_seq.get(("Point", rid))
                     if _retr_anchor is None or seq > _retr_anchor:
-                        self._retract(rid)
+                        # #5048: the RECORDED instant — parity with
+                        # `rebuild_all`'s pass-1b and with the live writer.
+                        self._retract(rid, now=ev.get("ts"))
             elif t == "PointPromoted":
                 # #785: rebuild parity — re-apply the promoted snapshot.
                 p = ev.get("point")
