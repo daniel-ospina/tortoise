@@ -1046,10 +1046,10 @@ def _event_meta_last_seq(entries) -> int | None:
     a LOWER value than the section actually carries.
     """
     values = [
-        entry.get("last_seq") for entry in entries or []
+        seq for entry in entries or []
         if isinstance(entry, dict)
-        and isinstance(entry.get("last_seq"), int)
-        and not isinstance(entry.get("last_seq"), bool)
+        and isinstance((seq := entry.get("last_seq")), int)
+        and not isinstance(seq, bool)
     ]
     return max(values) if values else None
 
