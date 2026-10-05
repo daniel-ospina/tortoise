@@ -793,14 +793,23 @@ def test_the_clean_line_reports_clean_medians_not_the_contaminated_ones():
     # future edit that collapses the two cannot pass by matching itself.
     clean = res["leg_a_clock_split_clean_pct"]
     contaminated = res["leg_a_clock_split_pct"]
-    assert clean["dispatch"] == 25.0, clean
-    # The other two clean shares and the all-PR magnitude are published in the
-    # same sentence, so they are pinned too: pinning only `dispatch` left a wrong
-    # denominator (or a clean numerator over the all-PR total) free to land
-    # silently, which is the same class of hole as the unpinned shares above.
-    assert clean["authoring"] == 0.0, clean
-    assert clean["gate_ci"] == 75.0, clean
-    assert contaminated["dispatch"] == 63.2, contaminated
+    # Every share each sentence publishes, pinned as a WHOLE rather than one field
+    # at a time. The two dicts must DIFFER (the contaminated row's dispatch charges
+    # the PR's earlier life; the clean one measures a CI-start latency), and
+    # pinning the full published set means a corruption of ANY share — a wrong
+    # denominator, or the clean numerator over the all-PR total — fails here,
+    # instead of only the single field a reviewer happened to name.
+    SHARES = ("prs", "authoring", "dispatch", "gate_ci")
+    assert {k: clean[k] for k in SHARES} == {
+        "prs": 1, "authoring": 0.0, "dispatch": 25.0, "gate_ci": 75.0,
+    }, clean
+    assert {k: contaminated[k] for k in SHARES} == {
+        "prs": 2, "authoring": 0.0, "dispatch": 63.2, "gate_ci": 36.8,
+    }, contaminated
     assert clean["dispatch"] != contaminated["dispatch"], (clean, contaminated)
     assert f"dispatch {clean['dispatch']:.1f}%" in clean_line, clean_line
     assert f"dispatch {contaminated['dispatch']:.1f}%" not in clean_line, clean_line
+    # The clean sentence's parenthetical MEDIANS are a second published surface:
+    # pin the clean gate-CI median, or an edit that re-reads med(merged) prints
+    # the contaminated 0.29h and nothing here notices.
+    assert "0.50h" in clean_line, clean_line
