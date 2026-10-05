@@ -3294,9 +3294,9 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # an already-installed copy is stale by construction. The sibling scripts carry
 # the same marker because the layout declares ONE generation
 # (`contract_version` returns None when they disagree).
-# claude 8→9 and codex/cursor 2→3 are #5838: the two breadcrumb kinds now occupy
-# SEPARATE slots, so an inert install can no longer destroy a live
-# quota/network refusal.  The bump covers the three marked layout scripts whose
+# claude 8→9 is #5838: the two breadcrumb kinds now occupy SEPARATE slots, so an
+# inert install can no longer destroy a live quota/network refusal.  The bump
+# covers the three marked layout scripts whose
 # generation the layout grades — claude's `session-start.sh`, `session-end.sh`
 # and `session-turn.sh` — so an already-installed copy must read as stale to
 # receive the new slot.  `volunteer-turn.sh` carries NO `tortoise-hook-version`
@@ -3304,10 +3304,11 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # `ARTIFACT_CONTRACTS` entry, so it is never graded and needs no marker of its
 # own; the installer registers the SHIPPED package path rather than copying the
 # file, so the slot change reaches it through the package upgrade.
-# codex/cursor were bumped to 3 by MAIN's #5919 (the redirection fix); this
-# change's slot split rides that same generation because the stale-installed-copy
-# check also compares file BYTES (`modified-script`), which a copy carrying the
-# old single-slot writer fails.
+# codex/cursor are ALREADY at 3 on main (#5919, the redirection fix) and this
+# change's slot split moves no number for them — main b3c3d949c already ships
+# both seams at 3.  Their stale installed copies are caught by the file-BYTES
+# comparison (`modified-script`), which a copy carrying the old single-slot
+# writer fails.
 # pi 1 is the FIRST generation of the Pi seam's contract (#4680): the seam is a
 # TypeScript extension rather than a shell hook, so it has no `HarnessLayout` —
 # its contract is carried by `hook_install.ARTIFACT_CONTRACTS['pi']`.  Before

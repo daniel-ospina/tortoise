@@ -364,11 +364,16 @@ def test_a_stale_install_inert_breadcrumb_is_not_rendered_as_live(tmp_path):
     (``<harness>-install.json``); the normal path reads only the
     capture-failure slot, so a resolved install never replays the old claim.
 
-    Mutation: read the install-inert slot on the resolved path — the stale
-    claim appears and this REDs.  (The ``render`` kind gate itself is pinned by
-    ``test_a_legacy_single_slot_install_inert_breadcrumb_is_not_rendered``: the
-    resolved path never reads THIS slot, so the slot choice alone satisfies
-    this test.)"""
+    Mutation: this test pins the CONJUNCTION of the two protections, so it is
+    the COMPOUND mutation that REDs it — read the install-inert slot on the
+    resolved path AND drop ``render``'s ``kind == KIND_CAPTURE_FAILURE`` gate.
+    ``render_file`` refuses the record on its kind before the slot choice can
+    matter, so neither protection alone is observable here; each is isolated by
+    a sibling that DOES red for it:
+    ``test_a_legacy_single_slot_install_inert_breadcrumb_is_not_rendered`` for
+    the kind gate alone, and
+    ``test_only_the_capture_cause_is_reported_when_only_it_exists`` for the slot
+    choice alone."""
     home = tmp_path / "home"
     home.mkdir()
     bindir = tmp_path / "bin"
