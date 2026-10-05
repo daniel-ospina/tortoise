@@ -713,6 +713,13 @@ surfaces:
   - test_battery_validation_real.py
   - test_battery_write_channel.py
   core:
+  # #4071: guards that the URI-less embedded test lane cannot resolve a bare
+  # TortoiseSDK() to the owner's canonical store (~/.tortoise/tortoise.db) —
+  # the writer path #4028 left open, so residue regenerated after each purge.
+  # DB-free and hermetic, and it asserts in BOTH lanes (redirect in force
+  # embedded, a genuine no-op under a supported URI), so `core` is the correct
+  # home and it must not be skipped on a conftest-only change.
+  - test_embedded_lane_canonical_store_4071.py
   - test_4041_breadcrumb_reader.py
   # #3982: a date-only temporal value anchors to UTC midnight rather than the
   # reading machine's local midnight (ECMA-262 §21.4.3.2). DB-free — it only
@@ -791,6 +798,12 @@ surfaces:
   # (tortoise/cypher_guard.py: guarded_client -> guarded Graph -> exceptions)
   # plus the projection's own `_GuardedGraph` query entry points.
   - test_cypher_regex_guard_3595.py
+  # #7174: the #4647 numeric domain enforced at the SAME handle seam — the
+  # predicate lives in `tortoise/numeric_domain.py` and `cypher_guard` applies it
+  # to every param map, so the SDK call-site list is no longer the only
+  # mechanism (its excludes-list is stated in `cypher_guard._guard_numeric_params`).
+  # Pure-unit guard: needs no DB or network, exactly like the file above it.
+  - test_7174_param_boundary_numeric_guard.py
   - test_graph_name_ownership.py
   # #5331: the graph byte meter (tortoise/graph_storage.py + the metering/
   # supabase graph-storage lane). Dual-registered with `api`: a change to the new
@@ -1626,6 +1639,11 @@ surfaces:
   - test_tripwire.py
   - test_unjournaled_mutation_class.py
   - test_uri_env_mutations_declared.py
+  # #4649: the write OR-set (Source by id OR url) — producer, both replay
+  # folds and the MCP delete preview, with the rebuild residual pinned to #5048.
+  # Same surface as its siblings test_entity_delete_rebuild.py /
+  # test_unjournaled_mutation_class.py (the projection/journal seam).
+  - test_url_keyed_source_write_4649.py
   - test_validity_windows.py
   # #5365: a fail-open supersession skip must be VISIBLE — the refusal from
   # #4021 lands in an OPTIONAL `skipped` result channel on
@@ -2467,6 +2485,11 @@ durations:
 # `# unmeasured` (a file no source leg collected, whose value is carried forward
 # and is not a measurement).
   test_fly_secret_drift.py: 8.5
+  # #4071: four hermetic asserts (no DB, no network). The duration-coverage
+  # floor counts it as a fast file, so it needs an entry like every other fast
+  # file; its own testcase call time is sub-second (the file's wall time is
+  # session setup, which the map does not price).
+  test_embedded_lane_canonical_store_4071.py: 0.1
   test_embedded_evidence.py: 17.2
   # #3892 (B6): new file in this pool — it has no CI junit measurement yet (a file that
   # never ran cannot appear in an artifact), so it takes the flat 2.0s default under the
@@ -2484,6 +2507,7 @@ durations:
   test_shared_state_recovery.py: 0.2
   test_hermetic_egress_guard.py: 2.0  # #4387: no CI junit measurement exists for this file yet (a file that never ran cannot appear in an artifact), so it takes the #3400 flat 2.0s default. Refresh from the first post-merge run that includes it. Do NOT drop the row without re-deriving the 90% floor at that head (#4348 trap) — and NO figure is restated here on purpose; this row's comment asserted one for three review rounds and each base merge re-staled it.
   test_5048_retract_instant_recorded.py: 2.0  # #5048: same #3400 flat default as the row above and for the same reason — the file is new, so no CI junit measurement exists for it yet (a file that never ran cannot appear in an artifact). Refresh from the first post-merge run that includes it. Its registration is load-bearing for the durations half as well as the surface half: an unregistered new test file reds `integrity_problems`, which is how this row was found (#4348 trap — do not drop it without re-deriving the 90% floor at that head).
+  test_7174_param_boundary_numeric_guard.py: 2.0  # #7174: same #3400 flat default as the row above — a new file has no CI junit measurement. MEASURED this turn: WITHOUT this row the durations coverage falls below the 90% floor and `tools/ci_selection.py --integrity` reds; the surface entry alone does not cover it. Refresh from the first post-merge run that includes it.
   test_license_surface_consumer.py: 0.3
   test_installer_preserves_foreign_skill_content.py: 0.6
   test_backup_watcher_health.py: 0.2
@@ -2535,6 +2559,7 @@ durations:
   test_graph_diagnostics.py: 24.3
   eval/write_path/test_write_path_runner.py: 70.0
   test_unjournaled_mutation_class.py: 100.0  # unmeasured — #4743: locally measured (46 tests, live FalkorDB); refresh from CI junit — the file builds a projection per row.
+  test_url_keyed_source_write_4649.py: 170.0  # unmeasured — #4649: locally measured (23 tests, live FalkorDB on a spare container; 169.5s wall for the whole file). Needed here rather than left to the sweep because tools/ci_timing.py --refresh-durations samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time — the >=90% coverage floor (#2876) fails by construction for any test-adding PR. Refresh from CI junit once this file has run on main.
   test_write_verb.py: 34.6
   test_index_restore.py: 2.7
   test_capture_session.py: 53.9
@@ -3167,7 +3192,7 @@ durations:
   test_dream_noop_3139.py: 4.0
   test_durability_posture.py: 1.1
   test_embed_metering.py: 12.0  # unmeasured — #4488: locally measured (58 tests, embedded lane: 10.9–16.0s across runs, ~12s under fleet load); no source leg of the sweep collected it — refresh from CI junit.
-  test_embedder_provision.py: 0.9
+  test_embedder_provision.py: 12.0  # unmeasured — #7359: the file gained two subprocess-hang tests (a blocked main thread signalled, and a watchdog dump) at locally measured 8-16s; refresh from CI junit.
   test_entity_delete_rebuild.py: 1.9
   test_env_truthy.py: 10.6
   test_health_client_effect.py: 3.5
