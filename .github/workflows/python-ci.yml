@@ -836,6 +836,54 @@ jobs:
               echo "HEARTBEAT: pytest still running — $p passed, $f failed so far"
             done ) &
           HB_PID=$!
+          # #6136 (epic #5215, owner decision D3): xdist is admitted for ONE
+          # shard, on the DOCKER shape only. The decision is made HERE, at
+          # the point of use, so both limits are enforced by the command that
+          # actually runs — not by a comment claiming them.
+          #   * one shard — `matrix.half == "a"` ONLY. Half (b) stays serial:
+          #     it is the control leg that keeps a flake attributable, and
+          #     bounding the fan-out to one leg is what D3 admits. Plan input
+          #     (docs/plans/2026-09-26-5215-merge-throughput.md §2.2 T-I):
+          #     test (a) 38 m vs test (b) 28 m, so (a) is the half whose
+          #     reduction can move the job's wall.
+          #     HONEST LIMIT: this parallelises ONE of the fast job's two
+          #     halves, so the job's wall becomes max(half a / speedup,
+          #     half b) and the OVERALL gate wall may still be the serial
+          #     `test-slow` legs. One shard is not claimed to reach the
+          #     <10 min target on its own — it is the isolation-bounded
+          #     proof D3 admits, not the full throughput lever.
+          #   * docker shape — TORTOISE_DB_URI non-empty. On a tier-2 PR the
+          #     URI gate above leaves it empty and this SAME step runs the
+          #     embedded redislite lane — the RC5 leak surface (#2875,
+          #     #3653) D3 does not admit `-n` on. Enforced by the `-n` test
+          #     below, not assumed; the branch that ran is echoed so which
+          #     shape got `-n` is legible in the job log.
+          #   * `--dist loadscope`, NOT loadfile: distribution is by module/
+          #     class scope, so a module's fixtures and intra-module ordering
+          #     stay on one worker by construction while files still
+          #     parallelise. D3 names loadscope specifically.
+          #   * leak count — per-worker resources come for free (each worker
+          #     is its own process: its own TORTOISE_TEST_SESSION nonce,
+          #     journal and active-suite marker), and the E2E-7 survivor gate
+          #     in tests/conftest.py is now sibling-worker-aware, so it
+          #     asserts the OWNED leak count PER WORKER rather than once per
+          #     job. Every output contract the steps below read is
+          #     xdist-safe: the -r fEs summary (`^FAILED ` nodeids, the
+          #     skip-guard's reason source) is printed unprefixed by the
+          #     controller, `grep -c ' PASSED'` still counts, and the
+          #     junitxml the coverage manifest reconciles is aggregated.
+          # `-n 0` is xdist's serial mode (no worker subprocesses; every
+          # session fixture runs in the main process — verified against the
+          # pinned pytest-xdist 3.8.0 with `--dist loadscope`), so the
+          # command line carries the flag unconditionally while the EFFECTIVE
+          # worker count is 0 everywhere except the one admitted shard. That
+          # keeps the whole decision on the single line a reader (and the
+          # workflow pin in tests/test_ci_selection.py) inspects.
+          XDIST_WORKERS=0
+          if [ "${{ matrix.half }}" = "a" ] && [ -n "${TORTOISE_DB_URI:-}" ]; then
+            XDIST_WORKERS="$PYTEST_XDIST_WORKERS"
+          fi
+          echo "#6136 xdist: -n $XDIST_WORKERS --dist loadscope (half=${{ matrix.half }} uri=${TORTOISE_DB_URI:-<unset>})"
           # #6142: last-failed FAST-FAIL pre-phase. On a PR whose PREVIOUS
           # push left a non-empty .pytest_cache/v/cache/lastfailed (restored
           # above), re-run ONLY those tests first. A known failure that still
@@ -985,54 +1033,6 @@ jobs:
               echo "==================== WATCHDOG: last-failed pre-phase interrupted/killed (rc=$LF_RC; $passed passed, $failed failed, $errored errored) — inconclusive, falling through to the FULL half ===================="
             fi
           fi
-          # #6136 (epic #5215, owner decision D3): xdist is admitted for ONE
-          # shard, on the DOCKER shape only. The decision is made HERE, at
-          # the point of use, so both limits are enforced by the command that
-          # actually runs — not by a comment claiming them.
-          #   * one shard — `matrix.half == "a"` ONLY. Half (b) stays serial:
-          #     it is the control leg that keeps a flake attributable, and
-          #     bounding the fan-out to one leg is what D3 admits. Plan input
-          #     (docs/plans/2026-09-26-5215-merge-throughput.md §2.2 T-I):
-          #     test (a) 38 m vs test (b) 28 m, so (a) is the half whose
-          #     reduction can move the job's wall.
-          #     HONEST LIMIT: this parallelises ONE of the fast job's two
-          #     halves, so the job's wall becomes max(half a / speedup,
-          #     half b) and the OVERALL gate wall may still be the serial
-          #     `test-slow` legs. One shard is not claimed to reach the
-          #     <10 min target on its own — it is the isolation-bounded
-          #     proof D3 admits, not the full throughput lever.
-          #   * docker shape — TORTOISE_DB_URI non-empty. On a tier-2 PR the
-          #     URI gate above leaves it empty and this SAME step runs the
-          #     embedded redislite lane — the RC5 leak surface (#2875,
-          #     #3653) D3 does not admit `-n` on. Enforced by the `-n` test
-          #     below, not assumed; the branch that ran is echoed so which
-          #     shape got `-n` is legible in the job log.
-          #   * `--dist loadscope`, NOT loadfile: distribution is by module/
-          #     class scope, so a module's fixtures and intra-module ordering
-          #     stay on one worker by construction while files still
-          #     parallelise. D3 names loadscope specifically.
-          #   * leak count — per-worker resources come for free (each worker
-          #     is its own process: its own TORTOISE_TEST_SESSION nonce,
-          #     journal and active-suite marker), and the E2E-7 survivor gate
-          #     in tests/conftest.py is now sibling-worker-aware, so it
-          #     asserts the OWNED leak count PER WORKER rather than once per
-          #     job. Every output contract the steps below read is
-          #     xdist-safe: the -r fEs summary (`^FAILED ` nodeids, the
-          #     skip-guard's reason source) is printed unprefixed by the
-          #     controller, `grep -c ' PASSED'` still counts, and the
-          #     junitxml the coverage manifest reconciles is aggregated.
-          # `-n 0` is xdist's serial mode (no worker subprocesses; every
-          # session fixture runs in the main process — verified against the
-          # pinned pytest-xdist 3.8.0 with `--dist loadscope`), so the
-          # command line carries the flag unconditionally while the EFFECTIVE
-          # worker count is 0 everywhere except the one admitted shard. That
-          # keeps the whole decision on the single line a reader (and the
-          # workflow pin in tests/test_ci_selection.py) inspects.
-          XDIST_WORKERS=0
-          if [ "${{ matrix.half }}" = "a" ] && [ -n "${TORTOISE_DB_URI:-}" ]; then
-            XDIST_WORKERS="$PYTEST_XDIST_WORKERS"
-          fi
-          echo "#6136 xdist: -n $XDIST_WORKERS --dist loadscope (half=${{ matrix.half }} uri=${TORTOISE_DB_URI:-<unset>})"
           timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m stdbuf -oL python -m pytest $FILES -n "$XDIST_WORKERS" --dist loadscope -v --timeout=300 -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
           # #1436: -v truncates skip reasons to terminal width (80 cols when
           # redirected to a file with COLUMNS unset), dropping e.g.
