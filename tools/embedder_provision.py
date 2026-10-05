@@ -94,60 +94,64 @@ PROBE_FAILED_MARKER = "embedding model: not cached — downloading (with retries
 DONE_MARKER = "embedder provision: complete"
 
 
-def _install_termination_stack_dump() -> None:
-    """#7359: dump every thread's stack if the step is cancelled.
+def _watchdog_seconds() -> float:
+    """Seconds before the watchdog fires (and exits non-zero with a dump).
 
-    The step normally takes ~9s. On the observed failure it printed its success
-    marker and THEN sat until the step's 6-minute timeout — so the bounding
-    question is "what is the process doing during that time", and the existing
-    log cannot answer it (the last line is a success).
-
-    TWO details decide whether this diagnostic can fire at all, and both were
-    got wrong on the first attempt (P1, review of #7364):
-
-    1. **The runner signals the SHELL, not this process.** `actions/runner`
-       passes `killProcessOnCancel: false`, so on cancel it sends SIGINT to the
-       step's direct child first (7500ms), then SIGTERM (2500ms), then SIGKILL —
-       and `SendSignal` is `kill(_proc.Id, sig)` against that child. For a
-       `run:` block that child is bash, and bash FORKS a simple command rather
-       than exec'ing it, so Python is a grandchild and receives no signal. The
-       workflow invocations therefore use `exec`, which replaces bash with this
-       process and puts Python on the receiving end.
-    2. **SIGINT arrives first.** Handling only SIGTERM would leave the earlier
-       SIGINT to Python's default `KeyboardInterrupt` (uncaught — the bare
-       `except Exception` guards above do not catch `BaseException`), killing
-       the process before any dump. Both are handled here.
-
-    The banner uses `os.write`, not `sys.stderr.write`: a handler that blocks on
-    the stderr lock because another thread holds it produces no dump at all,
-    which is the failure mode of the diagnostic itself.
-
-    KNOWN LIMIT: `all_threads=True` lists PYTHON threads only. torch's thread
-    pool and OpenMP workers are native threads and do not appear, and 3.12 has
-    no `dump_c_stack` (3.14+). The dump will show the waiting Python frame, not
-    the native join — an empty-looking dump must not be read as "nothing was
-    running".
+    Default 300: the step is ~9s when it works and its tightest bound is the
+    6-minute `timeout-minutes` on `test`, so 5 minutes separates "slow" from
+    "stuck" with a wide margin. Overridable so the test can fire it in ~1s.
     """
-    def _dump(signum, _frame):
-        try:
-            os.write(
-                2,
-                f"\n::warning::embedder_provision got signal {signum} — dumping all "
-                "thread stacks (#7359; the step was cancelled)\n".encode(),
-            )
-            faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
-        except Exception:  # a diagnostic must never mask the cancellation
-            pass
-        # 124 rather than the default SIGTERM status 143: both read as a cancel
-        # to the runner, but 124 is the conventional "timed out" code.
-        os._exit(124)
+    with contextlib.suppress(TypeError, ValueError):
+        return max(1.0, float(os.environ.get("TORTOISE_EMBEDDER_WATCHDOG_S", "300")))
+    return 300.0
 
-    # A non-main thread or an unsupported platform means no handler — the step
-    # still runs and still provisions; only the diagnostic is lost.
-    with contextlib.suppress(ValueError, OSError):
-        signal.signal(signal.SIGTERM, _dump)
-    with contextlib.suppress(ValueError, OSError):
-        signal.signal(signal.SIGINT, _dump)
+
+def _install_termination_stack_dump() -> None:
+    """#7359: make a stall dump its own stack, by two mechanisms, because one
+    is not enough and the gap between them is the whole point.
+
+    MEASURED: run 37239542471 spent 6.27m in this step against 0.13m on main,
+    and its log ENDS with the success marker — so the six minutes are spent
+    AFTER the last Python statement, in interpreter/native teardown
+    (`sentence_transformers` imports torch, whose teardown joins thread pools
+    and runs C++ destructors).
+
+    A Python-level `signal.signal` handler CANNOT fire in that state. It runs
+    only when the main thread reaches an eval-loop / `PyErr_CheckSignals` point,
+    and a thread blocked inside native code never gets there — worse, replacing
+    the disposition means the process no longer dies on the signal either, so it
+    sits until the runner's SIGKILL. A previous version of this function used
+    `signal.signal` and was therefore inert for exactly the failure class it was
+    written for (P1, second review of #7364); the reviewer reproduced it against
+    a fake blocking in a C `pthread_join`. Both mechanisms below avoid that:
+
+    1. **`faulthandler.register`** — a C-LEVEL handler, so the dump happens
+       inside the signal trampoline regardless of what the main thread is
+       doing. `chain=True` preserves the default disposition, so the process
+       still terminates. Covers a runner cancel that is delivered here.
+    2. **`faulthandler.dump_traceback_later`** — a WATCHDOG THREAD, needing no
+       signal delivery at all, so it covers a main thread wedged in native code
+       AND a cancel that never reaches this process. This is the one that
+       answers the motivating failure.
+
+    Signal DELIVERY is a separate precondition and is handled in the workflows:
+    `actions/runner` sends the cancel signal to the step's direct child
+    (`killProcessOnCancel: false`; SIGINT at 7500ms, then SIGTERM, then SIGKILL),
+    which for a `run:` block is bash — and bash forks rather than exec'ing, so
+    the five invocations carry `exec` to put this process on the receiving end.
+
+    KNOWN LIMIT: `all_threads=True` lists PYTHON threads only. torch's pool and
+    OpenMP workers are native threads and do not appear, and 3.12 has no
+    `dump_c_stack` (3.14+). An apparently-sparse dump must not be read as
+    "nothing was running".
+    """
+    faulthandler.enable()
+    for _sig in (signal.SIGTERM, signal.SIGINT):
+        # An unsupported platform or a non-main thread loses the diagnostic only.
+        with contextlib.suppress(ValueError, OSError):
+            faulthandler.register(_sig, all_threads=True, chain=True)
+    with contextlib.suppress(ValueError, RuntimeError, OSError):
+        faulthandler.dump_traceback_later(_watchdog_seconds(), exit=True)
 
 
 def _annotation(level: str, message: str) -> None:

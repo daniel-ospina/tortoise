@@ -493,60 +493,108 @@ _HANGS_FOREVER = (
     "        time.sleep(600)\n"
 )
 
+# The #7359 class: the main thread blocked inside NATIVE code, where a
+# Python-level signal handler can never run (no eval-loop point is reached).
+# `pthread_mutex_lock` on an already-held mutex is the simplest genuinely
+# uninterruptible C block available without a C compiler.
+_HANGS_IN_NATIVE_CODE = (
+    "import ctypes, threading, time\n"
+    "\n"
+    "_libc = ctypes.CDLL(None)\n"
+    "\n"
+    "class _Mutex:\n"
+    "    def __init__(self):\n"
+    "        self.buf = ctypes.create_string_buffer(64)\n"
+    "        _libc.pthread_mutex_init(ctypes.byref(self.buf), None)\n"
+    "    def lock(self):\n"
+    "        _libc.pthread_mutex_lock(ctypes.byref(self.buf))\n"
+    "\n"
+    "_m = _Mutex()\n"
+    "_m.lock()\n"
+    "threading.Thread(target=lambda: (_m.lock(), time.sleep(600)), daemon=True).start()\n"
+    "time.sleep(0.5)  # let the helper take it\n"
+    "\n"
+    "class SentenceTransformer:\n"
+    "    def __init__(self, *a, **k):\n"
+    "        print('FAKE_NATIVE_HANG_ENTERED', flush=True)\n"
+    "        _m.lock()  # blocks in C, uninterruptibly\n"
+)
+
+
+def _run_until_hang(tmp_path, fake_source, marker, env_extra=None):
+    """Start the script against a fake, wait until it is INSIDE the hang, return proc."""
+    fake = tmp_path / f"fake-{abs(hash(fake_source)) % 10**8}"
+    fake.mkdir(parents=True, exist_ok=True)
+    (fake / "sentence_transformers.py").write_text(fake_source, encoding="utf-8")
+    env = _base_env(tmp_path)
+    env["PYTHONPATH"] = str(fake) + os.pathsep + env.get("PYTHONPATH", "")
+    env.update(env_extra or {})
+    proc = subprocess.Popen(
+        [sys.executable, str(_SCRIPT), "--attempts", "1", "--backoff", "0"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+    )
+    # Positive evidence it is inside the hang, rather than a fixed sleep guess.
+    ready, _, _ = select.select([proc.stdout], [], [], 60)
+    assert ready, "script never reached the fake hanging constructor"
+    assert marker in proc.stdout.readline(), marker
+    return proc
+
 
 def test_a_cancelled_step_dumps_every_thread_stack(tmp_path):
-    """#7359: the observable failure must be self-diagnosing.
-
-    Measured: run 37239542471 spent 6.27m in this step against 0.13m on main,
-    and its log ENDS with the success marker — so the one fact needed is *what
-    the process was doing*, and a plain log cannot yield it.
+    """A DELIVERED signal must produce a dump.
 
     SCOPE, stated because the first version of this test overclaimed: it proves
-    the handler works when a signal is DELIVERED TO THIS PROCESS. That is
-    necessary but not sufficient for CI — `actions/runner` sends the cancel
-    signal to the step's direct child, which for a `run:` block is bash, so the
-    workflow invocations carry `exec` (pinned in `_GATE_COMMAND_RE`) to put this
-    process on the receiving end. Both halves are needed; neither test covers
-    the other.
+    the C-level signal handler dumps when a signal is DELIVERED TO THIS PROCESS.
+    It does not prove the runner delivers it — that is the `exec` pin in
+    `_GATE_COMMAND_RE` — and it does not cover the native-blocked class, which a
+    Python-level handler cannot reach at all and which
+    `test_the_watchdog_dumps_a_native_blocked_thread` covers.
 
-    Load-bearing: delete the handler and this fails on `dumping all` (the
-    process dies on the default disposition, the log is unchanged, and the next
-    occurrence is as uninformative as this one was).
+    Load-bearing: revert to `signal.signal` AND remove the watchdog, and this
+    fails on the dump assertion.
     """
-    for sig, expected_status in ((signal.SIGTERM, 124), (signal.SIGINT, 124)):
-        fake = tmp_path / f"fake-{sig}"
-        fake.mkdir(parents=True, exist_ok=True)
-        (fake / "sentence_transformers.py").write_text(_HANGS_FOREVER, encoding="utf-8")
-        env = _base_env(tmp_path)
-        env["PYTHONPATH"] = str(fake) + os.pathsep + env.get("PYTHONPATH", "")
-
-        proc = subprocess.Popen(
-            [sys.executable, str(_SCRIPT), "--attempts", "1", "--backoff", "0"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=env,
-        )
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        proc = _run_until_hang(tmp_path, _HANGS_FOREVER, "FAKE_HANG_ENTERED")
         try:
-            # Wait for positive evidence the process is INSIDE the hang, rather
-            # than sleeping a fixed guess — a fixed sleep is both slower and racy.
-            ready, _, _ = select.select([proc.stdout], [], [], 60)
-            assert ready, "script never reached the (fake) hanging constructor"
-            assert "FAKE_HANG_ENTERED" in proc.stdout.readline()
-
             proc.send_signal(sig)
             _out, err = proc.communicate(timeout=60)
         finally:
             if proc.poll() is None:
                 proc.kill()
                 proc.communicate()
-
-        assert "dumping all" in err, f"no stack dump on {sig!r}; stderr was:\n{err}"
-        # The traceback body: the fake's own frame must appear, or it is empty.
+        # faulthandler writes its own header; the fake's frame must be in the body
+        # or the dump is not the one we think it is.
+        assert "Current thread" in err, f"no faulthandler dump on {sig!r}:\n{err}"
         assert "sentence_transformers" in err, f"dump had no useful frames:\n{err}"
-        assert proc.returncode == expected_status, (
-            f"{sig!r}: expected status {expected_status}, got {proc.returncode}"
-        )
+        assert proc.returncode != 0, f"{sig!r}: expected a non-zero exit, got 0"
+
+
+def test_the_watchdog_dumps_a_native_blocked_thread(tmp_path):
+    """#7359's ACTUAL failure class: the main thread blocked in native code.
+
+    This is the case that made the previous `signal.signal` version inert — a
+    Python-level handler needs an eval-loop point the thread never reaches, and
+    replacing the disposition means the process no longer even dies on the
+    signal. The watchdog thread needs no signal delivery and no eval-loop point,
+    so it is the mechanism that answers this issue.
+
+    Load-bearing: delete the `dump_traceback_later` arm and this hangs until the
+    test's own timeout instead of dumping.
+    """
+    proc = _run_until_hang(
+        tmp_path, _HANGS_IN_NATIVE_CODE, "FAKE_NATIVE_HANG_ENTERED",
+        {"TORTOISE_EMBEDDER_WATCHDOG_S": "1"},
+    )
+    try:
+        _out, err = proc.communicate(timeout=90)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+    assert "sentence_transformers" in err, (
+        f"the watchdog produced no dump for a native-blocked main thread:\n{err}"
+    )
+    assert proc.returncode != 0, "the watchdog must exit non-zero on firing"
 
 
 def test_the_print_pins_are_byte_exact_and_survive_abbreviation(tmp_path):
