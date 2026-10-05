@@ -39,6 +39,15 @@ from tortoise.config import DEFAULT_DB_PATH, resolve_db_path
 #: is identifiable from a test without re-deriving the temp path.
 _GUARD_MARKER = "tortoise-embedded-lane-"
 
+#: Captured at MODULE IMPORT time — i.e. during COLLECTION, after conftest has
+#: been imported and BEFORE any session-scoped fixture runs. This is the
+#: PLACEMENT pin. The guard's whole justification is that a fixture is
+#: structurally too late for a module-body writer, so a guard that works only
+#: once a fixture has run would satisfy every TEST-TIME assertion in this file
+#: while leaving the writer path open — which is exactly what happened on the
+#: first, fixture-based revision of `tests/conftest.py`.
+_REDIRECT_AT_COLLECTION = os.environ.get("TORTOISE_DB_PATH") or ""
+
 
 def _sdk_binds_an_embedded_path() -> bool:
     """True when the SDK will resolve an embedded path (its own rule):
@@ -110,3 +119,32 @@ def test_the_guard_is_a_session_wide_redirect_not_a_single_call_shim():
         assert _GUARD_MARKER not in redirect, (
             "the guard set a TORTOISE_DB_PATH in a URI lane — it must be a "
             f"no-op there, got {redirect!r}")
+
+
+def test_the_guard_is_in_force_before_collection_runs():
+    """The PLACEMENT pin: the redirect must already be in force when this
+    module's BODY runs during COLLECTION — not merely by the time a test runs.
+
+    Every other assertion in this file reads ``TORTOISE_DB_PATH`` at TEST
+    time, so a guard moved into a session-scoped fixture satisfies all of them
+    while installing the redirect *after* collection — and a module that
+    constructs a bare SDK in its body (two do:
+    ``tests/test_issue94_annotate_ep_batch.py``,
+    ``tests/test_topic_summarization.py``) then recreates the canonical store,
+    which is the regression #4071 exists to prevent.
+
+    Mutation-verified: with conftest's guard moved into a session ``autouse``
+    fixture doing the identical work, the three tests above stay GREEN and this
+    one fails (the snapshot is empty because the module body ran first).
+    """
+    if _sdk_binds_an_embedded_path():
+        assert _GUARD_MARKER in _REDIRECT_AT_COLLECTION, (
+            "the #4071 guard is NOT in force at COLLECTION time "
+            f"(TORTOISE_DB_PATH={_REDIRECT_AT_COLLECTION!r}) — a session "
+            "fixture is structurally too late for a module-body writer, so "
+            "the canonical store will be recreated during collection")
+    else:
+        assert _GUARD_MARKER not in _REDIRECT_AT_COLLECTION, (
+            "the embedded-lane guard set a TORTOISE_DB_PATH before collection "
+            f"in a URI lane — it must be a no-op there, got "
+            f"{_REDIRECT_AT_COLLECTION!r}")
