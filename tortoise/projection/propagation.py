@@ -105,9 +105,21 @@ class _PropagationMixin:
         A point's neighbors are the other endpoints of any operator it participates in,
         regardless of source/target role — this is what makes EP affected-set expansion
         work for directional IMPL and bidirectional hasPart/NAND alike (#86).
+
+        ⛔ THE QUERY WAS UNFILTERED AND CONTRADICTED THIS DOCSTRING (#5566). It matched
+        `-[r]-(op)-[r2]-(m)` with no type constraint at all, so a structural edge
+        (`related`, `aboutSubject`, `memberOf`, …) or a reverse-only `IMPL` (the
+        mitigation back-link `(m)-[:IMPL]->(op)`) was returned as a neighbour — while the
+        line above promises IMPL/NAND. `TortoiseEP._live_neighbors` was narrowed to
+        `-(n)<-[:IMPL|NAND]-(op)-[:IMPL|NAND]->(m)` and this copy was left behind; it is
+        reachable only through the deprecated `propagate_shock` path (no production
+        callers — `tests/test_bfs_audit.py::test_no_propagate_shock_callers`), so it did
+        not keep #5566 alive, but it was the same defect one refactor from being live.
+        Filtered here so the code matches its contract either way.
         """
         rows = self.g.query(
-            "MATCH (n:Point {id:$id})-[r]-(op:Point {is_operator:true})-[r2]-(m:Point) "
+            "MATCH (n:Point {id:$id})-[:IMPL|NAND]-(op:Point {is_operator:true})"
+            "-[:IMPL|NAND]-(m:Point) "
             "WHERE m.id <> $id RETURN DISTINCT m.id",
             params={"id": node_id},
         ).result_set

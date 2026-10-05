@@ -66,9 +66,12 @@ doc_status: live
 >   `_update_claim_posterior` recomputed it as `Beta(1,1)` and **discarded its prior**.
 >   The operator-mediated hops are now typed **and directed**
 >   (`(n)<-[:IMPL|NAND]-(op)-[:IMPL|NAND]->(m)`): only operator **inputs** are admitted,
->   which are exactly the relations `_affected_factors` turns into factors. The §3.9 and
->   §8 status notes are updated accordingly; `related` is now weight-free in fact, not
->   only by the #5025 decision.
+>   which are the relations `_affected_factors` turns into factors. **One residual
+>   remains, and it is not reached through `related`:** a factor whose participating
+>   inputs drop below two no-ops, so an *admitted* input can still be recomputed as
+>   `Beta(1,1)` (`ep.py`, the KNOWN EXCEPTION noted at the affected-factor walk). The
+>   §3.9 and §8 status notes are updated accordingly; `related` is now weight-free in
+>   fact, not only by the #5025 decision.
 >
 > **Changelog v3.18 (2026-09-27 — issue #5025, owner ruling — `related` is the neutral association link and carries no EP):**
 >
@@ -93,11 +96,14 @@ doc_status: live
 >   most general relation … can't determine what that relationship is"); and AIF's
 >   scheme node, cited as an **illustrative** analogy for relevance-on-the-operator
 >   only.
-> - Known defect on the designated operator route, **and it breaches the rule above
->   today**: **#5566** — a non-logical edge onto an operator pulls the node into the
->   affected set, where its prior is discarded (`Beta(1,1)`). The EP traversal is
->   unfiltered on relation, so `related` is not yet weight-free in fact. Owner-reserved
->   (belief model, DECISION-LEDGER §22).
+> - Known defect on the designated operator route, **as of 2026-09-27**: **#5566** — a
+>   non-logical edge onto an operator pulled the node into the affected set, where its
+>   prior was discarded (`Beta(1,1)`). The EP traversal was then unfiltered on relation,
+>   so `related` was not yet weight-free in fact. **The traversal half of this is now
+>   CLOSED** — the affected-set traversal is `IMPL`/`NAND`-filtered and direction-checked
+>   as of v3.18 below, so a `related` edge can no longer pull a node in. The
+>   belief-model half remains **owner-reserved** (DECISION-LEDGER §22), which is why
+>   #5566 stays open.
 >
 > **Changelog v3.18 (2026-09-25, issue #4021 — the inverted predecessor window is refused):**
 >
