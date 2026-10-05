@@ -14055,7 +14055,130 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             # closed.
             _rid = _written.get("id") if isinstance(_written, dict) else None
             resolved_pid = _rid if isinstance(_rid, str) and _rid else pid
-            sdk.supersede_point(pr.existing_id, resolved_pid)
+            # #3366: terminal pre-check, mirroring
+            # ``commit_ops.apply_supersessions`` (the SAME shared
+            # ``is_terminal_status`` vocabulary, on ``(status, outdated)``).
+            # ``_load_commit_graph_state`` loads ``points`` as ``{id: content}``
+            # only — no status — so ``reconcile_payload`` can return
+            # "supersede" for a prior that is ALREADY terminal.
+            # ``supersede_point`` raises inside its own lifecycle guard for
+            # that case, and the writer's catch-all converts the raise to a
+            # fail-closed HTTP 500 that re-raises deterministically for the
+            # same payload: the payload is replay-safe but the transition is
+            # permanently illegal, so the retry can never succeed.
+            #
+            # The query is deliberately the SAME STATEMENT
+            # ``sdk._assert_lifecycle_guard`` runs (#2498) — same MATCH, same
+            # three projected columns, same ``row[0]`` read, and NO ``LIMIT``.
+            # A differently-shaped or first-row-only probe could select a
+            # DIFFERENT node than the write's own guard: point ids are not
+            # unique, row order is server-dependent, and that divergence
+            # either resurrects this bug (guard sees a live sibling, the
+            # write sees a terminal one) or silently drops a legitimate
+            # supersede. Keep the two statements in lockstep.
+            #
+            # An ``is_operator`` prior is deliberately NOT absorbed here: it
+            # is corruption, not a benign replay, so it must still raise.
+            #
+            # The successor created just above is deliberately KEPT on a
+            # skip: that is ``apply_supersessions``' idempotent no-op for the
+            # supersession while preserving the new content. A PRIOR THAT IS
+            # ABSENT (no row) is left to ``supersede_point`` exactly as
+            # before — only the terminal case is a no-op here.
+            #
+            # Scope of the guarantee: this prevents the DETERMINISTIC,
+            # PERMANENTLY-UNCOMMITTABLE 500. ``_prevalidate_supersede_window``
+            # above still runs first, so a terminal prior carrying a genuinely
+            # INVERTED window still 422s — that is a correctable payload
+            # error (the client fixes the window and retries), not a wedge,
+            # and the two are deliberately not conflated.
+            from .live import is_terminal_status as _is_terminal_status
+
+            def _terminal_state(point_id: str) -> tuple | None:
+                """The terminal state of ``point_id``, or ``None``.
+
+                The query is deliberately the SAME STATEMENT
+                ``sdk._assert_lifecycle_guard`` runs (#2498) — same MATCH,
+                same three projected columns in the same order, same
+                ``row[0]`` read, and NO ``LIMIT``. A differently-shaped or
+                first-row-only probe could select a DIFFERENT node than the
+                write's own guard: point ids are not unique and row order is
+                server-dependent, and that divergence would either resurrect
+                this bug or silently drop a legitimate supersede.
+
+                ``None`` means "not terminal, or not a statement point": an
+                ``is_operator`` prior is corruption, not a benign replay, so
+                it must still be left to raise rather than absorbed here.
+                An ABSENT node also returns ``None`` — the guard's own
+                missing-point path is unchanged.
+                """
+                rows = sdk._get_proj().g.query(
+                    "MATCH (n:Point {id:$id}) "
+                    "RETURN n.is_operator, n.status, "
+                    "coalesce(n.outdated, false)",
+                    params={"id": point_id}).result_set
+                if not rows or bool(rows[0][0]):
+                    return None
+                return (rows[0][1], bool(rows[0][2]))
+
+            # #3366: terminal pre-check, mirroring
+            # ``commit_ops.apply_supersessions`` (the SAME shared
+            # ``is_terminal_status`` vocabulary, on ``(status, outdated)``).
+            # ``_load_commit_graph_state`` loads ``points`` as ``{id: content}``
+            # only — no status — so ``reconcile_payload`` can return
+            # "supersede" for a prior that is ALREADY terminal.
+            # ``supersede_point`` raises inside its own lifecycle guard for
+            # that case, and the writer's catch-all converts the raise to a
+            # fail-closed HTTP 500 that re-raises deterministically for the
+            # same payload: the payload is replay-safe but the transition is
+            # permanently illegal, so the retry can never succeed.
+            #
+            # BOTH endpoints are probed, because ``supersede_point`` guards
+            # both (role="source" AND role="target", sdk.py #2498) and the
+            # successor leg is independently reachable: ``create_point``'s
+            # dedup resolution carries NO terminal filter, so it can re-key
+            # the successor onto an already-dead node and raise on the
+            # TARGET — the identical retry-proof 500 on the other endpoint.
+            #
+            # The successor created just above is deliberately KEPT on a
+            # skip: that is ``apply_supersessions``' idempotent no-op for the
+            # supersession while preserving the new content. A PRIOR THAT IS
+            # ABSENT (no row) is left to ``supersede_point`` exactly as
+            # before — only the terminal case is a no-op here.
+            #
+            # Scope of the guarantee: this prevents the DETERMINISTIC,
+            # PERMANENTLY-UNCOMMITTABLE 500. ``_prevalidate_supersede_window``
+            # above still runs first, so a terminal prior carrying a genuinely
+            # INVERTED window still 422s — that is a correctable payload
+            # error (the client fixes the window and retries), not a wedge,
+            # and the two are deliberately not conflated.
+            _prior_state = _terminal_state(pr.existing_id)
+            _succ_state = _terminal_state(resolved_pid)
+            if _prior_state is not None and _is_terminal_status(*_prior_state):
+                # WARNING (not the helper's silent ``continue``): the shared
+                # helper serves the high-volume capture/eval replay path where
+                # a terminal ref is routine, whereas here the client is told
+                # 200 and otherwise gets NO signal that a supersession it
+                # asked for was dropped. The summary-log WARNING discipline
+                # (see test_hosted_commit_summary_log_reserves_warning_...)
+                # is about not spending WARNING on routine records — a
+                # deliberately-skipped requested write is not routine.
+                _logger.warning(
+                    "hosted supersede skipped: prior point %r is already "
+                    "terminal (%r, outdated=%r) — idempotent no-op (#3366)",
+                    pr.existing_id, _prior_state[0], _prior_state[1])
+            elif _succ_state is not None and _is_terminal_status(*_succ_state):
+                # The successor dedup-landed on an already-dead node — the
+                # content already exists, so there is nothing to supersede
+                # onto. Same idempotent no-op, surfaced distinctly so the
+                # two causes are not conflated in the logs (#3366).
+                _logger.warning(
+                    "hosted supersede skipped: resolved successor %r is "
+                    "already terminal (%r, outdated=%r) — idempotent no-op "
+                    "(#3366)",
+                    resolved_pid, _succ_state[0], _succ_state[1])
+            else:
+                sdk.supersede_point(pr.existing_id, resolved_pid)
         else:
             point_props = {}
             if pr.point.when:
