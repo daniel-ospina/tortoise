@@ -113,7 +113,8 @@ that the payload does not name:
   order: (1) the opening record — `{id, created_at, turn_count, is_episodic}`
   plus `harness` / `actor_user_id` when set, and `capture_lane` when a
   journaling producer sets it (`_fold_session_recorded` already coalesces it;
-  the hosted lane journals no Session event today, so nothing emits it yet);
+  no caller passes `capture_lane` to a journaling writer today, so nothing
+  emits it yet);
   (2) a trailing record written by
   `sdk._write_capture_turns` right after its batched turn statement, carrying
   `capture_redactions` (#4911); (3) after the entity-linking pass, carrying

@@ -515,6 +515,12 @@ export interface SpoolMeta {
   next_attempt_at_ms: number;
   /** capture_key of the last 2xx upload — a replay of identical content is a no-op. */
   filed_key?: string;
+  /** #3516 §B: the LANE the 2xx actually carried. `filed_key` is content-derived,
+   *  so on its own it says the content was delivered — not that the lane was. An
+   *  entry filed lane-less and then upgraded must be re-posted, or the lane is
+   *  stranded and a working hook reads as not-live. Entries filed before this
+   *  field existed have neither lane nor `filed_lane`, so they compare equal. */
+  filed_lane?: string;
   filed_at?: string;
 }
 
@@ -969,7 +975,8 @@ export function writeSpoolEntry(
     ...(prior?.filed_key &&
     prior.content_digest === contentDigest(snapshot.turns) &&
     !laneUpgrade
-      ? { filed_key: prior.filed_key, filed_at: prior.filed_at }
+      ? { filed_key: prior.filed_key, filed_lane: prior.filed_lane,
+          filed_at: prior.filed_at }
       : {}),
   };
   const metaText = `${JSON.stringify(meta, null, 2)}\n`;
@@ -1238,7 +1245,8 @@ export async function flushSpool(
       summary.heldBack += 1;
       continue;
     }
-    if (meta.filed_key && meta.filed_key === meta.capture_key) {
+    if (meta.filed_key && meta.filed_key === meta.capture_key &&
+        meta.filed_lane === meta.capture_lane) {
       summary.skipped += 1;
       continue;
     }
@@ -1299,6 +1307,15 @@ export async function flushSpool(
         // cancelled: the payload went out lane-less, the on-disk meta got the
         // lane, and the CAS re-filed it — leaving `filed_key === capture_key`,
         // so every later drain SKIPPED it and the lane was stranded forever.
+        // The read happens IMMEDIATELY before the write, and the WRITE APPLIES
+        // TO THE FRESHLY-READ META — never to a snapshot taken earlier. Writing
+        // an earlier snapshot back would clobber any concurrent edit that landed
+        // in between, including a lane upgrade, which is precisely the edit that
+        // must survive.
+        //
+        // The LANE is part of the identity: `capture_key` is content-derived and
+        // the lane is not part of the content, so without it a lane upgrade
+        // landing inside the POST window was cancelled and the lane stranded.
         const onDisk = readSpoolEntry(dir, meta.session_id);
         const onDiskTurns = readSpoolTurns(dir, meta.session_id);
         const postedLane = payload.capture_lane as string | undefined;
@@ -1308,6 +1325,7 @@ export async function flushSpool(
           onDisk.capture_lane === postedLane
         ) {
           onDisk.filed_key = onDisk.capture_key ?? captureKey(meta.session_id, onDiskTurns);
+          onDisk.filed_lane = postedLane;
           onDisk.filed_at = new Date(nowMs).toISOString();
           onDisk.attempts = 0;
           onDisk.next_attempt_at_ms = 0;
@@ -1332,7 +1350,8 @@ export async function flushSpool(
       // Re-read before the backoff write-back for the same reason as the CAS
       // above: never clobber newer turns written while the POST was in flight.
       const pending = readSpoolEntry(dir, meta.session_id) ?? meta;
-      if (pending.filed_key && pending.filed_key === pending.capture_key) {
+          if (pending.filed_key && pending.filed_key === pending.capture_key &&
+              pending.filed_lane === pending.capture_lane) {
         // A CONCURRENT flush already filed this exact content while our POST was
         // in flight. Re-arming the backoff here would attach a window to content
         // that was never refused — and since writeSpoolEntry now CARRIES the

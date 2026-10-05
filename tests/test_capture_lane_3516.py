@@ -378,6 +378,46 @@ def test_a_lane_upgrade_during_the_post_window_is_not_swallowed(tmp_path, monkey
         "the lane was STRANDED — the drain skipped the upgraded entry forever")
 
 
+def test_a_lane_that_appears_after_filing_is_never_skipped(tmp_path, monkeypatch):
+    """`filed_key` is content-derived and says nothing about the LANE, so on its
+    own it lets a lane-less filing mask a lane that appears afterwards — the
+    lane is then stranded and a working hook reads as not-live. `filed_lane`
+    records what the 2xx actually carried, and the skip requires it to match.
+    The state is written directly here because the CAS's read→write instant can
+    produce exactly it."""
+    import tortoise.capture_spool as spool
+
+    root = tmp_path / "spool"
+    monkeypatch.setattr(spool, "spool_dir", lambda: root)
+    sid = "3516-filed-lane"
+    turns = [{"role": "user", "content": "same"}]
+    spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid, turns=turns, source="t", machine_id="m"))
+
+    first: list[dict] = []
+    spool.flush_spool(
+        root, lambda p: (first.append(dict(p)),
+                         spool.PostOutcome(ok=True, status=200))[1],
+        only_session_id=sid)
+    assert first and "capture_lane" not in first[0]
+    meta = spool.read_spool_meta(root, sid)
+    assert meta.get("filed_key") == meta.get("capture_key")
+    assert "filed_lane" in meta and meta.get("filed_lane") is None, (
+        "the filing did not record the delivered lane")
+
+    meta["capture_lane"] = "hook"  # the lane appears after the filing
+    spool._write_meta(root, meta)
+
+    second: list[dict] = []
+    spool.flush_spool(
+        root, lambda p: (second.append(dict(p)),
+                         spool.PostOutcome(ok=True, status=200))[1],
+        only_session_id=sid)
+    assert second and second[0].get("capture_lane") == "hook", (
+        "a lane arriving after the filing was skipped — it is stranded")
+    assert spool.read_spool_meta(root, sid).get("filed_lane") == "hook"
+
+
 def test_an_empty_stored_lane_is_filled_in_by_a_later_snapshot(tmp_path, monkeypatch):
     """The ONLY input that distinguishes truthy `or` from a nullish form: a
     stored EMPTY lane with a truthy new one (`"" or "hook"` -> `"hook"`; the

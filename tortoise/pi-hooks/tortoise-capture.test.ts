@@ -745,6 +745,36 @@ test("a lane upgrade during the POST window is not swallowed", async () => {
   );
 });
 
+test("a lane arriving AFTER a lane-less filing is never skipped", async () => {
+  // `filed_key` is content-derived and says nothing about the LANE, so the skip
+  // must also require the recorded `filed_lane` to match — otherwise a lane-less
+  // filing masks a lane that appears later and the lane is stranded.
+  const spool = tmpSpool();
+  const sid = "sess-filed-lane";
+  const turns = [{ role: "user" as const, content: "same" }];
+  writeSpoolEntry(spool, snapshot(sid, turns));
+
+  const server = recordingServer();
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+  const filed = readSpoolEntry(spool, sid)!;
+  assert.equal(filed.filed_key, filed.capture_key);
+  // `JSON.stringify` drops an `undefined` value, so a lane-less filing leaves
+  // the key absent — absent and `undefined` must compare equal in the skip.
+  assert.equal(filed.filed_lane, undefined, "the filing did not record the delivered lane");
+  // The lane appears after the filing (the CAS read→write instant can do this).
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  writeFileSync(metaPath, `${JSON.stringify({ ...filed, capture_lane: "hook" }, null, 2)}\n`);
+
+  const later = recordingServer();
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: later.fetchImpl, now: 2 });
+  assert.equal(
+    later.sessions.get(sid)?.capture_lane,
+    "hook",
+    "a lane arriving after the filing was skipped — it is stranded",
+  );
+  assert.equal(readSpoolEntry(spool, sid)?.filed_lane, "hook");
+});
+
 test("an empty STORED lane is filled in (truthy, not nullish)", () => {
   // The only input that distinguishes `||` from `??`: a stored EMPTY lane with a
   // truthy new one. `"" || "hook"` -> "hook"; `??` would omit the key. An empty

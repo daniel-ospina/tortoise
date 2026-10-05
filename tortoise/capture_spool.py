@@ -821,6 +821,7 @@ def write_spool_entry(
     if (prior and prior.get("content_digest") == new_digest
             and prior.get("filed_key") and not lane_upgrade):
         meta["filed_key"] = prior["filed_key"]
+        meta["filed_lane"] = prior.get("filed_lane")
         meta["filed_at"] = prior.get("filed_at")
 
     meta_text = json.dumps(meta, ensure_ascii=False, indent=2) + "\n"
@@ -1152,7 +1153,14 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
                       "by a drain",
         })
         return
-    if meta.get("filed_key") and meta.get("filed_key") == meta.get("capture_key"):
+    if (meta.get("filed_key") and meta.get("filed_key") == meta.get("capture_key")
+            and meta.get("filed_lane") == meta.get("capture_lane")):
+        # #3516 §B: `filed_key` is CONTENT-derived, so on its own it says the
+        # content was delivered — not that the LANE was. An entry filed
+        # lane-less and then upgraded must be re-posted, or the lane is
+        # stranded and a working hook reads as not-live. `filed_lane` records
+        # the lane the 2xx actually carried; entries filed before this field
+        # existed have neither lane nor filed_lane, so they compare equal.
         summary.skipped += 1
         return
     window = _backoff_ms(meta)
@@ -1210,31 +1218,38 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         # COMPARE-AND-SWAP, on the POSTED CONTENT **AND LANE**. A concurrent
         # capture (a resumed session, or the SessionStart drain racing a live
         # turn) can grow this entry while the POST is in flight. Stamp
-        # `filed_key` only when what is on disk NOW is exactly what was posted;
-        # otherwise the entry stays unfiled and the next opportunity re-posts.
-        # Comparing meta-to-meta was wrong: a writer killed between its log
-        # append and its meta write leaves the meta digest stale, so the check
-        # passed while a turn went unfiled forever.
+        # `filed_key`/`filed_lane` only when what is on disk NOW is exactly what
+        # was posted; otherwise the entry stays unfiled and the next opportunity
+        # re-posts. Comparing meta-to-meta was wrong: a writer killed between
+        # its log append and its meta write leaves the meta digest stale, so the
+        # check passed while a turn went unfiled forever.
         #
-        # The LANE is part of that identity (#3516 §B). `capture_key` is
-        # content-derived and the lane is not part of the content, so without
-        # this clause a lane UPGRADE landing inside the POST window was
-        # cancelled: the payload went out lane-less, the on-disk meta got the
-        # lane, and the CAS re-filed it — leaving `filed_key == capture_key`,
-        # so every later drain SKIPPED it and the lane was stranded forever
-        # (a working hook reading as not-live). Reachable in the shipped
-        # topology: claude-hooks/session-start.sh backgrounds the drain.
-        on_disk_turns = read_spool_turns(root, sid)
-        on_disk = read_spool_meta(root, sid)
-        if (on_disk is not None
-                and content_digest(on_disk_turns) == posted_digest
-                and on_disk.get("capture_lane") == posted_lane):
-            on_disk["filed_key"] = on_disk.get("capture_key") or capture_key(sid, on_disk_turns)
-            on_disk["filed_at"] = datetime.fromtimestamp(
+        # The read happens IMMEDIATELY before the write, and the WRITE APPLIES
+        # TO THE FRESHLY-READ META — never to a snapshot taken earlier. Writing
+        # an earlier snapshot back would clobber any concurrent edit that landed
+        # in between, including a lane upgrade, which is precisely the edit that
+        # must survive. (A lock would close the remaining read→write instant
+        # entirely; it is deliberately NOT taken, because this is the capture
+        # hot path and a stale lock would block — or lose — captures, which is a
+        # worse failure than a race this narrow.)
+        #
+        # The LANE is part of that identity: `capture_key` is content-derived
+        # and the lane is not part of the content, so without it a lane upgrade
+        # landing inside the POST window was cancelled and the lane stranded
+        # (reachable in the shipped topology — claude-hooks/session-start.sh
+        # backgrounds this drain).
+        fresh_turns = read_spool_turns(root, sid)
+        fresh = read_spool_meta(root, sid)
+        if (fresh is not None
+                and content_digest(fresh_turns) == posted_digest
+                and fresh.get("capture_lane") == posted_lane):
+            fresh["filed_key"] = fresh.get("capture_key") or capture_key(sid, fresh_turns)
+            fresh["filed_lane"] = posted_lane
+            fresh["filed_at"] = datetime.fromtimestamp(
                 now_ms / 1000.0, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-            on_disk["attempts"] = 0
-            on_disk["next_attempt_at_ms"] = 0
-            _write_meta(root, on_disk)
+            fresh["attempts"] = 0
+            fresh["next_attempt_at_ms"] = 0
+            _write_meta(root, fresh)
         # else: the posted content WAS filed; the entry keeps the newer turns
         # and stays unfiled, so they are re-posted next time.
         summary.filed += 1
