@@ -6566,7 +6566,11 @@ class FalkorProjection(
         # locks survive rebuilds, and promote_point still sees them.
         for props in batch_snapshot:
             bid = props.get("id")
-            if not bid:
+            # #7369: `bid` is the Batch MERGE key, and this restore runs AFTER
+            # `_wipe_all_nodes` with no per-record try/except (unlike the
+            # sibling onboarding/config restores), so a value the driver cannot
+            # take aborts a rebuild that has already wiped the graph.
+            if not _writable_id(bid):
                 continue
             clean = {k: v for k, v in props.items() if k != "id"}
             self.g.query(
@@ -6752,7 +6756,9 @@ class FalkorProjection(
         # journaled capture no longer depends on this snapshot.
         for props in session_snapshot:
             sid = props.get("id")
-            if not sid:
+            # #7369: `sid` is the Session MERGE key — same post-wipe exposure
+            # as the Batch restore above.
+            if not _writable_id(sid):
                 continue
             clean = {k: v for k, v in props.items() if k != "id"}
             self.g.query(
