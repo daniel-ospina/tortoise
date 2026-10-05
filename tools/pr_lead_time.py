@@ -419,6 +419,72 @@ def _span(runs: list[dict], newest_only: bool) -> float | None:
     return (max(e for _, e in sel) - min(s for s, _ in sel)).total_seconds()
 
 
+# A completed check in one of these conclusions is NOT red. This is the rail's own
+# allow-list POLARITY, adopted after a merge went ahead on an unrecognised
+# conclusion (agent-infra #6807): an unknown conclusion is RED, never green.
+NON_RED_CONCLUSIONS = frozenset({"success", "neutral", "skipped", "cancelled", "stale"})
+
+
+def eligible_at(runs: list[dict]) -> datetime | None:
+    """The instant the head's check surface was COMPLETE and non-red.
+
+    This is the READINESS/RESIDENCE boundary, and it is the clock the two legs
+    lack. Measured 2026-10-04: a PR whose head has just gone non-red merges in a
+    median **0.8 min** (n=30, all 30 rail-merged), while time-to-non-red is where
+    a PR's wait actually lives (median 2.02 h created -> non-red over the same
+    population). So (b) is overwhelmingly READINESS, and this field is what
+    separates the two halves instead of charging the whole of (b) to residence.
+
+    `None` unless EVERY newest attempt per `(app.slug, name)` (by max `id` — the
+    same weak key the gate rule uses, and the same recorded defect) is complete
+    and in `NON_RED_CONCLUSIONS`. `None` therefore means the head was never
+    observable as non-red: a reported bucket, never a zero, never folded into
+    either half of the split. The `Mergify` merge-queue marker is excluded — it
+    is queue entry, not CI.
+    """
+    newest: dict[tuple, dict] = {}
+    for r in runs:
+        name = r.get("name") or ""
+        if name.startswith("Mergify"):
+            continue
+        key = ((r.get("app") or {}).get("slug"), name)
+        if key not in newest or (r.get("id") or 0) > (newest[key].get("id") or 0):
+            newest[key] = r
+    if not newest:
+        return None
+    completed: list[datetime] = []
+    for r in newest.values():
+        if r.get("conclusion") not in NON_RED_CONCLUSIONS:
+            return None  # red, or still in flight: not eligible
+        t = ts(r.get("completed_at"))
+        if t is None:
+            return None  # complete by conclusion but not by clock: not observable
+        completed.append(t)
+    return max(completed)
+
+
+def split_b_at_eligibility(gate: datetime, merged_at: datetime,
+                           elig: datetime | None) -> dict:
+    """Split leg (b) at eligibility: readiness, then residence.
+
+    `pre_eligible_seconds` = gate -> eligible (the head was still red or in
+    flight: author work, or a re-run), `post_eligible_seconds` = eligible ->
+    merged (what the merge machinery charges). By construction the two sum to (b)
+    exactly whenever eligibility is observable, which is asserted in `measure()`;
+    when it is not observable BOTH are `None`, so (b) stays whole rather than
+    being silently charged to either half. Eligibility is clamped into
+    [gate, merged] for the same reason queue entry is: a check can complete
+    before the cheap entry gate finishes.
+    """
+    if elig is None:
+        return {"eligible_at": None, "pre_eligible_seconds": None,
+                "post_eligible_seconds": None}
+    elig = min(max(elig, gate), merged_at)
+    return {"eligible_at": elig.isoformat(),
+            "pre_eligible_seconds": (elig - gate).total_seconds(),
+            "post_eligible_seconds": (merged_at - elig).total_seconds()}
+
+
 def ci_on_head(gh: Gh, repo: str, sha: str, contexts: list[str]) -> dict:
     """CI and queue timing from the check-runs on the PR's head commit.
 
@@ -456,6 +522,7 @@ def ci_on_head(gh: Gh, repo: str, sha: str, contexts: list[str]) -> dict:
     runs = check_runs(gh, repo, sha)
     gha = [r for r in runs if (r.get("app") or {}).get("slug") == "github-actions"]
     entry = queue_entry(runs)
+    elig = eligible_at(runs)
     attempts: dict[str, int] = {}
     for r in gha:
         attempts[r.get("name")] = attempts.get(r.get("name"), 0) + 1
@@ -468,6 +535,7 @@ def ci_on_head(gh: Gh, repo: str, sha: str, contexts: list[str]) -> dict:
         "rerun_seconds": (max(0.0, all_span - newest_span)
                           if all_span is not None and newest_span is not None else None),
         "queue_enter_at": entry.isoformat() if entry else None,
+        "eligible_at": elig.isoformat() if elig else None,
         "attempts": len(gha),
         "reruns": sum(1 for c in attempts.values() if c > 1),
     }
@@ -568,6 +636,11 @@ def measure(gh: Gh, repo: str, contexts: list[str], days: int, now: datetime,
             "closed_at": closed_at.isoformat() if closed_at else None,
             "merged_at": merged_at.isoformat() if merged_at else None,
             "draft": bool(pr.get("draft")),
+            # the eligibility split defaults to None and is filled only where a
+            # merged_at and a gate make it computable — never folded into zero
+            "eligible_at": None,
+            "pre_eligible_seconds": None,
+            "post_eligible_seconds": None,
         }
         reviews = gh.paged(f"repos/{repo}/pulls/{pr['number']}/reviews?per_page={PAGE}")
         fa = first_activity(gh, repo, pr, reviews)
@@ -577,7 +650,8 @@ def measure(gh: Gh, repo: str, contexts: list[str], days: int, now: datetime,
         row["review_rounds"] = rs["review_rounds"]
         row["ci"] = ci_on_head(gh, repo, head_sha, contexts) if head_sha else {
             "span_seconds": None, "final_pass_seconds": None, "gate_pass_seconds": None,
-            "rerun_seconds": None, "queue_enter_at": None, "attempts": 0, "reruns": 0}
+            "rerun_seconds": None, "queue_enter_at": None, "eligible_at": None,
+            "attempts": 0, "reruns": 0}
         row["force_pushes"] = force_pushes(gh, repo, pr["number"])
         end = merged_at or closed_at
         if created is None or end is None:
@@ -659,6 +733,11 @@ def measure(gh: Gh, repo: str, contexts: list[str], days: int, now: datetime,
         qenter = min(max(qenter, gate), merged_at)
         row["post_gate_pre_entry_seconds"] = (qenter - gate).total_seconds()
         row["queue_cycle_seconds"] = (merged_at - qenter).total_seconds()
+        # and at ELIGIBILITY — the boundary the queue split cannot express once
+        # the queue is out of the path (no queue entry => the whole of (b) is
+        # "pre-entry" and residence is invisible). This is the live split.
+        row.update(split_b_at_eligibility(
+            gate, merged_at, ts(row["ci"].get("eligible_at"))))
         row["leg"] = "merged"
         rows.append(row)
 
@@ -699,8 +778,13 @@ def measure(gh: Gh, repo: str, contexts: list[str], days: int, now: datetime,
                 (r["post_gate_pre_entry_seconds"] + r["queue_cycle_seconds"])
                 - r["seconds_b"]) > 1e-6:
             raise SystemExit(f"QUEUE SPLIT VIOLATED: PR #{r['number']}")
+        if r.get("pre_eligible_seconds") is not None and abs(
+                (r["pre_eligible_seconds"] + r["post_eligible_seconds"])
+                - r["seconds_b"]) > 1e-6:
+            raise SystemExit(f"ELIGIBILITY SPLIT VIOLATED: PR #{r['number']}")
         for k in ("pre_activity_seconds", "a_gate_seconds", "post_gate_pre_entry_seconds",
-                  "queue_cycle_seconds", "first_activity_seconds"):
+                  "queue_cycle_seconds", "pre_eligible_seconds",
+                  "post_eligible_seconds", "first_activity_seconds"):
             v = r.get(k)
             if v is not None and v < -1e-6:
                 raise SystemExit(f"NEGATIVE SUB-SEGMENT: PR #{r['number']} {k}={v:.3f}")
@@ -747,6 +831,8 @@ def measure(gh: Gh, repo: str, contexts: list[str], days: int, now: datetime,
         "first_activity_all": tot(active, "first_activity_seconds"),
         "post_gate_pre_entry": tot(merged, "post_gate_pre_entry_seconds"),
         "queue_cycle": tot(merged, "queue_cycle_seconds"),
+        "pre_eligible": tot(merged, "pre_eligible_seconds"),
+        "post_eligible": tot(merged, "post_eligible_seconds"),
     }
     # shares over the ACCOUNTED population, and over the whole population so the
     # unknown (no observable gate) bucket is never hidden
@@ -800,6 +886,18 @@ def measure(gh: Gh, repo: str, contexts: list[str], days: int, now: datetime,
             "non-bot user; the author is NOT excluded because every agent shares "
             "the daniel-ospina login, so author != reviewer cannot be observed"
         ),
+        "rule_eligibility": (
+            "eligibility = the latest completion among the NEWEST attempt (max id) "
+            "of every check on the final head, excluding the Mergify marker, and "
+            "only when every one of those attempts is complete and non-red "
+            "(success/neutral/skipped/cancelled/stale — the rail's allow-list "
+            "polarity, so an unrecognised conclusion is RED). (b) is split at it "
+            "into pre_eligible (readiness) + post_eligible (residence), which sum "
+            "to (b) exactly, asserted per PR. A head never observable as non-red "
+            "reports None for BOTH halves — never a zero, never folded into the "
+            "other half. Eligibility is a HARDER boundary than the queue entry: "
+            "it exists on a path with no queue."
+        ),
         "population": {
             "human_closed_in_window": len(rows),
             "human_merged": n_merged,
@@ -823,6 +921,10 @@ def measure(gh: Gh, repo: str, contexts: list[str], days: int, now: datetime,
                             if leg["b_merge_path"] else None),
             "queue_cycle": (round(100.0 * sub["queue_cycle"] / leg["b_merge_path"], 1)
                             if leg["b_merge_path"] else None),
+            "pre_eligible": (round(100.0 * sub["pre_eligible"] / leg["b_merge_path"], 1)
+                             if leg["b_merge_path"] else None),
+            "post_eligible": (round(100.0 * sub["post_eligible"] / leg["b_merge_path"], 1)
+                              if leg["b_merge_path"] else None),
         },
         "medians_seconds": {
             "first_activity": med(active, "first_activity_seconds"),
@@ -832,6 +934,8 @@ def measure(gh: Gh, repo: str, contexts: list[str], days: int, now: datetime,
             "c_abandoned": med(aband, "seconds_c"),
             "queue_wait": med(merged, "queue_wait_seconds"),
             "approval_wait": med(merged, "approval_wait_seconds"),
+            "pre_eligible": med(merged, "pre_eligible_seconds"),
+            "post_eligible": med(merged, "post_eligible_seconds"),
             "post_gate_pre_entry": med(merged, "post_gate_pre_entry_seconds"),
             "queue_cycle": med(merged, "queue_cycle_seconds"),
             "ci_gate_pass": statistics.median(ci_gate) if ci_gate else None,
@@ -940,6 +1044,11 @@ def render(result: dict) -> str:
           f"  sub-split of (b) at queue entry: post-gate development/wait "
           f"{pct(split['post_gate_pre_entry'])} "
           f"| queue residence {pct(split['queue_cycle'])}",
+          f"  sub-split of (b) at ELIGIBILITY (live path; queue-independent): "
+          f"readiness {pct(split['pre_eligible'])} "
+          f"| residence {pct(split['post_eligible'])} "
+          f"(median readiness={hours(m.get('pre_eligible'))}, "
+          f"median residence={minutes(m.get('post_eligible'))})",
           f"  terminal: abandonment = {t['abandoned_time_share_pct']}% of elapsed PR-time",
           f"CI on head: final pass median={minutes(m['ci_final_pass'])} "
           f"| gate pass median={minutes(m['ci_gate_pass'])} "

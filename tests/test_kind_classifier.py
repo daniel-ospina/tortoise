@@ -724,8 +724,8 @@ class TestClassifierConstruction:
         _clear_index_cache()
         clf = KindClassifier(encoder=KeywordEncoder(), model=None, llm_tail=False)
         assert clf.index is not None and len(clf.index) > 0
-        with ki._INDEX_LOCK:
-            assert ki._INDEX_CACHE == {}, "stub builds must never touch the production memo"
+        assert len(ki._INDEX_CACHE) == 0, \
+            "stub builds must never touch the production memo"
 
     def test_degraded_build_never_memoized_recovery_rebuilds_good(
             self, monkeypatch, tmp_path):
@@ -757,9 +757,8 @@ class TestClassifierConstruction:
         state["up"] = False
         clf_down = KindClassifier(model=None, llm_tail=False)
         assert clf_down.index.degraded is True
-        with ki._INDEX_LOCK:
-            assert ki._INDEX_CACHE == {}, \
-                "the degraded in-process build must not stay in the memo"
+        assert len(ki._INDEX_CACHE) == 0, \
+            "the degraded in-process build must not stay in the memo"
 
         # embedder UP: a fresh construction must NOT memo-hit the degraded
         # build — it loads/rebuilds a NON-degraded index
