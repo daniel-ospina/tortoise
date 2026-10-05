@@ -325,6 +325,35 @@ def test_spool_lane_ful_identical_resnapshot_is_a_no_op(tmp_path, monkeypatch):
     assert spool.read_spool_meta(root, sid).get("capture_lane") == "hook"
 
 
+def test_the_journal_carrier_carries_the_lane_and_replay_recovers_it():
+    """Pins the PRODUCER half of the journal guard. `_write_session_and_turns`
+    must put the lane into the record it hands `on_session_merged`, or a
+    journal-only replay of a lane-carrying capture cannot recover it — and the
+    fold pinned by `test_journal_fold_keeps_the_first_lane` would be permanently
+    UNREACHABLE (review P2). Drives both ends directly, because no caller passes
+    a lane and `on_session_merged` together today."""
+    from tortoise.sdk import _write_session_and_turns
+
+    sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
+    proj = sdk._get_proj()
+    sid = "3516-journal-lane"
+    emitted: list[dict] = []
+    _write_session_and_turns(
+        proj, sdk, sid, [{"role": "user", "content": "hi"}],
+        now="2026-10-04T00:00:00Z", harness="pi", capture_lane="hook",
+        on_session_merged=emitted.append)
+    assert emitted, "the writer emitted no journal carrier at all"
+    assert any(ev.get("capture_lane") == "hook" for ev in emitted), (
+        "the writer dropped the lane from its journal carrier")
+
+    # Simulate a journal-only REPLAY: wipe the live node, then fold the journal.
+    proj.g.query("MATCH (s:Session {id:$sid}) DELETE s", params={"sid": sid})
+    for ev in emitted:
+        proj._fold_session_recorded({"type": "SessionRecorded", **ev})
+    assert _session_lane(sdk, sid) == "hook", (
+        "the lane did not survive a journal-only replay")
+
+
 def test_spool_lane_upgrade_refiles_an_already_filed_entry(tmp_path, monkeypatch):
     """A lane upgrade must also INVALIDATE the filing marker. `filed_key` is
     content-derived (the lane is not part of it), so an entry already filed
