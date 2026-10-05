@@ -1796,6 +1796,120 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
 # shape this hardening eliminates.
 
 
+def _journal_safe_params(params, cypher=None):
+    """``params`` with every value a Cypher property can actually take (#7369).
+
+    The parameter boundary is the ONE place a journal-derived value reaches
+    FalkorDB, so the writability policy is enforced HERE rather than at each of
+    the fold sites that build a parameter. That is the whole point: a recorded
+    field becomes safe BY CONSTRUCTION, and a field recorded LATER cannot
+    reopen the hole. That is how this hole reopened — every newly recorded
+    field had to remember its own per-site gate, and ``valid_to`` is simply the
+    one that was missed; the creation folds carry ~20 more.
+
+    ``self.g`` is that boundary. It is the single handle every projection write
+    goes through — live ``apply()`` and all three replay engines — and it
+    already carries the sibling cross-cutting decisions: the #3595 operator
+    refusal, ``_is_bulk_wipe``, and the #3359 op count.
+
+    DEGRADES, never raises. A value the driver cannot take becomes ``None``
+    instead of aborting a replay that has ALREADY wiped the graph — pass-1a and
+    pass-1b have no per-event ``try/except``, so the raise lands after
+    ``_wipe_all_nodes`` and leaves the graph wiped or half-built.
+
+    ``None`` rather than a REMOVED key, deliberately: a parameter the Cypher
+    still references must stay BOUND, and for a ``SET n += $map`` an omitted
+    key leaves the PRE-EXISTING value in place — state the journal never
+    justified, which is the outcome this gate exists to prevent.
+
+    The statement — not the value — says which parameters are CONTAINERS, and a
+    container must be walked as one or a legitimate structure is nulled
+    wholesale. Three shapes exist in this codebase (measured, not assumed):
+
+      ``SET n += $p``        the map is MERGED into the node's properties
+      ``SET n = $p``         the map REPLACES the node's properties
+      ``UNWIND $p AS row``   the list holds ROW MAPS, consumed as rows
+
+    Anything else is a VALUE position, where a map / bytes / set / non-finite
+    float / NUL-or-surrogate string is what the engine rejects. Getting the
+    container shapes wrong is not hypothetical: a rows-first rule nulled
+    ``$turns``, which silently skipped the capture turn upsert AND the document
+    version bump — the replay completed with the right shape and the wrong
+    content, which is worse than the raise it was meant to prevent. The
+    predicate is ``_annotator_value_ok``: the policy the annotator dims already
+    use, so the rule keeps ONE home.
+
+    Returns ``params`` UNCHANGED (the same object) when nothing needed
+    degrading, so the healthy hot path allocates nothing.
+    """
+    if not params:
+        return params
+    statement = cypher or ""
+    # ``SET n += $p`` and ``SET n = $p`` both hold a MAP OF PROPERTIES. The
+    # second pattern anchors on a BARE name (``n``), so ``SET n.x = $v`` — a
+    # scalar in a property — does not match and stays a value position.
+    spread = frozenset(
+        re.findall(r"\+= *\$([A-Za-z_][A-Za-z0-9_]*)", statement)
+    ) | frozenset(
+        re.findall(
+            r"SET +[A-Za-z_][A-Za-z0-9_]* *= *\$([A-Za-z_][A-Za-z0-9_]*)",
+            statement,
+        )
+    )
+    # ``UNWIND $p AS row`` — a LIST OF ROW MAPS, not properties.
+    rows = frozenset(
+        re.findall(r"UNWIND +\$([A-Za-z_][A-Za-z0-9_]*)", statement, re.I)
+    )
+    degraded: list = []
+
+    def _walk(value, path, shape):
+        if shape == "rows" and isinstance(value, (list, tuple)):
+            changed = False
+            out = []
+            for i, row in enumerate(value):
+                walked = _walk(row, "%s[%d]" % (path, i), "map")
+                if walked is not row:
+                    changed = True
+                out.append(walked)
+            return out if changed else value
+        if shape == "map" and isinstance(value, dict):
+            changed = False
+            out = {}
+            for k, v in value.items():
+                walked = _walk(v, "%s.%s" % (path, k), None)
+                if walked is not v:
+                    changed = True
+                out[k] = walked
+            return out if changed else value
+        if _annotator_value_ok(value):
+            return value
+        degraded.append(path)
+        return None
+
+    changed = False
+    out = None
+    for key, value in params.items():
+        shape = "rows" if key in rows else ("map" if key in spread else None)
+        walked = _walk(value, str(key), shape)
+        if walked is not value:
+            if out is None:
+                out = dict(params)
+            out[key] = walked
+            changed = True
+    if not changed:
+        return params
+    logger.warning(
+        "#7369: degraded %d parameter value(s) FalkorDB cannot write (%s) to "
+        "null before dispatch; statement=%r. Degrading rather than raising "
+        "on purpose: the folds that build these values run on replay paths "
+        "whose pass-1a/1b carry no per-event try/except, so a raise would "
+        "abort the rebuild AFTER the wipe.",
+        len(degraded), ", ".join(str(p) for p in degraded[:8]),
+        " ".join((cypher or "").split())[:120],
+    )
+    return out
+
+
 class _GuardedGraph:
     """Wrapper around the FalkorDB Graph handle that guards bulk graph-wipe queries.
 
@@ -1855,32 +1969,37 @@ class _GuardedGraph:
         # dead socket is still an op the capture generated). No-op (one
         # ContextVar read) when no capture is active.
         record_graph_op(cypher)
-        return self._g.query(cypher, params=params, timeout=timeout)
+        return self._g.query(
+            cypher, params=_journal_safe_params(params, cypher), timeout=timeout
+        )
 
     def ro_query(self, cypher: str, params=None, timeout=None):
         # Same refusal for the read-only verb: the raw handle this wrapper
         # holds is guarded too, but keep the projection's own wrapper complete
         # rather than relying on the inner handle's class.
         _guard_unsupported_cypher(cypher)
-        return self._g.ro_query(cypher, params=params, timeout=timeout)
+        return self._g.ro_query(
+            cypher, params=_journal_safe_params(params, cypher), timeout=timeout
+        )
 
     def _query(self, cypher: str, params=None, timeout=None, read_only=False):
         # The vendor's `query`/`ro_query` both delegate to `_query`; a caller
         # reaching `_query` directly must not slip past the refusal either.
         _guard_unsupported_cypher(cypher)
         return self._g._query(
-            cypher, params=params, timeout=timeout, read_only=read_only
+            cypher, params=_journal_safe_params(params, cypher),
+            timeout=timeout, read_only=read_only,
         )
 
     def profile(self, cypher: str, params=None):
         # PROFILE/EXPLAIN put the statement on the wire WITHOUT routing through
         # `_query`, so they carry their own refusal.
         _guard_unsupported_cypher(cypher)
-        return self._g.profile(cypher, params=params)
+        return self._g.profile(cypher, params=_journal_safe_params(params, cypher))
 
     def explain(self, cypher: str, params=None):
         _guard_unsupported_cypher(cypher)
-        return self._g.explain(cypher, params=params)
+        return self._g.explain(cypher, params=_journal_safe_params(params, cypher))
 
     def execute_command(self, *args, **kwargs):
         # #3595 (review round 2, P2): the raw Redis command channel carries
