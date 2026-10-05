@@ -64,12 +64,16 @@ EXIT CODES
 2  could not measure (file missing/unparsable, nothing to compare, live read
    failed) — fail-closed: "nothing was compared" is never a pass.
 
-   ONE NAMED EXCEPTION: an ABSENT `.github/settings.yml` is exit 0, not 2. The
-   declarative mirror is OPTIONAL — a file that does not exist declares nothing
-   to compare, and requiring it would red every repo that does not keep one.
-   The moment the file EXISTS it must be usable: present-but-unparsable is 2,
-   and present-but-declaring-nothing is a violation (1). "Missing" and "empty"
-   are deliberately different verdicts; only the former is a skip.
+   NAMED EXCEPTION: an ABSENT `.github/settings.yml` is exit 0 ONLY while the
+   enumeration's `injected` bucket is non-empty. The mirror is optional because a
+   file that does not exist declares nothing to compare, and requiring it would
+   red every repo that does not keep one — but an absent mirror while NOTHING is
+   filed under `injected` leaves the live set unaccounted for, and that is 1
+   (`check_partition`'s `if unaccounted or not mirror`), not a skip. The moment
+   the file EXISTS it must be usable: present-but-unparsable is 2, and
+   present-but-declaring-nothing is a violation (1). "Missing" and "empty" are
+   deliberately different verdicts; only the former is a skip, and only when
+   something else accounts for the live set.
 """
 
 from __future__ import annotations
@@ -1420,7 +1424,8 @@ def run(live: bool = False) -> tuple[int, list[str], list[str]]:
     # note at all and `main()` still printed a success line claiming the mirror
     # AGREED — asserting a comparison that never happened.
     notes.append(
-        "declarative mirror : ABSENT — not compared (the file is optional)"
+        "declarative mirror : ABSENT — not compared (optional, but NOT a skip "
+        "once the injected bucket is empty)"
         if settings is None
         else f"declarative mirror : {len(settings)} context(s) declared for main")
     notes.append(f"producible on PR refs: {len(producible)} check name(s) across "

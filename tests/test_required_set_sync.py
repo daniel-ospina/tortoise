@@ -186,9 +186,11 @@ def test_the_real_enumeration_partitions_every_name(guard):
     assert guard.REQUIRED_SET["ai-review-gate"][0] == "queue", (
         "`ai-review-gate` is required on main and is gated at queue ENTRY by "
         "`.mergify.yml` (#6272) — it must stay in the `queue` bucket")
-    assert "ai-review-gate" in queue, (
-        "`ai-review-gate` must be named in `.mergify.yml`'s queue_conditions — "
-        "that line IS the server-side enforcement of the review record (#5433)")
+    # Deliberately NOT a third assertion that `"ai-review-gate" in queue`: `queue`
+    # is built from REQUIRED_SET, so that is the same predicate as the assertion
+    # above and cannot redden independently. That the config really names it (and
+    # that the enumeration and `.mergify.yml` agree) is `run()`'s job, pinned by
+    # `test_the_real_repo_agrees_offline`.
     assert set(guard.REQUIRED_SET) == queue | merge | injected, (
         "the enumeration is the LIVE-required set — every entry must be in one "
         "of the three buckets and every bucket entry in the enumeration")
