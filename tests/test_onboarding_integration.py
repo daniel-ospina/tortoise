@@ -132,7 +132,7 @@ class TestOnboardingJourney:
         (sdk.team_create — node init is hosted-provision-only) → the legacy
         jsonb writer is kept and a client PATCH onboarding_complete still
         lands (grandfathered pre-backfill fallback). The node-present drop
-        branch is covered in test_onboarding_state_split.py."""
+        branch is covered in the four test_onboarding_state_split_* modules."""
         r = client.patch("/v1/onboarding/state", json={"onboarding_complete": True})
         assert r.status_code == 200
         assert r.json()["onboarding"]["onboarding_complete"] is True

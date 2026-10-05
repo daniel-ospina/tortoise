@@ -598,8 +598,23 @@ def test_e2e15_b_d2_symlink_root_escape(tmp_path):
         return _run_hook(env=env, transcript_path=transcript)
 
     def _drain_settled():
-        """Poll for the child's daemon release (redislite .settings registry
-        disappears when the child's daemon closes on exit)."""
+        """Bounded wait for the child's daemon release (redislite .settings registry
+        disappears when the child's daemon closes on exit).
+
+        #6133 removed the fixed `sleep(1)` that used to open this helper. That sleep
+        was LOAD-BEARING, not padding: the bare `not exists()` check below passes at
+        t=0, before the detached child has created the registry at all, so the sleep
+        was the drain and the loop was only its fallback. This waits for the registry
+        to APPEAR first (bounded), then for it to go away, so the parent cannot open
+        the store while the daemon is still to come.
+        """
+        appear_deadline = _time.monotonic() + 5.0
+        while _time.monotonic() < appear_deadline:
+            if Path(db + ".settings").exists():
+                break
+            _time.sleep(0.05)
+        else:
+            return True  # never appeared: nothing to drain
         for _ in range(60):
             if not Path(db + ".settings").exists():
                 return True
