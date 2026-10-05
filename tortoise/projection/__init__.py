@@ -3960,15 +3960,13 @@ class FalkorProjection(
         # direction or the other. The code has TWO policies and they differ: the
         # journal pass drops only `_SWEEP_OWNED_PREFIXES` families, so the
         # journal is necessary but NOT sufficient (a journal-listed
-        # `registry_control_plane` is PRESERVED); the journal-BLIND passes are
-        # governed a different way entirely — `_sweep_legacy_strays` is OPT-IN
-        # because it drops on shape alone, while the default session-end
-        # `wipe_server(scope=None)` runs ungated and is narrowed instead to
-        # `_SERVER_WIPE_PREFIXES`, a strict subset of `_SWEEP_OWNED_PREFIXES`.
-        # So the message names only the pass that runs by default, and
-        # enumerates no family. It names no residue pass either: an operator
-        # cannot invoke it (no default call site), so naming its env lever
-        # would be advice that frees nothing.
+        # `registry_control_plane` is PRESERVED). The message therefore names no
+        # family AND promises no reclaim: an earlier revision said that pass
+        # "reclaims what this session's ownership record lists", which is
+        # exactly the over-inclusive claim the intersection above forbids. It
+        # names no residue pass either: `_sweep_legacy_strays` is OPT-IN and has
+        # no default call site, so naming its env lever would be advice that
+        # frees nothing.
         #
         # The message also makes NO claim about which graph commands the server
         # refuses at the ceiling. An earlier revision asserted that
@@ -3992,8 +3990,7 @@ class FalkorProjection(
             "container's --maxmemory. Do NOT hand-pick names from "
             "GRAPH.LIST to free memory instead: GRAPH.DELETE cannot be "
             "undone, and a name you cannot attribute is not yours to delete. "
-            "The suite's journal pass reclaims what this session's ownership "
-            "record lists, once memory is relieved. Never delete the "
+            "Never delete the "
             "production graph tortoise or a tortoise_restored* snapshot, and "
             "do NOT FLUSHALL. See #2981 for the shared-lane form of this."
         )

@@ -101,11 +101,15 @@ def test_write_refusal_remedy_names_the_safe_path_and_claims_no_flags(monkeypatc
     assert msg is not None
     # 1. The one executable lever.
     assert "raise / relieve the container's --maxmemory" in msg, msg
-    # 2. The suite's journal pass is named as the reclaim path — the pass that
-    #    runs by DEFAULT. The residue pass is deliberately NOT named: it has no
-    #    default call site, so naming its env lever would be advice that frees
-    #    nothing (rounds 3 and 5).
-    assert "The suite's journal pass reclaims what this session's" in msg, msg
+    # 2. The residue-pass lever is NOT named: the pass has no default call site,
+    #    so naming its env lever would be advice that frees nothing (rounds 3
+    #    and 5). The message also promises NO reclaim. An earlier revision said
+    #    the journal pass "reclaims what this session's ownership record
+    #    lists", which is over-inclusive — the default pass drops the journal
+    #    INTERSECT `_SWEEP_OWNED_PREFIXES`, so a journal-listed
+    #    `registry_control_plane` is PRESERVED. Round 6 measured that; the
+    #    sentence was DELETED, not reworded (see the code comment above
+    #    `_write_refusal_message`).
     assert "TORTOISE_TEST_SWEEP_LEGACY" not in msg, msg
     # 3. The unsafe shortcut is refused, and the mechanism is still named.
     assert "GRAPH.DELETE" in msg, msg          # the pre-existing pin, kept
@@ -113,12 +117,14 @@ def test_write_refusal_remedy_names_the_safe_path_and_claims_no_flags(monkeypatc
     assert "cannot be undone" in msg, msg
     assert "FLUSHALL" in msg, msg
     # 4. NO claim about which commands the server refuses (the round-4 P1).
-    #    STRUCTURAL, not a denylist of the two wordings already removed: any
-    #    rewording that re-introduces the claim uses one of these stems, which
-    #    is the same upgrade the sibling test got (round 5).
-    #    NOTE: "refus" is deliberately NOT a stem here — the message's own
-    #    opening line is "DB refused writes on open", so it could never be a
-    #    sound discriminator for a claim about a COMMAND being refused.
+    #    This is a DENYLIST, and round 6 measured that it is NOT structural: the
+    #    removed sentence — "GRAPH.DELETE is refused too while the server is at
+    #    the ceiling, so it cannot free the memory itself" (commit fd9cf5b63) —
+    #    contains none of these stems and would pass verbatim. The property
+    #    genuinely cannot be pinned by substring, because "refus" is legitimate
+    #    in this message's own opening line and "cannot" is legitimate in
+    #    "cannot be undone". Best-effort, then; the real protection is that the
+    #    sentence is gone and the comment says why it must not come back.
     lowered = msg.lower()
     for stem in ("deny", "reject", "blocked"):
         assert stem not in lowered, (stem, msg)
@@ -141,8 +147,11 @@ def test_write_refusal_remedy_does_not_hand_roll_the_ownership_policy(monkeypatc
     docstring: a fixed six-token denylist only catches a reintroduction of THE
     SAME wording, while the census residencies this repo actually reports
     (`tt_gate_*`, `v10fix_*`, `typeprobe_*`, `review_rw_probe*`) would pass it.
-    So the structural property is pinned instead: an enumeration needs a `*`, and
-    the message may carry exactly ONE — the `tortoise_restored*` guard name.
+    It now also pins the message's WILDCARD BUDGET — exactly ONE `*`, the
+    `tortoise_restored*` guard name. That bounds only the glob spelling: round 6
+    measured that a prose list of concrete names (``tt_gate_1234``,
+    ``askshape_b6_live_1_33760_21``) carries no `*` and passes it, so the token
+    denylist in (b) is the OPERATIVE guard, not the belt to (a)'s braces.
     """
     monkeypatch.delenv("FLY_APP_NAME", raising=False)
     proj = _projection(probe_error=RuntimeError(_MAXMEMORY_ERROR))
@@ -150,25 +159,27 @@ def test_write_refusal_remedy_does_not_hand_roll_the_ownership_policy(monkeypatc
 
     msg = proj._write_refusal_message(RuntimeError(_MAXMEMORY_ERROR))
     assert msg is not None
-    # (a) THE STRUCTURAL PIN: at most the one guard wildcard, so any family
-    #     enumeration — whatever its spelling — reds this test.
+    # (a) THE WILDCARD BUDGET: exactly the one guard wildcard. Catches an
+    #     enumeration written with a glob character; a prose list of concrete
+    #     names carries no `*` at all and is caught by (b) instead.
     assert msg.count("*") == 1, msg
     assert "tortoise_restored*" in msg, msg
-    # (b) the belt to that braces: the exact tokens the rounds introduced, plus
+    # (b) the OPERATIVE guard: the exact tokens the rounds introduced, plus
     #     the residue-pass lever the message must NOT name (rounds 3 and 5: it
     #     has no default call site, so naming it is advice that frees nothing).
     for token in ("NEVER delete", "org_*", "team_*", "registry", "test_",
                   "v10fix", "tt_gate", "typeprobe", "review_rw_probe",
                   "TORTOISE_TEST_SWEEP_LEGACY"):
         assert token not in msg, (token, msg)
-    # (c) the two names `TortoiseSDK.test_guard` blocks are still named, and the
-    #     ownership claim is scoped to the JOURNAL pass — the only pass it is
-    #     true of AND the only one that runs by default. (`_sweep_legacy_strays`
-    #     is opt-in and journal-blind; `wipe_server(scope=None)` runs ungated and
-    #     is narrowed to `_SERVER_WIPE_PREFIXES` instead.)
+    # (c) the two names `TortoiseSDK.test_guard` blocks are still named, and NO
+    #     claim about what any pass reclaims is made. An earlier revision scoped
+    #     such a claim to the journal pass; round 6 measured that even the
+    #     journal pass does not "reclaim what the ownership record lists" — it
+    #     drops the journal INTERSECT `_SWEEP_OWNED_PREFIXES`, preserving a
+    #     journal-listed `registry_control_plane`. The sentence was DELETED.
     assert "the production graph tortoise" in msg, msg
     assert "tortoise_restored* snapshot" in msg, msg
-    assert "The suite's journal pass reclaims what this session's" in msg, msg
+    assert "reclaims" not in msg.lower(), msg
 
 
 def test_memory_pressure_unreadable_still_avoids_rebuild(monkeypatch):
