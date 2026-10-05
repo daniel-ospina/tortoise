@@ -42,6 +42,15 @@ call-site-only guard had. ``execute_command`` is a special case (the vendor
 binds it as an INSTANCE attribute, so a class-level override is shadowed); it is
 intercepted explicitly — see :func:`_guarded_execute_command`.
 
+**The second invariant (#4647/#7174) — the store's numeric domain.** FalkorDB
+stores an integer as INT64 and a number as a double, so a param outside those
+domains is SILENTLY ALTERED (``SET n.v = $v`` reports success and stores
+``9223372036854775807`` for ``2**70``). The predicate lives in
+:mod:`tortoise.numeric_domain`; this seam applies it to every param map on every
+guarded handle, so a writer is covered without anyone remembering to add a call
+site. It is a PARAM boundary — what it excludes is listed once, in
+:func:`_guard_numeric_params`.
+
 **The scan** is a single left-to-right pass that keeps state, so ``=~`` is
 reported only where it is CODE. Inside a quoted literal (``RETURN 'a =~ b'``) it
 is DATA; inside a backtick-quoted identifier (``MATCH (n:`a=~b`)``) it is a
@@ -51,7 +60,11 @@ which is its own class of harm even though it is loud rather than silent.
 """
 from __future__ import annotations
 
-from tortoise.exceptions import UnsupportedCypherOperatorError
+from tortoise.exceptions import (
+    UnrepresentableNumberError,
+    UnsupportedCypherOperatorError,
+)
+from tortoise.numeric_domain import numeric_alteration_reason
 
 #: Marker set on the generated classes so the factories are idempotent —
 #: wrapping an already-guarded client/handle again is a no-op, never a second
@@ -173,6 +186,40 @@ def _guard_unsupported_cypher(cypher: str) -> None:
         raise UnsupportedCypherOperatorError(op, cypher)
 
 
+def _guard_numeric_params(params) -> None:
+    """#7174: refuse a param the store would silently ALTER, on any handle.
+
+    The predicate is ``tortoise.numeric_domain``'s — the same one the SDK's
+    #4647 call sites use, so the early refusal and this one cannot drift.
+
+    Only a ``dict`` is a param map: that is what the vendor's
+    ``_build_params_header`` accepts, so any other shape is the vendor's own
+    error and is forwarded rather than refused by a guess.
+
+    Refusal is uniform and deliberately NOT write-gated. A read param is refused
+    too: gating on write clauses would need Cypher write-detection, which is its
+    own source of false refusals.
+
+    NOT covered here, deliberately: a numeric LITERAL in the statement text
+    (``{v: 1180591620717411303424}`` with no ``params``) and a raw vendor client
+    the package did not build are separate mechanisms with their own homes — see
+    the SCOPE paragraph above and issue #7174, which also carries the analysis of
+    a number already serialized into a STRING param (a JSON payload).
+    """
+    if not isinstance(params, dict):
+        return
+    for key, value in params.items():
+        reason = numeric_alteration_reason(key, value)
+        if reason:
+            raise UnrepresentableNumberError(reason)
+
+
+def _guard_query(cypher: str, params=None) -> None:
+    """Both pre-dispatch refusals in one call: unsupported operator, then domain."""
+    _guard_unsupported_cypher(cypher)
+    _guard_numeric_params(params)
+
+
 def _as_text(value):
     """Decode a bytes command/payload so the scan can see its text, else return it.
 
@@ -196,6 +243,18 @@ def _guard_execute_command(args) -> None:
     is positional (``(cmd, graph_name, cypher, ...)``). Every other command
     (``GRAPH.DELETE``, ``GRAPH.COPY``, ``GRAPH.CONFIG``, ``INFO``, ...) and
     every non-``GRAPH`` command is forwarded untouched.
+
+    #7174 — deliberately NO numeric check here, and the reason is MEASURED, not
+    assumed: a raw ``GRAPH.QUERY`` has no positional params argument. The pinned
+    vendor (``falkordb`` 1.6.2, ``graph.py::_query``) builds its param header INTO
+    the statement (``self._build_params_header(params) + q``) and sends
+    ``[cmd, name, query, "--compact"]``, appending ``["timeout", <int>]`` only
+    when a timeout was given — so ``args[3]`` is a flag such as ``--compact``,
+    never a JSON payload. Params on this channel are
+    therefore inlined as TEXT (``CYPHER k=<v>``), which is a statement-literal
+    channel, not a param map: covered on the ``params=`` path by
+    :func:`_guard_numeric_params` before the vendor serializes them, and left
+    uncovered as a literal (see its docstring).
     """
     if len(args) >= 3:
         verb = _as_text(args[0])
@@ -247,25 +306,25 @@ class _UnsupportedOperatorGuardedQueries:
         self.execute_command = _guarded_execute_command(client.execute_command)
 
     def query(self, q, params=None, timeout=None):
-        _guard_unsupported_cypher(q)
+        _guard_query(q, params)
         return super().query(q, params=params, timeout=timeout)
 
     def ro_query(self, q, params=None, timeout=None):
-        _guard_unsupported_cypher(q)
+        _guard_query(q, params)
         return super().ro_query(q, params=params, timeout=timeout)
 
     def _query(self, q, params=None, timeout=None, read_only=False):
-        _guard_unsupported_cypher(q)
+        _guard_query(q, params)
         return super()._query(
             q, params=params, timeout=timeout, read_only=read_only
         )
 
     def profile(self, query, params=None):
-        _guard_unsupported_cypher(query)
+        _guard_query(query, params)
         return super().profile(query, params=params)
 
     def explain(self, query, params=None):
-        _guard_unsupported_cypher(query)
+        _guard_query(query, params)
         return super().explain(query, params=params)
 
     def copy(self, clone):
@@ -298,26 +357,26 @@ class _GuardedHandleProxy:
         self._handle = handle
 
     def query(self, q, params=None, timeout=None):
-        _guard_unsupported_cypher(q)
+        _guard_query(q, params)
         return _forward_query(self._handle.query, q, params, timeout)
 
     def ro_query(self, q, params=None, timeout=None):
-        _guard_unsupported_cypher(q)
+        _guard_query(q, params)
         return _forward_query(self._handle.ro_query, q, params, timeout)
 
     def _query(self, q, params=None, timeout=None, read_only=False):
-        _guard_unsupported_cypher(q)
+        _guard_query(q, params)
         extra = {"read_only": True} if read_only else {}
         return _forward_query(
             self._handle._query, q, params, timeout, **extra
         )
 
     def profile(self, query, params=None):
-        _guard_unsupported_cypher(query)
+        _guard_query(query, params)
         return _forward_query(self._handle.profile, query, params)
 
     def explain(self, query, params=None):
-        _guard_unsupported_cypher(query)
+        _guard_query(query, params)
         return _forward_query(self._handle.explain, query, params)
 
     def execute_command(self, *args, **kwargs):
@@ -372,6 +431,12 @@ def _forward_query(method, q, params=None, timeout=None, **extra):
         kwargs["params"] = params
     if timeout is not None:
         kwargs["timeout"] = timeout
+    # #7174: defence in depth — the proxy's verbs already guard, so this is
+    # normally a second (cheap) pass over the same map. It exists so that a verb
+    # added to THIS proxy later cannot forward params unguarded by forgetting
+    # `_guard_query`. (The vendor-subclass mixin does not route through here — it
+    # calls `super()` directly, so its verbs must keep guarding themselves.)
+    _guard_numeric_params(params)
     return method(q, **kwargs)
 
 

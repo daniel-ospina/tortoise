@@ -31,6 +31,7 @@ from typing import NamedTuple, Protocol, runtime_checkable
 
 from tortoise.cypher_guard import (  # #3595 `=~` guard — the ONE seam
     _guard_execute_command,
+    _guard_numeric_params,  # #7174: the store's numeric domain, same seam
     _guard_unsupported_cypher,
     _skip_cypher_quoted,  # noqa: F401  re-export: the scanner's public test surface
     _unsupported_cypher_operator,  # noqa: F401  re-export
@@ -1826,9 +1827,14 @@ class _GuardedGraph:
     (``query``, ``ro_query``, ``_query``, ``profile``, ``explain``,
     ``execute_command``), so it does not depend on the inner handle's class to
     refuse the ``=~`` operator. NOTE the override is NOT uniform: only
-    ``query`` applies the bulk-wipe check (L2) as well — the other five verbs
-    carry the operator guard only (see KNOWN GAPS in the module comment
-    above). ``__getattr__`` below forwards only the remaining non-query
+    ``query`` applies the bulk-wipe check (L2) as well. The five query verbs
+    (``query``, ``ro_query``, ``_query``, ``profile``, ``explain``) carry BOTH
+    pre-dispatch refusals — the #3595 operator guard and, since #7174, the
+    numeric-domain guard on their ``params`` — while ``execute_command`` carries
+    the operator guard only (a raw command has no params map to walk; the
+    vendor inlines params into the statement text instead — see
+    ``cypher_guard._guard_numeric_params``). See KNOWN GAPS in the module
+    comment above. ``__getattr__`` below forwards only the remaining non-query
     attributes (``name``, ``delete``, ``schema``, ...) to the underlying handle.
     """
 
@@ -1845,6 +1851,10 @@ class _GuardedGraph:
         # ``cypher_guard._guard_unsupported_cypher`` — shared with the guarded
         # handles so the two paths cannot drift.
         _guard_unsupported_cypher(cypher)
+        # #7174: the same shared refusal the guarded handles apply — the numeric
+        # domain travels in PARAMS, and this wrapper must stay complete rather
+        # than rely on the inner handle's class (the #3595 precedent above).
+        _guard_numeric_params(params)
         if _is_bulk_wipe(cypher):
             self._proj._assert_test_graph(
                 "REFUSING to run bulk DETACH DELETE on non-test graph"
@@ -1862,12 +1872,14 @@ class _GuardedGraph:
         # holds is guarded too, but keep the projection's own wrapper complete
         # rather than relying on the inner handle's class.
         _guard_unsupported_cypher(cypher)
+        _guard_numeric_params(params)
         return self._g.ro_query(cypher, params=params, timeout=timeout)
 
     def _query(self, cypher: str, params=None, timeout=None, read_only=False):
         # The vendor's `query`/`ro_query` both delegate to `_query`; a caller
         # reaching `_query` directly must not slip past the refusal either.
         _guard_unsupported_cypher(cypher)
+        _guard_numeric_params(params)
         return self._g._query(
             cypher, params=params, timeout=timeout, read_only=read_only
         )
@@ -1876,10 +1888,12 @@ class _GuardedGraph:
         # PROFILE/EXPLAIN put the statement on the wire WITHOUT routing through
         # `_query`, so they carry their own refusal.
         _guard_unsupported_cypher(cypher)
+        _guard_numeric_params(params)
         return self._g.profile(cypher, params=params)
 
     def explain(self, cypher: str, params=None):
         _guard_unsupported_cypher(cypher)
+        _guard_numeric_params(params)
         return self._g.explain(cypher, params=params)
 
     def execute_command(self, *args, **kwargs):
