@@ -30,6 +30,17 @@ def _offline_llm(monkeypatch):
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
 
 
+@pytest.fixture(autouse=True)
+def _warm_embedded_graph():
+    """#3834/#4098: the hosted lane's 10s transport wait bound measures the FIRST
+    request that OPENS the embedded graph. On a loaded box that open alone can
+    exceed it and an unrelated request is refused with 504 — an environment
+    flake, not a product failure (the convention
+    tests/test_hosted_api.py::_warm_data_graph documents). Warming it here keeps
+    the lane assertions about the LANE rather than about box load."""
+    ha_mod._make_sdk(namespace=TEST_ORG_ID)._get_proj().g.query("RETURN 1")
+
+
 def _session_lane(sdk, sid: str) -> str | None:
     """The lane as STORED on the :Session — the artifact the liveness check reads."""
     rows = sdk._get_proj().g.query(
@@ -37,6 +48,23 @@ def _session_lane(sdk, sid: str) -> str | None:
         params={"sid": sid}).result_set
     assert rows, f"no :Session {sid!r} — the capture did not land"
     return rows[0][0]
+
+
+def _post_capture(client, payload: dict):
+    """POST /v1/sessions, tolerating the embedded lane's #3834/#4098 504.
+
+    The hosted lane's 10s transport wait bound measures the request that OPENS
+    the embedded graph; on a loaded box that open alone exceeds it and the
+    request is refused with a 504 whose own body says the work may still have
+    completed and that a retry is safe when repeating the operation is safe.
+    Capture IS idempotent by ``session_id`` and the lane is first-writer-wins,
+    so a single retry is sound — it makes these assertions about the LANE
+    rather than about box load.
+    """
+    r = client.post("/v1/sessions", json=payload)
+    if r.status_code == 504:
+        r = client.post("/v1/sessions", json=payload)
+    return r
 
 
 # ── the boundary contract (no DB) ──────────────────────────────────────────
@@ -115,7 +143,7 @@ def test_store_sync_lane_is_persisted_and_read_back(client):
     the lane reads back off the :Session."""
     sid = "3516-lane-store-sync"
     sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
-    r = client.post("/v1/sessions", json={
+    r = _post_capture(client, {
         "conversation": [{"role": "user", "content": "hello from store-sync"}],
         "session_id": sid,
         "harness": "pi",
@@ -131,7 +159,7 @@ def test_lane_marker_distinguishes_hook_from_store_sync(client):
     sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
     for sid, lane in (("3516-lane-hook", "hook"),
                       ("3516-lane-sync", "store_sync")):
-        r = client.post("/v1/sessions", json={
+        r = _post_capture(client, {
             "conversation": [{"role": "user", "content": "same payload"}],
             "session_id": sid,
             "harness": "pi",
@@ -151,7 +179,7 @@ def test_absent_lane_is_not_fabricated_and_never_422s(client):
     assert "capture_lane" in ha_mod.SessionRequest.model_fields
     sid = "3516-lane-absent"
     sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
-    r = client.post("/v1/sessions", json={
+    r = _post_capture(client, {
         "conversation": [{"role": "user", "content": "no lane here"}],
         "session_id": sid,
         "harness": "claude",
@@ -264,6 +292,37 @@ def test_spool_lane_survives_a_lane_less_resnapshot(tmp_path, monkeypatch):
         source="t", machine_id="m"))  # lane-less, grew
     assert spool.read_spool_meta(root, sid).get("capture_lane") == "hook", (
         "a lane-less re-snapshot ERASED the stored lane")
+    # The resolution is TRUTHY, not nullish: an empty-string lane must carry
+    # the stored lane forward too, exactly as the TypeScript leg does.
+    spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid,
+        turns=[{"role": "user", "content": "x"},
+               {"role": "assistant", "content": "y"},
+               {"role": "user", "content": "z"}],
+        source="t", machine_id="m", capture_lane=""))
+    assert spool.read_spool_meta(root, sid).get("capture_lane") == "hook", (
+        "an empty-string lane erased the stored lane (nullish vs truthy)")
+
+
+def test_spool_lane_ful_identical_resnapshot_is_a_no_op(tmp_path, monkeypatch):
+    """Pins the `not prior.capture_lane` half of `lane_upgrade`. Without it
+    EVERY identical re-snapshot would rewrite the meta and clear `filed_key`,
+    re-POSTing the same conversation at turn cadence — the amplification the
+    dedup guard exists to prevent (review P2)."""
+    import tortoise.capture_spool as spool
+
+    root = tmp_path / "spool"
+    monkeypatch.setattr(spool, "spool_dir", lambda: root)
+    sid = "3516-spool-noop"
+    turns = [{"role": "user", "content": "same"}]
+    spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid, turns=turns, source="t", machine_id="m",
+        capture_lane="hook"))
+    res = spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid, turns=turns, source="t", machine_id="m",
+        capture_lane="hook"))
+    assert res["written"] is False, "a lane-ful identical re-snapshot must be a no-op"
+    assert spool.read_spool_meta(root, sid).get("capture_lane") == "hook"
 
 
 def test_spool_lane_upgrade_refiles_an_already_filed_entry(tmp_path, monkeypatch):

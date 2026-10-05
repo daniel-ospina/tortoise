@@ -1381,10 +1381,11 @@ class _EntityHandlers:
         BOTH the id and every journal-derived property value are gated for
         WRITABILITY, not just type (review P1): a NUL / lone-surrogate id and
         a map-valued ``created_at`` / ``turn_count`` / ``harness`` /
-        ``actor_user_id`` / ``capture_lane`` payload each raise at parameter
-        parse, and ``rebuild_all`` folds this
-        record INLINE (no try/except) AFTER the wipe. A malformed id is a
-        NO-OP (return 0); a malformed field is OMITTED, never bound.
+        ``actor_user_id`` / ``capture_lane`` payload are each REJECTED by
+        ``_annotator_value_ok`` BEFORE the bind — a malformed id is a NO-OP
+        (return 0), a malformed field is OMITTED, never bound, so neither can
+        reach parameter parse. That matters because ``rebuild_all`` folds this
+        record INLINE (no try/except) AFTER the wipe.
 
         ``entity_links_attempted`` / ``entity_links_created`` are carried by a
         ``SessionRecorded`` the capture emits after the link pass

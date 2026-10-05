@@ -888,13 +888,13 @@ export function writeSpoolEntry(
   }
   const stored = prior ? readSpoolTurns(dir, snapshot.sessionId) : [];
 
-  // #3516 §B: the entry's lane is set-only-when-present and carried forward
-  // (like `model`) — a lane-less re-snapshot must not ERASE a lane the hook
-  // already claimed. This is the Python writer's EXACT rule (`or`, TRUTHY —
-  // not `??`), because BOTH legs read and write this one directory: with `??`
-  // an empty-string lane would resolve to `""`, the spread below would then
-  // omit the key, and the TS rewrite would erase a lane the Python leg had
-  // preserved.
+  // #3516 §B: the entry's lane is set-only-when-present and carried forward —
+  // NOT `model`'s rule (that one is not carried forward), because a lane-less
+  // re-snapshot must not ERASE a lane the hook already claimed. This is the
+  // Python writer's EXACT rule (`or`, TRUTHY — not `??`), because BOTH legs
+  // read and write this one directory: with `??` an empty-string lane would
+  // resolve to `""`, the spread below would then omit the key, and the TS
+  // rewrite would erase a lane the Python leg had preserved.
   const lane = snapshot.captureLane || prior?.capture_lane;
   // A snapshot carrying a lane the entry has never had is an UPGRADE, not a
   // no-op. `sameContent` is content-addressed and the lane is NOT part of the

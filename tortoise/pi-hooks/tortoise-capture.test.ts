@@ -594,6 +594,10 @@ test("an interrupted session (no session_shutdown) is filed at the next session_
   const spooled = readSpoolEntry(spool, "sess-A");
   assert.ok(spooled, "the interrupted session's turns must be durable in the spool");
   assert.equal(spooled.turns_count, SPOOL_TURNS.length);
+  // #3516 §B: the in-process hook's entry claims its lane AT THE WRITE. Without
+  // this assertion, deleting `captureLane: "hook"` from `spoolSnapshot` leaves
+  // the whole suite green while a WORKING hook files as not-live.
+  assert.equal(spooled.capture_lane, "hook", "the hook's spool entry lost its lane");
   assert.deepEqual(readSpoolTurns(spool, "sess-A"), SPOOL_TURNS);
 
   // Session B (a later Pi run) starts: the replay opportunity.
@@ -703,6 +707,38 @@ test("a lane upgrade survives the dedup and refiles an ALREADY FILED entry", asy
   const second = await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 2 });
   assert.equal(second.filed, 1, "the lane upgrade never reached the wire");
   assert.equal(server.sessions.get("sess-upgrade")?.capture_lane, "hook");
+});
+
+test("a lane-FUL identical re-snapshot is a no-op (upgrade is not a rewrite rule)", () => {
+  // Pins the `!prior?.capture_lane` half of `laneUpgrade`. Without it EVERY
+  // identical re-snapshot would rewrite the meta and clear `filed_key`, so the
+  // same conversation would be re-POSTed at turn cadence — the amplification
+  // the dedup guard exists to prevent.
+  const spool = tmpSpool();
+  const turns = [{ role: "user" as const, content: "same" }];
+  writeSpoolEntry(spool, { ...snapshot("sess-noop", turns), captureLane: "hook" });
+  const res = writeSpoolEntry(spool, { ...snapshot("sess-noop", turns), captureLane: "hook" });
+  assert.equal(res.written, false, "a lane-ful identical re-snapshot must be a no-op");
+  assert.equal(readSpoolEntry(spool, "sess-noop")?.capture_lane, "hook");
+});
+
+test("an empty-string lane carries the stored lane forward (TRUTHY, not nullish)", () => {
+  // Pins the `||` (NOT `??`). `"" ?? prior` resolves to `""`, the spread then
+  // omits the key, and this leg ERASES a lane its Python twin preserves — and
+  // the legs share one spool directory.
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, {
+    ...snapshot("sess-empty", [{ role: "user", content: "hi" }]),
+    captureLane: "hook",
+  });
+  writeSpoolEntry(spool, {
+    ...snapshot("sess-empty", [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "grown" },
+    ]),
+    captureLane: "",
+  });
+  assert.equal(readSpoolEntry(spool, "sess-empty")?.capture_lane, "hook");
 });
 
 test("the capture key is content-addressed: changed turns get a new key, a replay does not", () => {

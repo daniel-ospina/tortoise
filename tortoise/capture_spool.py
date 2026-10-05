@@ -795,7 +795,10 @@ def write_spool_entry(
     # Set-only-when-present, and carry a stored lane forward: a lane-less
     # re-snapshot (backfill/import, or a pre-#3516 producer) must not ERASE the
     # lane a hook already claimed — absence is stored as ABSENT, never as a
-    # fabricated or null lane (#3516 §B review F3). Same rule as `model` below.
+    # fabricated or null lane (#3516 §B review F3). NOT `model`'s rule below:
+    # `model` is set-only-when-present WITHOUT carry-forward; the lane must
+    # survive a snapshot that simply does not mention it. The resolution is
+    # TRUTHY (`or`), matching the TypeScript leg byte-for-byte.
     _lane = snapshot.capture_lane or (prior or {}).get("capture_lane")
     if _lane:
         meta["capture_lane"] = _lane
