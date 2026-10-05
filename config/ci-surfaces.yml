@@ -724,6 +724,15 @@ surfaces:
   # count. No DB, no network — default `core` surface is correct.
   - test_capture_graph_ops.py
   - test_4542_retract_fold_decay.py
+  # #5048 (from #4666): the recorded retraction instant. Pins that a rebuild
+  # REPLAYS `updatedAt` from the journal rather than re-reading the clock, across
+  # both #330 engines — `tortoise/projection/entities.py`'s `_retract`,
+  # `projection/__init__.py`'s `_apply_one`/pass-1b, `consistency.py`'s reference
+  # fold, and `sdk.py`'s `retract_point`/`supersede_point` producers. Registered
+  # `core` for the same reason as `test_4542_retract_fold_decay.py` beside it: no
+  # DB or network of its own, and a `tortoise/projection/`-only change selects
+  # this surface.
+  - test_5048_retract_instant_recorded.py
   - test_4716_capture_operator_ref_remap.py
   - test_6131_operator_mutation_vocabulary.py
   - test_comove_dispatch_3627.py
@@ -2448,6 +2457,7 @@ durations:
   test_shared_state_monitoring.py: 0.1
   test_shared_state_recovery.py: 0.2
   test_hermetic_egress_guard.py: 2.0  # #4387: no CI junit measurement exists for this file yet (a file that never ran cannot appear in an artifact), so it takes the #3400 flat 2.0s default. Refresh from the first post-merge run that includes it. Do NOT drop the row without re-deriving the 90% floor at that head (#4348 trap) — and NO figure is restated here on purpose; this row's comment asserted one for three review rounds and each base merge re-staled it.
+  test_5048_retract_instant_recorded.py: 2.0  # #5048: same #3400 flat default as the row above and for the same reason — the file is new, so no CI junit measurement exists for it yet (a file that never ran cannot appear in an artifact). Refresh from the first post-merge run that includes it. Its registration is load-bearing for the durations half as well as the surface half: an unregistered new test file reds `integrity_problems`, which is how this row was found (#4348 trap — do not drop it without re-deriving the 90% floor at that head).
   test_license_surface_consumer.py: 0.3
   test_installer_preserves_foreign_skill_content.py: 0.6
   test_backup_watcher_health.py: 0.2

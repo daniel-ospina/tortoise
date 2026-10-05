@@ -4972,7 +4972,8 @@ class TortoiseSDK:
 
     def _emit_event(self, type_: str, payload: dict | None = None, *,
                     point: dict | None = None,
-                    id: str | None = None, **extra) -> None:
+                    id: str | None = None,
+                    recorded_ts: str | None = None, **extra) -> None:
         """Unified event emission: JSONL rebuild log (#548) + graph event store (#432).
 
         Both stores are best-effort — failures log and continue (never crash
@@ -4997,6 +4998,25 @@ class TortoiseSDK:
         and appended as the ``"point"`` key) or *id* is provided. Events with
         neither are skipped (nothing meaningful to log). The full point
         snapshot is needed for ``rebuild_all`` replay.
+
+        *recorded_ts* (#5048, recorded from #4666): the RECORDED instant of the
+        transition, minted ONCE by the caller when the same instant must also
+        be written to the node (``retract_point``). ``None`` (the default)
+        mints it here as before.
+
+        The name is deliberately NOT ``ts``. ``ts`` is an established **extra**
+        key, and ``extra`` is what builds the ``:GraphEvent`` payload —
+        ``invalidate_point`` passes ``ts=now`` (sdk.py, kwargs form, so it
+        routes into ``{"id": id, **extra}``) and the duplicate-fold tests in
+        ``tests/test_object_registered_journal.py`` do the same for
+        ``ObjectSuperseded``. Promoting the name to a named parameter silently
+        REMOVES it from that payload — a client-visible change to a durable
+        artifact (``events_poll`` returns the payload verbatim), invisible to
+        every existing test. ``recorded_ts`` collides with no caller key, so
+        the default path is additive in the strict sense: every existing
+        caller's envelope, graph payload and JSONL record are byte-identical.
+        A caller that passes BOTH keeps the old ``event.update(extra)``
+        precedence.
         """
         # ── Graph event store (#432) ──────────────────────────────
         if type_ in _GRAPH_EVENT_TYPES:
@@ -5036,7 +5056,7 @@ class TortoiseSDK:
         from .ids import ulid, now_iso  # noqa: I001
         event: dict = {
             "event_id": ulid(),
-            "ts": now_iso(),
+            "ts": recorded_ts or now_iso(),
             "type": type_,
             "initiated_by": "sdk",
             "projection_version": 2,
@@ -8821,6 +8841,16 @@ class TortoiseSDK:
             "PointSuperseded",
             id=old_id, new_id=new_id,
             valid_from=succ_vf, valid_to=succ_vf, expired_at=now,
+            # #5048: `now` is ALSO the envelope instant, so the replay's
+            # `updated_at = _journal_instant(ev)` reads the instant the live
+            # SET below writes. Without it the envelope `ts` was a SECOND
+            # clock read and every supersede drifted live vs rebuilt by
+            # microseconds — the same defect #5048 fixes for retraction, and
+            # the rule `invalidate_point` already documents ("ts=now MUST be
+            # passed … a drift from the live SET clock breaks exact-stamp
+            # rebuild parity"). `recorded_ts`, not `ts`: the latter would also
+            # add the key to the :GraphEvent payload (see `_emit_event`).
+            recorded_ts=now,
         )
 
         # CYCLE-26 REVIEW-FIX P1 (cycle-7 pin): the superseded-status write +
@@ -9161,9 +9191,15 @@ class TortoiseSDK:
         # _assert_lifecycle_guard) — the pre-#2498 body hardcoded the same
         # 3-status subset as supersede_point.
         self._assert_lifecycle_guard(id, method="retraction")
+        # #5048 (#4666): ONE clock read for both the record and the node.
+        # `updatedAt` is RECORDED, not recomputed (docs/durability-posture.md
+        # → `:Source.updatedAt`), so the producer must mint the instant once —
+        # a second read here, and a third at replay, made live/rebuild/fold
+        # hold three different stamps for one retraction.
+        _now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         # #432 Task 3: durable PointRetracted event (append-before-mutation;
         # only after the input contract validates).
-        self._emit_event("PointRetracted", {"id": id}, id=id)
+        self._emit_event("PointRetracted", {"id": id}, id=id, recorded_ts=_now)
         # P1 (Qwen review): CAS the SET — the WHERE re-checks terminal state so
         # a concurrent retract/supersede/invalidate can't both pass validation
         # and have a terminal overwrite. #2498: the CAS now uses the SAME
@@ -9175,7 +9211,7 @@ class TortoiseSDK:
             f"WHERE {_terminal_excluded('n.status')} "
             "SET n.status = 'retracted', n.updatedAt = $now, "
             f"{decay_clause('n')} RETURN properties(n)",
-            params={"id": id, "now": datetime.now(timezone.utc).isoformat()})  # noqa: UP017
+            params={"id": id, "now": _now})
         if not r.result_set:
             raise ValueError(
                 f"Point {id!r} is already terminal — retraction is terminal")
