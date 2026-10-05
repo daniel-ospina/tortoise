@@ -782,3 +782,18 @@ def test_the_clean_line_reports_clean_medians_not_the_contaminated_ones():
                       if "never force-pushed" in ln)
     assert "10.0min" in clean_line, clean_line
     assert "30.0min" not in clean_line, clean_line
+    # #7414: the MEDIANS above were pinned, the SHARES were not. Substituting the
+    # contaminated all-PR share (a_split['dispatch']) for the clean one
+    # (a_clean['dispatch']) in the rendered sentence left every assertion here
+    # green, so the exact misattribution this change exists to kill could be
+    # reintroduced silently. This output carries two shares for one reason: they
+    # must DIFFER (the contaminated row's dispatch charges the PR's earlier life;
+    # the clean one measures a real CI-start latency). Pin the value in both
+    # places it is published, and pin the contamination as an INEQUALITY so a
+    # future edit that collapses the two cannot pass by matching itself.
+    clean = res["leg_a_clock_split_clean_pct"]
+    contaminated = res["leg_a_clock_split_pct"]
+    assert clean["dispatch"] == 25.0, clean
+    assert clean["dispatch"] != contaminated["dispatch"], (clean, contaminated)
+    assert f"dispatch {clean['dispatch']:.1f}%" in clean_line, clean_line
+    assert f"dispatch {contaminated['dispatch']:.1f}%" not in clean_line, clean_line
