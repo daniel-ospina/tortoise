@@ -364,9 +364,11 @@ def test_a_stale_install_inert_breadcrumb_is_not_rendered_as_live(tmp_path):
     (``<harness>-install.json``); the normal path reads only the
     capture-failure slot, so a resolved install never replays the old claim.
 
-    Mutation: read the install-inert slot on the resolved path (or drop the
-    ``kind == capture-failure`` gate in ``render``) — the stale claim appears
-    and this REDs."""
+    Mutation: read the install-inert slot on the resolved path — the stale
+    claim appears and this REDs.  (The ``render`` kind gate itself is pinned by
+    ``test_a_legacy_single_slot_install_inert_breadcrumb_is_not_rendered``: the
+    resolved path never reads THIS slot, so the slot choice alone satisfies
+    this test.)"""
     home = tmp_path / "home"
     home.mkdir()
     bindir = tmp_path / "bin"
@@ -386,6 +388,37 @@ def test_a_stale_install_inert_breadcrumb_is_not_rendered_as_live(tmp_path):
     assert proc.stdout == "", (
         f"a stale install-inert record was rendered as a live claim: "
         f"{proc.stdout!r}")
+
+
+def test_a_legacy_single_slot_install_inert_breadcrumb_is_not_rendered(tmp_path):
+    """#5838, the LEGACY population.  Before the slot split an inert install wrote
+    ``capture-errors/<harness>.json`` — the CAPTURE slot — and every machine that
+    has not upgraded still has that file.  The capture slot is the one the
+    resolved path DOES read, so ``render``'s ``kind`` gate is the only thing
+    between a stale ``install-inert`` record and the agent being told the wrong
+    cause.
+
+    Mutation: drop the ``kind == KIND_CAPTURE_FAILURE`` gate in ``render`` — the
+    legacy record is rendered and this REDs.  The install-slot test above cannot
+    see that mutation, because the resolved path never reads the install slot."""
+    home = tmp_path / "home"
+    home.mkdir()
+    bindir = tmp_path / "bin"
+    _mock_tortoise(bindir, tmp_path / "calls.log")
+    _python3_shim(bindir)
+    legacy = _crumb_path(home)
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(json.dumps(_capture_failure(
+        kind="install-inert",
+        detail="the installed Claude session-start hook resolved nothing")),
+        encoding="utf-8")
+
+    proc = _run_hook(home, path=f"{bindir}:/usr/bin:/bin", src=REPO)
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "", (
+        f"a legacy single-slot install-inert record was rendered as a live "
+        f"claim: {proc.stdout!r}")
 
 
 def test_an_unknown_kind_is_never_rendered(tmp_path):
@@ -745,6 +778,11 @@ def test_the_two_readers_resolve_the_two_slots(tmp_path, monkeypatch):
     assert breadcrumb_name("claude", KIND_CAPTURE_FAILURE) == "claude.json"
     assert breadcrumb_name("claude", KIND_INSTALL_INERT) == \
         "claude-install.json"
+    # An unrecognised kind must not silently inherit a slot: the obvious
+    # fallback is the capture slot, which carries a live quota/network refusal,
+    # so a third kind landing there would recreate the collision #5838 removes.
+    with pytest.raises(ValueError, match="unrecognised capture-error kind"):
+        breadcrumb_name("claude", "some-future-kind")
 
     capture = _seed_breadcrumb(home, **_capture_failure(
         detail="import failed (HTTP 402): quota exceeded"))

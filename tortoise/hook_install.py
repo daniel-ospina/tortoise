@@ -223,12 +223,21 @@ def breadcrumb_name(harness: str, kind: str) -> str:
     was FIRED with (#4314).  A second literal for either slot is how the #4373
     false-PROVEN happened, so there is exactly one.
 
-    ``capture-failure`` keeps the historical ``<harness>.json``, and so does
-    any unrecognised kind (fail closed to the known slot); ``install-inert``
-    takes ``<harness>-install.json``.
+    ``capture-failure`` keeps the historical ``<harness>.json`` and
+    ``install-inert`` takes ``<harness>-install.json``.  An UNRECOGNISED kind
+    RAISES rather than inheriting a slot: the fallback a caller would reach for
+    is the capture slot, which is the one that carries a live quota/network
+    refusal, so a third kind quietly landing there would recreate the very
+    collision #5838 exists to remove — and it would do so silently.  A new kind
+    has to say where it belongs.
     """
-    suffix = _INSTALL_INERT_SUFFIX if kind == KIND_INSTALL_INERT else ""
-    return f"{harness}{suffix}.json"
+    if kind == KIND_CAPTURE_FAILURE:
+        return f"{harness}.json"
+    if kind == KIND_INSTALL_INERT:
+        return f"{harness}{_INSTALL_INERT_SUFFIX}.json"
+    raise ValueError(
+        f"unrecognised capture-error kind {kind!r}: expected "
+        f"{KIND_CAPTURE_FAILURE!r} or {KIND_INSTALL_INERT!r}")
 
 
 def breadcrumb_file(harness: str, kind: str) -> Path:

@@ -3296,12 +3296,18 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # (`contract_version` returns None when they disagree).
 # claude 8→9 and codex/cursor 2→3 are #5838: the two breadcrumb kinds now occupy
 # SEPARATE slots, so an inert install can no longer destroy a live
-# quota/network refusal.  The write path moved in `session-start.sh`,
-# `session-end.sh` and `volunteer-turn.sh` (claude) and in each harness's
-# `session-end.sh`, so an already-installed copy must read as stale to receive
-# it.  codex/cursor were bumped to 3 by BOTH sides (#5919 for the redirection
-# fix, #5838 for the slot) — one generation carries both, which is why the
-# merged number is 3 and not 4.
+# quota/network refusal.  The bump covers the three marked layout scripts whose
+# generation the layout grades — claude's `session-start.sh`, `session-end.sh`
+# and `session-turn.sh` — so an already-installed copy must read as stale to
+# receive the new slot.  `volunteer-turn.sh` carries NO `tortoise-hook-version`
+# marker, is not a member of `HarnessLayout.scripts` and has no
+# `ARTIFACT_CONTRACTS` entry, so it is never graded and needs no marker of its
+# own; the installer registers the SHIPPED package path rather than copying the
+# file, so the slot change reaches it through the package upgrade.
+# codex/cursor were bumped to 3 by MAIN's #5919 (the redirection fix); this
+# change's slot split rides that same generation because the stale-installed-copy
+# check also compares file BYTES (`modified-script`), which a copy carrying the
+# old single-slot writer fails.
 # pi 1 is the FIRST generation of the Pi seam's contract (#4680): the seam is a
 # TypeScript extension rather than a shell hook, so it has no `HarnessLayout` —
 # its contract is carried by `hook_install.ARTIFACT_CONTRACTS['pi']`.  Before
@@ -3333,10 +3339,12 @@ def test_shipped_install_contract_generations(harness):
     already-installed copy.  #5838 changed the claude hooks' BEHAVIOUR once
     more (the two breadcrumb kinds now occupy SEPARATE slots, so an inert
     install cannot overwrite a live capture-failure refusal), so claude moved
-    8→9; the codex/cursor seams changed their write path the same way, so they
-    moved 2→3 — the same generation #5919 also assigned them, because one
-    generation carries both writes.  `pi` moved 1→2 on main under #4897, which
-    this branch predates, so 2 is main's number and not a #5838 bump.  Those
+    8→9.  The codex/cursor seams take the same slot split, but their marker was
+    already at 3 on main (#5919) and this branch agreed, so NO number moved for
+    them: their stale installed copies are caught by the installed-copy byte
+    comparison (`modified-script`), not by a generation bump.  `pi` moved 1→2 on
+    main under #4897, which this branch predates, so 2 is main's number and not
+    a #5838 bump.  Those
     numbers are a reviewed decision, not a detail, so they are pinned once and
     explicitly.
 

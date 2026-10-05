@@ -150,10 +150,17 @@ _record_breadcrumb() {
   # #5838: `capture-failure` keeps the historical ``<harness>.json``;
   # `install-inert` takes ``<harness>-install.json``. Decided from the KIND,
   # which is the one input both the writer and `session verify` agree on.
+  # An unrecognised kind writes NOTHING.  The `*)` arm used to fall back to the
+  # capture slot — the one carrying a live quota/network refusal, i.e. exactly
+  # the collision #5838 exists to remove — and it did so silently.  `kind`
+  # defaults to `install-inert` (``${3:-install-inert}``), so the 2-argument
+  # callers above still take the install slot; this arm is reachable only by a
+  # genuinely new kind, which must be given a slot deliberately.
   local crumb_file
   case "$kind" in
+    capture-failure) crumb_file="$harness.json" ;;
     install-inert) crumb_file="$harness-install.json" ;;
-    *) crumb_file="$harness.json" ;;
+    *) return 0 ;;
   esac
   # #5919: redirect the WHOLE write block. Bash opens redirections left to
   # right and reports a failed open of the STDOUT target BEFORE a trailing
