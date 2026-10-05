@@ -1245,8 +1245,13 @@ export async function flushSpool(
       summary.heldBack += 1;
       continue;
     }
+    // `?? undefined`: a meta written by the PYTHON leg stores `"filed_lane": null`
+    // for a lane-less filing (JSON has no `undefined`), while this leg omits the
+    // key. Strict `===` would read `null !== undefined`, bypass the skip, and
+    // re-POST an entry the Python leg had already filed — the two legs share one
+    // spool directory (#3516 §B).
     if (meta.filed_key && meta.filed_key === meta.capture_key &&
-        meta.filed_lane === meta.capture_lane) {
+        (meta.filed_lane ?? undefined) === (meta.capture_lane ?? undefined)) {
       summary.skipped += 1;
       continue;
     }
@@ -1301,21 +1306,28 @@ export async function flushSpool(
         // leaves the meta digest stale, so the check passed while a turn went
         // unfiled forever.
         //
-        // The LANE is part of that identity (#3516 §B). `capture_key` is
-        // content-derived and the lane is not part of the content, so without
-        // this clause a lane UPGRADE landing inside the POST window was
-        // cancelled: the payload went out lane-less, the on-disk meta got the
-        // lane, and the CAS re-filed it — leaving `filed_key === capture_key`,
-        // so every later drain SKIPPED it and the lane was stranded forever.
         // The read happens IMMEDIATELY before the write, and the WRITE APPLIES
-        // TO THE FRESHLY-READ META — never to a snapshot taken earlier. Writing
+        // TO THE FRESHLY-READ META — never to a snapshot taken earlier: writing
         // an earlier snapshot back would clobber any concurrent edit that landed
         // in between, including a lane upgrade, which is precisely the edit that
         // must survive.
         //
-        // The LANE is part of the identity: `capture_key` is content-derived and
-        // the lane is not part of the content, so without it a lane upgrade
-        // landing inside the POST window was cancelled and the lane stranded.
+        // The LANE is part of this identity (#3516 §B): `capture_key` is
+        // content-derived and the lane is not part of the content, so without
+        // that clause a lane upgrade landing inside the POST window was
+        // cancelled and the lane stranded on the wire.
+        //
+        // A RESIDUAL window remains: a lane-upgrading snapshot landing between
+        // the read above and the write below is still clobbered, and the entry
+        // then reads as FILED LANE-LESS until some later snapshot re-triggers
+        // the upgrade (permanent only if the session never snapshots again). It
+        // is accepted rather than closed — the window is two file reads plus one
+        // digest (single-digit ms), and the racer must be the FIRST lane-ful
+        // snapshot of a previously lane-less entry. Closing it needs mutual
+        // exclusion in the capture hot path (every turn_end) in two languages,
+        // where a stale lock would BLOCK OR LOSE CAPTURES — a worse failure. If
+        // it ever must be closed, the lock-free route is a SIDECAR marker file
+        // for the drain-owned fields, so no read-modify-write touches meta.json.
         const onDisk = readSpoolEntry(dir, meta.session_id);
         const onDiskTurns = readSpoolTurns(dir, meta.session_id);
         const postedLane = payload.capture_lane as string | undefined;
@@ -1350,8 +1362,8 @@ export async function flushSpool(
       // Re-read before the backoff write-back for the same reason as the CAS
       // above: never clobber newer turns written while the POST was in flight.
       const pending = readSpoolEntry(dir, meta.session_id) ?? meta;
-          if (pending.filed_key && pending.filed_key === pending.capture_key &&
-              pending.filed_lane === pending.capture_lane) {
+      if (pending.filed_key && pending.filed_key === pending.capture_key &&
+          (pending.filed_lane ?? undefined) === (pending.capture_lane ?? undefined)) {
         // A CONCURRENT flush already filed this exact content while our POST was
         // in flight. Re-arming the backoff here would attach a window to content
         // that was never refused — and since writeSpoolEntry now CARRIES the

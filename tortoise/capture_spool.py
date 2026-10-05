@@ -811,17 +811,17 @@ def write_spool_entry(
     # keeps the filing marker (the prior branch was unreachable above when the
     # digests matched and the lengths matched — retained for a window shift that
     # lands on identical content).
-    # A lane UPGRADE must also invalidate the filing marker: `filed_key` is
-    # content-derived (the lane is not part of it), so an entry that was
-    # already filed LANE-LESS would otherwise keep its marker, be skipped by
-    # `_flush_one`, and stay lane-less forever — the exact outcome the
-    # `lane_upgrade` dedup guard exists to prevent (#3516 §B review). Clearing
-    # it makes the entry re-POSTable; the server's coalesce makes that
-    # idempotent.
+    # `lane_upgrade` is BELT-AND-BRACES: `_flush_one`'s skip requires
+    # `filed_lane == capture_lane`, so a lane-less filing whose lane later
+    # appears already fails that clause and re-posts without this guard. Keep it
+    # so the marker itself never claims a lane it did not deliver, and note the
+    # mechanism lives in the skip clause, not here. (#3516 §B review)
     if (prior and prior.get("content_digest") == new_digest
             and prior.get("filed_key") and not lane_upgrade):
         meta["filed_key"] = prior["filed_key"]
-        meta["filed_lane"] = prior.get("filed_lane")
+        prior_lane_delivered = prior.get("filed_lane")
+        if prior_lane_delivered:
+            meta["filed_lane"] = prior_lane_delivered
         meta["filed_at"] = prior.get("filed_at")
 
     meta_text = json.dumps(meta, ensure_ascii=False, indent=2) + "\n"
@@ -1228,10 +1228,20 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         # TO THE FRESHLY-READ META — never to a snapshot taken earlier. Writing
         # an earlier snapshot back would clobber any concurrent edit that landed
         # in between, including a lane upgrade, which is precisely the edit that
-        # must survive. (A lock would close the remaining read→write instant
-        # entirely; it is deliberately NOT taken, because this is the capture
-        # hot path and a stale lock would block — or lose — captures, which is a
-        # worse failure than a race this narrow.)
+        # must survive.
+        #
+        # A RESIDUAL window remains: a lane-upgrading snapshot landing between
+        # the read below and the write is still clobbered, and the entry then
+        # reads as FILED LANE-LESS until some later snapshot re-triggers the
+        # upgrade (permanent only if the session never snapshots again). It is
+        # accepted rather than closed — the window is two file reads plus one
+        # `content_digest` (single-digit ms), and the racer must be the FIRST
+        # lane-ful snapshot of a previously lane-less entry. Closing it needs
+        # mutual exclusion in the capture hot path (every turn_end) in two
+        # languages, where a stale lock would BLOCK OR LOSE CAPTURES — a worse
+        # failure. If it ever must be closed, the lock-free route is a SIDECAR
+        # marker file for these drain-owned fields, so no read-modify-write
+        # touches `meta.json`.
         #
         # The LANE is part of that identity: `capture_key` is content-derived
         # and the lane is not part of the content, so without it a lane upgrade
@@ -1244,7 +1254,15 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
                 and content_digest(fresh_turns) == posted_digest
                 and fresh.get("capture_lane") == posted_lane):
             fresh["filed_key"] = fresh.get("capture_key") or capture_key(sid, fresh_turns)
-            fresh["filed_lane"] = posted_lane
+            # OMIT the key for a lane-less filing rather than writing `null`: the
+            # TS leg's `readSpoolEntry` is a raw `JSON.parse`, so it would see
+            # `null` where its own writer leaves `undefined`, and its strict
+            # `===` would then bypass the skip and re-POST a Python-filed entry
+            # (a cross-leg amplification in a directory the two legs share).
+            if posted_lane:
+                fresh["filed_lane"] = posted_lane
+            else:
+                fresh.pop("filed_lane", None)
             fresh["filed_at"] = datetime.fromtimestamp(
                 now_ms / 1000.0, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
             fresh["attempts"] = 0

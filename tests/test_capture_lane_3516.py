@@ -189,13 +189,62 @@ def test_absent_lane_is_not_fabricated_and_never_422s(client):
 
 
 def test_invalid_lane_is_rejected_at_the_http_boundary(client):
+    # The content is NON-BLANK and the detail must name `capture_lane`: with
+    # blank content the request 422s for an unrelated reason ("no extractable
+    # content"), so a bare `status_code == 422` here passed even with the lane
+    # validator disabled — the test claimed a boundary guarantee it could not
+    # detect (#3516 §B review).
     r = client.post("/v1/sessions", json={
-        "conversation": [{"role": "user", "content": "x"}],
+        "conversation": [{"role": "user", "content": "a real turn"}],
         "session_id": "3516-lane-invalid",
         "harness": "pi",
         "capture_lane": "recorder",
     })
     assert r.status_code == 422, r.text[:400]
+    detail = str(r.json().get("detail"))
+    assert "capture_lane" in detail, detail
+    assert "loc" not in detail or "recorder" in detail, detail
+
+
+def test_a_lane_less_filing_omits_the_key_so_both_legs_read_it_alike(tmp_path, monkeypatch):
+    """The lane-less filing must NOT write ``"filed_lane": null``.
+
+    The two legs share one spool directory and read each other's meta: JSON has
+    no ``undefined``, so a Python-written ``null`` read by the TS leg (a raw
+    ``JSON.parse``) is ``null`` where its own writer leaves the key ABSENT — and
+    the TS skip's strict ``===`` then reads ``null !== undefined``, bypasses the
+    skip, and re-POSTs an entry Python already filed. Asserting the key is
+    ABSENT (not merely falsy) is the point: ``.get(...) is None`` passes on
+    ``null`` and would not catch the defect.
+    """
+    import tortoise.capture_spool as spool
+
+    root = tmp_path / "spool"
+    monkeypatch.setattr(spool, "spool_dir", lambda: root)
+    sid = "3516-lane-less-filing"
+    spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid, turns=[{"role": "user", "content": "lane-less"}],
+        source="t", machine_id="m"))  # no capture_lane
+    posted: list[dict] = []
+    spool.flush_spool(root, lambda p: (posted.append(p),
+                                       spool.PostOutcome(ok=True, status=200))[1],
+                      only_session_id=sid)
+    assert posted, "the lane-less entry was not filed at all"
+    assert "capture_lane" not in posted[0], posted[0]
+    on_disk = spool.read_spool_meta(root, sid)
+    assert on_disk and on_disk.get("filed_key"), on_disk
+    assert "filed_lane" not in on_disk, (
+        "a lane-less filing must OMIT filed_lane, not write it as null — a TS "
+        f"reader sees null where its own writer leaves the key absent: {on_disk}"
+    )
+    # And it must be SKIPPED on the next drain in THIS leg — the negative
+    # assertion above cannot distinguish "omitted" from "skipped forever".
+    again: list[dict] = []
+    summary = spool.flush_spool(
+        root, lambda p: (again.append(p),
+                         spool.PostOutcome(ok=True, status=200))[1],
+        only_session_id=sid)
+    assert not again and summary.skipped == 1, (again, summary)
 
 
 # ── the shipped Claude hook leg claims 'hook' ──────────────────────────────
@@ -402,8 +451,10 @@ def test_a_lane_that_appears_after_filing_is_never_skipped(tmp_path, monkeypatch
     assert first and "capture_lane" not in first[0]
     meta = spool.read_spool_meta(root, sid)
     assert meta.get("filed_key") == meta.get("capture_key")
-    assert "filed_lane" in meta and meta.get("filed_lane") is None, (
-        "the filing did not record the delivered lane")
+    assert "filed_lane" not in meta, (
+        "the lane-less filing recorded a delivered lane it never put on the "
+        "wire (and must OMIT the key, not write null — the TS leg reads this "
+        f"same directory): {meta}")
 
     meta["capture_lane"] = "hook"  # the lane appears after the filing
     spool._write_meta(root, meta)

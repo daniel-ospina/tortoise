@@ -775,6 +775,32 @@ test("a lane arriving AFTER a lane-less filing is never skipped", async () => {
   assert.equal(readSpoolEntry(spool, sid)?.filed_lane, "hook");
 });
 
+test("a PYTHON-written null filed_lane still skips (the legs share one spool dir)", async () => {
+  // The two legs read each other's meta. JSON has no `undefined`, so before the
+  // fix the Python leg stored `"filed_lane": null` for a lane-less filing while
+  // this leg omits the key — and this leg's strict `===` read `null !==
+  // undefined`, bypassed the skip, and re-POSTed an entry Python had already
+  // filed (a cross-leg amplification). Python now OMITS the key; this pins the
+  // read-side tolerance that makes a Python-written `null` safe either way.
+  const spool = tmpSpool();
+  const sid = "sess-python-null";
+  const turns = [{ role: "user" as const, content: "same" }];
+  writeSpoolEntry(spool, snapshot(sid, turns));
+
+  const first = recordingServer();
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: first.fetchImpl, now: 1 });
+  const filed = readSpoolEntry(spool, sid)!;
+  assert.equal(filed.filed_key, filed.capture_key, "not filed at all");
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  writeFileSync(metaPath, `${JSON.stringify({ ...filed, filed_lane: null }, null, 2)}\n`);
+  assert.equal(readSpoolEntry(spool, sid)?.filed_lane, null, "fixture must carry null");
+
+  const second = recordingServer();
+  const summary = await flushSpool(TEST_CFG, { dir: spool, fetchImpl: second.fetchImpl, now: 2 });
+  assert.equal(second.sessions.size, 0, "a Python-filed lane-less entry was re-POSTed");
+  assert.equal(summary.skipped, 1);
+});
+
 test("an empty STORED lane is filled in (truthy, not nullish)", () => {
   // The only input that distinguishes `||` from `??`: a stored EMPTY lane with a
   // truthy new one. `"" || "hook"` -> "hook"; `??` would omit the key. An empty
