@@ -14684,9 +14684,10 @@ async def list_sessions(request: Request, org: dict = Depends(get_current_org_se
     filter EXCLUDES null-actor (legacy) rows by construction (a MATCH-level
     WHERE on a property a legacy Session does not have can never match).
     Malformed (non-UUID) filter → 422 (a client error, never a silent empty
-    result). When absent the query is byte-identical to the pre-#2600 shape
-    + two appended RETURN columns (actor_user_id/harness — appended at the
-    END so the positional r[0..3] count mapping is unchanged).
+    result). When absent the query keeps the pre-#2600 shape, except that
+    #3555 unified its point predicate with the detail endpoint's non-turn
+    filter, plus the RETURN columns appended since (at the END, so the
+    positional r[0..3] count mapping is unchanged).
     """
     _require_scope(org, "graphs:read", "list_sessions")
     actor_filter = (request.query_params.get("actor_user_id") or "").strip()
