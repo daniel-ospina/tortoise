@@ -1315,13 +1315,20 @@ def run_vector_query(
             # #3019 KNOWN RESIDUAL: this index-accelerated path preserves the
             # engine's returned order, so two rows with EQUAL distances keep
             # whatever order the engine gave them, and rank-based fusion can see
-            # a tie-order flip. It is deliberately NOT re-sorted here. Signature
-            # B's distance could be sorted losslessly, but signature A's score IS
-            # its row POSITION, and two existing tests pin this path's
-            # order-preservation (`test_docker_mode_signature_b_scores_clamped_to
-            # _non_negative`, `test_none_api_keeps_probe_behavior`) — so changing
-            # it is its own unit of work, not a mechanical edit. Tracked as a
-            # follow-up issue rather than papered over by the source pin.
+            # a tie-order flip. It is deliberately NOT re-sorted here: signature
+            # A's score IS its row POSITION, so a Python re-sort is not lossless
+            # for it, and that is what the two named tests actually pin (below).
+            # Signature B's DISTANCE could be ordered losslessly in the QUERY —
+            # measured: the tests named here use `MultiCallGraph`, whose
+            # `query()` returns canned rows and never inspects the Cypher, so an
+            # added `ORDER BY` would NOT break them; only a PYTHON re-sort would.
+            # Corrected from an earlier claim that both tests "pin this path's
+            # order-preservation" and therefore block any fix — they pin the
+            # PYTHON layer's order pass-through (`result == [("a", 0.0), ...]`
+            # from a mock returning `[("a", 2.4), ...]`) and the probe CALL
+            # COUNT. The signature-B query fix is still its own unit of work
+            # (two signatures share this function), tracked as a follow-up
+            # rather than papered over by the source pin.
             if sig == "B":
                 # #5583: the engine's value here is a DISTANCE (lower is
                 # better), NOT a similarity. `db.idx.vector.queryNodes`
@@ -1546,8 +1553,17 @@ def run_structural_query(
     else:
         label_str = entity_type.capitalize()
         kind_field = {"point": "pointKind", "event": "eventKind", "subject": "subjectKind"}[entity_type]
-    if entity_type == "source":
-        id_field = "url"  # #149: Source canonical key is url, not id
+    if entity_type in ("source", "document"):
+        # #149: Source canonical key is url, not id. #3019: `document` belongs in
+        # this branch for the same D10 reason the label block above gives — a
+        # document IS a :Source, and `_upsert_source` creates it as
+        # `MERGE (s:Source {url:$url})`, so it has NO `id` property. Falling
+        # through to `id` below made `ORDER BY n.id ASC` order on NULL for every
+        # row: the tie stayed unresolved (DB row order, the exact defect this
+        # PR exists to close) AND every returned pid was None. The vector (921)
+        # and FTS (1165) legs already map document->url; this leg was the one
+        # that did not.
+        id_field = "url"
     elif entity_type == "event":
         id_field = "eventId"
     else:
@@ -1746,6 +1762,13 @@ def rrf_fusion(
         # (weights defaults to None → all 1.0).
         w = 1.0
         if strategy_names is not None and weights:
+            # PRECONDITION: `strategy_names` must be at least as long as
+            # `ranked_lists` (both call sites build it alongside them). The
+            # lookup below indexes `strategy_names[i]`, so a SHORTER list raises
+            # IndexError here — a dead `... else i` fallback used to sit on the
+            # warning line below, implying a tolerance that never existed
+            # (#3019 review). Deliberately left failing loudly rather than
+            # defaulting to 1.0: a misaligned list would silently misweight a leg.
             w = weights.get(strategy_names[i], 1.0)
             # #3019 part 2: a non-finite weight makes EVERY fused score NaN, and
             # tuple comparison against NaN is False in BOTH directions, so the
@@ -1762,7 +1785,7 @@ def rrf_fusion(
                 # equal weighting (PRODUCTION DEFAULT, tortoise/sdk.py).
                 logger.warning(
                     "non-finite RRF weight for %r (%r) — using 1.0",
-                    strategy_names[i] if i < len(strategy_names) else i, w,
+                    strategy_names[i], w,
                 )
                 w = 1.0
         for rank, (pid, _score) in enumerate(ranked):

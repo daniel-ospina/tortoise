@@ -2655,6 +2655,13 @@ durations:
   test_wipe_server.py: 5.1
   test_boot_regressions.py: 4.2
   test_de2e1_entity_extraction.py: 2.1
+  # #3019: measured 2026-10-05 on the embedded carve-out lane — one embedding
+  # fixture dominates (5.16s setup of a 7.10s file). Over-weight rather than
+  # round down: this is a FAST-POOL split weight, and under-weighting packs it
+  # into a shard that then runs long (#3400). Measured because registering this
+  # file in the `api` surface pushed fast-pool coverage to 667/742 = 89.9%,
+  # under the 0.90 floor — the entry is what keeps the floor satisfied.
+  test_determinism_tie_order_3019.py: 7.0
   test_epic903_staleness.py: 2.6
   test_epic903_observability.py: 3.1
   test_lme_m6_evidence.py: 2.4

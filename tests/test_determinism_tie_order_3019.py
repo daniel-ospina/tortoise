@@ -33,15 +33,16 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest  # noqa: I001
-from tortoise import search_engine  # noqa: I001
+import pytest
+
+from tortoise import search_engine
+from tortoise.sdk import TortoiseSDK
 from tortoise.search_engine import (
     reset_circuit_breakers,
     rrf_fusion,
     run_fts_query,
     run_structural_query,
 )
-from tortoise.sdk import TortoiseSDK
 
 
 @pytest.fixture
@@ -202,6 +203,49 @@ def test_structural_leg_orders_a_constant_scored_result_by_id(sdk):
     assert got == sorted(got), f"a constant-scored leg is not id-ordered: {got}"
 
 
+def test_structural_leg_orders_documents_by_their_canonical_key(sdk):
+    """FAIL VALUE: `run_structural_query(..., entity_type="document")` returned
+    `[(None, 1.0), (None, 1.0), (None, 1.0)]` — every pid ``None``, in DB row
+    order. The leg resolved ``id_field`` to ``id`` for documents, and a document
+    has no ``id`` (see the fixture), so ``ORDER BY n.id ASC`` ordered on NULL for
+    every row: the tie stayed UNRESOLVED — the exact defect #3019 exists to close
+    — and the caller could not identify a document it had been handed.
+
+    THE FIXTURE REACHES IT: the sources are created exactly as
+    ``sdk._upsert_source`` writes a document — ``MERGE (s:Source {url:$url})``,
+    with NO ``id`` property — and in DESCENDING url order, so
+    ``["a-doc", "m-doc", "z-doc"]`` is unreachable unless the leg orders by the
+    document's canonical key.
+
+    WHY THIS IS BEHAVIOURAL AND NOT A SECOND STRING PIN:
+    ``test_every_leg_query_carries_a_secondary_sort_key`` asserts the ORDER BY
+    *text* (``"ORDER BY n.{id_field} ASC"``), so it stayed GREEN on the broken
+    arm — ``id_field`` is interpolated, and a wrong value is invisible to a
+    substring match. That is the pin's own lesson: pin the behaviour, not the
+    presence of a textual fix.
+    """
+    graph = sdk._get_proj().g
+    for url in ["z-doc", "m-doc", "a-doc"]:
+        graph.query(
+            "MERGE (s:Source {url:$url}) SET s.documentKind=$kind",
+            params={"url": url, "kind": "note"},
+        )
+
+    rows = run_structural_query(graph, "note", entity_type="document", limit=10,
+                                excluded_statuses=())
+    got = [pid for pid, _ in rows]
+
+    assert got, "FIXTURE NOT REACHED: the structural leg returned no rows"
+    assert len(got) == 3, f"FIXTURE NOT REACHED: expected 3 rows, got {got}"
+    assert None not in got, (
+        "a document's pid came back None — the leg ordered on a property "
+        f"documents do not have (D10: a document is a :Source keyed by url): {got}"
+    )
+    assert got == ["a-doc", "m-doc", "z-doc"], (
+        f"documents are not ordered by their canonical key: {got}"
+    )
+
+
 def test_every_leg_query_carries_a_secondary_sort_key():
     """A CONTRACT PIN, not behavioural coverage (the behaviour is proved above for
     the three brute-force / index-FTS paths).
@@ -213,10 +257,14 @@ def test_every_leg_query_carries_a_secondary_sort_key():
 
     KNOWN RESIDUAL: the index-accelerated vector path preserves the engine's
     returned order, so two rows with EQUAL distances keep the engine's order and
-    rank-based fusion can see a tie-order flip. Fixing it needs the distance from
-    signature A (whose score IS its row position) and a deliberate revision of
-    two tests that pin this path's order-preservation, so it is tracked as a
-    follow-up rather than asserted away by this pin.
+    rank-based fusion can see a tie-order flip. A PYTHON re-sort cannot fix it
+    (signature A's score IS its row position, so a re-sort is not lossless for
+    it), which is what the two tests named in the engine comment actually pin —
+    the PYTHON layer's pass-through, not the Cypher. The genuinely fixable half
+    is a QUERY-level ORDER BY for signature B alone, measured to be compatible
+    with those mock-graph tests; it is its own unit of work because both
+    signatures share the function, so it is tracked as a follow-up rather than
+    asserted away by this pin.
     """
     src = inspect.getsource(search_engine)
     assert "ORDER BY score DESC, n.id ASC" in src, "operator leg lost its tie key"
