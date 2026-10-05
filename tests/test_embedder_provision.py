@@ -672,6 +672,13 @@ def test_the_watchdog_dumps_a_native_blocked_thread(tmp_path):
         assert b"embedder_provision.py" in seen, (
             "no dump of the MAIN thread:\n" + seen.decode(errors="replace")
         )
+        # `exit=False` is the property under test, and until round 9 NOTHING
+        # pinned it: flipping it to `exit=True` passed all 22 tests while
+        # reinstating round 5's P1 (the watchdog killing a run that was still
+        # working). The fake blocks forever, so a surviving process MUST raise
+        # here, and an exiting one returns — which is the discriminator.
+        with pytest.raises(subprocess.TimeoutExpired):
+            proc.wait(timeout=2)
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -754,6 +761,77 @@ def test_the_completion_marker_is_emitted_on_success_only(tmp_path):
     )
 
 
+def test_the_watchdog_does_not_kill_a_slow_but_working_run(tmp_path):
+    """The other side of `exit=False`: a working run must still SUCCEED.
+
+    The native test above proves the watchdog does not exit a blocked process;
+    this proves the property that actually matters to CI — a load that is merely
+    slow (round 5's cited run took 336s against a 360s cap) still completes and
+    still prints the marker, with the watchdog firing in between.
+
+    Load-bearing: with `exit=True` this exits 1 with no marker and fails.
+    """
+    delay = 3
+    fake = tmp_path / "fake-slow"
+    fake.mkdir(parents=True, exist_ok=True)
+    (fake / "sentence_transformers.py").write_text(
+        "import time\n"
+        "class SentenceTransformer:\n"
+        "    def __init__(self, *a, **k):\n"
+        f"        time.sleep({delay})  # slow, but working\n",
+        encoding="utf-8",
+    )
+    env = _base_env(tmp_path)
+    env["PYTHONPATH"] = str(fake) + os.pathsep + env.get("PYTHONPATH", "")
+    env["TORTOISE_EMBEDDER_WATCHDOG_S"] = "1"
+    proc = subprocess.run(
+        [sys.executable, str(_SCRIPT), "--attempts", "1", "--backoff", "0"],
+        capture_output=True, text=True, env=env, timeout=120,
+    )
+    assert proc.returncode == 0, (
+        f"the watchdog killed a working run (rc={proc.returncode}):\n{proc.stderr}"
+    )
+    assert "embedder provision: complete" in proc.stdout, proc.stdout
+    # The dump DID fire — otherwise this test would pass with no watchdog at all.
+    assert "Thread 0x" in proc.stderr, f"the watchdog never fired:\n{proc.stderr}"
+
+
+def test_sigterm_terminates_under_a_default_disposition(tmp_path):
+    """`chain=True` must re-raise into SIG_DFL, so a cancel still terminates.
+
+    Deterministic BY CONSTRUCTION: the child is started under `trap - TERM`, so
+    its SIGTERM disposition is default regardless of the harness that runs this
+    suite. That is what makes this safe where the round-7/8 pins were not — those
+    asserted termination while inheriting the ambient disposition, so they
+    reddened under `trap '' INT`/`trap '' TERM`.
+
+    Load-bearing: `chain=True` -> `False` leaves the process alive and fails.
+    """
+    fake = tmp_path / "fake-chain"
+    fake.mkdir(parents=True, exist_ok=True)
+    (fake / "sentence_transformers.py").write_text(_HANGS_FOREVER, encoding="utf-8")
+    env = _base_env(tmp_path)
+    env["PYTHONPATH"] = str(fake) + os.pathsep + env.get("PYTHONPATH", "")
+    proc = subprocess.Popen(
+        [
+            "bash",
+            "-c",
+            f"trap - TERM; exec {sys.executable} {_SCRIPT} --attempts 1 --backoff 0",
+        ],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+    )
+    try:
+        ready, _, _ = select.select([proc.stdout], [], [], 60)
+        assert ready, "script never reached the fake hanging constructor"
+        assert "FAKE_HANG_ENTERED" in proc.stdout.readline()
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=30) != 0, (
+            "chain=True must let SIGTERM terminate under a default disposition"
+        )
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
 def test_the_process_never_runs_atexit_teardown(tmp_path):
     """The PR's CENTRAL fix, which had no test at all (P2, third review).
 
