@@ -336,8 +336,8 @@ def check_runs(gh: Gh, repo: str, sha: str) -> list[dict]:
     return obj.get("check_runs") or []
 
 
-def gate_success(gh: Gh, repo: str, pr_number: int, contexts: list[str],
-                 not_after: datetime | None) -> datetime | None:
+def ci_clock(gh: Gh, repo: str, pr_number: int, contexts: list[str],
+             not_after: datetime | None) -> dict:
     """Earliest instant the AND of `contexts` held, over the PR's commits.
 
     Per commit, for each context the NEWEST check-run attempt (max `id`) decides
@@ -350,15 +350,29 @@ def gate_success(gh: Gh, repo: str, pr_number: int, contexts: list[str],
     A completion AFTER `not_after` (the merge) did NOT gate that merge — the queue
     re-checks on the queue branch — so it is rejected. Without that, a post-merge
     success yields a negative `(b)`; PR #5961 did exactly this (`(b) = -370s`).
+
+    It returns THREE clocks from that one pass, because the second and third are
+    free here and both are boundaries the report needs:
+      `gate_at` — the instant above;
+      `first_commit_at` — the PR's earliest commit, which opens leg (a)'s first
+      internal segment;
+      `first_gate_ci_start_at` — the EARLIEST `started_at` of ANY attempt (re-runs
+      included) of an entry-gate context on the PR's commits. That is the earliest
+      BEGINNING of CI, which is what "how long after the push did CI start" means;
+      a completion clock would answer a different question.
     """
     commits = gh.paged(f"repos/{repo}/pulls/{pr_number}/commits?per_page={PAGE}")
     best: datetime | None = None
+    first_commit: datetime | None = None
+    first_start: datetime | None = None
     need = set(contexts)
     for c in commits:
         sha = c.get("sha")
         if not sha:
             continue
         author_date = ts(((c.get("commit") or {}).get("author") or {}).get("date"))
+        if author_date is not None and (first_commit is None or author_date < first_commit):
+            first_commit = author_date
         if not_after is not None and author_date is not None and author_date > not_after:
             continue
         newest: dict[tuple, dict] = {}
@@ -366,6 +380,9 @@ def gate_success(gh: Gh, repo: str, pr_number: int, contexts: list[str],
             name = r.get("name")
             if name not in need:
                 continue
+            started = ts(r.get("started_at"))
+            if started is not None and (first_start is None or started < first_start):
+                first_start = started
             key = ((r.get("app") or {}).get("slug"), name)
             rid = r.get("id") or 0
             if key not in newest or rid > (newest[key].get("id") or 0):
@@ -392,7 +409,18 @@ def gate_success(gh: Gh, repo: str, pr_number: int, contexts: list[str],
                 break
         if ok and latest is not None and (best is None or latest < best):
             best = latest
-    return best
+    return {"gate_at": best, "first_commit_at": first_commit,
+            "first_gate_ci_start_at": first_start}
+
+
+def gate_success(gh: Gh, repo: str, pr_number: int, contexts: list[str],
+                 not_after: datetime | None) -> datetime | None:
+    """The gate boundary alone, for the callers that want only it.
+
+    Every figure comes from the same single pass in `ci_clock`; this is the
+    narrow view of it, kept so the gate rule has one definition rather than two.
+    """
+    return ci_clock(gh, repo, pr_number, contexts, not_after)["gate_at"]
 
 
 def _span(runs: list[dict], newest_only: bool) -> float | None:
@@ -483,6 +511,53 @@ def split_b_at_eligibility(gate: datetime, merged_at: datetime,
     return {"eligible_at": elig.isoformat(),
             "pre_eligible_seconds": (elig - gate).total_seconds(),
             "post_eligible_seconds": (merged_at - elig).total_seconds()}
+
+
+def split_a_at_commits(created: datetime, gate: datetime,
+                       first_commit: datetime | None,
+                       first_ci_start: datetime | None) -> dict:
+    """Split leg (a) at the first commit and the first entry-gate CI start.
+
+    (a) is created -> entry-gate success, and it was one opaque number: the
+    DOMINANT segment of the drain's accounted elapsed time and, at 61.36% with a
+    5.97 h median, the one carrying no internal boundary at all. So "authors take
+    a long time to push" and "CI takes a long time to go green" were the same
+    reading, and the queue that was blamed for the wait is 0.5% of it.
+
+    Two boundaries name the difference:
+      `authoring_seconds` = created -> first commit — the branch content does not
+        exist yet; no amount of CI work can shorten it.
+      `dispatch_seconds` = first commit -> first entry-gate check start — the push
+        and workflow-admission gap, owned by the CI configuration.
+      `gate_ci_seconds` = first start -> gate success — the CI campaign itself,
+        re-runs and fixups included; this is the CI-duration lever.
+
+    BOTH boundaries are required: if either is unobservable ALL THREE are `None`,
+    never a zero and never folded into a neighbour — the same both-or-neither rule
+    the (b) eligibility split uses, so an unobservable tail cannot masquerade as
+    measured authoring. Each boundary is clamped into `[created, gate]` and forced
+    monotone (a PR is usually opened AFTER its first commit, and a check can start
+    before the cheap entry gate finishes), so no segment is negative and the three
+    sum to (a) exactly whenever they are reported — asserted in `measure()`.
+
+    The returned boundary TIMESTAMPS are the clamped instants, not the raw reads:
+    a row must not print a boundary outside its own leg (a first commit before
+    the PR existed, a CI start after the gate it produced), because that would
+    contradict both the emitted rule and the segment printed next to it.
+    """
+    if first_commit is None or first_ci_start is None:
+        return {"first_commit_at": None, "first_gate_ci_start_at": None,
+                "authoring_seconds": None, "dispatch_seconds": None,
+                "gate_ci_seconds": None}
+    b1 = min(max(first_commit, created), gate)
+    b2 = min(max(first_ci_start, created), gate)
+    if b2 < b1:
+        b2 = b1
+    return {"first_commit_at": b1.isoformat(),
+            "first_gate_ci_start_at": b2.isoformat(),
+            "authoring_seconds": (b1 - created).total_seconds(),
+            "dispatch_seconds": (b2 - b1).total_seconds(),
+            "gate_ci_seconds": (gate - b2).total_seconds()}
 
 
 def ci_on_head(gh: Gh, repo: str, sha: str, contexts: list[str]) -> dict:
@@ -641,6 +716,12 @@ def measure(gh: Gh, repo: str, contexts: list[str], days: int, now: datetime,
             "eligible_at": None,
             "pre_eligible_seconds": None,
             "post_eligible_seconds": None,
+            # leg (a)'s internal boundaries, likewise never folded into a zero
+            "first_commit_at": None,
+            "first_gate_ci_start_at": None,
+            "authoring_seconds": None,
+            "dispatch_seconds": None,
+            "gate_ci_seconds": None,
         }
         reviews = gh.paged(f"repos/{repo}/pulls/{pr['number']}/reviews?per_page={PAGE}")
         fa = first_activity(gh, repo, pr, reviews)
@@ -691,8 +772,8 @@ def measure(gh: Gh, repo: str, contexts: list[str], days: int, now: datetime,
             rows.append(row)
             continue
 
-        gate = gate_success(gh, repo, pr["number"], contexts, not_after=merged_at)
-        gate = clamp_gate(gate, created, merged_at)
+        clock = ci_clock(gh, repo, pr["number"], contexts, not_after=merged_at)
+        gate = clamp_gate(clock["gate_at"], created, merged_at)
         row["gate_success_at"] = gate.isoformat() if gate else None
         if gate is None:
             row["leg"] = "unknown"
@@ -738,6 +819,12 @@ def measure(gh: Gh, repo: str, contexts: list[str], days: int, now: datetime,
         # "pre-entry" and residence is invisible). This is the live split.
         row.update(split_b_at_eligibility(
             gate, merged_at, ts(row["ci"].get("eligible_at"))))
+        # and INSIDE (a) — the dominant leg, which had no internal boundary at
+        # all, so its two very different halves (authoring ramp vs the CI
+        # campaign) could not be told apart
+        row.update(split_a_at_commits(
+            created, gate, clock["first_commit_at"],
+            clock["first_gate_ci_start_at"]))
         row["leg"] = "merged"
         rows.append(row)
 
@@ -782,9 +869,14 @@ def measure(gh: Gh, repo: str, contexts: list[str], days: int, now: datetime,
                 (r["pre_eligible_seconds"] + r["post_eligible_seconds"])
                 - r["seconds_b"]) > 1e-6:
             raise SystemExit(f"ELIGIBILITY SPLIT VIOLATED: PR #{r['number']}")
+        if r.get("authoring_seconds") is not None and abs(
+                (r["authoring_seconds"] + r["dispatch_seconds"]
+                 + r["gate_ci_seconds"]) - r["seconds_a"]) > 1e-6:
+            raise SystemExit(f"(a) CLOCK SPLIT VIOLATED: PR #{r['number']}")
         for k in ("pre_activity_seconds", "a_gate_seconds", "post_gate_pre_entry_seconds",
                   "queue_cycle_seconds", "pre_eligible_seconds",
-                  "post_eligible_seconds", "first_activity_seconds"):
+                  "post_eligible_seconds", "first_activity_seconds",
+                  "authoring_seconds", "dispatch_seconds", "gate_ci_seconds"):
             v = r.get(k)
             if v is not None and v < -1e-6:
                 raise SystemExit(f"NEGATIVE SUB-SEGMENT: PR #{r['number']} {k}={v:.3f}")
@@ -833,7 +925,15 @@ def measure(gh: Gh, repo: str, contexts: list[str], days: int, now: datetime,
         "queue_cycle": tot(merged, "queue_cycle_seconds"),
         "pre_eligible": tot(merged, "pre_eligible_seconds"),
         "post_eligible": tot(merged, "post_eligible_seconds"),
+        "authoring": tot(merged, "authoring_seconds"),
+        "dispatch": tot(merged, "dispatch_seconds"),
+        "gate_ci": tot(merged, "gate_ci_seconds"),
     }
+    # the (a) clock split is reportable only where BOTH boundaries exist, so its
+    # denominator is the (a) time of exactly those rows — dividing by the whole
+    # leg would dilute the shares with rows the split cannot see
+    a_split_rows = [r for r in merged if r.get("authoring_seconds") is not None]
+    a_split_total = tot(a_split_rows, "seconds_a")
     # shares over the ACCOUNTED population, and over the whole population so the
     # unknown (no observable gate) bucket is never hidden
     shares_total = {k: round(100.0 * v / total_secs, 2) if total_secs else 0.0
@@ -898,6 +998,18 @@ def measure(gh: Gh, repo: str, contexts: list[str], days: int, now: datetime,
             "other half. Eligibility is a HARDER boundary than the queue entry: "
             "it exists on a path with no queue."
         ),
+        "rule_leg_a_split": (
+            "(a) is split at its FIRST COMMIT and its FIRST ENTRY-GATE CI START "
+            "into authoring (created -> first commit), dispatch (first commit -> "
+            "first gate check start) and gate CI (first start -> gate success). "
+            "Both boundaries are required: with either unobservable ALL THREE are "
+            "None — never a zero, never folded into a neighbour. Each boundary is "
+            "clamped into [created, gate] and forced monotone, so the three sum to "
+            "(a) exactly, asserted per PR. The start is the earliest `started_at` "
+            "of ANY attempt of an entry-gate context (re-runs included): the "
+            "earliest BEGINNING of CI, which is the question 'when did CI start' "
+            "and not a completion clock."
+        ),
         "population": {
             "human_closed_in_window": len(rows),
             "human_merged": n_merged,
@@ -926,6 +1038,17 @@ def measure(gh: Gh, repo: str, contexts: list[str], days: int, now: datetime,
             "post_eligible": (round(100.0 * sub["post_eligible"] / leg["b_merge_path"], 1)
                               if leg["b_merge_path"] else None),
         },
+        "leg_a_clock_split_pct": {
+            "prs": len(a_split_rows),
+            "authoring": (round(100.0 * sub["authoring"] / a_split_total, 1)
+                          if a_split_total else None),
+            "dispatch": (round(100.0 * sub["dispatch"] / a_split_total, 1)
+                         if a_split_total else None),
+            "gate_ci": (round(100.0 * sub["gate_ci"] / a_split_total, 1)
+                        if a_split_total else None),
+            "note": ("shares are of the (a) time of the rows where BOTH boundaries "
+                     "are observable, not of the whole leg"),
+        },
         "medians_seconds": {
             "first_activity": med(active, "first_activity_seconds"),
             "pre_activity": med(active_merged, "pre_activity_seconds"),
@@ -936,6 +1059,9 @@ def measure(gh: Gh, repo: str, contexts: list[str], days: int, now: datetime,
             "approval_wait": med(merged, "approval_wait_seconds"),
             "pre_eligible": med(merged, "pre_eligible_seconds"),
             "post_eligible": med(merged, "post_eligible_seconds"),
+            "authoring": med(merged, "authoring_seconds"),
+            "dispatch": med(merged, "dispatch_seconds"),
+            "gate_ci": med(merged, "gate_ci_seconds"),
             "post_gate_pre_entry": med(merged, "post_gate_pre_entry_seconds"),
             "queue_cycle": med(merged, "queue_cycle_seconds"),
             "ci_gate_pass": statistics.median(ci_gate) if ci_gate else None,
@@ -980,6 +1106,8 @@ def measure(gh: Gh, repo: str, contexts: list[str], days: int, now: datetime,
             "no_activity_prs": sum(1 for r in rows if not r.get("has_activity")),
             "activity_clamped_to_end_prs": sum(
                 1 for r in rows if r.get("activity_clamped")),
+            "leg_a_clock_split_prs": len(a_split_rows),
+            "leg_a_clock_split_missing_prs": len(merged) - len(a_split_rows),
         },
         "queue_pr_lifetime": _queue_lifetime(queue_prs),
         "verified": {
@@ -988,6 +1116,7 @@ def measure(gh: Gh, repo: str, contexts: list[str], days: int, now: datetime,
             "closed_equals_merged_plus_unmerged": True,
             "queue_prs_excluded_from_human": True,
             "no_negative_segments": True,
+            "leg_a_clock_split_asserted": True,
         },
         "prs": rows,
     }
@@ -1015,6 +1144,7 @@ def render(result: dict) -> str:
     active_n = sum(1 for r in result["prs"] if r.get("first_activity_seconds") is not None)
     active_merged_n = sum(1 for r in result["prs"] if r.get("a_gate_seconds") is not None)
     split = result["merge_path_split_pct"]
+    a_split = result["leg_a_clock_split_pct"]
     ci_vs = result["ci_head_vs_merge_leg"]
     tsh = result["leg_shares_of_total_pct"]
 
@@ -1041,6 +1171,13 @@ def render(result: dict) -> str:
           f"median={hours(m['first_activity'])}",
           f"  sub-split of (a) at min(activity, gate) over {active_merged_n} merged PRs: "
           f"median={hours(m['pre_activity'])}",
+          f"  sub-split of (a) at FIRST COMMIT + FIRST CI START "
+          f"(over {a_split['prs']} PRs where both are observable): "
+          f"authoring {pct(a_split['authoring'])} | dispatch {pct(a_split['dispatch'])} "
+          f"| gate CI {pct(a_split['gate_ci'])}  "
+          f"(median authoring={hours(m.get('authoring'))}, "
+          f"dispatch={minutes(m.get('dispatch'))}, "
+          f"gate CI={hours(m.get('gate_ci'))})",
           f"  sub-split of (b) at queue entry: post-gate development/wait "
           f"{pct(split['post_gate_pre_entry'])} "
           f"| queue residence {pct(split['queue_cycle'])}",

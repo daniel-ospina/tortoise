@@ -51,6 +51,8 @@ import struct
 from contextlib import suppress
 from datetime import datetime, timezone
 
+from .cypher_guard import tolerates_altered_numbers
+from .exceptions import UnrepresentableNumberError
 from .projection import (
     _annotator_value_ok,
     _apply_one,
@@ -1168,6 +1170,7 @@ def check_consistency(log_path: str, projection, *,
     }
 
 
+@tolerates_altered_numbers
 def recover_from_log(events_dir: str, projection) -> dict:
     """Rebuild a projection from a JSONL event-log dir when its graph was lost.
 
@@ -1443,6 +1446,15 @@ def recover_from_log(events_dir: str, projection) -> dict:
     # number of links actually APPLIED so a dropped record is not counted as
     # replayed.
     applied = 0
+    # #7174: a record the store's numeric domain would ALTER is not a TORN
+    # record, so it gets its own tally and its own ADDITIVE clause in `reason`.
+    # DEFENSIVE by construction: this function runs under the journal-path
+    # tolerance (see the decorator), so the param guard itself cannot raise here —
+    # the clause covers a projection that refuses DIRECTLY (an injected backend,
+    # or a future in-scope raiser). Not dead code: without it such a refusal
+    # would be counted as crash damage and reported as a skipped line.
+    refused = 0
+    first_refusal = ""
     hard_delete_seqs = journal_hard_delete_seqs(events)
     entity_link_events: list[tuple[int, dict]] = []
     # #3305: the Point lifecycle terminalizers are folded by the SHARED
@@ -1474,6 +1486,10 @@ def recover_from_log(events_dir: str, projection) -> dict:
             else:
                 projection.apply(ev)
             applied += 1
+        except UnrepresentableNumberError as exc:
+            refused += 1
+            if not first_refusal:
+                first_refusal = str(exc)
         except Exception:
             torn += 1
     if deferred_corrects:
@@ -1492,8 +1508,19 @@ def recover_from_log(events_dir: str, projection) -> dict:
             torn += len(entity_link_events)
     after = _node_count()
     ok = applied > 0 and after is not None and after > 0
+    if refused:
+        logger.warning(
+            "recover_from_log: %d record(s) NOT replayed — the store's numeric "
+            "domain (#7174) would have altered them; first: %s",
+            refused,
+            first_refusal,
+        )
+    extra = f" ({torn} skipped)" if torn else ""
+    if refused:
+        extra += f" ({refused} refused by the numeric domain)"
     return {"recovered": ok, "log_points": len(events),
             "db_points": after if after is not None else 0,
-            "reason": f"replayed {applied} events from {files[0]}"
-            + (f" ({torn} skipped)" if torn else "") if ok
-            else "replay produced an empty graph"}
+            # The clause is ADDITIVE, so it rides BOTH branches — an `ok: False`
+            # result is exactly when a refused count matters most.
+            "reason": (f"replayed {applied} events from {files[0]}{extra}" if ok
+                       else f"replay produced an empty graph{extra}")}
