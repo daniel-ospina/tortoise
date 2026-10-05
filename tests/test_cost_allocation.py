@@ -741,14 +741,15 @@ def test_event_retention_loop_awaits_the_cost_refresh():
          and n.test.value is True), None)
     assert while_loop is not None, "_event_retention_loop has no `while True:`"
 
-    def _guarded_call(stmt: ast.stmt) -> tuple[str, str] | None:
-        """``(label, step)`` for one guarded body statement, else ``None``.
+    def _guarded_call(stmt: ast.stmt) -> tuple[str, str, str] | None:
+        """``(label, step, form)`` for one guarded body statement, else ``None``.
 
-        Off-loop work is scheduled as
-        ``functools.partial(run_on_daemon_worker, fn, name=...)``, so the guarded
-        step is the partial's SECOND positional argument AND the partial's
-        callable must BE ``run_on_daemon_worker``: a coroutine handed to any
-        other runner is never awaited.
+        ``form`` is ``"offload"`` when the step is scheduled as
+        ``functools.partial(run_on_daemon_worker, fn, ...)`` and ``"direct"``
+        when the callee is already async. The distinction is load-bearing: the
+        three sync sweeps MUST go through the offload (#2850/#2953) or their
+        whole-fleet DB work runs ON the event loop and the guard then swallows
+        an ``await None`` TypeError every interval.
         """
         if not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Await)
                 and isinstance(stmt.value.value, ast.Call)):
@@ -761,7 +762,7 @@ def test_event_retention_loop_awaits_the_cost_refresh():
         if not (isinstance(label, ast.Constant) and isinstance(label.value, str)):
             return None
         if isinstance(step, ast.Name):
-            return label.value, step.id
+            return label.value, step.id, "direct"
         if (isinstance(step, ast.Call)
                 and isinstance(step.func, ast.Attribute)
                 and step.func.attr == "partial"
@@ -769,10 +770,10 @@ def test_event_retention_loop_awaits_the_cost_refresh():
                 and isinstance(step.args[0], ast.Name)
                 and step.args[0].id == "run_on_daemon_worker"
                 and isinstance(step.args[1], ast.Name)):
-            return label.value, step.args[1].id
+            return label.value, step.args[1].id, "offload"
         return None
 
-    body: list[tuple[str, str]] = []
+    body: list[tuple[str, str, str]] = []
     slept = 0
     for stmt in while_loop.body:
         call = stmt.value.value if (
@@ -801,17 +802,57 @@ def test_event_retention_loop_awaits_the_cost_refresh():
         "the periodic body must contain exactly one `await asyncio.sleep(...)` "
         f"statement (found {slept})")
 
-    # ORDERED, and label-paired: a set of names would accept the same four
-    # steps bound to the wrong calls.
-    expected = [("event retention sweep", "_sweep_events"),
-                ("deleted-team purge", "_purge_deleted_orgs"),
-                ("oauth retention", "_sweep_oauth_retention"),
-                ("cost allocation refresh", "_refresh_cost_allocation")]
+    # ORDERED, label-paired, AND form-checked: a set of names accepted the same
+    # four steps bound to the wrong call sites, and accepting a bare Name for a
+    # sync sweep accepted dropping the offload entirely.
+    expected = [("event retention sweep", "_sweep_events", "offload"),
+                ("deleted-team purge", "_purge_deleted_orgs", "offload"),
+                ("oauth retention", "_sweep_oauth_retention", "offload"),
+                ("cost allocation refresh", "_refresh_cost_allocation", "direct")]
     assert body == expected, (
-        "the periodic body must guard exactly these steps, in order, each "
-        "off-loop step scheduled through `run_on_daemon_worker`; a step "
-        f"outside the guard can kill the loop (#5381). got={body} "
-        f"expected={expected}")
+        "the periodic body must guard exactly these steps, in order, each sync "
+        "sweep scheduled through `run_on_daemon_worker`; a step outside the "
+        f"guard can kill the loop (#5381). got={body} expected={expected}")
+
+    # The ARMED callable must be the guarded module-level loop. As a closure the
+    # pinned and armed functions were necessarily the same object; extracting it
+    # decoupled them, so arming an unguarded local copy would leave every
+    # assertion above inspecting dead code.
+    assert len([n for n in tree.body
+                if isinstance(n, ast.AsyncFunctionDef)
+                and n.name == "_event_retention_loop"]) == 1, (
+        "`_event_retention_loop` must be defined ONCE at module level")
+    lifespan = next(
+        (n for n in ast.walk(tree)
+         if isinstance(n, ast.AsyncFunctionDef) and n.name == "_lifespan"), None)
+    assert lifespan is not None, "_lifespan not found"
+    assert not [n for n in ast.walk(lifespan)
+                if isinstance(n, ast.AsyncFunctionDef)
+                and n.name == "_event_retention_loop"], (
+        "`_lifespan` must not redefine `_event_retention_loop` — the armed "
+        "callable must be the guarded module-level loop (#5381)")
+    assert [n for n in ast.walk(lifespan)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute) and n.func.attr == "create_task"
+            and n.args and isinstance(n.args[0], ast.Call)
+            and isinstance(n.args[0].func, ast.Name)
+            and n.args[0].func.id == "_event_retention_loop"], (
+        "`_lifespan` must arm the module-level `_event_retention_loop` through "
+        "`create_task(...)` (#5381)")
+
+    # The guard must swallow ANY exception. Sampling one class at runtime cannot
+    # catch a narrowed clause: a test raising RuntimeError still passes against
+    # `except (ValueError, RuntimeError)`, which re-opens #5381 for every real
+    # DB/driver error. Pin the width itself.
+    guard = next(
+        (n for n in ast.walk(tree)
+         if isinstance(n, ast.AsyncFunctionDef) and n.name == "_guarded_step"), None)
+    assert guard is not None, "_guarded_step not found"
+    assert any(isinstance(h.type, ast.Name) and h.type.id == "Exception"
+               for t in ast.walk(guard) if isinstance(t, ast.Try)
+               for h in t.handlers), (
+        "`_guarded_step` must catch a bare `Exception`: a narrower clause "
+        "re-opens #5381 for every class it misses")
 
 
 def test_a_raising_step_cannot_kill_the_retention_loop(monkeypatch, caplog):
@@ -879,6 +920,22 @@ def test_a_raising_step_cannot_kill_the_retention_loop(monkeypatch, caplog):
     assert any("sweep exploded" in r.getMessage() for r in caplog.records), (
         "the swallowed failure must be LOGGED, not silently dropped: "
         + caplog.text)
+
+
+def test_guarded_step_does_not_swallow_cancellation():
+    """#5381: the guard must contain FAILURES without containing SHUTDOWN.
+
+    ``_stop_liveness`` cancels these tasks and then `gather`s them with no
+    timeout, so a step that swallowed ``CancelledError`` would hang shutdown.
+    ``CancelledError`` derives from ``BaseException`` on 3.8+, so it was never
+    caught by ``except Exception`` — but nothing else here would notice if the
+    two clauses were ever collapsed into ``except BaseException``.
+    """
+    async def _cancelled():
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(ha._guarded_step("cancelled step", _cancelled))
 
 
 def test_a_failing_refresh_cannot_kill_the_retention_loop(monkeypatch, caplog):
