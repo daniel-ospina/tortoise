@@ -495,29 +495,30 @@ _HANGS_FOREVER = (
 
 # The #7359 class: the main thread blocked inside NATIVE code, where a
 # Python-level signal handler can never run (no eval-loop point is reached).
-# `pthread_mutex_lock` on an already-held mutex is the simplest genuinely
-# uninterruptible C block available without a C compiler.
+# `pthread_mutex_lock` on a mutex held by ANOTHER thread is a genuinely
+# uninterruptible C block, and unlike a self-relock its behaviour is well
+# defined on every libc (PTHREAD_MUTEX_DEFAULT may return EDEADLK instead of
+# blocking, which would make the fake not block at all).
 _HANGS_IN_NATIVE_CODE = (
-    "import ctypes, threading, time\n"
+    "import ctypes, threading\n"
     "\n"
     "_libc = ctypes.CDLL(None)\n"
+    "_buf = ctypes.create_string_buffer(64)\n"
+    "_libc.pthread_mutex_init(ctypes.byref(_buf), None)\n"
+    "_held = threading.Event()\n"
     "\n"
-    "class _Mutex:\n"
-    "    def __init__(self):\n"
-    "        self.buf = ctypes.create_string_buffer(64)\n"
-    "        _libc.pthread_mutex_init(ctypes.byref(self.buf), None)\n"
-    "    def lock(self):\n"
-    "        _libc.pthread_mutex_lock(ctypes.byref(self.buf))\n"
+    "def _hold():\n"
+    "    _libc.pthread_mutex_lock(ctypes.byref(_buf))\n"
+    "    _held.set()\n"
+    "    threading.Event().wait()  # hold it forever\n"
     "\n"
-    "_m = _Mutex()\n"
-    "_m.lock()\n"
-    "threading.Thread(target=lambda: (_m.lock(), time.sleep(600)), daemon=True).start()\n"
-    "time.sleep(0.5)  # let the helper take it\n"
+    "threading.Thread(target=_hold, daemon=True).start()\n"
+    "assert _held.wait(10), 'helper never took the mutex'\n"
     "\n"
     "class SentenceTransformer:\n"
     "    def __init__(self, *a, **k):\n"
     "        print('FAKE_NATIVE_HANG_ENTERED', flush=True)\n"
-    "        _m.lock()  # blocks in C, uninterruptibly\n"
+    "        _libc.pthread_mutex_lock(ctypes.byref(_buf))  # held by the helper\n"
 )
 
 
@@ -552,6 +553,14 @@ def test_a_cancelled_step_dumps_every_thread_stack(tmp_path):
 
     Load-bearing: revert to `signal.signal` AND remove the watchdog, and this
     fails on the dump assertion.
+
+    That claim is WRONG and was corrected in the third review: this test was
+    rebuilt against the round-2 `signal.signal` implementation (watchdog
+    removed) and PASSED — a Python-level handler is perfectly capable of dumping
+    a `time.sleep` block, which is why the inert handler survived two reviews.
+    What this test actually pins is the narrower, still-real contract: a
+    DELIVERED signal produces a dump carrying real frames. The native-blocked
+    case, the one that discriminates, is the watchdog test below.
     """
     for sig in (signal.SIGTERM, signal.SIGINT):
         proc = _run_until_hang(tmp_path, _HANGS_FOREVER, "FAKE_HANG_ENTERED")
@@ -580,6 +589,13 @@ def test_the_watchdog_dumps_a_native_blocked_thread(tmp_path):
 
     Load-bearing: delete the `dump_traceback_later` arm and this hangs until the
     test's own timeout instead of dumping.
+
+    NOTE the two tests are NOT symmetric, and the asymmetry is the point (P2,
+    third review): this one discriminates the fix, whereas the signal test above
+    does not — it was rebuilt against the round-2 `signal.signal` implementation
+    and PASSED, which is how an inert handler survived two reviews. Only a
+    native-blocked main thread separates a Python-level handler from a C-level
+    one, so only this test is load-bearing for the round-2 defect.
     """
     proc = _run_until_hang(
         tmp_path, _HANGS_IN_NATIVE_CODE, "FAKE_NATIVE_HANG_ENTERED",
@@ -671,3 +687,67 @@ def test_the_completion_marker_is_emitted_on_success_only(tmp_path):
     assert ep.DONE_MARKER not in bad.stdout, (
         f"the marker must NOT appear on the failure path; got {bad.stdout!r}"
     )
+
+
+def test_the_process_never_runs_atexit_teardown(tmp_path):
+    """The PR's CENTRAL fix, which had no test at all (P2, third review).
+
+    Swapping `os._exit(_rc)` back to `sys.exit(_rc)` left all 20 tests green
+    (identical stdout, identical exit codes on success, failure and both print
+    flags), so the teardown-skip this whole change is about was unpinned.
+
+    The fake registers an `atexit` hook and drops a sentinel file. `sys.exit`
+    runs it during normal interpreter shutdown; `os._exit` never does. So the
+    sentinel's ABSENCE is the assertion, and the assertion can fail.
+
+    Load-bearing: change the `__main__` exit to `sys.exit(_rc)` and this fails.
+    """
+    fake = tmp_path / "fake-atexit"
+    fake.mkdir(parents=True, exist_ok=True)
+    sentinel = tmp_path / "atexit-ran"
+    (fake / "sentence_transformers.py").write_text(
+        "import pathlib\n"
+        "class SentenceTransformer:\n"
+        "    def __init__(self, *a, **k):\n"
+        "        import atexit\n"
+        f"        atexit.register(lambda: pathlib.Path({str(sentinel)!r}).write_text('ran'))\n",
+        encoding="utf-8",
+    )
+    env = _base_env(tmp_path)
+    env["PYTHONPATH"] = str(fake) + os.pathsep + env.get("PYTHONPATH", "")
+    proc = subprocess.run(
+        [sys.executable, str(_SCRIPT), "--attempts", "1", "--backoff", "0"],
+        capture_output=True, text=True, env=env, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert not sentinel.exists(), (
+        "atexit teardown ran — the process left via sys.exit, so the #7359 "
+        "teardown stall is back"
+    )
+
+
+def test_every_watchdog_margin_sits_between_the_backoff_budget_and_the_step_cap():
+    """A per-site invariant, because a flat default regressed (P1, third review).
+
+    The watchdog is a hard wall-clock kill. Sitting below the step's own
+    backoff budget fails a run that was still legitimately retrying; sitting at
+    or above `timeout-minutes` makes it dead machinery (the runner's own kill
+    wins and no dump is produced). Both bounds are per site, so the check is too.
+    """
+    root = _SCRIPT.parent.parent
+    sites = 0
+    for name in ("python-ci.yml", "post-merge-validation.yml"):
+        text = (root / ".github" / "workflows" / name).read_text(encoding="utf-8")
+        for block in text.split("name: Embedding model REQUIRED")[1:]:
+            block = block.split("\n      - name:")[0]
+            watchdog = int(
+                re.search(r'TORTOISE_EMBEDDER_WATCHDOG_S: "(\d+)"', block).group(1)
+            )
+            cap = int(re.search(r"timeout-minutes: (\d+)", block).group(1)) * 60
+            attempts, backoff = re.search(r"--attempts (\d+) --backoff (\d+)", block).groups()
+            budget = (int(attempts) - 1) * int(backoff)
+            assert budget < watchdog < cap, (
+                f"{name}: watchdog {watchdog}s is outside ({budget}s, {cap}s)"
+            )
+            sites += 1
+    assert sites == 5, f"expected 5 embedder sites, found {sites}"

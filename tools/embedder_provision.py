@@ -75,6 +75,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 import argparse
 import contextlib
 import faulthandler
+import math
 import os
 import signal
 import time
@@ -97,13 +98,27 @@ DONE_MARKER = "embedder provision: complete"
 def _watchdog_seconds() -> float:
     """Seconds before the watchdog fires (and exits non-zero with a dump).
 
-    Default 300: the step is ~9s when it works and its tightest bound is the
-    6-minute `timeout-minutes` on `test`, so 5 minutes separates "slow" from
-    "stuck" with a wide margin. Overridable so the test can fire it in ~1s.
+    Set PER SITE in the workflow, because the two bounds it must sit between are
+    per site (P1, third review of #7364). A flat default was wrong: it killed a
+    legitimately-progressing run at the three `--attempts 5 --backoff 10` sites,
+    whose own declared budget is 10 minutes and whose comment says so — 40s of
+    backoff alone before the final probe, plus a slow-but-working download. The
+    invariant to preserve when editing a site's `timeout-minutes`:
+
+        backoff budget  <  TORTOISE_EMBEDDER_WATCHDOG_S  <  timeout-minutes * 60
+
+    Sites set 330 (under the 6-minute `test`/pmv cap) and 570 (under the three
+    10-minute caps). The fallback below is the tighter one on the principle that
+    firing early yields a dump, whereas firing late yields nothing.
     """
-    with contextlib.suppress(TypeError, ValueError):
-        return max(1.0, float(os.environ.get("TORTOISE_EMBEDDER_WATCHDOG_S", "300")))
-    return 300.0
+    raw = os.environ.get("TORTOISE_EMBEDDER_WATCHDOG_S", "330")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 330.0
+    if not math.isfinite(value):  # float('inf')/float('nan') -> OverflowError in dump_traceback_later
+        return 330.0
+    return min(3600.0, max(1.0, value))
 
 
 def _install_termination_stack_dump() -> None:
@@ -127,8 +142,16 @@ def _install_termination_stack_dump() -> None:
 
     1. **`faulthandler.register`** — a C-LEVEL handler, so the dump happens
        inside the signal trampoline regardless of what the main thread is
-       doing. `chain=True` preserves the default disposition, so the process
-       still terminates. Covers a runner cancel that is delivered here.
+       doing. Covers a runner cancel that is delivered here. `chain=True` is
+       required (`chain=False` was measured to swallow BOTH signals, leaving the
+       process alive), but it resolves differently per signal and the difference
+       matters: for SIGTERM it chains to `SIG_DFL` and the process terminates; for
+       SIGINT it chains to Python's own deferred `KeyboardInterrupt` handler,
+       which a main thread blocked in C will never run — so the process dumps
+       and SURVIVES until the runner's later SIGTERM. That is acceptable because
+       the runner escalates on a fixed 7500ms/2500ms schedule, but it is not the
+       blanket "chain=True still terminates" the first version of this comment
+       claimed.
     2. **`faulthandler.dump_traceback_later`** — a WATCHDOG THREAD, needing no
        signal delivery at all, so it covers a main thread wedged in native code
        AND a cancel that never reaches this process. This is the one that
@@ -150,7 +173,7 @@ def _install_termination_stack_dump() -> None:
         # An unsupported platform or a non-main thread loses the diagnostic only.
         with contextlib.suppress(ValueError, OSError):
             faulthandler.register(_sig, all_threads=True, chain=True)
-    with contextlib.suppress(ValueError, RuntimeError, OSError):
+    with contextlib.suppress(ValueError, RuntimeError, OSError, OverflowError):
         faulthandler.dump_traceback_later(_watchdog_seconds(), exit=True)
 
 

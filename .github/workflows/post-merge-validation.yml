@@ -378,6 +378,11 @@ jobs:
         #
         # #964: the step-level timeout still bounds a hung download (stalled TCP,
         # no error raised) that would otherwise stall the step for the job cap.
+        env:
+          # #7359 P1: strictly below this step's timeout-minutes AND above its
+          # `--attempts N --backoff S` budget, so a slow-but-working download is not
+          # killed at a wall-clock guess. Keep this line next to the cap.
+          TORTOISE_EMBEDDER_WATCHDOG_S: "330"
         timeout-minutes: 6
         run: |
           exec python3 tools/embedder_provision.py --attempts 3 --backoff 5
