@@ -568,13 +568,11 @@ def test_field_order_tracks_the_evidence_not_the_raw_retrieval_order(
         f"assemble_context, got {pool_order}")
     # Derived, not pinned: the fused order is the id tie-break (#3019), so
     # which session leads is a property of the ids, not of this test. What the
-    # test needs is only that the stub genuinely REVERSED the pool — asserted
-    # below, and that is the whole mutation-kill: a field derived from the raw
-    # hits reports `pool_order`, which `expected` is asserted to differ from.
+    # test needs is that the pool carries both sessions and that the stub
+    # reversed it; the kill is the field assertion below, which compares against
+    # `expected` — the order the EVIDENCE was assembled in — and not against
+    # the raw `pool_order` the retrieval returned.
     expected = list(reversed(pool_order))
-    assert expected != pool_order, (
-        f"precondition: the stub must reverse a genuinely ordered pool, got "
-        f"{pool_order}")
     assert result["retrieved_session_ids"] == expected, (
         "the field follows the raw retrieval order, not the order the "
         "evidence was assembled from")

@@ -918,6 +918,14 @@ def run_fts_query(
     label = "Source" if entity_type == "document" else entity_type.capitalize()
     # #448: three-way id_field — source→url (canonical key, #149),
     # event→eventId, else→id. D10: a document Source resolves by url too.
+    #
+    # #3019 KNOWN RESIDUAL (sibling gap, NOT a regression): `object` has the
+    # same NULL-key shape and is not closed here. A :Object is merged by its
+    # `name`, and the live write path mints it id-less (`MERGE (o:Object
+    # {name:$name})`, hosted_api), so the `else` below orders those rows on a
+    # NULL `id`. Out of this change's scope: the remedy is a coalesce KEY, not
+    # a field rename, so it changes the ORDER BY expression shape in all three
+    # legs. Evidence recorded on #3019.
     if entity_type in ("source", "document"):
         id_field = "url"
     elif entity_type == "event":
@@ -1329,7 +1337,9 @@ def run_vector_query(
             # these tests "pin this path's order-preservation" and therefore
             # block any fix. The signature-B query fix is still its own unit of
             # work (both signatures share this function), tracked as a follow-up
-            # rather than papered over by the source pin.
+            # rather than papered over by the source pin. That follow-up is
+            # #6214 — cite it rather than saying "a follow-up" and leaving a
+            # reader no way to reach it.
             if sig == "B":
                 # #5583: the engine's value here is a DISTANCE (lower is
                 # better), NOT a similarity. `db.idx.vector.queryNodes`
@@ -1570,7 +1580,10 @@ def run_structural_query(
         # on NULL then resolves NOTHING: the tie fell back to DB row order (the
         # defect this PR exists to close) AND every returned pid was None.
         # The FTS leg (921) and the vector leg (1164) already map document->url;
-        # this leg was the one that did not.
+        # this leg was the one that did not. `object` is a KNOWN RESIDUAL: its
+        # canonical key is `name` and the live write path mints it id-less, so
+        # the `else` below still orders those rows on NULL — see the note at
+        # the FTS leg's id_field block.
         id_field = "url"
     elif entity_type == "event":
         id_field = "eventId"

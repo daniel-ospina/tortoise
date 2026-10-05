@@ -7,8 +7,8 @@ product decision and is deliberately NOT touched):
   1. **Within-leg tie order.** Every leg ran ``ORDER BY score DESC`` with no
      secondary key, so a tie fell through to DB row order. The operator FTS leg
      is the sharpest case: it returns a CONSTANT ``1.0 AS score`` for every row,
-     so the entire leg is one tie *by construction* — no dependence on
-     FalkorDBLite's 0.0 fulltext scores.
+     so the entire leg is one tie *by construction* — no dependence on the
+     index leg's scores.
   2. **A non-finite fusion weight.** ``json.loads`` accepts bare ``NaN`` /
      ``Infinity``, and a NaN weight makes EVERY fused score NaN. Tuple comparison
      against NaN is False in BOTH directions, so the ``(-score, id)`` key that

@@ -2728,10 +2728,12 @@ durations:
   test_de2e1_entity_extraction.py: 2.1
   # #3019: measured 2026-10-05 on the embedded carve-out lane — 7.10s for the
   # file (a second run 8.31s; one embedding fixture is 5.16s of the setup). The
-  # entry's PRESENCE is what carries the fast-pool coverage floor (#3400): without
-  # it this file packs at the flat default and the floor is missed. Refresh from
-  # the first post-merge CI run that measures it. No pool size or percentage is
-  # restated here on purpose — see the same rule on the `#3400` rows above.
+  # row also changes the fast-pool durations coverage (#3400): a file with no
+  # durations row packs at the flat default, so whether removing this row keeps
+  # the pool above `DURATION_COVERAGE_MIN` must be measured at that head rather
+  # than assumed. Refresh from the first post-merge CI run that measures it. No
+  # pool size or percentage is restated here on purpose — see the same rule on
+  # the `#3400` rows above.
   test_determinism_tie_order_3019.py: 7.1
   test_epic903_staleness.py: 2.6
   test_epic903_observability.py: 3.1
