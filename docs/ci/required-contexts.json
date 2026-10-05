@@ -479,7 +479,7 @@
       ]
     ]
   },
-  "gate_digest": "8e7054d359bf68bca74046c6f8ad55e119ec3beab8b1fc34c66701f39479f176",
+  "gate_digest": "efdbed264d0c83981a3aac068c1a786dd82b1870dd8c7f39b9f5409d525ba2ea",
   "live_checked_at": "2026-09-29T02:35:26Z",
   "live_observed_contexts": [
     "ai-review-gate",
@@ -503,5 +503,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-10-01T13:18:04Z"
+  "verified_at": "2026-10-05T03:11:27Z"
 }
