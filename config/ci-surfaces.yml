@@ -33,15 +33,20 @@ version: 1
 # clock for aggregate runner-minutes, exactly like `fast_shards`.
 carve_shards: 3
 # S IS NO LONGER CAPPED BY THE FLOOR FROM THIS SIZE. #6133 split
-# `test_onboarding_state_split.py` (310.7 s), which used to SATURATE max(shard),
-# into four chunks (55.8/123.5/91.6/39.8 s, count-apportioned seeds). The pool's
-# largest file is now `eval/retrieval/test_run.py` at 179.8 s — so the split
-# changes NO pack at the S we ship: measured on the committed `durations` map,
-# max(shard) is 625.4 s (10.42 min) at S=7, 547.3 s (9.12 min) at S=8 and
-# 486.5 s (8.11 min) at S=9, byte-identical before and after the split. What the
-# split buys is HEADROOM at larger S: the single-file floor bound from S=15
-# (310.7 s, where max(shard) stops falling before the split) and now binds only
-# from S=25 (179.8 s), where it again stops falling (S=25 and S=26).
+# `test_onboarding_state_split.py` (310.7 s), the largest fast file and therefore
+# the floor under the fast gate, into four chunks (55.8/123.5/91.6/39.8 s, which
+# sum to that file's weight and are count-apportioned seeds marked `# unmeasured`
+# below).
+#
+# NO PACK NUMBER IS RESTATED HERE, DELIBERATELY. Every max(shard) figure this
+# comment used to carry is a function of the committed `durations` map, and that
+# map is refreshed on main while a PR is open — three review rounds in a row found
+# the same figure stale for exactly that reason. Recompute when a number is needed:
+# `max(s['est_seconds'] for s in push_legs({**m, 'fast_shards': S})['shards'])`.
+# What is stable without the map: the four chunks sum to the weight of the file
+# they replace, so the pool's total weight is unchanged, and no single fast file
+# can bind max(shard) as early as the 310.7 s one did — which is the headroom this
+# change creates for a higher shard count.
 #
 # S STAYS AT 9 — UNCHANGED FROM main, DELIBERATELY. The merge rail's lane-parity
 # compares job-NAME SETS (tools/ci_selection.py; test_ci_selection.py asserts on
