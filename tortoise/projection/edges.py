@@ -96,7 +96,7 @@ def _mint_subject_stub(g, name: str) -> None:
     )
 
 
-def _mint_source_stub(g, url: str, source_kind: str | None = None) -> str:
+def _mint_source_stub(g, url: str, source_kind: str | None = None) -> str | None:
     """MERGE the Source stub _link_source creates — single create path for live
     + replay (mirror _link_source's ON CREATE exactly: title=url, empty
     contentHash, ingestedAt now; session: refs carry is_episodic=true so the
@@ -752,6 +752,14 @@ class _EdgeHandlers:
             )
         # MERGE Source with auto-create (mirrors _link_source) — #205
         key = resolve_source_key(self.g, source_url)
+        # #7369: `key` is the Source MERGE key, and `source_url` is a
+        # first-class JOURNALED field of `DocumentCreated` (sdk.py), forwarded
+        # verbatim by `_upsert_document` — an unwritable one aborts the replay
+        # after the wipe. Same gate as its three siblings (_mint_source_stub,
+        # _materialize_connector_source, _upsert_source).
+        from tortoise.projection import _writable_id
+        if not _writable_id(key):
+            return
         canonical = normalize_source_url(key)
         self.g.query(
             "MERGE (s:Source {url:$url}) "

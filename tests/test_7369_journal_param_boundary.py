@@ -77,7 +77,7 @@ import pathlib
 import pytest
 
 from tortoise.projection import (
-    _GuardedGraph, _journal_safe_params, _writable_id,
+    _GuardedGraph, _flat_writable, _journal_safe_params, _writable_id,
 )
 from tortoise.sdk import TortoiseSDK
 
@@ -295,16 +295,42 @@ def test_the_boundary_degrades_before_the_driver_sees_it(verb):
 
 
 def test_a_read_only_statement_is_untouched():
-    """The walk must not run where nothing can be written.
+    """A read whose parameters are already writable returns the SAME object.
 
-    Retrieval is the hot path: before this short-circuit a 5,000-id read paid
-    the walk for a gate that could not apply to it. Identity-pinning makes a
-    regression that re-walks reads allocate visibly here.
+    NOTE: identity alone does NOT prove the walk was skipped — the full walk
+    also returns the same object when nothing is degraded, so this test passes
+    with or without the fast path. The fast path's own decision function is
+    asserted directly in `test_the_read_fast_path_admits_the_id_list_shape`;
+    this test is here for the read path's contract, not its cost.
     """
-    params = {"ids": ["p%d" % i for i in range(50)]}
+    params = {"ids": ["p%d" % i for i in range(5000)]}
     assert _journal_safe_params(
         params, "MATCH (p:Point) WHERE p.id IN $ids RETURN p",
     ) is params
+
+
+def test_the_read_fast_path_admits_the_id_list_shape():
+    """The read fast path must cover the shape retrieval actually sends.
+
+    The first version of this pre-scan admitted only SCALARS, so a 5,000-id
+    read — `params={"ids": [...5000 strings...]}`, which is a LIST — fell
+    through to the full walk (~22 ms/call) while the commit message claimed the
+    hot path was preserved. The claim was false and this assertion is the check
+    that would have caught it.
+    """
+    assert _flat_writable(["p%d" % i for i in range(5000)]) is True
+    assert _flat_writable(("a", "b")) is True
+    assert _flat_writable("a") is True
+    assert _flat_writable(None) is True
+    # ...and anything nested must DECLINE the fast path, so the full walk —
+    # where correctness lives — still runs.
+    assert _flat_writable({"a": 1}) is False
+    assert _flat_writable([{"a": 1}]) is False
+    assert _flat_writable([["a"]]) is False
+    assert _flat_writable(b"x") is False
+    assert _flat_writable({"a", "b"}) is False
+    # A corrupt scalar in a flat list must NOT be admitted as writable.
+    assert _flat_writable(["ok", "bad\x00id"]) is False
 
 
 def test_a_READ_statement_IS_gated_because_the_engine_parses_every_param():
@@ -576,6 +602,11 @@ _FAMILY_RECORDS = [
                                         "uses": [{"name": "ok"}]}},
      "event.uses[0].name", "bad\x00use"),
     ("Document", {"type": "DocumentCreated"}, "id", "bad\x00doc"),
+    # `_upsert_document` forwards `source_url` verbatim to `link_source_to_entity`
+    # (edges.py), which merges on it — the fourth round-3 miss.
+    ("Document.source_url",
+     {"type": "DocumentCreated", "id": "doc-src-7369", "title": "t"},
+     "source_url", "bad\x00ref"),
 ]
 
 

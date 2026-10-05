@@ -1806,9 +1806,8 @@ class _EntityHandlers:
         query: the plan's gate covers the terminalizer's target, not this
         successor, so a corrupt successor would otherwise reach parameter
         encode and raise — aborting a post-wipe replay at the trailing sweep
-        (the same class the target gate exists to prevent). Note ``_writable_id``
-        alone admits ``""``, hence the explicit emptiness test. Returns 0 for
-        it; nothing is merged.
+        (the same class the target gate exists to prevent). Returns 0 for it;
+        nothing is merged.
 
         The edge names the SUCCESSOR, which a chronological replay may not
         have materialized yet — the caller is responsible for the trailing

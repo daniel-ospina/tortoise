@@ -1824,6 +1824,32 @@ _GATE_PARAM_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
 _GATE_ROW_FIELD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\.([A-Za-z_][A-Za-z0-9_]*)")
 
 
+def _flat_writable(val) -> bool:
+    """Cheap test: ``val`` is a writable scalar, or a FLAT sequence of them.
+
+    This is the READ fast path ONLY. A retrieval's parameters are
+    overwhelmingly an id list — the shape a 5,000-id lookup sends — and the
+    full container walk that gates it costs ~22 ms per call, so the flat case is
+    checked without the recursive container machinery.
+
+    Anything nested (a dict, a list OF dicts, a set, bytes, a subclass) returns
+    False and takes the FULL walk, which is where correctness lives. The
+    predicate is deliberately exact-type: it can only ever decide "no walk
+    needed", so it must stay conservative about what it admits.
+    """
+    if val is None:
+        return True
+    if type(val) in (str, int, float, bool):
+        return _annotator_value_ok(val)
+    if type(val) in (list, tuple):
+        return all(
+            item is None or (type(item) in (str, int, float, bool)
+                             and _annotator_value_ok(item))
+            for item in val
+        )
+    return False
+
+
 def _journal_safe_params(params, cypher=None):
     """``params`` with every value a Cypher property can actually take (#7369).
 
@@ -1863,11 +1889,12 @@ def _journal_safe_params(params, cypher=None):
     responsible for skipping a record whose identity is unwritable (the
     creation anchors do this via ``_writable_id``).
 
-    READ STATEMENTS ARE GATED TOO, but cheaply. FalkorDB parses every
-    parameter regardless of clause, so a read cannot be skipped — but a read
-    whose parameters are all writable SCALARS (the usual retrieval shape) needs
-    no container walk, so the scalar pre-scan returns without allocating. A
-    read carrying a dict/list pays the full walk, which is what was aborting.
+    READ STATEMENTS ARE GATED TOO, but the two dominant shapes are cheap. A
+    statement with no write clause cannot put a value into a property, but the
+    engine still PARSES every parameter, so a read cannot be skipped — a read
+    whose parameters are all scalars or flat id LISTS (``WHERE p.id IN $ids``)
+    takes ``_flat_writable`` and returns without the container walk; a read
+    carrying a nested value pays the walk, which is what was aborting.
 
     The statement — not the value — says which parameters are CONTAINERS, and a
     container must be walked as one or a legitimate structure is nulled
@@ -1898,17 +1925,15 @@ def _journal_safe_params(params, cypher=None):
     # RE-OPENED the hole (measured: ``resolve_source_key``,
     # ``_try_about_edge``, and a plain dict in ``about_entities``).
     #
-    # What the clause DOES buy is a cheap route for the overwhelmingly common
-    # read shape: ids. A read's parameters are scalars, and a scalar needs no
-    # container walk — so if every one is already a writable scalar this
-    # returns without allocating (the walk is what cost ~5.6 ms per 5,000-id
-    # retrieval). A read carrying a dict/list still falls through to the full
+    # What the clause buys is a cheap route for the two dominant READ shapes:
+    # scalars, and an id LIST (``WHERE p.id IN $ids``). Neither needs the
+    # container walk — the walk is what cost ~22 ms per 5,000-id retrieval — so
+    # ``_flat_writable`` admits them without allocating. Anything nested (a
+    # dict, a list of dicts, a set, bytes) fails that test and takes the FULL
     # walk, which is the case that was aborting.
     if statement and not _WRITE_CLAUSE_RE.search(statement):
         if isinstance(params, dict) and all(
-            val is None or (type(val) in (str, int, float, bool)
-                            and _annotator_value_ok(val))
-            for val in params.values()
+            _flat_writable(val) for val in params.values()
         ):
             return params
     # ``SET n += $p`` and ``SET n = $p`` both hold a MAP OF PROPERTIES. The
@@ -3266,10 +3291,11 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
             # and the live node held the producer's — three values for one
             # retraction. The gate is ``_usable_instant`` — the SAME predicate
             # the graph arm (``_retract``) uses, deliberately shared rather
-            # than re-spelled, because ``_writable_id`` alone ACCEPTS the
-            # empty string: with two spellings, a record carrying ``ts=""``
+            # than re-spelled: with two spellings, a record carrying ``ts=""``
             # had this fold write ``""`` while the graph arm wrote no column
-            # at all (both are now "no usable instant stated").
+            # at all (both are now "no usable instant stated"). (Until #7369's
+            # round-3 fix ``_writable_id`` ACCEPTED ``""``; it no longer does,
+            # but the shared predicate stays the single home for the rule.)
             p["status"] = "retracted"
             p.update(VACUITY_BELIEF)
             if _usable_instant(ev.get("ts")):
