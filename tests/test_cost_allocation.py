@@ -1109,3 +1109,52 @@ def test_publish_is_the_only_writer_of_the_team_cost_metric():
         "unexpected references to TEAM_COST/its mutators outside monitoring.py "
         f"+ the writer allowlist: {offenders} — a second writer would break the "
         "reconciliation invariant")
+
+
+def test_a_raising_boot_sweep_cannot_kill_the_other_boot_sweeps(monkeypatch, caplog):
+    """#5381/#7352: drive the REAL boot runner, not the step.
+
+    ``_run_boot_sweeps`` routes each sweep through the same ``_guarded_step`` the
+    periodic loop uses ("one runner, so the boot and periodic paths cannot drift
+    apart"). Without that guard a raise in the FIRST boot sweep abandons the
+    remaining two — ``_purge_deleted_orgs`` and ``_sweep_oauth_retention`` never
+    run at boot at all.
+
+    The invariant is "a later sweep still runs after an earlier one raises", and
+    the only evidence for it is a SUBSEQUENT sweep actually running. A test that
+    drives a step directly cannot observe it: mutating the guarded call site to a
+    bare ``await run_on_daemon_worker(fn, ...)`` left this whole file green, which
+    is the gap this test closes.
+    """
+    calls = {"event": 0, "purge": 0, "oauth": 0}
+
+    def _boom(*_a, **_k):
+        calls["event"] += 1
+        raise RuntimeError("boot sweep exploded")
+
+    def _purge(*_a, **_k):
+        calls["purge"] += 1
+
+    def _oauth(*_a, **_k):
+        calls["oauth"] += 1
+
+    async def _inline(fn, *, name, timeout=None):  # no threads in this test
+        return fn()
+
+    monkeypatch.setattr(ha, "run_on_daemon_worker", _inline)
+    monkeypatch.setattr(ha, "_sweep_events", _boom)
+    monkeypatch.setattr(ha, "_purge_deleted_orgs", _purge)
+    monkeypatch.setattr(ha, "_sweep_oauth_retention", _oauth)
+
+    with caplog.at_level("WARNING", logger="tortoise.hosted_api"):
+        asyncio.run(ha._run_boot_sweeps())
+
+    assert calls["event"] == 1, "the first boot sweep did not run at all"
+    assert calls["purge"] == 1, (
+        "the FIRST boot sweep raised and the deleted-team purge never ran — the "
+        "boot path is not routed through the shared guard (#5381)")
+    assert calls["oauth"] == 1, (
+        "the FIRST boot sweep raised and the oauth retention sweep never ran — "
+        "the boot path is not routed through the shared guard (#5381)")
+    assert any("boot event retention sweep" in r.getMessage() for r in caplog.records), (
+        "the guarded boot failure was swallowed without a log record")
