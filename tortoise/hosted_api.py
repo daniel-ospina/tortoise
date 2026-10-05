@@ -170,6 +170,20 @@ from tortoise.supabase_control import _service_key  # #3677
 TEAM_DELETE_GRACE_HOURS = _RESTORE_WINDOW_HOURS
 USER_ACCOUNT_DELETE_GRACE_HOURS = _RESTORE_WINDOW_HOURS
 
+# #4029 review (P2-3 / P1-4): how long an UNSTAMPED ``account_deletions`` anchor
+# may sit before it is read as a request that DIED mid-cascade rather than one
+# still in flight. The endpoint INSERTs the anchor BEFORE its cascade and stamps
+# it LAST, so between those two points the row is visible and un-stamped: a
+# second request must DEFER to it (no second cascade, no second audit), while an
+# abandoned row must still be COMPLETED. ``created_at`` is the only field that
+# separates the two. The bound is deliberately generous relative to the cascade
+# — a handful of control-plane + graph operations, seconds in practice — so
+# exceeding it means the process died (restart, deploy, unhandled fault) and the
+# row is a retry, not a live request. ONE constant, shared by the endpoint's
+# in-flight guard and the sweep's stale-anchor completion, so the two cannot
+# disagree about what "in flight" means.
+ACCOUNT_DELETION_IN_FLIGHT_SECONDS = 900.0
+
 _logger = logging.getLogger(__name__)
 
 
@@ -1379,9 +1393,8 @@ async def _event_retention_loop(interval: float) -> None:
 
     Guarded per STEP, not per iteration. A per-iteration guard would let one
     failing step skip its siblings for that whole hour — a failed event sweep
-    would also skip the deleted-team purge, the deleted-account purge, the
-    OAuth GC and the cost refresh, which is the same silent-loss shape this
-    closes, one scope larger.
+    would also skip the deleted-team purge, the OAuth GC and the cost refresh,
+    which is the same silent-loss shape this closes, one scope larger.
 
     ``interval`` is a parameter rather than a captured closure so the loop is
     directly drivable by a test: the observable invariant is that a raising step
@@ -1401,10 +1414,9 @@ async def _event_retention_loop(interval: float) -> None:
             "deleted-team purge",
             functools.partial(run_on_daemon_worker, _purge_deleted_orgs,
                               name="tortoise-boot-sweep"))
-        # #4029: erase deleted accounts past their stored grace. Same cadence
-        # and same guard as the boot sweep above — the two entry points must
-        # not drift, or an account purge that raises at boot would silently
-        # stop being retried by the periodic loop.
+        # #4029: erase accounts past the stored grace (same sweep cadence; sync
+        # DB/auth work off the loop). The boot path above runs the same step
+        # under the same label, so the two cannot drift apart.
         await _guarded_step(
             "deleted-account purge",
             functools.partial(run_on_daemon_worker, _purge_deleted_accounts,
@@ -1910,7 +1922,9 @@ async def _lifespan(app):
             # #5381: the body is module-level (``_event_retention_loop``) so its
             # per-step guard is reachable by an executing TEST. As a closure the
             # only available check was a static AST pin, and an AST pin cannot
-            # observe whether a step's failure ENDS the loop.
+            # observe whether a step's failure ENDS the loop. #4029's
+            # deleted-account purge is a STEP inside that module-level loop, not
+            # a second closure here.
             _retention_task = asyncio.get_event_loop().create_task(
                 _event_retention_loop(interval))
             app.state._event_retention_task = _retention_task
@@ -15617,9 +15631,46 @@ async def create_org(body: dict, user: dict = Depends(get_current_user)):  # noq
     # burst from a 0-free-org account cannot all read count==0 and mint
     # multiple free orgs (the count+provision must be atomic).
     from tortoise.supabase_control import (
+        account_deletion_row,
         get_control_plane,
         is_supabase_enabled,
     )
+    # #4029 review P2-6: a user whose account deletion is pending must not be
+    # able to provision a NEW org. The erasure sweep re-derives sole ownership
+    # and then deletes the auth user; a delete-pending user is still
+    # authenticated during the grace window, so an org created AFTER the sweep's
+    # discovery read and BEFORE the auth erase lands in neither the claim set
+    # nor the discovery set — the auth erase then cascades this user's
+    # memberships (FK ON DELETE CASCADE) and leaves an org with ``deleted_at IS
+    # NULL`` and NO owner, which ``_purge_deleted_orgs`` (selects on
+    # ``deleted_at``) never sees. Refusing the create closes that TOCTOU at the
+    # smallest seam. Checked BEFORE the lane branch so the Supabase and registry
+    # lanes cannot drift.
+    #
+    # FAIL-OPEN on a ledger READ failure only: an unavailable control plane must
+    # not break every user's org creation. "Row present" still refuses — that is
+    # the whole point, and it is the one outcome a read fault cannot fake.
+    try:
+        _deletion_cp = get_control_plane()
+        _pending = await asyncio.to_thread(
+            account_deletion_row, _deletion_cp, user["user_id"])
+        if _pending is not None:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error_code": "account_deletion_pending",
+                    "message": (
+                        "This account is scheduled for deletion and cannot "
+                        "create organizations."
+                    ),
+                },
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        _logger.warning(
+            "account-deletion ledger read failed; allowing org create",
+            exc_info=True)
     if is_supabase_enabled():
         cp = get_control_plane()
         async with _org_create_lock(user["user_id"]):
@@ -20710,7 +20761,36 @@ def _account_replay_body(row: dict, env_grace: float) -> dict:
     }
 
 
+def _account_deletion_in_flight(row: dict | None, now_dt: datetime) -> bool:
+    """#4029 review P2-3: is this UNSTAMPED anchor a cascade still RUNNING?
+
+    The ledger row is visible from the moment ``begin_account_deletion``
+    INSERTs it — BEFORE the winner's cascade and its final stamp — so an
+    un-stamped row means EITHER another request is mid-cascade OR a prior
+    attempt died between the INSERT and the stamp. Only ``created_at``
+    separates them: younger than ``ACCOUNT_DELETION_IN_FLIGHT_SECONDS`` → still
+    in flight; older → the attempt died and the row is the retry anchor. A row
+    whose ``created_at`` is missing or unparseable is a RETRY (False), never
+    in-flight: a real retry must never be refused on a missing field, and the
+    retry path below is idempotent. A stamped row is never in flight.
+    """
+    if not row or row.get("deleted_at"):
+        return False
+    created = row.get("created_at")
+    if created is None:
+        return False
+    try:
+        created_dt = datetime.fromisoformat(str(created))
+    except (ValueError, TypeError):
+        return False
+    if created_dt.tzinfo is None:
+        created_dt = created_dt.replace(tzinfo=UTC)
+    return (now_dt - created_dt) < timedelta(
+        seconds=ACCOUNT_DELETION_IN_FLIGHT_SECONDS)
+
+
 @app.delete("/v1/user/account", status_code=202)
+@_deferred_sensitive_op("account_delete")
 async def delete_user_account(request: Request,
                               user: dict = Depends(get_current_user)):  # noqa: B008
     """#4029 — self-service personal-account deletion (soft delete → grace → erasure).
@@ -20746,20 +20826,28 @@ async def delete_user_account(request: Request,
     Idempotent: a repeat request while pending → 200 ``already`` carrying the
     STORED promise. A concurrent schedule that loses the anchor INSERT race
     (409) defers to the winner's anchor — no second cascade, no second audit.
+    The same holds for a request that arrives while the winner is STILL
+    cascading: the winner holds the row un-stamped for that window, so a
+    request that reads an un-stamped anchor younger than
+    ``ACCOUNT_DELETION_IN_FLIGHT_SECONDS`` defers to it too (P2-3 review); an
+    un-stamped anchor OLDER than that bound is a request that died and falls
+    through to the idempotent retry below (a missing ``created_at`` opts out of
+    the guard, never refuses a real retry).
     AuthZ: the endpoint acts on the AUTHENTICATED account and
     there is no account id in the request, so there is no cross-account target
     and no existence oracle to leak; every org it touches was selected either
     by an active-owner membership or by a durable claim from this same
     deletion, itself gated on a membership row the caller holds. The per-IP
-    sensitive-op budget is shared with the
-    team path's shape (``_check_sensitive_op_rate_limit``).
+    sensitive-op budget uses the same DEFERRED-charge seam as the rest of the
+    sensitive-op family (``@_deferred_sensitive_op``): a 5xx passes through
+    UNCHARGED, so a control-plane fault cannot burn the caller's hourly budget
+    and 429-lock the only self-service way to delete an account (#2051).
 
     Registry (selfhost) mode has no hosted auth accounts → ``unsupported``,
     mirroring ``GET /v1/user/identity``. Backups are NOT deleted on this path
     (owner ruling 2B): they age out on the existing backup cycle; the erasure
     below removes the auth account and the deletion ledger row.
     """
-    await _check_sensitive_op_rate_limit(request, "account_delete")
     from tortoise.supabase_control import (
         account_deletion_row,
         begin_account_deletion,
@@ -20784,6 +20872,24 @@ async def delete_user_account(request: Request,
     if existing and existing.get("deleted_at"):
         # Idempotent replay: already scheduled — answer from the STORED
         # promise (never a fresh env read, which could move the deadline).
+        return JSONResponse(
+            status_code=200,
+            content=_account_replay_body(existing, grace_hours),
+        )
+
+    # The anchor is visible from its INSERT, BEFORE the winner's cascade and
+    # its LAST stamp, so an un-stamped anchor younger than the in-flight bound
+    # belongs to a request that is STILL RUNNING (P2-3 review). Defer to it
+    # exactly as the 409 loser does: answer from its stored row, with NO
+    # cascade and NO second ``account_delete_requested``. Without this guard, a
+    # second DELETE arriving mid-cascade saw a non-None ``existing`` with
+    # ``deleted_at = None``, skipped both the replay check above and the
+    # ``existing is None`` INSERT guard below, and re-ran the whole cascade +
+    # emitted a second audit — the opposite of the docstring's promise. An
+    # un-stamped anchor OLDER than the bound (or with no parseable
+    # ``created_at``) is a request that died, so it falls through to the
+    # idempotent retry below.
+    if _account_deletion_in_flight(existing, datetime.now(UTC)):
         return JSONResponse(
             status_code=200,
             content=_account_replay_body(existing, grace_hours),
@@ -21165,6 +21271,16 @@ def _purge_deleted_accounts() -> None:
     row the next sweep retries. A 404 from GoTrue is already-erased and counts
     as success (idempotent).
 
+    TWO RETRY SHAPES (P1-4 review of #4029). A STAMPED row past its stored
+    grace is erased as above. A STALE UNSTAMPED row — the endpoint INSERTed the
+    anchor and then the process died before stamping it — is COMPLETED instead:
+    the interrupted schedule is re-derived, claimed and cascaded, then stamped,
+    and the account is left for a later sweep. It must NOT be erased early,
+    because the 7-day promise starts at the STAMP; and it must not be ignored,
+    because ``deleted_at lte now`` excludes NULL, so an un-stamped row would
+    otherwise be invisible forever — the account never erased, the ledger row
+    never cleaned, and nothing noticing.
+
     RE-DERIVE BEFORE ERASING (cycle-2 review of #4029). Erasing the auth user
     cascades the person's ``org_memberships`` rows — the rows the sole-ownership
     discovery reads. A team the caller created INSIDE the grace window is in
@@ -21189,11 +21305,13 @@ def _purge_deleted_accounts() -> None:
     """
     try:
         from tortoise.supabase_control import (
+            caller_membership_org_ids,
             claim_account_deletion_org,
             get_control_plane,
             is_supabase_enabled,
             purge_account_deletion,
             sole_owned_org_ids,
+            stamp_account_deletion,
         )
         if not is_supabase_enabled():
             return
@@ -21202,16 +21320,48 @@ def _purge_deleted_accounts() -> None:
             str(USER_ACCOUNT_DELETE_GRACE_HOURS)))
         now_dt = datetime.now(UTC)
         cp = get_control_plane()
-        for row in cp.query(
+        scan_cutoff = now_dt.isoformat()
+        stale_before = (
+            now_dt - timedelta(seconds=ACCOUNT_DELETION_IN_FLIGHT_SECONDS)
+        ).isoformat()
+        # The selection must cover TWO populations (P1-4 review):
+        #   (a) STAMPED anchors past their stored grace — the erasure path; and
+        #   (b) STALE UNSTAMPED anchors — a request that died after the INSERT
+        #       and before its stamp, which SQL/PostgREST excludes from
+        #       `deleted_at lte now` (NULL never satisfies an ordered compare).
+        # Two queries rather than one PostgREST `or=`: the client's filter
+        # dialect carries no `or=` (and the test double implements none), so an
+        # `or=` here would be untestable. Dedupe by user_id — a row cannot be
+        # in both sets, but the guard keeps that an invariant of this code, not
+        # an assumption.
+        rows = list(cp.query(
             "account_deletions",
             select=["user_id", "deleted_at", "grace_hours",
-                    "claimed_org_ids"],
-            filters=[("deleted_at", "lte", now_dt.isoformat())],
-        ):
+                    "claimed_org_ids", "created_at"],
+            filters=[("deleted_at", "lte", scan_cutoff)],
+        ))
+        _seen_users = {r.get("user_id") for r in rows}
+        rows.extend(
+            r for r in cp.query(
+                "account_deletions",
+                select=["user_id", "deleted_at", "grace_hours",
+                        "claimed_org_ids", "created_at"],
+                filters=[("deleted_at", "is", None),
+                         ("created_at", "lte", stale_before)],
+            )
+            if r.get("user_id") not in _seen_users
+        )
+        for row in rows:
             user_id = row.get("user_id")
             if not user_id:
                 continue
-            if not _stored_grace_elapsed(
+            # An UNSTAMPED anchor still inside the in-flight bound belongs to a
+            # cascade that may be RUNNING right now (the endpoint's own guard,
+            # same constant) — leave it strictly alone.
+            if _account_deletion_in_flight(row, now_dt):
+                continue
+            unstamped = row.get("deleted_at") is None
+            if not unstamped and not _stored_grace_elapsed(
                     row.get("deleted_at"), row.get("grace_hours"),
                     env_grace, now_dt):
                 continue  # stored promise decides (env = fallback only)
@@ -21240,12 +21390,35 @@ def _purge_deleted_accounts() -> None:
                 # without a durable reach to its orgs is the one ordering
                 # that cannot be recovered, so the sweep must skip the row
                 # and retry instead.
+                # The claim's ownership gate, applied HERE too (P2-1 review).
+                # The endpoint filters a claimed id through
+                # `caller_membership_org_ids` before honouring it; this sweep
+                # merged the RAW claimed set. A malformed or stale anchor
+                # naming a stranger's org was therefore cascaded and stamped
+                # at purge time even though the endpoint would have refused it.
+                # Any status counts (a 'removed' row is what a post-fault
+                # replay must still complete), which is why the gate is this
+                # helper and not `sole_owned_org_ids`.
+                claimed_ids = _account_org_ids_from_row(row, "claimed_org_ids")
+                if claimed_ids:
+                    caller_orgs = set(caller_membership_org_ids(cp, user_id))
+                    claimed_ids = [o for o in claimed_ids if o in caller_orgs]
                 purge_org_ids = _merge_org_ids(
-                    _account_org_ids_from_row(row, "claimed_org_ids"),
+                    claimed_ids,
                     sole_owned_org_ids(cp, user_id))
                 for org_id in purge_org_ids:
                     claim_account_deletion_org(cp, user_id, org_id)
                     _cascade_soft_delete_org_sync(org_id, cascade_now, org_grace)
+                if unstamped:
+                    # P1-4(b): COMPLETE the interrupted schedule, never erase
+                    # early. The cascade above is the same idempotent one the
+                    # endpoint runs; stamping starts the promised window NOW.
+                    # The account and its ledger row are left for a later
+                    # sweep, once that stored window elapses — erasing here
+                    # would shorten a retention promise the row never made.
+                    stamp_account_deletion(cp, user_id, cascade_now,
+                                           grace_hours=org_grace)
+                    continue
                 status = _supabase_admin_delete_user(user_id)
                 # Fail-closed: a successful erasure is EXACTLY 200/204 (the
                 # auth user was deleted) or 404 (already gone — idempotent).

@@ -174,6 +174,65 @@ test('#4029: the section takes no window prop (the graph-trash constant is not i
     'a `graceDays` prop must not reach the copy — the account window is server-owned')
 })
 
+// ── D-P2: focus management + the busy live region ──────────────────────────
+test('#4029 (a11y): the popup autoFocuses Cancel, never the destructive CTA', () => {
+  const buttons = collect(DeleteAccountSection({ ...baseProps, open: true }), 'button')
+  const cancel = buttons.find((b) => textOf(b.props.children) === 'Cancel')
+  const confirm = buttons.find((b) => textOf(b.props.children) === 'Delete my account')
+  assert.equal(cancel.props.autoFocus, true, 'Cancel must take focus on open (#2392)')
+  assert.ok(!confirm.props.autoFocus,
+    'the destructive CTA must not be autofocused — a stray Enter must not delete')
+})
+
+test('#4029 (a11y): the busy transition is announced on a polite live region', () => {
+  const statusOf = (props) => collect(DeleteAccountSection(props), 'span')
+    .find((s) => s.props.role === 'status')
+  const idle = statusOf({ ...baseProps, open: true })
+  assert.ok(idle, 'the dialog needs a role=status live region')
+  assert.equal(idle.props['aria-live'], 'polite', 'the announcement must be polite')
+  assert.equal(textOf(idle.props.children), '', 'nothing is announced before the request')
+  const busy = statusOf({ ...baseProps, open: true, busy: true })
+  assert.equal(textOf(busy.props.children), 'Deleting…',
+    'the in-flight delete must be announced')
+})
+
+// ── A-P2 item 5: confirm to the user WHAT WAS REMOVED, before the logout ────
+// The delete response is a 202 whose body is the only source of truth for the
+// teams deleted and the erasure deadline. main.jsx keeps it so the popup can
+// confirm before the session ends (a confirmation after logout is unreachable).
+const DELETE_RESULT = {
+  status: 'delete_scheduled',
+  hard_delete_after: '2026-10-08T12:00:00+00:00',
+  teams_deleted: ['org_abc', 'org_def'],
+  note: 'Teams you solely own are deleted immediately (keys revoked, memberships removed).',
+}
+
+test('#4029 item 5: the confirmation renders the response body\'s teams_deleted list', () => {
+  const html = render({ ...baseProps, open: true, result: DELETE_RESULT })
+  assert.ok(html.includes('org_abc') && html.includes('org_def'),
+    'the confirmation must show which teams were deleted (from teams_deleted)')
+  assert.ok(/erased after/i.test(html),
+    'the confirmation must state that the account is erased (from hard_delete_after)')
+  assert.ok(!html.includes('Delete my account'),
+    'the confirm CTA gives way to the confirmation once the delete succeeded')
+})
+
+test('#4029 item 5: an empty teams_deleted renders a clear line, not a bare list', () => {
+  const html = render({ ...baseProps, open: true, result: { ...DELETE_RESULT, teams_deleted: [] } })
+  assert.ok(!html.includes('<li>'), 'an empty list must not render an empty <ul>')
+  assert.ok(/no team was deleted/i.test(html), 'the empty case needs an explicit line')
+})
+
+test('#4029 item 5: the confirmation is dismissed into the acknowledgement', () => {
+  let done = 0
+  const props = { ...baseProps, open: true, result: DELETE_RESULT, onDone: () => { done += 1 } }
+  const signOut = collect(DeleteAccountSection(props), 'button')
+    .find((b) => textOf(b.props.children) === 'Sign out')
+  assert.ok(signOut, 'the confirmation must offer a dismissal action')
+  signOut.props.onClick()
+  assert.equal(done, 1, 'the dismissal runs the acknowledgement (which ends the session)')
+})
+
 // ── FIX 1: the WIRING main.jsx ships, compiled and EXECUTED ─────────────────
 const MAIN_IMPORTS = importsFromMain(mainJsx, ['DeleteAccountSection'])
 
@@ -184,12 +243,19 @@ const MAIN_IMPORTS = importsFromMain(mainJsx, ['DeleteAccountSection'])
  * cross-contaminate an earlier one.
  */
 async function wiringProbe(open) {
-  const calls = { delete: 0, logout: 0, setOpen: [], setError: [] }
+  const calls = { delete: 0, logout: 0, setOpen: [], setError: [], setResult: [], remember: 0, restore: 0, done: 0 }
   globalThis.__acctWiring = {
     deleteAccount: () => { calls.delete += 1; return Promise.resolve({}) },
     logout: () => { calls.logout += 1; return Promise.resolve() },
     setOpen: (v) => { calls.setOpen.push(v) },
     setError: (v) => { calls.setError.push(v) },
+    setResult: (v) => { calls.setResult.push(v) },
+    // #2392 focus spies — the opener captures the trigger, every non-logout
+    // close restores it.
+    remember: (ref) => { calls.remember += 1; if (ref) ref.current = { focus() {} } },
+    restore: (ref) => { calls.restore += 1; if (ref) ref.current = null },
+    restoreRef: { current: null },
+    done: () => { calls.done += 1; return Promise.resolve() },
   }
   const probes = await probeTags(mainJsx, {
     tag: 'DeleteAccountSection',
@@ -198,9 +264,15 @@ async function wiringProbe(open) {
       deleteAccountOpen: String(Boolean(open)),
       deleteAccountBusy: 'false',
       deleteAccountError: "''",
+      deleteAccountResult: 'null',
       setDeleteAccountOpen: 'globalThis.__acctWiring.setOpen',
       setDeleteAccountError: 'globalThis.__acctWiring.setError',
+      setDeleteAccountResult: 'globalThis.__acctWiring.setResult',
       deleteAccount: 'globalThis.__acctWiring.deleteAccount',
+      finishAccountDeletion: 'globalThis.__acctWiring.done',
+      rememberFocusedTrigger: 'globalThis.__acctWiring.remember',
+      restoreFocus: 'globalThis.__acctWiring.restore',
+      deleteAccountRestoreRef: 'globalThis.__acctWiring.restoreRef',
     },
   })
   assert.equal(probes.length, 1, 'main.jsx must render exactly one <DeleteAccountSection .../>')
@@ -215,6 +287,8 @@ test('#4029 wiring: main.jsx cancel is a real exit — it never requests the del
   assert.equal(calls.logout, 0, 'cancel must not end the session')
   assert.deepEqual(calls.setOpen, [false], 'cancel only closes the popup')
   assert.deepEqual(calls.setError, [], 'cancel must not touch the error state')
+  assert.deepEqual(calls.setResult, [null], 'cancel drops any stale response state')
+  assert.equal(calls.restore, 1, 'cancel returns focus to the opener (#2392)')
 })
 
 test('#4029 wiring: main.jsx opener only opens — it never requests the deletion', async () => {
@@ -225,6 +299,8 @@ test('#4029 wiring: main.jsx opener only opens — it never requests the deletio
   assert.equal(calls.logout, 0)
   assert.deepEqual(calls.setOpen, [true], 'the opener opens the popup')
   assert.deepEqual(calls.setError, [''], 'the opener clears any stale error')
+  assert.deepEqual(calls.setResult, [null], 'the opener clears any stale confirmation')
+  assert.equal(calls.remember, 1, 'the opener captures the trigger for focus restore (#2392)')
 })
 
 test('#4029 wiring: main.jsx confirm is the delete handler, and the popup is state-driven', async () => {
@@ -242,31 +318,59 @@ test('#4029 wiring: main.jsx confirm is the delete handler, and the popup is sta
   assert.ok(!('graceDays' in closed.props), 'main.jsx must not pass graceDays')
 })
 
-test('#4029: main.jsx deleteAccount is a session DELETE that ends the session (EXECUTED)', async () => {
+/** The source of a top-level `async function <name>` in main.jsx, to the next one. */
+function extractAsyncFunction(name) {
+  const start = mainJsx.indexOf(`async function ${name}(`)
+  assert.notEqual(start, -1, `${name} must exist in main.jsx`)
+  const next = mainJsx.indexOf('\n  async function ', start + 1)
+  return mainJsx.slice(start, next === -1 ? mainJsx.length : next)
+}
+
+test('#4029 item 5: main.jsx deleteAccount keeps the body and does NOT end the session (EXECUTED)', async () => {
   const seen = []
-  globalThis.__acctApi = async (path, opts) => { seen.push([path, opts]); return {} }
+  let stored = null
+  globalThis.__acctApi = async (path, opts) => {
+    seen.push([path, opts])
+    return { teams_deleted: ['org_1'], hard_delete_after: '2026-10-08T12:00:00+00:00' }
+  }
   globalThis.__acctLogout = async () => { seen.push(['logout']) }
   globalThis.__acctSetBusy = () => {}
   globalThis.__acctSetError = () => {}
-  globalThis.__acctSetOpen = () => {}
+  globalThis.__acctSetResult = (v) => { stored = v }
 
-  const start = mainJsx.indexOf('async function deleteAccount(')
-  assert.notEqual(start, -1, 'deleteAccount must exist in main.jsx')
-  const next = mainJsx.indexOf('\n  async function ', start + 1)
-  const src = mainJsx.slice(start, next === -1 ? mainJsx.length : next)
-
-  const [{ value: fn }] = await evalExpressions([`(${src})`], {
+  const [{ value: fn }] = await evalExpressions([`(${extractAsyncFunction('deleteAccount')}\n)`], {
     bindings: {
       api: 'globalThis.__acctApi',
       logout: 'globalThis.__acctLogout',
       setDeleteAccountBusy: 'globalThis.__acctSetBusy',
       setDeleteAccountError: 'globalThis.__acctSetError',
-      setDeleteAccountOpen: 'globalThis.__acctSetOpen',
+      setDeleteAccountResult: 'globalThis.__acctSetResult',
     },
   })
   assert.equal(typeof fn, 'function')
   await fn()
   assert.deepEqual(seen[0], ['/v1/user/account', { method: 'DELETE', useSession: true }],
     'deleteAccount must DELETE the session account')
-  assert.deepEqual(seen[1], ['logout'], 'a scheduled deletion must end the session')
+  assert.equal(seen.length, 1,
+    'the session must NOT end before the user is told what was removed (#4029 item 5)')
+  assert.deepEqual(stored, { teams_deleted: ['org_1'], hard_delete_after: '2026-10-08T12:00:00+00:00' },
+    'the response body must be kept for the confirmation')
+})
+
+test('#4029 item 5: main.jsx finishAccountDeletion ends the session on the acknowledgement (EXECUTED)', async () => {
+  const seen = []
+  globalThis.__acctLogout = async () => { seen.push(['logout']) }
+  globalThis.__acctSetOpen = () => {}
+  globalThis.__acctSetResult = () => {}
+
+  const [{ value: fn }] = await evalExpressions([`(${extractAsyncFunction('finishAccountDeletion')})`], {
+    bindings: {
+      logout: 'globalThis.__acctLogout',
+      setDeleteAccountOpen: 'globalThis.__acctSetOpen',
+      setDeleteAccountResult: 'globalThis.__acctSetResult',
+    },
+  })
+  assert.equal(typeof fn, 'function')
+  await fn()
+  assert.deepEqual(seen, [['logout']], 'the acknowledgement must end the session')
 })

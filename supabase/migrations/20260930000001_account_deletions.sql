@@ -15,6 +15,13 @@
 -- ANCHOR. The purge deletes the auth user FIRST and this row LAST, so a partial
 -- failure leaves the row in place for the next sweep; an ON DELETE CASCADE from
 -- auth.users would silently drop the anchor the moment the auth user is erased.
+-- The anchor has TWO retry shapes and the sweep handles both (#4029 review
+-- P1-4): a STAMPED row past its stored grace is erased, while a STALE UNSTAMPED
+-- row — the request died between the INSERT and the stamp — is COMPLETED
+-- (re-derive, claim, cascade, then stamp) and left for a later sweep, because
+-- the promised window starts at the stamp. So an un-stamped row is the anchor
+-- for the CASCADE, not only for the erasure, and `deleted_at lte now` — which
+-- SQL excludes NULL from — is NOT a sufficient selection on its own.
 --
 -- TWO-PHASE STAMP (code review of #4029): the row is INSERTed BEFORE the org
 -- cascade runs, carrying `org_ids` — the set this deletion intends to cascade.
@@ -25,7 +32,9 @@
 -- stranded. `deleted_at` / `grace_hours` stay NULL until the cascade COMPLETES
 -- (stamped LAST), so a partial failure leaves the account un-stamped while the
 -- intended org set survives — the same fail-closed ordering the per-org
--- cascade uses.
+-- cascade uses. An un-stamped row that outlives the in-flight bound
+-- (`hosted_api.ACCOUNT_DELETION_IN_FLIGHT_SECONDS`) is therefore a COMPLETABLE
+-- schedule, not a dead one: the sweep finishes the cascade and stamps it.
 --
 -- INTENT vs CLAIM (cycle-2 review of #4029). `org_ids` is a CACHE of ownership
 -- — a fact that changes. Two review cycles produced one defect in each

@@ -720,7 +720,7 @@ def test_event_retention_loop_awaits_the_cost_refresh():
     ``await _refresh_cost_allocation()``. This asserts the invariant that
     spelling encoded, and more: every top-level statement of the periodic body
     is an awaited call, every one of them bar the sleep goes through
-    ``_guarded_step``, and all five known steps are guarded.
+    ``_guarded_step``, and all four known steps are guarded.
 
     The DIRECT statements of the body are inspected, not ``ast.walk`` results,
     so a step parked in a nested def that is never invoked does not count as
@@ -807,9 +807,10 @@ def test_event_retention_loop_awaits_the_cost_refresh():
     # sync sweep accepted dropping the offload entirely.
     expected = [("event retention sweep", "_sweep_events", "offload"),
                 ("deleted-team purge", "_purge_deleted_orgs", "offload"),
-                # #4029: the account-erasure sweep. It sits here to match the
-                # boot order in `_run_boot_sweeps`, so the two entry points stay
-                # leg-for-leg comparable.
+                # #4029: the account-erasure step. Registered here because the
+                # pin exists to force a new periodic step to be DELIBERATE —
+                # and it must appear in the same relative order as the boot
+                # path's tuple in ``_run_boot_sweeps``.
                 ("deleted-account purge", "_purge_deleted_accounts", "offload"),
                 ("oauth retention", "_sweep_oauth_retention", "offload"),
                 ("cost allocation refresh", "_refresh_cost_allocation", "direct")]
@@ -892,10 +893,6 @@ def test_a_raising_step_cannot_kill_the_retention_loop(monkeypatch, caplog):
     monkeypatch.setattr(ha, "_sweep_oauth_retention", lambda *_a, **_k: None)
     # The 4th step is the one the sibling test owns; keep this test focused.
     monkeypatch.setattr(ha, "_refresh_cost_allocation", _noop)
-    # #4029 added a 5th step to the SAME loop. `run_on_daemon_worker` is inlined
-    # above, so an unstubbed step would run its REAL sync DB work inline here —
-    # this test asserts the guard's shape and must stay hermetic.
-    monkeypatch.setattr(ha, "_purge_deleted_accounts", lambda *_a, **_k: None)
 
     async def _drive():
         task = asyncio.ensure_future(ha._event_retention_loop(0))
@@ -1200,50 +1197,70 @@ def test_publish_is_the_only_writer_of_the_team_cost_metric():
         "reconciliation invariant")
 
 
-def test_a_raising_boot_sweep_cannot_kill_the_other_boot_sweeps(monkeypatch, caplog):
+#: The boot sweeps ``_run_boot_sweeps`` runs, in order, paired with the module
+#: attribute the test monkeypatches and the guarded-step label they log under.
+#: Stated once so the count is not hardcoded in the assertion: the earlier form
+#: said "the remaining two", which the #4029 account-erasure step falsified.
+_BOOT_SWEEPS = (
+    ("event", "_sweep_events", "boot event retention sweep"),
+    ("purge", "_purge_deleted_orgs", "boot deleted-team purge sweep"),
+    ("account", "_purge_deleted_accounts", "boot deleted-account purge sweep"),
+    ("oauth", "_sweep_oauth_retention", "boot oauth retention sweep"),
+)
+
+
+@pytest.mark.parametrize(
+    "raising", [name for name, _attr, _label in _BOOT_SWEEPS])
+def test_a_raising_boot_sweep_cannot_kill_the_other_boot_sweeps(
+        monkeypatch, caplog, raising):
     """#5381/#7352: drive the REAL boot runner, not the step.
 
     ``_run_boot_sweeps`` routes each sweep through the same ``_guarded_step`` the
     periodic loop uses ("one runner, so the boot and periodic paths cannot drift
-    apart"). Without that guard a raise in the FIRST boot sweep abandons the
-    remaining two — ``_purge_deleted_orgs`` and ``_sweep_oauth_retention`` never
-    run at boot at all.
+    apart"). Without that guard a raise in one boot sweep abandons every sweep
+    after it — they never run at boot at all.
 
     The invariant is "a later sweep still runs after an earlier one raises", and
     the only evidence for it is a SUBSEQUENT sweep actually running. A test that
     drives a step directly cannot observe it: mutating the guarded call site to a
     bare ``await run_on_daemon_worker(fn, ...)`` left this whole file green, which
     is the gap this test closes.
+
+    Parametrized over EVERY boot sweep so the evidence is per-step: an unguarded
+    call site for ANY of them lets its raise escape and leaves the sweeps after
+    it unrun. The #4029 ``_purge_deleted_accounts`` step is covered here, which a
+    count of the two pre-existing sweeps could not do.
     """
-    calls = {"event": 0, "purge": 0, "oauth": 0}
+    calls = {name: 0 for name, _attr, _label in _BOOT_SWEEPS}
+
+    def _recorder(name):
+        def _fn(*_a, **_k):
+            calls[name] += 1
+        return _fn
 
     def _boom(*_a, **_k):
-        calls["event"] += 1
+        calls[raising] += 1
         raise RuntimeError("boot sweep exploded")
-
-    def _purge(*_a, **_k):
-        calls["purge"] += 1
-
-    def _oauth(*_a, **_k):
-        calls["oauth"] += 1
 
     async def _inline(fn, *, name, timeout=None):  # no threads in this test
         return fn()
 
     monkeypatch.setattr(ha, "run_on_daemon_worker", _inline)
-    monkeypatch.setattr(ha, "_sweep_events", _boom)
-    monkeypatch.setattr(ha, "_purge_deleted_orgs", _purge)
-    monkeypatch.setattr(ha, "_sweep_oauth_retention", _oauth)
+    for name, attr, _label in _BOOT_SWEEPS:
+        monkeypatch.setattr(
+            ha, attr, _boom if name == raising else _recorder(name))
 
     with caplog.at_level("WARNING", logger="tortoise.hosted_api"):
         asyncio.run(ha._run_boot_sweeps())
 
-    assert calls["event"] == 1, "the first boot sweep did not run at all"
-    assert calls["purge"] == 1, (
-        "the FIRST boot sweep raised and the deleted-team purge never ran — the "
-        "boot path is not routed through the shared guard (#5381)")
-    assert calls["oauth"] == 1, (
-        "the FIRST boot sweep raised and the oauth retention sweep never ran — "
-        "the boot path is not routed through the shared guard (#5381)")
-    assert any("boot event retention sweep" in r.getMessage() for r in caplog.records), (
+    assert calls[raising] == 1, f"the {raising} boot sweep did not run at all"
+    for name, _attr, _label in _BOOT_SWEEPS:
+        if name == raising:
+            continue
+        assert calls[name] == 1, (
+            f"the {raising} boot sweep raised and the {name} sweep never ran — "
+            "that call site is not routed through the shared guard (#5381)")
+
+    label = next(l for n, _a, l in _BOOT_SWEEPS if n == raising)
+    assert any(label in r.getMessage() for r in caplog.records), (
         "the guarded boot failure was swallowed without a log record")

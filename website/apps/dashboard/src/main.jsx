@@ -1048,6 +1048,28 @@ function App() {
   const [deleteAccountOpen, setDeleteAccountOpen] = React.useState(false)
   const [deleteAccountBusy, setDeleteAccountBusy] = React.useState(false)
   const [deleteAccountError, setDeleteAccountError] = React.useState('')
+  // #4029 item 5: the DELETE response body (teams_deleted / hard_delete_after /
+  // note) drives a confirmation shown BEFORE the session ends, so the user is
+  // told what was removed instead of landing on the sign-in page.
+  const [deleteAccountResult, setDeleteAccountResult] = React.useState(null)
+  // #2392 (a11y): focus-restore holder — the opener is captured at the gesture
+  // and every non-logout close hands focus back instead of dropping it on
+  // <body>.
+  const deleteAccountRestoreRef = React.useRef(null)
+  // #4029 (a11y): while the DELETE is in flight BOTH dialog buttons are
+  // disabled, which drops focus to <body>. Reclaim it for the dialog container
+  // (tabIndex -1) — guarded on activeElement === body, mirroring the account
+  // menu's outside-click reclaim, so focus the user moved is never stolen.
+  React.useEffect(() => {
+    if (!deleteAccountOpen || !deleteAccountBusy) return
+    const raf = requestAnimationFrame(() => {
+      if (typeof document === 'undefined') return
+      if (document.activeElement !== document.body) return
+      const dlg = document.getElementById('delete-account-dialog')
+      if (dlg) dlg.focus()
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [deleteAccountOpen, deleteAccountBusy])
   const [reauthOpen, setReauthOpen] = React.useState(false)
   const [reauthBusy, setReauthBusy] = React.useState(false)
   const [reauthError, setReauthError] = React.useState('')
@@ -2466,16 +2488,17 @@ function claimIntentInFlight() {
 
   // #4029: confirm-CTA action for the account-delete popup. DELETE
   // /v1/user/account schedules the deletion server-side (solely-owned teams
-  // are cascaded there); on success the session is ended so the user cannot
-  // keep poking at workspaces that no longer resolve. Cancel is NOT this —
+  // are cascaded there). The response body is KEPT so the popup can confirm
+  // what was removed (#4029 item 5) to a user who is still signed in; the
+  // session ends on the acknowledgement (finishAccountDeletion below), never
+  // before — a confirmation after logout is unreachable. Cancel is NOT this —
   // it only closes the popup (no request).
   async function deleteAccount() {
     setDeleteAccountBusy(true)
     setDeleteAccountError('')
     try {
-      await api('/v1/user/account', { method: 'DELETE', useSession: true })
-      setDeleteAccountOpen(false)
-      await logout()
+      const body = await api('/v1/user/account', { method: 'DELETE', useSession: true })
+      setDeleteAccountResult(body || {})
     } catch (e) {
       // A failed DELETE keeps the popup OPEN (armed retry) and surfaces the
       // reason in it.
@@ -2483,6 +2506,15 @@ function claimIntentInFlight() {
     } finally {
       setDeleteAccountBusy(false)
     }
+  }
+
+  // #4029 item 5: the acknowledgement action on the deletion confirmation —
+  // the deletion is already scheduled server-side, so this only ends the
+  // session (and clears the per-session confirmation state).
+  async function finishAccountDeletion() {
+    setDeleteAccountOpen(false)
+    setDeleteAccountResult(null)
+    await logout()
   }
 
   async function handleReauthPassword(password) {
@@ -9226,9 +9258,22 @@ function claimIntentInFlight() {
             open={deleteAccountOpen}
             busy={deleteAccountBusy}
             error={deleteAccountError}
-            onOpen={() => { setDeleteAccountError(''); setDeleteAccountOpen(true) }}
-            onCancel={() => setDeleteAccountOpen(false)}
+            result={deleteAccountResult}
+            onOpen={() => {
+              rememberFocusedTrigger(deleteAccountRestoreRef)
+              setDeleteAccountError('')
+              setDeleteAccountResult(null)
+              setDeleteAccountOpen(true)
+            }}
+            onCancel={() => {
+              // Every non-logout close path (Cancel, backdrop, Escape): close,
+              // drop the response state, and hand focus back to the opener.
+              setDeleteAccountOpen(false)
+              setDeleteAccountResult(null)
+              restoreFocus(deleteAccountRestoreRef)
+            }}
             onConfirm={deleteAccount}
+            onDone={finishAccountDeletion}
           />
         )}
         {tab === 'keys' && (

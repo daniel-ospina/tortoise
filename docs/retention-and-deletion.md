@@ -271,17 +271,23 @@ this document supersedes them): `docs/plans/2026-09-06-2304-delete-trash-can.md`
 > gone from your view immediately · restorable for 7 days · no copy remains
 > after about four weeks."* The approved §6 bullets are quoted below; each is
 > labelled **applied** or **superseded**, and `website/privacy.html` carries
-> exactly the applied text. The §"Deletion scope" sentence
+> the applied text (with one recorded exception — the §6 Accounts bullet's
+> account-level immediate-removal claim; see *Recorded gap* under that bullet
+> below). The §"Deletion scope" sentence
 > was **applied 2026-09-30** (rulings 1B + 2B; quoted below). `website/dpa.html`
 > §11 already states the backup carve-out as *up to four weeks*, which is what
 > ruling 2B requires, so it was left **unchanged** and remains pending the
 > owner's confirmation.
 >
-> **Mirror note.** `docs/drafts/2026-08-08-657-privacy-draft.md` is **not** a
-> mirror kept in sync: it is the `doc_status: draft` snapshot taken to the
-> G-gate *before* owner approval, and `website/privacy.html` is the published
-> artifact produced from the approved version. It is deliberately left as the
-> historical draft — its old §6/§16 wording is not policy drift.
+> **Mirror note.** The draft's **policy body** is coupled to the published
+> page: `tests/e2e/test_legal_pages.py::test_draft_to_render_fidelity`
+> (anchored at `^## Scope of this policy`) requires every ≥40-char sentence of
+> the draft body to appear in the served `/privacy` page, so §6/§16 (and every
+> other retained-number sentence) **must be edited in BOTH files together** —
+> updating one without the other reddens the gate. Only the G-gate
+> preface/metadata (the `## Draft metadata` block, the delete-account capability
+> check, and the LFPDPPP / outline / canonical-sentence notes above the anchor)
+> is the historical snapshot, kept for the record and not rendered.
 >
 > **Division of labour.** The policy copy states the **restore window** as one
 > number (7 days), the **backup horizon** as one number (four weeks), and the
@@ -317,6 +323,30 @@ history; ruling 2B replaced it in `website/privacy.html` with the version under
 > view immediately. It stays restorable for 7 days. After that the account's
 > live data is permanently erased. Deleting your personal account also deletes
 > any team for which you are the only owner.
+
+**Recorded gap — the account-level half of that wording is not shipped, and the
+published copy is narrowed to what ships.** The approved wording covers two
+things and only the first is enforced. The **solely-owned-team** half IS:
+`DELETE /v1/user/account` cascades every team the deleter alone owns through the
+same `_cascade_soft_delete_org` the team endpoint uses (API keys revoked,
+memberships set `removed`), so those teams are gone from the deleter's view
+immediately (ruling 1B). The **account-level** half — "gone from your view
+immediately" for the account itself — is NOT: nothing in the shipped change
+gates sign-in for a delete-pending account. `account_deletions` is read only by
+the deletion ledger seams and the boot/hourly `_purge_deleted_accounts` erase
+sweep, so a user inside the 7-day window can sign back in and keep using the
+account; the account and its live data are erased when the stored window
+elapses. `website/privacy.html` §6/§16 therefore state immediate removal for the
+**solely-owned teams** only, and describe the account as erased after the same
+7-day window (reversible through the email channel), keeping every other
+approved element — the 7-day window, the four-week backup horizon, the
+sole-ownership rule, and the no-self-service-restore statement — unchanged.
+Closing the account-level half needs a session-mint gate outside
+`tortoise/hosted_api.py`, where no sign-in path reads the ledger; the
+account-level immediate-removal sentence returns to the copy when that gate
+ships. This is a **recorded gap against the ruling, not a new ruling**: the
+approved wording above is kept as the approval record, and the published copy
+now describes the behaviour the product actually ships.
 
 **Privacy §6 — the backup path distinction (owner ruling 2B, applied):**
 

@@ -971,6 +971,30 @@ def _is_uuid(value: object) -> bool:
         return False
 
 
+def _same_uuid(a: object, b: object) -> bool:
+    """#4029 review P2-2: compare two uuid values BY VALUE, not as strings.
+
+    Required because the two sides are stored in different forms. A ``uuid``
+    column is returned by PostgREST in CANONICAL form (lower-case, hyphenated),
+    while the value it is compared against is whatever the JWT ``sub`` carried.
+    ``_is_uuid`` deliberately admits every form Postgres's uuid input accepts
+    (upper-case, 32-hex without hyphens, braced), so a non-canonical ``sub``
+    passes the shape gate and the ``user_id eq`` filter matches BY VALUE — but a
+    raw string comparison then never equalises it with the stored canonical
+    value, and a solely-owned org is judged shared (the account is erased
+    leaving an ownerless org ``_purge_deleted_orgs`` never selects). Both sides
+    are parsed so those accepted forms compare equal. ``None`` (the anonymous
+    agent owner anchor, ``user_id IS NULL``) and any non-uuid value compare only
+    directly, so a NULL second owner still blocks sole ownership and junk is
+    never read as a match.
+    """
+    if a is None or b is None:
+        return a is b
+    if not _is_uuid(a) or not _is_uuid(b):
+        return a == b
+    return _uuid.UUID(str(a)) == _uuid.UUID(str(b))
+
+
 def mint_target_user_for_key(cp, key_created_by, org_id: str) -> str | None:
     """#1511: the user a key's session-exchange should mint for.
 
@@ -2318,14 +2342,16 @@ def account_deletion_row(cp, user_id: str) -> dict | None:
     that failed mid-cascade and ``claimed_org_ids`` is the durable claim set
     the retry replays (the cascade itself removes the membership discovery
     reads; ``org_ids`` is only the historical intent record and never gates a
-    cascade on its own). Shape-gates user_id (#1719).
+    cascade on its own). ``created_at`` is read too (#4029 review P2-3): it is
+    what distinguishes an un-stamped anchor another request is still cascading
+    under from one a dead attempt left behind. Shape-gates user_id (#1719).
     """
     if not _is_uuid(user_id):
         return None
     rows = cp.query(
         "account_deletions",
         select=["user_id", "deleted_at", "grace_hours", "org_ids",
-                "claimed_org_ids"],
+                "claimed_org_ids", "created_at"],
         filters=[("user_id", "eq", user_id)],
     )
     return rows[0] if rows else None
@@ -3045,7 +3071,10 @@ def sole_owned_org_ids(cp, user_id: str) -> list[str]:
         )
         # An org reached from an active-owner row always yields >=1 owner row;
         # `owners and` keeps a defensive empty read from reading as "sole".
-        if owners and all(r.get("user_id") == user_id for r in owners):
+        # `_same_uuid` (P2-2), never `==`: the stored owner ids are canonical
+        # while the caller's `user_id` may be any uuid form `_is_uuid` admits.
+        if owners and all(_same_uuid(r.get("user_id"), user_id)
+                          for r in owners):
             ids.append(org_id)
     return ids
 

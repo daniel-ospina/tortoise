@@ -414,8 +414,10 @@ routes:
   - method: GET
     path: /v1/topics/{topic}/summary
     class: tenant
-  # #4029: self-service account deletion. Account-level, not org-level — the
-  # caller's own account is the resource, so it takes no path parameter.
+  # #4029: self-service account deletion. The route is `DELETE
+  # /v1/user/account` in tortoise/hosted_api.py; the #3875 guard
+  # (tests/test_rest_surface_inventory.py) fails closed on a live route absent
+  # here, so this is a DECLARATION of the product's public API, not a waiver.
   - method: DELETE
     path: /v1/user/account
     class: tenant
