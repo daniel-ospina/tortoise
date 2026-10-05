@@ -13,7 +13,7 @@ the server leg of that contract (surface 10):
   Settings panel reads/writes;
 - session_recording defaults ON (#1927) and flips off/back.
 
-Runs in the docker lane (TORTOISE_DB_URI) — mirrors test_onboarding_state_split.py.
+Runs in the docker lane (TORTOISE_DB_URI) — mirrors the four test_onboarding_state_split_* modules.
 URI-less runs (tier-2 embedded legs, carve-out) SKIP at module level.
 """
 

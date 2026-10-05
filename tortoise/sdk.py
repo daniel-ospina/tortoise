@@ -2108,6 +2108,7 @@ def _write_session_and_turns(
     *,
     now: str,
     harness: str | None = None,
+    capture_lane: str | None = None,
     actor_user_id: str | None = None,
     machine_id: str | None = None,
     model: str | None = None,
@@ -2126,8 +2127,8 @@ def _write_session_and_turns(
     BYTE-IDENTICAL COPIES of and could therefore drift on:
 
       * the ``:Session`` MERGE field list (``created_at``/``turn_count``/
-        ``is_episodic`` + the conditional ``harness``/``actor_user_id``/
-        ``machine_id``/``model`` clauses);
+        ``is_episodic`` + the conditional ``harness``/``capture_lane``/
+        ``actor_user_id``/``machine_id``/``model`` clauses);
       * the per-turn MERGE field list, the turn-point Cypher text, the
         ``CONTAINS`` wiring and the stale-turn sweep — all delegated to
         ``_write_capture_turns``, which holds the ONE ``UNWIND $turns``
@@ -2190,6 +2191,18 @@ def _write_session_and_turns(
         merge_sets.append("s.harness=$harness")
         merge_params["harness"] = harness
         session_record["harness"] = harness
+    # #3516 §B: the producer lane ('hook' | 'store_sync'). Set-only-when-present
+    # AND first-writer-wins — the SAME effective rule as harness, whose plain
+    # SET is made first-writer-wins by its caller's resolution
+    # (`_observed_capture_harness`). The coalesce is load-bearing: the store-sync
+    # backstop ships the SAME session AFTER the hook (#3515 piece 7), so a plain
+    # SET would RELABEL a hook session to 'store_sync' and make the hook-liveness
+    # check report a WORKING hook as not-live. A lane-less re-capture
+    # (backfill/import, or a pre-#3516 producer) never erases either.
+    if capture_lane:
+        merge_sets.append("s.capture_lane=coalesce(s.capture_lane, $capture_lane)")
+        merge_params["capture_lane"] = capture_lane
+        session_record["capture_lane"] = capture_lane
     if actor_user_id:
         merge_sets.append("s.actor_user_id=coalesce(s.actor_user_id, $uid)")
         merge_params["uid"] = actor_user_id
@@ -6025,7 +6038,8 @@ class TortoiseSDK:
         # loses the node, making any EntityLinked edge FROM it unreplayable), so
         # it rides the ``on_session_merged`` hook rather than following the
         # whole write. The idempotent fold MERGEs by id and coalesce-preserves
-        # created_at/actor_user_id, mirroring the live SET clauses; it is
+        # created_at/actor_user_id/capture_lane, mirroring the live SET clauses;
+        # it is
         # emitted on every capture (the MERGE is itself unconditional) so the
         # journaled ``turn_count`` tracks the live value on the #1727
         # longer-replay-payload path.

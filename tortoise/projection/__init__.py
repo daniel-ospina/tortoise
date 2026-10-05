@@ -3979,13 +3979,32 @@ class FalkorProjection(
             used, cap = pressure
             detail = (f"used_memory {_fmt_bytes(used)} of maxmemory "
                       f"{_fmt_bytes(cap)}")
+        # The remedy must NOT restate the ownership policy in prose: a name
+        # list here is wrong in one direction or the other, and nothing keeps
+        # it in sync with the predicate that owns the rule. So the message
+        # names no delete-authorizing residue family, promises no reclaim, and
+        # offers no pass — `_sweep_legacy_strays` runs only when an operator
+        # invokes it, so naming its env lever would be advice that frees nothing.
+        #
+        # It also makes no claim about which graph commands the server refuses:
+        # upstream's flag semantics are not what #2979's log line suggests (that
+        # line is the DETACH `safe_graph_delete` sends before `graph.delete()`),
+        # and an operator message should not assert them either way.
+        #
+        # The only names it gives are the ones `TortoiseSDK.test_guard` blocks
+        # (tortoise/sdk.py) — `tortoise` exact and `tortoise_restored*` by
+        # prefix. `is_legacy_residue` refuses a superset; that case is covered
+        # by "do not hand-pick", not by enumeration.
         return (
             "DB refused writes on open: the graph is INTACT but the server "
             f"has reached its memory ceiling ({detail}). This is NOT "
-            "corruption — do NOT rebuild. Free memory first: delete "
-            "ephemeral test graphs (GRAPH.LIST, then GRAPH.DELETE test_*), "
-            "or raise / relieve the container's --maxmemory. See #2981 for "
-            "the shared-lane form of this."
+            "corruption — do NOT rebuild. Remedy: raise / relieve the "
+            "container's --maxmemory. Do NOT hand-pick names from "
+            "GRAPH.LIST to free memory instead: GRAPH.DELETE cannot be "
+            "undone, and a name you cannot attribute is not yours to delete. "
+            "Never delete the "
+            "production graph tortoise or a tortoise_restored* snapshot, and "
+            "do NOT FLUSHALL. See #2981 for the shared-lane form of this."
         )
 
     def _backend_failure_message(

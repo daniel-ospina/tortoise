@@ -334,6 +334,15 @@ export function buildCapturePayload(args: {
   source: string;
   machineId: string;
   model?: string;
+  /**
+   * #3516 §B: the lane of the SPOOL ENTRY being drained — never a constant.
+   * The lane describes the entry's PRODUCER, not the process doing the
+   * draining: `flushSpool` drains entries written by other legs, and a
+   * hardcoded 'hook' here would stamp a lane on a lane-less backfill/import
+   * entry — defeating falsifiability in the false-POSITIVE direction. The
+   * in-process hook passes 'hook' when it SPOOLS (see `spoolSnapshot`).
+   */
+  captureLane?: string;
 }): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     harness: HARNESS,
@@ -342,6 +351,7 @@ export function buildCapturePayload(args: {
     conversation: args.turns,
     machine_id: args.machineId,
   };
+  if (args.captureLane) payload.capture_lane = args.captureLane;
   if (args.model) payload.model = args.model;
   return payload;
 }
@@ -485,6 +495,11 @@ export interface SpoolMeta {
   source: string;
   machine_id: string;
   model?: string;
+  /** #3516 §B: the PRODUCER lane ('hook'). Set-only-when-present, carried
+   *  forward. The Python leg forwards it to `/v1/sessions` verbatim, so an
+   *  entry spooled by the Pi hook must carry it — or a later drain files the
+   *  capture lane-less and a WORKING hook reads as not-live (#3515 piece 8). */
+  capture_lane?: string;
   created_at: string;
   updated_at: string;
   turns_count: number;
@@ -500,6 +515,12 @@ export interface SpoolMeta {
   next_attempt_at_ms: number;
   /** capture_key of the last 2xx upload — a replay of identical content is a no-op. */
   filed_key?: string;
+  /** #3516 §B: the LANE the 2xx actually carried. `filed_key` is content-derived,
+   *  so on its own it says the content was delivered — not that the lane was. An
+   *  entry filed lane-less and then upgraded must be re-posted, or the lane is
+   *  stranded and a working hook reads as not-live. Entries filed before this
+   *  field existed have neither lane nor `filed_lane`, so they compare equal. */
+  filed_lane?: string;
   filed_at?: string;
 }
 
@@ -517,6 +538,9 @@ export interface SpoolSnapshot {
   source: string;
   machineId: string;
   model?: string;
+  /** #3516 §B: the lane this snapshot's PRODUCER claims ('hook' for the
+   *  in-process hook). Omitted/undefined = no lane — never fabricated. */
+  captureLane?: string;
 }
 
 export interface SpoolBounds {
@@ -870,13 +894,37 @@ export function writeSpoolEntry(
   }
   const stored = prior ? readSpoolTurns(dir, snapshot.sessionId) : [];
 
+  // #3516 §B: the entry's lane is set-only-when-present, FIRST-WRITER-WINS, and
+  // carried forward — NOT `model`'s rule (that one is not carried forward).
+  // `prior` wins when both are set, so a later snapshot can only FILL IN an
+  // absent lane, never RELABEL one: a `store_sync` snapshot can never DOWNGRADE
+  // a stored `hook` (the pinned "delivery lane is monotone" contract), which is
+  // also the rule the SERVER applies via `sdk._write_session_and_turns`'
+  // coalesce — the spool must not be the odd leg out, because its lane is what
+  // gets delivered. The resolution is TRUTHY (`||`, not `??`), because BOTH
+  // legs read and write this one directory and must state ONE rule. The input
+  // that distinguishes them is a stored EMPTY lane with a truthy new one: `""
+  // || "hook"` fills the lane in, while `??` keeps `""` and the spread below
+  // then OMITS the key. (A stored empty lane is reachable only from a crafted
+  // or corrupt meta — which is why it has its own test.)
+  const lane = prior?.capture_lane || snapshot.captureLane;
+  // A snapshot carrying a lane the entry has never had is an UPGRADE, not a
+  // no-op. `sameContent` is content-addressed and the lane is NOT part of the
+  // content, so without this bypass an entry first written lane-less (a
+  // pre-#3516 spool, or an `sessions import` entry the hook then re-captured
+  // byte-identically) would keep its lane-less meta forever — and a WORKING
+  // hook would file as not-live, the false-negative this feature exists to
+  // remove.
+  const laneUpgrade = !!snapshot.captureLane && !prior?.capture_lane;
+
   // Dedup: a snapshot that is byte-identical to what is stored already is a
   // no-op — no rewrite, no re-upload (incremental capture must not amplify
   // identical writes).
   const sameContent =
     prior !== undefined &&
     stored.length === snapshot.turns.length &&
-    prior.content_digest === contentDigest(snapshot.turns);
+    prior.content_digest === contentDigest(snapshot.turns) &&
+    !laneUpgrade;
   if (sameContent) {
     return { written: false, bytes: spoolEntryBytes(dir, snapshot.sessionId), discards };
   }
@@ -904,6 +952,7 @@ export function writeSpoolEntry(
     source: snapshot.source,
     machine_id: snapshot.machineId,
     ...(snapshot.model ? { model: snapshot.model } : {}),
+    ...(lane ? { capture_lane: lane } : {}),
     created_at: prior?.created_at ?? now,
     updated_at: now,
     turns_count: snapshot.turns.length,
@@ -918,8 +967,16 @@ export function writeSpoolEntry(
     // (attempts=0) and a genuinely fresh entry starts at zero.
     attempts: clampAttempts(prior?.attempts),
     next_attempt_at_ms: carriedWindow(prior?.next_attempt_at_ms),
-    ...(prior?.filed_key && prior.content_digest === contentDigest(snapshot.turns)
-      ? { filed_key: prior.filed_key, filed_at: prior.filed_at }
+    // A lane UPGRADE also invalidates the filing marker: `filed_key` is
+    // content-derived (the lane is not part of it), so an entry already filed
+    // lane-less would otherwise keep its marker and be skipped by the drain
+    // forever — the lane would never reach the wire. Mirrors the Python
+    // writer's `and not lane_upgrade`.
+    ...(prior?.filed_key &&
+    prior.content_digest === contentDigest(snapshot.turns) &&
+    !laneUpgrade
+      ? { filed_key: prior.filed_key, filed_lane: prior.filed_lane,
+          filed_at: prior.filed_at }
       : {}),
   };
   const metaText = `${JSON.stringify(meta, null, 2)}\n`;
@@ -1188,7 +1245,15 @@ export async function flushSpool(
       summary.heldBack += 1;
       continue;
     }
-    if (meta.filed_key && meta.filed_key === meta.capture_key) {
+    // Read tolerance: a meta written by an OLDER Python producer stored
+    // `"filed_lane": null` for a lane-less filing. The Python leg now OMITS the
+    // key, so both legs write alike — but a spool written before that fix, or
+    // by any producer that emits JSON `null`, must still be read alike, because
+    // JSON has no `undefined`: a raw `JSON.parse` yields `null`, and strict
+    // `===` against this leg's ABSENT key would bypass the skip and re-POST an
+    // entry the other leg had already filed (#3516 §B).
+    if (meta.filed_key && meta.filed_key === meta.capture_key &&
+        (meta.filed_lane ?? undefined) === (meta.capture_lane ?? undefined)) {
       summary.skipped += 1;
       continue;
     }
@@ -1228,21 +1293,54 @@ export async function flushSpool(
         source: meta.source,
         machineId: meta.machine_id,
         model: meta.model,
+        // The ENTRY's lane, not this process's: a lane-less import entry
+        // drained here must stay lane-less.
+        captureLane: meta.capture_lane,
       });
       const res = await postCapture(cfg, payload, doFetch, opts.timeoutMs);
       if (res.ok) {
-        // COMPARE-AND-SWAP, on the POSTED CONTENT. A `turn_end` can append to
-        // this very entry while the POST is in flight (a resumed session; a
-        // cross-process drain). Stamp `filed_key` only when what is on disk NOW
-        // is exactly what was posted; otherwise leave the entry unfiled so the
-        // next opportunity re-posts the longer conversation. Comparing
-        // meta-to-meta was wrong: a writer killed between its log append and its
-        // meta write leaves the meta digest stale, so the check passed while a
-        // turn went unfiled forever.
+        // COMPARE-AND-SWAP, on the POSTED CONTENT **AND LANE**. A `turn_end` can
+        // append to this very entry while the POST is in flight (a resumed
+        // session; a cross-process drain). Stamp `filed_key` only when what is
+        // on disk NOW is exactly what was posted; otherwise leave the entry
+        // unfiled so the next opportunity re-posts. Comparing meta-to-meta was
+        // wrong: a writer killed between its log append and its meta write
+        // leaves the meta digest stale, so the check passed while a turn went
+        // unfiled forever.
+        //
+        // The read happens IMMEDIATELY before the write, and the WRITE APPLIES
+        // TO THE FRESHLY-READ META — never to a snapshot taken earlier: writing
+        // an earlier snapshot back would clobber any concurrent edit that landed
+        // in between, including a lane upgrade, which is precisely the edit that
+        // must survive.
+        //
+        // The LANE is part of this identity (#3516 §B): `capture_key` is
+        // content-derived and the lane is not part of the content, so without
+        // that clause a lane upgrade landing inside the POST window was
+        // cancelled and the lane stranded on the wire.
+        //
+        // A RESIDUAL window remains: a lane-upgrading snapshot landing between
+        // the read above and the write below is still clobbered, and the entry
+        // then reads as FILED LANE-LESS until some later snapshot re-triggers
+        // the upgrade (permanent only if the session never snapshots again). It
+        // is accepted rather than closed — the window is two file reads plus one
+        // digest (sub-ms for a typical session, up to ~150 ms at the 16 MB
+        // `SPOOL_MAX_ENTRY_BYTES` bound), and the racer must be the FIRST lane-ful
+        // snapshot of a previously lane-less entry. Closing it needs mutual
+        // exclusion in the capture hot path (every turn_end) in two languages,
+        // where a stale lock would BLOCK OR LOSE CAPTURES — a worse failure. If
+        // it ever must be closed, the lock-free route is a SIDECAR marker file
+        // for the drain-owned fields, so no read-modify-write touches meta.json.
         const onDisk = readSpoolEntry(dir, meta.session_id);
         const onDiskTurns = readSpoolTurns(dir, meta.session_id);
-        if (onDisk && contentDigest(onDiskTurns) === postedDigest) {
+        const postedLane = payload.capture_lane as string | undefined;
+        if (
+          onDisk &&
+          contentDigest(onDiskTurns) === postedDigest &&
+          onDisk.capture_lane === postedLane
+        ) {
           onDisk.filed_key = onDisk.capture_key ?? captureKey(meta.session_id, onDiskTurns);
+          onDisk.filed_lane = postedLane;
           onDisk.filed_at = new Date(nowMs).toISOString();
           onDisk.attempts = 0;
           onDisk.next_attempt_at_ms = 0;
@@ -1267,7 +1365,8 @@ export async function flushSpool(
       // Re-read before the backoff write-back for the same reason as the CAS
       // above: never clobber newer turns written while the POST was in flight.
       const pending = readSpoolEntry(dir, meta.session_id) ?? meta;
-      if (pending.filed_key && pending.filed_key === pending.capture_key) {
+      if (pending.filed_key && pending.filed_key === pending.capture_key &&
+          (pending.filed_lane ?? undefined) === (pending.capture_lane ?? undefined)) {
         // A CONCURRENT flush already filed this exact content while our POST was
         // in flight. Re-arming the backoff here would attach a window to content
         // that was never refused — and since writeSpoolEntry now CARRIES the
@@ -1427,6 +1526,9 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
           source: sourceName(manager?.getSessionFile?.()),
           machineId: deriveMachineId(),
           model: modelLabel(ctx?.model),
+          // #3516 §B: this IS the in-process hook, so the entry it spools
+          // claims 'hook' — the drain later forwards it verbatim.
+          captureLane: "hook",
         },
         bounds,
       );
