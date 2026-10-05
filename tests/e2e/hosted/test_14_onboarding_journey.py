@@ -146,7 +146,7 @@ def test_grandfathered_wire_stable_then_node_governs(api):
     onboarding_complete on a node-present org is DROPPED (accepted 200,
     echo node-governed); the wire follows the node. The raw-writer
     grandfathered branch (legacy jsonb true, pre-W1 org) is asserted in
-    test_onboarding_state_split.py (HTTP can't raw-write)."""
+    the four test_onboarding_state_split_* modules (HTTP can't raw-write)."""
     _org_id, headers = _register(api, "gf")
     # legacy wizard completion attempt — the legacy jsonb write is inert on
     # node-present orgs post-W1 (the wizard no longer even calls it)

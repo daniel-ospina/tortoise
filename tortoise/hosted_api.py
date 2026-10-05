@@ -1324,15 +1324,12 @@ async def _refresh_cost_allocation() -> None:
 
     The SINGLE production write path for the per-team cost metric
     (``tortoise_team_cost_cents``, which had no production caller at all before
-    this). It is module-level ON PURPOSE: the periodic seam that arms it,
-    ``_event_retention_loop``, is a CLOSURE inside ``_lifespan`` and cannot be
-    called from a test, so a test that asserts the PRODUCTION call site needs
-    this half to be directly invocable.
+    this). It is module-level ON PURPOSE, so a test can invoke the production
+    call site directly.
 
-    Best-effort by construction: ``_event_retention_loop`` has NO per-iteration
-    guard, so a raise here would kill event retention AND the deleted-org purge
-    for the process's lifetime. Every non-cancellation exception is swallowed
-    with a warning.
+    Best-effort by construction: every non-cancellation exception is swallowed
+    with a warning. Since #5381 the retention loop also routes this through
+    ``_guarded_step``, so a raise here cannot end the loop.
     """
     from tortoise.cost_allocation import refresh_and_publish
 
@@ -1354,6 +1351,74 @@ async def _refresh_cost_allocation() -> None:
         raise
     except Exception as exc:  # noqa: BLE001, RUF100 — must never kill the retention loop
         _logger.warning("cost allocation refresh failed: %s", exc)
+
+
+async def _guarded_step(label: str, step) -> None:
+    """#5381: await ONE background step so its failure cannot kill its runner.
+
+    ``step`` is a zero-arg callable returning an awaitable, so the awaitable is
+    built INSIDE the guard — a factory that raises is caught too. Cancellation
+    must still propagate (shutdown cancels these tasks), so ``CancelledError``
+    is re-raised; any other exception is logged and swallowed.
+
+    Shared by ``_run_boot_sweeps`` and ``_event_retention_loop``. Without it the
+    obligation is per-caller: every step added to the loop must remember to
+    swallow its own exceptions, and the one that forgets ends event retention
+    AND the deleted-team purge for the life of the process.
+    """
+    try:
+        await step()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # never fatal to the runner
+        _logger.warning("%s failed: %s", label, exc)
+
+
+async def _event_retention_loop(interval: float) -> None:
+    """#5381: the periodic retention runner, with EVERY step individually guarded.
+
+    Guarded per STEP, not per iteration. A per-iteration guard would let one
+    failing step skip its siblings for that whole hour — a failed event sweep
+    would also skip the deleted-team purge, the deleted-account purge, the
+    OAuth GC and the cost refresh, which is the same silent-loss shape this
+    closes, one scope larger.
+
+    ``interval`` is a parameter rather than a captured closure so the loop is
+    directly drivable by a test: the observable invariant is that a raising step
+    cannot end the ``while True``, and the evidence for it is a SUBSEQUENT
+    iteration actually running.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        # #2850: daemon worker, not the shared default executor — see
+        # _run_boot_sweeps.
+        await _guarded_step(
+            "event retention sweep",
+            functools.partial(run_on_daemon_worker, _sweep_events,
+                              name="tortoise-boot-sweep"))
+        # #302: hard-delete past grace (sync DB work off the loop)
+        await _guarded_step(
+            "deleted-team purge",
+            functools.partial(run_on_daemon_worker, _purge_deleted_orgs,
+                              name="tortoise-boot-sweep"))
+        # #4029: erase deleted accounts past their stored grace. Same cadence
+        # and same guard as the boot sweep above — the two entry points must
+        # not drift, or an account purge that raises at boot would silently
+        # stop being retried by the periodic loop.
+        await _guarded_step(
+            "deleted-account purge",
+            functools.partial(run_on_daemon_worker, _purge_deleted_accounts,
+                              name="tortoise-boot-sweep"))
+        # #3036: GC dead OAuth rows (sync DB work off the loop)
+        await _guarded_step(
+            "oauth retention",
+            functools.partial(run_on_daemon_worker, _sweep_oauth_retention,
+                              name="tortoise-boot-sweep"))
+        # #4493: allocated fixed/shared SaaS cost per org — the production write
+        # path for tortoise_team_cost_cents. It already swallows internally (see
+        # _refresh_cost_allocation); the guard is what makes that belt-and-braces
+        # rather than the single thing keeping the loop alive.
+        await _guarded_step("cost allocation refresh", _refresh_cost_allocation)
 
 
 async def _run_boot_sweeps() -> None:
@@ -1385,12 +1450,12 @@ async def _run_boot_sweeps() -> None:
                       ("deleted-team purge", _purge_deleted_orgs),
                       ("deleted-account purge", _purge_deleted_accounts),
                       ("oauth retention", _sweep_oauth_retention)):
-        try:
-            await run_on_daemon_worker(fn, name="tortoise-boot-sweep")
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # never fatal
-            _logger.warning("boot %s sweep failed: %s", label, exc)
+        # #5381: the same guard the periodic loop uses — one runner, so the
+        # boot and periodic paths cannot drift apart.
+        await _guarded_step(
+            f"boot {label} sweep",
+            functools.partial(run_on_daemon_worker, fn,
+                              name="tortoise-boot-sweep"))
 
 
 #: Task attributes armed across the lifespan that a re-entry or shutdown must
@@ -1842,29 +1907,12 @@ async def _lifespan(app):
             # (#2851/#2922; regression guard tests/test_boot_regressions.py).
             interval = event_retention_interval()
 
-            async def _event_retention_loop() -> None:
-                while True:
-                    await asyncio.sleep(interval)
-                    # #2850: daemon worker, not the shared default executor —
-                    # see _run_boot_sweeps.
-                    await run_on_daemon_worker(_sweep_events,
-                                               name="tortoise-boot-sweep")
-                    # #302: hard-delete past grace (sync DB work off the loop)
-                    await run_on_daemon_worker(_purge_deleted_orgs,
-                                               name="tortoise-boot-sweep")
-                    # #4029: erase accounts past the stored grace (same sweep
-                    # cadence; sync DB/auth work off the loop).
-                    await run_on_daemon_worker(_purge_deleted_accounts,
-                                               name="tortoise-boot-sweep")
-                    # #3036: GC dead OAuth rows (sync DB work off the loop)
-                    await run_on_daemon_worker(_sweep_oauth_retention,
-                                               name="tortoise-boot-sweep")
-                    # #4493: allocated fixed/shared SaaS cost per org — the
-                    # production write path for tortoise_team_cost_cents.
-                    # Swallows internally (see _refresh_cost_allocation).
-                    await _refresh_cost_allocation()
-
-            _retention_task = asyncio.get_event_loop().create_task(_event_retention_loop())
+            # #5381: the body is module-level (``_event_retention_loop``) so its
+            # per-step guard is reachable by an executing TEST. As a closure the
+            # only available check was a static AST pin, and an AST pin cannot
+            # observe whether a step's failure ENDS the loop.
+            _retention_task = asyncio.get_event_loop().create_task(
+                _event_retention_loop(interval))
             app.state._event_retention_task = _retention_task
         except Exception as exc:
             # Best-effort by design (a purge failure must never block bind), but
@@ -4203,20 +4251,43 @@ def _probe_sdk() -> TortoiseSDK:
     return sdk
 
 
+def _acquire_probe_sdk() -> TortoiseSDK:
+    """``_probe_sdk`` with its cache-invalidating failure path (#3446).
+
+    Handed to ``probe_db(acquire=…)`` so the acquisition runs as a BOUNDED
+    phase on the shared probe worker instead of inline on the coordinator's
+    thread. The reset must survive the move: a half-built handle is dropped so
+    the next probe rebuilds rather than reusing it.
+    """
+    try:
+        return _probe_sdk()
+    except Exception:
+        _probe_sdk_reset()
+        raise
+
+
 def _probe_db() -> dict:
     """Deep-check the graph DB through the reused probe connection (#1384).
 
-    Reports ``{"ok": bool, "latency_ms": float, "error": str|None}`` via
-    monitoring.probe_db — never raises. ``probe_db`` itself is statically
-    bounded at ``PROBE_DB_TOTAL_TIMEOUT`` (2 x ``PROBE_TIMEOUT`` + the retry
-    delay, ~3.1s, because a transient connect failure is retried once). The
-    ``_probe_sdk()`` prefix that runs BEFORE it is only NOMINALLY charged at
-    ``PROBE_SDK_ACQUISITION_BUDGET`` — that is the redis CONNECT leg, and on
-    the embedded path the acquisition runs real queries bounded by the redis
-    READ timeout (10s default, clampable to 60s) with redis-py's default 10
-    retries, which the budget does not cover. ``DB_PROBE_HARD_TIMEOUT`` below
-    is therefore the best-effort bound a caller should clear, NOT a proof that
-    it exceeds this worker's real total. The probe target is
+    Reports ``{"ok": bool, "observed": bool, "latency_ms": float,
+    "error": str|None}`` via
+    monitoring.probe_db — never raises on a probe failure. ``probe_db``'s own
+    deadline is ONE caller deadline (``PROBE_TIMEOUT``, ~1.5s): since #3143 the
+    #1565 retry rides the REMAINDER of it rather than taking a second, so
+    ``PROBE_DB_TOTAL_TIMEOUT`` (2 x ``PROBE_TIMEOUT`` + the retry delay, ~3.1s)
+    is only the LOOSE over-estimate the outer bound is sized above — NOT this
+    function's ceiling, as the pre-#3143 wording here claimed. The SDK
+    acquisition, since #3446, is its OWN bounded phase: it is handed to
+    ``probe_db`` as ``acquire=`` and abandoned at
+    ``PROBE_SDK_ACQUISITION_BUDGET`` (2.0s) rather than running unbounded on
+    this coordinator's thread. That is what makes ``DB_PROBE_HARD_TIMEOUT`` an
+    outer bound PROVABLY above a sum of ENFORCED inner deadlines instead of an
+    alignment against a guess. It is still not a ceiling on the acquisition's
+    INTERIOR — on the embedded path the anchor connects eagerly, runs real
+    queries, and ``TortoiseSDK.__init__`` runs the unbounded cross-process
+    ``_probe_embedded_busy`` liveness probe; an acquisition that cannot finish
+    inside the budget is REPORTED as a failed phase (and its worker abandoned,
+    never cancelled — CPython #87185). The probe target is
     ``_make_sdk(namespace=None)``: the default-graph connection shares the DB
     server with every org/registry endpoint, so a stopped FalkorDB (NXDOMAIN,
     #1381) fails it too.
@@ -4224,38 +4295,49 @@ def _probe_db() -> dict:
     #669: NEVER probe the registry namespace — FalkorDB auto-creates the
     graph on select, so a registry-namespaced probe RECREATES a deleted
     registry_control_plane on every health check.
+
+    ``db["latency_ms"]`` is UNCHANGED by the move: ``probe_db`` subtracts the
+    acquisition phase's own elapsed time, so this coordinator reports the SAME
+    probe latency it did before #3446 (when it acquired the handle itself and
+    the probe clock started afterwards) instead of silently inflating it by up
+    to ``PROBE_SDK_ACQUISITION_BUDGET`` (2.0s) on a cold acquisition.
     """
     from tortoise.monitoring import probe_db
     # #4608: the episode spans the handle fetch AND the query, so a reset or a
-    # target change cannot close this handle mid-query.
+    # target change cannot close this handle mid-query. #3446: the acquisition
+    # itself is handed to `probe_db(acquire=…)` so its deadline is bounded on
+    # the shared probe worker instead of inline on the coordinator's thread.
     with _probe_episode():
-        try:
-            sdk = _probe_sdk()
-        except Exception as exc:
-            _probe_sdk_reset()
-            return {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
-        return probe_db(sdk)
+        return probe_db(acquire=_acquire_probe_sdk)
 
 
 # The FalkorDB-backed probes' bound. DERIVED, not restated: it is the shared
 # ``monitoring.PROBE_HARD_TIMEOUT`` (``PROBE_DB_TOTAL_TIMEOUT`` +
 # ``PROBE_SDK_ACQUISITION_BUDGET`` + a strict-above margin), so a
-# ``PROBE_TIMEOUT`` change propagates. ``probe_db`` retries one transient
-# connect failure, so its statically-known ceiling is
-# ``PROBE_DB_TOTAL_TIMEOUT`` (~3.1s) — NOT ``PROBE_TIMEOUT`` (1.5s); reading
-# only the per-attempt figure is what inverted the ordering in the
-# #2850/#2988 merge. Two honest caveats:
-#   * the ``_probe_sdk()`` prefix that runs BEFORE ``probe_db`` is charged at
-#     ``PROBE_SDK_ACQUISITION_BUDGET`` (the redis CONNECT leg). In URI mode
-#     that prefix is ~free (lazy projection, connect happens inside
-#     ``probe_db``'s own per-attempt bound); on the EMBEDDED path it runs real
-#     queries bounded by the redis READ timeout (10s default, clampable to
-#     60s) with redis-py's default 10 retries, which the budget does NOT cover;
+# ``PROBE_TIMEOUT`` change propagates. ``probe_db``'s own deadline is ONE
+# caller deadline, so the figure that clears it is
+# ``PROBE_DB_TOTAL_TIMEOUT`` (~3.1s = 2 x PROBE_TIMEOUT + the retry delay) —
+# NOT ``PROBE_TIMEOUT`` (1.5s); reading only the per-attempt figure is what
+# inverted the ordering in the #2850/#2988 merge. Since #3143 that 3.1s is a
+# deliberate OVER-ESTIMATE (the retry rides the remainder of the one deadline,
+# it does not take a second), which is why the bound is sized above the LOOSE
+# figure rather than above the exact total. Since #3446 the acquisition prefix
+# is no longer an unenforced term either: ``_probe_db`` hands ``_probe_sdk``
+# to ``probe_db(acquire=…)``, which bounds it at
+# ``PROBE_SDK_ACQUISITION_BUDGET`` on the shared probe worker. So the sum is
+# one ENFORCED deadline plus one deliberate over-estimate, and the ordering is
+# provable for this plane. Two honest caveats,
+# neither of them a missing deadline:
+#   * the acquisition's INTERIOR is not bounded by that budget — the embedded
+#     anchor connects eagerly, runs real queries, and ``TortoiseSDK.__init__``
+#     runs the unbounded cross-process ``_probe_embedded_busy`` liveness
+#     probe. An overrun is REPORTED (the phase fails at the budget), and its
+#     worker is abandoned, never cancelled (CPython #87185);
 #   * ``TORTOISE_FALKORDB_CONNECT_TIMEOUT_S`` can raise even the connect leg
 #     the budget models (clamped at ``projection._DB_TIMEOUT_MAX_S`` = 60s).
-# So this is a best-effort ALIGNMENT that reduces how often a worker is
-# stranded; it is not a proof that the outer bound exceeds the worker's real
-# total. See the guarantee summary at ``monitoring.PROBE_MAX_SUPERSEDES``.
+# So this remains an ordering over WAITS, and the residual is stranding, not
+# an unenforced phase. See the guarantee summary at
+# ``monitoring.PROBE_MAX_SUPERSEDES``.
 DB_PROBE_HARD_TIMEOUT = PROBE_HARD_TIMEOUT
 
 
@@ -4382,12 +4464,15 @@ CONTROL_PLANE_HARD_TIMEOUT = CONTROL_PLANE_PROBE_TOTAL_S + CONTROL_PLANE_BOUND_M
 # each plane's statically-known inner TOTAL, not a single global number.
 # FalkorDB's ``probe_db`` retries one transient failure, so the bound that CAN
 # be computed is ``PROBE_DB_TOTAL_TIMEOUT`` (~3.1s = 2 x PROBE_TIMEOUT +
-# PROBE_RETRY_DELAY) plus the nominal SDK-acquisition budget plus a
+# PROBE_RETRY_DELAY) plus the ENFORCED SDK-acquisition phase plus a
 # strict-above margin — hence ``DB_PROBE_HARD_TIMEOUT`` =
-# ``PROBE_HARD_TIMEOUT`` (5.6s), not the superseded 2.0s bare default. The embedded acquisition prefix is NOT covered
-# by that computation, so this ordering is a best-effort alignment that
-# reduces how often a worker is stranded — see the guarantee summary at
-# ``monitoring.PROBE_MAX_SUPERSEDES``.
+# ``PROBE_HARD_TIMEOUT`` (5.6s), not the superseded 2.0s bare default. Since
+# #3446 the acquisition prefix is itself a bounded phase
+# (``probe_db(acquire=…)``), so no term of that sum is an UNBOUNDED phase any
+# more — one is an enforced deadline and the other (``PROBE_DB_TOTAL_TIMEOUT``)
+# is a deliberate over-estimate. The ordering is provable for this plane, and
+# the residual is stranding — a phase that overruns its deadline is abandoned,
+# not cancelled. See the guarantee summary at ``monitoring.PROBE_MAX_SUPERSEDES``.
 _CONTROL_PLANE_PROBE = HealthProbe(
     lambda: _probe_control_plane(),
     timeout=CONTROL_PLANE_HARD_TIMEOUT,
@@ -4572,10 +4657,9 @@ async def health_ready():
     # Data plane. Runs its OWN coordinator (``_READY_PROBE`` — deliberately
     # NOT the liveness refresher's, so a readiness call cannot join a probe
     # started before the outage), hard-bounded at ``DB_PROBE_HARD_TIMEOUT``
-    # (a best-effort alignment: the ~3.1s ``probe_db`` TOTAL plus the nominal
-    # SDK-acquisition budget; the embedded acquisition prefix is not covered),
-    # and it never raises, so a dead DB degrades the result instead of the
-    # process.
+    # (the #3143 loose outer-alignment figure the derivation is sized above,
+    # plus the ENFORCED SDK-acquisition phase, since #3446), and it never
+    # raises, so a dead DB degrades the result instead of the process.
     # #669 post-flip: NEVER a registry-namespaced probe — FalkorDB
     # auto-creates the graph on select, so a registry-namespaced probe
     # RECREATED the deleted registry_control_plane on every health check
@@ -11367,6 +11451,14 @@ _SESSION_HARNESS_VALUES = frozenset({
     "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
 })
 
+# #3516 §B / #3515 piece 8: which producer captured a session — 'hook' (the
+# in-process hook/CLI leg) or 'store_sync' (the store-sync backstop). This is
+# the ONLY discriminator that makes the hook-liveness check falsifiable: the two
+# lanes POST the same payload except this field, so without it a run with the
+# hook stubbed no-op greens. Distinct from the EXTRACTION lane (`_capture_lane()`
+# returns m2/v2) — same word, different meaning; do not merge the two.
+_SESSION_CAPTURE_LANE_VALUES = frozenset({"hook", "store_sync"})
+
 
 class SessionRequest(BaseModel):
     conversation: list[dict] = Field(..., max_length=1000)
@@ -11392,6 +11484,11 @@ class SessionRequest(BaseModel):
     # session_id is the idempotency key (re-POST same id ⇒ 0 new nodes);
     # source carries the transcript stem (forwarded by _cmd_session_capture).
     harness: str | None = None
+    # #3516 §B: OPTIONAL and set-only-when-present, so a pre-installed hook, an
+    # SDK caller or a backfill producer that POSTs without it never 422s and
+    # never erases a lane the server already stored. `None` is stored as ABSENT,
+    # never as a fabricated lane. Invalid values fail the boundary 422.
+    capture_lane: str | None = None
     source: str | None = None
     # #2599: machine_id and model are CLIENT-CLAIMED informational fields
     # (forgeable, never security-trusted) — complementing the server-resolved
@@ -11410,6 +11507,18 @@ class SessionRequest(BaseModel):
             raise ValueError(
                 f"invalid harness {v!r} — must be one of "
                 f"{sorted(_SESSION_HARNESS_VALUES)}")
+        return v
+
+    # #3516 §B: invalid capture_lane ⇒ 422 at the model boundary (same contract
+    # as harness) — a typo'd lane must be visible, and must never be silently
+    # stored as a lane the hook-liveness check would then misread.
+    @field_validator("capture_lane")
+    @classmethod
+    def _validate_capture_lane(cls, v):
+        if v is not None and v not in _SESSION_CAPTURE_LANE_VALUES:
+            raise ValueError(
+                f"invalid capture_lane {v!r} — must be one of "
+                f"{sorted(_SESSION_CAPTURE_LANE_VALUES)}")
         return v
 
     # #2599: reject non-printable characters in machine_id/model (a newline
@@ -12199,6 +12308,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     _capture_write = await _run_off_loop(
         _CAPTURE_EXECUTOR, _write_session_and_turns, proj, sdk, session_id,
         windowed, now=now, harness=capture_harness,
+        capture_lane=body.capture_lane,
         actor_user_id=_actor_uid, machine_id=body.machine_id,
         model=body.model, session_existed=session_existed,
         embed_fn=lambda texts: _capture_turn_embeddings(
@@ -14253,13 +14363,17 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     # the gate removal; the off-switch lives in _capture_session_impl only).
     from tortoise.commit_idempotency import CommitRecordStore
     from tortoise.commit_schema import (
+        compile_vocab,
         plan_commit,
         validate_payload_dict,
     )
+    from tortoise.pack_state import graph_installed_namespaces
 
     # [1] Layer-1 (400 class = missing required fields; 422 class = shape +
     # semantic violations with field reasons). The derived payload has NO
-    # turns — the legacy turn cap (POST /v1/sessions) does not apply.
+    # turns — the legacy turn cap (POST /v1/sessions) does not apply. The
+    # vocab is the GRAPH's installed-pack gate (#5163), not the process-global
+    # union — resolved below, before validation.
     try:
         raw_bytes = await _read_capped_body(
             request, _COMMIT_SESSION_MAX_BYTES, _COMMIT_SESSION_413_DETAIL)
@@ -14269,7 +14383,31 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     except Exception:
         raise HTTPException(  # noqa: B904
             status_code=400, detail="Request body must be a JSON object")
-    result, payload = validate_payload_dict(raw)
+
+    # #5163: the WRITE GATE must enforce the graph's APPROVAL set, not the
+    # process-global catalog union. Resolve the tenant SDK and the graph's
+    # installed-pack set BEFORE Layer-1 so the 422 is per-graph — the same
+    # decision the extractor prompt already renders (build_master_list reads
+    # the gated tenant_view brief). An unreachable graph RAISES here
+    # (fail-closed): an outage never becomes a silent widen back to the
+    # union. ``None`` = a graph with no :PackInstall records → the catalog
+    # union, exactly as before (#2714 indicator 3).
+    #
+    # #5339 review (P1): ``graph_installed_namespaces`` is a WHOLE-GRAPH read
+    # (the :PackInstall rows plus ``graph_kind_namespaces``' per-property
+    # scans — O(nodes), documented to run per call), and ``compile_vocab`` on a
+    # cold or evicted memo is a filesystem walk + YAML parse of every manifest
+    # (~40 ms). This handler is ``async``, so running either inline parks the
+    # event loop — the #3086/#3060 class this very handler already off-loads
+    # for its SDK open and its point-count check. Resolve the gate AND compile
+    # the vocab in ONE offloaded unit through the graph pool.
+    _require_scope(org, "graphs:write", "commit_session")
+    sdk = await _data_sdk_offloaded(org)
+    _gate_vocab = await _graph_offload(
+        lambda: compile_vocab(
+            installed_namespaces=graph_installed_namespaces(sdk)),
+        op="commit_gate_vocab")
+    result, payload = validate_payload_dict(raw, vocab=_gate_vocab)
     if result.code == "missing_required_fields":
         raise HTTPException(
             status_code=400,
@@ -14292,8 +14430,6 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
             detail={"warnings": blocking, "code": "domain_rule_block"},
         )
 
-    _require_scope(org, "graphs:write", "commit_session")
-    sdk = _data_sdk(org)
     proj = sdk._get_proj()
     store = CommitRecordStore(sdk)
 

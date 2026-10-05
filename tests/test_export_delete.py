@@ -280,7 +280,7 @@ def _quiesce_testclient_background_work(monkeypatch) -> None:
 
     1. `_run_boot_sweeps()` (armed by `_lifespan` as
        `app.state._boot_sweep_task`, one-shot) and `_event_retention_loop()`
-       (the `_lifespan` closure armed as `app.state._event_retention_task`,
+       (armed by `_lifespan` as `app.state._event_retention_task`,
        re-armed every `event_retention_interval()`) BOTH call
        `_purge_deleted_teams`. A
        background purge landing between a test's seeding and its own

@@ -11,7 +11,7 @@ acts — connected + first-points-filed, #3913).
 Runs in the docker lane (TORTOISE_DB_URI) — real FalkorDB graph assertions
 (Subject kinds, memberOf edge, onboards edge/org_subject_id, step-edge
 created signals). URI-less runs (tier-2 embedded legs, carve-out) SKIP at
-module level — mirror of test_onboarding_state_split.py's guard.
+module level — mirror of the four test_onboarding_state_split_* modules' guard.
 """
 from __future__ import annotations
 

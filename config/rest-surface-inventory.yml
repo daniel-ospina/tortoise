@@ -414,6 +414,11 @@ routes:
   - method: GET
     path: /v1/topics/{topic}/summary
     class: tenant
+  # #4029: self-service account deletion. Account-level, not org-level — the
+  # caller's own account is the resource, so it takes no path parameter.
+  - method: DELETE
+    path: /v1/user/account
+    class: tenant
   - method: GET
     path: /v1/user/identity
     class: tenant

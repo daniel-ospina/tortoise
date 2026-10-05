@@ -380,3 +380,26 @@ class UnsupportedCypherOperatorError(ValueError):
             f"Use a supported operator instead: STARTS WITH / ENDS WITH / "
             f"CONTAINS."
         )
+
+
+class UnrepresentableNumberError(ValueError):
+    """#4647/#7174 — a Cypher PARAM holds a number the store would ALTER.
+
+    FalkorDB stores an integer as INT64 and a number as a double. A Python
+    ``int`` is unbounded and ``decimal.Decimal`` is arbitrary-precision, so a
+    value outside those domains is SILENTLY ALTERED: ``SET n.v = $v`` reports
+    success and stores a different number (``2**70`` is stored as
+    ``9223372036854775807``; ``Decimal('0.12345678901234567890')`` is rounded).
+
+    Raised by the param-boundary seam (``tortoise.cypher_guard``) on every
+    guarded handle BEFORE the statement is sent, so a writer no longer has to be
+    on the SDK's hand-maintained call-site list to be covered (#7174). It is
+    specifically a PARAM boundary: a number written as a LITERAL in the statement
+    text still reaches the store, as does one sent through a raw vendor client
+    the package did not build. The message names the param KEY and the reason,
+    and never interpolates Cypher (same contract as
+    :class:`UnsupportedCypherOperatorError`).
+
+    Subclasses ``ValueError``: the SDK's #4647 call sites raise ``ValueError``
+    for this same condition, and that call convention is kept.
+    """

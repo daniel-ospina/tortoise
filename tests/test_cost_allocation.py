@@ -707,9 +707,28 @@ def test_production_path_publishes_a_nonzero_value_for_a_real_org(
 
 def test_event_retention_loop_awaits_the_cost_refresh():
     """The leg must live INSIDE the hourly ``while True:`` body — a call placed
-    anywhere else fires once per process. Pinned statically because the loop is
-    a closure inside ``_lifespan`` (the established pattern in
-    ``tests/test_3036_oauth_retention.py``)."""
+    anywhere else fires once per process.
+
+    This pins the SHAPE; it is no longer the only pin, because #5381 moved the
+    loop body out of the ``_lifespan`` closure so it can be EXECUTED by
+    ``test_a_raising_step_cannot_kill_the_retention_loop`` below. That runtime
+    test is the stronger guard: it observes the steps actually running on a
+    second iteration.
+
+    #5381 also routes every step through the shared ``_guarded_step`` guard, so
+    the refresh is an ARGUMENT to an awaited guard rather than a bare
+    ``await _refresh_cost_allocation()``. This asserts the invariant that
+    spelling encoded, and more: every top-level statement of the periodic body
+    is an awaited call, every one of them bar the sleep goes through
+    ``_guarded_step``, and all five known steps are guarded.
+
+    The DIRECT statements of the body are inspected, not ``ast.walk`` results,
+    so a step parked in a nested def that is never invoked does not count as
+    scheduled — one of the regressions the original spelling caught.
+    ``test_a_raising_step_cannot_kill_the_retention_loop`` below is the other
+    half: it EXECUTES the loop. This half is what no runtime test can see —
+    that no step sits outside the guard.
+    """
     tree = ast.parse((REPO / "tortoise" / "hosted_api.py").read_text(encoding="utf-8"))
     loop = next(
         (n for n in ast.walk(tree)
@@ -721,24 +740,210 @@ def test_event_retention_loop_awaits_the_cost_refresh():
          if isinstance(n, ast.While) and isinstance(n.test, ast.Constant)
          and n.test.value is True), None)
     assert while_loop is not None, "_event_retention_loop has no `while True:`"
-    # The refresh must be an AWAITED call that is a DIRECT statement of the
-    # `while True:` body. Asserting on the bare Name (the previous form) passed
-    # for an UN-AWAITED `_refresh_cost_allocation()` — the exact dead-hook
-    # regression #4493 exists to fix — and for a call inside a never-invoked
-    # nested async def. Both are excluded here: only `await f()` at the top
-    # level of the loop body is accepted.
-    awaited_direct: list[str] = []
+
+    def _guarded_call(stmt: ast.stmt) -> tuple[str, str, str] | None:
+        """``(label, step, form)`` for one guarded body statement, else ``None``.
+
+        ``form`` is ``"offload"`` when the step is scheduled as
+        ``functools.partial(run_on_daemon_worker, fn, ...)`` and ``"direct"``
+        when the callee is already async. The distinction is load-bearing: the
+        three sync sweeps MUST go through the offload (#2850/#2953) or their
+        whole-fleet DB work runs ON the event loop and the guard then swallows
+        an ``await None`` TypeError every interval.
+        """
+        if not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Await)
+                and isinstance(stmt.value.value, ast.Call)):
+            return None
+        call = stmt.value.value
+        if not (isinstance(call.func, ast.Name)
+                and call.func.id == "_guarded_step" and len(call.args) >= 2):
+            return None
+        label, step = call.args[0], call.args[1]
+        if not (isinstance(label, ast.Constant) and isinstance(label.value, str)):
+            return None
+        if isinstance(step, ast.Name):
+            return label.value, step.id, "direct"
+        if (isinstance(step, ast.Call)
+                and isinstance(step.func, ast.Attribute)
+                and step.func.attr == "partial"
+                and len(step.args) >= 2
+                and isinstance(step.args[0], ast.Name)
+                and step.args[0].id == "run_on_daemon_worker"
+                and isinstance(step.args[1], ast.Name)):
+            return label.value, step.args[1].id, "offload"
+        return None
+
+    body: list[tuple[str, str, str]] = []
+    slept = 0
     for stmt in while_loop.body:
-        if (
-            isinstance(stmt, ast.Expr)
-            and isinstance(stmt.value, ast.Await)
-            and isinstance(stmt.value.value, ast.Call)
-            and isinstance(stmt.value.value.func, ast.Name)
-        ):
-            awaited_direct.append(stmt.value.value.func.id)
-    assert "_refresh_cost_allocation" in awaited_direct, (
-        "the cost refresh must be an `await _refresh_cost_allocation()` that is "
-        "a DIRECT statement of the `while True:` body")
+        call = stmt.value.value if (
+            isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Await)
+            and isinstance(stmt.value.value, ast.Call)) else None
+        if (call is not None
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "sleep"
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id == "asyncio"):
+            slept += 1
+            continue  # the interval wait, not a step
+        guarded = _guarded_call(stmt)
+        assert guarded is not None, (
+            "every statement of the periodic body must be an awaited "
+            "`_guarded_step(<label>, <step>)` call, so no step can sit outside "
+            "the guard (#5381): " + ast.unparse(stmt))
+        body.append(guarded)
+
+    # Without the interval wait the loop is a 100% CPU busy-spin hammering the
+    # DB every pass — worse than the defect above, and no other assertion here
+    # would notice its removal. Only the STATEMENT is pinned, not the argument:
+    # `sleep(0)` would still spin, and is left unpinned because nothing has
+    # ever produced it in production.
+    assert slept == 1, (
+        "the periodic body must contain exactly one `await asyncio.sleep(...)` "
+        f"statement (found {slept})")
+
+    # ORDERED, label-paired, AND form-checked: a set of names accepted the same
+    # four steps bound to the wrong call sites, and accepting a bare Name for a
+    # sync sweep accepted dropping the offload entirely.
+    expected = [("event retention sweep", "_sweep_events", "offload"),
+                ("deleted-team purge", "_purge_deleted_orgs", "offload"),
+                # #4029: the account-erasure sweep. It sits here to match the
+                # boot order in `_run_boot_sweeps`, so the two entry points stay
+                # leg-for-leg comparable.
+                ("deleted-account purge", "_purge_deleted_accounts", "offload"),
+                ("oauth retention", "_sweep_oauth_retention", "offload"),
+                ("cost allocation refresh", "_refresh_cost_allocation", "direct")]
+    assert body == expected, (
+        "the periodic body must guard exactly these steps, in order, each sync "
+        "sweep scheduled through `run_on_daemon_worker`; a step outside the "
+        f"guard can kill the loop (#5381). got={body} expected={expected}")
+
+    # The ARMED callable must be the guarded module-level loop. As a closure the
+    # pinned and armed functions were necessarily the same object; extracting it
+    # decoupled them, so arming an unguarded local copy would leave every
+    # assertion above inspecting dead code.
+    assert len([n for n in tree.body
+                if isinstance(n, ast.AsyncFunctionDef)
+                and n.name == "_event_retention_loop"]) == 1, (
+        "`_event_retention_loop` must be defined ONCE at module level")
+    lifespan = next(
+        (n for n in ast.walk(tree)
+         if isinstance(n, ast.AsyncFunctionDef) and n.name == "_lifespan"), None)
+    assert lifespan is not None, "_lifespan not found"
+    assert not [n for n in ast.walk(lifespan)
+                if isinstance(n, ast.AsyncFunctionDef)
+                and n.name == "_event_retention_loop"], (
+        "`_lifespan` must not redefine `_event_retention_loop` — the armed "
+        "callable must be the guarded module-level loop (#5381)")
+    assert [n for n in ast.walk(lifespan)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute) and n.func.attr == "create_task"
+            and n.args and isinstance(n.args[0], ast.Call)
+            and isinstance(n.args[0].func, ast.Name)
+            and n.args[0].func.id == "_event_retention_loop"], (
+        "`_lifespan` must arm the module-level `_event_retention_loop` through "
+        "`create_task(...)` (#5381)")
+
+    # The guard must swallow ANY exception. Sampling one class at runtime cannot
+    # catch a narrowed clause: a test raising RuntimeError still passes against
+    # `except (ValueError, RuntimeError)`, which re-opens #5381 for every real
+    # DB/driver error. Pin the width itself.
+    guard = next(
+        (n for n in ast.walk(tree)
+         if isinstance(n, ast.AsyncFunctionDef) and n.name == "_guarded_step"), None)
+    assert guard is not None, "_guarded_step not found"
+    assert any(isinstance(h.type, ast.Name) and h.type.id == "Exception"
+               for t in ast.walk(guard) if isinstance(t, ast.Try)
+               for h in t.handlers), (
+        "`_guarded_step` must catch a bare `Exception`: a narrower clause "
+        "re-opens #5381 for every class it misses")
+
+
+def test_a_raising_step_cannot_kill_the_retention_loop(monkeypatch, caplog):
+    """#5381: drive the REAL loop, not the step.
+
+    ``_event_retention_loop`` had NO per-iteration guard, so any step that
+    raised ended event retention AND the deleted-team purge for the life of the
+    process. The invariant is "the loop keeps iterating after a step raises",
+    and the only evidence for it is a SUBSEQUENT iteration actually running.
+
+    The sibling test below calls ``_refresh_cost_allocation()`` DIRECTLY and
+    never executes the loop — a bare no-op step passes it — so the loop's own
+    invariant was never asserted by anything.
+    """
+    calls = {"sweep": 0, "purge": 0}
+
+    def _boom(*_a, **_k):
+        calls["sweep"] += 1
+        raise RuntimeError("sweep exploded")
+
+    def _purge(*_a, **_k):
+        calls["purge"] += 1
+
+    async def _noop(*_a, **_k):
+        return None
+
+    async def _inline(fn, *, name, timeout=None):  # no threads in this test
+        return fn()
+
+    monkeypatch.setattr(ha, "run_on_daemon_worker", _inline)
+    monkeypatch.setattr(ha, "_sweep_events", _boom)
+    monkeypatch.setattr(ha, "_purge_deleted_orgs", _purge)
+    monkeypatch.setattr(ha, "_sweep_oauth_retention", lambda *_a, **_k: None)
+    # The 4th step is the one the sibling test owns; keep this test focused.
+    monkeypatch.setattr(ha, "_refresh_cost_allocation", _noop)
+    # #4029 added a 5th step to the SAME loop. `run_on_daemon_worker` is inlined
+    # above, so an unstubbed step would run its REAL sync DB work inline here —
+    # this test asserts the guard's shape and must stay hermetic.
+    monkeypatch.setattr(ha, "_purge_deleted_accounts", lambda *_a, **_k: None)
+
+    async def _drive():
+        task = asyncio.ensure_future(ha._event_retention_loop(0))
+        try:
+            for _ in range(500):
+                if calls["sweep"] >= 2 and calls["purge"] >= 1:
+                    break
+                await asyncio.sleep(0.01)
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                # The loop task DIED — the defect under test. Swallowed here so
+                # the assertion below reports it with a useful message instead
+                # of an opaque escaped RuntimeError.
+                pass
+
+    with caplog.at_level("WARNING", logger="tortoise.hosted_api"):
+        asyncio.run(_drive())
+
+    assert calls["sweep"] >= 2, (
+        "the loop died on the first raising step — it must iterate AGAIN "
+        f"(sweep ran {calls['sweep']}x)")
+    assert calls["purge"] >= 1, (
+        "a raising step skipped its SIBLINGS — the guard must be per STEP, not "
+        "per iteration")
+    assert any("sweep exploded" in r.getMessage() for r in caplog.records), (
+        "the swallowed failure must be LOGGED, not silently dropped: "
+        + caplog.text)
+
+
+def test_guarded_step_does_not_swallow_cancellation():
+    """#5381: the guard must contain FAILURES without containing SHUTDOWN.
+
+    ``_stop_liveness`` cancels these tasks and then `gather`s them with no
+    timeout, so a step that swallowed ``CancelledError`` would hang shutdown.
+    ``CancelledError`` derives from ``BaseException`` on 3.8+, so it was never
+    caught by ``except Exception`` — but nothing else here would notice if the
+    two clauses were ever collapsed into ``except BaseException``.
+    """
+    async def _cancelled():
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(ha._guarded_step("cancelled step", _cancelled))
 
 
 def test_a_failing_refresh_cannot_kill_the_retention_loop(monkeypatch, caplog):
@@ -751,7 +956,9 @@ def test_a_failing_refresh_cannot_kill_the_retention_loop(monkeypatch, caplog):
     # No real metering/DB round trip: this test verifies ONLY the swallow path.
     monkeypatch.setattr(
         ha, "_measured_write_ops_basis", lambda orgs: {o: 1 for o in orgs})
-    # The retention loop has no per-iteration guard: this must NOT raise.
+    # The refresh must swallow its own failure. Since #5381 the loop's
+    # `_guarded_step` also contains a raise, making this the inner of two
+    # layers rather than the only one: this must NOT raise.
     with caplog.at_level("WARNING", logger="tortoise.hosted_api"):
         asyncio.run(ha._refresh_cost_allocation())
     # ... and the failure must have been OBSERVED and swallowed, not silently
@@ -991,3 +1198,52 @@ def test_publish_is_the_only_writer_of_the_team_cost_metric():
         "unexpected references to TEAM_COST/its mutators outside monitoring.py "
         f"+ the writer allowlist: {offenders} — a second writer would break the "
         "reconciliation invariant")
+
+
+def test_a_raising_boot_sweep_cannot_kill_the_other_boot_sweeps(monkeypatch, caplog):
+    """#5381/#7352: drive the REAL boot runner, not the step.
+
+    ``_run_boot_sweeps`` routes each sweep through the same ``_guarded_step`` the
+    periodic loop uses ("one runner, so the boot and periodic paths cannot drift
+    apart"). Without that guard a raise in the FIRST boot sweep abandons the
+    remaining two — ``_purge_deleted_orgs`` and ``_sweep_oauth_retention`` never
+    run at boot at all.
+
+    The invariant is "a later sweep still runs after an earlier one raises", and
+    the only evidence for it is a SUBSEQUENT sweep actually running. A test that
+    drives a step directly cannot observe it: mutating the guarded call site to a
+    bare ``await run_on_daemon_worker(fn, ...)`` left this whole file green, which
+    is the gap this test closes.
+    """
+    calls = {"event": 0, "purge": 0, "oauth": 0}
+
+    def _boom(*_a, **_k):
+        calls["event"] += 1
+        raise RuntimeError("boot sweep exploded")
+
+    def _purge(*_a, **_k):
+        calls["purge"] += 1
+
+    def _oauth(*_a, **_k):
+        calls["oauth"] += 1
+
+    async def _inline(fn, *, name, timeout=None):  # no threads in this test
+        return fn()
+
+    monkeypatch.setattr(ha, "run_on_daemon_worker", _inline)
+    monkeypatch.setattr(ha, "_sweep_events", _boom)
+    monkeypatch.setattr(ha, "_purge_deleted_orgs", _purge)
+    monkeypatch.setattr(ha, "_sweep_oauth_retention", _oauth)
+
+    with caplog.at_level("WARNING", logger="tortoise.hosted_api"):
+        asyncio.run(ha._run_boot_sweeps())
+
+    assert calls["event"] == 1, "the first boot sweep did not run at all"
+    assert calls["purge"] == 1, (
+        "the FIRST boot sweep raised and the deleted-team purge never ran — the "
+        "boot path is not routed through the shared guard (#5381)")
+    assert calls["oauth"] == 1, (
+        "the FIRST boot sweep raised and the oauth retention sweep never ran — "
+        "the boot path is not routed through the shared guard (#5381)")
+    assert any("boot event retention sweep" in r.getMessage() for r in caplog.records), (
+        "the guarded boot failure was swallowed without a log record")
