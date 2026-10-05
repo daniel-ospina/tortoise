@@ -79,15 +79,19 @@ def test_full_but_healthy_is_not_reported_as_corrupt(monkeypatch):
     assert "GRAPH.DELETE" in msg, msg
 
 
-def test_write_refusal_remedy_names_the_executable_remedy(monkeypatch):
-    """#2979 — the remedy must be one an operator can actually execute.
+def test_write_refusal_remedy_names_the_safe_path_and_claims_no_flags(monkeypatch):
+    """#2979 — the remedy must be executable, and must make no false claim.
 
-    Two rounds of this fix prescribed deletion steps that cannot run at the
-    moment the message fires: FalkorDB flags graph commands `denyoom`, so a
-    server at its ceiling refuses `GRAPH.DELETE` too — #2979 records exactly
-    that ("drop of 'test_...' failed: server:OutOfMemoryError"). A remedy list
-    whose first executable entry is "delete graphs" therefore frees nothing.
-    Pin the ordering and the mechanism.
+    Round 4 caught a P1 in an earlier revision of THIS change: it asserted that
+    `GRAPH.DELETE` is refused at the ceiling and therefore cannot free memory.
+    That is wrong — upstream registers `graph.DELETE` as "write deny-script"
+    (no `deny-oom`); it is `graph.QUERY` that carries `deny-oom`, and #2979's
+    "drop of 'test_...' failed: server:OutOfMemoryError" is the DETACH inside
+    `GRAPH.QUERY` that `safe_graph_delete` sends BEFORE `graph.delete()`. A test
+    had pinned that false sentence. Flag semantics are not something an operator
+    message should assert at all, so the claim is DROPPED, and this test pins
+    both halves: the executable lever is named, and no command-refusal claim is
+    made.
     """
     monkeypatch.delenv("FLY_APP_NAME", raising=False)
     proj = _projection(probe_error=RuntimeError(_MAXMEMORY_ERROR))
@@ -95,38 +99,40 @@ def test_write_refusal_remedy_names_the_executable_remedy(monkeypatch):
 
     msg = proj._write_refusal_message(RuntimeError(_MAXMEMORY_ERROR))
     assert msg is not None
-    # 1. The one executable lever, named first.
+    # 1. The one executable lever.
     assert "raise / relieve the container's --maxmemory" in msg, msg
-    # 2. The ordering hazard: deletes are refused at the ceiling too.
-    assert "GRAPH.DELETE is refused too while the server is at the ceiling" in msg, msg
-    # 3. The reclaim mechanism is the suite's own passes, gated on the
-    #    ownership record — not the operator's judgement.
-    assert "the suite's own reclaim passes" in msg, msg
-    assert "they gate on the ownership record" in msg, msg
-    assert "a name is never dropped on a prefix alone" in msg, msg
-    # 4. The two shortcuts are refused, with the mechanism still named.
-    assert "GRAPH.DELETE" in msg, msg          # the existing pin, kept
-    assert "do NOT hand-pick names from GRAPH.LIST" in msg, msg
+    # 2. The opt-in residue lever is named (round-4 P2: actionability must not
+    #    narrow — it is the only pass that reaches the journal-blind cohort).
+    assert "TORTOISE_TEST_SWEEP_LEGACY=1" in msg, msg
+    # 3. The unsafe shortcut is refused, and the mechanism is still named.
+    assert "GRAPH.DELETE" in msg, msg          # the pre-existing pin, kept
+    assert "Do NOT hand-pick names from GRAPH.LIST" in msg, msg
+    assert "cannot be undone" in msg, msg
     assert "FLUSHALL" in msg, msg
-    assert "GRAPH.DELETE has no undo" in msg, msg
+    # 4. NO claim about which commands the server refuses (the round-4 P1).
+    for token in ("deny-oom", "denyoom", "is refused"):
+        assert token not in msg, (token, msg)
 
 
 def test_write_refusal_remedy_does_not_hand_roll_the_ownership_policy(monkeypatch):
     """#2979 review — enumerate NO families: defer to the code's own predicate.
 
-    Three review rounds each found this message disagreeing with the code's
-    ownership policy, and every disagreement had the same cause: the message
-    was ENUMERATING deletable/forbidden name families in prose. The code owns
-    that policy in exactly two places — `_SWEEP_OWNED_PREFIXES` (the journal
-    path; it deliberately INCLUDES `team_`/`org_`) and `is_legacy_residue` ->
-    `owns_by_ownership_record` (the journal-blind path; `_SERVER_WIPE_PREFIXES`
+    Four review rounds each found this message disagreeing with the code's
+    ownership policy, and every disagreement had the same cause: the message was
+    ENUMERATING deletable/forbidden name families in prose. The code owns that
+    policy in two places — `_SWEEP_OWNED_PREFIXES` (the journal path; it
+    deliberately INCLUDES `team_`/`org_`) and `is_legacy_residue` ->
+    `owns_by_ownership_record` (the journal-BLIND path; `_SERVER_WIPE_PREFIXES`
     is a strict subset BECAUSE `GRAPH.LIST` has no attribution). Any list in the
     message is therefore wrong in one direction or the other, and drifts as the
     vocabulary changes.
 
-    So this pins the SEAM: the message must NOT carry a family list, and must
-    name only the two EXACT names the code hard-refuses. If a future editor
-    reintroduces a prefix enumeration, this goes RED.
+    Round 4 also showed the first version of this pin was weaker than its own
+    docstring: a fixed six-token denylist only catches a reintroduction of THE
+    SAME wording, while the census residencies this repo actually reports
+    (`tt_gate_*`, `v10fix_*`, `typeprobe_*`, `review_rw_probe*`) would pass it.
+    So the structural property is pinned instead: an enumeration needs a `*`, and
+    the message may carry exactly ONE — the `tortoise_restored*` guard name.
     """
     monkeypatch.delenv("FLY_APP_NAME", raising=False)
     proj = _projection(probe_error=RuntimeError(_MAXMEMORY_ERROR))
@@ -134,14 +140,21 @@ def test_write_refusal_remedy_does_not_hand_roll_the_ownership_policy(monkeypatc
 
     msg = proj._write_refusal_message(RuntimeError(_MAXMEMORY_ERROR))
     assert msg is not None
-    # (a) no hand-rolled family boundary, in either direction.
-    for token in ("NEVER delete", "org_*", "team_*", "registry", "test_*", "tortoise_test"):
+    # (a) THE STRUCTURAL PIN: at most the one guard wildcard, so any family
+    #     enumeration — whatever its spelling — reds this test.
+    assert msg.count("*") == 1, msg
+    assert "tortoise_restored*" in msg, msg
+    # (b) the belt to that braces: the exact tokens the four rounds introduced.
+    for token in ("NEVER delete", "org_*", "team_*", "registry", "test_",
+                  "v10fix", "tt_gate", "typeprobe", "review_rw_probe"):
         assert token not in msg, (token, msg)
-    # (b) the two names the code actually hard-refuses are still named, and as
-    #     EXACT names (a starred `tortoise` would also ban the journal-owned
-    #     `tortoise_test*` family — the round-3 under/over-inclusion defect).
+    # (c) the two names `TortoiseSDK.test_guard` blocks are still named, and the
+    #     ownership claim is scoped to the JOURNAL pass — the only pass it is
+    #     true of (round-4 P2: `_sweep_legacy_strays` and the session-end
+    #     `wipe_server(scope=None)` are journal-blind by design).
     assert "the production graph tortoise" in msg, msg
     assert "tortoise_restored* snapshot" in msg, msg
+    assert "the journal pass drops only what this session's" in msg, msg
 
 
 def test_memory_pressure_unreadable_still_avoids_rebuild(monkeypatch):

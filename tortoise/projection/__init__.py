@@ -3954,33 +3954,47 @@ class FalkorProjection(
             used, cap = pressure
             detail = (f"used_memory {_fmt_bytes(used)} of maxmemory "
                       f"{_fmt_bytes(cap)}")
-        # The remedy must NOT hand-roll the ownership policy in prose. Three
-        # review rounds each found the message disagreeing with the code's own
+        # The remedy must NOT hand-roll the ownership policy in prose. Four
+        # review rounds each found this message disagreeing with the code's own
         # predicate — the journal is necessary but not sufficient (`_sweep_drop`
-        # deletes only `_SWEEP_OWNED_PREFIXES` families, so a journal-listed
-        # `registry_control_plane` is PRESERVED), a blanket product-prefix ban
-        # contradicts `_SWEEP_OWNED_PREFIXES` (which owns `team_`/`org_`), and
-        # any prefix list drifts as the vocabulary changes. So the message names
-        # the MECHANISM instead of a list: the suite's own reclaim passes, which
-        # apply both gates (tests/_embedded.py). It also states the ORDER — at
-        # the ceiling FalkorDB flags graph commands `denyoom`, so `GRAPH.DELETE`
-        # is refused too and cannot free the memory it is asked to free (#2979
-        # records exactly this: "drop of 'test_...' failed: server:OutOfMemoryError").
-        # Only the two names `is_legacy_residue` hard-refuses are enumerated,
-        # because they are exact and stable, not prefixes.
+        # deletes only `_SWEEP_OWNED_PREFIXES` families), a blanket product-prefix
+        # ban contradicts `_SWEEP_OWNED_PREFIXES` (which owns `team_`/`org_`),
+        # and any family list drifts as the vocabulary changes. So the message
+        # names the MECHANISM instead of a list, and scopes each claim to the
+        # pass it is actually true of: only the JOURNAL pass is gated on the
+        # ownership record, because `_sweep_legacy_strays` and the session-end
+        # `wipe_server(scope=None)` are deliberately journal-BLIND (prefix on
+        # shape alone — that is why they are opt-in).
+        #
+        # It also makes NO claim about which graph commands the server refuses
+        # at the ceiling. An earlier revision of this comment asserted that
+        # `GRAPH.DELETE` is `denyoom` and therefore cannot free the memory; that
+        # was wrong (upstream registers `graph.DELETE` as "write deny-script"
+        # and it is `graph.QUERY` that carries `deny-oom`), and the misreading
+        # came from #2979's log line, which is the DETACH inside `GRAPH.QUERY`
+        # that `safe_graph_delete` sends BEFORE `graph.delete()`. Flag semantics
+        # are not something an operator message should assert, so the assertion
+        # is dropped rather than corrected.
+        #
+        # The two enumerated names are the ones `TortoiseSDK.test_guard` blocks
+        # (tortoise/sdk.py) — one exact (`tortoise`) and one prefix
+        # (`tortoise_restored*`). `is_legacy_residue` refuses a superset (it also
+        # refuses the env-dependent URI default graph); that case is covered by
+        # "do not hand-pick", not by enumeration.
         return (
             "DB refused writes on open: the graph is INTACT but the server "
             f"has reached its memory ceiling ({detail}). This is NOT "
             "corruption — do NOT rebuild. Remedy: raise / relieve the "
-            "container's --maxmemory. GRAPH.DELETE is refused too while the "
-            "server is at the ceiling, so it cannot free the memory itself. "
-            "Once relieved, let the suite's own reclaim passes drop the "
-            "graphs THIS session journaled (they gate on the ownership "
-            "record, so a name is never dropped on a prefix alone); do NOT "
-            "hand-pick names from GRAPH.LIST, never delete the production "
-            "graph tortoise or a tortoise_restored* snapshot, and do NOT "
-            "FLUSHALL — GRAPH.DELETE has no undo. See #2981 for the "
-            "shared-lane form of this."
+            "container's --maxmemory. Do NOT hand-pick names from "
+            "GRAPH.LIST to free memory instead: GRAPH.DELETE cannot be "
+            "undone, and a name you cannot attribute is not yours to delete. "
+            "To reclaim graphs, let the suite's own passes run once memory "
+            "is relieved — the journal pass drops only what this session's "
+            "ownership record lists, and the opt-in residue pass "
+            "(TORTOISE_TEST_SWEEP_LEGACY=1) reclaims the recorded residue "
+            "cohort. Never delete the production graph tortoise or a "
+            "tortoise_restored* snapshot, and do NOT FLUSHALL. See #2981 "
+            "for the shared-lane form of this."
         )
 
     def _backend_failure_message(
