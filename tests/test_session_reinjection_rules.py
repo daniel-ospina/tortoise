@@ -90,6 +90,66 @@ def test_seed_window_bounds_the_head():
     assert seeded_sessions([]) == []
 
 
+def test_seed_matches_the_readers_admitted_set_across_a_skip_gap():
+    """#3594: the seed must be the reader's ADMITTED head, not the raw pool
+    prefix. ``assemble_context`` skips claim-text-less hits (#2978, the
+    ``_has_claim_text`` gate) WITHOUT spending an item slot, so it admits
+    hits BELOW the raw prefix — and seeding from the prefix alone left a
+    session that is reader-reachable yet unseeded, biasing exactly the A/B
+    the arm exists to measure."""
+    def _pt(pid: str, sid: str, text: str = "") -> dict:
+        return {"id": pid, "session_id": sid, "point_kind": TURN_POINT_KIND,
+                "content": text}
+
+    # rank 1 is decoration-only (no content, no validity marker): the
+    # reader skips it and its slot goes to rank 2's s2. So s2 is
+    # READER-REACHABLE, but a window of 2 spent on the raw prefix
+    # (a1 + the gap) never reaches it.
+    pool = [_pt("a1", "s1", "alpha one"),
+            {"id": "gap", "session_id": "sGap"},
+            _pt("c1", "s2", "charlie two")]
+
+    admitted = retrieval.assemble_context(
+        pool, top_k=2, max_context_tokens=10_000, context_item_cap=2)
+    admitted_ids = [h["id"] for h in admitted]
+    # preconditions: the reader skips the gap AND still admits past it
+    assert "gap" not in admitted_ids
+    assert admitted_ids == ["a1", "c1"]
+
+    reader_sessions = [session_key_of(h) for h in admitted]
+    assert reader_sessions == ["s1", "s2"]
+
+    # the fix: given the reader's OWN predicate, the seed agrees exactly
+    seeds = seeded_sessions(pool, window=2, limit=5,
+                            admitted=retrieval._has_claim_text)
+    assert [s.session_id for s in seeds] == reader_sessions
+    # pool ranks are preserved (not renumbered by the skip)
+    assert seeds == [SeededSession("s1", 0, "a1"),
+                     SeededSession("s2", 2, "c1")]
+
+    # and the raw prefix (the pre-#3594 behaviour) did NOT agree — and it
+    # is wrong in BOTH directions with one window: it seeded sGap, whose
+    # only hit the reader SKIPS (so it is not reader-reachable at all),
+    # and it missed s2, which the reader does admit. Neither error is
+    # discoverable from the prefix alone, which is why the predicate — not
+    # a wider window — is the fix.
+    assert [s.session_id
+            for s in seeded_sessions(pool, window=2, limit=5)] \
+        == ["s1", "sGap"]
+
+
+def test_driver_passes_the_readers_admission_predicate_to_the_seed():
+    """#3594 wiring: the invariant above only holds if the DRIVER hands the
+    predicate to ``seeded_sessions``. The hermetic test would still pass on
+    a driver that forgot it, so pin the call site itself."""
+    src = (ROOT / "tools" / "longmem_eval" / "retrieve.py").read_text()
+    call = src[src.index("_sr.seeded_sessions("):]
+    call = call[:call.index(")")]
+    assert "admitted=_has_claim_text" in call, (
+        "the eval driver must seed through the reader's #2978 admission "
+        f"predicate; got:\n{call}")
+
+
 def test_seed_drops_synthetic_and_sentinel_buckets():
     pool = [_point("x1", "idx:0"), _point("x2", "idx:-1"),
             {"id": "x3", "lme_session_index": 2},
