@@ -126,10 +126,9 @@ def test_write_refusal_remedy_does_not_hand_roll_the_ownership_policy(monkeypatc
 
     The ownership policy lives in the code: `_SWEEP_OWNED_PREFIXES`, with
     `owns_by_ownership_record` as the JOURNAL path's predicate, and
-    `is_legacy_residue` on the journal-blind path. A prose copy of the policy in
-    the message disagrees with one predicate or the other in every wording,
-    because the two differ and the victim is a name someone cannot attribute —
-    so the message names none.
+    `is_legacy_residue` on the journal-blind path. A flat list of graph-name
+    families cannot be exact here, because the two predicates differ and the
+    victim is a name someone cannot attribute — so the message names none.
 
     The ABSENCE properties below are pinned best-effort, and are labelled as
     such rather than as stronger properties than they are:
