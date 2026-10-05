@@ -286,7 +286,7 @@ enabled.
 | Key | Provider | Default model | Notes |
 |-----|----------|---------------|-------|
 | `OPENROUTER_API_KEY` | OpenRouter (aggregator) | `deepseek/deepseek-chat` | First in priority; one key → many model families |
-| `DEEPSEEK_API_KEY` | DeepSeek | `deepseek-chat` | Cheapest-tier default; matches the analyzer's historical default |
+| `DEEPSEEK_API_KEY` | DeepSeek | `deepseek-flash` | Cheapest-tier default, and the analyzer's model too (`analyze._LLM_PROVIDERS`). NOT `deepseek-chat`: that id is retired and the provider answers 200 while silently serving `deepseek-flash`, so naming it made the configured model differ from the model used (#4129) |
 | `OPENAI_API_KEY` | OpenAI | `gpt-4o-mini` | |
 | `GEMINI_API_KEY` | Google Gemini | `gemini-2.0-flash` | Also used by MCP tooling — its presence here does NOT alone prove session capture is enabled |
 | `TORTOISE_SESSION_LLM_MODEL` | — | per-provider default | Override, format `<provider>:<model>`; the provider must match the key that is set. **On the hosted deployment `deploy-hosted.yml` now sets this unconditionally** — from the GitHub secret if present, else the versioned default `openrouter:google/gemini-2.5-flash` — so hosted extraction requires `OPENROUTER_API_KEY` (or a GitHub secret overriding the model). It is deliberately NOT left optional: an absent GitHub secret used to leave the hand-set Fly value in place forever (#4126). Unset for self-hosters, where the per-provider default applies. |
@@ -301,7 +301,7 @@ provider/model and fails in hosted mode when the key is missing.
 
 ### Provider choice guidance
 
-- **Recommended default:** `DEEPSEEK_API_KEY` + default `deepseek-chat` —
+- **Recommended default:** `DEEPSEEK_API_KEY` + default `deepseek-flash` —
   cheapest viable tier, zero extra config.
 - **Aggregation / future model swaps:** `OPENROUTER_API_KEY` — one key covers
   many model families (`openrouter:deepseek/deepseek-chat`, …) with per-route
@@ -345,7 +345,7 @@ fail-closed upper bound.
 
 **Dollar cost:** depends on the provider's then-current pricing and the
 transcript length (5,000-char truncation per turn in `_session_llm_transcript`).
-All four default models are cheap-tier (`deepseek-chat`, `deepseek/deepseek-chat`,
+All four default models are cheap-tier (`deepseek-flash`, `deepseek/deepseek-chat`,
 `gpt-4o-mini`, `gemini-2.0-flash`). At free-tier volumes (10K write ops/month)
 per-capture cost is fractions of a cent — the quota gates above are the hard
 stop, not spend; monitor spend via the provider dashboard.

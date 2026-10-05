@@ -253,7 +253,7 @@ def _extract_entity(question: str, trigger: str) -> str:
 # issued it. (The old code used `OPENAI_API_KEY or DEEPSEEK_API_KEY` and always
 # POSTed to api.deepseek.com — the OpenAI key was exfiltrated to DeepSeek.)
 _LLM_PROVIDERS: dict[str, tuple[str, str]] = {
-    "DEEPSEEK_API_KEY": ("https://api.deepseek.com/v1/chat/completions", "deepseek-v4-flash"),
+    "DEEPSEEK_API_KEY": ("https://api.deepseek.com/v1/chat/completions", "deepseek-flash"),
     "OPENAI_API_KEY": ("https://api.openai.com/v1/chat/completions", "gpt-4o-mini"),
 }
 # Priority order when multiple keys are set (deepseek first — historical default).
