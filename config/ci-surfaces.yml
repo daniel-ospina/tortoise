@@ -39,9 +39,9 @@ carve_shards: 3
 # changes NO pack at the S we ship: measured on the committed `durations` map,
 # max(shard) is 625.4 s (10.42 min) at S=7, 547.3 s (9.12 min) at S=8 and
 # 486.5 s (8.11 min) at S=9, byte-identical before and after the split. What the
-# split buys is HEADROOM at larger S: the single-file floor bound from S=14
-# (310.7 s) and now binds only from S=25 (179.8 s), where max(shard) stops
-# falling (179.8 s at S=25 and S=26).
+# split buys is HEADROOM at larger S: the single-file floor bound from S=15
+# (310.7 s, where max(shard) stops falling before the split) and now binds only
+# from S=25 (179.8 s), where it again stops falling (S=25 and S=26).
 #
 # S STAYS AT 9 — UNCHANGED FROM main, DELIBERATELY. The merge rail's lane-parity
 # compares job-NAME SETS (tools/ci_selection.py; test_ci_selection.py asserts on
@@ -3314,7 +3314,7 @@ durations:
 on_demand:
   - eval/retrieval/test_integration.py
 
-# ── #6133: THE BOUND IS DECLARED SLEEP, NOT THE MEAN ──
+# ── #6133: DECLARED SLEEP IS NOT GATE COST, AND NOT THE FLOOR ──
 #
 # DECLARED sleep is not gate cost, and ranking by it produces a wrong floor.
 #    #6133 was filed on a census that summed the suite's literal `time.sleep`

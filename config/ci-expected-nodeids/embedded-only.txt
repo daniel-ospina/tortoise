@@ -36,11 +36,11 @@
 #
 # PROVENANCE (regenerate, never hand-edit): the 72 entries are the junitxml
 # <testcase> set of CI run 35518962357 (head fd23a4033), job
-# test-d14-hosted-api, artifact junit-d14.xml, PLUS the four
-# `test_onboarding_state_split_*` markers #6133 added — those postdate that run
-# and are the forward-looking replacements for the single
-# `test_onboarding_state_split.py` marker it carried. Drop the PLUS clause once a
-# d14 run has regenerated this file. Reconstructed with
+# test-d14-hosted-api, artifact junit-d14.xml, with its single
+# `test_onboarding_state_split.py` marker REPLACED BY the four
+# `test_onboarding_state_split_*` markers #6133 added (they postdate that run,
+# so 72 = the run's 69, minus that one marker, plus these four). Restore the
+# single marker once a d14 run has regenerated this file. Reconstructed with
 # tools/skip-guard.py's own `reconstruct_nodeid`, so the spelling cannot diverge
 # from what the guard compares against.
 # Regenerate by re-running the d14 job and extracting its junit, NOT with
