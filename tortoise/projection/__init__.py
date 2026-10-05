@@ -3958,8 +3958,8 @@ class FalkorProjection(
         # list here is wrong in one direction or the other, and nothing keeps
         # it in sync with the predicate that owns the rule. So the message
         # names no delete-authorizing residue family, promises no reclaim, and
-        # offers no pass — `_sweep_legacy_strays` has no default call site, so
-        # naming its env lever would be advice that frees nothing.
+        # offers no pass — `_sweep_legacy_strays` runs only when an operator
+        # invokes it, so naming its env lever would be advice that frees nothing.
         #
         # It also makes no claim about which graph commands the server refuses:
         # upstream's flag semantics are not what #2979's log line suggests (that

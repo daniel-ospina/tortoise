@@ -103,8 +103,9 @@ def test_write_refusal_remedy_names_the_safe_path_and_claims_no_flags(monkeypatc
     assert msg is not None
     # 1. The one executable lever.
     assert "raise / relieve the container's --maxmemory" in msg, msg
-    # 2. The residue-pass lever is NOT named: the pass has no default call site,
-    #    so naming its env lever would be advice that frees nothing.
+    # 2. The residue-pass lever is NOT named: that pass runs only when an
+    #    operator invokes it, so naming its env lever would be advice that frees
+    #    nothing.
     assert "TORTOISE_TEST_SWEEP_LEGACY" not in msg, msg
     # 3. The unsafe shortcut is refused, and the mechanism is still named.
     assert "GRAPH.DELETE" in msg, msg          # the pre-existing pin, kept
@@ -154,8 +155,8 @@ def test_write_refusal_remedy_does_not_hand_roll_the_ownership_policy(monkeypatc
     assert msg.count("*") == 1, msg
     assert "tortoise_restored*" in msg, msg
     # (b) DENYLIST of specific graph-name tokens the message must never carry,
-    #     plus the residue-pass lever (that pass has no default call site, so
-    #     naming it is advice that frees nothing). Not a guard against a
+    #     plus the residue-pass lever (that pass runs only when an operator
+    #     invokes it, so naming it is advice that frees nothing). Not a guard against a
     #     concrete name outside this list — see the docstring.
     for token in ("NEVER delete", "org_*", "team_*", "registry", "test_",
                   "v10fix", "tt_gate", "typeprobe", "review_rw_probe",
