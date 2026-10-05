@@ -10,9 +10,11 @@ product decision and is deliberately NOT touched):
      so the entire leg is one tie *by construction* — no dependence on the
      index leg's scores.
   2. **A non-finite fusion weight.** ``json.loads`` accepts bare ``NaN`` /
-     ``Infinity``, and a NaN weight makes EVERY fused score NaN. Tuple comparison
-     against NaN is False in BOTH directions, so the ``(-score, id)`` key that
-     #2952 introduced silently degraded to insertion order.
+     ``Infinity``. A NaN weight makes every fused score FROM THAT LEG NaN — a
+     candidate carried only by another leg keeps a finite score, but a NaN key
+     compares False against every key, so the ORDER damage is global. Tuple
+     comparison against NaN is False in BOTH directions, so the ``(-score, id)``
+     key that #2952 introduced silently degraded to insertion order.
 
 Every test below names (a) the value that makes it FAIL and (b) how the fixture
 reaches that value. Tests whose fixture could silently produce nothing carry an

@@ -1802,9 +1802,9 @@ def rrf_fusion(
             # established. An INFINITE weight is different: ``inf == inf`` is
             # True, so the order stays deterministic. A candidate carried only by
             # another leg keeps a finite score, so the SCORE damage is per-leg —
-            # but the ORDER damage is global, because a NaN key compares False
-            # against every other key and the finite candidate therefore lands at
-            # its insertion position too. ``json.loads`` accepts bare
+            # but the ORDER damage is global: a NaN key compares False against
+            # every other key, so no candidate can cross a NaN-keyed one and each
+            # leg's own order is preserved around it. ``json.loads`` accepts bare
             # ``NaN``/``Infinity``, so
             # TORTOISE_FUSION_WEIGHTS can carry one, and a kwarg caller can pass
             # one. Guarded at the ROOT so every entry point is covered, not just
