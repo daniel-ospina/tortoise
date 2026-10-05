@@ -204,15 +204,14 @@ class TestPersistLoad:
         idx = KindIndex.build(spec, persist=False)
         assert idx.degraded is True, "embedder down → degraded build"
         key = cache_key_for(spec)
-        with ki._INDEX_LOCK:
-            assert key in ki._INDEX_CACHE
-            assert ki._INDEX_CACHE[key].degraded is True
+        _memo = ki._INDEX_CACHE.get(key)
+        assert _memo is not None
+        assert _memo.degraded is True
         state["up"] = True
         assert KindIndex.load(spec) is None, \
             "a memoized degraded index is popped + treated as a miss"
-        with ki._INDEX_LOCK:
-            assert key not in ki._INDEX_CACHE, \
-                "the degraded entry must not survive the load"
+        assert ki._INDEX_CACHE.get(key) is None, \
+            "the degraded entry must not survive the load"
         good = KindIndex.build(spec, persist=True)
         assert good.degraded is False, "recovery rebuilds good"
 
@@ -339,3 +338,147 @@ class TestMemoizationAndLazy:
         _clear_kind_spec_cache()
         compile_kind_index_spec()
         assert calls["n"] > first, "clear hook must force a re-parse"
+
+
+class TestIndexMemoIsBoundedAndThreadSafe:
+    """#5339 review: the index memo is gate-keyed after #5163 (tenant-growable
+    key space), and the classifier must never raise — so the cap must evict,
+    and the evict-and-insert must be ATOMIC. The first cut's inline
+    ``if len(d) >= cap: d.pop(next(iter(d)))`` was a check-then-act that could
+    raise ``KeyError`` out of a never-raise path; nothing pinned it.
+    """
+
+    def test_memoize_index_evicts_the_lru(self, monkeypatch):
+        import tortoise.kind_index as ki
+        from tortoise._gate_memo import GateMemo
+
+        monkeypatch.setattr(ki, "_INDEX_CACHE", GateMemo(maxsize=2))
+        for k in ("a", "b"):
+            ki._memoize_index(k, object())
+        assert ki._INDEX_CACHE.get("a") is not None  # refresh a's recency
+        ki._memoize_index("c", object())
+        assert ki._INDEX_CACHE.get("b") is None, "the LRU entry must be evicted"
+        assert ki._INDEX_CACHE.get("a") is not None
+        assert ki._INDEX_CACHE.get("c") is not None
+        assert len(ki._INDEX_CACHE) == 2
+
+    def test_memoize_index_never_raises_under_concurrency(self, monkeypatch):
+        import threading
+
+        import tortoise.kind_index as ki
+        from tortoise._gate_memo import GateMemo
+
+        monkeypatch.setattr(ki, "_INDEX_CACHE", GateMemo(maxsize=4))
+        errors: list[str] = []
+
+        def worker(n: int) -> None:
+            for i in range(2000):
+                key = f"{n}-{i % 8}"
+                ki._memoize_index(key, object())
+                ki._INDEX_CACHE.get(key)
+
+        def guarded(n: int) -> None:
+            try:
+                worker(n)
+            except Exception as e:
+                errors.append(repr(e))
+
+        threads = [threading.Thread(target=guarded, args=(n,))
+                   for n in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert not errors, f"_memoize_index raised under concurrency: {errors[:3]}"
+        assert len(ki._INDEX_CACHE) <= 4
+
+    def test_concurrent_persist_same_key_never_raises(self, spec, tmp_path):
+        """A FIXED temp name made concurrent writers of the SAME key collide:
+        the loser's ``replace`` hit an already-renamed source and raised
+        ``FileNotFoundError`` out of ``build`` (measured when the memo-hit
+        persist lost ``_INDEX_LOCK``'s incidental serialization). Each writer
+        now gets its own O_EXCL uuid4 temp path (#5339 review)."""
+        import threading
+
+        idx = KindIndex.build(spec, encoder=StubEncoder(), persist=False)
+        errors: list[str] = []
+
+        def worker() -> None:
+            try:
+                for _ in range(10):
+                    idx.persist(cache_dir=tmp_path)
+            except Exception as e:
+                errors.append(repr(e))
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert not errors, f"persist raised under concurrency: {errors[:3]}"
+        written = tmp_path / f"{cache_key_for(spec)}.npz"
+        assert written.exists()
+        # No stray per-writer temps survive.
+        assert not list(tmp_path.glob(".*.tmp.npz"))
+
+    @pytest.mark.parametrize("umask,mode", [
+        (0o022, 0o644),
+        (0o077, 0o600),
+        (0o002, 0o664),
+    ])
+    def test_persist_mode_is_the_kernel_umask_default(self, spec, tmp_path,
+                                                      umask, mode):
+        """#5339 review: the temp is created via ``os.open(..., 0o666)`` so the
+        KERNEL applies the umask — the persisted index keeps the pre-#5339
+        ``np.savez`` mode (``0o666 & ~umask``) instead of mkstemp's forced
+        0600. The umask is never read on this path (an ``os.umask(0)`` dance
+        races across the capture pool or leaks umask 0 on an interrupt)."""
+        import os
+        import stat as _stat
+
+        idx = KindIndex.build(spec, encoder=StubEncoder(), persist=False)
+        path = tmp_path / f"{cache_key_for(spec)}.npz"
+        old_umask = os.umask(umask)
+        try:
+            idx.persist(cache_dir=tmp_path)
+        finally:
+            os.umask(old_umask)
+        assert _stat.S_IMODE(path.stat().st_mode) == mode
+
+    def test_persist_leaves_no_temp_when_the_save_raises(self, spec, tmp_path,
+                                                        monkeypatch):
+        """#5339 review: a raising save must leave no ``.tmp.npz`` behind and
+        must not create the destination."""
+        import numpy as np
+
+        idx = KindIndex.build(spec, encoder=StubEncoder(), persist=False)
+
+        def boom(*a, **k):
+            raise RuntimeError("save failed")
+
+        monkeypatch.setattr(np, "savez", boom)
+        with pytest.raises(RuntimeError):
+            idx.persist(cache_dir=tmp_path)
+        assert not list(tmp_path.glob(".*.tmp.npz")), "a stray temp leaked"
+        assert not (tmp_path / f"{cache_key_for(spec)}.npz").exists()
+
+    def test_persist_never_mutates_the_process_umask(self, spec, tmp_path,
+                                                    monkeypatch):
+        """#5339 review (P1): the umask is process-global, so an
+        ``os.umask(0)``/restore dance either races across the capture pool or
+        leaks umask 0 on an interrupt. ``persist()`` must derive the mode from
+        the kernel (``os.open(..., 0o666)``), never READ the umask — this pins
+        the deletion, which the mode assertions alone cannot (the old dance and
+        the kernel give the same modes)."""
+        import os
+
+        idx = KindIndex.build(spec, encoder=StubEncoder(), persist=False)
+        calls: list[object] = []
+
+        def recorder(mask=None):
+            calls.append(mask)
+            return 0o022
+
+        monkeypatch.setattr(os, "umask", recorder)
+        idx.persist(cache_dir=tmp_path)
+        assert calls == [], f"persist() mutated the process umask: {calls}"

@@ -71,6 +71,7 @@ from typing import Any
 
 from . import value_gate as _value_gate  # #4899: the S2.2b identifier-only predicate
 from . import vet_gate as _vet_gate  # #5005: S2.2 VET (stdlib-only module)
+from ._gate_memo import GateMemo
 from .env_truthy import is_truthy  # #4097: the declared truthy contract
 
 # ── The v2 master list (design doc §3) ─────────────────────────────────────
@@ -391,8 +392,15 @@ def _desc(brief: dict, key: str) -> str:
 
 _MASTER_LIST_CACHE: dict | None = None
 
+#: Sentinel for ``_build_master_from_brief(installed_namespaces=...)``:
+#: means "this master carries NO gate" — distinct from an explicit ``None``
+#: gate ("the graph has no :PackInstall records"). Both mean no gate today;
+#: keeping them distinct is what lets the default path stay ungated (#5163).
+_NO_GATE = object()
 
-def _build_master_from_brief(brief: dict) -> dict:
+
+def _build_master_from_brief(brief: dict,
+                             installed_namespaces: object = _NO_GATE) -> dict:
     """The master-list sections from a compiled value brief (#2031 refactor
     of the build_master_list loop body).
 
@@ -431,7 +439,7 @@ def _build_master_from_brief(brief: dict) -> dict:
             objects.setdefault(k, _desc(brief, k))
             continue
         pack_kinds[k] = _desc(brief, k)
-    return {
+    master = {
         "objects": objects,
         "subjects": dict(SUBJECTS),
         "points": dict(POINTS),
@@ -445,6 +453,22 @@ def _build_master_from_brief(brief: dict) -> dict:
         # it); rendered into S2/S4 prompt context only.
         "user_personal_state": dict(USER_PERSONAL_STATE),
     }
+    if installed_namespaces is not _NO_GATE:
+        # #5163 review (P2): carry the graph's AUTHORITATIVE installed set —
+        # resolved once by ``pack_state.graph_installed_namespaces`` — rather
+        # than letting the write gate re-infer it from ``pack_kinds``, which
+        # is LOSSY: a namespace declaring only kindDefs-less kinds contributes
+        # no ``pack_kinds`` key, so inferring from that section DROPS it and
+        # over-gates a kind the classifier's graph-gated index can still
+        # assign (FIX L synthesis). An allow-list is fail-CLOSED: absent ⇒
+        # denied, so "invisible here" can never be the safe direction.
+        #   absent key ⇒ no gate (the pre-#5163 union) — the default path;
+        #   explicit None ⇒ the graph has no :PackInstall records (#2714
+        #   indicator 3) — also no gate.
+        master["_installed_namespaces"] = (
+            None if installed_namespaces is None
+            else frozenset(installed_namespaces))
+    return master
 
 
 def build_master_list(sdk=None) -> dict:
@@ -484,7 +508,8 @@ def build_master_list(sdk=None) -> dict:
         return master
     from tortoise.pack_manifest_store import tenant_view
     view = tenant_view(sdk)
-    return _build_master_from_brief(view["brief"])
+    return _build_master_from_brief(
+        view["brief"], installed_namespaces=view["installed_namespaces"])
 
 
 def master_kind_forms(master: dict) -> set[str]:
@@ -648,13 +673,17 @@ def _value_gate_enabled() -> bool:
     return _value_gate.value_gate_enabled()
 
 
-def _default_kind_classifier(model):
+def _default_kind_classifier(model, installed_namespaces=None):
     """The default classify-later classifier (built lazily — index build is
     the first-use cost; the EmbeddingModel singleton is shared, never
     re-instantiated). The session's LLM adapter powers the adjudication
-    tail."""
+    tail.
+
+    ``installed_namespaces`` (#5163) is the graph's installed-pack gate
+    threaded into the kind index — ``None`` = no gate (the catalog union)."""
     from tortoise.kind_classifier import KindClassifier
-    return KindClassifier(model=model)
+    return KindClassifier(model=model,
+                          installed_namespaces=installed_namespaces)
 
 
 def _render_master(master: dict, story: str | None = None, *,
@@ -5594,9 +5623,48 @@ _POINT_FALLBACK = {"kind": "statement"}
 #: ones: the classifier can assign them via the kind index's "events"
 #: section (FIX L synthesis), so the write gate must accept them (FIX A
 #: candidate/write-gate alignment). Full + bare forms, case-folded.
-#: Derived once per process from the default packs (packs are static per
-#: process — mirrors the other vocab caches).
-_PACK_EVENT_FORMS: set[str] | None = None
+#: Derived from the default packs, but CACHED PER INSTALLED NAMESPACE SET —
+#: not once per process. #5163 review (P1): this used to be one unkeyed
+#: process global justified by "packs are static per process", which is
+#: exactly the premise #2714/#5163 invalidated — the S5 write gate admitted
+#: EVERY pack's declared kinds on EVERY graph, so a graph with only `dev:`
+#: installed could still mint `marketing:*`.
+#: Bounded + LRU + thread-safe via ``GateMemo`` (``tortoise/_gate_memo.py``) —
+#: the key space is tenant-growable and this gate must never raise (#5339).
+_PACK_EVENT_FORMS = GateMemo()
+
+
+def _installed_pack_ns(master: dict) -> frozenset[str] | None:
+    """The graph's AUTHORITATIVE installed namespaces, in ``"ns:"`` form.
+
+    ``None`` means **NO GATE** — the caller must fall back to the catalogue
+    union (the pre-#5163 behaviour). That is the meaning for every master that
+    carries no ``_installed_namespaces`` (the default/ungated path via
+    ``build_master_list()``) and for an explicit ``None`` (a graph with no
+    ``:PackInstall`` records — #2714 indicator 3).
+
+    The value is carried on the master by ``_build_master_from_brief`` from the
+    resolver's answer (``view["installed_namespaces"]``). It is deliberately
+    NOT re-inferred from ``pack_kinds``: that section is lossy, so a namespace
+    declaring only kindDefs-less kinds would be dropped and its kinds
+    over-gated — an allow-list filter denies what it cannot see.
+
+    NO case folding (#5339 review, P2): the gate is compared to the registry
+    namespace RAW, exactly as ``compile_value_brief``,
+    ``compile_kind_index_spec`` and ``commit_schema.compile_vocab`` compare
+    it. A former ``.lower()`` here made this gate WIDER than the other three
+    whenever the resolver returned a mixed-case namespace (reachable —
+    ``graph_kind_namespaces`` mines the prefix of an unvalidated ``objectKind``
+    verbatim), i.e. the S5 write/repair gate admitted a lowercase pack the
+    prompt and the door both excluded. Raw comparison is the fail-CLOSED
+    direction an allow-list must take: absent ⇒ denied.
+    """
+    if "_installed_namespaces" not in master:
+        return None
+    ns = master["_installed_namespaces"]
+    if ns is None:
+        return None
+    return frozenset(f"{str(n).rstrip(':')}:" for n in ns)
 
 
 def _event_kind_forms(master: dict) -> set[str]:
@@ -5604,13 +5672,14 @@ def _event_kind_forms(master: dict) -> set[str]:
     alignment): the master's event forms (core EVENTS + pack kindDefs —
     the entity-gate mirror, ``master_kind_forms``) PLUS the namespaced
     pack DECLARED event kinds (eventKinds — including kindDefs-less ones
-    the classifier can assign). Full + bare forms, case-folded. The gate
-    must never raise: a pack-registry failure degrades to the
-    master-forms-only set."""
-    global _PACK_EVENT_FORMS
+    the classifier can assign) **for the namespaces this graph installs**.
+    Full + bare forms, case-folded. The gate must never raise: a
+    pack-registry failure degrades to the master-forms-only set."""
     forms = master_kind_forms(master)
-    if _PACK_EVENT_FORMS is None:
-        _PACK_EVENT_FORMS = set()
+    gate = _installed_pack_ns(master)
+    pack_forms = _PACK_EVENT_FORMS.get(gate)
+    if pack_forms is None:
+        pack_forms = set()
         try:
             from tortoise.pack_registry import (
                 PackRegistry,
@@ -5620,23 +5689,27 @@ def _event_kind_forms(master: dict) -> set[str]:
             reg = PackRegistry(packs_dir)
             reg.load_all()
             for ns, pack in reg.packs.items():
+                if gate is not None and f"{ns}:" not in gate:
+                    continue
                 for k in (pack.event_kinds or []):
-                    _PACK_EVENT_FORMS.add(f"{ns}:{k}".lower())
-                    _PACK_EVENT_FORMS.add(k.lower())
+                    pack_forms.add(f"{ns}:{k}".lower())
+                    pack_forms.add(k.lower())
         except Exception:  # noqa: BLE001, RUF100 — never let the write
             # gate raise (fail-open to the master-forms-only gate)
-            _PACK_EVENT_FORMS = set()
-    return forms | _PACK_EVENT_FORMS
+            pack_forms = set()
+        pack_forms = _PACK_EVENT_FORMS.put_if_absent(gate, pack_forms)
+    return forms | pack_forms
 
 
 #: The pack-DECLARED object/document kinds (objectKinds + documentKinds) —
 #: including the kindDefs-less ones: the classifier can assign them via the
 #: kind index's "objects" section (FIX L synthesis), so the entity write
 #: gate must accept them (FIX M candidate/write-gate alignment — the events
-#: lane's FIX A mirror). Full + bare forms, case-folded. Derived once per
-#: process from the default packs (packs are static per process — mirrors
-#: _PACK_EVENT_FORMS).
-_PACK_OBJECT_FORMS: set[str] | None = None
+#: lane's FIX A mirror). Full + bare forms, case-folded. Cached per INSTALLED
+#: namespace set, never once per process (see ``_PACK_EVENT_FORMS`` — the
+#: same #5163 review P1: an unkeyed global admitted every pack on every graph).
+#: Bounded + LRU + thread-safe via ``GateMemo`` (``tortoise/_gate_memo.py``).
+_PACK_OBJECT_FORMS = GateMemo()
 
 
 def _object_kind_forms(master: dict) -> set[str]:
@@ -5645,13 +5718,15 @@ def _object_kind_forms(master: dict) -> set[str]:
     (``master_kind_forms``) PLUS the namespaced pack DECLARED object and
     document kinds (objectKinds + documentKinds — including kindDefs-less
     ones the classifier can assign, e.g. dev:apiSpec, pm:milestone,
-    marketing:keyword). Full + bare forms, case-folded. The gate must never
-    raise: a pack-registry failure degrades to the master-forms-only set
-    (mirrors _event_kind_forms)."""
-    global _PACK_OBJECT_FORMS
+    marketing:keyword) **for the namespaces this graph installs**. Full +
+    bare forms, case-folded. The gate must never raise: a pack-registry
+    failure degrades to the master-forms-only set (mirrors
+    _event_kind_forms)."""
     forms = master_kind_forms(master)
-    if _PACK_OBJECT_FORMS is None:
-        _PACK_OBJECT_FORMS = set()
+    gate = _installed_pack_ns(master)
+    pack_forms = _PACK_OBJECT_FORMS.get(gate)
+    if pack_forms is None:
+        pack_forms = set()
         try:
             from tortoise.pack_registry import (
                 PackRegistry,
@@ -5661,14 +5736,17 @@ def _object_kind_forms(master: dict) -> set[str]:
             reg = PackRegistry(packs_dir)
             reg.load_all()
             for ns, pack in reg.packs.items():
+                if gate is not None and f"{ns}:" not in gate:
+                    continue
                 for k in (pack.object_kinds or []) + \
                         (pack.document_kinds or []):
-                    _PACK_OBJECT_FORMS.add(f"{ns}:{k}".lower())
-                    _PACK_OBJECT_FORMS.add(k.lower())
+                    pack_forms.add(f"{ns}:{k}".lower())
+                    pack_forms.add(k.lower())
         except Exception:  # noqa: BLE001, RUF100 — never let the write
             # gate raise (fail-open to the master-forms-only gate)
-            _PACK_OBJECT_FORMS = set()
-    return forms | _PACK_OBJECT_FORMS
+            pack_forms = set()
+        pack_forms = _PACK_OBJECT_FORMS.put_if_absent(gate, pack_forms)
+    return forms | pack_forms
 
 
 def _canonicalize_nand_direction(src: str, dst: str, turns: dict) -> \
@@ -6879,7 +6957,26 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     classify_later = kind_classifier is not None or _classify_later_enabled()
     if classify_later and kind_classifier is None:
         try:
-            kind_classifier = _default_kind_classifier(model)
+            # #5163: gate the classifier's kind index on the graph's
+            # installed pack set — the SAME resolver the prompt's
+            # tenant_view uses, so the classifier can never assign a kind
+            # the L1 write gate will 422. ``sdk=None`` (offline callers) =
+            # no gate (the union). A bound-but-unreachable graph RAISES
+            # here and the except below sets ``classify_later = False``:
+            # the GATED classifier pass does not run and the session
+            # continues down the legacy path, whose master is the ungated
+            # catalog union — fail-OPEN onto the wider vocabulary, with the
+            # error recorded (the except's own note says fail-open).
+            # #5339 review: this sentence used to call that fail-closed,
+            # which its own except contradicts; the SDK entry points that
+            # need the fail-closed direction (``_commit_session_v1``/
+            # ``_commit_session_v2``) guard the resolver themselves.
+            installed = None
+            if sdk is not None:
+                from tortoise.pack_state import graph_installed_namespaces
+                installed = graph_installed_namespaces(sdk)
+            kind_classifier = _default_kind_classifier(
+                model, installed_namespaces=installed)
         except Exception as e:  # noqa: BLE001, RUF100 — never let the
             # classifier construction block capture (fail-open: legacy path)
             classify_later = False
