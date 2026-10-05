@@ -2420,14 +2420,16 @@ durations:
 # the full-matrix push halves; duration_coverage_issues() floors coverage at 90%.
 # A weight is a measured CI value wherever one exists: the sweep takes the CI junit
 # wall time of the leg that CARRIES the file, not a local timing, because the CI wall
-# is what the split must model. Four exceptions are named below — the pinned equality
+# is what the split must model. The exceptions are named below: the pinned equality
 # (borrowed from a measured sibling), the row retained from main (a local embedded-lane
 # timing from #4602, kept deliberately), any row marked `# unmeasured` (a file no leg
 # of this sweep's four source runs collected; see the RETAINED paragraph), and a NEW
 # file's first weight taken from a local timing before any sweep has collected it
 # (`test_venture_pack.py`, #3419). The fourth is recorded rather than defaulted on
 # purpose: a `# unmeasured` placeholder moves the coverage ratio while leaving the
-# split blind to the file, which is the rot #3400 exists to catch.
+# split blind to the file, which is the rot #3400 exists to catch. This is a list of
+# CATEGORIES, not of every such row: further local-timing rows predate this note
+# (search `locally measured`), and refreshing them all is #5215's job.
 #
 # ONE row borrows its value: test_mcp_rename_table.py is held equal to
 # test_bridge_table.py's measurement because

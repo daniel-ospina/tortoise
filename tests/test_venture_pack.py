@@ -234,9 +234,10 @@ class TestVentureManifest:
 
     def test_extraction_config_is_declared(self, venture):
         assert venture.extraction["active"] is True
-        # Empty = active for every source type. The meeting source kinds are not
-        # in the pack validator's allowlist until #2726 (PR #2747) lands, and a
-        # pack that declares an unregistered source type is dropped.
+        # Empty = active for every source type. The meeting source kinds ARE in
+        # the validator now (#2726 landed 2026-09-24 in 2d7af8bfc), so leaving
+        # sourceTypes empty is a choice rather than a constraint — a pack that
+        # declares an unregistered source type is still dropped.
         assert venture.extraction["sourceTypes"] == []
         assert venture.is_active_for("conversation") is True
         # Exactly two kinds carry a bounded classifier retry — the two the
@@ -544,7 +545,7 @@ class TestPackFitLayers:
         assert "venture:tranche" in compile_kind_index_spec()
 
         # The gate compares BARE namespaces (`ns not in _gate`,
-        # tortoise/value_extractor.py:325) — never `"ns:"`. A `"dev:"` literal
+        # tortoise/value_extractor.py:328) — never `"ns:"`. A `"dev:"` literal
         # therefore drops EVERY catalog pack, and a one-directional assertion
         # would pass for that wrong reason; measured, it leaves only
         # `core`/`statement`. So assert both directions: the excluded pack's kinds
@@ -554,8 +555,13 @@ class TestPackFitLayers:
         gated = compile_kind_index_spec(installed_namespaces=starters)
         assert not [k for k in gated if str(k).startswith("venture:")], (
             "venture kinds survived an approval set that excludes the pack")
-        assert [k for k in gated if str(k).startswith("dev:")], (
-            "the gate over-narrowed — an approved pack's kinds went missing")
+        # All five, not just one: a gate that over-narrows to a single pack while
+        # dropping the other four is invisible to a `dev`-only check (measured —
+        # mutating the gate to `ns != "dev"` leaves such an assertion green).
+        kept = {str(k).split(":")[0] for k in gated if ":" in str(k)}
+        assert starters <= kept, (
+            f"the gate over-narrowed — an approved pack's kinds went missing: "
+            f"{sorted(starters - kept)}")
 
     def test_no_per_document_domain_detection(self):
         """Requirement: per-document 'domain detection' is parked. Classification
