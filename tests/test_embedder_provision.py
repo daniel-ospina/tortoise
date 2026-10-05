@@ -555,21 +555,49 @@ def test_a_cancelled_step_dumps_every_thread_stack(tmp_path):
     What this test actually pins is the narrower, still-real contract: a
     DELIVERED signal produces a dump carrying real frames. The native-blocked
     case, the one that discriminates, is the watchdog test below.
+
+    Termination is asserted for SIGTERM only. `chain=True` chains to whatever
+    disposition the process INHERITED, and SIGINT is commonly inherited as
+    SIG_IGN (a backgrounded job from a non-interactive shell, `trap '' INT`, a
+    `nohup`-style harness) — the chain preserves the ignore, the process dumps
+    and then SURVIVES, and a `communicate(timeout=...)` here raised
+    TimeoutExpired and reddened the suite after a 60s stall. That is the module's
+    own documented contract for SIGINT, so requiring an exit was the test
+    contradicting the implementation (P1, seventh review). The dump is read from
+    the raw fd with a deadline instead, and the process is killed.
     """
     for sig in (signal.SIGTERM, signal.SIGINT):
         proc = _run_until_hang(tmp_path, _HANGS_FOREVER, "FAKE_HANG_ENTERED")
         try:
             proc.send_signal(sig)
-            _out, err = proc.communicate(timeout=60)
+            seen, deadline = b"", time.monotonic() + 30
+            fd = proc.stderr.fileno()
+            while time.monotonic() < deadline and b"sentence_transformers" not in seen:
+                ready, _, _ = select.select([fd], [], [], 5)
+                if not ready:
+                    continue
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                seen += chunk
+            # faulthandler writes its own header; the fake's frame must be in
+            # the body or the dump is not the one we think it is.
+            assert b"Current thread" in seen, (
+                f"no faulthandler dump on {sig!r}:\n" + seen.decode(errors="replace")
+            )
+            assert b"sentence_transformers" in seen, (
+                "dump had no useful frames:\n" + seen.decode(errors="replace")
+            )
+            if sig is signal.SIGTERM:
+                # SIGTERM chains to SIG_DFL, which inheritance cannot change.
+                # WAIT, do not poll: the dump is written from inside the C signal
+                # trampoline, so the exit has not completed at the moment the
+                # last frame lands in the pipe.
+                assert proc.wait(timeout=30) != 0, "SIGTERM must terminate the process"
         finally:
             if proc.poll() is None:
                 proc.kill()
                 proc.communicate()
-        # faulthandler writes its own header; the fake's frame must be in the body
-        # or the dump is not the one we think it is.
-        assert "Current thread" in err, f"no faulthandler dump on {sig!r}:\n{err}"
-        assert "sentence_transformers" in err, f"dump had no useful frames:\n{err}"
-        assert proc.returncode != 0, f"{sig!r}: expected a non-zero exit, got 0"
 
 
 def test_the_watchdog_dumps_a_native_blocked_thread(tmp_path):
@@ -600,12 +628,13 @@ def test_the_watchdog_dumps_a_native_blocked_thread(tmp_path):
         {"TORTOISE_EMBEDDER_WATCHDOG_S": "1"},
     )
     try:
-        # Read the RAW fd, not `proc.stderr`. That stream is `text=True`, so the
-        # first `read()` drains the whole dump into the TextIOWrapper's
-        # userspace buffer and the fd goes empty — `select` then never reports
-        # ready again, the loop spins to its deadline, and the suite goes red
-        # (P1, sixth review: 1 failed / 21 passed). `os.read` on the fileno sees
-        # the bytes the buffer already swallowed.
+        # Read the RAW fd, not `proc.stderr`. This reader must NEVER use
+        # `proc.stderr.read()`/`.readline()`: those drain bytes into the
+        # TextIOWrapper's userspace buffer, after which `select` reports the fd
+        # empty forever and the loop spins to its deadline (P1, sixth review: 1
+        # failed / 21 passed). `os.read` bypasses the wrapper entirely — it does
+        # NOT see bytes the wrapper already swallowed, which is precisely why
+        # nothing here may hand any to it.
         fd = proc.stderr.fileno()
         seen = b""
         deadline = time.monotonic() + 60
@@ -621,8 +650,13 @@ def test_the_watchdog_dumps_a_native_blocked_thread(tmp_path):
             # the helper thread carries the fake module alone. Asserting on
             # "sentence_transformers" alone was satisfied by the HELPER's frame,
             # so a green run did not prove the blocked main thread was captured.
-            if b"embedder_provision.py" in seen:
+            # `Thread 0x` anchors it to a faulthandler dump, so an ordinary
+            # traceback mentioning the script path cannot satisfy it either.
+            if b"embedder_provision.py" in seen and b"Thread 0x" in seen:
                 break
+        assert b"Thread 0x" in seen, (
+            "no faulthandler dump:\n" + seen.decode(errors="replace")
+        )
         assert b"embedder_provision.py" in seen, (
             "no dump of the MAIN thread:\n" + seen.decode(errors="replace")
         )

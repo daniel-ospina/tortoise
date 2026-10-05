@@ -193,8 +193,8 @@ def _install_termination_stack_dump() -> None:
             faulthandler.register(_sig, all_threads=True, chain=True)
     with contextlib.suppress(ValueError, RuntimeError, OSError, OverflowError):
         # exit=False, DELIBERATELY. The watchdog fires whenever provisioning is
-        # slow, and the cited run proves "slow" is not "stuck": its load alone
-        # took 336s against a 360s cap, so an `exit=True` watchdog at 330s would
+        # slow, and the cited run proves "slow" is not "stuck": 336s elapsed
+        # before its first output, against a 360s cap, so an `exit=True` watchdog at 330s would
         # have killed — ~8s before the load completed — exactly the run
         # `os._exit` saves. A diagnostic that can turn a working run red is a
         # new failure mode, and this one has no need to be one: with `exit=False`
