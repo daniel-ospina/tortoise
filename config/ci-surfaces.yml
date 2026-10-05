@@ -1284,8 +1284,11 @@ surfaces:
   - test_embeddings_filters.py
   # #2725: a `packs/` diff selects `core`, but the enforcement drift pin that
   # enumerates index-reachable retry kinds lives in this file. Without dual
-  # registration a pack that declares a new per-kind retry passes its own PR's
-  # CI and reds main after merge (it did: venture:asset/venture:condition).
+  # registration a pack that declares a new per-kind retry would pass its own
+  # PR's CI and could red main after merge, because the pin never ran on the
+  # diff that introduced the kind. The RISK is the reason for the registration;
+  # no such red has been observed on main (main has never carried the venture
+  # pack).
   # Same rationale and pattern as test_boot_regressions.py above.
   - test_enforcement.py
   - test_entity_delete_rebuild.py   # #3299 journaled delete → rebuild_all survivor rule (last_recreate_seq)
@@ -2675,6 +2678,7 @@ durations:
   test_session_key_http.py: 5.5
   test_write_consolidation.py: 5.3
   test_value_extractor.py: 6.5
+  test_venture_pack.py: 67.2  # local (2026-10-05, this box), NOT this sweep's CI junit — new in #3419, so no source run collected it; the sweeper should replace this from the run's junit. Recorded rather than defaulted because the guard exists to stop the split being count-based (#3400), and a real weight serves that while an unmeasured default only moves the ratio.
   test_pack_state.py: 5.1
   test_skip_guard.py: 16.0
   test_admin_return_to.py: 1.2

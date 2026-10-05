@@ -829,7 +829,7 @@ def _render_master_verbose(master: dict, rng=None) -> str:
     lines.append(_group("SUBJECTS (core)", master["subjects"], shuffle=True))
     lines.append(_group("POINTS", master["points"], shuffle=True))
     lines.append(_group("EVENTS", master["events"], shuffle=True))
-    lines.append(_group("PACK KINDS (from the shipped packs)",
+    lines.append(_group("PACK KINDS (from the pack manifests)",
                         master["pack_kinds"], shuffle=True))
 
     lines.append("\nCHAINS (the business logic of mapping)")

@@ -24,8 +24,13 @@ What this file pins:
    and is named as such rather than pretending to be pack-specific.
 4. **The two orthogonal pack-fit layers** — per-graph pack APPROVAL
    (`:PackInstall`) and per-item kind CLASSIFICATION (the kind index and the
-   extraction master list) are separate mechanisms. Approval does not gate
-   classification today, and classification does not consult approval records.
+   extraction master list) — are separate MECHANISMS: approval is a graph-scoped
+   record, classification is a kind index. They are no longer UNCOUPLED, though:
+   the caller resolves the graph's approval set and passes it to the compile as
+   `installed_namespaces` (#5163), so approval narrows classification wherever a
+   gate is resolved — and where none is (no `:PackInstall` records, or the
+   `sdk=None` path), the catalog union stands. Classification still never reads
+   `:PackInstall` records itself; the caller owns that lookup.
    Per-document domain detection is parked and asserted absent.
 """
 from __future__ import annotations
@@ -468,8 +473,9 @@ class TestPackFitLayers:
     Layer (b) CLASSIFICATION: which approved kind an item gets — per item.
 
     The two must not be conflated: approval is graph-scoped and lives in
-    `:PackInstall`; classification is a catalog-scoped kind index. Per-document
-    domain detection (a third mechanism) is parked and asserted absent.
+    `:PackInstall`; classification is a kind index that is catalog-scoped until a
+    resolved approval set narrows it (#5163). Per-document domain detection (a
+    third mechanism) is parked and asserted absent.
     """
 
     def test_classification_index_is_catalog_scoped(self, registry):
@@ -481,12 +487,23 @@ class TestPackFitLayers:
         assert not missing, f"classifier cannot see: {missing}"
         assert spec["venture:tranche"]["section"] == "objects"
 
-    def test_classification_does_not_take_a_graph_or_approval_input(self):
-        """Structural proof that classification is not derived from per-graph
-        approval: the compile entry point takes no sdk/graph argument."""
+    def test_classification_takes_a_resolved_set_not_a_graph(self):
+        """Classification takes the approval set as a RESOLVED collection.
+
+        This replaces an assertion that the compile takes no approval input at
+        all, which #5163 made false: `installed_namespaces` IS the approval
+        input. The surviving structural claim is the one that still matters —
+        the compile is handed a plain collection of namespaces, never an sdk or
+        a graph object, so the `:PackInstall` lookup stays with the caller and
+        the compile stays a pure function of its inputs.
+        """
         import inspect
         params = set(inspect.signature(compile_kind_index_spec).parameters)
-        assert not (params & {"sdk", "graph", "graph_name", "namespace", "team"})
+        assert "installed_namespaces" in params, (
+            "the approval input must be nameable — a caller cannot gate what it "
+            "cannot pass")
+        assert not (params & {"sdk", "graph", "graph_name", "namespace", "team"}), (
+            "the compile must not do the :PackInstall lookup itself")
 
     @requires_db
     def test_approval_is_per_graph(self, tmp_path, force_sparse_tfidf):
@@ -504,30 +521,41 @@ class TestPackFitLayers:
             a.close()
             b.close()
 
-    @requires_db
-    def test_classification_is_not_gated_by_this_graphs_approval(
-            self, sdk, force_sparse_tfidf):
-        """The two layers stated as the coupling that ACTUALLY exists today.
+    def test_a_resolved_approval_set_gates_the_index(self):
+        """The flip this file was written to announce (#5163) — the DB-free arm.
 
-        Approval is per-graph (`:PackInstall`); classification is catalog-scoped.
-        A graph that never approved the venture pack therefore still classifies
-        and accepts its kinds — this is the interim behaviour of #2714/#2728,
-        pinned deliberately instead of left incidental. When per-graph approval
-        starts gating classification, this assertion MUST flip — which is the
-        point: the change becomes visible here rather than silently altering
-        behaviour. (An earlier version of this test asserted that installing the
-        pack leaves the index unchanged; that cannot fail, since the compile
-        takes no graph input at all.)
+        An earlier version asserted the OPPOSITE — that the venture kinds stay
+        visible regardless of approval — and stated that "when per-graph approval
+        starts gating classification, this assertion MUST flip". #5163 is that
+        change, so this is the flip.
+
+        Deliberately NOT behind `@requires_db`: the assertion is about the compile
+        and its approval input, needs no graph, and a skipped test asserts
+        nothing. The write gate (S5) is not asserted here — `create_object` reads
+        no gate, so an assertion on it would prove nothing; that gate is covered
+        by `tests/test_vocab_gating_callers_5163.py`.
+        """
+        assert "venture:tranche" in compile_kind_index_spec()
+
+        starters = frozenset({"dev:", "marketing:", "product-strategy:",
+                              "pm:", "agent-ops:"})
+        gated = compile_kind_index_spec(installed_namespaces=starters)
+        assert not [k for k in gated if str(k).startswith("venture:")], (
+            "venture kinds survived an approval set that excludes the pack")
+
+    @requires_db
+    def test_a_graph_with_no_install_records_resolves_no_gate(
+            self, sdk, force_sparse_tfidf):
+        """The other arm of the same rule: no `:PackInstall` records => no gate.
+
+        A graph that has approved nothing resolves no approval set, so the
+        catalog union stands and its kinds remain classifiable (#2714 indicator
+        3). Pairing this with the DB-free gate test above is the point — the two
+        arms are one rule, not a contradiction.
         """
         installs = [p["namespace"] for p in get_tenant_packs(sdk)]
         assert "venture" not in installs, installs
-
         assert "venture:tranche" in compile_kind_index_spec()
-
-        # …and the write path accepts the kind with no approval on this graph.
-        node = sdk.create_object("Tranche T1", objectKind="venture:tranche",
-                                 status="pending")
-        assert node["objectKind"] == "venture:tranche"
 
     def test_no_per_document_domain_detection(self):
         """Requirement: per-document 'domain detection' is parked. Classification
