@@ -593,7 +593,7 @@ jobs:
         # no error raised) that would otherwise stall the step for the full job cap.
         timeout-minutes: 6
         run: |
-          python3 tools/embedder_provision.py --attempts 3 --backoff 5
+          exec python3 tools/embedder_provision.py --attempts 3 --backoff 5
       - name: Provision FalkorDB services on ephemeral host ports (#6673)
         # #6673: replaced this job's `services:` block. The assigned ports land
         # in $TORTOISE_TEST_DOCKER_PORT / $TORTOISE_TEST_LEGACY_PORT, which
@@ -1353,7 +1353,7 @@ jobs:
         # job cap; a timeout now FAILS the step, which is the honest outcome.
         timeout-minutes: 10
         run: |
-          python3 tools/embedder_provision.py --attempts 5 --backoff 10
+          exec python3 tools/embedder_provision.py --attempts 5 --backoff 10
       - name: Drift guard — legs cover slow_files minus carve-out (#1471)
         # #1471: the committed leg lists MUST stay the full slow-file set — a
         # new slow file added to config/ci-surfaces.yml `slow_files:` that
@@ -1707,7 +1707,7 @@ jobs:
         # now fails the step outright.
         timeout-minutes: 10
         run: |
-          python3 tools/embedder_provision.py --attempts 5 --backoff 10
+          exec python3 tools/embedder_provision.py --attempts 5 --backoff 10
       - name: Provision FalkorDB services on ephemeral host ports (#6673)
         # #6673: replaced this job's `services:` block. `uri_graph` is set here
         # because this job's TORTOISE_DB_URI used to be the fixed-port literal
@@ -2066,7 +2066,7 @@ jobs:
         # tighter `--attempts 3 --backoff 5` budget under a 6-minute cap.
         timeout-minutes: 10
         run: |
-          python3 tools/embedder_provision.py --attempts 5 --backoff 10
+          exec python3 tools/embedder_provision.py --attempts 5 --backoff 10
       - name: Generate coverage manifest (carve-out — expected nodeids, epic #1647 Task 9)
         run: |
           FILES=""

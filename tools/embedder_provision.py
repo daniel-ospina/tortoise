@@ -100,28 +100,54 @@ def _install_termination_stack_dump() -> None:
     The step normally takes ~9s. On the observed failure it printed its success
     marker and THEN sat until the step's 6-minute timeout — so the bounding
     question is "what is the process doing during that time", and the existing
-    log cannot answer it (the last line is a success). GitHub cancels a timed-out
-    step with SIGTERM before SIGKILL, so a handler here turns the NEXT occurrence
-    into its own diagnosis: it prints all thread stacks and exits non-zero.
+    log cannot answer it (the last line is a success).
 
-    Without this, the only fact a timeout yields is that the step was slow.
+    TWO details decide whether this diagnostic can fire at all, and both were
+    got wrong on the first attempt (P1, review of #7364):
+
+    1. **The runner signals the SHELL, not this process.** `actions/runner`
+       passes `killProcessOnCancel: false`, so on cancel it sends SIGINT to the
+       step's direct child first (7500ms), then SIGTERM (2500ms), then SIGKILL —
+       and `SendSignal` is `kill(_proc.Id, sig)` against that child. For a
+       `run:` block that child is bash, and bash FORKS a simple command rather
+       than exec'ing it, so Python is a grandchild and receives no signal. The
+       workflow invocations therefore use `exec`, which replaces bash with this
+       process and puts Python on the receiving end.
+    2. **SIGINT arrives first.** Handling only SIGTERM would leave the earlier
+       SIGINT to Python's default `KeyboardInterrupt` (uncaught — the bare
+       `except Exception` guards above do not catch `BaseException`), killing
+       the process before any dump. Both are handled here.
+
+    The banner uses `os.write`, not `sys.stderr.write`: a handler that blocks on
+    the stderr lock because another thread holds it produces no dump at all,
+    which is the failure mode of the diagnostic itself.
+
+    KNOWN LIMIT: `all_threads=True` lists PYTHON threads only. torch's thread
+    pool and OpenMP workers are native threads and do not appear, and 3.12 has
+    no `dump_c_stack` (3.14+). The dump will show the waiting Python frame, not
+    the native join — an empty-looking dump must not be read as "nothing was
+    running".
     """
     def _dump(signum, _frame):
         try:
-            sys.stderr.write(
+            os.write(
+                2,
                 f"\n::warning::embedder_provision got signal {signum} — dumping all "
-                "thread stacks (#7359; the step was cancelled)\n"
+                "thread stacks (#7359; the step was cancelled)\n".encode(),
             )
-            sys.stderr.flush()
             faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
-            sys.stderr.flush()
         except Exception:  # a diagnostic must never mask the cancellation
             pass
-        os._exit(124)  # 124 = the conventional timeout exit status
+        # 124 rather than the default SIGTERM status 143: both read as a cancel
+        # to the runner, but 124 is the conventional "timed out" code.
+        os._exit(124)
 
-    # non-main thread or unsupported platform — the step still runs
+    # A non-main thread or an unsupported platform means no handler — the step
+    # still runs and still provisions; only the diagnostic is lost.
     with contextlib.suppress(ValueError, OSError):
         signal.signal(signal.SIGTERM, _dump)
+    with contextlib.suppress(ValueError, OSError):
+        signal.signal(signal.SIGINT, _dump)
 
 
 def _annotation(level: str, message: str) -> None:
@@ -220,6 +246,15 @@ def main(argv: list[str] | None = None) -> int:
 
     ok, detail = provision(attempts=max(1, args.attempts), backoff=max(0.0, args.backoff))
     if ok:
+        # Emitted from CONTROL FLOW, not from a `sys.argv` scan. The first
+        # attempt gated this in __main__ on `{"--print-model", "--print-revision"}
+        # & set(sys.argv[1:])`, which argparse's default `allow_abbrev=True`
+        # defeats: `--print-m` is a valid, unambiguous spelling that returns the
+        # pin early, yet matched no string in that set — so the marker
+        # contaminated machine-read output the lockstep check parses (P1, review
+        # of #7364). Returning from here cannot be abbreviation-bypassed, and it
+        # is also success-only, so `grep` for it never reads a failure as done.
+        print(DONE_MARKER, flush=True)
         return 0
 
     detail = _one_line(detail)
@@ -264,14 +299,6 @@ def main(argv: list[str] | None = None) -> int:
 # log's `cached, no download needed` rules out).
 if __name__ == "__main__":
     _rc = main()
-    # --print-model / --print-revision are MACHINE-READ pins consumed by the
-    # workflow-side lockstep check, so their stdout stays byte-exact; the marker
-    # belongs only to the provisioning path (which is the one that can hang).
-    if not {"--print-model", "--print-revision"} & set(sys.argv[1:]):
-        # The marker is the diagnostic: if a future log shows it and the step
-        # STILL hangs, the stall is outside this interpreter, and the SIGTERM
-        # stack dump installed above is what will say where.
-        print(DONE_MARKER, flush=True)
     try:
         sys.stdout.flush()
         sys.stderr.flush()

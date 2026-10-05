@@ -380,7 +380,7 @@ jobs:
         # no error raised) that would otherwise stall the step for the job cap.
         timeout-minutes: 6
         run: |
-          python3 tools/embedder_provision.py --attempts 3 --backoff 5
+          exec python3 tools/embedder_provision.py --attempts 3 --backoff 5
       - name: Generate coverage manifest (expected nodeids, epic #1647 Task 10 Step 1a)
         # The pmv run's collect-only expected set, generated in its OWN step
         # (off the pytest step's 50m watchdog). Task 10 Step 1a (cycle-2

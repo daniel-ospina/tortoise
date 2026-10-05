@@ -292,8 +292,12 @@ def _all_gate_steps(name: str) -> list[tuple[str, dict]]:
 # The exact provisioning invocation. Pinning the whole command (rather than
 # checking a few tokens) is what closes the zero-exit escapes: `--help`/`-h`
 # exit 0 via argparse, and an expansion can hide a flag from `shlex.split`.
+# `exec` is part of the pin (#7359): actions/runner sends the cancel signal to
+# the step's DIRECT CHILD with `killProcessOnCancel: false`, so without `exec`
+# bash stays in the middle, Python is a grandchild, and no signal — and therefore
+# no stack dump — ever reaches the script.
 _GATE_COMMAND_RE = re.compile(
-    r"^python3 tools/embedder_provision\.py --attempts \d+ --backoff \d+$"
+    r"^exec python3 tools/embedder_provision\.py --attempts \d+ --backoff \d+$"
 )
 
 
@@ -495,58 +499,127 @@ def test_a_cancelled_step_dumps_every_thread_stack(tmp_path):
 
     Measured: run 37239542471 spent 6.27m in this step against 0.13m on main,
     and its log ENDS with the success marker — so the one fact needed is *what
-    the process was doing*, and a plain log cannot yield it. GitHub cancels a
-    timed-out step with SIGTERM before SIGKILL, so the script must convert that
-    into an all-thread stack dump.
+    the process was doing*, and a plain log cannot yield it.
 
-    Load-bearing: delete the SIGTERM handler and this fails on `dumping all`
-    (the process dies on the default disposition, the step log is unchanged,
-    and the next occurrence is as uninformative as this one was).
+    SCOPE, stated because the first version of this test overclaimed: it proves
+    the handler works when a signal is DELIVERED TO THIS PROCESS. That is
+    necessary but not sufficient for CI — `actions/runner` sends the cancel
+    signal to the step's direct child, which for a `run:` block is bash, so the
+    workflow invocations carry `exec` (pinned in `_GATE_COMMAND_RE`) to put this
+    process on the receiving end. Both halves are needed; neither test covers
+    the other.
+
+    Load-bearing: delete the handler and this fails on `dumping all` (the
+    process dies on the default disposition, the log is unchanged, and the next
+    occurrence is as uninformative as this one was).
     """
-    fake = tmp_path / "fake"
-    fake.mkdir(parents=True, exist_ok=True)
-    (fake / "sentence_transformers.py").write_text(_HANGS_FOREVER, encoding="utf-8")
-    env = _base_env(tmp_path)
-    env["PYTHONPATH"] = str(fake) + os.pathsep + env.get("PYTHONPATH", "")
+    for sig, expected_status in ((signal.SIGTERM, 124), (signal.SIGINT, 124)):
+        fake = tmp_path / f"fake-{sig}"
+        fake.mkdir(parents=True, exist_ok=True)
+        (fake / "sentence_transformers.py").write_text(_HANGS_FOREVER, encoding="utf-8")
+        env = _base_env(tmp_path)
+        env["PYTHONPATH"] = str(fake) + os.pathsep + env.get("PYTHONPATH", "")
 
-    proc = subprocess.Popen(
-        [sys.executable, str(_SCRIPT), "--attempts", "1", "--backoff", "0"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=env,
-    )
-    try:
-        # Wait for positive evidence the process is INSIDE the hang, rather
-        # than sleeping a fixed guess — a fixed sleep is both slower and racy.
-        ready, _, _ = select.select([proc.stdout], [], [], 60)
-        assert ready, "script never reached the (fake) hanging constructor"
-        assert "FAKE_HANG_ENTERED" in proc.stdout.readline()
+        proc = subprocess.Popen(
+            [sys.executable, str(_SCRIPT), "--attempts", "1", "--backoff", "0"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        try:
+            # Wait for positive evidence the process is INSIDE the hang, rather
+            # than sleeping a fixed guess — a fixed sleep is both slower and racy.
+            ready, _, _ = select.select([proc.stdout], [], [], 60)
+            assert ready, "script never reached the (fake) hanging constructor"
+            assert "FAKE_HANG_ENTERED" in proc.stdout.readline()
 
-        proc.send_signal(signal.SIGTERM)
-        _out, err = proc.communicate(timeout=60)
-    finally:
-        if proc.poll() is None:
-            proc.kill()
-            proc.communicate()
+            proc.send_signal(sig)
+            _out, err = proc.communicate(timeout=60)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
 
-    assert "dumping all" in err, f"no stack dump on SIGTERM; stderr was:\n{err}"
-    # The traceback body: the fake's own frame must appear, or the dump is empty.
-    assert "sentence_transformers" in err, f"dump had no useful frames:\n{err}"
-    assert proc.returncode == 124, f"expected the timeout status 124, got {proc.returncode}"
+        assert "dumping all" in err, f"no stack dump on {sig!r}; stderr was:\n{err}"
+        # The traceback body: the fake's own frame must appear, or it is empty.
+        assert "sentence_transformers" in err, f"dump had no useful frames:\n{err}"
+        assert proc.returncode == expected_status, (
+            f"{sig!r}: expected status {expected_status}, got {proc.returncode}"
+        )
 
 
-def test_the_print_pins_are_byte_exact_for_the_lockstep_check(tmp_path):
+def test_the_print_pins_are_byte_exact_and_survive_abbreviation(tmp_path):
     """--print-model/--print-revision feed the workflow-side lockstep check, so
-    the #7359 completion marker must not contaminate them."""
+    the #7359 completion marker must not contaminate them.
+
+    The abbreviation cases are the ones that matter and the ones the FIRST
+    version missed: argparse has `allow_abbrev=True`, so `--print-m` is a valid
+    unambiguous spelling that returns the pin early. The first implementation
+    gated the marker on `{"--print-model", "--print-revision"} & set(sys.argv[1:])`,
+    which no abbreviation matches — so `--print-m` printed the pin AND the
+    marker. Emitting from control flow in `main()` is what closes it, and these
+    cases are what keeps it closed.
+    """
     env = _base_env(tmp_path)
-    for flag, expected in (("--print-model", ep.MODEL), ("--print-revision", ep.REVISION)):
+    cases = (
+        ("--print-model", ep.MODEL),
+        ("--print-revision", ep.REVISION),
+        ("--print-m", ep.MODEL),      # abbreviation — defeated the first gate
+        ("--print-r", ep.REVISION),   # abbreviation
+    )
+    for flag, expected in cases:
         got = subprocess.run(
             [sys.executable, str(_SCRIPT), flag],
             capture_output=True, text=True, env=env, timeout=120,
         )
-        assert got.returncode == 0
-        assert got.stdout.strip() == expected, (
-            f"{flag} stdout must be exactly the pin; got {got.stdout!r}"
+        assert got.returncode == 0, f"{flag}: rc={got.returncode} {got.stderr!r}"
+        assert got.stdout == expected + "\n", (
+            f"{flag} stdout must be EXACTLY the pin and a newline — the lockstep "
+            f"check parses it; got {got.stdout!r}"
         )
-        assert ep.DONE_MARKER not in got.stdout
+        assert ep.DONE_MARKER not in got.stdout, (
+            f"{flag}: the completion marker leaked into machine-read output"
+        )
+
+
+def test_the_completion_marker_is_emitted_on_success_only(tmp_path):
+    """The marker is the diagnostic that tells a future reader whether a stall
+    is inside the interpreter or outside it, so its PRESENCE on success and its
+    ABSENCE on failure are both load-bearing. Without the first assertion,
+    deleting the marker would go unnoticed and the diagnostic would silently
+    stop existing.
+    """
+    env = _base_env(tmp_path)
+
+    # Success: the cache probe hits.
+    fake_ok = tmp_path / "fake-ok"
+    fake_ok.mkdir(parents=True, exist_ok=True)
+    (fake_ok / "sentence_transformers.py").write_text(_FAITHFUL_CACHED, encoding="utf-8")
+    ok_env = dict(env)
+    ok_env["PYTHONPATH"] = str(fake_ok) + os.pathsep + env.get("PYTHONPATH", "")
+    ok = subprocess.run(
+        [sys.executable, str(_SCRIPT), "--attempts", "1", "--backoff", "0"],
+        capture_output=True, text=True, env=ok_env, timeout=120,
+    )
+    assert ok.returncode == 0, ok.stderr
+    assert ep.DONE_MARKER in ok.stdout, (
+        "the success path must emit the marker — it is the only evidence that a "
+        f"later stall is OUTSIDE the interpreter; got {ok.stdout!r}"
+    )
+
+    # Failure: the model is unobtainable. A "complete" line here would let a
+    # grep read a failed provision as a finished one.
+    fake_bad = tmp_path / "fake-bad"
+    fake_bad.mkdir(parents=True, exist_ok=True)
+    (fake_bad / "sentence_transformers.py").write_text(_ALWAYS_RAISES, encoding="utf-8")
+    bad_env = dict(env)
+    bad_env["PYTHONPATH"] = str(fake_bad) + os.pathsep + env.get("PYTHONPATH", "")
+    bad = subprocess.run(
+        [sys.executable, str(_SCRIPT), "--attempts", "1", "--backoff", "0"],
+        capture_output=True, text=True, env=bad_env, timeout=120,
+    )
+    assert bad.returncode == 1, bad.stderr
+    assert ep.DONE_MARKER not in bad.stdout, (
+        f"the marker must NOT appear on the failure path; got {bad.stdout!r}"
+    )
