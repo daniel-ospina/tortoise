@@ -794,6 +794,13 @@ def test_the_clean_line_reports_clean_medians_not_the_contaminated_ones():
     clean = res["leg_a_clock_split_clean_pct"]
     contaminated = res["leg_a_clock_split_pct"]
     assert clean["dispatch"] == 25.0, clean
+    # The other two clean shares and the all-PR magnitude are published in the
+    # same sentence, so they are pinned too: pinning only `dispatch` left a wrong
+    # denominator (or a clean numerator over the all-PR total) free to land
+    # silently, which is the same class of hole as the unpinned shares above.
+    assert clean["authoring"] == 0.0, clean
+    assert clean["gate_ci"] == 75.0, clean
+    assert contaminated["dispatch"] == 63.2, contaminated
     assert clean["dispatch"] != contaminated["dispatch"], (clean, contaminated)
     assert f"dispatch {clean['dispatch']:.1f}%" in clean_line, clean_line
     assert f"dispatch {contaminated['dispatch']:.1f}%" not in clean_line, clean_line
