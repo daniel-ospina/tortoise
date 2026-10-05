@@ -1861,3 +1861,56 @@ def test_the_render_is_identical_with_no_machine_local_call_log(tmp_path, monkey
         )
     finally:
         out.unlink(missing_ok=True)
+
+
+def test_the_render_makes_no_uncalled_count_when_the_baseline_has_no_usage_signal(
+    tmp_path, monkeypatch
+):
+    """The count is a claim about a MEASUREMENT, so it is only made when one was taken.
+
+    `used_by` carries the `in use` / `never called` flag only when the baseline was cut
+    on a machine that had the call log. A baseline cut without one leaves
+    `observed_usage()` None for every row, so `_never` is empty — and the paragraph then
+    asserted "Two thirds of what we advertise has never been called by anything,
+    including us (0 of 82)": a negative nobody measured, in the document the owner reads
+    to decide what to cut, and self-contradicting besides. What is reported instead is
+    the measurement's ABSENCE.
+
+    The companion assertion pins the other direction — a recorded signal must still
+    print its count, so the guard cannot be satisfied by suppressing the claim always.
+    """
+    sm = _load_manifest_tool()
+    doc = copy.deepcopy(_manifest())
+    stripped = 0
+    for row in doc["rows"]:
+        parts = [p.strip() for p in (row.get("used_by") or "").split(",")]
+        if parts and parts[0] in ("agents", "never called"):
+            row["used_by"] = ", ".join(["tooling", *[p for p in parts[1:] if p]])
+            stripped += 1
+    assert stripped, "the fixture must actually remove the usage signal"
+
+    path = _manifest_at(sm, doc, tmp_path)
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    out = _render_scratch()
+    monkeypatch.setattr(sm, "RENDERED_FILE", out)
+    try:
+        assert sm.cmd_render(argparse.Namespace()) == 0
+        text = out.read_text(encoding="utf-8")
+    finally:
+        out.unlink(missing_ok=True)
+
+    assert "including us (0 of" not in text, (
+        "the render asserted an uncalled count of 0 from a baseline that recorded no "
+        "usage signal at all — a negative nobody measured"
+    )
+    assert "never been\ncalled by anything" not in text, (
+        "the hardcoded 'Two thirds ... has never been called' survived the guard"
+    )
+    assert "no count of" in text and "asserted here" in text, (
+        "the render neither measured the count nor said it was not asserting one"
+    )
+
+    # And the measured case is unchanged: the committed baseline still prints its count.
+    assert "(55 of 82)" in RENDERED.read_text(encoding="utf-8"), (
+        "the committed document must still carry the count its baseline does measure"
+    )
