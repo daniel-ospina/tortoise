@@ -121,7 +121,10 @@ def _disable_redislite_rdb_save() -> None:
 _disable_redislite_rdb_save()
 
 # #4096: session-scoped test trees created by fixtures in this module and in
-# tests/conftest.py. They are reclaimed by `conftest.py::_reclaim_session_tmpdirs`,
+# tests/conftest.py — and one created at conftest IMPORT time (the #4071
+# embedded-lane guard, which cannot be a fixture: it must be in place before
+# test-module bodies run at collection). They are reclaimed by
+# `conftest.py::_reclaim_session_tmpdirs`,
 # which `_redislite_hygiene` declares as a dependency so pytest's reverse-order
 # teardown runs it LAST — after `_redislite_hygiene` / `_server_graph_hygiene` have
 # used the socket/pid evidence inside these trees. A local `rmtree` in the shared
