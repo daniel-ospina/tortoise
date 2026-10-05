@@ -10,8 +10,10 @@
 #      state-bearing concept below is an objectKind, so a re-mention MERGEs onto
 #      one node and supersession — not append — decides the current value.
 #   2. Full ontology. Subjects (the companies and people) are core; Objects are
-#      the state carriers; Points are the claims (core `statement`, attached with
-#      the IMPL relations below); Events are the dated occurrences.
+#      the state carriers; Points are the claims (core `statement`, carried by the
+#      core `about_entities` edge — the `relations` below connect Objects to
+#      Objects/Subjects only, so they never attach a claim); Events are the dated
+#      occurrences.
 #   3. No cross-pack references. Every relation endpoint and chain step is either
 #      a kind of this pack or a core kind. Nothing here resolves against another
 #      pack, so dropping or upgrading a sibling pack can never silently delete

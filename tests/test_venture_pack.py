@@ -533,29 +533,29 @@ class TestPackFitLayers:
         and its approval input, needs no graph, and a skipped test asserts
         nothing. The write gate (S5) is not asserted here — `create_object` reads
         no gate, so an assertion on it would prove nothing; that gate is covered
-        by `tests/test_vocab_gating_callers_5163.py`.
+        by `tests/test_vocab_gating_callers_5163.py`. The "no `:PackInstall`
+        records resolves `None`" arm is likewise NOT asserted from here: a test
+        that called `get_tenant_packs(sdk)` for it would be self-defeating, since
+        that helper WRITES the starter records on a fresh graph, so the
+        no-records state would be gone before the assertion ran. That arm lives
+        in `tests/test_vocab_gating_by_graph.py::TestGraphInstalledNamespaces::
+        test_absent_records_returns_none_and_leaves_the_prompt_untouched`.
         """
         assert "venture:tranche" in compile_kind_index_spec()
 
-        starters = frozenset({"dev:", "marketing:", "product-strategy:",
-                              "pm:", "agent-ops:"})
+        # The gate compares BARE namespaces (`ns not in _gate`,
+        # tortoise/value_extractor.py:325) — never `"ns:"`. A `"dev:"` literal
+        # therefore drops EVERY catalog pack, and a one-directional assertion
+        # would pass for that wrong reason; measured, it leaves only
+        # `core`/`statement`. So assert both directions: the excluded pack's kinds
+        # go, and the approved packs' kinds stay.
+        starters = frozenset({"dev", "marketing", "product-strategy",
+                              "pm", "agent-ops"})
         gated = compile_kind_index_spec(installed_namespaces=starters)
         assert not [k for k in gated if str(k).startswith("venture:")], (
             "venture kinds survived an approval set that excludes the pack")
-
-    @requires_db
-    def test_a_graph_with_no_install_records_resolves_no_gate(
-            self, sdk, force_sparse_tfidf):
-        """The other arm of the same rule: no `:PackInstall` records => no gate.
-
-        A graph that has approved nothing resolves no approval set, so the
-        catalog union stands and its kinds remain classifiable (#2714 indicator
-        3). Pairing this with the DB-free gate test above is the point — the two
-        arms are one rule, not a contradiction.
-        """
-        installs = [p["namespace"] for p in get_tenant_packs(sdk)]
-        assert "venture" not in installs, installs
-        assert "venture:tranche" in compile_kind_index_spec()
+        assert [k for k in gated if str(k).startswith("dev:")], (
+            "the gate over-narrowed — an approved pack's kinds went missing")
 
     def test_no_per_document_domain_detection(self):
         """Requirement: per-document 'domain detection' is parked. Classification
