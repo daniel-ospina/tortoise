@@ -4974,15 +4974,18 @@ class TortoiseSDK:
         mints it here as before.
 
         The name is deliberately NOT ``ts``. ``ts`` is an established **extra**
-        key: ``PointInvalidated`` (sdk.py) and ``ObjectSuperseded`` both pass
-        ``ts=`` through ``**extra``, which routes it into the ``:GraphEvent``
-        payload. Promoting the name to a named parameter silently REMOVES it
-        from that payload — a client-visible change to a durable artifact
-        (``events_poll`` returns the payload verbatim), invisible to every
-        existing test. ``recorded_ts`` collides with no caller key, so the
-        default path is additive in the strict sense: every existing caller's
-        envelope, graph payload and JSONL record are byte-identical. A caller
-        that passes BOTH keeps the old ``event.update(extra)`` precedence.
+        key, and ``extra`` is what builds the ``:GraphEvent`` payload —
+        ``invalidate_point`` passes ``ts=now`` (sdk.py, kwargs form, so it
+        routes into ``{"id": id, **extra}``) and the duplicate-fold tests in
+        ``tests/test_object_registered_journal.py`` do the same for
+        ``ObjectSuperseded``. Promoting the name to a named parameter silently
+        REMOVES it from that payload — a client-visible change to a durable
+        artifact (``events_poll`` returns the payload verbatim), invisible to
+        every existing test. ``recorded_ts`` collides with no caller key, so
+        the default path is additive in the strict sense: every existing
+        caller's envelope, graph payload and JSONL record are byte-identical.
+        A caller that passes BOTH keeps the old ``event.update(extra)``
+        precedence.
         """
         # ── Graph event store (#432) ──────────────────────────────
         if type_ in _GRAPH_EVENT_TYPES:

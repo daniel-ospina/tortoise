@@ -225,10 +225,14 @@ def test_a_new_named_parameter_must_not_steal_an_extra_key(tmp_path):
 
 def test_a_legacy_record_without_an_instant_still_retracts():
     """A record predating the field (or a hand-written one) must still
-    tombstone the point, and must not have an instant INVENTED for it.
+    tombstone the point, and NEITHER engine may invent an instant for it.
 
-    This pins the `ev.get("ts")` guard: the fix reads the record, it does not
-    assume one.
+    This pins the shared `_writable_id` gate: the graph arm writes the
+    `updatedAt` column only when the journal states a usable instant, so a
+    record that states none leaves the point's existing stamp alone — exactly
+    what the pure fold does. (Before the gate the graph arm fell back to
+    `_now_iso()` while the fold kept the old stamp, so the two #330 engines
+    disagreed on a legacy record.)
     """
     points = {"p1": {"id": "p1", "status": "live", "updatedAt": "T0"}}
     _apply_one(points, {"type": "PointRetracted", "id": "p1"})
@@ -236,3 +240,49 @@ def test_a_legacy_record_without_an_instant_still_retracts():
     assert points["p1"]["updatedAt"] == "T0", (
         "a record with no instant had one invented for it — the fold must "
         "only ever replay what the journal carries")
+
+
+def test_a_malformed_instant_does_not_abort_the_rebuild(tmp_path):
+    """A corrupt `ts` must not abort `rebuild_all` AFTER the wipe.
+
+    THE FAILURE THIS PINS: `ts` now rides a Cypher parameter, so it needs the
+    same `_writable_id` gate the id has (that gate's own docstring cites the
+    identical incident: "a corrupt journal line with such an id aborts
+    `rebuild_all` after the wipe"). Ungthated, `{"evil": 1}` raises
+    `ResponseError: Property values can only be of primitive types`, pass-1b
+    has no per-event try/except, and the wipe has ALREADY happened — so the
+    run dies leaving the claim LIVE, i.e. the graph serves retracted content
+    as current. Measured end-to-end before the gate was added.
+    """
+    events = tmp_path / "events"
+    events.mkdir()
+    journal = events / "events.jsonl"
+    db = str(tmp_path / "bad5048.db")
+    sdk = TortoiseSDK(db, event_log_path=str(journal))
+    pid = sdk.create_point("statement", "a claim")["id"]
+    sdk.retract_point(pid)
+    sdk.close()
+
+    # Re-write the retraction record with a `ts` the driver cannot take.
+    recs = [json.loads(line) for line in journal.read_text().splitlines()
+            if line.strip()]
+    poisoned = 0
+    for rec in recs:
+        if rec.get("type") == "PointRetracted":
+            rec["ts"] = {"evil": 1}
+            poisoned += 1
+    assert poisoned == 1, recs
+    journal.write_text("\n".join(json.dumps(r) for r in recs) + "\n")
+
+    sdk2 = TortoiseSDK(db, event_log_path=str(journal))
+    try:
+        # Unguarded on purpose: a raise here IS the defect.
+        sdk2._get_proj().rebuild_all(str(events), confirm_destructive=True)
+        node = _node(sdk2, pid)
+        assert node["status"] == "retracted", (
+            "the rebuild did not apply the retraction — the claim is left "
+            f"LIVE after an aborted replay: {node}")
+        assert isinstance(node["updatedAt"], str), (
+            f"a malformed record poisoned the node property: {node}")
+    finally:
+        sdk2.close()

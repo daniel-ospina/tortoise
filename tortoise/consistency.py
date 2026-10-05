@@ -110,7 +110,9 @@ _EXCLUSION_REASONS: dict[str, str] = {
     "reason": "deny-listed per D4 — never a node property",
     # Recomputed / replay-owned — a pure function of the row, or a write time.
     "content_hash": "pure f(content) — RECOMPUTE (STORAGE-ARCHITECTURE §3)",
-    "updatedAt": "write time set by every writer (live and replay)",
+    "updatedAt": (
+        "write time; replayed from the record for a retraction (#5048), and "
+        "still set live by every other writer"),
     "_nid": "replay bookkeeping",
     "_graph_id": "replay bookkeeping",
     # #5004: the embedding's IDENTITY is journal PAYLOAD metadata (`_POINT_HANDLED`)
@@ -915,6 +917,18 @@ def _fold_journal(events: list[dict]) -> dict:
             entry.update(_DECAY)
             if t == "PointRetracted":
                 entry["status"] = "retracted"
+                # #5048: `updatedAt` is RECORDED, and this is the reference
+                # fold `check_consistency` compares the graph against — its own
+                # docstring says ground truth is `_apply_one`, which now stamps
+                # this field. Stamp it under the SAME gate the two replay arms
+                # use, and only "when the journal states it": a writer's
+                # wall-clock fallback states nothing, exactly as `expired_at`
+                # below. (Without this the reference disagreed with BOTH
+                # `fold()` and the rebuilt graph on the one field this change
+                # makes recorded — invisible only while the field is excluded
+                # from comparison.)
+                if _writable_id(ev.get("ts")):
+                    entry["updatedAt"] = ev["ts"]
             elif t == "PointSuperseded":
                 entry["status"] = "superseded"
             if t in ("PointSuperseded", "PointInvalidated"):

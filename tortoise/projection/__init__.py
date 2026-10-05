@@ -3055,12 +3055,13 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
             # fold did not stamp at all, so the pure fold kept the point's
             # ORIGINAL stamp while ``rebuild_all`` held this replay's clock
             # and the live node held the producer's — three values for one
-            # retraction. ``None`` (legacy record) falls through to the
-            # point's existing stamp, matching the graph arm's ``_now_iso()``
-            # fallback only in that both are "no record, no authority".
+            # retraction. The gate is ``_writable_id``, shared verbatim with
+            # the graph arm (``_retract``), so a record stating NO usable
+            # instant leaves the stamp alone in BOTH engines rather than
+            # inventing one in either.
             p["status"] = "retracted"
             p.update(VACUITY_BELIEF)
-            if ev.get("ts"):
+            if _writable_id(ev.get("ts")):
                 p["updatedAt"] = ev["ts"]
     elif t == "PointsMerged":
         # #331 (review r2): `or []` also covers an explicit "merge_ids": null
