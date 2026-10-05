@@ -722,6 +722,11 @@ def measure(gh: Gh, repo: str, contexts: list[str], days: int, now: datetime,
             "authoring_seconds": None,
             "dispatch_seconds": None,
             "gate_ci_seconds": None,
+            # every row carries the flag, including one whose gate is unobservable,
+            # so a consumer of `prs` never has to distinguish "absent" from "not
+            # applicable" (found by review on this change)
+            "dispatch_unreliable": None,
+            "dispatch_unreliable_reason": None,
         }
         reviews = gh.paged(f"repos/{repo}/pulls/{pr['number']}/reviews?per_page={PAGE}")
         fa = first_activity(gh, repo, pr, reviews)
@@ -825,6 +830,18 @@ def measure(gh: Gh, repo: str, contexts: list[str], days: int, now: datetime,
         row.update(split_a_at_commits(
             created, gate, clock["first_commit_at"],
             clock["first_gate_ci_start_at"]))
+        # The split PARTITIONS (a) for every row, but its DISPATCH boundary is only
+        # honest where the head was not rewritten: CI on a force-pushed head cannot
+        # have started before that head existed, so a rebased PR charges its whole
+        # earlier life to "dispatch". Measured 2026-10-05: dispatch median 0.002 h
+        # (~7 s) for non-force-pushed PRs against 62.36 h for force-pushed ones —
+        # the 52.9% aggregate share was entirely the latter. A share must never be
+        # published without the subpopulation that produced it, so the row is
+        # flagged and the report prints an honest-population split beside it.
+        row["dispatch_unreliable"] = bool(row["force_pushes"] > 0)
+        row["dispatch_unreliable_reason"] = (
+            f"head force-pushed {row['force_pushes']}x: the first-CI-start boundary is "
+            f"charged the PR's earlier life" if row["force_pushes"] > 0 else None)
         row["leg"] = "merged"
         rows.append(row)
 
@@ -917,6 +934,15 @@ def measure(gh: Gh, repo: str, contexts: list[str], days: int, now: datetime,
     # finer, NON-additive sub-splits (reported, not part of the partition):
     # (a) is divided over the rows that HAVE an observed activity; (b) is divided
     # at queue entry into review wait + queue residence.
+    # the (a) clock split is reportable only where BOTH boundaries exist, so its
+    # denominator is the (a) time of exactly those rows — dividing by the whole
+    # leg would dilute the shares with rows the split cannot see
+    a_split_rows = [r for r in merged if r.get("authoring_seconds") is not None]
+    a_split_total = tot(a_split_rows, "seconds_a")
+    # the HONEST population for the dispatch boundary: a force-pushed head cannot
+    # have had CI before it existed, so those rows are excluded from the clean share
+    a_clean_rows = [r for r in a_split_rows if not r.get("dispatch_unreliable")]
+    a_clean_total = tot(a_clean_rows, "seconds_a")
     sub = {
         "a_pre_activity": tot(active_merged, "pre_activity_seconds"),
         "a_after_activity": tot(active_merged, "a_gate_seconds"),
@@ -928,12 +954,10 @@ def measure(gh: Gh, repo: str, contexts: list[str], days: int, now: datetime,
         "authoring": tot(merged, "authoring_seconds"),
         "dispatch": tot(merged, "dispatch_seconds"),
         "gate_ci": tot(merged, "gate_ci_seconds"),
+        "authoring_clean": tot(a_clean_rows, "authoring_seconds"),
+        "dispatch_clean": tot(a_clean_rows, "dispatch_seconds"),
+        "gate_ci_clean": tot(a_clean_rows, "gate_ci_seconds"),
     }
-    # the (a) clock split is reportable only where BOTH boundaries exist, so its
-    # denominator is the (a) time of exactly those rows — dividing by the whole
-    # leg would dilute the shares with rows the split cannot see
-    a_split_rows = [r for r in merged if r.get("authoring_seconds") is not None]
-    a_split_total = tot(a_split_rows, "seconds_a")
     # shares over the ACCOUNTED population, and over the whole population so the
     # unknown (no observable gate) bucket is never hidden
     shares_total = {k: round(100.0 * v / total_secs, 2) if total_secs else 0.0
@@ -1008,7 +1032,13 @@ def measure(gh: Gh, repo: str, contexts: list[str], days: int, now: datetime,
             "(a) exactly, asserted per PR. The start is the earliest `started_at` "
             "of ANY attempt of an entry-gate context (re-runs included): the "
             "earliest BEGINNING of CI, which is the question 'when did CI start' "
-            "and not a completion clock."
+            "and not a completion clock. THE DISPATCH SHARE IS CONTAMINATED for a row "
+            "whose head was force-pushed (CI cannot have run on a head that did not "
+            "exist yet) and for a PR opened before a gate context existed (the "
+            "context set is read now and applied to the whole window): such rows are "
+            "flagged `dispatch_unreliable` with a reason, and "
+            "leg_a_clock_split_clean_pct reports the shares over the unflagged "
+            "population, which is the only causal reading."
         ),
         "population": {
             "human_closed_in_window": len(rows),
@@ -1046,8 +1076,26 @@ def measure(gh: Gh, repo: str, contexts: list[str], days: int, now: datetime,
                          if a_split_total else None),
             "gate_ci": (round(100.0 * sub["gate_ci"] / a_split_total, 1)
                         if a_split_total else None),
+            "unreliable_prs": len(a_split_rows) - len(a_clean_rows),
             "note": ("shares are of the (a) time of the rows where BOTH boundaries "
-                     "are observable, not of the whole leg"),
+                     "are observable, not of the whole leg — and they INCLUDE rows "
+                     "flagged dispatch_unreliable, so read "
+                     "leg_a_clock_split_clean_pct for the causal reading"),
+        },
+        "leg_a_clock_split_clean_pct": {
+            "prs": len(a_clean_rows),
+            "authoring": (round(100.0 * sub["authoring_clean"] / a_clean_total, 1)
+                          if a_clean_total else None),
+            "dispatch": (round(100.0 * sub["dispatch_clean"] / a_clean_total, 1)
+                         if a_clean_total else None),
+            "gate_ci": (round(100.0 * sub["gate_ci_clean"] / a_clean_total, 1)
+                        if a_clean_total else None),
+            "note": ("rows whose head was never force-pushed: the only population in "
+                     "which the dispatch boundary measures a CI-start latency rather "
+                     "than the PR's earlier life. A PR opened before a gate context "
+                     "existed is contaminated even without a force-push and is NOT "
+                     "detectable here — the context set is read now and applied to "
+                     "the whole window (rule_gate_success)."),
         },
         "medians_seconds": {
             "first_activity": med(active, "first_activity_seconds"),
@@ -1062,6 +1110,13 @@ def measure(gh: Gh, repo: str, contexts: list[str], days: int, now: datetime,
             "authoring": med(merged, "authoring_seconds"),
             "dispatch": med(merged, "dispatch_seconds"),
             "gate_ci": med(merged, "gate_ci_seconds"),
+            # the clean population's medians, so the rendered line scoped to it cannot
+            # print the contaminated figure it exists to quarantine (found by review:
+            # the first cut scoped the sentence to the clean rows but the medians in
+            # its parenthetical were still med(merged, ...), over force-pushed rows)
+            "authoring_clean": med(a_clean_rows, "authoring_seconds"),
+            "dispatch_clean": med(a_clean_rows, "dispatch_seconds"),
+            "gate_ci_clean": med(a_clean_rows, "gate_ci_seconds"),
             "post_gate_pre_entry": med(merged, "post_gate_pre_entry_seconds"),
             "queue_cycle": med(merged, "queue_cycle_seconds"),
             "ci_gate_pass": statistics.median(ci_gate) if ci_gate else None,
@@ -1108,6 +1163,7 @@ def measure(gh: Gh, repo: str, contexts: list[str], days: int, now: datetime,
                 1 for r in rows if r.get("activity_clamped")),
             "leg_a_clock_split_prs": len(a_split_rows),
             "leg_a_clock_split_missing_prs": len(merged) - len(a_split_rows),
+            "leg_a_clock_split_unreliable_prs": len(a_split_rows) - len(a_clean_rows),
         },
         "queue_pr_lifetime": _queue_lifetime(queue_prs),
         "verified": {
@@ -1145,6 +1201,7 @@ def render(result: dict) -> str:
     active_merged_n = sum(1 for r in result["prs"] if r.get("a_gate_seconds") is not None)
     split = result["merge_path_split_pct"]
     a_split = result["leg_a_clock_split_pct"]
+    a_clean = result["leg_a_clock_split_clean_pct"]
     ci_vs = result["ci_head_vs_merge_leg"]
     tsh = result["leg_shares_of_total_pct"]
 
@@ -1171,13 +1228,19 @@ def render(result: dict) -> str:
           f"median={hours(m['first_activity'])}",
           f"  sub-split of (a) at min(activity, gate) over {active_merged_n} merged PRs: "
           f"median={hours(m['pre_activity'])}",
-          f"  sub-split of (a) at FIRST COMMIT + FIRST CI START "
-          f"(over {a_split['prs']} PRs where both are observable): "
+          f"  sub-split of (a) at FIRST COMMIT + FIRST CI START, over the "
+          f"{a_clean['prs']} PRs whose head was never force-pushed: "
+          f"authoring {pct(a_clean['authoring'])} | dispatch {pct(a_clean['dispatch'])} "
+          f"| gate CI {pct(a_clean['gate_ci'])}  "
+          f"(median authoring={hours(m.get('authoring_clean'))}, "
+          f"dispatch={minutes(m.get('dispatch_clean'))}, "
+          f"gate CI={hours(m.get('gate_ci_clean'))})",
+          f"    of the {a_split['prs']} PRs where both boundaries exist, "
+          f"{a_split['unreliable_prs']} are EXCLUDED from that share: a force-pushed "
+          f"head cannot have had CI before it existed, so their dispatch charges the "
+          f"PR's earlier life (all-PR share: "
           f"authoring {pct(a_split['authoring'])} | dispatch {pct(a_split['dispatch'])} "
-          f"| gate CI {pct(a_split['gate_ci'])}  "
-          f"(median authoring={hours(m.get('authoring'))}, "
-          f"dispatch={minutes(m.get('dispatch'))}, "
-          f"gate CI={hours(m.get('gate_ci'))})",
+          f"| gate CI {pct(a_split['gate_ci'])})",
           f"  sub-split of (b) at queue entry: post-gate development/wait "
           f"{pct(split['post_gate_pre_entry'])} "
           f"| queue residence {pct(split['queue_cycle'])}",
