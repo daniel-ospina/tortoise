@@ -123,7 +123,7 @@ def test_rebuild_all_rederives_event_meta_watermark(tmp_path):
     # A real subscriber, caught up at the last event BEFORE the rebuild.
     parked = sdk.events_poll(after=None)["next_cursor"]
 
-    counts = proj.rebuild_all(str(events))
+    counts = proj.rebuild_all(str(events), confirm_destructive=True)
     assert counts["nodes"] == 3, "the replay must actually restore the points"
     assert _seqs(sdk) == [], (
         "#4664 context: the rebuild does NOT replay :GraphEvent rows — the "
@@ -182,7 +182,7 @@ def test_rebuild_all_never_moves_the_watermark_backward_on_retry(tmp_path):
     _plant(Path(_sidecar_path(events)),
            _sidecar_payload(event_meta=[{"last_seq": 500}]))
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     assert _meta(sdk) == (500, 501), (
         "#4653: the carried high-water mark must win over a lower post-wipe "
@@ -210,7 +210,7 @@ def test_rebuild_all_keeps_the_fresh_capture_when_it_is_higher(tmp_path):
     _plant(Path(_sidecar_path(events)),
            _sidecar_payload(event_meta=[{"last_seq": 1}]))
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     assert _meta(sdk) == (3, 4)
 
@@ -263,7 +263,7 @@ def test_rebuild_journal_only_engine_keeps_watermark(tmp_path):
     proj = sdk._get_proj()
     assert _meta(sdk) == (1, 1)
 
-    proj.rebuild(EventLog(str(events / "events.jsonl")))
+    proj.rebuild(EventLog(str(events / "events.jsonl")), confirm_destructive=True)
 
     assert _seen_points(sdk) == 1
     assert _meta(sdk) == (1, 2)
@@ -294,10 +294,16 @@ def test_rebuild_all_watermark_survives_interrupted_rebuild_retry(tmp_path, capl
     assert _meta(sdk) is None, "the live graph must be the post-wipe, empty one"
     _plant(Path(_sidecar_path(events)),
            _sidecar_payload(event_meta=[{"last_seq": 7}],
-                            batch_snapshot=[{"id": "b1"}]))
+                            batch_snapshot=[{"id": "b1"}],
+                            # A complete CURRENT-version shape: the merged
+                            # build's writer always emits the onboarding
+                            # sections, so their absence would fire #4641's
+                            # state-UNKNOWN ERROR and mask the watermark pin.
+                            onboarding_snapshot=[],
+                            onboarding_step_links=[]))
 
     with caplog.at_level(logging.INFO):
-        sdk._get_proj().rebuild_all(str(events))
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     assert _meta(sdk) == (7, 8), (
         "#4653: the durable carrier is the only record of the allocator once "
@@ -340,7 +346,7 @@ def test_rebuild_all_carries_the_watermark_in_the_prewipe_sidecar(
     sdk, events = _mk_sdk(tmp_path)
     for i in range(3):
         sdk.create_point("statement", f"pre {i}")
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     assert written, "no pre-wipe sidecar was written — the spy missed"
     assert written[0]["event_meta"] == [{"last_seq": 3}], (
@@ -362,7 +368,7 @@ def test_rebuild_all_without_events_leaves_counter_absent(tmp_path):
     rebuild replays zero events.
     """
     sdk, events = _mk_sdk(tmp_path)
-    counts = sdk._get_proj().rebuild_all(str(events))
+    counts = sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert counts["events"] == 0
     assert _meta(sdk) is None
     assert event_store.next_seq(sdk._get_proj()) == 1
@@ -476,7 +482,7 @@ def test_v2_leftover_with_a_live_reset_counter_reports_the_loss(
     assert _meta(sdk) == (1, 1)
 
     with caplog.at_level(logging.ERROR):
-        proj.rebuild_all(str(events))
+        proj.rebuild_all(str(events), confirm_destructive=True)
 
     assert _meta(sdk) == (1, 2), (
         "the reset counter is carried forward, not the lost pre-wipe mark")
@@ -518,7 +524,7 @@ def test_v2_leftover_rebuild_reports_the_lost_watermark(tmp_path, caplog):
     assert loaded is not None and loaded["version"] == 2
 
     with caplog.at_level(logging.ERROR):
-        sdk._get_proj().rebuild_all(str(events))
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     assert _meta(sdk) is None, "a legacy sidecar cannot fabricate a counter"
     assert event_store.next_seq(sdk._get_proj()) == 1
@@ -557,7 +563,7 @@ def test_rebuild_all_refuses_before_the_wipe_when_capture_fails(
 
     monkeypatch.setattr(pr, "_capture_event_meta", boom)
     with pytest.raises(RuntimeError, match="graph wipe"):
-        proj.rebuild_all(str(events))
+        proj.rebuild_all(str(events), confirm_destructive=True)
 
     assert _seen_points(sdk) == before, "the wipe must not have run"
     assert _meta(sdk) == (1, 1), "the counter must be untouched"
@@ -587,7 +593,7 @@ def test_event_meta_only_write_failure_names_the_watermark(
 
     monkeypatch.setattr(pr, "_write_prewipe_snapshot", boom)
     with pytest.raises(RuntimeError) as exc:
-        sdk._get_proj().rebuild_all(str(events))
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     msg = str(exc.value)
     assert "aborted BEFORE the graph wipe" in msg
     assert "event-log high-water mark" in msg, (
@@ -618,7 +624,7 @@ def test_rebuild_all_degrades_when_the_watermark_restore_fails(
 
     monkeypatch.setattr(event_store, "reestablish_watermark", boom)
     with caplog.at_level(logging.ERROR):
-        counts = proj.rebuild_all(str(events))
+        counts = proj.rebuild_all(str(events), confirm_destructive=True)
 
     assert counts["nodes"] == 1, "the rebuild itself completed"
     assert _seen_points(sdk) == 1
@@ -646,7 +652,7 @@ def test_rebuild_journal_only_degrades_when_the_watermark_restore_fails(
 
     monkeypatch.setattr(event_store, "reestablish_watermark", boom)
     with caplog.at_level(logging.ERROR):
-        proj.rebuild(EventLog(str(events / "events.jsonl")))
+        proj.rebuild(EventLog(str(events / "events.jsonl")), confirm_destructive=True)
 
     assert _seen_points(sdk) == 1
     assert any("could not re-establish" in r.getMessage()
@@ -874,7 +880,7 @@ def test_capture_watermark_refuses_a_corrupt_live_counter(tmp_path):
     with pytest.raises(ValueError, match="domain"):
         capture_watermark(proj)
     with pytest.raises(RuntimeError, match="graph wipe"):
-        proj.rebuild_all(str(events))
+        proj.rebuild_all(str(events), confirm_destructive=True)
     assert _seen_points(sdk) == 1, "the wipe must not have run"
 
 
@@ -911,9 +917,10 @@ def test_event_meta_section_and_validator_are_wired():
     """The section cannot silently fall out of the sidecar plumbing.
 
     FAILING VALUE: `event_meta` is in `_SNAPSHOT_SECTIONS`, has an entry check,
-    and the read/write version is 3 (so a pre-#4653 binary REFUSES a v3 file
-    instead of ignoring the section and wiping) — removing any one of these
-    silently de-carries the watermark.
+    and the read/write version is 5 — one increment past main's v3
+    (`graph_identity`, #3049) and v4 (the onboarding pair, #4641) — so a
+    pre-#4653 binary REFUSES a v5 file instead of ignoring the section and
+    wiping. Removing any one of these silently de-carries the watermark.
 
     REACHABLE: pure import-level assertions on the module constants.
     """
@@ -927,8 +934,8 @@ def test_event_meta_section_and_validator_are_wired():
 
     assert "event_meta" in _SNAPSHOT_SECTIONS
     assert _SNAPSHOT_ENTRY_CHECK["event_meta"] is _validate_event_meta_entry
-    assert _PREWIPE_SNAPSHOT_VERSION == 3
-    assert set(_PREWIPE_SNAPSHOT_READABLE_VERSIONS) >= {1, 2, 3}
+    assert _PREWIPE_SNAPSHOT_VERSION == 5
+    assert set(_PREWIPE_SNAPSHOT_READABLE_VERSIONS) >= {1, 2, 3, 4, 5}
     # The union's return literal is hand-written per section, so pin its key
     # set against the tuple: a section added to `_SNAPSHOT_SECTIONS` and
     # forgotten in the literal would be silently dropped from the merged
