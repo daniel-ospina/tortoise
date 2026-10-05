@@ -14776,7 +14776,7 @@ class TortoiseSDK:
         ``coverage`` is added = affected / remaining-stale-before-pass (the
         claim-hop closure of the PRE-PASS window recorded by dream_window —
         the pre-pass value because stamps written by the pass reorder the
-        ranking; a converged full-window pass reports 1.0). The
+        ranking). The
         `0 ≤ coverage ≤ 1` bound does NOT hold: `affected` and this closure
         are not mirrors, so `affected` can exceed the closure and coverage can
         exceed 1.0 on chains of ≥4 claims — see `_window_closure` and #6597.
@@ -14865,14 +14865,16 @@ class TortoiseSDK:
         claim-hops (an operator-less isolated claim is its own window).
 
         ⚠️ It is **not** an exact mirror, and ``affected ⊆ closure`` is **not**
-        guaranteed — do not reinstate that claim. Two pre-existing gaps, filed
-        separately as **#6597** (both predate #5566): (a) **hop accounting** —
-        ``_affected_claims`` expands its seeds by ONE claim-hop before its
-        loop while this starts at 0, so ``affected`` can exceed ``closure``
-        and ``coverage`` can exceed 1.0 on chains of ≥4 claims; (b) the
-        **liveness filter** here is draft-only rather than ``_live_only``, so a
-        terminal/outdated bridge is counted here but can never be reached by
-        EP.
+        guaranteed — do not reinstate that claim. Two gaps remain, both
+        predating #5566 and both filed (as the duplicate pair **#6597** /
+        **#6598**): (a) **hop accounting** — ``_affected_claims`` expands its
+        seeds by ONE claim-hop before its loop while this starts at 0, so
+        ``affected`` can exceed ``closure`` and ``coverage`` can exceed 1.0 on
+        chains of ≥4 claims; (b) the **liveness filter** here is draft-only
+        rather than ``_live_only``, so a terminal/outdated bridge is counted
+        here but can never be reached by EP. The third asymmetry — an operator
+        window member being dropped from the seed set — was #5566's own
+        regression and is handled below.
 
         Two batched queries per hop (operator-bridge + direct-edge), seeded
         with the whole window — cheap for the scheduler's large windows
@@ -14887,6 +14889,25 @@ class TortoiseSDK:
             params={"ids": list(window)},
         ).result_set
         closure: set[str] = {r[0] for r in rows}
+        # A window can contain an OPERATOR: `_mark_dirty` seeds exactly the pair
+        # a mitigation write touches (`[mitigation, operator]`). EP seeded at an
+        # operator reaches that operator's INPUTS, so they are part of what a
+        # pass CAN reach and belong in the denominator. Without them the closure
+        # under-counts and coverage exceeds 1.0 — measured 2.0 on a two-claim
+        # IMPL operator (`affected={a, b}`, `reachable={mitigation}`), i.e. the
+        # denominator bug #6597/#6598 describe, reached through the SEED rather
+        # than the hop. Mirrors `_affected_claims`'s operator-seed branch, which
+        # admits an operator seed's outgoing `IMPL|NAND` targets.
+        op_input_rows = proj.g.query(
+            "MATCH (o:Point)-[r:IMPL|NAND]->(c:Point) "
+            "WHERE o.id IN $ids "
+            "AND (o.is_operator = true OR o.op_type IS NOT NULL) "
+            "AND (o.status IS NULL OR o.status <> 'draft') "
+            "AND (c.status IS NULL OR c.status <> 'draft') "
+            "RETURN DISTINCT c.id",
+            params={"ids": list(window)},
+        ).result_set
+        closure |= {r[0] for r in op_input_rows}
         frontier = list(closure)
         hops = 0
         while frontier and (max_hops is None or hops < max_hops):
