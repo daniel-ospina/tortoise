@@ -11,17 +11,6 @@ version: 1
 # one-line, reviewable change; the labels are positional letters so an S-adding
 # diff stays a SUPERSET of main's names (a rename would refuse every merge).
 #
-# The value (recomputable from the committed `durations` map:
-# `max(s['est_seconds'] for s in push_legs({**m, 'fast_shards': S})['shards'])`):
-# LPT puts max(shard) at 6.8 min of test time at S=9 (30.6 min at S=2, 5.6 at
-# S=11), and the measured per-shard fixed cost is ~3.4 min, so T ≈ 10.2 min —
-# at the epic's 10-minute goal. S≥12 buys nothing more: the largest single fast
-# file (`test_onboarding_state_split.py`, 310.7 s = 5.18 min) is then
-# max(shard) itself, which is #6133's floor expressed as a number. Raising this
-# trades WALL CLOCK for AGGREGATE runner time (~61 min of test time + ~9 × 3.4
-# min of setup ≈ 92 min at S=9, the same self-hosted capacity the epic is
-# trying to enlarge), so it is a wall-clock lever, not a free win.
-fast_shards: 9
 
 # W37: the CARVE-OUT pool. `test-carve-out` was the CI critical path as ONE
 # unsharded job — measured 2026-09-30 over 23 PR runs and 3 successful main
@@ -39,6 +28,36 @@ fast_shards: 9
 # level with the fast band instead of 16.9m above it. Raising this trades wall
 # clock for aggregate runner-minutes, exactly like `fast_shards`.
 carve_shards: 3
+# S IS NO LONGER CAPPED BY THE FLOOR FROM THIS SIZE. #6133 split
+# `test_onboarding_state_split.py` (310.7 s), the largest fast file and therefore
+# the floor under the fast gate, into four chunks (55.8/123.5/91.6/39.8 s, which
+# sum to that file's weight and are count-apportioned seeds marked `# unmeasured`
+# below).
+#
+# NO PACK NUMBER IS RESTATED HERE, DELIBERATELY. Every max(shard) figure this
+# comment used to carry is a function of the committed `durations` map, and that
+# map is refreshed on main while a PR is open. Recompute when a number is needed:
+# `max(s['est_seconds'] for s in push_legs({**m, 'fast_shards': S})['shards'])`.
+# What is stable without the map: the four chunks sum to the weight of the file
+# they replace, so the pool's total weight is unchanged, and no single fast file
+# can bind max(shard) as early as the 310.7 s one did — which is the headroom this
+# change creates for a higher shard count.
+#
+# S STAYS AT 9 — UNCHANGED FROM main, DELIBERATELY. The merge rail's lane-parity
+# compares job-NAME SETS (tools/ci_selection.py; test_ci_selection.py asserts on
+# it): a PR emitting FEWER shard jobs than main runs has legs main has that the PR
+# lacks, and is refused NOT COMPARABLE. An S-REDUCTION therefore cannot land by PR
+# at all — only an S-INCREASE stays a superset. Raising S is unblocked by this
+# change and belongs in a follow-up.
+#
+# The four split files' weights are count-apportioned seeds (55.8/123.5/91.6/39.8,
+# summing to the pre-split 310.7 s) and are marked `# unmeasured` below; the
+# durations bridge (Task 4b) refreshes both sides.
+#
+# Raising this trades WALL CLOCK for AGGREGATE runner time (the same self-hosted
+# capacity the epic is trying to enlarge), so it is a wall-clock lever, not a
+# free win.
+fast_shards: 9
 
 surfaces:
   api:
@@ -1866,7 +1885,10 @@ surfaces:
   - test_onboarding_integration.py
   - test_onboarding_state.py        # #2001 (W5): canonical module unit tests (lane-agnostic)
   - test_onboarding_state_cas.py    # #3553: jsonb RMW compare-and-set against the REAL registry path (docker-lane)
-  - test_onboarding_state_split.py  # #2001 (W5): docker-lane graph-held FLOW-state tests
+  - test_onboarding_state_split_init.py  # #2001 (W5): docker-lane graph-held FLOW-state tests
+  - test_onboarding_state_split_checkpoint.py  # #2001 (W5): docker-lane graph-held FLOW-state tests
+  - test_onboarding_state_split_patch.py  # #2001 (W5): docker-lane graph-held FLOW-state tests
+  - test_onboarding_state_split_projection.py  # #2001 (W5): docker-lane graph-held FLOW-state tests
   - test_onboarding_seed.py         # #1999 (W3): shared seed-core unit tests (lane-agnostic)
   - test_onboarding_seed_endpoint.py  # #1999 (W3): docker-lane seed/decide/completion tests
   # #2006 (W11): the funnel-event exact-once guard (emission gated on the
@@ -2323,7 +2345,10 @@ uri_requiring:
 - test_onboarding_false_completion_repair.py
 - test_onboarding_seed_endpoint.py
 - test_onboarding_state_cas.py
-- test_onboarding_state_split.py
+- test_onboarding_state_split_checkpoint.py
+- test_onboarding_state_split_init.py
+- test_onboarding_state_split_patch.py
+- test_onboarding_state_split_projection.py
 - test_onboarding_w4_settings.py
 - test_onboarding_w6_capture_disclosure.py
 push_extra: []
@@ -2462,11 +2487,14 @@ durations:
   test_installer_preserves_foreign_skill_content.py: 0.6
   test_backup_watcher_health.py: 0.2
   eval/retrieval/test_integration.py: 1523.4
-  test_onboarding_state_split.py: 310.7
   # #3553: this file is NEW on this branch, so main's sweep has no junit measurement for it.
   # It is NOT presented as a measurement — it carries the branch's local reading under the
   # `# unmeasured` convention stated above. Refresh from the first post-merge main run that includes it.
   test_onboarding_state_cas.py: 120.0  # unmeasured
+  test_onboarding_state_split_init.py: 55.8  # unmeasured
+  test_onboarding_state_split_checkpoint.py: 123.5  # unmeasured
+  test_onboarding_state_split_patch.py: 91.6  # unmeasured
+  test_onboarding_state_split_projection.py: 39.8  # unmeasured
   test_onboarding_truth_surface.py: 4.0
   eval/write_path/test_write_path_benchmark.py: 101.8
   test_tortoise_client.py: 11.9
@@ -3299,3 +3327,17 @@ durations:
 #   sub-second) stay in the merge path — they are real contracts.
 on_demand:
   - eval/retrieval/test_integration.py
+
+# ── #6133: DECLARED SLEEP IS NOT GATE COST, AND NOT THE FLOOR ──
+#
+# DECLARED sleep is not gate cost, and ranking by it produces a wrong floor.
+#    #6133 was filed on a census that summed the suite's literal `time.sleep`
+#    arguments to ~16,000s ("4.5h the suite chose to wait"). The suite's
+#    largest such file, tests/test_battery_real_deadline.py, declares 7,200.0s
+#    of it in a hang SIMULATION — a 3600s sleep on a DAEMON thread
+#    that a 2-3s deadline abandons; a paid-sleep probe measured 0.0s of it. The
+#    600s values in test_monitoring.py / test_hosted_api.py are the same shape
+#    (`_hang()` under a 0.05-0.3s monkeypatched bound). Read the floor from the
+#    measured weights above; never from the sum of sleep() arguments.
+#    Census: https://github.com/daniel-ospina/tortoise/issues/6133 (the
+#    per-file census command and the paid-vs-declared probe are recorded there).

@@ -20,7 +20,7 @@ W6 (session-capture disclosure, self-use path) owns:
   the invariant under the real interleaving.
 
 Runs in the docker lane (TORTOISE_DB_URI) — mirrors
-test_onboarding_w4_settings.py / test_onboarding_state_split.py. URI-less
+test_onboarding_w4_settings.py / the four test_onboarding_state_split_* modules. URI-less
 runs (tier-2 embedded legs, carve-out) SKIP at module level.
 """
 
