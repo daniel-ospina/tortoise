@@ -3060,6 +3060,12 @@ durations:
   test_session_attribution.py: 0.3
   test_session_import_codex.py: 0.2
   test_capture_spool.py: 1.9
+  # #3516 §B: the capture-lane marker. Measured as the CALL sum of an
+  # embedded-lane run (18 tests, four of them HTTP round-trips); the docker
+  # lane is expected to be faster, so this is a conservative over-weight. The
+  # entry exists because registering the file left the fast pool at 667/742
+  # durations = 89.9%, one file below the DURATION_COVERAGE_MIN = 0.90 floor.
+  test_capture_lane_3516.py: 15.0  # unmeasured on the docker lane
   test_session_import_desktop.py: 0.1
   test_session_indexer_ollama.py: 0.2
   test_session_login_helpers.py: 0.1
