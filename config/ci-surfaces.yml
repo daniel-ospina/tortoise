@@ -79,9 +79,6 @@ carve_shards: 3
 # durations bridge (Task 4b) refreshes both sides.
 #
 # Raising this trades WALL CLOCK for AGGREGATE runner time (the same self-hosted
-# capacity the epic is trying to enlarge), so it is a wall-clock lever, not a
-# free win.
-fast_shards: 9
 
 surfaces:
   api:
