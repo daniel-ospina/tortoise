@@ -592,13 +592,23 @@ class TestPackFitLayers:
 class TestPackWiringGuards:
     def test_every_shipped_pack_namespace_reaches_the_extraction_master_list(
             self, registry):
-        """A pack whose namespace never reaches ``pack_kinds`` compiles in the
-        registry but is INVISIBLE to the extractor — the pack ships inert. This
-        is the guard for that whole class of bug, not just venture.
+        """A pack whose namespace never reaches ``pack_kinds`` is not offered by
+        the PROMPT. This is the guard for that class of bug, not just venture.
+
+        Scope of the claim, measured: a namespace absent from ``pack_kinds`` is
+        not necessarily invisible to the extractor. A kind declared only via
+        ``objectKinds``/``eventKinds`` (no ``kindDefs``) contributes no
+        ``pack_kinds`` key yet IS classifier-assignable — measured on this tree,
+        `dev:apiSpec`, `marketing:keyword` and `pm:milestone` are all in
+        ``compile_kind_index_spec()`` while absent from ``pack_kinds``. So the
+        documented direction is the narrower one: absent here means the prompt
+        cannot offer it, NOT that the pack ships inert. The other direction (a
+        namespace present in the brief but dropped by the gate) is a different
+        seam, covered by `tests/test_vocab_gating_callers_5163.py`.
 
         The pack-kind set is derived from the compiled value brief (#5165), so
         the default (ungated catalog-union) path must carry every shipped
-        namespace; a namespace absent here can never be offered by the prompt.
+        namespace.
         """
         master_ns = {k.split(":", 1)[0]
                      for k in v2.build_master_list()["pack_kinds"]}
