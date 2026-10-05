@@ -3954,27 +3954,31 @@ class FalkorProjection(
             used, cap = pressure
             detail = (f"used_memory {_fmt_bytes(used)} of maxmemory "
                       f"{_fmt_bytes(cap)}")
-        # The remedy must NOT hand-roll the ownership policy in prose. Four
+        # The remedy must NOT hand-roll the ownership policy in prose. Five
         # review rounds each found this message disagreeing with the code's own
-        # predicate — the journal is necessary but not sufficient (`_sweep_drop`
-        # deletes only `_SWEEP_OWNED_PREFIXES` families), a blanket product-prefix
-        # ban contradicts `_SWEEP_OWNED_PREFIXES` (which owns `team_`/`org_`),
-        # and any family list drifts as the vocabulary changes. So the message
-        # names the MECHANISM instead of a list, and scopes each claim to the
-        # pass it is actually true of: only the JOURNAL pass is gated on the
-        # ownership record, because `_sweep_legacy_strays` and the session-end
-        # `wipe_server(scope=None)` are deliberately journal-BLIND (prefix on
-        # shape alone — that is why they are opt-in).
+        # predicate, because a name list written in prose is wrong in one
+        # direction or the other. The code has TWO policies and they differ: the
+        # journal pass drops only `_SWEEP_OWNED_PREFIXES` families, so the
+        # journal is necessary but NOT sufficient (a journal-listed
+        # `registry_control_plane` is PRESERVED); the journal-BLIND passes are
+        # governed a different way entirely — `_sweep_legacy_strays` is OPT-IN
+        # because it drops on shape alone, while the default session-end
+        # `wipe_server(scope=None)` runs ungated and is narrowed instead to
+        # `_SERVER_WIPE_PREFIXES`, a strict subset of `_SWEEP_OWNED_PREFIXES`.
+        # So the message names only the pass that runs by default, and
+        # enumerates no family. It names no residue pass either: an operator
+        # cannot invoke it (no default call site), so naming its env lever
+        # would be advice that frees nothing.
         #
-        # It also makes NO claim about which graph commands the server refuses
-        # at the ceiling. An earlier revision of this comment asserted that
+        # The message also makes NO claim about which graph commands the server
+        # refuses at the ceiling. An earlier revision asserted that
         # `GRAPH.DELETE` is `denyoom` and therefore cannot free the memory; that
-        # was wrong (upstream registers `graph.DELETE` as "write deny-script"
-        # and it is `graph.QUERY` that carries `deny-oom`), and the misreading
-        # came from #2979's log line, which is the DETACH inside `GRAPH.QUERY`
-        # that `safe_graph_delete` sends BEFORE `graph.delete()`. Flag semantics
-        # are not something an operator message should assert, so the assertion
-        # is dropped rather than corrected.
+        # was wrong (upstream registers `graph.DELETE` as "write deny-script" and
+        # it is `graph.QUERY` that carries `deny-oom`), and the misreading came
+        # from #2979's log line, which is the DETACH inside `GRAPH.QUERY` that
+        # `safe_graph_delete` sends BEFORE `graph.delete()`. Flag semantics are
+        # not something an operator message should assert, so the assertion is
+        # dropped rather than corrected.
         #
         # The two enumerated names are the ones `TortoiseSDK.test_guard` blocks
         # (tortoise/sdk.py) — one exact (`tortoise`) and one prefix
@@ -3988,13 +3992,10 @@ class FalkorProjection(
             "container's --maxmemory. Do NOT hand-pick names from "
             "GRAPH.LIST to free memory instead: GRAPH.DELETE cannot be "
             "undone, and a name you cannot attribute is not yours to delete. "
-            "To reclaim graphs, let the suite's own passes run once memory "
-            "is relieved — the journal pass drops only what this session's "
-            "ownership record lists, and the opt-in residue pass "
-            "(TORTOISE_TEST_SWEEP_LEGACY=1) reclaims the recorded residue "
-            "cohort. Never delete the production graph tortoise or a "
-            "tortoise_restored* snapshot, and do NOT FLUSHALL. See #2981 "
-            "for the shared-lane form of this."
+            "The suite's journal pass reclaims what this session's ownership "
+            "record lists, once memory is relieved. Never delete the "
+            "production graph tortoise or a tortoise_restored* snapshot, and "
+            "do NOT FLUSHALL. See #2981 for the shared-lane form of this."
         )
 
     def _backend_failure_message(

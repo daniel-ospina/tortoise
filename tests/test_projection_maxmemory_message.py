@@ -101,17 +101,27 @@ def test_write_refusal_remedy_names_the_safe_path_and_claims_no_flags(monkeypatc
     assert msg is not None
     # 1. The one executable lever.
     assert "raise / relieve the container's --maxmemory" in msg, msg
-    # 2. The opt-in residue lever is named (round-4 P2: actionability must not
-    #    narrow — it is the only pass that reaches the journal-blind cohort).
-    assert "TORTOISE_TEST_SWEEP_LEGACY=1" in msg, msg
+    # 2. The suite's journal pass is named as the reclaim path — the pass that
+    #    runs by DEFAULT. The residue pass is deliberately NOT named: it has no
+    #    default call site, so naming its env lever would be advice that frees
+    #    nothing (rounds 3 and 5).
+    assert "The suite's journal pass reclaims what this session's" in msg, msg
+    assert "TORTOISE_TEST_SWEEP_LEGACY" not in msg, msg
     # 3. The unsafe shortcut is refused, and the mechanism is still named.
     assert "GRAPH.DELETE" in msg, msg          # the pre-existing pin, kept
     assert "Do NOT hand-pick names from GRAPH.LIST" in msg, msg
     assert "cannot be undone" in msg, msg
     assert "FLUSHALL" in msg, msg
     # 4. NO claim about which commands the server refuses (the round-4 P1).
-    for token in ("deny-oom", "denyoom", "is refused"):
-        assert token not in msg, (token, msg)
+    #    STRUCTURAL, not a denylist of the two wordings already removed: any
+    #    rewording that re-introduces the claim uses one of these stems, which
+    #    is the same upgrade the sibling test got (round 5).
+    #    NOTE: "refus" is deliberately NOT a stem here — the message's own
+    #    opening line is "DB refused writes on open", so it could never be a
+    #    sound discriminator for a claim about a COMMAND being refused.
+    lowered = msg.lower()
+    for stem in ("deny", "reject", "blocked"):
+        assert stem not in lowered, (stem, msg)
 
 
 def test_write_refusal_remedy_does_not_hand_roll_the_ownership_policy(monkeypatch):
@@ -144,17 +154,21 @@ def test_write_refusal_remedy_does_not_hand_roll_the_ownership_policy(monkeypatc
     #     enumeration — whatever its spelling — reds this test.
     assert msg.count("*") == 1, msg
     assert "tortoise_restored*" in msg, msg
-    # (b) the belt to that braces: the exact tokens the four rounds introduced.
+    # (b) the belt to that braces: the exact tokens the rounds introduced, plus
+    #     the residue-pass lever the message must NOT name (rounds 3 and 5: it
+    #     has no default call site, so naming it is advice that frees nothing).
     for token in ("NEVER delete", "org_*", "team_*", "registry", "test_",
-                  "v10fix", "tt_gate", "typeprobe", "review_rw_probe"):
+                  "v10fix", "tt_gate", "typeprobe", "review_rw_probe",
+                  "TORTOISE_TEST_SWEEP_LEGACY"):
         assert token not in msg, (token, msg)
     # (c) the two names `TortoiseSDK.test_guard` blocks are still named, and the
     #     ownership claim is scoped to the JOURNAL pass — the only pass it is
-    #     true of (round-4 P2: `_sweep_legacy_strays` and the session-end
-    #     `wipe_server(scope=None)` are journal-blind by design).
+    #     true of AND the only one that runs by default. (`_sweep_legacy_strays`
+    #     is opt-in and journal-blind; `wipe_server(scope=None)` runs ungated and
+    #     is narrowed to `_SERVER_WIPE_PREFIXES` instead.)
     assert "the production graph tortoise" in msg, msg
     assert "tortoise_restored* snapshot" in msg, msg
-    assert "the journal pass drops only what this session's" in msg, msg
+    assert "The suite's journal pass reclaims what this session's" in msg, msg
 
 
 def test_memory_pressure_unreadable_still_avoids_rebuild(monkeypatch):
