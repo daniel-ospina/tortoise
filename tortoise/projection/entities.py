@@ -1422,18 +1422,20 @@ class _EntityHandlers:
 
         The capture path MERGEs the Session with a raw graph write; this
         record is its journal carrier, so the node (and any ``EntityLinked``
-        edge from it) replays. Idempotent MERGE keyed on ``id``; ``created_at``
-        and ``actor_user_id`` are coalesce-preserved (first writer wins,
-        mirroring the live merge), ``turn_count`` tracks the latest journaled
-        capture. Returns 1 when the node exists after the fold, 0 on a
+        edge from it) replays. Idempotent MERGE keyed on ``id``; ``created_at``,
+        ``actor_user_id`` and ``capture_lane`` are coalesce-preserved (first
+        writer wins, mirroring the live merge), ``turn_count`` tracks the latest
+        journaled capture. Returns 1 when the node exists after the fold, 0 on a
         malformed record.
 
         BOTH the id and every journal-derived property value are gated for
         WRITABILITY, not just type (review P1): a NUL / lone-surrogate id and
         a map-valued ``created_at`` / ``turn_count`` / ``harness`` /
-        ``actor_user_id`` payload each raise at parameter parse, and ``rebuild_all`` folds this
-        record INLINE (no try/except) AFTER the wipe. A malformed id is a
-        NO-OP (return 0); a malformed field is OMITTED, never bound.
+        ``actor_user_id`` / ``capture_lane`` payload are each REJECTED by
+        ``_annotator_value_ok`` BEFORE the bind — a malformed id is a NO-OP
+        (return 0), a malformed field is OMITTED, never bound, so neither can
+        reach parameter parse. That matters because ``rebuild_all`` folds this
+        record INLINE (no try/except) AFTER the wipe.
 
         ``entity_links_attempted`` / ``entity_links_created`` are carried by a
         ``SessionRecorded`` the capture emits after the link pass
@@ -1473,6 +1475,17 @@ class _EntityHandlers:
         if created_at is not None and _annotator_value_ok(created_at):
             sets.append("s.created_at=coalesce(s.created_at, $created_at)")
             params["created_at"] = created_at
+        # #3516 §B: the producer lane. Folded with coalesce (first writer wins)
+        # to MATCH the live capture write, which is also first-writer-wins. No
+        # producer journals this field YET: no caller passes `capture_lane` to a
+        # journaling writer (the hosted lane passes no `on_session_merged` at
+        # all; the SDK lane passes one but never a lane), so this is a GUARD for
+        # the first journaling lane (the store-sync CLI), not a parity property
+        # that holds today.
+        lane = ev.get("capture_lane")
+        if lane is not None and _annotator_value_ok(lane):
+            sets.append("s.capture_lane=coalesce(s.capture_lane, $v_capture_lane)")
+            params["v_capture_lane"] = lane
         for prop in ("turn_count", "harness", "entity_links_attempted",
                      "entity_links_created", "capture_ok",
                      "capture_extractor", "capture_redactions"):
