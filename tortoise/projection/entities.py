@@ -2148,7 +2148,12 @@ class _EntityHandlers:
         """MERGE Subject by name (content-hash dedup)."""
         sid = ev.get("id")
         name = ev.get("name", "")
-        if not sid or not name:
+        # #7369: `name` is the MERGE KEY (`MERGE (s:Subject {name:$name})`), and
+        # a null/refused key aborts the replay. `sid` is only a property value,
+        # so it is left to the parameter boundary. Function-local import — the
+        # module-level cycle-avoidance pattern this file already uses.
+        from tortoise.projection import _writable_id
+        if not sid or not _writable_id(name):
             return
         # Compute embedding for Subject name (#7845)
         embedding = None
@@ -2226,7 +2231,9 @@ class _EntityHandlers:
         """
         oid = ev.get("id")
         name = ev.get("name", "")
-        if not oid or not name:
+        # #7369: `name` is the MERGE KEY (`MERGE (o:Object {name:$name})`).
+        from tortoise.projection import _writable_id
+        if not oid or not _writable_id(name):
             return
         title = ev.get("title")  # None default — coalesce needs NULL, not ""
         ok = ev.get("object_kind")  # None default — same issue
@@ -2652,7 +2659,9 @@ class _EntityHandlers:
         """
         inner = event.get("event", event)  # unwrap nested format
         eid = inner.get("id") or inner.get("eventId")
-        if not eid:
+        # #7369: `eid` is the MERGE KEY (`MERGE (e:Event {eventId:$eid})`).
+        from tortoise.projection import _writable_id
+        if not _writable_id(eid):
             return
         # Embedding: the journaled EventRecorded payload carries the live
         # value (epic #900 cycle-18/19 — the sanctioned replay carrier for the
@@ -3127,9 +3136,16 @@ class _EntityHandlers:
         """
         sid = ev.get("id")
         url = ev.get("url", "")
-        if not sid and not url:
+        # #7369: the Source MERGE key is a RESOLVED key, but a truthy yet
+        # unwritable `url`/`sid` would still become it (`$id = sid or key`),
+        # and the engine refuses such a key. Require at least one WRITABLE
+        # identity, then make sure the truthy winner is not the unwritable one.
+        from tortoise.projection import _writable_id
+        if not _writable_id(url) and not _writable_id(sid):
             return None
         raw_key = url or sid
+        if not _writable_id(raw_key):
+            raw_key = sid if _writable_id(sid) else url
         # ── S0a/S0b (#5012): canonical source identity ──
         # S0a runs FIRST and is mechanical (no model, no graph).  S0b then
         # resolves the inbound spelling to the ONE node its canonical identity
@@ -3230,7 +3246,7 @@ class _EntityHandlers:
             # fail and be mistaken for "no node".
             "RETURN _prev_props AS previousProps",
             params={
-                "url": key, "id": sid or key,
+                "url": key, "id": sid if _writable_id(sid) else key,
                 "cu": canonical,
                 "raw_url": raw_key,
                 "sk": ev.get("sourceKind", "document"),

@@ -496,6 +496,56 @@ def test_a_corrupt_PROMOTE_id_is_skipped_rather_than_aborting_the_rebuild(supers
     assert rows[0][0] >= 1, "the rebuild lost the healthy points"
 
 
+# ── 4. the ENTITY families' MERGE keys (the second half of the class) ────
+#
+# Each of these folds MERGEs on a journal-derived key, and each guarded that
+# key with TRUTHINESS — so a NUL-carrying value passed the guard, reached the
+# MERGE, and (with the boundary correctly refusing to null a merge key) died in
+# pass-1b AFTER the wipe. The fix is the same `_writable_id` gate the Point
+# anchors use.
+
+_FAMILY_RECORDS = [
+    ("Subject", {"type": "SubjectAdded", "id": "sub-7369"},
+     "name", "bad\x00name"),
+    ("Object", {"type": "ObjectRegistered", "id": "obj-7369"},
+     "name", "bad\x00name"),
+    ("Source", {"type": "SourceCreated", "id": "src-7369"},
+     "url", "bad\x00url"),
+    ("Event", {"type": "EventRecorded", "event": {"id": "ev-7369"}},
+     "event.id", "bad\x00ev"),
+]
+
+
+@pytest.mark.parametrize("label,rec,key,val", _FAMILY_RECORDS)
+def test_a_corrupt_entity_key_does_not_abort_the_rebuild(
+        superseded, label, rec, key, val):
+    """The identity route through the ENTITY folds, one case per family.
+
+    Without the `_writable_id` guard each of these aborts pass-1b after the
+    wipe; with it the record is skipped and the healthy points survive.
+    """
+    events, sdk, _old, _new = superseded
+    node = rec
+    parts = key.split(".")
+    for part in parts[:-1]:
+        node = node.setdefault(part, {})
+    node[parts[-1]] = val
+    (events / "events.jsonl").write_text(
+        (events / "events.jsonl").read_text()
+        + json.dumps(rec, ensure_ascii=False) + "\n"
+    )
+
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point) RETURN count(n)", params={},
+    ).result_set
+    assert rows[0][0] >= 1, (
+        "%s: the rebuild lost the healthy points (aborted after the wipe?)"
+        % label
+    )
+
+
 def test_two_rebuilds_of_a_poisoned_journal_agree(superseded):
     """Degrading must still be a FUNCTION of the journal."""
     events, sdk, old, _new = superseded
