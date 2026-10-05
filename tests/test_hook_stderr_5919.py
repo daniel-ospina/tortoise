@@ -222,6 +222,11 @@ def test_the_writer_still_writes_when_the_directory_is_writable(tmp_path):
     whole point of the inert-install evidence (#4314).  Without this, a fix
     that replaced the write with ``true`` would pass the tests above.
 
+    #5838: the assertion is on the ``install-inert`` SLOT
+    (``claude-install.json``), which is where this writer now lands — the path
+    moved, the guarantee did not.  The capture slot is asserted ABSENT, so
+    this test also pins that #5919's fix did not reintroduce the collision.
+
     Mutation: replace the write block with ``:`` (or drop the call site) → no
     crumb file is written → RED.
     """
@@ -239,12 +244,17 @@ def test_the_writer_still_writes_when_the_directory_is_writable(tmp_path):
         env=env, cwd=str(tmp_path), timeout=60)
     assert proc.returncode == 0, proc.stderr
     assert proc.stderr == "", proc.stderr
-    crumb = home / ".tortoise" / "capture-errors" / "claude.json"
+    crumb = home / ".tortoise" / "capture-errors" / "claude-install.json"
+    stale = home / ".tortoise" / "capture-errors" / "claude.json"
     run = home / ".tortoise" / "hook-runs" / "claude.json"
     assert crumb.is_file(), f"breadcrumb missing at {crumb}"
     assert run.is_file(), f"hook-run record missing at {run}"
     assert json.loads(crumb.read_text())["kind"] == "install-inert"
     assert json.loads(run.read_text())["kind"] == "hook-run"
+    # #5838: the inert writer has its OWN slot, so a live `capture-failure`
+    # refusal is not destroyed by this write (and this test is where that
+    # collision would show up first, because it drives the REAL hook).
+    assert not stale.exists(), "the inert writer touched the capture slot"
 
 
 # ── the FROZEN hook: stdout guard only ───────────────────────────────────
