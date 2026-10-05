@@ -96,7 +96,7 @@ DONE_MARKER = "embedder provision: complete"
 
 
 def _watchdog_seconds() -> float:
-    """Seconds before the watchdog fires (and exits non-zero with a dump).
+    """Seconds before the watchdog fires (and dumps every thread's stack).
 
     Set PER SITE in the workflow, because the two bounds it must sit between are
     per site (P1, third review of #7364). A flat default was wrong: it killed a
@@ -195,7 +195,7 @@ def _install_termination_stack_dump() -> None:
         # exit=False, DELIBERATELY. The watchdog fires whenever provisioning is
         # slow, and the cited run proves "slow" is not "stuck": its load alone
         # took 336s against a 360s cap, so an `exit=True` watchdog at 330s would
-        # have killed — 6s before the model finished loading — exactly the run
+        # have killed — ~8s before the load completed — exactly the run
         # `os._exit` saves. A diagnostic that can turn a working run red is a
         # new failure mode, and this one has no need to be one: with `exit=False`
         # it can only ADD information (a stack from the stall) and the runner's

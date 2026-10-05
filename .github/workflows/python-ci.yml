@@ -592,9 +592,9 @@ jobs:
         # #964: the step-level timeout still bounds a hung download (stalled TCP,
         # no error raised) that would otherwise stall the step for the full job cap.
         env:
-          # #7359 P1: strictly below this step's timeout-minutes AND above its
-          # `--attempts N --backoff S` budget, so a slow-but-working download is not
-          # killed at a wall-clock guess. Keep this line next to the cap.
+          # #7359: the watchdog only DUMPS (exit=False) — it cannot fail a run. Below the
+          # cap so the dump lands before the runner's kill; above the `--attempts N
+          # --backoff S` budget so it does not fire during legitimate retry sleeps.
           TORTOISE_EMBEDDER_WATCHDOG_S: "330"
         timeout-minutes: 6
         run: |
@@ -1357,9 +1357,9 @@ jobs:
         # no error raised) that would otherwise stall the step for the full 90-min
         # job cap; a timeout now FAILS the step, which is the honest outcome.
         env:
-          # #7359 P1: strictly below this step's timeout-minutes AND above its
-          # `--attempts N --backoff S` budget, so a slow-but-working download is not
-          # killed at a wall-clock guess. Keep this line next to the cap.
+          # #7359: the watchdog only DUMPS (exit=False) — it cannot fail a run. Below the
+          # cap so the dump lands before the runner's kill; above the `--attempts N
+          # --backoff S` budget so it does not fire during legitimate retry sleeps.
           TORTOISE_EMBEDDER_WATCHDOG_S: "570"
         timeout-minutes: 10
         run: |
@@ -1716,9 +1716,9 @@ jobs:
         # whole budget and cancel the run step with NO summary), so the timeout
         # now fails the step outright.
         env:
-          # #7359 P1: strictly below this step's timeout-minutes AND above its
-          # `--attempts N --backoff S` budget, so a slow-but-working download is not
-          # killed at a wall-clock guess. Keep this line next to the cap.
+          # #7359: the watchdog only DUMPS (exit=False) — it cannot fail a run. Below the
+          # cap so the dump lands before the runner's kill; above the `--attempts N
+          # --backoff S` budget so it does not fire during legitimate retry sleeps.
           TORTOISE_EMBEDDER_WATCHDOG_S: "570"
         timeout-minutes: 10
         run: |
@@ -2080,9 +2080,9 @@ jobs:
         # backoff before the final probe, which does not fit the `test` job's
         # tighter `--attempts 3 --backoff 5` budget under a 6-minute cap.
         env:
-          # #7359 P1: strictly below this step's timeout-minutes AND above its
-          # `--attempts N --backoff S` budget, so a slow-but-working download is not
-          # killed at a wall-clock guess. Keep this line next to the cap.
+          # #7359: the watchdog only DUMPS (exit=False) — it cannot fail a run. Below the
+          # cap so the dump lands before the runner's kill; above the `--attempts N
+          # --backoff S` budget so it does not fire during legitimate retry sleeps.
           TORTOISE_EMBEDDER_WATCHDOG_S: "570"
         timeout-minutes: 10
         run: |

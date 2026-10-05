@@ -600,20 +600,31 @@ def test_the_watchdog_dumps_a_native_blocked_thread(tmp_path):
         {"TORTOISE_EMBEDDER_WATCHDOG_S": "1"},
     )
     try:
-        seen = ""
+        # Read the RAW fd, not `proc.stderr`. That stream is `text=True`, so the
+        # first `read()` drains the whole dump into the TextIOWrapper's
+        # userspace buffer and the fd goes empty — `select` then never reports
+        # ready again, the loop spins to its deadline, and the suite goes red
+        # (P1, sixth review: 1 failed / 21 passed). `os.read` on the fileno sees
+        # the bytes the buffer already swallowed.
+        fd = proc.stderr.fileno()
+        seen = b""
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
-            ready, _, _ = select.select([proc.stderr], [], [], 5)
+            ready, _, _ = select.select([fd], [], [], 5)
             if not ready:
                 continue
-            chunk = proc.stderr.read(1)
+            chunk = os.read(fd, 65536)
             if not chunk:
                 break
             seen += chunk
-            if "sentence_transformers" in seen:
+            # `embedder_provision.py` appears only on the MAIN thread's stack;
+            # the helper thread carries the fake module alone. Asserting on
+            # "sentence_transformers" alone was satisfied by the HELPER's frame,
+            # so a green run did not prove the blocked main thread was captured.
+            if b"embedder_provision.py" in seen:
                 break
-        assert "sentence_transformers" in seen, (
-            f"the watchdog produced no dump for a native-blocked main thread:\n{seen}"
+        assert b"embedder_provision.py" in seen, (
+            "no dump of the MAIN thread:\n" + seen.decode(errors="replace")
         )
     finally:
         if proc.poll() is None:
@@ -729,19 +740,20 @@ def test_the_process_never_runs_atexit_teardown(tmp_path):
     )
     assert proc.returncode == 0, proc.stderr
     assert not sentinel.exists(), (
-        "atexit teardown ran — the process left via sys.exit, so the #7359 "
-        "teardown stall is back"
+        "atexit teardown ran — the process left via sys.exit, so the unbounded "
+        "interpreter shutdown #7359 measured is back"
     )
 
 
 def test_every_watchdog_margin_sits_between_the_backoff_budget_and_the_step_cap():
     """A per-site invariant, because a flat default regressed (P1, third review).
 
-    Sitting below the site's own worst-case retry sleep fails a run that was
-    still legitimately retrying; sitting at or above `timeout-minutes` makes the
-    dump miss its window (the runner's own kill arrives first). Both bounds are
-    per site, so the check is too — and both are derived from the formula rather
-    than restated, because restating the budget is exactly what went wrong here.
+    Sitting below the site's own worst-case retry sleep produces a premature
+    dump while the script is still legitimately sleeping between retries;
+    sitting at or above `timeout-minutes` makes the dump miss its window (the
+    runner's own kill arrives first). Both bounds are per site, so the check is
+    too — and both are derived from the formula rather than restated, because
+    restating the budget is exactly what went wrong here.
 
     Enumerated with `_all_gate_steps`, the SAME selector the wiring tests use,
     not a name-prefix split: the earlier version matched only steps literally
