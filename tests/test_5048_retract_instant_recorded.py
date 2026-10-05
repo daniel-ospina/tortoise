@@ -195,17 +195,26 @@ def test_the_pure_fold_agrees_with_the_rebuilt_graph(retracted):
     """`fold()` and `rebuild_all` are the two replay engines and must not
     drift (the #330 contract the neighbouring arms cite).
 
+    The node is sentinel-stamped before the replay, so a `rebuild_all` that
+    did nothing cannot satisfy this: the rebuilt value must be the RECORDED
+    one, which only a real replay writes.
+
     FAILS BEFORE: the pure fold did not stamp `updatedAt` at all, so it kept
     the point's ORIGINAL `PointAdded` stamp while the graph held a third
     value — three stamps for one retraction.
     """
     events, sdk, pid = retracted
+    recorded = _of_type(events, "PointRetracted")[0]["ts"]
+    _stamp(sdk, pid, "REPLAY-DID-NOT-RUN")
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     rebuilt = _node(sdk, pid)
 
     folded = fold(_records(events))
     assert pid in folded, "the fold lost the retracted point entirely"
     assert folded[pid]["status"] == "retracted", folded[pid]
+    assert rebuilt["updatedAt"] == recorded, (
+        f"the replay did not write the recorded instant: "
+        f"{rebuilt['updatedAt']!r} (recorded {recorded!r})")
     assert folded[pid]["updatedAt"] == rebuilt["updatedAt"], (
         f"fold={folded[pid].get('updatedAt')!r} vs "
         f"rebuild_all={rebuilt['updatedAt']!r}")
@@ -336,13 +345,58 @@ def test_a_malformed_instant_does_not_abort_the_rebuild(tmp_path):
 
     sdk2 = TortoiseSDK(db, event_log_path=str(journal))
     try:
+        # Undo the retraction IN THE GRAPH (never in the journal) so that a
+        # `rebuild_all` which did nothing cannot pass: only a real replay can
+        # re-apply the retraction and move the stamp off the sentinel.
+        sdk2._get_proj().g.query(
+            "MATCH (n:Point {id:$i}) SET n.status = 'live', "
+            "n.updatedAt = 'REPLAY-DID-NOT-RUN'", params={"i": pid})
         # Unguarded on purpose: a raise here IS the defect.
         sdk2._get_proj().rebuild_all(str(events), confirm_destructive=True)
         node = _node(sdk2, pid)
         assert node["status"] == "retracted", (
             "the rebuild did not apply the retraction — the claim is left "
             f"LIVE after an aborted replay: {node}")
+        assert node["updatedAt"] != "REPLAY-DID-NOT-RUN", (
+            "the rebuild did not re-materialise the node from the journal")
         assert isinstance(node["updatedAt"], str), (
             f"a malformed record poisoned the node property: {node}")
+    finally:
+        sdk2.close()
+
+
+def test_an_empty_string_instant_writes_no_stamp_in_the_graph(tmp_path):
+    """The GRAPH arm's half of the shared-predicate agreement.
+
+    `_writable_id("")` is TRUE, so a regression of `_retract`'s gate from
+    `_usable_instant` back to `_writable_id` would make the graph write
+    `updatedAt=""` while the fold writes nothing — the exact divergence an
+    earlier review round found — and every other test in this file stays
+    green (the malformed test uses a dict, which `_writable_id` also rejects).
+    """
+    events = tmp_path / "events"
+    events.mkdir()
+    journal = events / "events.jsonl"
+    db = str(tmp_path / "empty5048.db")
+    sdk = TortoiseSDK(db, event_log_path=str(journal))
+    pid = sdk.create_point("statement", "a claim")["id"]
+    sdk.retract_point(pid)
+    sdk.close()
+
+    recs = [json.loads(line) for line in journal.read_text().splitlines()
+            if line.strip()]
+    for rec in recs:
+        if rec.get("type") == "PointRetracted":
+            rec["ts"] = ""
+    journal.write_text("\n".join(json.dumps(r) for r in recs) + "\n")
+
+    sdk2 = TortoiseSDK(db, event_log_path=str(journal))
+    try:
+        sdk2._get_proj().rebuild_all(str(events), confirm_destructive=True)
+        node = _node(sdk2, pid)
+        assert node["status"] == "retracted", node
+        assert node["updatedAt"] != "", (
+            "an empty-string instant was written as a stamp — the graph arm "
+            "is not using the shared `_usable_instant` predicate")
     finally:
         sdk2.close()

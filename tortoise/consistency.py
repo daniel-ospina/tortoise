@@ -792,7 +792,8 @@ def _fold_journal(events: list[dict]) -> dict:
     lifecycle arms `fold` does not have.
 
     `fold` is the in-memory POINT-only index. It HAS an arm for `PointRetracted`
-    (status only — no belief decay), and none for `PointPromoted`,
+    (status, the vacuity belief, and the #5048 recorded `updatedAt` — no belief
+    decay), and none for `PointPromoted`,
     `OperatorPromoted`, `PointSuperseded` or `PointInvalidated` — a documented,
     intentional scope gap its own `_NO_POINT_FOLD` names (#3692 records the same
     four). The GRAPH writer folds all of them: `apply()` for the promotions,
@@ -825,7 +826,8 @@ def _fold_journal(events: list[dict]) -> dict:
         keys the payload carries, except `content`/`is_operator`/`op_type`,
         which it sets UNCONDITIONALLY — so a snapshot that omits those RESETS
         them, and this arm pins them the same way.
-      PointRetracted  — `_retract` (`_apply_one`'s arm sets only the status):
+      PointRetracted  — `_retract` (`_apply_one`'s arm sets same three:
+        status, `VACUITY_BELIEF`, and the #5048 recorded `updatedAt`):
         `status='retracted'` + the `decay_clause` belief decay, which is why
         this arm exists at all rather than deferring to `_apply_one`.
       PointSuperseded — `_fold_point_superseded`: requires `new_id` (a

@@ -86,11 +86,18 @@ def _journal_instant(ev: dict, key: str = "ts") -> str:
     clock.
 
     Byte-identical to the ``ev.get(key) or _now_iso()`` it replaces for every
-    value that expression accepted AND could write — a truthy string the
-    driver can take. The differing family is exactly what that expression
-    could not write: any non-string and a string carrying a NUL or lone
-    surrogate (which reached FalkorDB and raised), plus the empty string (which
-    it treated as absent).
+    value that expression accepted AND that `_usable_instant` accepts: a
+    truthy, driver-writable **string**. The differing family is everything
+    `_usable_instant` rejects — any non-string, a string carrying a NUL or lone
+    surrogate, the empty string, and an ARRAY of primitive strings (which
+    FalkorDB would have written, but which is not an instant this schema
+    stores).
+
+    Also NOT covered here, and measured: a live caller that folds an event dict
+    it built itself (``commit_ops``'s ``fold_ev`` for ``ObjectSuperseded``)
+    passes no ``ts``, so the live write, the record's envelope ``ts`` and this
+    helper each hold a different read. Journal-derived values still ride
+    parameters ungated elsewhere (``valid_to``) — #7369.
 
     NOTE the policy difference from ``_retract``, which is deliberate and not
     an oversight: when a record states NO usable instant this helper writes the
