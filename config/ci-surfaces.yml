@@ -2460,6 +2460,7 @@ durations:
   test_graph_diagnostics.py: 24.3
   eval/write_path/test_write_path_runner.py: 70.0
   test_unjournaled_mutation_class.py: 100.0  # unmeasured — #4743: locally measured (46 tests, live FalkorDB); refresh from CI junit — the file builds a projection per row.
+  test_url_keyed_source_write_4649.py: 170.0  # unmeasured — #4649: locally measured (23 tests, live FalkorDB on a spare container; 169.5s wall for the whole file). Needed here rather than left to the sweep because tools/ci_timing.py --refresh-durations samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time — the >=90% coverage floor (#2876) fails by construction for any test-adding PR. Refresh from CI junit once this file has run on main.
   test_write_verb.py: 34.6
   test_index_restore.py: 2.7
   test_capture_session.py: 53.9
