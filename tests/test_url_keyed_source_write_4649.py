@@ -403,7 +403,7 @@ class TestFoldHonoursTheOrSet:
 
         caplog.clear()
         with caplog.at_level(logging.WARNING):
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
 
         assert _fold_warnings(caplog) == [], (
             f"a valid journal produced a fold-miss: {_fold_warnings(caplog)}")
@@ -425,7 +425,7 @@ class TestFoldHonoursTheOrSet:
 
         caplog.clear()
         with caplog.at_level(logging.WARNING):
-            proj.rebuild_all(str(events))
+            proj.rebuild_all(str(events), confirm_destructive=True)
 
         assert _fold_warnings(caplog) == [], _fold_warnings(caplog)
         assert not _rows(proj, "MATCH (s:Source {url:$u}) RETURN s.url", u=url), (
@@ -470,7 +470,7 @@ class TestTheStateReadBackIsTheSameStatement:
             "read-back by the old url cannot find the re-keyed node (#4649)")
         assert recs[0]["state"] == {"url": new}, recs[0]
 
-        proj.rebuild_all(str(events))
+        proj.rebuild_all(str(events), confirm_destructive=True)
         assert _rows(proj, "MATCH (s:Source {url:$u}) RETURN s.url", u=new), (
             "rebuild_all reverted the re-key: the state write had no record")
 
@@ -616,7 +616,7 @@ class TestPassTwoMintOrderingResidual:
         sdk.create_point("statement", "the claim", extractedFrom=url)
         sdk.update_entity(url, status="retired")
 
-        sdk._get_proj().rebuild_all(str(events))
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
         assert _stub(sdk._get_proj(), url)[1] == "retired"
 
@@ -632,7 +632,7 @@ class TestPassTwoMintOrderingResidual:
         sdk.create_point("statement", "the claim", extractedFrom=url)
         assert sdk.delete(url) is True
 
-        sdk._get_proj().rebuild_all(str(events))
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
         assert not _rows(sdk._get_proj(),
                          "MATCH (s:Source {url:$u}) RETURN s.url", u=url)
@@ -650,7 +650,7 @@ class TestPassTwoMintOrderingResidual:
 
         caplog.clear()
         with caplog.at_level(logging.WARNING):
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
         assert _fold_warnings(caplog), (
             "the pass-2 ordering gap silently dropped a journaled mutation — "
