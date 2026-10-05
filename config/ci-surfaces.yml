@@ -1670,9 +1670,9 @@ surfaces:
   # #2725: venture domain pack — manifest scope, corpus kind coverage, the
   # Objects-hold-state/supersede shape, and the two orthogonal pack-fit layers
   # (per-graph approval vs per-item classification). Mostly DB-free; the
-  # state/approval assertions are URI-gated — the `sdk`/`db_path` fixtures skip
-  # when no TORTOISE_DB_URI is set, following
-  # tests/test_commit_supersession_parity.py's module-level skip.
+  # state/approval assertions are URI-gated PER TEST by the `requires_db` marker,
+  # which skips when no TORTOISE_DB_URI is set — the `sdk` fixture itself does
+  # not skip, so a new URI-dependent test must carry the marker.
   - test_venture_pack.py
   # #2714 (lane L7): vocab gating by graph — the compile seams
   # (compile_value_brief / compile_vocab) and the graph's :PackInstall

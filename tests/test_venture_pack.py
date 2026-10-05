@@ -597,14 +597,15 @@ class TestPackWiringGuards:
 
         Scope of the claim, measured: a namespace absent from ``pack_kinds`` is
         not necessarily invisible to the extractor. A kind declared only via
-        ``objectKinds``/``eventKinds`` (no ``kindDefs``) contributes no
-        ``pack_kinds`` key yet IS classifier-assignable — measured on this tree,
-        `dev:apiSpec`, `marketing:keyword` and `pm:milestone` are all in
-        ``compile_kind_index_spec()`` while absent from ``pack_kinds``. So the
-        documented direction is the narrower one: absent here means the prompt
-        cannot offer it, NOT that the pack ships inert. The other direction (a
-        namespace present in the brief but dropped by the gate) is a different
-        seam, covered by `tests/test_vocab_gating_callers_5163.py`.
+        ``objectKinds``/``documentKinds``/``eventKinds`` (no ``kindDefs``)
+        contributes no ``pack_kinds`` key yet IS classifier-assignable — measured
+        on this tree, `dev:apiSpec` (a `documentKind`), `marketing:keyword` and
+        `pm:milestone` are all in ``compile_kind_index_spec()`` while absent from
+        ``pack_kinds``. So the documented direction is the narrower one: absent
+        here means the prompt cannot offer it, NOT that the pack ships inert. The
+        other direction (a namespace present in the brief but dropped by the
+        gate) is a different seam, covered by
+        `tests/test_vocab_gating_callers_5163.py`.
 
         The pack-kind set is derived from the compiled value brief (#5165), so
         the default (ungated catalog-union) path must carry every shipped
@@ -614,7 +615,7 @@ class TestPackWiringGuards:
                      for k in v2.build_master_list()["pack_kinds"]}
         missing = [ns for ns in registry.packs if ns not in master_ns]
         assert not missing, (
-            f"packs invisible to the extractor (absent from pack_kinds): {missing}")
+            f"packs not offered by the prompt (absent from pack_kinds): {missing}")
 
     def test_venture_kinds_are_in_the_master_list_and_its_forms(self):
         master = v2.build_master_list()
