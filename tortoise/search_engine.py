@@ -1315,19 +1315,20 @@ def run_vector_query(
             # #3019 KNOWN RESIDUAL: this index-accelerated path preserves the
             # engine's returned order, so two rows with EQUAL distances keep
             # whatever order the engine gave them, and rank-based fusion can see
-            # a tie-order flip. It is deliberately NOT re-sorted here: signature
-            # A's score IS its row POSITION, so a Python re-sort is not lossless
-            # for it, and that is what the two named tests actually pin (below).
-            # Signature B's DISTANCE could be ordered losslessly in the QUERY —
-            # measured: the tests named here use `MultiCallGraph`, whose
-            # `query()` returns canned rows and never inspects the Cypher, so an
-            # added `ORDER BY` would NOT break them; only a PYTHON re-sort would.
-            # Corrected from an earlier claim that both tests "pin this path's
-            # order-preservation" and therefore block any fix — they pin the
-            # PYTHON layer's order pass-through (`result == [("a", 0.0), ...]`
-            # from a mock returning `[("a", 2.4), ...]`) and the probe CALL
-            # COUNT. The signature-B query fix is still its own unit of work
-            # (two signatures share this function), tracked as a follow-up
+            # a tie-order flip. Deliberately NOT re-sorted here: signature A's
+            # score IS its row POSITION, so a Python re-sort is not lossless for
+            # it, and that is what
+            # `test_docker_mode_signature_b_scores_clamped_to_non_negative` and
+            # `test_none_api_keeps_probe_behavior` actually pin — the PYTHON
+            # layer's order pass-through (a mock returning [("a", 2.4),
+            # ("b", 0.0)] must come back as [("a", 0.0), ("b", 1.0)]) and the
+            # probe CALL COUNT. Signature B's DISTANCE could be ordered
+            # losslessly in the QUERY, and the same two tests do NOT forbid it:
+            # they drive `MultiCallGraph`, whose `query()` returns canned rows
+            # and never inspects the Cypher. Corrected from an earlier claim that
+            # these tests "pin this path's order-preservation" and therefore
+            # block any fix. The signature-B query fix is still its own unit of
+            # work (both signatures share this function), tracked as a follow-up
             # rather than papered over by the source pin.
             if sig == "B":
                 # #5583: the engine's value here is a DISTANCE (lower is
@@ -1554,15 +1555,22 @@ def run_structural_query(
         label_str = entity_type.capitalize()
         kind_field = {"point": "pointKind", "event": "eventKind", "subject": "subjectKind"}[entity_type]
     if entity_type in ("source", "document"):
-        # #149: Source canonical key is url, not id. #3019: `document` belongs in
-        # this branch for the same D10 reason the label block above gives — a
-        # document IS a :Source, and `_upsert_source` creates it as
-        # `MERGE (s:Source {url:$url})`, so it has NO `id` property. Falling
-        # through to `id` below made `ORDER BY n.id ASC` order on NULL for every
-        # row: the tie stayed unresolved (DB row order, the exact defect this
-        # PR exists to close) AND every returned pid was None. The vector (921)
-        # and FTS (1165) legs already map document->url; this leg was the one
-        # that did not.
+        # #149: Source canonical key is url, not id. #3019: `document` belongs
+        # in this branch for the same D10 reason the label block above gives — a
+        # document IS a :Source, and a :Source is NOT guaranteed to carry `id`.
+        #
+        # MEASURED, not assumed (an earlier version of this comment named the
+        # wrong mechanism): `_upsert_source` sets `s.id` only in its ON CREATE
+        # clause, and `_mint_source_stub` (projection/edges.py — the stub every
+        # provenance link mints) sets url/sourceKind/contentHash/ingestedAt and
+        # NEVER sets `id`. So a stub that a document write later adopts keeps
+        # `id` NULL. Verified on that path: `MATCH (s:Source) RETURN s.url, s.id`
+        # = [['z-doc', None], ['m-doc', None], ['a-doc', None]] after the stub,
+        # and still [..., None, 'note'] after documentKind is written. Ordering
+        # on NULL then resolves NOTHING: the tie fell back to DB row order (the
+        # defect this PR exists to close) AND every returned pid was None.
+        # The FTS leg (921) and the vector leg (1164) already map document->url;
+        # this leg was the one that did not.
         id_field = "url"
     elif entity_type == "event":
         id_field = "eventId"

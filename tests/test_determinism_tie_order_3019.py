@@ -211,9 +211,14 @@ def test_structural_leg_orders_documents_by_their_canonical_key(sdk):
     every row: the tie stayed UNRESOLVED — the exact defect #3019 exists to close
     — and the caller could not identify a document it had been handed.
 
-    THE FIXTURE REACHES IT: the sources are created exactly as
-    ``sdk._upsert_source`` writes a document — ``MERGE (s:Source {url:$url})``,
-    with NO ``id`` property — and in DESCENDING url order, so
+    THE FIXTURE REACHES IT: the sources are minted with
+    ``projection.edges._mint_source_stub`` — the REAL stub path every provenance
+    link uses — which sets url / sourceKind / contentHash / ingestedAt and NEVER
+    sets ``id`` (measured: ``MATCH (s:Source) RETURN s.url, s.id`` =
+    ``[['z-doc', None], ['m-doc', None], ['a-doc', None]]``). ``documentKind`` is
+    then written onto those same nodes, which leaves ``id`` NULL — a state
+    ``_upsert_source`` cannot repair either, since it sets ``id`` only ON CREATE.
+    They are minted in DESCENDING url order, so
     ``["a-doc", "m-doc", "z-doc"]`` is unreachable unless the leg orders by the
     document's canonical key.
 
@@ -224,12 +229,26 @@ def test_structural_leg_orders_documents_by_their_canonical_key(sdk):
     substring match. That is the pin's own lesson: pin the behaviour, not the
     presence of a textual fix.
     """
+    from tortoise.projection.edges import _mint_source_stub
+
     graph = sdk._get_proj().g
     for url in ["z-doc", "m-doc", "a-doc"]:
+        _mint_source_stub(graph, url)
         graph.query(
-            "MERGE (s:Source {url:$url}) SET s.documentKind=$kind",
+            "MATCH (s:Source {url:$url}) SET s.documentKind=$kind",
             params={"url": url, "kind": "note"},
         )
+
+    # FIXTURE NOT REACHED guard: the premise of this test is that a document can
+    # carry documentKind with NO id. If a writer starts setting `id` on the stub
+    # path, this test would pass for the WRONG reason — so assert the premise.
+    stored = graph.query(
+        "MATCH (s:Source) RETURN s.url, s.id, s.documentKind").result_set
+    assert len(stored) == 3, f"FIXTURE NOT REACHED: expected 3 sources, got {stored}"
+    assert all(r[1] is None for r in stored), (
+        "FIXTURE NOT REACHED: the documents now carry an `id`, so this test no "
+        f"longer exercises the id-less path it is named for: {stored}"
+    )
 
     rows = run_structural_query(graph, "note", entity_type="document", limit=10,
                                 excluded_statuses=())
