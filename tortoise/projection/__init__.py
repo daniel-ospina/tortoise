@@ -7651,7 +7651,7 @@ class FalkorProjection(
             return ("embedded", str(path))
         return None
 
-    def _record_vector_index_inventory(self) -> None:
+    def _record_vector_index_inventory(self, catalogue_rows=None) -> None:
         """Measure which of the labels the vector leg SERVES carry a VECTOR
         index on this engine, and report the gap. (#4997)
 
@@ -7698,7 +7698,11 @@ class FalkorProjection(
             endpoint = self._falkordb_version_cache_key() or id(self)
             key = (endpoint, self._graph_name)
 
-            rows = self.g.query("CALL db.indexes()").result_set
+            # #5434: reuse the rows `_schema_is_current` already read when the
+            # caller supplied them (the fast path); otherwise probe HERE (the
+            # full sweep, where the catalogue changed since any earlier read).
+            rows = (catalogue_rows if catalogue_rows is not None
+                    else self.g.query("CALL db.indexes()").result_set)
             if rows is None:
                 # NOT the same thing as [] — see the attribute's docstring.
                 log.debug(
@@ -8026,8 +8030,20 @@ class FalkorProjection(
         try:
             rows = self.g.query("CALL db.indexes()").result_set
         except Exception:  # a probe that cannot run is not a pass
+            self._index_catalogue_rows = None
             return False
+        # #4997/#5434: Publish the rows just read so a caller that runs LATER in
+        # the same sweep can reuse them instead of issuing a second
+        # `CALL db.indexes()`. The fast path in `_ensure_indexes` reads this
+        # catalogue immediately before `_ensure_vector_index_api()`, and
+        # `tests/test_indexes.py::test_repeat_sweep_runs_no_already_satisfied_ddl`
+        # pins a repeat sweep to EXACTLY ONE catalogue probe, so the
+        # vector-index inventory must not re-probe. Only valid on the "schema is
+        # current" answer — a caller that got False is about to CHANGE the
+        # catalogue, so the full-sweep path deliberately re-reads instead.
+        self._index_catalogue_rows = rows
         if not rows:
+            self._index_catalogue_rows = None
             return False
         present: set[tuple[str, str, str]] = set()
         for row in rows:
@@ -8382,7 +8398,10 @@ class FalkorProjection(
             # report. The existing index is never reconciled here (same as the
             # sweep) and a MISSING one is still created — so a server graph
             # that lost only its vector index still gets it back.
-            self._ensure_vector_index_api()
+            # #5434: hand over the catalogue rows `_schema_is_current` just
+            # read, so the inventory below does not re-probe (one probe per
+            # repeat sweep).
+            self._ensure_vector_index_api(self._index_catalogue_rows)
             return
 
         # ── Range indexes (always safe, pre-4.x compatible) ──
@@ -8719,7 +8738,7 @@ class FalkorProjection(
                 "Skipping FTS and vector indexes: FalkorDB %s < 4.x",
                 '.'.join(map(str, _ver)))
 
-    def _ensure_vector_index_api(self) -> None:
+    def _ensure_vector_index_api(self, catalogue_rows=None) -> None:
         """Resolve ``_vector_index_api`` — the engine's vector-index API.
 
         #4465: extracted from ``_ensure_indexes`` unchanged so the schema fast
@@ -8798,7 +8817,13 @@ class FalkorProjection(
         # #4997: measure what the catalog ACTUALLY has, AFTER the creation
         # attempt above, so a fresh graph reports post-creation state rather
         # than a false "everything is missing" gap. Read-only and fail-open.
-        self._record_vector_index_inventory()
+        #
+        # #5434: `catalogue_rows` is supplied ONLY by the fast path, where the
+        # catalogue was read moments ago and nothing in between can have written
+        # an index — so this measurement costs no extra probe. On the full sweep
+        # it is None and the read below is deliberate: the sweep just created
+        # indexes, so a reused pre-creation read would report a false gap.
+        self._record_vector_index_inventory(catalogue_rows)
 
     @property
     def required_embedding_dim(self) -> int | None:
