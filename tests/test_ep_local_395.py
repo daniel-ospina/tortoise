@@ -675,7 +675,7 @@ def test_idempotent_remitigation_dirties_the_operator():
         sdk.set_point_baseline(claim["id"], 1, 1)
         op = sdk.create_operator("IMPL", src["id"], [claim["id"]])
         proj = sdk._get_proj()
-        sdk.mitigate_operator(op["id"], "minor caveat", strength=0.1)
+        mit = sdk.mitigate_operator(op["id"], "minor caveat", strength=0.1)
         weak = sdk.compute_confidence()["confidences"][claim["id"]]["mean"]
         # Clear the creation-time marking: the graph flags AND the in-memory
         # mirror, i.e. what a rebuilt/replayed process starts from.
@@ -693,6 +693,18 @@ def test_idempotent_remitigation_dirties_the_operator():
         assert strong < weak, (
             "a stronger re-mitigation must lower the downstream claim's "
             f"confidence: weak(0.10)={weak:.4f}, strong(0.50)={strong:.4f}")
+        # The coverage denominator (`_window_closure`) must not under-count a
+        # window that contains an OPERATOR — the dirty-root state a mitigation
+        # write produces. EP seeded at the operator reaches that operator's
+        # inputs, so they belong in the closure; without the operator-seed
+        # branch `reachable` is smaller than `affected` and coverage exceeds
+        # 1.0 (measured 2.0 on this fixture's shape).
+        window = [mit["id"], op["id"]]
+        reachable = sdk._window_closure(window, max_hops=2)
+        affected = sdk._get_ep()._affected_claims(window, max_hops=2)
+        assert len(affected) <= len(reachable), (
+            f"coverage denominator under-counts an operator window: "
+            f"affected={len(affected)}, reachable={len(reachable)}")
 
 
 def test_ac3_last_affected_no_stale_writeback():

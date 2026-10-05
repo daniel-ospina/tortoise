@@ -1,5 +1,5 @@
 ---
-title: "Tortoise — Canonical Ontology v3.19"
+title: "Tortoise — Canonical Ontology v3.20"
 type: data
 domain: data
 status: live
@@ -11,7 +11,7 @@ aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.19
+# Tortoise — Canonical Ontology v3.20
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -32,6 +32,31 @@ doc_status: live
 > **⭐ If this document and the code disagree, THIS DOCUMENT IS RIGHT and the code
 > has a defect.** The single exception is a *factual* error — the model itself
 > being wrong — which is corrected here and recorded in the changelog.
+>
+> **Changelog v3.20 (2026-09-29 — issue #5566 — the EP affected-set traversal is factor-bearing-only):**
+> - `TortoiseEP._affected_claims` / `_live_neighbors` admitted a claim through **any**
+>   edge onto an operator, so a structural predicate (`related`, `aboutSubject`,
+>   `memberOf`, …) — or a reverse-only `IMPL` (the mitigation back-link
+>   `(m)-[:IMPL]->(op)`) — pulled a factorless node into the run, where
+>   `_update_claim_posterior` recomputed it as `Beta(1,1)` and **discarded its prior**.
+>   The operator-mediated hops are now typed **and directed**
+>   (`(n)<-[:IMPL|NAND]-(op)-[:IMPL|NAND]->(m)`): only operator **inputs** are admitted,
+>   which are exactly the relations `_affected_factors` turns into factors. The §3.9 and
+>   §8 status notes are updated accordingly; `related` is now weight-free in fact, not
+>   only by the #5025 decision.
+> - `mitigate_operator`'s **idempotent** update branch now dirties the operator
+>   (`_mark_dirty([mid, id])`), exactly as its CREATE branch does. With the hop now
+>   factor-filtered, a mitigation-only dirty root no longer reaches the operator's
+>   factor — marking the mitigation alone finds no operator, because
+>   `_reverse_bfs_neighbors` matches `(op)-[:IMPL|NAND]->(p)` while the mitigation edge
+>   runs the other way — so a re-mitigation whose strength changed would leave
+>   downstream confidence unmoved on any graph whose `ep_dirty` flags are not journaled
+>   (#5166).
+> - `TortoiseSDK._window_closure` (the dream coverage denominator) now also seeds the
+>   **inputs of an operator window member**. A mitigation write marks
+>   `[mitigation, operator]` dirty and EP seeded at the operator reaches its inputs, so
+>   dropping the operator from the seed set made `reachable` smaller than `affected`
+>   (measured `coverage = 2.0` on a two-claim IMPL operator).
 >
 > **Changelog v3.19 (2026-09-28, issue #3985 — a falsey-but-ORDERABLE stored `validFrom` is a real window start):**
 > - §4.7 (`validTo`): the resolution branch and the read path now agree for every successor
@@ -57,26 +82,6 @@ doc_status: live
 >   longer holds.
 >   This entry records only what the code now does. (The two v3.18 entries further below
 >   are a pre-existing duplicated label — filed as **#7214**, not renumbered here.)
->
-> **Changelog v3.20 (2026-09-29 — issue #5566 — the EP affected-set traversal is factor-bearing-only):**
-> - `TortoiseEP._affected_claims` / `_live_neighbors` admitted a claim through **any**
->   edge onto an operator, so a structural predicate (`related`, `aboutSubject`,
->   `memberOf`, …) — or a reverse-only `IMPL` (the mitigation back-link
->   `(m)-[:IMPL]->(op)`) — pulled a factorless node into the run, where
->   `_update_claim_posterior` recomputed it as `Beta(1,1)` and **discarded its prior**.
->   The operator-mediated hops are now typed **and directed**
->   (`(n)<-[:IMPL|NAND]-(op)-[:IMPL|NAND]->(m)`): only operator **inputs** are admitted,
->   which are exactly the relations `_affected_factors` turns into factors. The §3.9 and
->   §8 status notes are updated accordingly; `related` is now weight-free in fact, not
->   only by the #5025 decision.
-> - `mitigate_operator`'s **idempotent** update branch now dirties the operator
->   (`_mark_dirty([mid, id])`), exactly as its CREATE branch does. With the hop now
->   factor-filtered, a mitigation-only dirty root no longer reaches the operator's
->   factor — marking the mitigation alone finds no operator, because
->   `_reverse_bfs_neighbors` matches `(op)-[:IMPL|NAND]->(p)` while the mitigation edge
->   runs the other way — so a re-mitigation whose strength changed would leave
->   downstream confidence unmoved on any graph whose `ep_dirty` flags are not journaled
->   (#5166).
 >
 > **Changelog v3.18 (2026-09-27 — issue #5025, owner ruling — `related` is the neutral association link and carries no EP):**
 >
