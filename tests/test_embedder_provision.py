@@ -36,6 +36,7 @@ import select
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -580,30 +581,44 @@ def test_the_watchdog_dumps_a_native_blocked_thread(tmp_path):
     signal. The watchdog thread needs no signal delivery and no eval-loop point,
     so it is the mechanism that answers this issue.
 
-    Load-bearing: delete the `dump_traceback_later` arm and this hangs until the
-    test's own timeout instead of dumping.
+    The watchdog dumps WITHOUT exiting (`exit=False`), so this asserts the dump
+    is produced and then kills the still-blocked process — asserting a non-zero
+    exit here would pin the very `exit=True` behaviour that was killing working
+    runs (P1, fifth review).
 
-    NOTE the two tests are NOT symmetric, and the asymmetry is the point (P2,
-    third review): this one discriminates the fix, whereas the signal test above
-    does not — it was rebuilt against the round-2 `signal.signal` implementation
-    and PASSED, which is how an inert handler survived two reviews. Only a
-    native-blocked main thread separates a Python-level handler from a C-level
-    one, so only this test is load-bearing for the round-2 defect.
+    Load-bearing: delete the `dump_traceback_later` arm and no dump ever appears.
+
+    NOTE the two diagnostic tests are NOT symmetric, and the asymmetry is the
+    point (P2, third review): this one discriminates the round-2 fix, whereas
+    the signal test above does not — it was rebuilt against the round-2
+    `signal.signal` implementation and PASSED, which is how an inert handler
+    survived two reviews. Only a native-blocked main thread separates a
+    Python-level handler from a C-level one.
     """
     proc = _run_until_hang(
         tmp_path, _HANGS_IN_NATIVE_CODE, "FAKE_NATIVE_HANG_ENTERED",
         {"TORTOISE_EMBEDDER_WATCHDOG_S": "1"},
     )
     try:
-        _out, err = proc.communicate(timeout=90)
+        seen = ""
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([proc.stderr], [], [], 5)
+            if not ready:
+                continue
+            chunk = proc.stderr.read(1)
+            if not chunk:
+                break
+            seen += chunk
+            if "sentence_transformers" in seen:
+                break
+        assert "sentence_transformers" in seen, (
+            f"the watchdog produced no dump for a native-blocked main thread:\n{seen}"
+        )
     finally:
         if proc.poll() is None:
             proc.kill()
             proc.communicate()
-    assert "sentence_transformers" in err, (
-        f"the watchdog produced no dump for a native-blocked main thread:\n{err}"
-    )
-    assert proc.returncode != 0, "the watchdog must exit non-zero on firing"
 
 
 def test_the_print_pins_are_byte_exact_and_survive_abbreviation(tmp_path):
@@ -722,31 +737,40 @@ def test_the_process_never_runs_atexit_teardown(tmp_path):
 def test_every_watchdog_margin_sits_between_the_backoff_budget_and_the_step_cap():
     """A per-site invariant, because a flat default regressed (P1, third review).
 
-    The watchdog is a hard wall-clock kill. Sitting below the site's own
-    worst-case retry sleep fails a run that was still legitimately retrying;
-    sitting at or above `timeout-minutes` makes it dead machinery (the runner's
-    own kill wins and no dump is produced). Both bounds are per site, so the
-    check is too — and both are derived from the formula rather than restated,
-    because restating the budget is exactly what went wrong here.
+    Sitting below the site's own worst-case retry sleep fails a run that was
+    still legitimately retrying; sitting at or above `timeout-minutes` makes the
+    dump miss its window (the runner's own kill arrives first). Both bounds are
+    per site, so the check is too — and both are derived from the formula rather
+    than restated, because restating the budget is exactly what went wrong here.
+
+    Enumerated with `_all_gate_steps`, the SAME selector the wiring tests use,
+    not a name-prefix split: the earlier version matched only steps literally
+    named `Embedding model REQUIRED`, so a gate step named differently escaped
+    the check entirely — the reviewer added one to a scratch copy and the suite
+    stayed green (P2, fifth review).
+
+    Load-bearing: a 10-minute site's watchdog set to 60 (below the real 100s
+    budget) or to 600 (= the cap) both fail; verified by mutation.
     """
-    root = _SCRIPT.parent.parent
-    sites = 0
+    checked = 0
     for name in ("python-ci.yml", "post-merge-validation.yml"):
-        text = (root / ".github" / "workflows" / name).read_text(encoding="utf-8")
-        for block in text.split("name: Embedding model REQUIRED")[1:]:
-            block = block.split("\n      - name:")[0]
-            watchdog = int(
-                re.search(r'TORTOISE_EMBEDDER_WATCHDOG_S: "(\d+)"', block).group(1)
+        for job, step in _all_gate_steps(name):
+            where = f"{name}:{job}"
+            assert "TORTOISE_EMBEDDER_WATCHDOG_S" in (step.get("env") or {}), (
+                f"{where}: the gate step sets no watchdog margin"
             )
-            # Assert on the CLAMPED runtime value, not the YAML literal: `0`,
-            # `-1` or `1e-9` in the workflow would arm a 1s watchdog while a
-            # literal-vs-literal comparison stayed green (P1-adjacent, fourth
-            # review).
+            raw = str(step["env"]["TORTOISE_EMBEDDER_WATCHDOG_S"])
+            assert raw.isdigit(), f"{where}: watchdog {raw!r} is not a plain integer"
+            # Assert on the CLAMPED runtime value, not the YAML literal: a site
+            # setting `0` would arm a 1s watchdog and still pass a
+            # literal-vs-literal comparison.
             with pytest.MonkeyPatch.context() as mp:
-                mp.setenv("TORTOISE_EMBEDDER_WATCHDOG_S", str(watchdog))
+                mp.setenv("TORTOISE_EMBEDDER_WATCHDOG_S", raw)
                 armed = ep._watchdog_seconds()
-            cap = int(re.search(r"timeout-minutes: (\d+)", block).group(1)) * 60
-            attempts, backoff = re.search(r"--attempts (\d+) --backoff (\d+)", block).groups()
+            cap = int(step["timeout-minutes"]) * 60
+            attempts, backoff = re.search(
+                r"--attempts (\d+) --backoff (\d+)", step["run"]
+            ).groups()
             # WORST-CASE retry sleep: attempts sleep `backoff * attempt` for
             # attempt 1..n-1, so they SUM to backoff * n*(n-1)/2. `(n-1)*backoff`
             # is wrong by 2.5x at the 10-minute sites and let a 60s watchdog
@@ -754,7 +778,7 @@ def test_every_watchdog_margin_sits_between_the_backoff_budget_and_the_step_cap(
             n, b = int(attempts), int(backoff)
             budget = b * n * (n - 1) // 2
             assert budget < armed < cap, (
-                f"{name}: watchdog {armed}s is outside ({budget}s, {cap}s)"
+                f"{where}: watchdog {armed}s is outside ({budget}s, {cap}s)"
             )
-            sites += 1
-    assert sites == 5, f"expected 5 embedder sites, found {sites}"
+            checked += 1
+    assert checked == 5, f"expected 5 embedder gate steps, found {checked}"

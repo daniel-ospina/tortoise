@@ -132,13 +132,19 @@ def _install_termination_stack_dump() -> None:
     """#7359: make a stall dump its own stack, by two mechanisms, because one
     is not enough and the gap between them is the whole point.
 
-    MEASURED: run 37239542471 spent 6.27m in this step against 0.13m on main,
-    and its log ENDS with the success marker — so the six minutes are spent
-    AFTER the last Python statement, in interpreter/native teardown
-    (`sentence_transformers` imports torch, whose teardown joins thread pools
-    and runs C++ destructors).
+    MEASURED, and this corrects an earlier claim in this very file: run
+    37239542471's log shows the step starting at 22:25:59.10, its FIRST output
+    (`Loading weights: 0%`) at 22:31:35.37, the success marker at 22:31:37.13 and
+    the runner's timeout at 22:32:14.79. So ~5m36s is spent BEFORE the marker —
+    torch + `sentence_transformers` import and the model load, with no output at
+    all — and only ~38s after it, of which ~22s is the teardown. The cap is
+    consumed by the LOAD, not by teardown; the teardown is merely what tipped a
+    5m38s run over 6m. (The earlier "the six minutes are spent in teardown"
+    reading was wrong, and it mattered: it is why `exit=True` was put on the
+    watchdog below.)
 
-    A Python-level `signal.signal` handler CANNOT fire in that state. It runs
+    A Python-level `signal.signal` handler CANNOT fire while the main thread is
+    blocked in native code. It runs
     only when the main thread reaches an eval-loop / `PyErr_CheckSignals` point,
     and a thread blocked inside native code never gets there — worse, replacing
     the disposition means the process no longer dies on the signal either, so it
@@ -186,7 +192,16 @@ def _install_termination_stack_dump() -> None:
         with contextlib.suppress(ValueError, RuntimeError, OSError):
             faulthandler.register(_sig, all_threads=True, chain=True)
     with contextlib.suppress(ValueError, RuntimeError, OSError, OverflowError):
-        faulthandler.dump_traceback_later(_watchdog_seconds(), exit=True)
+        # exit=False, DELIBERATELY. The watchdog fires whenever provisioning is
+        # slow, and the cited run proves "slow" is not "stuck": its load alone
+        # took 336s against a 360s cap, so an `exit=True` watchdog at 330s would
+        # have killed — 6s before the model finished loading — exactly the run
+        # `os._exit` saves. A diagnostic that can turn a working run red is a
+        # new failure mode, and this one has no need to be one: with `exit=False`
+        # it can only ADD information (a stack from the stall) and the runner's
+        # own `timeout-minutes` still bounds the step. Margin stays below that
+        # cap so the dump lands before the kill.
+        faulthandler.dump_traceback_later(_watchdog_seconds(), exit=False)
 
 
 def _annotation(level: str, message: str) -> None:
@@ -289,8 +304,8 @@ def main(argv: list[str] | None = None) -> int:
         # attempt gated this in __main__ on `{"--print-model", "--print-revision"}
         # & set(sys.argv[1:])`, which argparse's default `allow_abbrev=True`
         # defeats: `--print-m` is a valid, unambiguous spelling that returns the
-        # pin early, yet matched no string in that set — so the marker
-        # machine-read output a consumer parses (P1, review
+        # pin early, yet matched no string in that set — so the marker leaked
+        # into machine-read output a consumer parses (P1, review
         # of #7364). Returning from here cannot be abbreviation-bypassed, and it
         # is also success-only, so `grep` for it never reads a failure as done.
         print(DONE_MARKER, flush=True)
@@ -311,17 +326,24 @@ def main(argv: list[str] | None = None) -> int:
 # #7359: leave via os._exit, NOT sys.exit.
 #
 # MEASURED: run 37239542471 (PR #5339) spent 6.27m in this step, against 0.13m for
-# the same step on main (37240061542, 37229990684). The step's log ends with the
-# #2573 success marker and nothing after it:
+# the same step on main (37240061542, 37229990684). Its log, with timestamps:
 #
-#     Loading weights: 100%|##########| 199/199 [...]
-#     embedding model: cached, no download needed
-#     ##[error] ... has timed out after 6 minutes.
+#     22:25:59.10  Run python3 tools/embedder_provision.py --attempts 3 --backoff 5
+#     22:31:35.37  Loading weights:   0%| ...          <- 5m36s of SILENCE
+#     22:31:37.13  embedding model: cached, no download needed
+#     22:32:14.79  ##[error] ... has timed out after 6 minutes.
+#
+# So ~5m36s is spent BEFORE the marker — the torch/sentence_transformers import
+# plus the model load, emitting nothing — and ~38s after it, of which ~22s is
+# teardown. `os._exit` therefore buys 22s, which is enough to put this run at
+# ~5m39s and INSIDE the cap: the teardown is the margin, not the whole stall.
+# (Do not restate this as "the six minutes are teardown"; that is what an earlier
+# version of this comment said, and it is refuted by the timestamps above.)
 #
 # Python runs interpreter shutdown AFTER the last user statement, so the marker
-# being the final line places the six minutes in teardown, not in this script:
-# `sentence_transformers` imports torch, whose teardown joins its thread pools
-# and runs C++ destructors. That is normally milli­seconds of work, but it is
+# being the final line puts whatever remains in teardown: `sentence_transformers`
+# imports torch, whose teardown joins its thread pools and runs C++ destructors.
+# That is normally milliseconds of work, but it is
 # not bounded and it is not this step's business — the step's contract is "is
 # the pinned embedder obtainable", and that answer is already established and
 # printed by the time we get here.
