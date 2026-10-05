@@ -536,9 +536,17 @@ def _run_until_hang(tmp_path, fake_source, marker, env_extra=None):
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
     )
     # Positive evidence it is inside the hang, rather than a fixed sleep guess.
-    ready, _, _ = select.select([proc.stdout], [], [], 60)
-    assert ready, "script never reached the fake hanging constructor"
-    assert marker in proc.stdout.readline(), marker
+    # Killed before re-raising: a failure here would otherwise leak the hung
+    # child (and, for the native fake, a thread blocked in C) for its full sleep.
+    try:
+        ready, _, _ = select.select([proc.stdout], [], [], 60)
+        assert ready, "script never reached the fake hanging constructor"
+        assert marker in proc.stdout.readline(), marker
+    except BaseException:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+        raise
     return proc
 
 
@@ -556,15 +564,16 @@ def test_a_cancelled_step_dumps_every_thread_stack(tmp_path):
     DELIVERED signal produces a dump carrying real frames. The native-blocked
     case, the one that discriminates, is the watchdog test below.
 
-    Termination is asserted for SIGTERM only. `chain=True` chains to whatever
-    disposition the process INHERITED, and SIGINT is commonly inherited as
-    SIG_IGN (a backgrounded job from a non-interactive shell, `trap '' INT`, a
-    `nohup`-style harness) — the chain preserves the ignore, the process dumps
-    and then SURVIVES, and a `communicate(timeout=...)` here raised
-    TimeoutExpired and reddened the suite after a 60s stall. That is the module's
-    own documented contract for SIGINT, so requiring an exit was the test
-    contradicting the implementation (P1, seventh review). The dump is read from
-    the raw fd with a deadline instead, and the process is killed.
+    Termination is NOT asserted for either signal. `chain=True` chains to the
+    disposition the process INHERITED, and either signal can be inherited as
+    SIG_IGN (a backgrounded job from a non-interactive shell, `trap '' INT`,
+    `trap '' TERM`, a supervisor that masks it) — the chain preserves the
+    ignore, so the process dumps and then SURVIVES. Requiring an exit reddened
+    the suite after a stall for SIGINT (round 7) and again for SIGTERM
+    (round 8), each time on whichever runner happened to inherit the ignore.
+    The test's contract was always "a DELIVERED signal produces a dump", which
+    never needed one; the dump is read from the raw fd with a deadline and the
+    process is killed.
     """
     for sig in (signal.SIGTERM, signal.SIGINT):
         proc = _run_until_hang(tmp_path, _HANGS_FOREVER, "FAKE_HANG_ENTERED")
@@ -588,12 +597,15 @@ def test_a_cancelled_step_dumps_every_thread_stack(tmp_path):
             assert b"sentence_transformers" in seen, (
                 "dump had no useful frames:\n" + seen.decode(errors="replace")
             )
-            if sig is signal.SIGTERM:
-                # SIGTERM chains to SIG_DFL, which inheritance cannot change.
-                # WAIT, do not poll: the dump is written from inside the C signal
-                # trampoline, so the exit has not completed at the moment the
-                # last frame lands in the pipe.
-                assert proc.wait(timeout=30) != 0, "SIGTERM must terminate the process"
+            # NO termination assertion. The chain target is the disposition the
+            # process INHERITED, and EITHER signal can be inherited as SIG_IGN
+            # (`trap '' INT`, `trap '' TERM`, a supervisor that masks it) — then
+            # the handler dumps and the process SURVIVES. Requiring an exit was
+            # this test contradicting its own contract ("a DELIVERED signal
+            # produces a dump") for SIGINT in round 7 and again for SIGTERM in
+            # round 8, each time reddening the suite after a stall on whichever
+            # runner happened to inherit the ignore. The dump is the assertion;
+            # the `finally` kills the process.
         finally:
             if proc.poll() is None:
                 proc.kill()

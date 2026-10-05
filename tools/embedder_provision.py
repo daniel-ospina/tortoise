@@ -158,13 +158,16 @@ def _install_termination_stack_dump() -> None:
        doing. Covers a runner cancel that is delivered here. `chain=True` is
        required (`chain=False` was measured to swallow BOTH signals, leaving the
        process alive), but it resolves differently per signal and the difference
-       matters: for SIGTERM it chains to `SIG_DFL` and the process terminates; for
-       SIGINT it chains to Python's own deferred `KeyboardInterrupt` handler,
-       which a main thread blocked in C will never run — so the process dumps
-       and SURVIVES until the runner's later SIGTERM. That is acceptable because
-       the runner escalates on a fixed 7500ms/2500ms schedule, but it is not the
-       blanket "chain=True still terminates" the first version of this comment
-       claimed.
+       matters — and the first two versions of this comment both got it wrong by
+       naming a fixed disposition. `chain=True` re-raises into whatever the
+       process INHERITED: SIG_DFL by default, but SIG_IGN when the parent ignored
+       it (`trap '' TERM`, a supervisor that masks it), in which case the handler
+       DUMPS AND THE PROCESS SURVIVES. That holds for BOTH signals — for SIGINT
+       the chain usually lands on Python's deferred `KeyboardInterrupt` handler,
+       which a main thread blocked in C will never run, so it survives too.
+       Surviving is fine: the dump is the deliverable, the runner escalates on a
+       fixed 7500ms/2500ms schedule and SIGKILLs, and `dump_traceback_later`
+       below does not depend on any of this.
     2. **`faulthandler.dump_traceback_later`** — a WATCHDOG THREAD, needing no
        signal delivery at all, so it covers a main thread wedged in native code
        AND a cancel that never reaches this process. This is the one that
