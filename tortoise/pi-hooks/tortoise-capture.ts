@@ -1245,11 +1245,13 @@ export async function flushSpool(
       summary.heldBack += 1;
       continue;
     }
-    // `?? undefined`: a meta written by the PYTHON leg stores `"filed_lane": null`
-    // for a lane-less filing (JSON has no `undefined`), while this leg omits the
-    // key. Strict `===` would read `null !== undefined`, bypass the skip, and
-    // re-POST an entry the Python leg had already filed — the two legs share one
-    // spool directory (#3516 §B).
+    // Read tolerance: a meta written by an OLDER Python producer stored
+    // `"filed_lane": null` for a lane-less filing. The Python leg now OMITS the
+    // key, so both legs write alike — but a spool written before that fix, or
+    // by any producer that emits JSON `null`, must still be read alike, because
+    // JSON has no `undefined`: a raw `JSON.parse` yields `null`, and strict
+    // `===` against this leg's ABSENT key would bypass the skip and re-POST an
+    // entry the other leg had already filed (#3516 §B).
     if (meta.filed_key && meta.filed_key === meta.capture_key &&
         (meta.filed_lane ?? undefined) === (meta.capture_lane ?? undefined)) {
       summary.skipped += 1;
