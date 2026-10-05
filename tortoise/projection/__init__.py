@@ -2386,6 +2386,7 @@ from tortoise.projection.entities import (  # noqa: E402, I001
     _belief_prop_value_ok,
     _EntityHandlers,
     _is_persistable_prop_value,
+    _usable_instant,
 )
 from tortoise.projection.edges import _EdgeHandlers  # noqa: E402
 from tortoise.projection.grounding import _GroundingMixin  # noqa: E402
@@ -2618,6 +2619,10 @@ _NO_POINT_FOLD = _NO_PROJECTION_FOLD | frozenset({
     "ObjectSuperseded",
     "DocumentCreated",
     "SourceCreated",
+    # #5024 (T6): the `:Source` version transition. Same reason as
+    # `SourceCreated` above — a real fold in `apply`/`rebuild_all`, but a
+    # `:Source` node has no representation in this `{id: point}` index.
+    "SourceVersioned",
     "DirectEdgeRepoint",
     # JSONL-only siblings of the two above: both have REAL fold branches in
     # ``apply``/``rebuild_all``, but neither has a representation in this
@@ -3046,11 +3051,21 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
             # one — a divergence on EVERY retract, and the #330 parity
             # contract this function owns. ``VACUITY_BELIEF`` is the single
             # declaration both arms render, so they cannot re-drift.
-            # (``updatedAt`` is the one prop this fold still does not
-            # stamp; that divergence is a #5048 symptom — recorded from
-            # #4666 — not this one.)
+            # #5048 (recorded from #4666): ``updatedAt`` is now stamped too,
+            # from the RECORD's instant. Before this it was the one prop this
+            # fold did not stamp at all, so the pure fold kept the point's
+            # ORIGINAL stamp while ``rebuild_all`` held this replay's clock
+            # and the live node held the producer's — three values for one
+            # retraction. The gate is ``_usable_instant`` — the SAME predicate
+            # the graph arm (``_retract``) uses, deliberately shared rather
+            # than re-spelled, because ``_writable_id`` alone ACCEPTS the
+            # empty string: with two spellings, a record carrying ``ts=""``
+            # had this fold write ``""`` while the graph arm wrote no column
+            # at all (both are now "no usable instant stated").
             p["status"] = "retracted"
             p.update(VACUITY_BELIEF)
+            if _usable_instant(ev.get("ts")):
+                p["updatedAt"] = ev["ts"]
     elif t == "PointsMerged":
         # #331 (review r2): `or []` also covers an explicit "merge_ids": null
         # in the log — dict.get(key, []) only covers the missing key.
@@ -3950,13 +3965,32 @@ class FalkorProjection(
             used, cap = pressure
             detail = (f"used_memory {_fmt_bytes(used)} of maxmemory "
                       f"{_fmt_bytes(cap)}")
+        # The remedy must NOT restate the ownership policy in prose: a name
+        # list here is wrong in one direction or the other, and nothing keeps
+        # it in sync with the predicate that owns the rule. So the message
+        # names no delete-authorizing residue family, promises no reclaim, and
+        # offers no pass — `_sweep_legacy_strays` runs only when an operator
+        # invokes it, so naming its env lever would be advice that frees nothing.
+        #
+        # It also makes no claim about which graph commands the server refuses:
+        # upstream's flag semantics are not what #2979's log line suggests (that
+        # line is the DETACH `safe_graph_delete` sends before `graph.delete()`),
+        # and an operator message should not assert them either way.
+        #
+        # The only names it gives are the ones `TortoiseSDK.test_guard` blocks
+        # (tortoise/sdk.py) — `tortoise` exact and `tortoise_restored*` by
+        # prefix. `is_legacy_residue` refuses a superset; that case is covered
+        # by "do not hand-pick", not by enumeration.
         return (
             "DB refused writes on open: the graph is INTACT but the server "
             f"has reached its memory ceiling ({detail}). This is NOT "
-            "corruption — do NOT rebuild. Free memory first: delete "
-            "ephemeral test graphs (GRAPH.LIST, then GRAPH.DELETE test_*), "
-            "or raise / relieve the container's --maxmemory. See #2981 for "
-            "the shared-lane form of this."
+            "corruption — do NOT rebuild. Remedy: raise / relieve the "
+            "container's --maxmemory. Do NOT hand-pick names from "
+            "GRAPH.LIST to free memory instead: GRAPH.DELETE cannot be "
+            "undone, and a name you cannot attribute is not yours to delete. "
+            "Never delete the "
+            "production graph tortoise or a tortoise_restored* snapshot, and "
+            "do NOT FLUSHALL. See #2981 for the shared-lane form of this."
         )
 
     def _backend_failure_message(
@@ -4255,7 +4289,9 @@ class FalkorProjection(
                 # #331 (review r2): NO event_id fallback — an event id is not
                 # a point id, and the fallback diverged from _apply_one (the
                 # fold is the single source of truth, module contract).
-                self._retract(rid)
+                # #5048: the RECORDED instant, so the rebuilt `updatedAt` is
+                # the producer's, not this replay's clock.
+                self._retract(rid, now=ev.get("ts"))
         elif t == "PointPromoted":
             # #785: re-apply the full promoted snapshot (status live +
             # reviewed + promotedAt) — rebuild parity for reviewer-gated
@@ -4362,6 +4398,13 @@ class FalkorProjection(
             # popped here so it never reaches _persist_extra_props.
             return self._upsert_source(
                 ev, merge_run_id=ev.pop("_merge_run_id", None))
+        elif t == "SourceVersioned":
+            # #5024 (T6): the re-materialisation record. `_upsert_source`'s
+            # hash-diff ON MATCH bumps version/updatedAt/contentHash in place
+            # and journals nothing OF ITS OWN; this is that write's record.
+            # A no-op re-check (identical hash) emits NOTHING, so the journal
+            # does not grow on every re-check (§9.6's cost bound).
+            self._fold_source_versioned(ev)
         elif t == "ConfidenceChanged":
             # #2884 D3: the EP/dream belief-state write-back. Inline (a
             # non-terminalizing property SET — parity with the PointRevised
@@ -5684,7 +5727,9 @@ class FalkorProjection(
                     # tombstone still applies.
                     _retr_anchor = last_ann_drop_seq.get(("Point", rid))
                     if _retr_anchor is None or seq > _retr_anchor:
-                        self._retract(rid)
+                        # #5048: the RECORDED instant — parity with
+                        # `rebuild_all`'s pass-1b and with the live writer.
+                        self._retract(rid, now=ev.get("ts"))
             elif t == "PointPromoted":
                 # #785: rebuild parity — re-apply the promoted snapshot.
                 p = ev.get("point")
@@ -6069,6 +6114,11 @@ class FalkorProjection(
             elif t == "SourceCreated":
                 # #330 parity with apply(): SourceCreated was dropped by rebuild.
                 self._upsert_source(ev)
+            elif t == "SourceVersioned":
+                # #5024 (T6): apply()/rebuild parity — the transition must be
+                # replayed in pass 1b exactly as it was applied live, or the
+                # rebuilt `:Source` keeps the pre-transition hash/version.
+                self._fold_source_versioned(ev)
             elif t in _NO_PROJECTION_FOLD:
                 # Recognized, intentionally not folded here — the audit-only
                 # markers, the JSONL-only batch snapshot (replayed in pass

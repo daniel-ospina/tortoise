@@ -144,8 +144,15 @@ TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
     # Object / subject lane additions (MERGE + SET; an object or subject
     # upsert clears the DERIVED embedding so it is recomputed).
     "ObjectRegistered", "SubjectAdded",
-    # Source lane addition (MERGE + SET only).
-    "SourceCreated",
+    # Source lane additions (MERGE + SET only). `SourceVersioned` is the
+    # #5024 T6 re-materialisation record: `_fold_source_versioned` delegates to
+    # the IDENTICAL `_upsert_source` fold `SourceCreated` already rides
+    # (MERGE + SET, hash-diff-gated, no removal), so its loss cannot revive
+    # state by the module's own criterion. Before #5024 that same transition
+    # was journalled as `SourceCreated`, whose torn tail was tolerated —
+    # refusing the new type would be a silent tightening of the recovery
+    # posture (it blocks `rebuild_all`/`recover_from_log`/`backup.restore`).
+    "SourceCreated", "SourceVersioned",
     # Bookkeeping records: ``_NO_PROJECTION_FOLD`` (projection/__init__.py:
     # 1868) — recognized and INTENTIONALLY not folded by any dispatcher
     # (``apply``/``_apply_one``/``rebuild_all`` pass over them), so their loss

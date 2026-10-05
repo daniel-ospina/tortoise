@@ -557,6 +557,9 @@ def test_torn_tail_allowlist_holds_no_destructive_type():
         "ObjectRegistered", "SubjectAdded",
         # source lane addition
         "SourceCreated",
+        # #5024: the re-materialisation transition — same MERGE + SET fold as
+        # `SourceCreated`
+        "SourceVersioned",
         # additive edge write
         "EntityLinked",
         # `_NO_PROJECTION_FOLD` audit records: NO fold in any dispatcher

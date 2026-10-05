@@ -314,7 +314,10 @@ def test_long_turn_and_coerced_content_still_store_the_encoded_text(
     # The long turn: the node stores the full text; the vector is the encode of
     # its 512-word truncation (not the raw stored string).
     stored0, emb0 = rows["sess-4194-long_t0"]
-    assert stored0 == "[user] " + long_turn[:5000], stored0[:60]
+    from tortoise.sdk import _clip_capture_turn_content
+    assert stored0 == "[user] " + _clip_capture_turn_content(long_turn), stored0[:60]
+    assert "[truncated:" in stored0, (
+        "the node must carry the #4897 marker, not a silent cut")
     assert emb0 is not None
     truncated = " ".join(stored0.split()[:512])
     assert np.allclose(emb0, embedder.encode([truncated])[0], atol=1e-6)

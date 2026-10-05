@@ -3,7 +3,7 @@
 Docker-lane (TORTOISE_DB_URI): real FalkorDB graph semantics (server-mode
 eager-init Cypher + keyed-MERGE writers — the embedded redislite lane cannot
 satisfy these, #1997 tier-2 regression). URI-less runs (tier-2 embedded
-legs / carve-out) SKIP at module level — mirror tests/test_onboarding_state_split.py.
+legs / carve-out) SKIP at module level — mirror the four test_onboarding_state_split_* modules.
 
 Journey under test (epic DE2E-8 surface 12):
 - register a fresh owner (account leg) → invite a second email → mismatch

@@ -132,12 +132,14 @@ from tortoise.sdk import (
     _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING,  # #3892: shared "stored, never extracted" disclosure
     _CAPTURE_NO_PROVIDER_MODE,  # #3892: keyless-capture receipt mode (reused, not reinvented)
     _CAPTURE_NO_PROVIDER_WARNING,  # #3892: the canonical "stored, not extracted" notice
+    _WRITER_CLOCK,  # #3985: the resolution's "falls to the writer's clock" sentinel
     REPORT_HOOK_URL,  # #2335 WI-2: the bug_report.yml report-hook target
     InvertedSupersedeWindow,  # #5363: the named #4021 refusal the commit path maps to 422
     TortoiseSDK,
     _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
     _capture_ep_target_ids,  # W5 Phase D (#2104): EP pass targets (minted + first-time folds)
     _capture_extraction_window,  # #6246: the shared extraction view (both lanes)
+    _capture_gate_window,  # #4897: strip synthetic markers before the empty/blank gate
     _capture_minted_ids,  # W5 Phase D (#2104): provenance-stamp gate (minted only)
     _capture_redaction_warning,  # #4911: the shared "a secret was redacted" receipt warning
     _capture_resp_error_split,  # #2335 WI-2: customer error contract (headline/diagnostics)
@@ -152,6 +154,7 @@ from tortoise.sdk import (
     _session_extraction_estimate,  # #1532 D4: v2-aware pre-write quota estimate
     _session_llm_transcript,  # P1 #1529: the shared empty/blank conversation gate
     _supersede_window_end,  # #5363: the ONE inverted-window predicate (pre-write check)
+    _supersede_window_start_source,  # #3985: the ONE home for the stored-start predicate
     _write_session_and_turns,  # #3551: the ONE :Session + turn store writer (shared with sdk.capture_session)
 )
 from tortoise.security import redact_error  # billing webhook + checkout error logging
@@ -1319,15 +1322,12 @@ async def _refresh_cost_allocation() -> None:
 
     The SINGLE production write path for the per-team cost metric
     (``tortoise_team_cost_cents``, which had no production caller at all before
-    this). It is module-level ON PURPOSE: the periodic seam that arms it,
-    ``_event_retention_loop``, is a CLOSURE inside ``_lifespan`` and cannot be
-    called from a test, so a test that asserts the PRODUCTION call site needs
-    this half to be directly invocable.
+    this). It is module-level ON PURPOSE, so a test can invoke the production
+    call site directly.
 
-    Best-effort by construction: ``_event_retention_loop`` has NO per-iteration
-    guard, so a raise here would kill event retention AND the deleted-org purge
-    for the process's lifetime. Every non-cancellation exception is swallowed
-    with a warning.
+    Best-effort by construction: every non-cancellation exception is swallowed
+    with a warning. Since #5381 the retention loop also routes this through
+    ``_guarded_step``, so a raise here cannot end the loop.
     """
     from tortoise.cost_allocation import refresh_and_publish
 
@@ -1349,6 +1349,65 @@ async def _refresh_cost_allocation() -> None:
         raise
     except Exception as exc:  # noqa: BLE001, RUF100 — must never kill the retention loop
         _logger.warning("cost allocation refresh failed: %s", exc)
+
+
+async def _guarded_step(label: str, step) -> None:
+    """#5381: await ONE background step so its failure cannot kill its runner.
+
+    ``step`` is a zero-arg callable returning an awaitable, so the awaitable is
+    built INSIDE the guard — a factory that raises is caught too. Cancellation
+    must still propagate (shutdown cancels these tasks), so ``CancelledError``
+    is re-raised; any other exception is logged and swallowed.
+
+    Shared by ``_run_boot_sweeps`` and ``_event_retention_loop``. Without it the
+    obligation is per-caller: every step added to the loop must remember to
+    swallow its own exceptions, and the one that forgets ends event retention
+    AND the deleted-team purge for the life of the process.
+    """
+    try:
+        await step()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # never fatal to the runner
+        _logger.warning("%s failed: %s", label, exc)
+
+
+async def _event_retention_loop(interval: float) -> None:
+    """#5381: the periodic retention runner, with EVERY step individually guarded.
+
+    Guarded per STEP, not per iteration. A per-iteration guard would let one
+    failing step skip its siblings for that whole hour — a failed event sweep
+    would also skip the deleted-team purge, the OAuth GC and the cost refresh,
+    which is the same silent-loss shape this closes, one scope larger.
+
+    ``interval`` is a parameter rather than a captured closure so the loop is
+    directly drivable by a test: the observable invariant is that a raising step
+    cannot end the ``while True``, and the evidence for it is a SUBSEQUENT
+    iteration actually running.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        # #2850: daemon worker, not the shared default executor — see
+        # _run_boot_sweeps.
+        await _guarded_step(
+            "event retention sweep",
+            functools.partial(run_on_daemon_worker, _sweep_events,
+                              name="tortoise-boot-sweep"))
+        # #302: hard-delete past grace (sync DB work off the loop)
+        await _guarded_step(
+            "deleted-team purge",
+            functools.partial(run_on_daemon_worker, _purge_deleted_orgs,
+                              name="tortoise-boot-sweep"))
+        # #3036: GC dead OAuth rows (sync DB work off the loop)
+        await _guarded_step(
+            "oauth retention",
+            functools.partial(run_on_daemon_worker, _sweep_oauth_retention,
+                              name="tortoise-boot-sweep"))
+        # #4493: allocated fixed/shared SaaS cost per org — the production write
+        # path for tortoise_team_cost_cents. It already swallows internally (see
+        # _refresh_cost_allocation); the guard is what makes that belt-and-braces
+        # rather than the single thing keeping the loop alive.
+        await _guarded_step("cost allocation refresh", _refresh_cost_allocation)
 
 
 async def _run_boot_sweeps() -> None:
@@ -1379,12 +1438,12 @@ async def _run_boot_sweeps() -> None:
     for label, fn in (("event retention", _sweep_events),
                       ("deleted-team purge", _purge_deleted_orgs),
                       ("oauth retention", _sweep_oauth_retention)):
-        try:
-            await run_on_daemon_worker(fn, name="tortoise-boot-sweep")
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # never fatal
-            _logger.warning("boot %s sweep failed: %s", label, exc)
+        # #5381: the same guard the periodic loop uses — one runner, so the
+        # boot and periodic paths cannot drift apart.
+        await _guarded_step(
+            f"boot {label} sweep",
+            functools.partial(run_on_daemon_worker, fn,
+                              name="tortoise-boot-sweep"))
 
 
 #: Task attributes armed across the lifespan that a re-entry or shutdown must
@@ -1476,6 +1535,20 @@ async def _stop_liveness(app) -> None:
     if pending:
         with suppress(Exception):
             await asyncio.gather(*pending, return_exceptions=True)
+
+
+def _watcher_expected_on_this_host() -> bool:
+    """Whether a backup watcher was EXPECTED on this host.
+
+    The ONE declaration of the hosted-marker test (#4498): the lifespan
+    calls it once at boot to derive BOTH its "no monitor" warning and the
+    module marker ``_WATCHER_EXPECTED`` that ``/health`` publishes, so the two
+    can never disagree about whether this host is supposed to be running a
+    watcher. ``FLY_APP_NAME`` is the same truthiness test the #101 durability
+    guard uses — a deployment that sets it is a hosted deployment and must
+    have backup staleness monitoring.
+    """
+    return bool(os.environ.get("FLY_APP_NAME"))
 
 
 @asynccontextmanager
@@ -1622,7 +1695,7 @@ async def _lifespan(app):
             # those deployments legitimately leave off: a warning that fires on
             # every healthy non-production boot is training-to-ignore material for
             # the very signal #2922 needed.
-            _watcher_expected = bool(os.environ.get("FLY_APP_NAME"))
+            _watcher_expected = _watcher_expected_on_this_host()
             # #4498: publish it to the module marker `_backup_watcher_health()`
             # reads. The assignment sits ABOVE the `_not_started_reason` branch,
             # so BOTH the `_watcher_expected` true and false cases reach the
@@ -1822,25 +1895,12 @@ async def _lifespan(app):
             # (#2851/#2922; regression guard tests/test_boot_regressions.py).
             interval = event_retention_interval()
 
-            async def _event_retention_loop() -> None:
-                while True:
-                    await asyncio.sleep(interval)
-                    # #2850: daemon worker, not the shared default executor —
-                    # see _run_boot_sweeps.
-                    await run_on_daemon_worker(_sweep_events,
-                                               name="tortoise-boot-sweep")
-                    # #302: hard-delete past grace (sync DB work off the loop)
-                    await run_on_daemon_worker(_purge_deleted_orgs,
-                                               name="tortoise-boot-sweep")
-                    # #3036: GC dead OAuth rows (sync DB work off the loop)
-                    await run_on_daemon_worker(_sweep_oauth_retention,
-                                               name="tortoise-boot-sweep")
-                    # #4493: allocated fixed/shared SaaS cost per org — the
-                    # production write path for tortoise_team_cost_cents.
-                    # Swallows internally (see _refresh_cost_allocation).
-                    await _refresh_cost_allocation()
-
-            _retention_task = asyncio.get_event_loop().create_task(_event_retention_loop())
+            # #5381: the body is module-level (``_event_retention_loop``) so its
+            # per-step guard is reachable by an executing TEST. As a closure the
+            # only available check was a static AST pin, and an AST pin cannot
+            # observe whether a step's failure ENDS the loop.
+            _retention_task = asyncio.get_event_loop().create_task(
+                _event_retention_loop(interval))
             app.state._event_retention_task = _retention_task
         except Exception as exc:
             # Best-effort by design (a purge failure must never block bind), but
@@ -2391,16 +2451,23 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     # keyed on ``<key>@<path>`` (see _bucket_key) — fully separate from the
     # general 100/min bucket.
     PATH_LIMITS = {"/v1/sessions/commit": 300}  # noqa: RUF012
+    # #3124: hard cap on the key space (see the bounded-store policy block
+    # near the shared primitive). The old 60 s periodic prune was the only
+    # bound and was an O(n) sweep over an attacker-supplied key set (guessed
+    # ``tt_`` keys and ``ip:<host>`` for unauthenticated/session-JWT traffic).
+    MAX_BUCKETS = 10_000
 
-    def __init__(self, app, max_per_minute=100, path_limits: dict | None = None):
+    def __init__(self, app, max_per_minute=100, path_limits: dict | None = None,
+                 max_buckets: int | None = None):
         super().__init__(app)
         self.max_per_minute = max_per_minute
         self.path_limits = dict(self.PATH_LIMITS)
         if path_limits:
             # test seam: override the per-path limits (R-13 bucket testing)
             self.path_limits.update(path_limits)
+        self.max_buckets = (
+            self.MAX_BUCKETS if max_buckets is None else max_buckets)
         self._buckets: dict[str, list[float]] = defaultdict(list)
-        self._last_cleanup = time.time()
         self._lock = asyncio.Lock()
         # RATE_LIMIT_DISABLED=1 disables throttling (test env) — the test
         # suite creates >100 points per run against a shared IP bucket,
@@ -2452,19 +2519,15 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         now = time.time()
 
         async with self._lock:
-            # Periodic cleanup: prune empty buckets and buckets older than 60s
-            if now - self._last_cleanup > 60:
-                stale = []
-                for k, v in list(self._buckets.items()):
-                    v[:] = [t for t in v if now - t < 60]
-                    if not v:
-                        stale.append(k)
-                for k in stale:
-                    del self._buckets[k]
-                self._last_cleanup = now
-
-            bucket = self._buckets[key_id]
-            bucket[:] = [t for t in bucket if now - t < 60]
+            # #3124: bounded key space + O(1) hot path, via the SAME
+            # `_bucket_route` policy as the shared primitive. Inactive
+            # insertion-order-head buckets are reclaimed ONLY on the new-key
+            # path (a tracked key is pruned in place and never scans the
+            # store); a new key at a full store is charged to the one shared
+            # overflow bucket (capped at this path's limit) instead of growing
+            # the store. Replaces the old 60 s wholesale O(n) prune.
+            bucket, on_overflow = _bucket_route(
+                self._buckets, key_id, now, 60, self.max_buckets)
 
             if len(bucket) >= limit:
                 # Return the 429 response directly: an HTTPException raised in
@@ -2482,7 +2545,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                     headers={"Retry-After": "60"},
                 )
 
-            bucket.append(now)
+            bucket.append((now, key_id) if on_overflow else now)
+            dest = _BUCKET_OVERFLOW_KEY if on_overflow else key_id
+            self._buckets[dest] = bucket
+            _bucket_touch(self._buckets, dest)
         return await call_next(request)
 
 
@@ -4173,20 +4239,43 @@ def _probe_sdk() -> TortoiseSDK:
     return sdk
 
 
+def _acquire_probe_sdk() -> TortoiseSDK:
+    """``_probe_sdk`` with its cache-invalidating failure path (#3446).
+
+    Handed to ``probe_db(acquire=…)`` so the acquisition runs as a BOUNDED
+    phase on the shared probe worker instead of inline on the coordinator's
+    thread. The reset must survive the move: a half-built handle is dropped so
+    the next probe rebuilds rather than reusing it.
+    """
+    try:
+        return _probe_sdk()
+    except Exception:
+        _probe_sdk_reset()
+        raise
+
+
 def _probe_db() -> dict:
     """Deep-check the graph DB through the reused probe connection (#1384).
 
-    Reports ``{"ok": bool, "latency_ms": float, "error": str|None}`` via
-    monitoring.probe_db — never raises. ``probe_db`` itself is statically
-    bounded at ``PROBE_DB_TOTAL_TIMEOUT`` (2 x ``PROBE_TIMEOUT`` + the retry
-    delay, ~3.1s, because a transient connect failure is retried once). The
-    ``_probe_sdk()`` prefix that runs BEFORE it is only NOMINALLY charged at
-    ``PROBE_SDK_ACQUISITION_BUDGET`` — that is the redis CONNECT leg, and on
-    the embedded path the acquisition runs real queries bounded by the redis
-    READ timeout (10s default, clampable to 60s) with redis-py's default 10
-    retries, which the budget does not cover. ``DB_PROBE_HARD_TIMEOUT`` below
-    is therefore the best-effort bound a caller should clear, NOT a proof that
-    it exceeds this worker's real total. The probe target is
+    Reports ``{"ok": bool, "observed": bool, "latency_ms": float,
+    "error": str|None}`` via
+    monitoring.probe_db — never raises on a probe failure. ``probe_db``'s own
+    deadline is ONE caller deadline (``PROBE_TIMEOUT``, ~1.5s): since #3143 the
+    #1565 retry rides the REMAINDER of it rather than taking a second, so
+    ``PROBE_DB_TOTAL_TIMEOUT`` (2 x ``PROBE_TIMEOUT`` + the retry delay, ~3.1s)
+    is only the LOOSE over-estimate the outer bound is sized above — NOT this
+    function's ceiling, as the pre-#3143 wording here claimed. The SDK
+    acquisition, since #3446, is its OWN bounded phase: it is handed to
+    ``probe_db`` as ``acquire=`` and abandoned at
+    ``PROBE_SDK_ACQUISITION_BUDGET`` (2.0s) rather than running unbounded on
+    this coordinator's thread. That is what makes ``DB_PROBE_HARD_TIMEOUT`` an
+    outer bound PROVABLY above a sum of ENFORCED inner deadlines instead of an
+    alignment against a guess. It is still not a ceiling on the acquisition's
+    INTERIOR — on the embedded path the anchor connects eagerly, runs real
+    queries, and ``TortoiseSDK.__init__`` runs the unbounded cross-process
+    ``_probe_embedded_busy`` liveness probe; an acquisition that cannot finish
+    inside the budget is REPORTED as a failed phase (and its worker abandoned,
+    never cancelled — CPython #87185). The probe target is
     ``_make_sdk(namespace=None)``: the default-graph connection shares the DB
     server with every org/registry endpoint, so a stopped FalkorDB (NXDOMAIN,
     #1381) fails it too.
@@ -4194,38 +4283,49 @@ def _probe_db() -> dict:
     #669: NEVER probe the registry namespace — FalkorDB auto-creates the
     graph on select, so a registry-namespaced probe RECREATES a deleted
     registry_control_plane on every health check.
+
+    ``db["latency_ms"]`` is UNCHANGED by the move: ``probe_db`` subtracts the
+    acquisition phase's own elapsed time, so this coordinator reports the SAME
+    probe latency it did before #3446 (when it acquired the handle itself and
+    the probe clock started afterwards) instead of silently inflating it by up
+    to ``PROBE_SDK_ACQUISITION_BUDGET`` (2.0s) on a cold acquisition.
     """
     from tortoise.monitoring import probe_db
     # #4608: the episode spans the handle fetch AND the query, so a reset or a
-    # target change cannot close this handle mid-query.
+    # target change cannot close this handle mid-query. #3446: the acquisition
+    # itself is handed to `probe_db(acquire=…)` so its deadline is bounded on
+    # the shared probe worker instead of inline on the coordinator's thread.
     with _probe_episode():
-        try:
-            sdk = _probe_sdk()
-        except Exception as exc:
-            _probe_sdk_reset()
-            return {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
-        return probe_db(sdk)
+        return probe_db(acquire=_acquire_probe_sdk)
 
 
 # The FalkorDB-backed probes' bound. DERIVED, not restated: it is the shared
 # ``monitoring.PROBE_HARD_TIMEOUT`` (``PROBE_DB_TOTAL_TIMEOUT`` +
 # ``PROBE_SDK_ACQUISITION_BUDGET`` + a strict-above margin), so a
-# ``PROBE_TIMEOUT`` change propagates. ``probe_db`` retries one transient
-# connect failure, so its statically-known ceiling is
-# ``PROBE_DB_TOTAL_TIMEOUT`` (~3.1s) — NOT ``PROBE_TIMEOUT`` (1.5s); reading
-# only the per-attempt figure is what inverted the ordering in the
-# #2850/#2988 merge. Two honest caveats:
-#   * the ``_probe_sdk()`` prefix that runs BEFORE ``probe_db`` is charged at
-#     ``PROBE_SDK_ACQUISITION_BUDGET`` (the redis CONNECT leg). In URI mode
-#     that prefix is ~free (lazy projection, connect happens inside
-#     ``probe_db``'s own per-attempt bound); on the EMBEDDED path it runs real
-#     queries bounded by the redis READ timeout (10s default, clampable to
-#     60s) with redis-py's default 10 retries, which the budget does NOT cover;
+# ``PROBE_TIMEOUT`` change propagates. ``probe_db``'s own deadline is ONE
+# caller deadline, so the figure that clears it is
+# ``PROBE_DB_TOTAL_TIMEOUT`` (~3.1s = 2 x PROBE_TIMEOUT + the retry delay) —
+# NOT ``PROBE_TIMEOUT`` (1.5s); reading only the per-attempt figure is what
+# inverted the ordering in the #2850/#2988 merge. Since #3143 that 3.1s is a
+# deliberate OVER-ESTIMATE (the retry rides the remainder of the one deadline,
+# it does not take a second), which is why the bound is sized above the LOOSE
+# figure rather than above the exact total. Since #3446 the acquisition prefix
+# is no longer an unenforced term either: ``_probe_db`` hands ``_probe_sdk``
+# to ``probe_db(acquire=…)``, which bounds it at
+# ``PROBE_SDK_ACQUISITION_BUDGET`` on the shared probe worker. So the sum is
+# one ENFORCED deadline plus one deliberate over-estimate, and the ordering is
+# provable for this plane. Two honest caveats,
+# neither of them a missing deadline:
+#   * the acquisition's INTERIOR is not bounded by that budget — the embedded
+#     anchor connects eagerly, runs real queries, and ``TortoiseSDK.__init__``
+#     runs the unbounded cross-process ``_probe_embedded_busy`` liveness
+#     probe. An overrun is REPORTED (the phase fails at the budget), and its
+#     worker is abandoned, never cancelled (CPython #87185);
 #   * ``TORTOISE_FALKORDB_CONNECT_TIMEOUT_S`` can raise even the connect leg
 #     the budget models (clamped at ``projection._DB_TIMEOUT_MAX_S`` = 60s).
-# So this is a best-effort ALIGNMENT that reduces how often a worker is
-# stranded; it is not a proof that the outer bound exceeds the worker's real
-# total. See the guarantee summary at ``monitoring.PROBE_MAX_SUPERSEDES``.
+# So this remains an ordering over WAITS, and the residual is stranding, not
+# an unenforced phase. See the guarantee summary at
+# ``monitoring.PROBE_MAX_SUPERSEDES``.
 DB_PROBE_HARD_TIMEOUT = PROBE_HARD_TIMEOUT
 
 
@@ -4352,12 +4452,15 @@ CONTROL_PLANE_HARD_TIMEOUT = CONTROL_PLANE_PROBE_TOTAL_S + CONTROL_PLANE_BOUND_M
 # each plane's statically-known inner TOTAL, not a single global number.
 # FalkorDB's ``probe_db`` retries one transient failure, so the bound that CAN
 # be computed is ``PROBE_DB_TOTAL_TIMEOUT`` (~3.1s = 2 x PROBE_TIMEOUT +
-# PROBE_RETRY_DELAY) plus the nominal SDK-acquisition budget plus a
+# PROBE_RETRY_DELAY) plus the ENFORCED SDK-acquisition phase plus a
 # strict-above margin — hence ``DB_PROBE_HARD_TIMEOUT`` =
-# ``PROBE_HARD_TIMEOUT`` (5.6s), not the superseded 2.0s bare default. The embedded acquisition prefix is NOT covered
-# by that computation, so this ordering is a best-effort alignment that
-# reduces how often a worker is stranded — see the guarantee summary at
-# ``monitoring.PROBE_MAX_SUPERSEDES``.
+# ``PROBE_HARD_TIMEOUT`` (5.6s), not the superseded 2.0s bare default. Since
+# #3446 the acquisition prefix is itself a bounded phase
+# (``probe_db(acquire=…)``), so no term of that sum is an UNBOUNDED phase any
+# more — one is an enforced deadline and the other (``PROBE_DB_TOTAL_TIMEOUT``)
+# is a deliberate over-estimate. The ordering is provable for this plane, and
+# the residual is stranding — a phase that overruns its deadline is abandoned,
+# not cancelled. See the guarantee summary at ``monitoring.PROBE_MAX_SUPERSEDES``.
 _CONTROL_PLANE_PROBE = HealthProbe(
     lambda: _probe_control_plane(),
     timeout=CONTROL_PLANE_HARD_TIMEOUT,
@@ -4410,10 +4513,15 @@ def _backup_watcher_health() -> dict:
       * ``disabled`` — no config / kill switch: legitimate, stays ``ok``.
 
     Every state also carries ``expected`` — whether THIS boot expected a
-    backup watcher at all (``_WATCHER_EXPECTED``, hosted marker only; #4498).
-    It makes "expected and absent" visible from /health, but it does NOT
-    affect ``ok``: a hosted deploy that legitimately runs without backups
-    stays ``ok``.
+    backup watcher at all. It is the module marker ``_WATCHER_EXPECTED``,
+    published once in ``_lifespan`` from the shared
+    `_watcher_expected_on_this_host` declaration, so this field and the
+    boot-time "no monitor" warning can never disagree (#4498). It makes
+    "expected and absent" visible from /health, but it does NOT affect ``ok``:
+    on a hosted deploy ``state: "disabled"`` is otherwise indistinguishable
+    from a deployment that deliberately runs without backups, and
+    ``expected: true`` alongside it is the operator's cue to read the boot log.
+    ``disabled`` still stays ``ok`` (#4470's explicit acceptance).
 
     Mirrors the ``db`` block: a sub-dict carrying ``ok``, folded into
     ``status`` by the caller. Never raises and never 5xxes — a dead monitor
@@ -4493,7 +4601,10 @@ async def health():
     shape of silent durability failure, so it rides along in ``backup_watcher``
     and flips ``status`` to "degraded" under the identical rule. A disabled
     sweep (no config / kill switch) stays ``ok`` — only "wanted but failed"
-    degrades.
+    degrades. #4498: the block also carries ``expected`` (``FLY_APP_NAME`` set),
+    so on a host where a watcher was expected, ``{"state": "disabled", "ok":
+    true, "expected": true}`` reads as "wanted, and not running" — the
+    operator's cue to check the boot log for the reason.
     """
     try:
         db = _HEALTH_PROBE.snapshot()
@@ -4534,10 +4645,9 @@ async def health_ready():
     # Data plane. Runs its OWN coordinator (``_READY_PROBE`` — deliberately
     # NOT the liveness refresher's, so a readiness call cannot join a probe
     # started before the outage), hard-bounded at ``DB_PROBE_HARD_TIMEOUT``
-    # (a best-effort alignment: the ~3.1s ``probe_db`` TOTAL plus the nominal
-    # SDK-acquisition budget; the embedded acquisition prefix is not covered),
-    # and it never raises, so a dead DB degrades the result instead of the
-    # process.
+    # (the #3143 loose outer-alignment figure the derivation is sized above,
+    # plus the ENFORCED SDK-acquisition phase, since #3446), and it never
+    # raises, so a dead DB degrades the result instead of the process.
     # #669 post-flip: NEVER a registry-namespaced probe — FalkorDB
     # auto-creates the graph on select, so a registry-namespaced probe
     # RECREATED the deleted registry_control_plane on every health check
@@ -6437,18 +6547,213 @@ def _retain_feed_task(key: str, task: asyncio.Task) -> None:
 
 
 def _normalize_mapped_ipv6(ip):
-    """Return the IPv4 address for an IPv4-mapped IPv6 (::ffff:a.b.c.d or
-    ::ffff:7f00:1), else the input unchanged. Prevents a dual-stack client
-    from presenting two bucket keys for one address (#1081 review P4)."""
-    if isinstance(ip, str) and ip.startswith("::ffff:") and len(ip) > 7:
-        try:
-            import ipaddress as _ipa
-            mapped = _ipa.ip_address(ip).ipv4_mapped
-            if mapped is not None:
-                return str(mapped)
-        except ValueError:
-            pass
-    return ip
+    """Return the IPv4 address for ANY IPv4-mapped IPv6 spelling
+    (``::ffff:a.b.c.d``, ``::ffff:7f00:1``, ``::FFFF:...``,
+    ``0:0:0:0:0:ffff:...``), else the input unchanged. Prevents a dual-stack
+    client from presenting two bucket keys for one address (#1081 review P4).
+
+    #3124 review: the old form tested the literal lowercase ``::ffff:``
+    prefix, so ``::FFFF:1.2.3.4`` and ``0:0:0:0:0:ffff:1.2.3.4`` were NOT
+    normalized and one IPv4 address could still hold two bucket identities.
+    #3130 found exactly that and worked around it in the DCR path only, whose
+    docstring records the shared helper as still defective; normalizing by
+    ``ipv4_mapped`` regardless of case/spelling makes that claim true.
+    """
+    if not isinstance(ip, str) or ":" not in ip:
+        return ip
+    try:
+        import ipaddress as _ipa
+        mapped = _ipa.ip_address(ip).ipv4_mapped
+    except ValueError:  # not an address (e.g. a composite key string)
+        return ip
+    return str(mapped) if mapped is not None else ip
+
+
+# ── Bounded store policy for the shared per-IP bucket primitive (#3124) ──
+# The primitive (and RateLimitMiddleware) pruned only *stale* buckets, so a
+# fresh-key flood pruned nothing — every bucket was charged inside the window.
+# The store then grew for the whole window_s (up to 86 400 s on the signup
+# limiter) and, once over max_entries, every request scanned the whole store
+# (O(n) per request, O(n^2) under a sustained flood). The policy below mirrors
+# #2866's DCR precedent:
+#
+#   owned-key cap .... max_entries (default 10 000) client-keyed buckets
+#   overflow ......... exactly ONE shared bucket per store (reserved key
+#                      _BUCKET_OVERFLOW_KEY), capped at the caller's
+#                      ``limit`` per window
+#   eviction ......... reclaim ONLY buckets whose in-window entries have all
+#                      expired; an ACTIVE key is never evicted
+#   hot path ......... O(1) in store size — no store-wide iteration on any
+#                      check or charge
+#
+# Last-charge ordering (every charge moves its key to the insertion-order
+# tail) makes reclaim O(1) and safe: the head is the least-recently-charged
+# key, so an active head implies every later key is also active. Reclaim stops
+# at the first active head and can never evict an active key — evicting one
+# would reset a victim's consumed budget, the fail-open shape #2866 rejects as
+# alternative C. A NEW key arriving when the owned store is full of active
+# buckets is charged to the shared overflow bucket instead of growing the
+# store; only when that overflow is ALSO at ``limit`` is the request refused
+# (429) — the deliberate, fail-closed store-overflow rejection class. The
+# overflow bucket lives in the SAME caller-owned store (this primitive is
+# polymorphic over 13 call sites, so a second global store cannot be passed
+# without a signature change); capacity counts owned keys only, so the stated
+# bound is owned <= max_entries and len(store) <= max_entries + 1.
+#
+# Per-key overflow attribution (fail-closed, #3124 review). A shared-overflow
+# entry is stored as ``(timestamp, key)``, so routing can tell WHICH key has
+# in-window overflow charges. That one change closes two opposite defects:
+#   * A key that exhausted its budget in the overflow cannot graduate to a
+#     fresh owned bucket while its OWN overflow charges are in-window — it
+#     stays in the overflow until they expire. Without attribution it
+#     graduated as soon as ANY slot freed and got a second full budget (up to
+#     2x its limit in one window — a fail-open regression vs. the pre-#3124
+#     per-key behaviour). Pinned by
+#     ``test_sticky_overflow_blocks_a_second_budget``.
+#   * The stickiness is PER KEY, never store-wide: a key with no overflow
+#     charges takes a free owned slot whenever one exists. A store-wide rule
+#     refused EVERY fresh key for the rest of the window (up to 86 400 s) once
+#     the overflow held any charge — a new-user denial reachable with an empty
+#     owned store. Pinned by
+#     ``test_fresh_key_below_cap_admitted_while_overflow_is_warm``.
+# The overflow still holds at most ``limit`` entries (the ``len >= limit``
+# check is unchanged) and the per-entry scan is O(limit), not O(store).
+#
+# Accepted overflow-regime properties (deliberate, both BOUNDED — a lane must
+# not "fix" either without re-opening the capacity decision):
+#   * Mixed-limit stores. One store may carry keys with different ``limit``s
+#     (``_SENSITIVE_BUCKETS`` is 20/5/5/5 per op; ``RateLimitMiddleware`` is
+#     300/100 per path). The overflow bucket is SHARED, so a high-limit key
+#     class can fill it and a fresh low-limit key then sees ``len >= limit``
+#     and is refused. This can only ever be MORE restrictive than the key's
+#     own budget — never more permissive — so it is fail-closed; it is
+#     reachable only in the genuine store-overflow regime (max_entries active
+#     keys in one window), which is a flood signature. Pinned by
+#     ``test_mixed_limit_overflow_is_fail_closed``.
+#   * ``_forget_bucket_charge`` pops the caller's OWN attributed overflow entry,
+#     so a successful accept refunds exactly its own charge and a forget for a
+#     key that was never charged is a no-op — it cannot refund a FOREIGN
+#     charge. "Successes consume no budget" still holds per store. The ceiling
+#     on the shared bucket is ``limit`` entries of overflow charges shared
+#     across overflow-routed keys; because a success refunds the per-token /
+#     IP / global dimensions, those caps bound FAILED attempts only, and the
+#     real ceiling on "limit + successes" is the outstanding-invite supply (a
+#     success consumes its invite).
+_BUCKET_OVERFLOW_KEY = "\x00overflow"
+
+
+def _bucket_entry_ts(entry) -> float:
+    """Timestamp of a bucket entry. Owned buckets and the DCR stores hold bare
+    floats; the shared overflow holds ``(ts, key)`` pairs so routing can
+    attribute each charge to its key (#3124). One accessor for both layouts
+    keeps `_bucket_prune_window` / `_bucket_reclaim` single-implementation."""
+    return entry[0] if isinstance(entry, tuple) else entry
+
+
+def _bucket_prune_window(bucket: list, now: float, window_s: int) -> list:
+    """In-window entries of `bucket`. The one implementation of the
+    security-relevant window boundary (``now - _bucket_entry_ts(entry) <
+    window_s``) for the hosted_api limiter family: #2866's
+    ``_dcr_prune_window`` delegates here (#3124). NOT the only copy in the
+    repo — ``tortoise/cimd.py`` keeps its own prune for a different
+    (threading) module — so the claim is scoped to this family.
+
+    `_bucket_entry_ts` reads the timestamp from either layout (a bare float, or the
+    shared overflow's ``(ts, key)`` pair), so this stays the ONE boundary
+    predicate for all of them.
+
+    The D10 parity test (``test_t_window_helper_parity_with_primitive``) can
+    no longer be an INDEPENDENT oracle now that both sides call this function
+    (#3124 review), so it asserts against a literal expected table: a mutation
+    of this boundary still fails it."""
+    return [t for t in bucket if now - _bucket_entry_ts(t) < window_s]
+
+
+def _bucket_owned_count(store) -> int:
+    """Client-keyed buckets in `store` — the one shared overflow bucket (if
+    present) does not count against the owned-key cap."""
+    return len(store) - (1 if _BUCKET_OVERFLOW_KEY in store else 0)
+
+
+def _bucket_touch(store, key) -> None:
+    """Move `key` to the insertion-order tail (last-charge ordering) so
+    `_bucket_reclaim` can stop at the first active head. Works on any
+    insertion-ordered mapping (dict/defaultdict/OrderedDict) — the primitive
+    takes a caller-owned store and must not change its type. O(1)."""
+    if not store or next(reversed(store), None) == key:
+        return
+    store[key] = store.pop(key)
+
+
+def _bucket_reclaim(store, now: float, window_s: int, cap: int,
+                    count=None) -> None:
+    """Pop inactive insertion-order-head buckets until the count is below
+    `cap` or the head is active. O(1) at the hot cap; never evicts an active
+    key (#2866 D3/D4 precedent).
+
+    `count` selects the capacity metric and defaults to ``len`` — a NEUTRAL
+    metric that assumes no reserved key. A caller whose store reserves one
+    (the primitive's shared overflow) passes ``_bucket_owned_count`` so the
+    reserved key does not consume a slot; #2866's separate-store layout counts
+    every key and passes ``len``. The default must not encode one caller's
+    layout: an adopter with a DIFFERENT reserved key would silently inherit
+    the primitive's counting semantics and a wrong cap (#3124 review)."""
+    _count = len if count is None else count
+    while _count(store) >= cap:
+        head_key = next(iter(store), None)
+        if head_key is None:
+            return
+        head = store[head_key]
+        if head and now - _bucket_entry_ts(head[-1]) < window_s:
+            return  # active head ⇒ every later key is active too
+        del store[head_key]
+
+
+def _bucket_route(store, key, now: float, window_s: int, cap: int):
+    """Resolve ``(bucket, on_overflow)`` for a check/charge of `key` under
+    the #3124 capacity policy — the ONE routing implementation shared by
+    `_check_ip_bucket_rate_limit`, `_charge_ip_bucket` and
+    `RateLimitMiddleware.dispatch`.
+
+    Does NOT insert: a fresh key returns a NEW empty list that the caller
+    writes back only when it charges (so a deferred check and a 429 leave no
+    store entry behind, #1719). A tracked key is pruned in place. A new key
+    at a full owned store is routed to the single shared overflow bucket
+    instead of growing the owned key space (#2866 reject-new/overflow), so
+    the owned count can never exceed `cap`. The overflow is STICKY PER KEY:
+    a key with its OWN in-window overflow charges stays in the overflow rather
+    than being handed a second full budget, while a key with none takes a free
+    owned slot (a store-wide rule would deny every fresh key until the whole
+    overflow drained). A key equal to the reserved overflow sentinel is routed
+    to the overflow rather than being allowed to own it."""
+    # A client key must NEVER own the reserved slot (#3124 review). If one
+    # could, its bucket would be stored under `_BUCKET_OVERFLOW_KEY` with bare
+    # float entries, and the next fresh-key scan (`entry[1]` on a float) would
+    # raise TypeError -> 500 for the whole window. Unreachable over HTTP today
+    # (h11's field grammar forbids NUL in a header value, and every other key
+    # is a tuple or an IP string), but the reserved-key boundary must be
+    # structural rather than transport-dependent.
+    if key == _BUCKET_OVERFLOW_KEY:
+        overflow = store.get(_BUCKET_OVERFLOW_KEY)
+        if overflow is None:
+            return [], True
+        overflow[:] = _bucket_prune_window(overflow, now, window_s)
+        return overflow, True
+    bucket = store.get(key)
+    if bucket is not None:
+        bucket[:] = _bucket_prune_window(bucket, now, window_s)
+        return bucket, False
+    _bucket_reclaim(store, now, window_s, cap, count=_bucket_owned_count)
+    # Per-key sticky overflow (see the policy block): entries are (ts, key), so
+    # a key is held in the overflow ONLY while its OWN charges are in-window.
+    overflow = store.get(_BUCKET_OVERFLOW_KEY)
+    if overflow is not None:
+        overflow[:] = _bucket_prune_window(overflow, now, window_s)
+        if any(entry[1] == key for entry in overflow):
+            return overflow, True
+    if _bucket_owned_count(store) >= cap:
+        return (overflow if overflow is not None else []), True
+    return [], False
 
 
 async def _check_ip_bucket_rate_limit(
@@ -6463,8 +6768,17 @@ async def _check_ip_bucket_rate_limit(
     Shared by /v1/register (3/hr), sensitive ops (export/org_delete), and
     /v1/agent/signup (2/24h). RATE_LIMIT_DISABLED=1 opts out (test env).
     Raises HTTPException(429) with Retry-After when the window is exhausted.
-    Memory bound: when the store exceeds max_entries, drop buckets whose
-    entries are all older than window_s (dead weight — #750.2 precedent).
+
+    #3124 capacity bound (policy block above the helpers): the store holds at
+    most max_entries client-keyed buckets plus one shared overflow bucket. A
+    new key arriving at a full store is charged to the overflow (capped at
+    `limit`/window) instead of growing the key space, and an overflow-routed
+    key STAYS there while its own charges are in-window (per-key sticky) so it
+    can never be handed a second budget; reclaim drops only fully-expired
+    buckets and never evicts an active key; the hot path does no store-wide
+    iteration. Below the cap, behaviour — including the 429 boundary at
+    `limit` — is unchanged (a fresh key takes a free owned slot even while the
+    overflow is warm).
 
     P1-FIX-1: bucket key is the caller-supplied `key` (required at wrappers)
     — the sensitive-op store is keyed (ip, op) composite; a bare-ip default
@@ -6508,18 +6822,25 @@ async def _check_ip_bucket_rate_limit(
         if key is None:
             key = request.client.host
     # P2-2 (coherence): normalize IPv4-mapped IPv6 so a dual-stack client
-    # cannot present two keys for one address. Handles both dotted-quad
-    # (::ffff:1.2.3.4) and hex (::ffff:7f00:1) forms via ipaddress.
+    # cannot present two keys for one address. Handles every spelling/case of
+    # the mapped form (::ffff:1.2.3.4, ::ffff:7f00:1, ::FFFF:...,
+    # 0:0:0:0:0:ffff:...) via ipaddress (#3124 review).
     ip = _normalize_mapped_ipv6(key)
     now = time.time()
     async with lock:
-        bucket = buckets[ip]
-        bucket[:] = [t for t in bucket if now - t < window_s]
+        # #3124: the shared `_bucket_route` resolves the bucket WITHOUT
+        # inserting on the check path — a fresh key must not be inserted
+        # before the 429 check (the old `buckets[ip]` did exactly that, which
+        # is why a fresh-key flood could never be bounded).
+        bucket, on_overflow = _bucket_route(
+            buckets, ip, now, window_s, max_entries)
         if len(bucket) >= limit:
             # #1081 review P4: ceil — int() floors and can understate (and
             # yield 0 for near-expiry windows); a client retrying exactly at
             # the advertised value must not get a surprise 429.
-            remaining = (math.ceil(bucket[0] + window_s - now)
+            # `_bucket_entry_ts` reads the oldest timestamp from either layout
+            # (a bare float, or the shared overflow's ``(ts, key)`` pair).
+            remaining = (math.ceil(_bucket_entry_ts(bucket[0]) + window_s - now)
                          if retry_after_s is None else retry_after_s)
             raise HTTPException(
                 status_code=429,
@@ -6527,12 +6848,14 @@ async def _check_ip_bucket_rate_limit(
                 headers={"Retry-After": str(remaining)},
             )
         if not defer_charge:
-            bucket.append(now)
-        if len(buckets) > max_entries:
-            stale = [ip for ip, b in buckets.items()
-                     if not any(now - t < window_s for t in b)]
-            for ip in stale:
-                del buckets[ip]
+            # Phase-2 write: a 429 inserted/charged nothing. The deferred path
+            # writes NOTHING here — a 5xx never consumes budget and, unlike
+            # the old defaultdict pre-insertion, leaves no empty bucket
+            # behind (#1719 preserved and strengthened).
+            bucket.append((now, ip) if on_overflow else now)
+            dest = _BUCKET_OVERFLOW_KEY if on_overflow else ip
+            buckets[dest] = bucket
+            _bucket_touch(buckets, dest)
 
 
 async def _charge_ip_bucket(
@@ -6561,24 +6884,24 @@ async def _charge_ip_bucket(
     ip = _normalize_mapped_ipv6(key)
     now = time.time()
     async with lock:
-        # setdefault: the deferred check creates buckets[ip]=[]; a concurrent
-        # request's max_entries prune treats an EMPTY bucket as stale and
-        # deletes it before this charge (botnet regime) — a KeyError here
-        # would replace a terminal 401/403/200 with a 500. A charge is
-        # telemetry and must never alter the response (code-review P2).
-        bucket = buckets.setdefault(ip, [])
-        bucket[:] = [t for t in bucket if now - t < window_s]
+        # #1719 never-raise: no indexing — a concurrent reclaim can delete a
+        # deferred check's bucket before this charge, and a charge is
+        # telemetry, never a failure path (a KeyError here would replace a
+        # terminal 401/403/200 with a 500). #3124: the SAME `_bucket_route`
+        # as the check, so a new key at a full store charges the shared
+        # overflow bucket instead of growing the owned key space.
+        bucket, on_overflow = _bucket_route(
+            buckets, ip, now, window_s, max_entries)
         # #1738 burst bound: a charge must never inflate the bucket past the
         # limiter's limit — drop it (return, no append) when the window is
-        # already full. The 429 boundary is preserved at limit.
+        # already full. The 429 boundary is preserved at limit. The overflow
+        # bucket obeys the same limit, so it cannot outgrow its cap.
         if len(bucket) >= limit:
             return
-        bucket.append(now)
-        if len(buckets) > max_entries:
-            stale = [ip for ip, b in buckets.items()
-                     if not any(now - t < window_s for t in b)]
-            for ip in stale:
-                del buckets[ip]
+        bucket.append((now, ip) if on_overflow else now)
+        dest = _BUCKET_OVERFLOW_KEY if on_overflow else ip
+        buckets[dest] = bucket
+        _bucket_touch(buckets, dest)
 
 
 async def _check_register_rate_limit(request: Request) -> None:
@@ -11085,16 +11408,27 @@ _SESSION_HARNESS_VALUES = frozenset({
     "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
 })
 
+# #3516 §B / #3515 piece 8: which producer captured a session — 'hook' (the
+# in-process hook/CLI leg) or 'store_sync' (the store-sync backstop). This is
+# the ONLY discriminator that makes the hook-liveness check falsifiable: the two
+# lanes POST the same payload except this field, so without it a run with the
+# hook stubbed no-op greens. Distinct from the EXTRACTION lane (`_capture_lane()`
+# returns m2/v2) — same word, different meaning; do not merge the two.
+_SESSION_CAPTURE_LANE_VALUES = frozenset({"hook", "store_sync"})
+
 
 class SessionRequest(BaseModel):
     conversation: list[dict] = Field(..., max_length=1000)
 
     # #1532 D1 (contract change, flagged): hosted previously rejected per-turn
-    # content > 5000 chars with 422 (Pydantic field_validator failure); it now
-    # accepts and truncates to the 5000-char stored window exactly like the SDK
-    # (the shared _capture_turn_window helper in the handler — both paths
-    # produce byte-identical stored turns). Non-str content is coerced in the
-    # handler turn loop (P1 #1529 D10) — no validator-side crash surface.
+    # content over the stored window with 422 (Pydantic field_validator
+    # failure); it now accepts and clips to the stored window exactly like the
+    # SDK (the shared _capture_turn_window helper in the handler — both paths
+    # produce byte-identical stored turns). The window is ONE number
+    # (sdk._CAPTURE_TURN_CAP) and the clip is ONE definition
+    # (sdk._clip_capture_turn_content, which marks a cut so it is never
+    # silent, #4897) — neither is restated here. Non-str content is coerced in
+    # the handler turn loop (P1 #1529 D10) — no validator-side crash surface.
     # W5 P2 (review round 1): session_id becomes the point-level provenance
     # source_session — an unbounded caller string would amplify onto every
     # extracted point (N x len).  Bounded at 256 (real ids are ULIDs / the
@@ -11107,6 +11441,11 @@ class SessionRequest(BaseModel):
     # session_id is the idempotency key (re-POST same id ⇒ 0 new nodes);
     # source carries the transcript stem (forwarded by _cmd_session_capture).
     harness: str | None = None
+    # #3516 §B: OPTIONAL and set-only-when-present, so a pre-installed hook, an
+    # SDK caller or a backfill producer that POSTs without it never 422s and
+    # never erases a lane the server already stored. `None` is stored as ABSENT,
+    # never as a fabricated lane. Invalid values fail the boundary 422.
+    capture_lane: str | None = None
     source: str | None = None
     # #2599: machine_id and model are CLIENT-CLAIMED informational fields
     # (forgeable, never security-trusted) — complementing the server-resolved
@@ -11125,6 +11464,18 @@ class SessionRequest(BaseModel):
             raise ValueError(
                 f"invalid harness {v!r} — must be one of "
                 f"{sorted(_SESSION_HARNESS_VALUES)}")
+        return v
+
+    # #3516 §B: invalid capture_lane ⇒ 422 at the model boundary (same contract
+    # as harness) — a typo'd lane must be visible, and must never be silently
+    # stored as a lane the hook-liveness check would then misread.
+    @field_validator("capture_lane")
+    @classmethod
+    def _validate_capture_lane(cls, v):
+        if v is not None and v not in _SESSION_CAPTURE_LANE_VALUES:
+            raise ValueError(
+                f"invalid capture_lane {v!r} — must be one of "
+                f"{sorted(_SESSION_CAPTURE_LANE_VALUES)}")
         return v
 
     # #2599: reject non-printable characters in machine_id/model (a newline
@@ -11539,8 +11890,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # #1532 D1: compute the shared stored-window conversation ONCE — the
     # empty/blank gate, the turn-store loop, and the extraction call all
     # consume the SAME window so the extractors can never see a phrase with no
-    # home in any stored turn (stored-source parity; >5000 turns are accepted
-    # and truncated here — the old 422 is removed, D1 contract change).
+    # home in any stored turn (stored-source parity; over-window turns are
+    # accepted and clipped here — the old 422 is removed, D1 contract change;
+    # the clip marks what it cut, #4897).
     windowed = _capture_turn_window(body.conversation)
     # #6246: the SHARED extraction view, built ONCE and handed to whichever
     # lane runs below, so a clipped turn with nothing to say contributes no
@@ -11556,7 +11908,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # empty conversation is never ok=True / a silent extracted:0).
     # 422 over 400: same family as the empty-conversation rejection; a
     # handler-level check because blankness is transcript-derived.
-    transcript, _est = _session_llm_transcript(windowed)
+    transcript, _est = _session_llm_transcript(_capture_gate_window(windowed))
     if not transcript.strip():
         raise HTTPException(
             status_code=422,
@@ -11913,6 +12265,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     _capture_write = await _run_off_loop(
         _CAPTURE_EXECUTOR, _write_session_and_turns, proj, sdk, session_id,
         windowed, now=now, harness=capture_harness,
+        capture_lane=body.capture_lane,
         actor_user_id=_actor_uid, machine_id=body.machine_id,
         model=body.model, session_existed=session_existed,
         embed_fn=lambda texts: _capture_turn_embeddings(
@@ -13336,7 +13689,6 @@ def _prevalidate_supersede_window(sdk, pr, *, now: str) -> None:
     Raises ``InvertedSupersedeWindow`` — the caller's ``[5]`` boundary maps it
     to the repo's validation posture (422).
     """
-    from .search_engine import _created_sort_key  # lazy — mirrors sdk.py
     proj = sdk._get_proj()
     old_rows = proj.g.query(
         "MATCH (n:Point {id:$id}) RETURN n.validFrom",
@@ -13369,9 +13721,13 @@ def _prevalidate_supersede_window(sdk, pr, *, now: str) -> None:
     # writer's clock, not a fact — so a resolution that would land on it is NOT
     # pre-validated; the boundary decides instead of this check guessing an
     # instant the writer has not chosen yet.
-    if not (stored_vf and _created_sort_key(stored_vf)[0] == 0) and not (
-            successor_created_at
-            and _created_sort_key(successor_created_at)[0] == 0):
+    # The resolution predicate is SHARED with the writer, not mirrored
+    # (#3985): a duplicated truthiness test drifted and deferred a resolution
+    # that is not the writer's `now`, minting the successor and losing the
+    # #5363 no-orphan guarantee. `_WRITER_CLOCK` is the writer's own answer to
+    # "nothing readable — `now` decides".
+    if _supersede_window_start_source(
+            stored_vf, successor_created_at) is _WRITER_CLOCK:
         return
     _supersede_window_end(
         old_id=pr.existing_id,
@@ -13964,13 +14320,17 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     # the gate removal; the off-switch lives in _capture_session_impl only).
     from tortoise.commit_idempotency import CommitRecordStore
     from tortoise.commit_schema import (
+        compile_vocab,
         plan_commit,
         validate_payload_dict,
     )
+    from tortoise.pack_state import graph_installed_namespaces
 
     # [1] Layer-1 (400 class = missing required fields; 422 class = shape +
     # semantic violations with field reasons). The derived payload has NO
-    # turns — the legacy turn cap (POST /v1/sessions) does not apply.
+    # turns — the legacy turn cap (POST /v1/sessions) does not apply. The
+    # vocab is the GRAPH's installed-pack gate (#5163), not the process-global
+    # union — resolved below, before validation.
     try:
         raw_bytes = await _read_capped_body(
             request, _COMMIT_SESSION_MAX_BYTES, _COMMIT_SESSION_413_DETAIL)
@@ -13980,7 +14340,31 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     except Exception:
         raise HTTPException(  # noqa: B904
             status_code=400, detail="Request body must be a JSON object")
-    result, payload = validate_payload_dict(raw)
+
+    # #5163: the WRITE GATE must enforce the graph's APPROVAL set, not the
+    # process-global catalog union. Resolve the tenant SDK and the graph's
+    # installed-pack set BEFORE Layer-1 so the 422 is per-graph — the same
+    # decision the extractor prompt already renders (build_master_list reads
+    # the gated tenant_view brief). An unreachable graph RAISES here
+    # (fail-closed): an outage never becomes a silent widen back to the
+    # union. ``None`` = a graph with no :PackInstall records → the catalog
+    # union, exactly as before (#2714 indicator 3).
+    #
+    # #5339 review (P1): ``graph_installed_namespaces`` is a WHOLE-GRAPH read
+    # (the :PackInstall rows plus ``graph_kind_namespaces``' per-property
+    # scans — O(nodes), documented to run per call), and ``compile_vocab`` on a
+    # cold or evicted memo is a filesystem walk + YAML parse of every manifest
+    # (~40 ms). This handler is ``async``, so running either inline parks the
+    # event loop — the #3086/#3060 class this very handler already off-loads
+    # for its SDK open and its point-count check. Resolve the gate AND compile
+    # the vocab in ONE offloaded unit through the graph pool.
+    _require_scope(org, "graphs:write", "commit_session")
+    sdk = await _data_sdk_offloaded(org)
+    _gate_vocab = await _graph_offload(
+        lambda: compile_vocab(
+            installed_namespaces=graph_installed_namespaces(sdk)),
+        op="commit_gate_vocab")
+    result, payload = validate_payload_dict(raw, vocab=_gate_vocab)
     if result.code == "missing_required_fields":
         raise HTTPException(
             status_code=400,
@@ -14003,8 +14387,6 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
             detail={"warnings": blocking, "code": "domain_rule_block"},
         )
 
-    _require_scope(org, "graphs:write", "commit_session")
-    sdk = _data_sdk(org)
     proj = sdk._get_proj()
     store = CommitRecordStore(sdk)
 
@@ -17603,12 +17985,59 @@ def _resolve_v2_mismatch(token: str, user: dict) -> dict | None:
             "email": inv["email"], "role": inv["role"], "token": token}
 
 
+def _forget_bucket_charge(buckets, key) -> None:
+    """#3124: roll back ONE charge from `buckets` for `key`.
+
+    A successful accept charges exactly one bucket per store (non-deferred
+    path). When the request was routed to the shared overflow bucket (the
+    owned store was full of active keys) the owned key is absent, so the
+    rollback removes one overflow entry instead — count-neutral, so the store
+    bound and the "successful accepts consume no budget" invariant both hold.
+    The refund is exact: the overflow entries carry their key (``(ts, key)``),
+    so this pops the caller's OWN charge and a request that was never charged
+    is a no-op — it can never refund a FOREIGN entry (#3124 review). The
+    existing concurrent-over-removal tolerance (a simultaneous accept's newest
+    entry may be the one popped) is unchanged and documented at the caller.
+
+    A `key` equal to the reserved overflow sentinel is sent straight to the
+    attributed scan: `buckets.get(sentinel)` IS the shared overflow list, so
+    the owned-bucket branch would `pop()` an arbitrary FOREIGN entry (#3124
+    review) — the same structural boundary `_bucket_route` enforces.
+    """
+    if key != _BUCKET_OVERFLOW_KEY:
+        bucket = buckets.get(key)
+        if bucket:
+            bucket.pop()
+            return
+        if key in buckets:
+            # Present but EMPTY — no charge was recorded for this key, so there
+            # is nothing to refund and the shared overflow must not be touched.
+            return
+    overflow = buckets.get(_BUCKET_OVERFLOW_KEY)
+    if not overflow:
+        return
+    # #3124 review: pop THIS key's attributed entry (overflow entries are
+    # ``(ts, key)``), never an arbitrary one — so a forget for a key that was
+    # never charged is a no-op and can never refund a foreign charge.
+    for i in range(len(overflow) - 1, -1, -1):
+        if overflow[i][1] == key:
+            del overflow[i]
+            return
+
+
 def _forget_invite_accept(request: Request, token: str) -> None:
     """Roll back the attempt recorded by _check_invite_accept_rate_limit
     after a SUCCESSFUL accept — attempts (not successes) are what the caps
     bound (#1228-review). Removes the newest entry of each bucket; under
     simultaneous accepts the most recent entry may belong to a concurrent
     request (over-removal is bounded and conservative at invite volume).
+
+    #3124 review: with per-key overflow attribution the refund is exact —
+    `_forget_bucket_charge` pops only the caller's OWN entry — so there is no
+    predicate to mirror here: a request whose check opted out simply has no
+    entry to pop. (An earlier mirror-the-opt-out guard was removed once the
+    primitive enforced this structurally; a convention that cannot be tested
+    independently is a liability, not a safety net.)
     """
     import hashlib as _hashlib
     token_key = _hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
@@ -17623,9 +18052,7 @@ def _forget_invite_accept(request: Request, token: str) -> None:
         (_INVITE_ACCEPT_GLOBAL_BUCKETS, _INVITE_ACCEPT_GLOBAL_LOCK,
          ("invite-accept", "global")),
     ):
-        bucket = buckets.get(key)
-        if bucket:
-            bucket.pop()
+        _forget_bucket_charge(buckets, key)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -31337,14 +31764,17 @@ async def webhooks_stripe(request: Request):
 
 # ── DCR capacity policy (#2866) ────────────────────────────────────────
 # RFC 7591 registration is an unauthenticated write surface. The limiter is
-# intentionally NOT the shared `_check_ip_bucket_rate_limit` primitive: that
-# primitive inserts the bucket (`defaultdict`) BEFORE its 429 check and prunes
-# only *stale* buckets, so an attacker-keyed fresh-key flood grows its store
-# without bound and every request scans the whole store once over
-# `max_entries` (the charge append itself happens after the check; the
-# unbounded growth and the O(n) scan are the defects). The primitive is left
-# byte-identical; the sibling filing tracks it). This limiter states its
-# capacity policy in concrete, falsifiable numbers:
+# intentionally NOT the shared `_check_ip_bucket_rate_limit` primitive: it
+# supplies dimensions that primitive does NOT — a trusted-CIDR carve-out, an
+# anonymous global aggregate, IPv6 /64 key aggregation (D6), and
+# per-dimension derived caps — and so it keeps its own four stores. The
+# store-bound POLICY is now shared: #3124 gave the primitive the same
+# reclaim-inactive / reject-new-shared-overflow / O(1) shape this limiter was
+# built with, and both now call the shared `_bucket_prune_window` /
+# `_bucket_reclaim` helpers. (#2866's note that the primitive was "left
+# byte-identical" and unbounded is superseded by #3124; do NOT delete this
+# limiter's separate stores — the dimensions above are still only here.)
+# This limiter states its capacity policy in concrete, falsifiable numbers:
 #
 #   per bucket (per client IP, or /64 for IPv6) ... 20/hr   (PER_HOUR)
 #   anonymous global aggregate ................... 600/hr   (ANON_AGGREGATE)
@@ -31391,7 +31821,8 @@ async def webhooks_stripe(request: Request):
 # client `Fly-*` headers (assumption 12 — dated re-verification with an
 # operator recipe is #3126, owner @daniel-ospina, 2026-11-15). Sibling
 # filings from this work: #3124 (the shared per-IP primitive + the generic
-# middleware's store are still unbounded), #3125 (`_check_claim_rate_limit`
+# middleware's store — now bounded: reclaim-inactive + reject-new/shared
+# overflow + O(1) hot path), #3125 (`_check_claim_rate_limit`
 # keys on the proxy IP), #3134 (dated measurement of real DCR volume —
 # the 600/1200 aggregates are not load-validated). #3036 already covers
 # oauth_* token-table retention/GC.
@@ -31420,7 +31851,11 @@ _OAUTH_DCR_TRUSTED_CIDRS_DEFAULT = "160.79.104.0/21"
 # Singleton store keys for the aggregate dimensions (malformed client IPs
 # share the constant below, never a per-raw-string bucket).
 _OAUTH_DCR_ANON_KEY = "\x00anon"
-_OAUTH_DCR_OVERFLOW_KEY = "\x00overflow"
+# Alias the shared sentinel rather than re-declaring the literal: the two
+# layouts count differently (in-store layout counts OWNED keys; the DCR
+# separate-store layout counts every key), so the KEY VALUE must not drift
+# (#3124 review).
+_OAUTH_DCR_OVERFLOW_KEY = _BUCKET_OVERFLOW_KEY
 _OAUTH_DCR_MALFORMED_KEY = "anonymous"
 
 _OAUTH_DCR_BUCKETS: OrderedDict[str, list[float]] = OrderedDict()
@@ -31431,9 +31866,13 @@ _OAUTH_DCR_LOCK = asyncio.Lock()
 
 
 def _dcr_prune_window(bucket: list[float], now: float, window_s: int) -> list[float]:
-    """In-window entries of `bucket` (pure; the primitive's window contract is
-    pinned against this by a parity test, D10)."""
-    return [t for t in bucket if now - t < window_s]
+    """In-window entries of `bucket` — delegates to the shared
+    `_bucket_prune_window` (#3124): ONE implementation of the
+    security-relevant window boundary for this limiter family, kept under
+    this name because the DCR path reads it. The D10 parity test asserts
+    against a literal expected table rather than against this function, so
+    the delegation does not make that test a self-comparison."""
+    return _bucket_prune_window(bucket, now, window_s)
 
 
 def _dcr_retry_after_s(bucket: list[float], now: float, window_s: int) -> int:
@@ -31466,10 +31905,12 @@ def _oauth_dcr_normalized_addr(client_ip):
     """`ipaddress` address for `client_ip`, normalizing ANY IPv4-mapped IPv6
     spelling (or None for a malformed address).
 
-    `_normalize_mapped_ipv6` (shared primitive helper, byte-identical to
-    origin/main) matches the literal lowercase ``::ffff:`` prefix, so the
-    structural check here additionally covers ``::FFFF:1.2.3.4`` and
-    ``0:0:0:0:0:ffff:1.2.3.4``. Without it one IPv4 address could hold two
+    `_normalize_mapped_ipv6` (shared primitive helper) historically matched
+    the literal lowercase ``::ffff:`` prefix, so the structural check here
+    additionally covers ``::FFFF:1.2.3.4`` and ``0:0:0:0:0:ffff:1.2.3.4``.
+    #3124 normalizes the shared helper by ``ipv4_mapped`` regardless of
+    spelling, so this path is now a redundant belt-and-braces guard (kept — it
+    must not depend on another module's fix landing). Without it one IPv4 address could hold two
     bucket identities (its own plus the shared ``::/64``) and a non-canonical
     mapped client would collapse into ``::/64`` instead of being keyed — or
     trusted — as the address it actually is.
@@ -31521,15 +31962,13 @@ def _oauth_dcr_store_key(client_ip) -> str:
 def _oauth_dcr_reclaim(store: OrderedDict, now: float, window_s: int,
                        cap: int) -> None:
     """Pop inactive LRU-head buckets until the store is below `cap` or the
-    head is active (D3/D4). By the last-charge ordering invariant an active
-    head implies every later key is active too, so this stops at the first
-    live bucket — it can never evict an active key. O(1) at the hot cap."""
-    while store and len(store) >= cap:
-        head_key = next(iter(store))
-        head = store[head_key]
-        if head and now - head[-1] < window_s:
-            break
-        del store[head_key]
+    head is active (D3/D4) — delegates to the shared `_bucket_reclaim`
+    (#3124) with ``count=len``, because this limiter's overflow lives in a
+    SEPARATE store so every key in `store` counts toward the cap. By the
+    last-charge ordering invariant an active head implies every later key is
+    active too, so this stops at the first live bucket — it can never evict an
+    active key. O(1) at the hot cap."""
+    _bucket_reclaim(store, now, window_s, cap, count=len)
 
 
 def _oauth_dcr_deny(retry_after: int) -> None:

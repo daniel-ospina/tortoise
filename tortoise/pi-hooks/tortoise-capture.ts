@@ -1,4 +1,4 @@
-// tortoise-hook-version: 1
+// tortoise-hook-version: 2
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -9,6 +9,12 @@
 // capturing with the old logic: `session verify` called it UNVERIFIABLE-IN-CI
 // rather than STALE, and `tortoise doctor` printed no freshness row for it at
 // all. Generation 1 is the first contract for this seam.
+//
+// Generation 2 (#4897): `extractTurns` no longer cuts a >TURN_MAX_CHARS turn
+// SILENTLY. A clipped turn now carries a truncation marker with its true
+// length (see `clipTurnContent`), so the bytes this seam POSTs changed and
+// every already-installed generation-1 copy must read as stale and be
+// reinstalled — an old copy would keep storing an unmarked 5,000-char wall.
 //
 // This is the Pi leg of the capture-INSTALL seam. It is installed BY THE
 // PRODUCT — `HARNESS_INSTALL.pi` copies this file into
@@ -75,8 +81,94 @@ export const CONFIG_PATH = join(homedir(), ".pi", "agent", "tortoise-config.json
  * pins this literal to it so the two legs cannot drift.
  */
 export const MAX_TURNS = 500;
-/** Hosted per-turn stored window (tortoise _capture_turn_window). */
+/** Hosted per-turn stored window (tortoise sdk._CAPTURE_TURN_CAP).
+ *
+ * ⛔ ONE number, owned by Python. The extension is shipped standalone (it
+ * cannot import a Python constant), so this literal is the client's copy and
+ * `tests/test_pi_capture_hooks.py` pins it to `sdk._CAPTURE_TURN_CAP` — a
+ * divergence reds a test instead of storing a different window per lane. */
 export const TURN_MAX_CHARS = 5000;
+/**
+ * Sentinel prefix of the truncation marker appended when a turn is clipped at
+ * `TURN_MAX_CHARS` (#4897). MUST stay identical to the Python sentinel
+ * (`sdk._CAPTURE_TRUNCATION_SENTINEL`): the server stores a client-clipped
+ * turn verbatim, so a reader on either side has to recognise the other's
+ * marker. Pinned by `tests/test_pi_capture_hooks.py`.
+ */
+export const TRUNCATION_SENTINEL = "…[truncated:";
+
+/** The marker appended INSIDE the window when a turn is cut (#4897). */
+export function truncationMarker(total: number): string {
+  return ` ${TRUNCATION_SENTINEL} original length ${total} chars]`;
+}
+
+/**
+ * Code points treated as BLANK by `clipTurnContent` — the exact Python set
+ * (`tortoise/sdk.py::_CAPTURE_BLANK_CHARS`). Spelled out explicitly instead of
+ * using `String.prototype.trim()` because this is the client half of a
+ * TWO-LANGUAGE contract (#4897 review round 15, P3): `trim()` strips U+FEFF but
+ * NOT U+001C-U+001F or U+0085, while Python's `str.strip()` does the reverse —
+ * so the two clippers disagreed on exactly those five code points and the
+ * "byte-identical stored turns" claim was false for them. This is the UNION of
+ * the two sets, so no input either side called blank becomes non-blank on the
+ * other. Pinned to the Python literal by the cross-language parity case in
+ * `tests/test_pi_capture_hooks.py`.
+ */
+export const BLANK_CHARS =
+  "\u0009\u000a\u000b\u000c\u000d" +          // tab, LF, VT, FF, CR
+  "\u001c\u001d\u001e\u001f" +                // file/group/record/unit separator
+  "\u0020\u0085\u00a0\u1680" +
+  "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a" +
+  "\u2028\u2029\u202f\u205f\u3000\ufeff";
+
+/** `content` is blank iff this finds nothing (see `BLANK_CHARS`). */
+const NON_BLANK_RE = new RegExp(`[^${BLANK_CHARS}]`);
+
+/**
+ * `content` unchanged when it fits `cap`; otherwise cut AND marked (#4897).
+ *
+ * Code-point safe on purpose: iteration is over `Array.from(content)`, so a
+ * multi-byte character (a surrogate pair) straddling the cut is never split
+ * into a lone surrogate, and counting CODE POINTS (not UTF-16 units) matches
+ * the server, whose `len()` counts code points — so a client-clipped turn is
+ * always `<= cap` on the server and the server's own cap re-application is a
+ * no-op.
+ *
+ * The marker is reserved INSIDE the cap, so the result is `<= cap` code points
+ * and `clip(clip(x)) === clip(x)`: a marker appended after a full-width cut
+ * would be destroyed by the server's second application.
+ */
+export function clipTurnContent(
+  content: string,
+  cap: number = TURN_MAX_CHARS,
+): string {
+  const points = Array.from(content);
+  if (points.length <= cap) return content;
+  // ⛔ A BLANK RETENTION IS NOT MARKED — the SAME predicate as the Python
+  // clipper (#4897 review round 14, P3; blankness unified in round 15). The
+  // marker means "there is more"; for a body that holds nothing that statement
+  // is misleading, and a marker-ONLY turn is what made the server's v1 extractor
+  // mint a Point whose entire content was the marker itself. The server now skips
+  // such a turn at extraction, and `NON_BLANK_RE` keeps the two clippers
+  // byte-identical on blank input too — `trim()`/`strip()` disagree on five code
+  // points, so the blankness test is the explicit shared set, not either
+  // language's builtin.
+  if (!NON_BLANK_RE.test(content)) return points.slice(0, cap).join("");
+  let marker = truncationMarker(points.length);
+  let keep = cap - Array.from(marker).length;
+  if (keep < 0) {
+    // `cap` too small to carry the full marker (never the production 5000).
+    // Fall back to the bare sentinel so the cut stays VISIBLE.
+    marker = TRUNCATION_SENTINEL;
+    keep = Math.max(cap - Array.from(marker).length, 0);
+  }
+  const out = points.slice(0, keep).join("") + marker;
+  // The degenerate branch can still exceed the cap by the sentinel's own
+  // width; trim by code points (never a UTF-16 slice, which could split a
+  // surrogate).
+  const outPoints = Array.from(out);
+  return outPoints.length <= cap ? out : outPoints.slice(0, cap).join("");
+}
 /** Bounded network budget — Pi must never be blocked by a capture. */
 export const REQUEST_TIMEOUT_MS = 10_000;
 /**
@@ -204,7 +296,10 @@ export function extractTurns(entries: Array<Record<string, unknown>>): Turn[] {
     if (role !== "user" && role !== "assistant") continue;
     const text = flattenContent(message.content).trim();
     if (!text) continue;
-    turns.push({ role, content: text.slice(0, TURN_MAX_CHARS) });
+    // #4897: clip WITH a marker rather than `slice(0, TURN_MAX_CHARS)`. A cut
+    // turn now records its true length, so a reader can tell "the user said
+    // this much" from "we cut it here" — the silent mid-word cut is the defect.
+    turns.push({ role, content: clipTurnContent(text) });
     // Keep the MOST RECENT turns — matching the backfill leg's
     // `window_turns` (`turns[-MAX_TURNS:]`). Dropping the oldest is the
     // whole point: recent context is what memory wants. An early `break`
@@ -239,6 +334,15 @@ export function buildCapturePayload(args: {
   source: string;
   machineId: string;
   model?: string;
+  /**
+   * #3516 §B: the lane of the SPOOL ENTRY being drained — never a constant.
+   * The lane describes the entry's PRODUCER, not the process doing the
+   * draining: `flushSpool` drains entries written by other legs, and a
+   * hardcoded 'hook' here would stamp a lane on a lane-less backfill/import
+   * entry — defeating falsifiability in the false-POSITIVE direction. The
+   * in-process hook passes 'hook' when it SPOOLS (see `spoolSnapshot`).
+   */
+  captureLane?: string;
 }): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     harness: HARNESS,
@@ -247,6 +351,7 @@ export function buildCapturePayload(args: {
     conversation: args.turns,
     machine_id: args.machineId,
   };
+  if (args.captureLane) payload.capture_lane = args.captureLane;
   if (args.model) payload.model = args.model;
   return payload;
 }
@@ -358,7 +463,8 @@ export const SPOOL_DIR = join(homedir(), ".tortoise", "capture-spool");
  *
  * `SPOOL_MAX_ENTRY_BYTES` must exceed the SERVER's own legal maximum, or a
  * legal capture is discarded as oversized: the handler accepts `MAX_TURNS`
- * (500) turns of up to `TURN_MAX_CHARS` (5000) characters, and non-ASCII text
+ * (500) turns of up to `TURN_MAX_CHARS` characters — the client clip reserves
+ * the #4897 truncation marker inside that window — and non-ASCII text
  * is up to 4 UTF-8 bytes per character → ~10 MB of JSON. 16 MiB leaves room for
  * the envelope. (A 4 MiB ceiling silently discarded legal CJK sessions.)
  */
@@ -389,6 +495,11 @@ export interface SpoolMeta {
   source: string;
   machine_id: string;
   model?: string;
+  /** #3516 §B: the PRODUCER lane ('hook'). Set-only-when-present, carried
+   *  forward. The Python leg forwards it to `/v1/sessions` verbatim, so an
+   *  entry spooled by the Pi hook must carry it — or a later drain files the
+   *  capture lane-less and a WORKING hook reads as not-live (#3515 piece 8). */
+  capture_lane?: string;
   created_at: string;
   updated_at: string;
   turns_count: number;
@@ -404,6 +515,12 @@ export interface SpoolMeta {
   next_attempt_at_ms: number;
   /** capture_key of the last 2xx upload — a replay of identical content is a no-op. */
   filed_key?: string;
+  /** #3516 §B: the LANE the 2xx actually carried. `filed_key` is content-derived,
+   *  so on its own it says the content was delivered — not that the lane was. An
+   *  entry filed lane-less and then upgraded must be re-posted, or the lane is
+   *  stranded and a working hook reads as not-live. Entries filed before this
+   *  field existed have neither lane nor `filed_lane`, so they compare equal. */
+  filed_lane?: string;
   filed_at?: string;
 }
 
@@ -421,6 +538,9 @@ export interface SpoolSnapshot {
   source: string;
   machineId: string;
   model?: string;
+  /** #3516 §B: the lane this snapshot's PRODUCER claims ('hook' for the
+   *  in-process hook). Omitted/undefined = no lane — never fabricated. */
+  captureLane?: string;
 }
 
 export interface SpoolBounds {
@@ -774,13 +894,37 @@ export function writeSpoolEntry(
   }
   const stored = prior ? readSpoolTurns(dir, snapshot.sessionId) : [];
 
+  // #3516 §B: the entry's lane is set-only-when-present, FIRST-WRITER-WINS, and
+  // carried forward — NOT `model`'s rule (that one is not carried forward).
+  // `prior` wins when both are set, so a later snapshot can only FILL IN an
+  // absent lane, never RELABEL one: a `store_sync` snapshot can never DOWNGRADE
+  // a stored `hook` (the pinned "delivery lane is monotone" contract), which is
+  // also the rule the SERVER applies via `sdk._write_session_and_turns`'
+  // coalesce — the spool must not be the odd leg out, because its lane is what
+  // gets delivered. The resolution is TRUTHY (`||`, not `??`), because BOTH
+  // legs read and write this one directory and must state ONE rule. The input
+  // that distinguishes them is a stored EMPTY lane with a truthy new one: `""
+  // || "hook"` fills the lane in, while `??` keeps `""` and the spread below
+  // then OMITS the key. (A stored empty lane is reachable only from a crafted
+  // or corrupt meta — which is why it has its own test.)
+  const lane = prior?.capture_lane || snapshot.captureLane;
+  // A snapshot carrying a lane the entry has never had is an UPGRADE, not a
+  // no-op. `sameContent` is content-addressed and the lane is NOT part of the
+  // content, so without this bypass an entry first written lane-less (a
+  // pre-#3516 spool, or an `sessions import` entry the hook then re-captured
+  // byte-identically) would keep its lane-less meta forever — and a WORKING
+  // hook would file as not-live, the false-negative this feature exists to
+  // remove.
+  const laneUpgrade = !!snapshot.captureLane && !prior?.capture_lane;
+
   // Dedup: a snapshot that is byte-identical to what is stored already is a
   // no-op — no rewrite, no re-upload (incremental capture must not amplify
   // identical writes).
   const sameContent =
     prior !== undefined &&
     stored.length === snapshot.turns.length &&
-    prior.content_digest === contentDigest(snapshot.turns);
+    prior.content_digest === contentDigest(snapshot.turns) &&
+    !laneUpgrade;
   if (sameContent) {
     return { written: false, bytes: spoolEntryBytes(dir, snapshot.sessionId), discards };
   }
@@ -808,6 +952,7 @@ export function writeSpoolEntry(
     source: snapshot.source,
     machine_id: snapshot.machineId,
     ...(snapshot.model ? { model: snapshot.model } : {}),
+    ...(lane ? { capture_lane: lane } : {}),
     created_at: prior?.created_at ?? now,
     updated_at: now,
     turns_count: snapshot.turns.length,
@@ -822,8 +967,16 @@ export function writeSpoolEntry(
     // (attempts=0) and a genuinely fresh entry starts at zero.
     attempts: clampAttempts(prior?.attempts),
     next_attempt_at_ms: carriedWindow(prior?.next_attempt_at_ms),
-    ...(prior?.filed_key && prior.content_digest === contentDigest(snapshot.turns)
-      ? { filed_key: prior.filed_key, filed_at: prior.filed_at }
+    // A lane UPGRADE also invalidates the filing marker: `filed_key` is
+    // content-derived (the lane is not part of it), so an entry already filed
+    // lane-less would otherwise keep its marker and be skipped by the drain
+    // forever — the lane would never reach the wire. Mirrors the Python
+    // writer's `and not lane_upgrade`.
+    ...(prior?.filed_key &&
+    prior.content_digest === contentDigest(snapshot.turns) &&
+    !laneUpgrade
+      ? { filed_key: prior.filed_key, filed_lane: prior.filed_lane,
+          filed_at: prior.filed_at }
       : {}),
   };
   const metaText = `${JSON.stringify(meta, null, 2)}\n`;
@@ -1092,7 +1245,15 @@ export async function flushSpool(
       summary.heldBack += 1;
       continue;
     }
-    if (meta.filed_key && meta.filed_key === meta.capture_key) {
+    // Read tolerance: a meta written by an OLDER Python producer stored
+    // `"filed_lane": null` for a lane-less filing. The Python leg now OMITS the
+    // key, so both legs write alike — but a spool written before that fix, or
+    // by any producer that emits JSON `null`, must still be read alike, because
+    // JSON has no `undefined`: a raw `JSON.parse` yields `null`, and strict
+    // `===` against this leg's ABSENT key would bypass the skip and re-POST an
+    // entry the other leg had already filed (#3516 §B).
+    if (meta.filed_key && meta.filed_key === meta.capture_key &&
+        (meta.filed_lane ?? undefined) === (meta.capture_lane ?? undefined)) {
       summary.skipped += 1;
       continue;
     }
@@ -1132,21 +1293,54 @@ export async function flushSpool(
         source: meta.source,
         machineId: meta.machine_id,
         model: meta.model,
+        // The ENTRY's lane, not this process's: a lane-less import entry
+        // drained here must stay lane-less.
+        captureLane: meta.capture_lane,
       });
       const res = await postCapture(cfg, payload, doFetch, opts.timeoutMs);
       if (res.ok) {
-        // COMPARE-AND-SWAP, on the POSTED CONTENT. A `turn_end` can append to
-        // this very entry while the POST is in flight (a resumed session; a
-        // cross-process drain). Stamp `filed_key` only when what is on disk NOW
-        // is exactly what was posted; otherwise leave the entry unfiled so the
-        // next opportunity re-posts the longer conversation. Comparing
-        // meta-to-meta was wrong: a writer killed between its log append and its
-        // meta write leaves the meta digest stale, so the check passed while a
-        // turn went unfiled forever.
+        // COMPARE-AND-SWAP, on the POSTED CONTENT **AND LANE**. A `turn_end` can
+        // append to this very entry while the POST is in flight (a resumed
+        // session; a cross-process drain). Stamp `filed_key` only when what is
+        // on disk NOW is exactly what was posted; otherwise leave the entry
+        // unfiled so the next opportunity re-posts. Comparing meta-to-meta was
+        // wrong: a writer killed between its log append and its meta write
+        // leaves the meta digest stale, so the check passed while a turn went
+        // unfiled forever.
+        //
+        // The read happens IMMEDIATELY before the write, and the WRITE APPLIES
+        // TO THE FRESHLY-READ META — never to a snapshot taken earlier: writing
+        // an earlier snapshot back would clobber any concurrent edit that landed
+        // in between, including a lane upgrade, which is precisely the edit that
+        // must survive.
+        //
+        // The LANE is part of this identity (#3516 §B): `capture_key` is
+        // content-derived and the lane is not part of the content, so without
+        // that clause a lane upgrade landing inside the POST window was
+        // cancelled and the lane stranded on the wire.
+        //
+        // A RESIDUAL window remains: a lane-upgrading snapshot landing between
+        // the read above and the write below is still clobbered, and the entry
+        // then reads as FILED LANE-LESS until some later snapshot re-triggers
+        // the upgrade (permanent only if the session never snapshots again). It
+        // is accepted rather than closed — the window is two file reads plus one
+        // digest (sub-ms for a typical session, up to ~150 ms at the 16 MB
+        // `SPOOL_MAX_ENTRY_BYTES` bound), and the racer must be the FIRST lane-ful
+        // snapshot of a previously lane-less entry. Closing it needs mutual
+        // exclusion in the capture hot path (every turn_end) in two languages,
+        // where a stale lock would BLOCK OR LOSE CAPTURES — a worse failure. If
+        // it ever must be closed, the lock-free route is a SIDECAR marker file
+        // for the drain-owned fields, so no read-modify-write touches meta.json.
         const onDisk = readSpoolEntry(dir, meta.session_id);
         const onDiskTurns = readSpoolTurns(dir, meta.session_id);
-        if (onDisk && contentDigest(onDiskTurns) === postedDigest) {
+        const postedLane = payload.capture_lane as string | undefined;
+        if (
+          onDisk &&
+          contentDigest(onDiskTurns) === postedDigest &&
+          onDisk.capture_lane === postedLane
+        ) {
           onDisk.filed_key = onDisk.capture_key ?? captureKey(meta.session_id, onDiskTurns);
+          onDisk.filed_lane = postedLane;
           onDisk.filed_at = new Date(nowMs).toISOString();
           onDisk.attempts = 0;
           onDisk.next_attempt_at_ms = 0;
@@ -1171,7 +1365,8 @@ export async function flushSpool(
       // Re-read before the backoff write-back for the same reason as the CAS
       // above: never clobber newer turns written while the POST was in flight.
       const pending = readSpoolEntry(dir, meta.session_id) ?? meta;
-      if (pending.filed_key && pending.filed_key === pending.capture_key) {
+      if (pending.filed_key && pending.filed_key === pending.capture_key &&
+          (pending.filed_lane ?? undefined) === (pending.capture_lane ?? undefined)) {
         // A CONCURRENT flush already filed this exact content while our POST was
         // in flight. Re-arming the backoff here would attach a window to content
         // that was never refused — and since writeSpoolEntry now CARRIES the
@@ -1331,6 +1526,9 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
           source: sourceName(manager?.getSessionFile?.()),
           machineId: deriveMachineId(),
           model: modelLabel(ctx?.model),
+          // #3516 §B: this IS the in-process hook, so the entry it spools
+          // claims 'hook' — the drain later forwards it verbatim.
+          captureLane: "hook",
         },
         bounds,
       );
@@ -1376,7 +1574,7 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
         } else if (res.detail === "no TORTOISE_API_KEY configured") {
           // Already warned at load; the probe is best-effort install telemetry.
         } else {
-          warn(`install probe failed (${res.detail ?? res.status}) — capture status may stay "not installed yet"`);
+          warn(`install probe failed (${res.detail ?? res.status}) — capture status may stay "not yet observed"`);
         }
       })
       .catch((err) => {
