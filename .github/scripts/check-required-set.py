@@ -246,13 +246,16 @@ REQUIRED_SET: dict[str, tuple[str, str]] = {
         "(see the python-ci.yml block above the job and tests/test_ci_selection.py)",
     ),
     "ai-review-gate": (
-        "injected",
-        "the AI review gate. Required on `main` and enforced at the MERGE by "
-        "Mergify's injected branch-protection conditions, and deliberately NOT "
-        "named in `queue_conditions`: naming it there would make an LLM review an "
-        "ENTRY gate for every PR, which is a queue behaviour change and an owner "
-        "decision, not a sync fix. Live protection lists SEVEN contexts and this "
-        "is the seventh (#6144)",
+        "queue",
+        "the AI review gate. Required on `main`, and named in `.mergify.yml`'s "
+        "`queue_conditions` — that line IS the server-side enforcement of the review "
+        "record (#5433), added deliberately by #6272 because Mergify merges server-side "
+        "and nothing on that path acted on the check's conclusion. So it gates ENTRY as "
+        "well as the merge; removing it silently restores #5433. This entry recorded "
+        "the PRE-#6272 world (#6169 was opened 2026-09-28, #6272 landed 2026-09-30) and "
+        "was the one thing making the guard's own measurement fail: the guard asserted "
+        "the config did not name it, and the config did. Live protection lists SEVEN "
+        "contexts and this is the seventh (#6144)",
     ),
 }
 
@@ -580,6 +583,55 @@ def _render_matrix(template: str, matrix: dict[str, Any]) -> set[str]:
     return acc
 
 
+# #6135: the fast pool's shard COUNT lives here, NOT in the workflow. Absence means
+# the historical S=2 — exactly as `tools/ci_selection.py::fast_shard_count` reads it,
+# because a guard that disagrees with the selector is measuring a different tree.
+CI_SURFACES_REL = "config/ci-surfaces.yml"
+DEFAULT_FAST_SHARDS = 2
+MAX_FAST_SHARDS = 26  # the a..z positional label space (`ci_selection.MAX_FAST_SHARDS`)
+
+
+def _declared_fast_shards(root: Path) -> int:
+    """The fast-pool shard count, as `config/ci-surfaces.yml` declares it."""
+    path = root / CI_SURFACES_REL
+    if not path.is_file():
+        return DEFAULT_FAST_SHARDS
+    doc = read_yaml(path)
+    if not isinstance(doc, dict):
+        raise CannotMeasure(f"{path}: not a mapping — cannot measure")
+    raw = doc.get("fast_shards", DEFAULT_FAST_SHARDS)
+    if isinstance(raw, bool) or not isinstance(raw, int) \
+            or raw < 2 or raw > MAX_FAST_SHARDS:
+        raise CannotMeasure(
+            f"{path}: fast_shards must be an integer in 2..{MAX_FAST_SHARDS}, "
+            f"got {raw!r} — cannot measure")
+    return raw
+
+
+def _render_expression_matrix(template: str, root: Path) -> set[str]:
+    """Render a `${{ fromJSON(…) }}` matrix from the source that DECLARES it.
+
+    #6135: the fast pool's matrix is the selector's OUTPUT. The count is
+    `config/ci-surfaces.yml::fast_shards` and the legs are POSITIONAL LETTERS
+    (`test (a)`, `test (b)`, …) — deliberately not written in the workflow, because
+    the labels are a contract the merge rail's lane-parity subtracts by NAME, so an
+    S-adding diff must stay a SUPERSET of main's `test (a)`, `test (b)`.
+
+    A guard that insists on a literal mapping therefore cannot measure this tree at
+    all. Refusing to measure a shape the repo uses BY DESIGN reds every run, and a
+    guard that cannot be kept green is a guard that gets deleted — so the honest
+    move is to resolve the declaration, not to refuse.
+    """
+    keys = _MATRIX_REF.findall(template)
+    if not keys:
+        raise CannotMeasure(
+            f"job strategy.matrix is a `${{{{ … }}}}` expression and the job name "
+            f"{template!r} references no `matrix.<key>` — cannot derive the legs")
+    count = _declared_fast_shards(root)
+    letters = [chr(ord("a") + i) for i in range(count)]
+    return _render_matrix(template, {key: list(letters) for key in keys})
+
+
 def producible_on_pull_request(workflows_dir: Path | None = None) -> set[str]:
     """Check names producible by any workflow that runs on a pull-request ref.
 
@@ -655,6 +707,14 @@ def producible_on_pull_request(workflows_dir: Path | None = None) -> set[str]:
                 matrix = strategy.get("matrix")
                 if matrix is None:
                     names.add(template.strip())
+                elif isinstance(matrix, str):
+                    # #6135: a `${{ fromJSON(...) }}` EXPRESSION is this repo's design
+                    # for the fast pool, not an anomaly. `require_mapping` here made
+                    # the guard exit 2 (CANNOT MEASURE) on every run of the real
+                    # tree — a guard that can never be green is a guard that gets
+                    # deleted, and the drift it exists to catch (required-set vs
+                    # `.mergify.yml` vs protection) goes unwatched.
+                    names |= _render_expression_matrix(template.strip(), REPO_ROOT)
                 else:
                     require_mapping(matrix, f"{path}: jobs.{job_id}.strategy.matrix")
                     names |= _render_matrix(template.strip(), matrix)
@@ -910,7 +970,26 @@ def check_partition(parsed: dict[str, set[str]]) -> list[str]:
         # by injection. So an empty bucket is UNVERIFIABLE offline — drop a name
         # from it while the mirror is absent and `run()` printed exit 0 over a live
         # set that still required it. Fail closed, like the other two.
-        problems.append("the enumeration declares an EMPTY injected bucket — fail-closed")
+        #
+        # #6272 CHANGED WHAT AN EMPTY BUCKET MEANS, so this is now conditional
+        # rather than unconditional. Until 2026-09-30 `ai-review-gate` was the
+        # bucket's only member: its ABSENCE from both `.mergify.yml` lists was the
+        # sole record that it was enforced by injection, which is exactly why an
+        # empty bucket was unverifiable. #6272 deliberately named it in
+        # `queue_conditions` ("IS the server-side enforcement of the review record")
+        # and the bucket emptied for a LEGITIMATE reason. The protection is
+        # preserved precisely: fire when the mirror declares a context that NEITHER
+        # bucket accounts for — a name that should have been filed here and was
+        # not — or when the mirror cannot be read at all, where nothing is checkable.
+        # An empty bucket alongside a fully-accounted mirror is a claim this guard
+        # CAN verify from two files, so refusing it was asserting a stale premise.
+        mirror = declared_settings_contexts()
+        unaccounted = (mirror or set()) - (dq | dm)
+        if unaccounted or not mirror:
+            problems.append(
+                "the enumeration declares an EMPTY injected bucket — fail-closed"
+                + (f"; the mirror declares unaccounted context(s) {sorted(unaccounted)}"
+                   if unaccounted else " (no readable mirror to account for it)"))
     return problems
 
 

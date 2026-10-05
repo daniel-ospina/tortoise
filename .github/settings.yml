@@ -18,10 +18,14 @@
 #   Settings -> Branches -> main -> Require status checks -> the SEVEN below.
 # Keep this list equal to live `.required_status_checks.contexts` and to
 # `check-required-set.py`'s enumeration; `check-required-set.py --live` is the
-# assertion. Live protection has SEVEN contexts: the six the queue names
-# explicitly, plus `ai-review-gate`, which Mergify enforces at the merge by
-# branch-protection injection and which is deliberately NOT in
-# `queue_conditions` (naming it there would make it an ENTRY gate too).
+# assertion. Live protection has SEVEN contexts. ALL SEVEN are named in
+# `.mergify.yml` — six in `queue_conditions` and `python-ci-gate` in
+# `merge_conditions`. In particular `ai-review-gate` IS in `queue_conditions`,
+# because `#6272` (b7fcaff51, 2026-09-30) put it there deliberately: that line is
+# the SERVER-SIDE enforcement of the review record (#5433), and removing it
+# silently restores #5433. An earlier revision of this file claimed the opposite
+# — "deliberately NOT in `queue_conditions`" — which was true only before #6272
+# and is why `check-required-set.py` reported drift against its own config.
 repository:
   branch-protection:
     - branch: main
