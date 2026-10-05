@@ -1372,16 +1372,17 @@ class _EntityHandlers:
 
         The capture path MERGEs the Session with a raw graph write; this
         record is its journal carrier, so the node (and any ``EntityLinked``
-        edge from it) replays. Idempotent MERGE keyed on ``id``; ``created_at``
-        and ``actor_user_id`` are coalesce-preserved (first writer wins,
-        mirroring the live merge), ``turn_count`` tracks the latest journaled
-        capture. Returns 1 when the node exists after the fold, 0 on a
+        edge from it) replays. Idempotent MERGE keyed on ``id``; ``created_at``,
+        ``actor_user_id`` and ``capture_lane`` are coalesce-preserved (first
+        writer wins, mirroring the live merge), ``turn_count`` tracks the latest
+        journaled capture. Returns 1 when the node exists after the fold, 0 on a
         malformed record.
 
         BOTH the id and every journal-derived property value are gated for
         WRITABILITY, not just type (review P1): a NUL / lone-surrogate id and
         a map-valued ``created_at`` / ``turn_count`` / ``harness`` /
-        ``actor_user_id`` payload each raise at parameter parse, and ``rebuild_all`` folds this
+        ``actor_user_id`` / ``capture_lane`` payload each raise at parameter
+        parse, and ``rebuild_all`` folds this
         record INLINE (no try/except) AFTER the wipe. A malformed id is a
         NO-OP (return 0); a malformed field is OMITTED, never bound.
 

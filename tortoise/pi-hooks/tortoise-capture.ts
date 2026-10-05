@@ -890,9 +890,12 @@ export function writeSpoolEntry(
 
   // #3516 §B: the entry's lane is set-only-when-present and carried forward
   // (like `model`) — a lane-less re-snapshot must not ERASE a lane the hook
-  // already claimed. The SAME rule as the Python writer, because BOTH legs
-  // read and write this one directory.
-  const lane = snapshot.captureLane ?? prior?.capture_lane;
+  // already claimed. This is the Python writer's EXACT rule (`or`, TRUTHY —
+  // not `??`), because BOTH legs read and write this one directory: with `??`
+  // an empty-string lane would resolve to `""`, the spread below would then
+  // omit the key, and the TS rewrite would erase a lane the Python leg had
+  // preserved.
+  const lane = snapshot.captureLane || prior?.capture_lane;
   // A snapshot carrying a lane the entry has never had is an UPGRADE, not a
   // no-op. `sameContent` is content-addressed and the lane is NOT part of the
   // content, so without this bypass an entry first written lane-less (a
