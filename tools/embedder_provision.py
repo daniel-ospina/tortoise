@@ -73,6 +73,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     )
 
 import argparse
+import contextlib
 import faulthandler
 import os
 import signal
@@ -118,10 +119,9 @@ def _install_termination_stack_dump() -> None:
             pass
         os._exit(124)  # 124 = the conventional timeout exit status
 
-    try:
+    # non-main thread or unsupported platform — the step still runs
+    with contextlib.suppress(ValueError, OSError):
         signal.signal(signal.SIGTERM, _dump)
-    except (ValueError, OSError):
-        pass  # non-main thread or unsupported platform — the step still runs
 
 
 def _annotation(level: str, message: str) -> None:
