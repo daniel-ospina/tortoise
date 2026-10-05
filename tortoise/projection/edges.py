@@ -81,7 +81,14 @@ def stub_key(rel: str, target: dict):
 def _mint_subject_stub(g, name: str) -> None:
     """MERGE the Subject stub live wiring's auto-detect fallback creates
     (edges.py _create_about_edges) — single create path for live + replay so a
-    replayed descriptor mints a byte-identical stub to live wiring."""
+    replayed descriptor mints a byte-identical stub to live wiring.
+
+    #7369: `name` IS the MERGE key, so an unwritable one aborts the replay
+    after the wipe. Skip rather than raise.
+    """
+    from tortoise.projection import _writable_id
+    if not _writable_id(name):
+        return
     g.query(
         "MERGE (s:Subject {name:$name}) "
         "ON CREATE SET s.id=$name, s.subjectKind='other'",
@@ -117,6 +124,10 @@ def _mint_source_stub(g, url: str, source_kind: str | None = None) -> str:
     # S0b (#5012): resolve a URL variant to the node its canonical identity
     # already names, so the stub path cannot mint a second :Source either.
     key = resolve_source_key(g, url)
+    # #7369: `key` is the Source MERGE key (`MERGE (s:Source {url:$url})`).
+    from tortoise.projection import _writable_id
+    if not _writable_id(key):
+        return None
     canonical = normalize_source_url(key)
     params = {"url": key, "raw_url": url, "cu": canonical,
               "sk": source_kind, "now": _now_iso()}
@@ -530,6 +541,12 @@ class _EdgeHandlers:
         keeps a session/connector/provenance Source from ever becoming an
         ``aboutDocument`` target.
         """
+        # #7369: `target_name` rides as a READ parameter here, and the engine
+        # parses every parameter regardless of clause — an unwritable one
+        # aborts the replay after the wipe just as a write would.
+        from tortoise.projection import _writable_id
+        if not _writable_id(target_name):
+            return False
         if label == 'Source':
             r = self.g.query(
                 "MATCH (e:Source) WHERE (e.url = $name OR e.title = $name) "

@@ -76,7 +76,9 @@ import pathlib
 
 import pytest
 
-from tortoise.projection import _GuardedGraph, _journal_safe_params
+from tortoise.projection import (
+    _GuardedGraph, _journal_safe_params, _writable_id,
+)
 from tortoise.sdk import TortoiseSDK
 
 
@@ -305,6 +307,55 @@ def test_a_read_only_statement_is_untouched():
     ) is params
 
 
+def test_a_READ_statement_IS_gated_because_the_engine_parses_every_param():
+    """THE P1 FIX (round 3). A read cannot be skipped.
+
+    The clause does not decide whether a parameter is PARSED — FalkorDB parses
+    every parameter regardless of clause, so an unwritable value in a read
+    ``MATCH {prop:$p}`` aborts ``rebuild_all`` after the wipe exactly as a
+    write does. Skipping reads here RE-OPENED the hole; measured aborts in
+    ``resolve_source_key`` (`MATCH (s:Source {canonicalUrl:$cu})`),
+    ``_try_about_edge`` (`MATCH (e:Subject {name:$name})`), and a plain dict
+    reaching a read through ``about_entities``.
+
+    The hot path is preserved by a cheap SCALAR pre-scan instead: a read whose
+    parameters are all writable scalars still returns identity, so this is a
+    correctness fix that costs the retrieval path nothing.
+    """
+    # A corrupt scalar in a READ is degraded (this used to be returned as-is).
+    assert _journal_safe_params(
+        {"cu": "bad\x00url"}, "MATCH (s:Source {canonicalUrl:$cu}) RETURN s",
+    ) == {"cu": None}
+    # A dict reaching a read is walked too — the `about_entities` shape.
+    assert _journal_safe_params(
+        {"name": "x", "payload": {"deep": object()}},
+        "MATCH (e:Subject {name:$name}) RETURN e",
+    )["payload"] is None
+    # ...and the all-scalar read still takes the cheap identity route.
+    assert _journal_safe_params(
+        {"name": "fine"}, "MATCH (e:Subject {name:$name}) RETURN e",
+    ) == {"name": "fine"}
+
+
+def test_an_EMPTY_identity_is_refused_not_admitted():
+    """THE P2 FIX (round 3). ``_annotator_value_ok("")`` is True.
+
+    So replacing the folds' ``if not name:`` / ``if not eid:`` / ``if not url``
+    with ``if not _writable_id(name):`` ADMITTED the empty string, and a record
+    with NO ``name`` defaults to ``""`` — so a `SubjectAdded` carrying no name
+    created ``:Subject {name:""}`` where the old guard skipped it. An empty
+    identity is not an identity; refusing it in ``_writable_id`` keeps the rule
+    in one home instead of repeating ``... and val`` at every call site.
+    """
+    assert _writable_id("") is False
+    assert _writable_id("a") is True
+    # A record whose name is ABSENT (not merely corrupt) is skipped, not
+    # materialised as an empty-keyed node.
+    assert _journal_safe_params(
+        {"name": ""}, "MERGE (s:Subject {name:$name}) RETURN s",
+    ) == {"name": ""}  # the MERGE key is left to the FOLD, which now skips it
+
+
 def test_a_MERGE_key_is_never_nulled_because_the_engine_refuses_a_null_key():
     """THE P1 FIX. FalkorDB REFUSES a null merge key (``Cannot merge node
     using null property value``), so degrading an identity parameter does not
@@ -513,23 +564,64 @@ _FAMILY_RECORDS = [
      "url", "bad\x00url"),
     ("Event", {"type": "EventRecorded", "event": {"id": "ev-7369"}},
      "event.id", "bad\x00ev"),
+    # The NESTED keys `_event_plain_merge` merges on. The top-level-only
+    # helper could not reach these, which is exactly the test gap that let
+    # the first version of this fix ship a still-open class (#7369 review r3).
+    ("Event.subject", {"type": "EventRecorded", "event": {"id": "ev-7369"}},
+     "event.subject", "bad\x00subj"),
+    ("Event.object", {"type": "EventRecorded", "event": {"id": "ev-7369"}},
+     "event.object", "bad\x00obj"),
+    ("Event.uses",
+     {"type": "EventRecorded", "event": {"id": "ev-7369",
+                                        "uses": [{"name": "ok"}]}},
+     "event.uses[0].name", "bad\x00use"),
+    ("Document", {"type": "DocumentCreated"}, "id", "bad\x00doc"),
 ]
+
+
+def _poison_path(rec, key, val):
+    """Set a possibly-NESTED ``key`` (``a.b[0].c``) on a record copy."""
+    parts = key.split(".")
+
+    def _step(node, part, create):
+        """Descend one part, creating a {} or [] per a trailing ``[i]``."""
+        idx = None
+        if part.endswith("]"):
+            part, _, rest = part.partition("[")
+            idx = int(rest[:-1])
+        if idx is None:
+            return node.setdefault(part, {}) if create else node[part]
+        seq = node.setdefault(part, []) if create else node[part]
+        while len(seq) <= idx:
+            seq.append({})
+        return seq[idx]
+
+    node = rec
+    for part in parts[:-1]:
+        node = _step(node, part, create=True)
+    last = parts[-1]
+    if last.endswith("]"):
+        name, _, rest = last.partition("[")
+        idx = int(rest[:-1])
+        seq = node.setdefault(name, [])
+        while len(seq) <= idx:
+            seq.append({})
+        seq[idx] = val
+    else:
+        node[last] = val
+    return rec
 
 
 @pytest.mark.parametrize("label,rec,key,val", _FAMILY_RECORDS)
 def test_a_corrupt_entity_key_does_not_abort_the_rebuild(
         superseded, label, rec, key, val):
-    """The identity route through the ENTITY folds, one case per family.
+    """The identity route through the ENTITY folds, one case per key.
 
     Without the `_writable_id` guard each of these aborts pass-1b after the
     wipe; with it the record is skipped and the healthy points survive.
     """
     events, sdk, _old, _new = superseded
-    node = rec
-    parts = key.split(".")
-    for part in parts[:-1]:
-        node = node.setdefault(part, {})
-    node[parts[-1]] = val
+    rec = _poison_path(rec, key, val)
     (events / "events.jsonl").write_text(
         (events / "events.jsonl").read_text()
         + json.dumps(rec, ensure_ascii=False) + "\n"

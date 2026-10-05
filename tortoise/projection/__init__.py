@@ -1863,9 +1863,11 @@ def _journal_safe_params(params, cypher=None):
     responsible for skipping a record whose identity is unwritable (the
     creation anchors do this via ``_writable_id``).
 
-    READ-ONLY STATEMENTS ARE SKIPPED. A statement with no write clause cannot
-    put a value into a property, so the walk does not run — which also keeps it
-    off the retrieval hot path.
+    READ STATEMENTS ARE GATED TOO, but cheaply. FalkorDB parses every
+    parameter regardless of clause, so a read cannot be skipped — but a read
+    whose parameters are all writable SCALARS (the usual retrieval shape) needs
+    no container walk, so the scalar pre-scan returns without allocating. A
+    read carrying a dict/list pays the full walk, which is what was aborting.
 
     The statement — not the value — says which parameters are CONTAINERS, and a
     container must be walked as one or a legitimate structure is nulled
@@ -1890,14 +1892,25 @@ def _journal_safe_params(params, cypher=None):
     if not params:
         return params
     statement = cypher or ""
-    # A statement with no write clause cannot put a value into a property, so
-    # there is nothing to gate — and skipping it keeps the walk off the READ
-    # hot path (measured before this short-circuit: a 5,000-id retrieval paid
-    # ~5.6 ms per call for a gate that could not apply). A MISSING statement is
-    # different: it means the shape is unknown, so gate (fail closed) rather
-    # than assume a read.
+    # A READ still has to be gated. FalkorDB PARSES every parameter regardless
+    # of clause, so an unwritable value in a read ``MATCH {prop:$p}`` aborts a
+    # replay after the wipe exactly as a write does — skipping reads here
+    # RE-OPENED the hole (measured: ``resolve_source_key``,
+    # ``_try_about_edge``, and a plain dict in ``about_entities``).
+    #
+    # What the clause DOES buy is a cheap route for the overwhelmingly common
+    # read shape: ids. A read's parameters are scalars, and a scalar needs no
+    # container walk — so if every one is already a writable scalar this
+    # returns without allocating (the walk is what cost ~5.6 ms per 5,000-id
+    # retrieval). A read carrying a dict/list still falls through to the full
+    # walk, which is the case that was aborting.
     if statement and not _WRITE_CLAUSE_RE.search(statement):
-        return params
+        if isinstance(params, dict) and all(
+            val is None or (type(val) in (str, int, float, bool)
+                            and _annotator_value_ok(val))
+            for val in params.values()
+        ):
+            return params
     # ``SET n += $p`` and ``SET n = $p`` both hold a MAP OF PROPERTIES. The
     # second pattern anchors on a BARE name (``n``), so ``SET n.x = $v`` — a
     # scalar in a property — does not match and stays a value position.
@@ -2699,14 +2712,23 @@ def _annotator_value_ok(val) -> bool:
 
 
 def _writable_id(val) -> bool:
-    """True when ``val`` is a str FalkorDB can take as a query parameter.
+    """True when ``val`` is a NON-EMPTY str FalkorDB can take as a parameter.
 
     The ``id`` rides as a Cypher parameter exactly like a dim value, so it
     needs the SAME NUL/lone-surrogate gate — otherwise a corrupt journal line
     with such an id aborts ``rebuild_all`` after the wipe (review P1; the
     pre-existing PointRevised fold had the same latent hole).
+
+    The EMPTY STRING is refused (#7369 review P2): ``_annotator_value_ok("")``
+    is True, but an empty identity is not an identity, and every call site it
+    replaced rejected it (``if not name:``, ``if not eid:``, ``if not url``).
+    Without this, swapping those guards for ``_writable_id`` ADMITTED the empty
+    string — the four entity folds would create ``:Subject {name:""}`` for a
+    record whose ``name`` was absent (it defaults to ``""``). Refusing it here
+    keeps the rule in ONE home rather than repeating ``... and val`` at every
+    call site.
     """
-    return isinstance(val, str) and _annotator_value_ok(val)
+    return isinstance(val, str) and bool(val) and _annotator_value_ok(val)
 
 
 def _annotator_dims(ev: dict, *, aliases: bool = False) -> dict:

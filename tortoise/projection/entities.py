@@ -1532,6 +1532,12 @@ class _EntityHandlers:
         pre-wipe sidecar; a journaled capture carries it via `SessionRecorded`;
         only a journal with no `SessionRecorded` still yields the stub.
         """
+        # #7369: `session_id` is the Session MERGE key (`MERGE (s:Session
+        # {id:$sid})`), reached from `PointAdded.contains_session` off the raw
+        # journal envelope — an unwritable one aborts after the wipe.
+        from tortoise.projection import _writable_id
+        if not _writable_id(session_id):
+            return
         self.g.query(
             "MERGE (s:Session {id:$sid}) SET s.is_episodic=true",
             params={"sid": session_id},
@@ -2454,7 +2460,10 @@ class _EntityHandlers:
         denied. ``version`` is advanced in the same clause, per §4.6.
         """
         did = ev.get("id")
-        if not did:
+        # #7369: `did` is the Source MERGE key (`MERGE (s:Source {url:$id})`),
+        # so an unwritable one aborts the replay AFTER the wipe.
+        from tortoise.projection import _writable_id
+        if not _writable_id(did):
             return
         # Compute embedding from title+content for semantic search (#7845).
         # Epic #900 T3 cycle-19: the NEW index path carries a suppress flag in
@@ -2736,7 +2745,10 @@ class _EntityHandlers:
         # ── Auto-create structural edges (#122) ──
         # Subject -[:performs]-> Event
         subj = inner.get("subject", "")
-        if subj:
+        # #7369: `subj`/`obj`/`use_name` are MERGE keys; function-local import
+        # (no module-level binding — the cycle-avoidance pattern this file uses).
+        from tortoise.projection import _writable_id
+        if _writable_id(subj):
             from tortoise.ids import ulid
             stub_id = ulid()
             self.g.query(
@@ -2752,7 +2764,8 @@ class _EntityHandlers:
         # Event -[:produces]-> Object (or Document when objectType='document', #125)
         obj = inner.get("object", "")
         object_type = inner.get("objectType", "")  # 'Document' | 'Object' | '' (legacy)
-        if obj:
+        # #7369: `obj` becomes a Source/Object MERGE key below.
+        if _writable_id(obj):
             if object_type == "Document":
                 # #329: the minted document id is tenant-influenced (event
                 # props passthrough) — validate it so it can never be a host
@@ -2836,7 +2849,8 @@ class _EntityHandlers:
                     # legacy string uses → default objectKind='other'
                     use_name = str(use_item)
                     use_kind = "other"
-                if use_name:
+                # #7369: `use_name` is the Object MERGE key.
+                if _writable_id(use_name):
                     from tortoise.ids import ulid
                     stub_id = ulid()
                     self.g.query(
@@ -2922,6 +2936,10 @@ class _EntityHandlers:
         # the connector registration path cannot mint a second :Source either.
         key = resolve_source_key(self.g, url)
         canonical = normalize_source_url(key)
+        # #7369: `key` is the Source MERGE key (`MERGE (s:Source {url: $url})`).
+        from tortoise.projection import _writable_id
+        if not _writable_id(key):
+            return
         # #388 conf-60 direction guard: NEVER let a fallback key displace a
         # real URL. chat_getPermalink returns None on ANY exception (rate
         # limits, transient outages), so a failed permalink poll emits the
