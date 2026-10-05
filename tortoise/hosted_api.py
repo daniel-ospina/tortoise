@@ -1830,10 +1830,13 @@ async def _lifespan(app):
                         # Registry lane only: the boot GC sweeps stale `_drill_*`
                         # scratch graphs. The DATA-plane handle (#1366) is resolved
                         # here rather than held above — `org_source` now comes from
-                        # the shared seam, and _make_sdk's process-lifetime
-                        # keepalive anchor keeps the embedded server alive
-                        # (#1475/#1607).
-                        _boot_gc_drill_graphs(_make_sdk(namespace=None)._get_proj().db)
+                        # the shared seam. The SDK is HELD for the call (#3750):
+                        # the keepalive anchor (#1475/#1607) keeps the embedded
+                        # SERVER alive, but not this handle's pooled connection —
+                        # a collected SDK's close-on-GC finalizer disconnects the
+                        # pool out from under a still-referenced `db`.
+                        _gc_sdk, _gc_db = _data_plane_db()
+                        _boot_gc_drill_graphs(_gc_db)
                     except Exception as exc:
                         # #2922 review: a separate operation, so a separate
                         # message. Reporting a drill-graph GC failure as "the
@@ -29863,6 +29866,28 @@ async def backups_acl_reconcile(request: Request):
     return await asyncio.to_thread(_reconcile_acl_users_sync)
 
 
+def _data_plane_db():
+    """Return ``(sdk, db)`` for a DR handler's data-plane handle (#3750).
+
+    ``_make_sdk(namespace=None)`` returns a FRESH SDK per call, and its
+    ``FalkorProjection`` registers a close-on-GC finalizer (#1475). Taking only
+    ``._get_proj().db`` from the temporary lets the SDK (and the projection
+    that owns the pooled connection) be collected as soon as the expression
+    ends; the finalizer then disconnects the embedded redislite pool out from
+    under the still-referenced ``db`` — surfacing as
+    ``ValueError: I/O operation on closed file`` on the next query.
+
+    On the URI-less embedded lane that intermittently failed the backup sweep
+    with ``no_work`` ("I/O operation on closed file" in its per-graph results)
+    and rejected drills with a 409 — the order/state-sensitive
+    ``tests/test_dr_endpoints.py`` reds (#3750). The holder MUST keep ``sdk``
+    alive as long as it uses ``db`` (across an ``asyncio.to_thread`` boundary
+    too); binding it to a local for the handler's lifetime is the contract.
+    """
+    sdk = _make_sdk(namespace=None)
+    return sdk, sdk._get_proj().db
+
+
 @app.post("/v1/internal/backups/sweep")
 async def backups_sweep(request: Request):
     """Run the per-org backup sweep (driver's core action). Internal-key only."""
@@ -29879,7 +29904,7 @@ async def backups_sweep(request: Request):
     registry = _control_plane_source()
     # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
     # the registry namespace (see _control_plane_source's docstring).
-    db = _make_sdk(namespace=None)._get_proj().db
+    _data_sdk, db = _data_plane_db()
     storage = _backup_storage()
     try:
         mirror = _backup_mirror_storage(cfg)
@@ -30008,7 +30033,7 @@ async def backups_purge(request: Request):
     registry = _control_plane_source()
     # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
     # the registry namespace (see _control_plane_source's docstring).
-    db = _make_sdk(namespace=None)._get_proj().db
+    _data_sdk, db = _data_plane_db()
     storage = _backup_storage()
     grace_days = int((body or {}).get("grace_days")
                      or _TRASH_GRACE_DAYS)
@@ -30320,7 +30345,7 @@ async def backups_rebaseline(request: Request):
     registry = _control_plane_source()
     # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
     # the registry namespace (see _control_plane_source's docstring).
-    db = _make_sdk(namespace=None)._get_proj().db
+    _data_sdk, db = _data_plane_db()
     storage = _backup_storage()
     try:
         row = resolve_active_graph(registry, org_id, graph_id)
@@ -30603,7 +30628,7 @@ async def backups_drill(request: Request):
     registry = _control_plane_source()
     # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
     # the registry namespace (see _control_plane_source's docstring).
-    db = _make_sdk(namespace=None)._get_proj().db
+    _data_sdk, db = _data_plane_db()
     storage = _backup_storage()
     try:
         return await asyncio.to_thread(
@@ -30647,7 +30672,7 @@ async def backups_drill_scheduled(request: Request):
     registry = _control_plane_source()
     # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
     # the registry namespace (see _control_plane_source's docstring).
-    db = _make_sdk(namespace=None)._get_proj().db
+    _data_sdk, db = _data_plane_db()
     storage = _backup_storage()
     alerts = _alert_store_from(cfg)
     try:
