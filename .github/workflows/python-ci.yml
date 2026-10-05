@@ -419,6 +419,29 @@ jobs:
         # <1s, no dependency beyond the pyyaml installed above.
         run: python3 tools/registry_integrity.py
 
+      - name: "Required-set sync (#6144)"
+        # The required-status-check set is declared in three places — live
+        # branch protection, `.mergify.yml`'s `queue_conditions` /
+        # `merge_conditions`, and the declarative branch-protection mirror — and
+        # nothing read two of them. (The mirror is named INDIRECTLY on purpose:
+        # I11's undeclared-reader scan is a BYTE scan, so naming its path in a
+        # comment here is indistinguishable from a tool that READS it, and the
+        # fix for that is not to exempt this workflow — which would blind the
+        # scan to a real reader added to it later — but to not spell the path in
+        # prose.) `.mergify.yml` stated the invariant in a COMMENT with a
+        # hand-maintained "Last reconciled …" line; a comment cannot fail.
+        #
+        # Hosted in THIS job because it is the same class of check as the
+        # manifest drift gate beside it: a cheap, unconditional, fail-closed
+        # assertion about repo config, whose red must block a merge. It adds
+        # no new required context and no new workflow — it rides the aggregate
+        # that is already required.
+        #
+        # Offline by default (no `--live`: reading branch protection needs
+        # admin scope, and `GITHUB_TOKEN` cannot). `--live` is the owner/rail
+        # check. Exit 2 = could not measure, which is NOT a pass.
+        run: python3 .github/scripts/check-required-set.py
+
   test:
     # #880: split into parallel shards (matrix). #6135: the COUNT is
     # `config/ci-surfaces.yml::fast_shards` and the shape is the selector's
@@ -591,9 +614,14 @@ jobs:
         #
         # #964: the step-level timeout still bounds a hung download (stalled TCP,
         # no error raised) that would otherwise stall the step for the full job cap.
+        env:
+          # #7359: the watchdog only DUMPS (exit=False) — it cannot fail a run. Below the
+          # cap so the dump lands before the runner's kill; above the `--attempts N
+          # --backoff S` budget so it does not fire during legitimate retry sleeps.
+          TORTOISE_EMBEDDER_WATCHDOG_S: "330"
         timeout-minutes: 6
         run: |
-          python3 tools/embedder_provision.py --attempts 3 --backoff 5
+          exec python3 tools/embedder_provision.py --attempts 3 --backoff 5
       - name: Provision FalkorDB services on ephemeral host ports (#6673)
         # #6673: replaced this job's `services:` block. The assigned ports land
         # in $TORTOISE_TEST_DOCKER_PORT / $TORTOISE_TEST_LEGACY_PORT, which
@@ -1351,9 +1379,14 @@ jobs:
         # #964: the step-level timeout still bounds a hung download (stalled TCP,
         # no error raised) that would otherwise stall the step for the full 90-min
         # job cap; a timeout now FAILS the step, which is the honest outcome.
+        env:
+          # #7359: the watchdog only DUMPS (exit=False) — it cannot fail a run. Below the
+          # cap so the dump lands before the runner's kill; above the `--attempts N
+          # --backoff S` budget so it does not fire during legitimate retry sleeps.
+          TORTOISE_EMBEDDER_WATCHDOG_S: "570"
         timeout-minutes: 10
         run: |
-          python3 tools/embedder_provision.py --attempts 5 --backoff 10
+          exec python3 tools/embedder_provision.py --attempts 5 --backoff 10
       - name: Drift guard — legs cover slow_files minus carve-out (#1471)
         # #1471: the committed leg lists MUST stay the full slow-file set — a
         # new slow file added to config/ci-surfaces.yml `slow_files:` that
@@ -1705,9 +1738,14 @@ jobs:
         # 15-min cap makes a stalled download strictly worse (it would burn the
         # whole budget and cancel the run step with NO summary), so the timeout
         # now fails the step outright.
+        env:
+          # #7359: the watchdog only DUMPS (exit=False) — it cannot fail a run. Below the
+          # cap so the dump lands before the runner's kill; above the `--attempts N
+          # --backoff S` budget so it does not fire during legitimate retry sleeps.
+          TORTOISE_EMBEDDER_WATCHDOG_S: "570"
         timeout-minutes: 10
         run: |
-          python3 tools/embedder_provision.py --attempts 5 --backoff 10
+          exec python3 tools/embedder_provision.py --attempts 5 --backoff 10
       - name: Provision FalkorDB services on ephemeral host ports (#6673)
         # #6673: replaced this job's `services:` block. `uri_graph` is set here
         # because this job's TORTOISE_DB_URI used to be the fixed-port literal
@@ -2064,9 +2102,14 @@ jobs:
         # (test-slow, test-concurrency-falkor): five attempts sleep 100s of
         # backoff before the final probe, which does not fit the `test` job's
         # tighter `--attempts 3 --backoff 5` budget under a 6-minute cap.
+        env:
+          # #7359: the watchdog only DUMPS (exit=False) — it cannot fail a run. Below the
+          # cap so the dump lands before the runner's kill; above the `--attempts N
+          # --backoff S` budget so it does not fire during legitimate retry sleeps.
+          TORTOISE_EMBEDDER_WATCHDOG_S: "570"
         timeout-minutes: 10
         run: |
-          python3 tools/embedder_provision.py --attempts 5 --backoff 10
+          exec python3 tools/embedder_provision.py --attempts 5 --backoff 10
       - name: Generate coverage manifest (carve-out — expected nodeids, epic #1647 Task 9)
         run: |
           FILES=""
