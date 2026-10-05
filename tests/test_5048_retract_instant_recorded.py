@@ -48,6 +48,21 @@ WHAT IS DELIBERATELY *NOT* COVERED HERE
     instant. The live node keeps the winner's stamp while a replay applies
     both records in order. Pre-existing (the old arm re-stamped on every
     record too); an atomic guard is a different change.
+  * **pass-1a still re-clocks `updatedAt` for every Point.**
+    `_upsert_point_props` writes `n.updatedAt=$now` with `now=_now_iso()`,
+    and `updatedAt` is in `_POINT_DENY`, so a Point that is never retracted
+    gets the REPLAY's clock back — the original #4666 divergence, untouched
+    by this change. That is why a ts-less retraction still leaves the two
+    `#330` engines disagreeing (the fold keeps the `PointAdded` snapshot's
+    stamp, the graph keeps pass-1a's clock) and why this file asserts only
+    the fold's half of that case. Closing it means pass-1a must replay the
+    snapshot's `updatedAt` instead of minting one — a change to the most
+    load-bearing fold in the tree, and the remaining #4666 scope.
+  * **The `consistency.py` alignment is latent.** Its reference fold now
+    stamps the same value as the two replay engines (it is declared to mirror
+    `_apply_one`), but `updatedAt` is in `_NOT_COMPARED`, so
+    `check_consistency` still cannot see the field either way. This keeps the
+    reference honest; it does not make the detector observe anything new.
 
 Run (embedded carve-out):
   TORTOISE_TEST_CARVE_OUT=1 python -m pytest \\
@@ -84,6 +99,15 @@ def _node(sdk, pid: str) -> dict:
     ).result_set
     assert rows, f"point {pid!r} missing from the graph"
     return rows[0][0]
+
+
+def _stamp(sdk, pid: str, instant: str) -> None:
+    """Overwrite the node's stamp so a `rebuild_all` that did NOTHING (no
+    wipe, no replay) cannot satisfy the assertions below — they must require
+    the replay to re-materialise the node from the journal."""
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$i}) SET n.updatedAt = $t",
+        params={"i": pid, "t": instant})
 
 
 @pytest.fixture
@@ -125,20 +149,25 @@ def test_the_record_and_the_node_carry_the_same_instant(retracted):
 def test_a_rebuild_reproduces_the_retraction_instant(retracted):
     """THE proof obligation: the rebuilt node is the live node.
 
+    The node is marked with a sentinel first, so a `rebuild_all` that did
+    nothing cannot pass: the final assertion requires the replay to have
+    re-materialised the node from the journal.
+
     FAILS BEFORE: measured live `...05.520761` vs rebuilt `...06.611460` —
     `_retract` stamped the rebuild's own wall-clock.
     """
     events, sdk, pid = retracted
-    before = _node(sdk, pid)["updatedAt"]
+    recorded = _of_type(events, "PointRetracted")[0]["ts"]
+    _stamp(sdk, pid, "REPLAY-DID-NOT-RUN")
 
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     after = _node(sdk, pid)
     assert after["status"] == "retracted", after
-    assert after["updatedAt"] == before, (
-        f"replay invented an instant: live={before!r} rebuilt="
-        f"{after['updatedAt']!r} — `updatedAt` is RECORDED, so the rebuild "
-        "must read it from the journal")
+    assert after["updatedAt"] == recorded, (
+        f"the replay did not restore the recorded instant: live/recorded="
+        f"{recorded!r} rebuilt={after['updatedAt']!r} — `updatedAt` is "
+        "RECORDED, so the rebuild must read it from the journal")
 
 
 def test_two_rebuilds_of_one_journal_agree(retracted):
@@ -149,13 +178,15 @@ def test_two_rebuilds_of_one_journal_agree(retracted):
     defect (not merely divergent from live, but non-deterministic).
     """
     events, sdk, pid = retracted
+    recorded = _of_type(events, "PointRetracted")[0]["ts"]
+    _stamp(sdk, pid, "REPLAY-DID-NOT-RUN")
     stamps = []
     for _ in range(2):
         sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
         stamps.append(_node(sdk, pid)["updatedAt"])
-    assert stamps[0] == stamps[1], (
-        "two replays of the same journal produced different graphs: "
-        f"{stamps}")
+    assert stamps[0] == stamps[1] == recorded, (
+        "two replays of the same journal did not both produce the recorded "
+        f"instant: {stamps} (recorded {recorded!r})")
 
 
 # ── 3. the #330 fold parity contract ─────────────────────────────────────
@@ -223,16 +254,45 @@ def test_a_new_named_parameter_must_not_steal_an_extra_key(tmp_path):
         sdk.close()
 
 
+def test_an_unusable_instant_is_treated_identically_by_both_engines():
+    """ONE predicate for "the journal states an instant".
+
+    This pins the bug a review found in the previous revision: the graph arm
+    gated on `_usable_instant` while `_apply_one` and the consistency
+    reference fold gated on bare `_writable_id`. Those differ on the empty
+    string — `_writable_id("")` is True — so a record carrying `ts=""` had
+    the fold write `""` while the graph arm wrote no column at all: the two
+    #330 engines disagreed on the very field this file exists to pin.
+    """
+    from tortoise.projection.entities import _usable_instant
+
+    assert _usable_instant("") is False, (
+        "an empty string is 'no instant stated', not a writable instant")
+    assert _usable_instant(None) is False
+    assert _usable_instant({"evil": 1}) is False
+    assert _usable_instant(0) is False
+    assert _usable_instant("2026-01-02T03:04:05+00:00") is True
+
+    # ...and the fold's half: an empty string must not be written as a stamp.
+    points = {"p1": {"id": "p1", "status": "live", "updatedAt": "T0"}}
+    _apply_one(points, {"type": "PointRetracted", "id": "p1", "ts": ""})
+    assert points["p1"]["updatedAt"] == "T0", (
+        f"an empty-string ts was written as an instant: {points['p1']}")
+
+
 def test_a_legacy_record_without_an_instant_still_retracts():
     """A record predating the field (or a hand-written one) must still
-    tombstone the point, and NEITHER engine may invent an instant for it.
+    tombstone the point, and the fold must not invent an instant for it.
 
-    This pins the shared `_writable_id` gate: the graph arm writes the
-    `updatedAt` column only when the journal states a usable instant, so a
-    record that states none leaves the point's existing stamp alone — exactly
-    what the pure fold does. (Before the gate the graph arm fell back to
-    `_now_iso()` while the fold kept the old stamp, so the two #330 engines
-    disagreed on a legacy record.)
+    This pins the FOLD's half only, and deliberately so — the measured truth
+    is asymmetric and is not claimed away here: `_apply_one` keeps the stamp
+    the `PointAdded` snapshot carried, while the graph arm leaves whatever
+    pass-1a's `_upsert_point_props` wrote, which is the REPLAY clock
+    (`n.updatedAt=$now` with `now=_now_iso()`). Making those two agree needs
+    pass-1a to stop re-clocking `updatedAt` — the wider #5048 residual that
+    applies to every never-retracted Point, and not something this fold may
+    paper over by inventing a value. Asserting only the fold is therefore the
+    honest scope of this test, not an omission.
     """
     points = {"p1": {"id": "p1", "status": "live", "updatedAt": "T0"}}
     _apply_one(points, {"type": "PointRetracted", "id": "p1"})

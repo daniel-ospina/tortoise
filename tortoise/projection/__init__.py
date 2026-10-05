@@ -2386,6 +2386,7 @@ from tortoise.projection.entities import (  # noqa: E402, I001
     _belief_prop_value_ok,
     _EntityHandlers,
     _is_persistable_prop_value,
+    _usable_instant,
 )
 from tortoise.projection.edges import _EdgeHandlers  # noqa: E402
 from tortoise.projection.grounding import _GroundingMixin  # noqa: E402
@@ -3055,13 +3056,15 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
             # fold did not stamp at all, so the pure fold kept the point's
             # ORIGINAL stamp while ``rebuild_all`` held this replay's clock
             # and the live node held the producer's — three values for one
-            # retraction. The gate is ``_writable_id``, shared verbatim with
-            # the graph arm (``_retract``), so a record stating NO usable
-            # instant leaves the stamp alone in BOTH engines rather than
-            # inventing one in either.
+            # retraction. The gate is ``_usable_instant`` — the SAME predicate
+            # the graph arm (``_retract``) uses, deliberately shared rather
+            # than re-spelled, because ``_writable_id`` alone ACCEPTS the
+            # empty string: with two spellings, a record carrying ``ts=""``
+            # had this fold write ``""`` while the graph arm wrote no column
+            # at all (both are now "no usable instant stated").
             p["status"] = "retracted"
             p.update(VACUITY_BELIEF)
-            if _writable_id(ev.get("ts")):
+            if _usable_instant(ev.get("ts")):
                 p["updatedAt"] = ev["ts"]
     elif t == "PointsMerged":
         # #331 (review r2): `or []` also covers an explicit "merge_ids": null

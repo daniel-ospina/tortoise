@@ -8758,6 +8758,16 @@ class TortoiseSDK:
             "PointSuperseded",
             id=old_id, new_id=new_id,
             valid_from=succ_vf, valid_to=succ_vf, expired_at=now,
+            # #5048: `now` is ALSO the envelope instant, so the replay's
+            # `updated_at = _journal_instant(ev)` reads the instant the live
+            # SET below writes. Without it the envelope `ts` was a SECOND
+            # clock read and every supersede drifted live vs rebuilt by
+            # microseconds — the same defect #5048 fixes for retraction, and
+            # the rule `invalidate_point` already documents ("ts=now MUST be
+            # passed … a drift from the live SET clock breaks exact-stamp
+            # rebuild parity"). `recorded_ts`, not `ts`: the latter would also
+            # add the key to the :GraphEvent payload (see `_emit_event`).
+            recorded_ts=now,
         )
 
         # CYCLE-26 REVIEW-FIX P1 (cycle-7 pin): the superseded-status write +

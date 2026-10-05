@@ -62,23 +62,44 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
 
-def _journal_instant(ev: dict, key: str = "ts") -> str:
-    """The record's instant when the journal STATES a usable one, else the
-    writer's clock.
+def _usable_instant(val) -> bool:
+    """True when a journal record states an instant a replay may write.
 
-    #5048: an instant read from a journal record rides as a Cypher parameter,
-    so it needs the same ``_writable_id`` gate the ``id`` does. Ungated, a
-    corrupt line raises ``ResponseError: Property values can only be of
-    primitive types`` from inside a replay that has ALREADY wiped the graph,
-    and the replay has no per-event try/except (measured end-to-end: a
-    ``PointRetracted`` carrying ``ts={"evil": 1}`` aborted ``rebuild_all`` and
-    left the claim LIVE). Well-formed records — every record a producer
-    writes — are unaffected: the gate only replaces a value that would have
-    crashed with the fallback this call site already used.
+    #5048: an instant read from a record rides as a Cypher parameter, so it
+    needs the same ``_writable_id`` gate the ``id`` does — ungated, a corrupt
+    line raises ``ResponseError: Property values can only be of primitive
+    types`` from inside a replay that has ALREADY wiped the graph, and pass-1b
+    has no per-event try/except (measured end-to-end: a ``PointRetracted``
+    carrying ``ts={"evil": 1}`` aborted ``rebuild_all`` and left the claim
+    LIVE).
+
+    The extra non-empty test is for the FALSEY half: the ``or _now_iso()``
+    this replaces treated ``""`` as "no instant stated", so an empty string
+    must keep falling back rather than become a written ``updatedAt``.
     """
     from tortoise.projection import _writable_id
+    return bool(val) and _writable_id(val)
+
+
+def _journal_instant(ev: dict, key: str = "ts") -> str:
+    """The record's instant when it states a usable one, else the writer's
+    clock.
+
+    Byte-identical to the ``ev.get(key) or _now_iso()`` it replaces for every
+    value that expression accepted AND could write — a truthy string the
+    driver can take. The differing family is exactly what that expression
+    could not write: any non-string and a string carrying a NUL or lone
+    surrogate (which reached FalkorDB and raised), plus the empty string (which
+    it treated as absent).
+
+    NOTE the policy difference from ``_retract``, which is deliberate and not
+    an oversight: when a record states NO usable instant this helper writes the
+    clock (these arms have always stamped ``updatedAt`` as part of their SET),
+    while ``_retract`` writes no column at all, because it has a ``#330`` twin
+    in ``_apply_one`` and neither may invent a value the journal never stated.
+    """
     val = ev.get(key)
-    return val if _writable_id(val) else _now_iso()
+    return val if _usable_instant(val) else _now_iso()
 
 
 # ── #2884 D3: the belief-state value gate ─────────────────────────────────
@@ -1538,19 +1559,24 @@ class _EntityHandlers:
         here stamped the rebuild's wall-clock onto every retracted point and
         agreed with neither the live node nor the producer's record.
 
-        ``now`` is gated by ``_writable_id`` — the SAME gate the id below and
-        the neighbouring terminalizer folds' ``updated_at`` use. Without it a
-        corrupt journal line (a dict/list/int ``ts``) rides a Cypher parameter
-        and aborts ``rebuild_all`` AFTER the wipe, leaving the claim LIVE —
-        the pre-fix code never read ``ts`` at all, so this hole only appears
-        with the recorded instant. A record that states no usable instant
-        stamps NOTHING, rather than inventing one: that keeps this arm
-        identical to ``_apply_one``, whose ``PointRetracted`` branch likewise
-        leaves the point's existing stamp alone (both ``#330`` engines must
-        agree on every prop, including the one neither can source).
+        ``now`` is gated by ``_usable_instant`` — the SAME gate the id below
+        and the sibling folds' ``updated_at`` use. Without it a corrupt journal
+        line (a dict/list/int ``ts``) rides a Cypher parameter and aborts
+        ``rebuild_all`` AFTER the wipe, leaving the claim LIVE — the pre-fix
+        code never read ``ts`` at all, so this hole only appears with the
+        recorded instant. A record that states no USABLE instant writes NO
+        column, rather than inventing one.
+
+        RESIDUAL, measured and NOT fixed by the no-column choice: it does not
+        make the two ``#330`` engines agree for a ts-less record.
+        ``_apply_one`` keeps the value the ``PointAdded`` snapshot carried,
+        while this arm leaves whatever pass-1a's ``_upsert_point_props`` just
+        wrote — and that is the REPLAY's clock (``n.updatedAt=$now`` with
+        ``now=_now_iso()``). Closing that needs pass-1a to stop re-clocking
+        ``updatedAt``, which is the wider #5048 residual for EVERY
+        never-retracted Point, not this arm's to invent.
         """
-        from tortoise.projection import _writable_id
-        stamp = ", n.updatedAt = $now" if _writable_id(now) else ""
+        stamp = ", n.updatedAt = $now" if _usable_instant(now) else ""
         params: dict = {"id": pid}
         if stamp:
             params["now"] = now

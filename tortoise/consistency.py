@@ -65,6 +65,7 @@ from .projection import (
 from .projection.entities import (
     _EntityHandlers,
     _is_persistable_prop_value,
+    _usable_instant,
     _writable_journalled_vector,
 )
 
@@ -111,8 +112,9 @@ _EXCLUSION_REASONS: dict[str, str] = {
     # Recomputed / replay-owned — a pure function of the row, or a write time.
     "content_hash": "pure f(content) — RECOMPUTE (STORAGE-ARCHITECTURE §3)",
     "updatedAt": (
-        "write time; replayed from the record for a retraction (#5048), and "
-        "still set live by every other writer"),
+        "excluded because the stamp is not journal-derivable for every writer "
+        "— a retraction now replays it from the record (#5048), but "
+        "pass-1a/other writers still set it from the replay clock"),
     "_nid": "replay bookkeeping",
     "_graph_id": "replay bookkeeping",
     # #5004: the embedding's IDENTITY is journal PAYLOAD metadata (`_POINT_HANDLED`)
@@ -920,14 +922,15 @@ def _fold_journal(events: list[dict]) -> dict:
                 # #5048: `updatedAt` is RECORDED, and this is the reference
                 # fold `check_consistency` compares the graph against — its own
                 # docstring says ground truth is `_apply_one`, which now stamps
-                # this field. Stamp it under the SAME gate the two replay arms
-                # use, and only "when the journal states it": a writer's
-                # wall-clock fallback states nothing, exactly as `expired_at`
-                # below. (Without this the reference disagreed with BOTH
-                # `fold()` and the rebuilt graph on the one field this change
-                # makes recorded — invisible only while the field is excluded
-                # from comparison.)
-                if _writable_id(ev.get("ts")):
+                # this field. Same predicate as both replay arms
+                # (`_usable_instant`, NOT bare `_writable_id`, which accepts
+                # the empty string), and only "when the journal states it": a
+                # writer's wall-clock fallback states nothing, exactly as
+                # `expired_at` below. (Without this the reference disagreed
+                # with BOTH `fold()` and the rebuilt graph on the one field
+                # this change makes recorded — invisible only while the field
+                # is excluded from comparison.)
+                if _usable_instant(ev.get("ts")):
                     entry["updatedAt"] = ev["ts"]
             elif t == "PointSuperseded":
                 entry["status"] = "superseded"
