@@ -80,7 +80,7 @@ def _unobserved_outcome(*, transport_failures: list[str], post_issued: bool) -> 
 
     `net::ERR_ABORTED` is deliberately NOT a product failure. What is VERIFIED: no
     code passes a `signal` to the signup `fetch` and nothing calls `.abort()` on it
-    (`signup.html`), so the signup path itself cannot cancel it. A page NAVIGATION
+    (`signup.html`), so the signup FETCH PATH cannot cancel it. A page NAVIGATION
     still can — the page's own session probe redirects before responding — which is
     exactly why an abort is bucketed as never-answered/UNAVAILABLE rather than as a
     product failure. (An earlier revision of this note claimed "nothing in the
@@ -516,6 +516,16 @@ def test_unobserved_outcome_is_disposed_correctly() -> None:
     assert "ERR_NAME_NOT_RESOLVED" in calls[2][1]
     assert "Supabase directly" in calls[4][1]
 
+    # The tripwire must win over an UNAVAILABLE skip EVEN WHEN BOTH are present:
+    # gated on transport being empty, a #4054 breach AND a transport failure would
+    # report as availability, inverting a real product verdict (#4940 round 11).
+    calls.clear()
+    _handle_unobserved(
+        ["obs ERR_NAME_NOT_RESOLVED"], True, ["https://x/auth/v1/token"], skip=_skip, fail=_fail
+    )
+    assert [kind for kind, _ in calls] == ["fail"]
+    assert "Supabase directly" in calls[0][1]
+
 
 def test_signup_capture_listeners_are_registered_and_wired() -> None:
     """#4940: the LIVE wiring is pinned by replaying the registered handlers.
@@ -686,8 +696,10 @@ def test_unobserved_outcome_splits_verdicts() -> None:
     signup_url = "https://app.premiselabs.co/auth/signup"
 
     # A client-side abort (net::ERR_ABORTED) is a never-answered request, not a
-    # product failure: the signup fetch has no AbortController, so the page cannot
-    # abort its own POST — it is browser/lifecycle cancellation.
+    # product failure: the signup fetch carries no AbortController/signal, so the
+    # signup FETCH PATH cannot cancel it — a page navigation still can (see
+    # `_unobserved_outcome`), which is why an abort lands here rather than in the
+    # product bucket.
     verdict, message = _unobserved_outcome(
         transport_failures=["POST https://app.premiselabs.co/auth/signup — net::ERR_ABORTED"],
         post_issued=True,
@@ -723,7 +735,9 @@ def test_unobserved_outcome_splits_verdicts() -> None:
     verdict, message = _unobserved_outcome(transport_failures=[], post_issued=False)
     assert verdict == "product"
     assert "did not submit" in message
-    assert "TRANSPORT" not in message
+    # Weightless-and-deleted: `assert "TRANSPORT" not in message` here could never
+    # fire, because the product message cannot contain that word (#4940 round 11).
+    assert message.strip().endswith("straight to Supabase")
 
 
 @LIVE_SIGNUP
@@ -824,7 +838,7 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
         if signup["status"] is None:
             # #4940/#4686: the BFF never ANSWERED. The verdict split, the tripwire's
             # precedence over a skip, and the evidence that reaches the message all
-            # live in `_handle_unobserved`, pinned behaviourally below rather than
+            # live in `_handle_unobserved`, pinned behaviourally above rather than
             # trusted.
             _dispose_live(transport_failures, post_issued, browser_to_supabase)
         assert signup["status"] == 200, (
