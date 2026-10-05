@@ -707,6 +707,54 @@ def test_idempotent_remitigation_dirties_the_operator():
             f"affected={len(affected)}, reachable={len(reachable)}")
 
 
+def test_a_mitigation_write_reaches_its_operator_from_any_caller():
+    """#5566 review (P1) — a mitigation write OUTSIDE `mitigate_operator` must reach it.
+
+    The narrowed hop requires the id to be the operator's TARGET
+    (`(n)<-[:IMPL|NAND]-(op)-…`), while a mitigation is the SOURCE of its
+    operator edge (`(mit)-[:IMPL]->(op)`). #5566 patched `mitigate_operator`'s two
+    branches by hand, but `update_point` — which the MCP write path forwards
+    arbitrary props to — marks only `[id]`, so on the pre-fix tree a strength
+    change through it reached NO operator: measured dirty roots `['mit']` and an
+    EMPTY affected set, with the operator's factor silently keeping the old
+    weight. Root discovery therefore has to be symmetric, which is what this
+    pins: the mitigation alone must find the operator, and the write must reach
+    the claims the operator feeds.
+    """
+    with _fresh_sdk() as sdk:
+        src = _make_claim(sdk, "source")
+        claim = _make_claim(sdk, "downstream")
+        sdk.set_point_baseline(src["id"], 10, 1)
+        sdk.set_point_baseline(claim["id"], 1, 1)
+        op = sdk.create_operator("IMPL", src["id"], [claim["id"]])
+        mit = sdk.mitigate_operator(op["id"], "minor caveat", strength=0.1)
+        proj = sdk._get_proj()
+        proj.g.query(
+            "MATCH (n:Point) WHERE n.ep_dirty = true "
+            "SET n.ep_dirty = null, n.ep_dirty_at = null")
+        sdk._dirty_roots.clear()
+        # The defect is in ROOT DISCOVERY, not in the traversal, so assert it
+        # directly first: reading the id only as the operator's TARGET finds
+        # nothing for a mitigation.
+        op_ids, _claim_ids = sdk._reverse_bfs_neighbors(proj, [mit["id"]])
+        assert op["id"] in op_ids, (
+            "a mitigation is the SOURCE of (mit)-[:IMPL]->(op); root discovery "
+            "that reads the id only as the operator's TARGET finds no operator, "
+            "so the write is a silent no-op")
+        sdk.update_point(mit["id"], mitigation_strength=0.5)
+        roots = sorted(
+            r[0] for r in proj.g.query(
+                "MATCH (n:Point) WHERE n.ep_dirty = true RETURN n.id").result_set)
+        assert src["id"] in roots and claim["id"] in roots, (
+            "a mitigation-strength write must dirty the operator's participants: "
+            "through the mitigation alone nothing downstream is recomputed, and "
+            f"the operator's factor keeps the old weight. roots={roots}")
+        affected = sdk._get_ep()._affected_claims(roots, max_hops=None)
+        assert src["id"] in affected and claim["id"] in affected, (
+            "a mitigation-strength write must reach the operator's participants: "
+            f"affected={affected}")
+
+
 def test_ac3_last_affected_no_stale_writeback():
     """AC3 — _last_affected is reset at run entry and assigned BEFORE the
     early returns: a degenerate-only run never leaves a previous run's set

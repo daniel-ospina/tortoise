@@ -8225,11 +8225,22 @@ class TortoiseSDK:
         # no neighbor would be dirtied (stored confidences stay stale at
         # pre-delete values). Shared helper keeps this capture in lockstep
         # with _mark_dirty's own traversal.
-        op_ids, neighbor_claims = self._reverse_bfs_neighbors(proj, [id])
-        neighbor_ids = (
-            [oid for oid in op_ids if oid != id]
-            + [cid for cid in neighbor_claims if cid != id]
-        )
+        _op_ids, neighbor_claims = self._reverse_bfs_neighbors(proj, [id])
+        # #2422/#5566: the OPERATOR ids are dropped here, exactly as
+        # `_mark_dirty` drops them. Most operators are unsweepable as roots —
+        # `_sweep_dirty_roots` subtracts only `affected`, and `_affected_claims`
+        # admits an operator's INPUTS, so an operator that is nobody's input
+        # keeps its `ep_dirty` forever, pinning `_auto_dream_mode` to 'local'
+        # (measured: after a converged pass such an operator was the only
+        # remaining root AND the only remaining graph flag). A NESTED operator —
+        # one that is another operator's input — is reachable through the
+        # per-hop expansion and does not have that problem, so this is a
+        # narrowing of which ids become roots, not a claim that operators can
+        # never be swept. Nothing is lost from #1916: the claims below are the
+        # operator's OTHER inputs, and the hop in `TortoiseEP` walks
+        # `(n)<-[:IMPL|NAND]-(op)-[:IMPL|NAND]->(m)` from them, so
+        # `_affected_factors` still re-derives the operator's factor.
+        neighbor_ids = [cid for cid in neighbor_claims if cid != id]
         proj.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": id})
         # #3300 residual: ONE event type must not mean two end-states.
         # `delete_point` hard-deletes; `retract_point` tombstones. The single
@@ -10241,15 +10252,15 @@ class TortoiseSDK:
             # the changed strength off the operator's factor, and only a
             # seeded operator pulls its inputs into the affected set. The
             # CREATE path below marks exactly this pair ([mid, id]); the
-            # update path must match it. Marking `[mid]` alone reaches
-            # nothing — `_reverse_bfs_neighbors` looks for
-            # `(op:Point {is_operator:true})-[:IMPL|NAND]->(p)`, and the
-            # mitigation edge runs the OTHER way (`(mit)-[:IMPL]->(op)`), so
-            # no operator and no claim are ever found. The in-process flow
-            # hides this behind the operator's own creation-time ep_dirty
-            # flag; `ep_dirty` is deliberately NOT journaled (#5166), so a
-            # rebuilt/replayed graph has no such mask and a re-mitigation
-            # would silently not move confidence. (#5566 review P2.)
+            # update path must match it. Marking `[mid]` alone is no longer a
+            # dead end — `_reverse_bfs_neighbors` now matches the mitigation
+            # back-link direction too — but the pair is what this path is
+            # specified to mark, and it does not depend on that helper's
+            # shape. The in-process flow hides a missing mark behind the
+            # operator's own creation-time ep_dirty flag; `ep_dirty` is
+            # deliberately NOT journaled (#5166), so a rebuilt/replayed graph
+            # has no such mask and a re-mitigation would silently not move
+            # confidence. (#5566 review P2.)
             self._mark_dirty([mid, id])
             return self.get_point(mid)
         # Create new mitigation Point
@@ -14216,19 +14227,41 @@ class TortoiseSDK:
 
     def _reverse_bfs_neighbors(self, proj, point_ids: list[str]
                                ) -> tuple[list[str], list[str]]:
-        """1-hop reverse-BFS from ``point_ids``: operators targeting them
-        (reverse of operator→point), then the claims those operators target
-        (1-hop forward). Shared by ``_mark_dirty`` (post-write marking) and
-        ``delete_point`` (pre-delete neighbor capture, #1916) so the
-        traversal can never drift between the two — a change to the BFS
-        shape updates both call sites in lockstep. Returns ``(op_ids,
-        claim_ids)``."""
+        """1-hop reverse-BFS from ``point_ids``: operators joined to them by an
+        ``IMPL|NAND`` edge in EITHER direction (``(op)-[:IMPL|NAND]->(p)`` and
+        ``(p)-[:IMPL|NAND]->(op)`` — a mitigation is the SOURCE of its operator
+        edge), then the claims those operators target (1-hop forward). Shared by
+        ``_mark_dirty`` (post-write marking) and ``delete_point`` (pre-delete
+        neighbor capture, #1916) so the traversal can never drift between the two
+        — a change to the BFS shape updates both call sites in lockstep. Returns
+        ``(op_ids, claim_ids)``."""
+        ids = list(point_ids)
         rows = proj.g.query(
             "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]->(p:Point) "
             "WHERE p.id IN $ids RETURN DISTINCT op.id",
-            params={"ids": list(point_ids)},
+            params={"ids": ids},
         ).result_set
         op_ids = [r[0] for r in rows]
+        # ⛔ A mitigation is the SOURCE of its operator edge —
+        # `(mit)-[:IMPL]->(op)` — so the match above, which reads the id as the
+        # operator's TARGET, misses it. Left out, a mitigation whose strength
+        # changed through `update_point` / the MCP write path (which mark only
+        # `[id]`, unlike `mitigate_operator`) reaches NO operator, so the run is
+        # a silent no-op and the operator's factor keeps the old weight. Measured
+        # at #5566: `_affected_claims([mit]) == []`, where the pre-narrowing
+        # traversal returned the operator's other participants. The second match
+        # is a deliberate over-approximation: it also returns an operator the id
+        # CONSUMES (the id points at it with an `IMPL|NAND` edge), whose factor
+        # does not contain the id, so that case costs a recompute and not a wrong
+        # value.
+        rows = proj.g.query(
+            "MATCH (p:Point)-[:IMPL|NAND]->(op:Point {is_operator:true}) "
+            "WHERE p.id IN $ids RETURN DISTINCT op.id",
+            params={"ids": ids},
+        ).result_set
+        for r in rows:
+            if r[0] not in op_ids:
+                op_ids.append(r[0])
         claim_ids: list[str] = []
         if op_ids:
             rows = proj.g.query(

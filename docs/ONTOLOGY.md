@@ -34,6 +34,7 @@ doc_status: live
 > being wrong — which is corrected here and recorded in the changelog.
 >
 > **Changelog v3.20 (2026-09-29 — issue #5566 — the EP affected-set traversal is factor-bearing-only):**
+>
 > - `TortoiseEP._affected_claims` / `_live_neighbors` admitted a claim through **any**
 >   edge onto an operator, so a structural predicate (`related`, `aboutSubject`,
 >   `memberOf`, …) — or a reverse-only `IMPL` (the mitigation back-link
@@ -50,13 +51,15 @@ doc_status: live
 > - `mitigate_operator`'s **idempotent** update branch now dirties the operator
 >   (`_mark_dirty([mid, id])`), exactly as its CREATE branch does. With the hop now
 >   factor-filtered, a mitigation-only dirty root no longer reaches the operator's
->   factor — marking the mitigation alone finds no operator, because
->   `_reverse_bfs_neighbors` matches `(op)-[:IMPL|NAND]->(p)` while the mitigation edge
->   runs the other way — so a re-mitigation whose strength changed would leave
->   downstream confidence unmoved on any graph whose `ep_dirty` flags are not journaled
->   (#5166).
+>   factor, so a re-mitigation whose strength changed would leave downstream
+>   confidence unmoved on any graph whose `ep_dirty` flags are not journaled
+>   (#5166). The root cause is closed in `_reverse_bfs_neighbors` itself: it matches
+>   `(op)-[:IMPL|NAND]->(p)` **and** `(p)-[:IMPL|NAND]->(op)`, so a mitigation — the
+>   SOURCE of `(mit)-[:IMPL]->(op)` — finds its operator, and ANY writer of a
+>   strength reaches the operator's factor, not only the caller patched above.
 >
 > **Changelog v3.19 (2026-09-28, issue #3985 — a falsey-but-ORDERABLE stored `validFrom` is a real window start):**
+>
 > - §4.7 (`validTo`): the resolution branch and the read path now agree for every successor
 >   start both can *order*. `_supersede_window_end` resolved with a truthiness test while
 >   `_covers` gates on presence, so a stored `validFrom = 0` was a real epoch-0 start to the
@@ -109,7 +112,7 @@ doc_status: live
 >   prior was discarded (`Beta(1,1)`). The EP traversal was then unfiltered on relation,
 >   so `related` was not yet weight-free in fact. **The traversal half of this is now
 >   CLOSED** — the affected-set traversal is `IMPL`/`NAND`-filtered and direction-checked
->   as of v3.18 below, so a `related` edge can no longer pull a node in. The
+>   as of v3.20 above, so a `related` edge can no longer pull a node in. The
 >   belief-model half remains **owner-reserved** (DECISION-LEDGER §22), which is why
 >   #5566 stays open.
 >
@@ -1053,7 +1056,6 @@ declared, not built (implementation is tracked separately):
 | supersession | `status='superseded'` ✅ ‡ | — | `supersededAt` ✅ | — | — |
 
 > † **A source's temporal slots are the Source column's.** No `:Object`-labelled write path reaches a Source, so the Object-labelled supersession fold (`_fold_object_superseded` / `apply_supersessions`, which `MATCH`es `(o:Object {id|name})`) **cannot stamp a Source** — **Source supersession is unreachable, not merely unimplemented (`—`).** `_upsert_source` writes no `validFrom`/`validTo`/`expiredAt` (**#3644**). **A content-changing re-fetch is no longer a silent in-place mutation:** since `#5024` it journals a `SourceVersioned` record naming the superseded `contentHash`, so the prior version is addressable and a replay reproduces the node.
-
 >
 > **Point valid start is ⚠️, not ✅** — populated by the date-carrying write
 > paths, with the legacy mining W-4 post-pass falling back to the wall clock when
