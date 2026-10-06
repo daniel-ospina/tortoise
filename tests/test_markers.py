@@ -97,6 +97,16 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_hosted_volunteer_context.py": {"registry": "prod-coupled"},   # #2103 (W4C) — registry control-plane mint/revoke mirrors test_hosted_auth
     "test_capture_phase_d_dedup.py": {"team-001": "team-identity"},  # #2104 (W5-D) — hosted _make_sdk(namespace="team-001") mirror arm
     "test_capture_loop_responsiveness.py": {"registry": "prod-coupled"},  # #3086 — the capture-writer loop-affinity proof reaches the graph class via _make_sdk(namespace="registry") to record writer-thread affinity
+    # #3718: the concurrent-commit cases read the MeteringRecord back through
+    # the CANONICAL registry namespace — the graph prod's `_record_write_op`
+    # writes — because the assertion IS the write-op count production billed
+    # (one per logical payload; the double-apply defect bills two). Same
+    # `prod-coupled` class as test_commit_endpoint / test_dr_endpoints /
+    # test_capture_loop_responsiveness: the read is PINNED to the production
+    # namespace because it must observe the op the production writer billed; if
+    # the two are ever decoupled the read returns 0 rows and the leading
+    # `assert rows and …` fails LOUDLY (it never passes vacuously).
+    "test_dataplane_lane_loop_responsiveness.py": {"registry": "prod-coupled"},
     "test_import_endpoint.py": {"registry": "import-ledger"},
     "test_issue_4010_sessions_unlimited.py": {"registry": "prod-coupled"},  # #4010: registry seeding (org_create + registry-lane auth) mirrors test_quota/test_commit_endpoint
     "test_index_mcp.py": {"registry": "prod-coupled",
