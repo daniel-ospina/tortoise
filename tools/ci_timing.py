@@ -177,15 +177,12 @@ TEST_JOB_PREFIX = "test"
 
 # The shard jobs whose work `selected_weight_s` actually weights: `test (a)`,
 # `test-slow (a)`, or a bare `test`/`test-slow`. Everything else that starts
-# with `test` is reported separately in `excluded_jobs` — see
-# `paid_vs_selected` for the TWO different reasons, which are NOT that their
-# files are unweighted: `test-track-b`, `test-concurrency-falkor` and
-# `test-d14-hosted-api` run files that ARE in the fast pool and in the
-# denominator. They are excluded because the counted shards run
-# `-m 'not track_b and not live and not integration'` while these legs run
-# exactly those marks — the two job sets cover DIFFERENT work, and one ratio
-# cannot describe both. So `paid_s` covers the COUNTED shards only; say so when
-# quoting it, because the excluded legs are a real share of gate execution.
+# with `test` is reported separately in `excluded_jobs` and contributes NOTHING
+# to `paid_s`, so `paid_s` is the COUNTED shards' execution time and not total
+# gate execution. The per-leg reasons differ per leg and live in
+# `.github/workflows/python-ci.yml` — see `paid_vs_selected`, which deliberately
+# states the rule and not a mechanism, because two summary mechanisms were tried
+# here and both were false.
 SHARD_JOB_RE = re.compile(r"^test(?:-slow)?(?: \([a-z]\))?$")
 
 
@@ -305,25 +302,23 @@ def paid_vs_selected(jobs: list[dict], selection: dict, durations: dict,
     pays a large one is execution inflation, not selection weight. `queue_s` is
     reported alongside so queue latency cannot be mistaken for execution cost.
 
-    ⛔ NUMERATOR AND DENOMINATOR MUST COVER THE SAME JOBS. Only the shard jobs
-    whose work `test_files`/`slow_selected` actually weight (`test (a)`, …,
-    `test-slow (a)`, …) are counted. Counting any other `test*` leg would add
-    seconds with no matching weight and inflate the ratio by construction.
-    There are TWO distinct reasons a leg is excluded, and they are not the
-    same reason (a previous version of this docstring claimed the first for
-    all four, which is false):
+    ⛔ NUMERATOR AND DENOMINATOR MUST COVER THE SAME JOBS. Only the counted
+    shard jobs (`test (a)`, …, `test-slow (a)`, …) are summed; every other
+    `test*` leg is returned in `excluded_jobs` and contributes NOTHING to
+    `paid_s`. **`paid_s` is therefore the COUNTED SHARDS' execution time, not
+    total gate execution — say so whenever it is quoted.**
 
-      * `test-carve-out` — `select()` SUBTRACTS carve-out files from
-        `test_files`/`slow_selected` (`ci_selection.py:1233,1081`), so its
-        seconds have no weight on the other side at all.
-      * `test-d14-hosted-api`, `test-concurrency-falkor`, `test-track-b` —
-        their files ARE in the fast pool and the denominator. They are excluded
-        because the counted shards run `-m 'not track_b and not live and not
-        integration'` while these legs run exactly those marks, so the two job
-        sets cover DIFFERENT work; one ratio cannot describe both.
-
-    Either way the legs are returned in `excluded_jobs`, and `paid_s` therefore
-    covers the COUNTED shards only — not total gate execution.
+    ⛔ The PER-LEG reason a leg is excluded is deliberately NOT asserted here.
+    Each leg's file set and marker expression is defined by
+    `.github/workflows/python-ci.yml`, and they differ per leg — `test-carve-out`
+    runs the same `-m 'not track_b and not live and not integration'` as the
+    counted shards but over files `select()` subtracts from the weighted keys;
+    `test-track-b` runs `-m track_b`; `test-concurrency-falkor` runs explicit
+    nodeids with no marker at all; `test-d14-hosted-api` runs `-m embedded_only`
+    with the URI unset. READ THAT FILE before describing any of them: two earlier
+    versions of this docstring asserted a single mechanism covering all four
+    legs, and BOTH were false. That is why the rule is stated and the mechanism
+    is not.
     """
     paid = 0.0
     queue = 0.0

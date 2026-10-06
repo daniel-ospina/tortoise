@@ -2095,16 +2095,19 @@ def test_push_extra_enters_the_full_selection_pool(tmp_path, monkeypatch, capsys
                         lambda r, i: {"created_at": "2026-10-06T10:00:00Z"})
     monkeypatch.setattr(ci_timing, "fetch_jobs", lambda r, i: [])
 
-    def run(manifest):
-        p = tmp_path / f"m{len(manifest)}.yml"
+    def run(manifest, tag):
+        # Named by TAG, not by len(manifest): both dicts have the same number of
+        # top-level keys, so a length-derived name silently wrote the same file
+        # twice and the intended distinctness did not hold.
+        p = tmp_path / f"m-{tag}.yml"
         p.write_text(yaml.safe_dump(manifest))
         args = argparse.Namespace(run_id="1", changed_files="tortoise/sdk.py",
                                   manifest=str(p), repo="o/r", event="push")
         assert ci_timing.paid_vs_selected_cli(args) == 0
         return json.loads(capsys.readouterr().out)["selected_s"]
 
-    plain = run(base)
-    bumped = run(with_extra)
+    plain = run(base, "base")
+    bumped = run(with_extra, "extra")
     assert bumped - plain == 1234.0, (
         "push_extra weight must enter the full-selection pool — otherwise the "
         "counted shards run files the denominator omits"
