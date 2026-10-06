@@ -28,13 +28,12 @@ CANONICAL_DOC_URL = (
 # ── 1. the implemented deletion paths agree; the user path is a doc pin ─────
 
 def test_restore_window_constants_agree():
-    """The two IMPLEMENTED deletion paths (graph, team) read one window. The
-    user-account constant is asserted separately as a DOCUMENTATION PIN — it
-    has no consumer path, so this test must not claim a third wired path.
+    """The deletion paths (graph, team, account) read one window.
 
     RED before #4179: the team default was 24h and the user-account constant
     did not exist. GREEN after: every realised path derives from
-    ``retention.RESTORE_WINDOW``.
+    ``retention.RESTORE_WINDOW``. #4029 wired the third path, so the
+    user-account constant is a CONSUMER now — see the account test below.
     """
     from tortoise import retention
     from tortoise.backup_sweep import _GRAPH_PURGE_GRACE_DAYS
@@ -47,19 +46,28 @@ def test_restore_window_constants_agree():
     assert TEAM_DELETE_GRACE_HOURS == retention.RESTORE_WINDOW_HOURS
 
 
-def test_user_account_window_is_a_documentation_pin():
-    """The user-account path has no deletion code today (privacy §16: no
-    self-service deletion). ``USER_ACCOUNT_DELETE_GRACE_HOURS`` records the
-    promised support/email window and is NOT read by any production module —
-    this pins the value and the fact that it is a promise, not behaviour.
+def test_user_account_window_is_consumed_by_the_account_deletion_path():
+    """#4029: the user-account restore window is CONSUMED, not just a doc pin.
 
-    Wiring it is a real feature (missing Supabase auth-admin deletion); if a
-    consumer appears, replace this pin with a behaviour assertion.
+    Replaces the pre-build ``..._is_a_documentation_pin`` test, whose stated
+    premise ("no consumer path") the account-deletion build invalidated. The
+    behaviour pinned here: `USER_ACCOUNT_DELETE_GRACE_HOURS` is the value of
+    the ONE authority, the `DELETE /v1/user/account` route exists, and the
+    purge that erases after the window is present.
     """
     from tortoise import retention
-    from tortoise.hosted_api import USER_ACCOUNT_DELETE_GRACE_HOURS
+    from tortoise.hosted_api import (
+        USER_ACCOUNT_DELETE_GRACE_HOURS,
+        _purge_deleted_accounts,
+        app,
+    )
 
     assert USER_ACCOUNT_DELETE_GRACE_HOURS == retention.RESTORE_WINDOW_HOURS
+    paths = {getattr(r, "path", None) for r in app.routes}
+    assert "/v1/user/account" in paths, (
+        "the account-deletion route must be registered — a constant with no "
+        "consumer is the state this test replaced")
+    assert callable(_purge_deleted_accounts)
 
 
 def test_lock_bound_stays_below_restore_window():
