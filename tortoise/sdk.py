@@ -24754,7 +24754,25 @@ class TortoiseSDK:
         # skips them) but MUST be compared here: an existing item's
         # `format`/`source_path` update lands live, and `contentHash` is the
         # gate every other fixed field rides.
-        _fixed_compared = {"format", "source_path", "contentHash"}
+        #
+        # #3998: `rawState`/`rawStateAt` join them for exactly this reason.
+        # Their `ON MATCH` clause is `s.rawState = CASE WHEN $rawState IS NULL
+        # THEN s.rawState ELSE $rawState END` (and the same shape for
+        # `rawStateAt`) — a NON-hash-diff write that mutates the node whenever
+        # the incoming state is non-null, which is the availability analogue of
+        # the `format`/`source_path` update above. Membership in
+        # `_SOURCE_HANDLED` is what keeps them out of the open passthrough; it is
+        # NOT a statement that they never change, and reading it as one
+        # suppressed the record. Measured before this line: a second
+        # `create_source(url, kind, contentHash="h1")` then
+        # `create_source(url, kind, raw_state="deleted")` moved the live node
+        # to `rawState="deleted"` while appending ZERO journal lines, so
+        # `rebuild_all` replayed the one `SourceCreated` that carried no state
+        # and the source came back PRESENT — `KeyError: 'rawState'` on the read.
+        # The state must ride the journal like every other source fact; this
+        # comparison is what lets the fail-safe emit arm see it as a change.
+        _fixed_compared = {"format", "source_path", "contentHash",
+                           "rawState", "rawStateAt"}
         # The writer's OWN passthrough predicate (`_persist_extra_props`): a
         # payload key outside this skip-set, with a persistable non-None value,
         # is what actually lands on the node.

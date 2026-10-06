@@ -565,7 +565,7 @@ def test_rebuild_does_not_re_materialise_a_payload_from_the_journal(sdk):
     s._emit_event("SourceCreated", id=RAW_URL, url=RAW_URL, sourceKind="conversation",
                   contentHash="h1", content=body, text=body)
 
-    s._get_proj().rebuild_all(str(events))
+    s._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     props = _source_props(s)
     assert "content" not in props and "text" not in props, sorted(props)
@@ -696,7 +696,7 @@ def test_rebuild_drops_a_payload_carried_by_an_entity_mutated_record(sdk):
         "Source", RAW_URL, "revise", state={"text": body, "format": "transcript"}
     )
 
-    s._get_proj().rebuild_all(str(events))
+    s._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     props = _source_props(s)
     assert "text" not in props, sorted(props)
@@ -828,7 +828,7 @@ def test_rebuild_does_not_replay_a_state_change_from_an_entity_mutation(sdk):
     assert _raw(s)["raw_state"] == RAW_DELETED
     s._journal_entity_mutation("Source", RAW_URL, "revise", state={"rawState": None})
 
-    s._get_proj().rebuild_all(str(events))
+    s._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     assert _raw(s)["raw_state"] == RAW_DELETED, (
         "a replayed EntityMutated resurrected the raw the record says is gone"
@@ -858,7 +858,7 @@ def test_the_identity_keys_are_refused_through_the_generic_route(sdk):
         s.update_entity(RAW_URL, url=body)
     assert _raw(s)["raw_state"] == "present", "the source stopped being readable"
     assert _source_props(s)["url"] == RAW_URL
-    s._get_proj().rebuild_all(str(events))
+    s._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert len(s.get_provenance_chain(pid)) == 1, (
         "the identity rewrite split the source and lost the Point's provenance"
     )
@@ -949,7 +949,7 @@ def test_absence_survives_a_rebuild(sdk):
     s.create_source(RAW_URL, "conversation", raw_state=RAW_DELETED)
     assert _source_props(s)[RAW_STATE_PROP] == RAW_DELETED
 
-    s._get_proj().rebuild_all(str(events))
+    s._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     props = _source_props(s)
     assert props[RAW_STATE_PROP] == RAW_DELETED, "the absence did not survive rebuild"
